@@ -26,10 +26,10 @@ speedwave-v2/
 ├── crates/
 │   ├── speedwave-runtime/   # SSOT: ContainerRuntime trait + implementations
 │   └── speedwave-cli/       # CLI client (~340 lines + tests)
-├── swift-reminders/         # macOS: EventKit Reminders CLI (Swift)
-├── swift-calendar/          # macOS: EventKit Calendar CLI (Swift)
-├── swift-mail/              # macOS: AppleScript Mail CLI (Swift)
-├── swift-notes/             # macOS: AppleScript Notes CLI (Swift)
+├── native/
+│   ├── macos/               # macOS: Swift CLI binaries (reminders, calendar, mail, notes)
+│   ├── linux/               # Linux: Rust native-os-cli (planned)
+│   └── windows/             # Windows: Rust native-os-cli (planned)
 ├── desktop/
 │   ├── src-tauri/           # Rust backend (Tauri) — includes IDE Bridge + mcp-os process
 │   └── src/                 # Angular frontend
@@ -49,7 +49,7 @@ speedwave-v2/
 Speedwave.app (host — core of the system)
 ├── Tauri app (host process)
 │   ├── spawns: node mcp-servers/os/dist/index.js  ← mcp-os (TypeScript MCP worker)
-│   │   ├── macOS:   swift-*/reminders-cli, calendar-cli, mail-cli, notes-cli (Swift, EventKit + AppleScript)
+│   │   ├── macOS:   native/macos/{reminders,calendar,mail,notes}/*-cli (Swift, EventKit + AppleScript)
 │   │   ├── Linux:   native-os-cli (Rust, zbus D-Bus + CalDAV) — planned, not yet implemented
 │   │   └── Windows: native-os-cli.exe (Rust, windows-rs WinRT + mapi-rs MAPI) — planned, not yet implemented
 │   ├── IDE Bridge (Rust module in src-tauri/)
@@ -263,7 +263,7 @@ make fmt            # format all code
 make status         # quick health check
 ```
 
-Granular targets: `make test-rust`, `make test-cli`, `make test-mcp`, `make test-os`, `make test-e2e`, `make test-desktop-build`, `make build-runtime`, `make build-cli`, `make build-swift`, `make build-os-cli`, `make build-mcp`, `make build-angular`, `make build-tauri`, `make download-lima`, `make check-clippy`, `make check-angular`, `make audit-rust`, `make audit-mcp`, `make coverage-rust`, `make coverage-mcp`.
+Granular targets: `make test-rust`, `make test-cli`, `make test-mcp`, `make test-os`, `make test-e2e`, `make test-desktop-build`, `make build-runtime`, `make build-cli`, `make build-native-macos`, `make build-os-cli`, `make build-mcp`, `make build-angular`, `make build-tauri`, `make download-lima`, `make check-clippy`, `make check-angular`, `make audit-rust`, `make audit-mcp`, `make coverage-rust`, `make coverage-mcp`.
 
 ## Engineering Principles
 
@@ -411,5 +411,5 @@ If CI fails — **fix the CI**, even if the failure is pre-existing or unrelated
 2. **IDE Bridge** — `desktop/src-tauri/src/ide_bridge.rs`
 3. **Chat UI** — `claude -p` subprocess + Angular streaming component
 4. **CLI thin client** — `crates/speedwave-cli/`
-5. **Native OS CLI + mcp-os worker** — `swift-*/`, `mcp-servers/os/`, hub integration
+5. **Native OS CLI + mcp-os worker** — `native/macos/`, `mcp-servers/os/`, hub integration
 6. **Installer** — platform installers (.dmg, .exe, .deb)

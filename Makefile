@@ -26,7 +26,7 @@ LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
 
 .PHONY: all build test check clean dev install-deps setup-dev install-hooks \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
-        build-swift build-os-cli \
+        build-native-macos build-os-cli \
         test-rust test-cli test-desktop test-angular test-mcp test-os test-e2e test-entrypoint test-desktop-build \
         test-e2e-desktop _e2e-macos _e2e-linux _e2e-windows test-e2e-all setup-e2e-vms \
         check-clippy check-desktop-clippy check-angular check-mcp check-fmt \
@@ -201,18 +201,18 @@ endif
 	cd desktop/src-tauri && cargo tauri build
 	@echo "\n✅ Tauri production bundle built"
 
-# ── Swift / native OS CLI builds ─────────────────────────────────────────────
+# ── Native OS CLI builds (macOS: Swift, Linux/Windows: Rust — planned) ───────
 
-build-swift:
-	@if [ "$$(uname)" != "Darwin" ]; then echo "⬚  Skipping Swift build (not macOS)"; exit 0; fi
-	@echo "🔨 Building Swift CLI binaries..."
-	cd swift-reminders && swift build -c release
-	cd swift-calendar && swift build -c release
-	cd swift-mail && swift build -c release
-	cd swift-notes && swift build -c release
-	@echo "✅ Swift CLI binaries built"
+build-native-macos:
+	@if [ "$$(uname)" != "Darwin" ]; then echo "⬚  Skipping macOS native build (not macOS)"; exit 0; fi
+	@echo "🔨 Building macOS native CLI binaries..."
+	cd native/macos/reminders && swift build -c release
+	cd native/macos/calendar && swift build -c release
+	cd native/macos/mail && swift build -c release
+	cd native/macos/notes && swift build -c release
+	@echo "✅ macOS native CLI binaries built"
 
-build-os-cli: build-swift
+build-os-cli: build-native-macos
 
 # ── MCP servers ──────────────────────────────────────────────────────────────
 
@@ -261,7 +261,7 @@ test-mcp: build-mcp
 	cd mcp-servers && npm test
 	@echo "✅ MCP server tests passed"
 
-test-os:
+test-os: build-mcp
 	cd mcp-servers/os && npx vitest run
 	@echo "✅ OS MCP server tests passed"
 
@@ -639,7 +639,7 @@ clean-wsl-resources:
 
 # ── Development ──────────────────────────────────────────────────────────────
 
-dev: build-cli build-swift build-mcp
+dev: build-cli build-native-macos build-mcp
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@echo "Preparing build context..."
 	@scripts/bundle-build-context.sh
