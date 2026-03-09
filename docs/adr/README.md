@@ -30,9 +30,11 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-021](ADR-021-bundled-dependencies-and-zero-install-strategy.md)   | Bundled Dependencies and Zero-Install Strategy          | Accepted              |
 | [ADR-022](ADR-022-bundled-claude-resources-and-project-coexistence.md) | Bundled .claude Resources and Project-Level Coexistence | Accepted              |
 | [ADR-023](ADR-023-appimage-static-runtime-for-fuse-independence.md)    | AppImage Static Runtime for FUSE Independence           | Superseded by ADR-025 |
-| [ADR-024](ADR-024-e2e-testing-strategy.md)                             | Desktop E2E Testing via Parallels VMs                   | Accepted              |
+| [ADR-024](ADR-024-e2e-testing-strategy.md)                             | Desktop E2E Testing Strategy                            | Accepted              |
 | [ADR-025](ADR-025-linux-deb-packaging.md)                              | Linux .deb Packaging (Replaces AppImage)                | Accepted              |
 | [ADR-026](ADR-026-linux-rootless-container-user.md)                    | Linux Rootless nerdctl — Per-Platform Container User    | Accepted              |
+| [ADR-027](ADR-027-native-directory-structure.md)                       | Native Directory Structure                              | Accepted              |
+| [ADR-028](ADR-028-tauri-over-electron.md)                              | Tauri v2 over Electron for Desktop Shell                | Accepted              |
 
 ## Creating a New ADR
 
