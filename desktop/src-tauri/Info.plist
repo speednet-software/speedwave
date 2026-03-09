@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSRemindersUsageDescription</key>
+    <string>Speedwave needs access to Reminders to create and manage reminders via Claude Code.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Speedwave needs access to Calendar to view and create events via Claude Code.</string>
+    <key>NSContactsUsageDescription</key>
+    <string>Speedwave needs access to Contacts to look up email addresses for Claude Code.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Speedwave needs to send Apple Events to automate Mail, Notes, and other apps via Claude Code.</string>
+</dict>
+</plist>

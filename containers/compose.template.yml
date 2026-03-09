@@ -1,0 +1,185 @@
+# OCI Compose V2 — works with nerdctl compose (all platforms)
+# Template variables substituted by render_compose() in speedwave-runtime.
+# NEVER edit generated compose files — edit this template instead.
+
+services:
+  claude:
+    image: speedwave-claude:latest
+    container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_claude
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    extra_hosts:
+      - "host.lima.internal:${HOST_GATEWAY}"
+      - "host.containers.internal:${HOST_GATEWAY}"
+      - "host.docker.internal:${HOST_GATEWAY}"
+      - "host.speedwave.internal:${HOST_GATEWAY}"
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    volumes:
+      - ${CLAUDE_HOME}:/home/speedwave:rw
+      - ${PROJECT_DIR}:/workspace
+      - ${RESOURCES_DIR}:/speedwave/resources:ro
+      - ${IDE_LOCK_DIR}:/home/speedwave/.claude/ide:ro
+    environment:
+      - CLAUDE_VERSION=${CLAUDE_VERSION}
+      - MCP_HUB_PORT=${PORT_HUB}
+      - CLAUDE_CODE_IDE_HOST_OVERRIDE=${IDE_HOST_OVERRIDE}
+    working_dir: /workspace
+    networks:
+      - ${NETWORK_NAME}
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4g
+
+  mcp-hub:
+    image: speedwave-mcp-hub:latest
+    container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_hub
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    environment:
+      - PORT=${PORT_HUB}
+      - WORKER_SLACK_URL=http://mcp-slack:${PORT_SLACK}
+      - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:${PORT_SHAREPOINT}
+      - WORKER_REDMINE_URL=http://mcp-redmine:${PORT_REDMINE}
+      - WORKER_GITLAB_URL=http://mcp-gitlab:${PORT_GITLAB}
+      - WORKER_GEMINI_URL=http://mcp-gemini:${PORT_GEMINI}
+    networks:
+      - ${NETWORK_NAME}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512m
+
+  mcp-slack:
+    image: speedwave-mcp-slack:latest
+    container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_slack
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - ${TOKENS_DIR}/slack:/tokens:ro
+    environment:
+      - PORT=${PORT_SLACK}
+    networks:
+      - ${NETWORK_NAME}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256m
+
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_sharepoint
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      # :rw required — SharePoint OAuth tokens expire and token-manager.ts
+      # writes refreshed access_token / refresh_token back to /tokens/
+      - ${TOKENS_DIR}/sharepoint:/tokens:rw
+    environment:
+      - PORT=${PORT_SHAREPOINT}
+    networks:
+      - ${NETWORK_NAME}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256m
+
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
+    container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_redmine
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - ${TOKENS_DIR}/redmine:/tokens:ro
+    environment:
+      - PORT=${PORT_REDMINE}
+    networks:
+      - ${NETWORK_NAME}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256m
+
+  mcp-gitlab:
+    image: speedwave-mcp-gitlab:latest
+    container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_gitlab
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - ${TOKENS_DIR}/gitlab:/tokens:ro
+    environment:
+      - PORT=${PORT_GITLAB}
+    networks:
+      - ${NETWORK_NAME}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256m
+
+  mcp-gemini:
+    image: speedwave-mcp-gemini:latest
+    container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_gemini
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - ${TOKENS_DIR}/gemini:/tokens:ro
+    environment:
+      - PORT=${PORT_GEMINI}
+    networks:
+      - ${NETWORK_NAME}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256m
+
+networks:
+  ${NETWORK_NAME}:
+    driver: bridge

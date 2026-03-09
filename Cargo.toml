@@ -1,0 +1,35 @@
+[workspace]
+members = [
+    "crates/speedwave-runtime",
+    "crates/speedwave-cli",
+]
+resolver = "2"
+
+[workspace.package]
+description = "AI platform connecting Claude Code with external services"
+authors = ["Speednet"]
+license = "Apache-2.0"
+repository = "https://github.com/speednet-software/speedwave"
+homepage = "https://github.com/speednet-software/speedwave"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+anyhow = "1"
+log = "0.4"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+todo = "deny"
+unimplemented = "deny"
+wildcard_imports = "deny"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+missing_docs = "warn"

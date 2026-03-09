@@ -1,0 +1,10 @@
+{
+  "identifier": "default",
+  "description": "Default capability granting access to all Speedwave commands",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "log:default"
+  ]
+}

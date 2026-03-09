@@ -1,0 +1,45 @@
+{
+  "name": "@speedwave/mcp-gitlab",
+  "version": "0.0.1",
+  "description": "Speedwave MCP GitLab Worker - Isolated GitLab API access",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "keywords": [
+    "speedwave",
+    "mcp",
+    "gitlab",
+    "worker"
+  ],
+  "author": "Speednet",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@gitbeaker/rest": "^43.8.0",
+    "@speedwave/mcp-shared": "file:../shared"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.16.0",
+    "@types/express": "^4.17.21",
+    "@types/node": "^24.0.0",
+    "@vitest/coverage-v8": "^4.0.16",
+    "eslint": "^9.16.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-jsdoc": "^61.4.1",
+    "eslint-plugin-prettier": "^5.1.0",
+    "globals": "^17.3.0",
+    "prettier": "^3.2.0",
+    "typescript": "^5.3.0",
+    "typescript-eslint": "^8.56.1",
+    "vitest": "^4.0.16"
+  }
+}

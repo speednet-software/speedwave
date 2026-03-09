@@ -1,0 +1,16 @@
+{
+  "bundle": {
+    "resources": {
+      "nerdctl-full/bin/": "nerdctl-full/bin/",
+      "nerdctl-full/lib/": "nerdctl-full/lib/",
+      "nerdctl-full/libexec/": "nerdctl-full/libexec/",
+      "nerdctl-full/share/": "nerdctl-full/share/",
+      "THIRD-PARTY-LICENSES/": "THIRD-PARTY-LICENSES/",
+      "build-context/containers/": "build-context/containers/",
+      "build-context/mcp-servers/": "build-context/mcp-servers/",
+      "nodejs/bin/node": "nodejs/bin/node",
+      "mcp-os/": "mcp-os/",
+      "cli/speedwave": "cli/speedwave"
+    }
+  }
+}

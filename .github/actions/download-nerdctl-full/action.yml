@@ -1,0 +1,45 @@
+name: 'Download nerdctl-full'
+description: 'Downloads and extracts the nerdctl-full bundle for Linux AppImage bundling'
+inputs:
+  arch:
+    description: 'Architecture (amd64 or arm64)'
+    required: true
+runs:
+  using: 'composite'
+  steps:
+    - name: Download nerdctl-full for bundling
+      shell: bash
+      run: |
+        CONSTS=crates/speedwave-runtime/src/consts.rs
+
+        # Read version from SSOT (grep -A1 handles multiline const declarations)
+        VERSION=$(grep -A1 '^pub const NERDCTL_FULL_VERSION' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
+        [ -n "$VERSION" ] || { echo "::error::Failed to parse NERDCTL_FULL_VERSION from consts.rs"; exit 1; }
+
+        # Read SHA256 hash based on arch
+        if [ "${{ inputs.arch }}" = "amd64" ]; then
+          EXPECTED_SHA256=$(grep -A1 '^pub const NERDCTL_FULL_SHA256_AMD64' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
+        else
+          EXPECTED_SHA256=$(grep -A1 '^pub const NERDCTL_FULL_SHA256_ARM64' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
+        fi
+        [ -n "$EXPECTED_SHA256" ] || { echo "::error::Failed to parse NERDCTL_FULL_SHA256 from consts.rs"; exit 1; }
+
+        TARBALL="nerdctl-full-${VERSION}-linux-${{ inputs.arch }}.tar.gz"
+        URL="https://github.com/containerd/nerdctl/releases/download/v${VERSION}/${TARBALL}"
+
+        mkdir -p desktop/src-tauri/nerdctl-full desktop/src-tauri/THIRD-PARTY-LICENSES
+        curl -fsSL "$URL" -o /tmp/nerdctl-full.tar.gz
+
+        # Verify SHA256
+        echo "${EXPECTED_SHA256}  /tmp/nerdctl-full.tar.gz" | sha256sum -c -
+
+        tar -xzf /tmp/nerdctl-full.tar.gz -C desktop/src-tauri/nerdctl-full/
+
+        # Apache 2.0 compliance
+        cp desktop/src-tauri/nerdctl-full/share/doc/nerdctl-full/LICENSE \
+          desktop/src-tauri/THIRD-PARTY-LICENSES/nerdctl-full-LICENSE 2>/dev/null || \
+        cp desktop/src-tauri/nerdctl-full/share/doc/nerdctl/LICENSE \
+          desktop/src-tauri/THIRD-PARTY-LICENSES/nerdctl-full-LICENSE 2>/dev/null || true
+
+        # Clean up tarball
+        rm /tmp/nerdctl-full.tar.gz

@@ -1,0 +1,63 @@
+[package]
+name = "speedwave-desktop"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "Speedwave desktop application — Tauri backend"
+authors = ["Speednet"]
+license = "Apache-2.0"
+repository = "https://github.com/speednet-software/speedwave"
+homepage = "https://github.com/speednet-software/speedwave"
+
+[dependencies]
+speedwave-runtime = { path = "../../crates/speedwave-runtime" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+dirs = "6"
+uuid = { version = "1", features = ["v4"] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+log = "0.4"
+open = "5"
+tauri-plugin-log = "2"
+tauri-plugin-updater = "2"
+url = "2"
+tokio-tungstenite = "0.28"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+http = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+    "Win32_System_Memory",
+    "Win32_Foundation",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+todo = "deny"
+unimplemented = "deny"
+wildcard_imports = "deny"
+
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+missing_docs = "warn"
+
+# Empty workspace table keeps this crate standalone (not part of root workspace).
+# Tauri has complex build dependencies — we don't want them in the main workspace.
+[workspace]

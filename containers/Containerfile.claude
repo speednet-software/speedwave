@@ -1,0 +1,52 @@
+# OCI Containerfile for Speedwave Claude container
+# Base: node:24-bookworm-slim (Debian)
+# Multi-arch: linux/amd64 + linux/arm64 (Apple Silicon)
+FROM node:24-bookworm-slim
+
+# Security: create unprivileged user
+# node:24-bookworm-slim already has uid/gid 1000 (user "node"), so reuse it
+RUN usermod -l speedwave -d /home/speedwave -m node && \
+    groupmod -n speedwave node
+
+# Install minimal runtime dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create directories for resources (read-only mount point)
+RUN mkdir -p /speedwave/resources && \
+    chown -R speedwave:speedwave /speedwave
+
+# Create workspace directory (read-only mount point for project)
+RUN mkdir -p /workspace && \
+    chown speedwave:speedwave /workspace
+
+# Install Claude Code as speedwave user, then copy binary to image layer.
+# `claude install` puts the binary at ~/.local/bin/claude (~210MB) and
+# ~/.local/share/claude/versions/. At runtime /home/speedwave is a VirtioFS
+# volume mount — reading 210MB through VirtioFS causes a ~10s freeze (Apple
+# Virtualization hypervisor spike). Fix: install as speedwave, then copy the
+# resolved binary to /usr/local/bin which lives on the VM's ext4 disk.
+ARG CLAUDE_VERSION=latest
+USER speedwave
+RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}"
+USER root
+RUN CLAUDE_BIN=$(readlink -f /home/speedwave/.local/bin/claude) && \
+    cp "$CLAUDE_BIN" /usr/local/bin/claude && \
+    chmod +x /usr/local/bin/claude && \
+    rm -rf /home/speedwave/.local/share/claude && \
+    rm -f /home/speedwave/.local/bin/claude && \
+    ln -sf /usr/local/bin/claude /home/speedwave/.local/bin/claude
+
+# Copy entrypoint late to avoid busting the ~210MB Claude Code layer cache
+COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
+
+# Final: run as unprivileged user
+USER speedwave
+WORKDIR /home/speedwave
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

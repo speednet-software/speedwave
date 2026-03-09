@@ -1,0 +1,17 @@
+{
+  "name": "@speedwave/mcp-servers",
+  "private": true,
+  "description": "MCP servers for Speedwave — Slack, SharePoint, GitLab, Redmine, and more",
+  "license": "Apache-2.0",
+  "author": "Speednet",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/speednet-software/speedwave.git"
+  },
+  "workspaces": ["shared", "hub", "slack", "sharepoint", "redmine", "gitlab", "gemini", "os"],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "test:coverage": "npm run test:coverage --workspaces --if-present"
+  }
+}

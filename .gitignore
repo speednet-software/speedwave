@@ -1,0 +1,62 @@
+# Rust / Cargo
+target/
+**/*.rs.bk
+
+# Node.js (root-level lockfiles if any)
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Tauri signing keys
+.tauri-privkey
+.tauri-privkey.pub
+.tauri-pubkey
+
+# Speedwave runtime data (should never be committed)
+.speedwave/
+
+# Worktree metadata
+.worktree.json
+
+# Coverage
+coverage/
+*.lcov
+*.profraw
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Build artifacts
+*.dmg
+*.exe
+*.msi
+*.deb
+*.rpm
+*.AppImage
+
+# Bundled Lima binaries (downloaded by `make download-lima`)
+desktop/src-tauri/lima/
+desktop/src-tauri/THIRD-PARTY-LICENSES/
+
+# Bundled Node.js binary (downloaded by `make download-nodejs`)
+desktop/src-tauri/nodejs/
+
+# Bundled container build context and mcp-os (copied before Tauri build)
+desktop/src-tauri/build-context/
+desktop/src-tauri/mcp-os/

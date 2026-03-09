@@ -1,0 +1,34 @@
+import { Routes } from '@angular/router';
+import { setupCompleteGuard } from './guards/setup-complete.guard';
+import { setupNotCompleteGuard } from './guards/setup-not-complete.guard';
+
+export const routes: Routes = [
+  {
+    path: 'setup',
+    canActivate: [setupNotCompleteGuard],
+    loadComponent: () =>
+      import('./setup/setup-wizard.component').then((m) => m.SetupWizardComponent),
+  },
+  {
+    path: '',
+    canActivate: [setupCompleteGuard],
+    loadComponent: () => import('./shell/shell.component').then((m) => m.ShellComponent),
+    children: [
+      { path: '', redirectTo: 'chat', pathMatch: 'full' },
+      {
+        path: 'chat',
+        loadComponent: () => import('./chat/chat.component').then((m) => m.ChatComponent),
+      },
+      {
+        path: 'integrations',
+        loadComponent: () =>
+          import('./integrations/integrations.component').then((m) => m.IntegrationsComponent),
+      },
+      {
+        path: 'settings',
+        loadComponent: () =>
+          import('./settings/settings.component').then((m) => m.SettingsComponent),
+      },
+    ],
+  },
+];

@@ -1,0 +1,38 @@
+name: 'Download Lima for Bundling'
+description: 'Downloads and verifies Lima binaries for macOS app bundling'
+inputs:
+  arch:
+    description: 'Target architecture (aarch64 or x86_64)'
+    required: true
+runs:
+  using: 'composite'
+  steps:
+    - name: Download Lima for bundling
+      shell: bash
+      run: |
+        # Read version from SSOT
+        LIMA_VERSION=$(cat .lima-version)
+
+        # Lima uses "arm64" in asset names (not "aarch64")
+        ARCH="${{ inputs.arch }}"
+        [ "$ARCH" = "aarch64" ] && ARCH="arm64"
+        LIMA_ARCH="Darwin-${ARCH}"
+        TARBALL="lima-${LIMA_VERSION}-${LIMA_ARCH}.tar.gz"
+        URL="https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/${TARBALL}"
+        SUMS_URL="https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/SHA256SUMS"
+
+        mkdir -p desktop/src-tauri/lima desktop/src-tauri/THIRD-PARTY-LICENSES
+        curl -fsSL "$URL" -o /tmp/lima.tar.gz
+        curl -fsSL "$SUMS_URL" -o /tmp/SHA256SUMS
+
+        # Verify SHA256
+        EXPECTED=$(grep "$TARBALL" /tmp/SHA256SUMS | awk '{print $1}')
+        ACTUAL=$(shasum -a 256 /tmp/lima.tar.gz | awk '{print $1}')
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "CHECKSUM MISMATCH"; exit 1; }
+
+        tar -xzf /tmp/lima.tar.gz -C desktop/src-tauri/lima/ --strip-components=1
+
+        # Apache 2.0 compliance
+        cp desktop/src-tauri/lima/share/doc/lima/LICENSE desktop/src-tauri/THIRD-PARTY-LICENSES/lima-LICENSE
+        curl -fsSL "https://raw.githubusercontent.com/lima-vm/lima/v${LIMA_VERSION}/NOTICE" \
+          -o desktop/src-tauri/THIRD-PARTY-LICENSES/lima-NOTICE

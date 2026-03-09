@@ -1,0 +1,21 @@
+# Base Containerfile for MCP servers
+# Multi-stage build: node:24-alpine for minimal image size
+# Used by all MCP server images (hub, slack, sharepoint, redmine, gitlab, gemini)
+
+# Stage 1: Build
+FROM node:24-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm install --production
+COPY . .
+RUN npm run build --if-present
+
+# Stage 2: Runtime
+FROM node:24-alpine
+RUN addgroup -g 1000 speedwave && \
+    adduser -u 1000 -G speedwave -s /bin/sh -D speedwave
+WORKDIR /app
+COPY --from=builder --chown=speedwave:speedwave /app /app
+USER speedwave
+EXPOSE 3000
+CMD ["node", "dist/index.js"]

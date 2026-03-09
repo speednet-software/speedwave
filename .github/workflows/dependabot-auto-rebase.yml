@@ -1,0 +1,34 @@
+name: Dependabot Auto Rebase
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  pull-requests: write
+  contents: write
+
+concurrency:
+  group: dependabot-rebase
+  cancel-in-progress: true
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rebase open Dependabot PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          prs=$(gh pr list --author "app/dependabot" --state open --json number --jq '.[].number')
+          if [ -z "$prs" ]; then
+            echo "No open Dependabot PRs found"
+            exit 0
+          fi
+          echo "$prs" | while IFS= read -r pr; do
+            echo "Rebasing PR #$pr onto main"
+            gh pr update-branch "$pr" --rebase \
+              || echo "::warning::Failed to rebase PR #$pr (may already be up to date)"
+          done

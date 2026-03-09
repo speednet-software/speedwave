@@ -1,0 +1,432 @@
+# Desktop Release — builds Tauri desktop app + CLI binaries for all platforms
+#
+# Based on the official Tauri v2 GitHub Actions guide:
+#   https://v2.tauri.app/distribute/pipelines/github/
+#
+# tauri-action handles release creation, artifact upload, and updater JSON
+# generation automatically — no custom release management needed.
+#
+# Triggers:
+#   - workflow_call (from release-please.yml — provides version, tag_name)
+#   - workflow_dispatch (manual, with version input)
+#
+# Required secrets:
+#   TAURI_SIGNING_PRIVATE_KEY          — Ed25519 private key for Tauri updater signatures
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD — passphrase for the signing key (can be empty string)
+#
+# Optional secrets (code signing):
+#   APPLE_CERTIFICATE                  — base64-encoded .p12 Developer ID Application certificate
+#   APPLE_CERTIFICATE_PASSWORD         — passphrase for the .p12 certificate
+#   APPLE_SIGNING_IDENTITY             — e.g. "Developer ID Application: Your Name (TEAMID)"
+#   APPLE_ID                           — Apple ID email for notarization
+#   APPLE_PASSWORD                     — app-specific password for notarization
+#   APPLE_TEAM_ID                      — Apple Developer Team ID
+#   WINDOWS_CERTIFICATE                — base64-encoded .pfx code signing certificate
+#   WINDOWS_CERTIFICATE_PASSWORD       — passphrase for the .pfx certificate
+
+name: Desktop Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.1.0)"
+        required: true
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      tag_name:
+        type: string
+        required: false
+
+permissions: {}
+
+concurrency:
+  group: release-build
+  cancel-in-progress: false
+
+jobs:
+  # ── Resolve version from trigger source ────────────────────────────────
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag_name: ${{ steps.resolve.outputs.tag_name }}
+      release_id: ${{ steps.resolve.outputs.release_id }}
+    steps:
+      - name: Resolve version and release parameters
+        id: resolve
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_TAG_NAME: ${{ inputs.tag_name }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          VERSION="$INPUT_VERSION"
+
+          # tag_name from workflow_call (release-please.yml) or derive from version
+          if [ -n "$INPUT_TAG_NAME" ]; then
+            TAG="$INPUT_TAG_NAME"
+          else
+            TAG="v${VERSION}"
+          fi
+
+          # Validate version format (stable only — no pre-release suffixes)
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Version '$VERSION' has invalid format. Expected: X.Y.Z"
+            exit 1
+          fi
+
+          # Look up draft release ID from tag
+          RELEASE_ID=$(gh release view "$TAG" --repo "$REPO" --json databaseId --jq '.databaseId' 2>/dev/null || true)
+
+          if [ -z "$RELEASE_ID" ]; then
+            echo "No existing release found for tag $TAG — tauri-action will create one"
+          else
+            echo "Found existing release ID: $RELEASE_ID for tag $TAG"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+
+          echo "Resolved: version=$VERSION tag=$TAG release_id=$RELEASE_ID"
+
+  # ── Desktop app (Tauri) — official tauri-action pattern ──────────────────
+  publish-tauri:
+    needs: resolve
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: "--target aarch64-apple-darwin"
+          - platform: macos-latest
+            args: "--target x86_64-apple-darwin"
+          - platform: ubuntu-22.04
+            args: ""
+          - platform: windows-latest
+            args: ""
+    timeout-minutes: 45
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev
+
+      - name: Setup Node.js
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238  # v6.2.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/src/package-lock.json
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5  # v2.8.2
+        with:
+          workspaces: "./desktop/src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: desktop/src
+
+      # Export code-signing secrets to GITHUB_ENV only when they are configured.
+      # tauri-action attempts certificate import when APPLE_CERTIFICATE env var
+      # exists (even if empty), so we must not set it unless the secret is real.
+      - name: Configure macOS code signing
+        if: matrix.platform == 'macos-latest'
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID_VAL: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD_VAL: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID_VAL: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$CERT" ]; then
+            # Mask all secrets before writing to GITHUB_ENV
+            echo "::add-mask::$CERT"
+            echo "::add-mask::$CERT_PASSWORD"
+            echo "::add-mask::$SIGNING_IDENTITY"
+            echo "::add-mask::$APPLE_ID_VAL"
+            echo "::add-mask::$APPLE_PASSWORD_VAL"
+            echo "::add-mask::$APPLE_TEAM_ID_VAL"
+            echo "APPLE_CERTIFICATE=$CERT" >> "$GITHUB_ENV"
+            echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD" >> "$GITHUB_ENV"
+            echo "APPLE_SIGNING_IDENTITY=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
+            echo "APPLE_ID=$APPLE_ID_VAL" >> "$GITHUB_ENV"
+            echo "APPLE_PASSWORD=$APPLE_PASSWORD_VAL" >> "$GITHUB_ENV"
+            echo "APPLE_TEAM_ID=$APPLE_TEAM_ID_VAL" >> "$GITHUB_ENV"
+            echo "::notice::macOS code signing configured"
+          else
+            echo "::notice::macOS code signing skipped (no APPLE_CERTIFICATE secret)"
+          fi
+
+      - name: Configure Windows code signing
+        if: matrix.platform == 'windows-latest'
+        env:
+          CERT: ${{ secrets.WINDOWS_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: bash
+        run: |
+          if [ -n "$CERT" ]; then
+            echo "::add-mask::$CERT"
+            echo "::add-mask::$CERT_PASSWORD"
+            echo "WINDOWS_CERTIFICATE=$CERT" >> "$GITHUB_ENV"
+            echo "WINDOWS_CERTIFICATE_PASSWORD=$CERT_PASSWORD" >> "$GITHUB_ENV"
+            echo "::notice::Windows code signing configured"
+          else
+            echo "::notice::Windows code signing skipped (no WINDOWS_CERTIFICATE secret)"
+          fi
+
+      - name: Download Lima for bundling
+        if: contains(matrix.platform, 'macos')
+        uses: ./.github/actions/download-lima
+        with:
+          arch: ${{ contains(matrix.args, 'aarch64') && 'aarch64' || 'x86_64' }}
+
+      - name: Download nerdctl-full for bundling
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: ./.github/actions/download-nerdctl-full
+        with:
+          arch: amd64
+
+      - name: Download WSL resources for offline bundling
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          CONSTS=crates/speedwave-runtime/src/consts.rs
+          NERDCTL_VERSION=$(grep -A1 '^pub const NERDCTL_FULL_VERSION' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
+          [ -n "$NERDCTL_VERSION" ] || { echo "::error::Failed to parse NERDCTL_FULL_VERSION"; exit 1; }
+          NERDCTL_SHA256=$(grep -A1 '^pub const NERDCTL_FULL_SHA256_AMD64' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
+          [ -n "$NERDCTL_SHA256" ] || { echo "::error::Failed to parse NERDCTL_FULL_SHA256_AMD64"; exit 1; }
+          ROOTFS_URL=$(grep -A1 '^pub const WSL_ROOTFS_URL_AMD64' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
+          [ -n "$ROOTFS_URL" ] || { echo "::error::Failed to parse WSL_ROOTFS_URL_AMD64"; exit 1; }
+          ROOTFS_SHA256=$(grep -A1 '^pub const WSL_ROOTFS_SHA256_AMD64' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
+          [ -n "$ROOTFS_SHA256" ] || { echo "::error::Failed to parse WSL_ROOTFS_SHA256_AMD64"; exit 1; }
+          mkdir -p desktop/src-tauri/wsl
+          curl -fsSL "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/nerdctl-full-${NERDCTL_VERSION}-linux-amd64.tar.gz" \
+            -o desktop/src-tauri/wsl/nerdctl-full.tar.gz
+          echo "${NERDCTL_SHA256}  desktop/src-tauri/wsl/nerdctl-full.tar.gz" | sha256sum -c -
+          curl -fsSL "${ROOTFS_URL}" \
+            -o desktop/src-tauri/wsl/ubuntu-rootfs.tar.gz
+          echo "${ROOTFS_SHA256}  desktop/src-tauri/wsl/ubuntu-rootfs.tar.gz" | sha256sum -c -
+
+      - name: Download Node.js for bundling
+        uses: ./.github/actions/download-nodejs
+        with:
+          platform: ${{ contains(matrix.platform, 'macos') && 'darwin' || (matrix.platform == 'windows-latest' && 'win' || 'linux') }}
+          # NOTE: assumes all non-macOS-aarch64 builds are x64. If a Linux arm64 runner
+          # is ever added to the matrix, this must be updated to detect runner arch separately.
+          arch: ${{ (contains(matrix.platform, 'macos') && contains(matrix.args, 'aarch64')) && 'arm64' || 'x64' }}
+
+      - name: Bundle build context and mcp-os
+        shell: bash
+        run: scripts/bundle-build-context.sh --ci
+
+      - name: Build CLI for bundling
+        shell: bash
+        run: |
+          # Extract --target value from matrix.args using sed (BSD-compatible)
+          TARGET=$(echo "${{ matrix.args }}" | sed -n 's/.*--target \([^ ]*\).*/\1/p')
+          if [ -n "$TARGET" ]; then
+            cargo build --release --target "$TARGET" -p speedwave-cli
+            CLI_BIN="target/$TARGET/release/speedwave"
+          else
+            cargo build --release -p speedwave-cli
+            CLI_BIN="target/release/speedwave"
+          fi
+          # Windows: append .exe
+          if [ "${{ matrix.platform }}" = "windows-latest" ]; then
+            CLI_BIN="${CLI_BIN}.exe"
+          fi
+          mkdir -p desktop/src-tauri/cli
+          cp "$CLI_BIN" desktop/src-tauri/cli/
+
+      # When releaseId is set, tauri-action uploads artifacts to the existing
+      # release and ignores tagName/releaseName/releaseDraft. When releaseId is
+      # empty (manual dispatch), tauri-action creates/finds the release by tag.
+      - uses: tauri-apps/tauri-action@73fb865345c54760d875b94642314f8c0c894afa  # v0.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: desktop/src-tauri
+          releaseId: ${{ needs.resolve.outputs.release_id }}
+          tagName: ${{ needs.resolve.outputs.release_id == '' && needs.resolve.outputs.tag_name || '' }}
+          releaseName: ${{ needs.resolve.outputs.release_id == '' && format('Speedwave {0}', needs.resolve.outputs.tag_name) || '' }}
+          releaseBody: ${{ needs.resolve.outputs.release_id == '' && 'See the assets to download and install this version.' || '' }}
+          releaseDraft: ${{ needs.resolve.outputs.release_id == '' && 'true' || 'false' }}
+          prerelease: false
+          args: ${{ matrix.args }}
+
+      - name: Repack AppImage with static runtime
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: ./.github/actions/repack-appimage-static-runtime
+
+      - name: Re-sign AppImage updater tarball
+        if: matrix.platform == 'ubuntu-22.04'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="desktop/src-tauri/target/release/bundle/appimage"
+          TARBALL=$(find "$BUNDLE_DIR" -maxdepth 1 -name '*.AppImage.tar.gz' | head -1)
+          [ -n "$TARBALL" ] || { echo "::error::No .AppImage.tar.gz found in $BUNDLE_DIR"; exit 1; }
+          npx --prefix desktop/src @tauri-apps/cli signer sign "$TARBALL"
+
+      - name: Re-upload repacked AppImage to release
+        if: matrix.platform == 'ubuntu-22.04'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.resolve.outputs.tag_name }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="desktop/src-tauri/target/release/bundle/appimage"
+          # Upload repacked AppImage, tarball, and new signature (overwrite originals)
+          for f in "$BUNDLE_DIR"/*.AppImage "$BUNDLE_DIR"/*.AppImage.tar.gz "$BUNDLE_DIR"/*.AppImage.tar.gz.sig; do
+            [ -f "$f" ] || { echo "::error::Expected file not found: $f"; exit 1; }
+            gh release upload "$TAG_NAME" "$f" --repo "$REPO" --clobber
+          done
+
+  # ── CLI binary cross-compilation ─────────────────────────────────────────
+  # Runs after publish-tauri so the GitHub release already exists
+  cli:
+    needs: [resolve, publish-tauri]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5  # v2.8.2
+        with:
+          shared-key: cli-${{ matrix.target }}
+
+      - name: Build CLI
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --target "$TARGET" -p speedwave-cli
+
+      - name: Package CLI (unix)
+        if: matrix.archive == 'tar.gz'
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          ARCHIVE_NAME="speedwave-v${VERSION}-${TARGET}.tar.gz"
+          chmod +x "target/${TARGET}/release/speedwave"
+          tar -czf "$ARCHIVE_NAME" -C "target/${TARGET}/release" speedwave
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> "$GITHUB_ENV"
+
+      - name: Package CLI (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $archiveName = "speedwave-v${env:VERSION}-${env:TARGET}.zip"
+          Compress-Archive -Path "target/${env:TARGET}/release/speedwave.exe" -DestinationPath $archiveName
+          "ARCHIVE_NAME=$archiveName" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload CLI to release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.resolve.outputs.tag_name }}
+          REPO: ${{ github.repository }}
+        run: gh release upload "$TAG_NAME" "$ARCHIVE_NAME" --repo "$REPO" --clobber
+
+  # ── Publish release: draft → live after all builds succeed ──────────────
+  publish-release:
+    needs: [resolve, publish-tauri, cli]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Validate artifacts and publish release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.resolve.outputs.tag_name }}
+          RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+
+          # Resolve release ID — use the one from resolve job, or look it up by tag
+          RID="$RELEASE_ID"
+          if [ -z "$RID" ]; then
+            RID=$(gh release view "$TAG_NAME" --repo "$REPO" --json databaseId --jq '.databaseId')
+          fi
+
+          if [ -z "$RID" ]; then
+            echo "ERROR: Could not find release for tag $TAG_NAME"
+            exit 1
+          fi
+
+          # Verify assets were uploaded (4 Tauri + 4 CLI + latest.json = 9 minimum)
+          ASSET_COUNT=$(gh api "repos/$REPO/releases/$RID/assets" --jq 'length')
+          echo "Release has $ASSET_COUNT assets"
+          if [ "$ASSET_COUNT" -lt 9 ]; then
+            echo "::warning::Release has fewer than 9 assets (expected: 4 Tauri + 4 CLI + latest.json) — some platforms may have failed"
+          fi
+          # Publish: draft -> live
+          gh api --method PATCH "repos/$REPO/releases/$RID" -f draft=false
+          echo "Release published successfully"

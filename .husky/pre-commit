@@ -1,0 +1,6 @@
+if ! command -v gitleaks &>/dev/null; then
+  echo "⚠️  gitleaks not found — run: brew install gitleaks (macOS) or see https://github.com/gitleaks/gitleaks#installing"
+  exit 1
+fi
+gitleaks git --pre-commit --staged --no-banner
+npx lint-staged

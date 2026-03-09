@@ -1,0 +1,14 @@
+{
+  "bundle": {
+    "resources": {
+      "lima/bin/limactl": "lima/bin/limactl",
+      "lima/share/": "lima/share/",
+      "THIRD-PARTY-LICENSES/": "THIRD-PARTY-LICENSES/",
+      "build-context/containers/": "build-context/containers/",
+      "build-context/mcp-servers/": "build-context/mcp-servers/",
+      "nodejs/bin/node": "nodejs/bin/node",
+      "mcp-os/": "mcp-os/",
+      "cli/speedwave": "cli/speedwave"
+    }
+  }
+}
