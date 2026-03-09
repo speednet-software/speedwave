@@ -30,7 +30,7 @@
     "@angular/router": "^21.2.1",
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-log": "^2",
-    "marked": "^14.0.0",
+    "marked": "^17.0.4",
     "rxjs": "^7.8.0",
     "tslib": "^2.6.0"
   },
