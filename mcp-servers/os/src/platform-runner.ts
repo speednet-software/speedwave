@@ -51,7 +51,7 @@ export interface PlatformPaths {
 
 /**
  * Detect whether we are running in dev mode or production (bundled).
- * Dev: binaries are in swift-<pkg>/.build/release/ or target/release/
+ * Dev: binaries are in native/macos/<pkg>/.build/release/ or target/release/
  * Prod: binaries are alongside the app (Resources/ on macOS)
  */
 function isDevMode(): boolean {
@@ -77,10 +77,18 @@ function resolveDarwinPaths(): PlatformPaths {
   if (isDevMode()) {
     const root = resolveProjectRoot();
     return {
-      reminders: path.join(root, 'swift-reminders', '.build', 'release', 'reminders-cli'),
-      calendar: path.join(root, 'swift-calendar', '.build', 'release', 'calendar-cli'),
-      mail: path.join(root, 'swift-mail', '.build', 'release', 'mail-cli'),
-      notes: path.join(root, 'swift-notes', '.build', 'release', 'notes-cli'),
+      reminders: path.join(
+        root,
+        'native',
+        'macos',
+        'reminders',
+        '.build',
+        'release',
+        'reminders-cli'
+      ),
+      calendar: path.join(root, 'native', 'macos', 'calendar', '.build', 'release', 'calendar-cli'),
+      mail: path.join(root, 'native', 'macos', 'mail', '.build', 'release', 'mail-cli'),
+      notes: path.join(root, 'native', 'macos', 'notes', '.build', 'release', 'notes-cli'),
     };
   }
 
