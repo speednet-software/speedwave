@@ -1,0 +1,13 @@
+{
+  "bundle": {
+    "resources": {
+      "wsl/nerdctl-full.tar.gz": "wsl/nerdctl-full.tar.gz",
+      "wsl/ubuntu-rootfs.tar.gz": "wsl/ubuntu-rootfs.tar.gz",
+      "build-context/containers/": "build-context/containers/",
+      "build-context/mcp-servers/": "build-context/mcp-servers/",
+      "nodejs/node.exe": "nodejs/node.exe",
+      "mcp-os/": "mcp-os/",
+      "cli/speedwave.exe": "cli/speedwave.exe"
+    }
+  }
+}

@@ -1,0 +1,198 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { SettingsComponent } from './settings.component';
+import { TauriService } from '../services/tauri.service';
+import { MockTauriService } from '../testing/mock-tauri.service';
+import { RouterModule } from '@angular/router';
+
+describe('SettingsComponent — update settings', () => {
+  let component: SettingsComponent;
+  let fixture: ComponentFixture<SettingsComponent>;
+  let mockTauri: MockTauriService;
+
+  beforeEach(async () => {
+    mockTauri = new MockTauriService();
+
+    mockTauri.invokeHandler = async (cmd: string) => {
+      switch (cmd) {
+        case 'list_projects':
+          return { projects: [], active_project: null };
+        case 'get_llm_config':
+          return { provider: 'anthropic', model: null, base_url: null, api_key_env: null };
+        case 'get_update_settings':
+          return { auto_check: true, check_interval_hours: 24 };
+        case 'set_update_settings':
+          return undefined;
+        case 'check_for_update':
+          return null;
+        case 'get_health':
+          return {
+            containers: [],
+            vm: { running: false, vm_type: 'lima' },
+            mcp_os: { running: false },
+            ide_bridge: { running: false, port: null, ws_url: null, detected_ides: [] },
+            overall_healthy: false,
+          };
+        case 'get_bridge_status':
+          return null;
+        default:
+          return undefined;
+      }
+    };
+
+    await TestBed.configureTestingModule({
+      imports: [SettingsComponent, RouterModule.forRoot([])],
+      providers: [{ provide: TauriService, useValue: mockTauri }],
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(SettingsComponent);
+    component = fixture.componentInstance;
+  });
+
+  describe('toggleAutoCheck()', () => {
+    it('flips updateAutoCheck from true to false', async () => {
+      component.updateAutoCheck = true;
+      await component.toggleAutoCheck();
+      expect(component.updateAutoCheck).toBe(false);
+    });
+
+    it('flips updateAutoCheck from false to true', async () => {
+      component.updateAutoCheck = false;
+      await component.toggleAutoCheck();
+      expect(component.updateAutoCheck).toBe(true);
+    });
+
+    it('awaits saveUpdateSettings (invokes set_update_settings)', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      component.updateAutoCheck = true;
+      await component.toggleAutoCheck();
+      expect(invokeSpy).toHaveBeenCalledWith('set_update_settings', {
+        settings: { auto_check: false, check_interval_hours: component.updateIntervalHours },
+      });
+    });
+  });
+
+  describe('setCheckInterval()', () => {
+    it('updates updateIntervalHours to the given value', async () => {
+      component.updateIntervalHours = 24;
+      await component.setCheckInterval(168);
+      expect(component.updateIntervalHours).toBe(168);
+    });
+
+    it('awaits saveUpdateSettings (invokes set_update_settings)', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      component.updateAutoCheck = true;
+      await component.setCheckInterval(12);
+      expect(invokeSpy).toHaveBeenCalledWith('set_update_settings', {
+        settings: { auto_check: true, check_interval_hours: 12 },
+      });
+    });
+  });
+
+  describe('installUpdate()', () => {
+    it('calls install_update with expectedVersion and restart_app with force', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
+      component.updateAvailableVersion = '2.0.0';
+      component.updateResult = 'available';
+      await component.installUpdate();
+      expect(invokeSpy).toHaveBeenCalledWith('install_update', { expectedVersion: '2.0.0' });
+      expect(invokeSpy).toHaveBeenCalledWith('restart_app', { force: true });
+    });
+
+    it('sets updateInstalling to true during install', async () => {
+      let resolveFn!: () => void;
+      mockTauri.invokeHandler = (cmd: string) =>
+        new Promise<void>((resolve) => {
+          if (cmd === 'install_update') resolveFn = resolve;
+          else resolve();
+        });
+      component.updateAvailableVersion = '2.0.0';
+      const promise = component.installUpdate();
+      expect(component.updateInstalling).toBe(true);
+      resolveFn();
+      await promise;
+      expect(component.updateInstalling).toBe(false);
+    });
+
+    it('sets updateInstallError on failure', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_update') throw new Error('download failed');
+        return undefined;
+      };
+      component.updateAvailableVersion = '2.0.0';
+      await component.installUpdate();
+      expect(component.updateInstallError).toBe('download failed');
+      expect(component.updateInstalling).toBe(false);
+    });
+
+    it('does nothing without updateAvailableVersion', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      component.updateAvailableVersion = '';
+      await component.installUpdate();
+      expect(invokeSpy).not.toHaveBeenCalledWith('install_update', expect.anything());
+    });
+
+    it('does not call restart_app if install_update fails', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_update') throw new Error('network error');
+        return undefined;
+      };
+      component.updateAvailableVersion = '2.0.0';
+      await component.installUpdate();
+      expect(invokeSpy).not.toHaveBeenCalledWith('restart_app', expect.anything());
+    });
+
+    it('clears previous error before starting install', async () => {
+      vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
+      component.updateAvailableVersion = '2.0.0';
+      component.updateInstallError = 'old error';
+      await component.installUpdate();
+      expect(component.updateInstallError).toBe('');
+    });
+  });
+
+  describe('checkForUpdate()', () => {
+    it('sets updateResult to available when update found', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'check_for_update') return { version: '3.0.0', body: null, date: null };
+        return undefined;
+      };
+      await component.checkForUpdate();
+      expect(component.updateResult).toBe('available');
+      expect(component.updateAvailableVersion).toBe('3.0.0');
+    });
+
+    it('sets updateResult to up-to-date when no update', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'check_for_update') return null;
+        return undefined;
+      };
+      await component.checkForUpdate();
+      expect(component.updateResult).toBe('up-to-date');
+    });
+
+    it('sets error on failure', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'check_for_update') throw new Error('network failed');
+        return undefined;
+      };
+      await component.checkForUpdate();
+      expect(component.error).toBe('network failed');
+    });
+
+    it('sets updateChecking during check', async () => {
+      let resolveFn!: () => void;
+      mockTauri.invokeHandler = (cmd: string) =>
+        new Promise<void>((resolve) => {
+          if (cmd === 'check_for_update') resolveFn = resolve;
+          else resolve();
+        });
+      const promise = component.checkForUpdate();
+      expect(component.updateChecking).toBe(true);
+      resolveFn();
+      await promise;
+      expect(component.updateChecking).toBe(false);
+    });
+  });
+});

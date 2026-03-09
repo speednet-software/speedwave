@@ -1,0 +1,61 @@
+name: Release Please — Regenerate Cargo.lock
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "crates/*/Cargo.toml"
+      - "desktop/src-tauri/Cargo.toml"
+
+permissions: {}
+
+jobs:
+  regenerate-lockfile:
+    if: >-
+      startsWith(github.head_ref, 'release-please--') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306  # v5.0.3
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-lockfile-${{ hashFiles('Cargo.lock', 'desktop/src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-lockfile-
+
+      - name: Regenerate root workspace Cargo.lock
+        run: cargo generate-lockfile
+
+      - name: Regenerate desktop workspace Cargo.lock
+        run: cargo generate-lockfile
+        working-directory: desktop/src-tauri
+
+      - name: Commit updated lockfiles
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock desktop/src-tauri/Cargo.lock
+          if git diff --cached --quiet; then
+            echo "Lockfiles already up to date"
+          else
+            git commit -m "regenerate Cargo.lock files"
+            git push origin "HEAD:$HEAD_REF"
+          fi

@@ -1,0 +1,165 @@
+name: Desktop Build
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".node-version"
+      - ".github/actions/download-nodejs/**"
+  push:
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".node-version"
+      - ".github/actions/download-nodejs/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matrix-setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - name: Determine build matrix
+        id: set
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo 'matrix={"include":[{"platform":"ubuntu-22.04","args":"","rust-targets":""}]}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matrix={"include":[{"platform":"ubuntu-22.04","args":"","rust-targets":""},{"platform":"macos-latest","args":"--target aarch64-apple-darwin","rust-targets":"aarch64-apple-darwin,x86_64-apple-darwin"},{"platform":"macos-latest","args":"--target x86_64-apple-darwin","rust-targets":"aarch64-apple-darwin,x86_64-apple-darwin"},{"platform":"windows-latest","args":"","rust-targets":""}]}' >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: matrix-setup
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
+    timeout-minutes: 45
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev
+
+      - name: Setup Node.js
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238  # v6.2.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/src/package-lock.json
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5  # v2.8.2
+        with:
+          workspaces: |
+            . -> target
+            ./desktop/src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: desktop/src
+
+      - name: Download Lima for bundling
+        if: contains(matrix.platform, 'macos')
+        uses: ./.github/actions/download-lima
+        with:
+          arch: ${{ contains(matrix.args, 'aarch64') && 'aarch64' || 'x86_64' }}
+
+      - name: Download nerdctl-full for bundling
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: ./.github/actions/download-nerdctl-full
+        with:
+          arch: amd64
+
+      - name: Download WSL resources for offline bundling
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          CONSTS=crates/speedwave-runtime/src/consts.rs
+          NERDCTL_VERSION=$(grep -A1 '^pub const NERDCTL_FULL_VERSION' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
+          [ -n "$NERDCTL_VERSION" ] || { echo "::error::Failed to parse NERDCTL_FULL_VERSION"; exit 1; }
+          NERDCTL_SHA256=$(grep -A1 '^pub const NERDCTL_FULL_SHA256_AMD64' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
+          [ -n "$NERDCTL_SHA256" ] || { echo "::error::Failed to parse NERDCTL_FULL_SHA256_AMD64"; exit 1; }
+          ROOTFS_URL=$(grep -A1 '^pub const WSL_ROOTFS_URL_AMD64' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
+          [ -n "$ROOTFS_URL" ] || { echo "::error::Failed to parse WSL_ROOTFS_URL_AMD64"; exit 1; }
+          ROOTFS_SHA256=$(grep -A1 '^pub const WSL_ROOTFS_SHA256_AMD64' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
+          [ -n "$ROOTFS_SHA256" ] || { echo "::error::Failed to parse WSL_ROOTFS_SHA256_AMD64"; exit 1; }
+          mkdir -p desktop/src-tauri/wsl
+          curl -fsSL "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/nerdctl-full-${NERDCTL_VERSION}-linux-amd64.tar.gz" \
+            -o desktop/src-tauri/wsl/nerdctl-full.tar.gz
+          echo "${NERDCTL_SHA256}  desktop/src-tauri/wsl/nerdctl-full.tar.gz" | sha256sum -c -
+          curl -fsSL "${ROOTFS_URL}" \
+            -o desktop/src-tauri/wsl/ubuntu-rootfs.tar.gz
+          echo "${ROOTFS_SHA256}  desktop/src-tauri/wsl/ubuntu-rootfs.tar.gz" | sha256sum -c -
+
+      - name: Download Node.js for bundling
+        uses: ./.github/actions/download-nodejs
+        with:
+          platform: ${{ contains(matrix.platform, 'macos') && 'darwin' || (matrix.platform == 'windows-latest' && 'win' || 'linux') }}
+          # NOTE: assumes all non-macOS-aarch64 builds are x64. If a Linux arm64 runner
+          # is ever added to the matrix, this must be updated to detect runner arch separately.
+          arch: ${{ (contains(matrix.platform, 'macos') && contains(matrix.args, 'aarch64')) && 'arm64' || 'x64' }}
+
+      - name: Bundle build context and mcp-os
+        shell: bash
+        run: scripts/bundle-build-context.sh --ci
+
+      - name: Build CLI for bundling
+        shell: bash
+        env:
+          MATRIX_ARGS: ${{ matrix.args }}
+          MATRIX_PLATFORM: ${{ matrix.platform }}
+        run: |
+          # Extract --target value from matrix.args using sed (BSD-compatible)
+          TARGET=$(echo "$MATRIX_ARGS" | sed -n 's/.*--target \([^ ]*\).*/\1/p')
+          if [ -n "$TARGET" ]; then
+            cargo build --release --target "$TARGET" -p speedwave-cli
+            CLI_BIN="target/$TARGET/release/speedwave"
+          else
+            cargo build --release -p speedwave-cli
+            CLI_BIN="target/release/speedwave"
+          fi
+          # Windows: append .exe
+          if [ "$MATRIX_PLATFORM" = "windows-latest" ]; then
+            CLI_BIN="${CLI_BIN}.exe"
+          fi
+          mkdir -p desktop/src-tauri/cli
+          cp "$CLI_BIN" desktop/src-tauri/cli/
+
+      - name: Build Tauri app
+        working-directory: desktop/src-tauri
+        shell: bash
+        env:
+          CI: true
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx --prefix ../src tauri build ${{ matrix.args }}

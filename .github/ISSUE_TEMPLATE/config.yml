@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & Discussions
+    url: https://github.com/speednet-software/speedwave/discussions
+    about: Use Discussions for questions, ideas, and general conversation.

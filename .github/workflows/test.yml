@@ -1,0 +1,237 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306  # v5.0.3
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('Cargo.lock', 'desktop/src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-lint-
+
+      - name: Setup Node
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238  # v6.2.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            mcp-servers/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cargo fetch
+          npm ci --ignore-scripts
+          cd mcp-servers && npm ci
+
+      - name: Rust clippy
+        run: cargo clippy -p speedwave-runtime -p speedwave-cli -- -D warnings
+
+      - name: Rust format check
+        run: cargo fmt --all -- --check
+
+      - name: Prettier format check
+        run: npx prettier --check 'mcp-servers/*/src/**/*.ts' 'desktop/src/src/**/*.ts' '*.md'
+
+      - name: MCP type-check (build shared first)
+        working-directory: mcp-servers
+        run: |
+          (cd shared && npx tsc)
+          for ws in hub slack sharepoint redmine gitlab gemini os; do
+            echo "tsc --noEmit $ws"
+            (cd "$ws" && npx tsc --noEmit)
+          done
+
+      - name: MCP ESLint
+        working-directory: mcp-servers
+        run: npx eslint .
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+
+      - name: Cache Cargo
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306  # v5.0.3
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-
+
+      - name: Setup Node
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238  # v6.2.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            mcp-servers/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cargo fetch
+          npm ci --ignore-scripts
+          cd mcp-servers && npm ci
+
+      - name: Rust tests
+        run: make test-rust
+
+      - name: MCP tests + coverage
+        run: make coverage-mcp
+
+      - name: Install bats
+        run: sudo apt-get update && sudo apt-get install -y bats
+
+      - name: Entrypoint tests
+        run: make test-entrypoint
+
+  desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306  # v5.0.3
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            desktop/src-tauri/target/
+          key: ${{ runner.os }}-cargo-desktop-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-desktop-
+
+      - name: Setup Node
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238  # v6.2.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/src/package-lock.json
+
+      - name: Install dependencies
+        working-directory: desktop/src-tauri
+        run: cargo fetch
+
+      - name: Install Angular dependencies
+        working-directory: desktop/src
+        run: npm ci
+
+      - name: Create resource stubs for Tauri build script
+        run: |
+          mkdir -p desktop/src-tauri/nerdctl-full/{bin,lib,libexec,share}
+          mkdir -p desktop/src-tauri/THIRD-PARTY-LICENSES
+          mkdir -p desktop/src-tauri/build-context/containers
+          mkdir -p desktop/src-tauri/build-context/mcp-servers
+          mkdir -p desktop/src-tauri/mcp-os/os/dist
+          mkdir -p desktop/src-tauri/mcp-os/shared/dist
+          mkdir -p desktop/src-tauri/nodejs/bin
+          touch desktop/src-tauri/nodejs/bin/node
+          touch desktop/src-tauri/nodejs/node.exe
+          mkdir -p desktop/src-tauri/cli
+          touch desktop/src-tauri/cli/speedwave
+
+      - name: Desktop clippy
+        working-directory: desktop/src-tauri
+        run: cargo clippy -- -D warnings
+
+      - name: Angular ESLint
+        working-directory: desktop/src
+        run: npx eslint 'src/**/*.ts'
+
+      - name: Angular tests + coverage
+        working-directory: desktop/src
+        run: npx vitest run --coverage
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Setup Node
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238  # v6.2.0
+        with:
+          node-version: 24
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+
+      - name: Cache Cargo
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306  # v5.0.3
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-audit-${{ hashFiles('Cargo.lock', 'desktop/src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-audit-
+
+      - name: npm audit (mcp-servers)
+        run: cd mcp-servers && npm audit --audit-level=high --omit=dev
+
+      - name: npm audit (desktop)
+        run: cd desktop/src && npm audit --audit-level=high --omit=dev
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: cargo audit (root workspace)
+        run: cargo audit
+
+      - name: cargo audit (desktop)
+        run: cargo audit --file desktop/src-tauri/Cargo.lock

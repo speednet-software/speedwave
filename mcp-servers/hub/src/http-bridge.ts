@@ -1,0 +1,545 @@
+/**
+ * HTTP Bridge - Hub-to-Worker Communication
+ * @module http-bridge
+ *
+ * Enables mcp-hub to call isolated MCP workers via HTTP.
+ * Each worker only has access to its own service tokens.
+ *
+ * Architecture:
+ * - Hub (this service) has NO tokens - only orchestrates
+ * - Workers have per-service token isolation
+ * - All communication via JSON-RPC 2.0 over HTTP
+ *
+ * Security:
+ * - Internal Docker network only (no exposed ports)
+ * - Network isolation provides security - no host access
+ */
+
+import { randomUUID } from 'crypto';
+import { buildServiceBridge, getEnabledServices } from './tool-registry.js';
+import { getAuthToken } from './auth-tokens.js';
+import { TIMEOUTS, ts } from '../../shared/dist/index.js';
+
+//═══════════════════════════════════════════════════════════════════════════════
+// Configuration
+//═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * List of all supported MCP worker services.
+ * Adding a new service: add to this array and create corresponding bridge function.
+ */
+export const SERVICES = ['slack', 'sharepoint', 'redmine', 'gitlab', 'gemini', 'os'] as const;
+
+/** Union type of all supported service names derived from SERVICES array. */
+export type ServiceName = (typeof SERVICES)[number];
+
+/**
+ * Resolve worker URL for a given service from WORKER_{SERVICE}_URL env var.
+ * Returns undefined if the env var is not set (service not enabled).
+ * @param service - service name (e.g. 'slack', 'gitlab')
+ */
+function getWorkerUrl(service: string): string | undefined {
+  return process.env[`WORKER_${service.toUpperCase()}_URL`] || undefined;
+}
+
+/**
+ * Get all services that have a WORKER_*_URL env var configured.
+ */
+function getConfiguredServices(): string[] {
+  return SERVICES.filter((service) => Boolean(getWorkerUrl(service)));
+}
+
+/**
+ * Get current worker request timeout value (for testing)
+ * @returns Current timeout in milliseconds
+ */
+export function getRequestTimeout(): number {
+  return TIMEOUTS.WORKER_REQUEST_MS;
+}
+
+//═══════════════════════════════════════════════════════════════════════════════
+// Types
+//═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Worker response structure
+ */
+export interface WorkerResponse<T = unknown> {
+  /** Whether the operation succeeded */
+  success: boolean;
+  /** Response data if successful */
+  data?: T;
+  /** Error message if failed */
+  error?: string;
+}
+
+/**
+ * JSON-RPC 2.0 response from worker
+ */
+export interface JSONRPCResponse {
+  /** JSON-RPC version */
+  jsonrpc: '2.0';
+  /** Request ID */
+  id: string | number;
+  /** Result object containing MCP response */
+  result?: {
+    /** Array of content items */
+    content: Array<{ type: string; text?: string }>;
+    /** Set by errorResult() when worker returns an error */
+    isError?: boolean;
+  };
+  /** Error object if request failed */
+  error?: {
+    /** Error code */
+    code: number;
+    /** Error message */
+    message: string;
+  };
+}
+
+//═══════════════════════════════════════════════════════════════════════════════
+// Worker Status Cache
+//═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Worker status cache entry
+ */
+interface WorkerStatus {
+  /** Whether worker is currently available */
+  available: boolean;
+  /** Last time availability was checked */
+  lastCheck: Date;
+  /** List of tools provided by this worker */
+  tools: string[];
+}
+
+const workerStatusCache: Map<string, WorkerStatus> = new Map();
+
+/**
+ * Clear worker status cache (for testing)
+ */
+export function clearWorkerCache(): void {
+  workerStatusCache.clear();
+}
+
+/**
+ * Check if worker is available (with caching)
+ * @param service - Service name to check
+ * @returns True if worker is available, false otherwise
+ */
+export async function isWorkerAvailable(service: string): Promise<boolean> {
+  const cached = workerStatusCache.get(service);
+  const now = new Date();
+
+  if (cached && now.getTime() - cached.lastCheck.getTime() < TIMEOUTS.CACHE_TTL_MS) {
+    return cached.available;
+  }
+
+  try {
+    const url = getWorkerUrl(service);
+    if (!url) return false;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.HEALTH_CHECK_MS);
+
+    const response = await fetch(`${url}/health`, {
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    const available = response.ok;
+    workerStatusCache.set(service, {
+      available,
+      lastCheck: now,
+      tools: [],
+    });
+
+    return available;
+  } catch (error) {
+    // Distinguish between different error types for better debugging
+    let errorType = 'UNKNOWN';
+    if (error instanceof Error) {
+      if (error.name === 'AbortError') {
+        errorType = 'TIMEOUT';
+      } else if ('code' in error) {
+        const code = (error as { code?: string }).code;
+        if (code === 'ENOTFOUND') {
+          errorType = 'DNS_ERROR';
+        } else if (code === 'ECONNREFUSED') {
+          errorType = 'CONNECTION_REFUSED';
+        } else if (code) {
+          errorType = code;
+        }
+      } else if (error.message.includes('TLS') || error.message.includes('SSL')) {
+        errorType = 'TLS_ERROR';
+      }
+    }
+
+    console.warn(
+      `${ts()} [http-bridge] Worker health check failed for ${service} [${errorType}]:`,
+      error instanceof Error ? error.message : error
+    );
+    workerStatusCache.set(service, {
+      available: false,
+      lastCheck: now,
+      tools: [],
+    });
+    return false;
+  }
+}
+
+/**
+ * Get all available services
+ * @returns Array of service names that are currently available
+ */
+export async function getAvailableServices(): Promise<string[]> {
+  const services = getConfiguredServices();
+  const results = await Promise.all(
+    services.map(async (service) => ({
+      service,
+      available: await isWorkerAvailable(service),
+    }))
+  );
+
+  return results.filter((r) => r.available).map((r) => r.service);
+}
+
+//═══════════════════════════════════════════════════════════════════════════════
+// Error Parsing
+//═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Parses and extracts meaningful error messages from MCP service errors.
+ * Handles various error structures from different APIs (GitLab, Slack, SharePoint, etc.).
+ *
+ * Error sources handled:
+ * - GitBeaker: error.cause.description, error.response.body.message
+ * - HTTP errors: error.response.status, error.response.body.error
+ * - Network errors: error.code (ECONNREFUSED, ETIMEDOUT)
+ * - Generic errors: error.message
+ * @param {unknown} error - The raw error from an MCP service call
+ * @param {string} serviceName - Name of the service for prefixing (e.g., 'gitlab', 'slack')
+ * @returns {string} A sanitized, user-friendly error message
+ * @example
+ * parseServiceError({ cause: { description: 'Invalid token' } }, 'gitlab')
+ * // → 'gitlab: Invalid token'
+ *
+ * parseServiceError({ response: { status: 404 } }, 'gitlab')
+ * // → 'gitlab: Resource not found'
+ */
+export function parseServiceError(error: unknown, serviceName: string): string {
+  const prefix = serviceName ? `${serviceName}: ` : '';
+
+  if (!(error instanceof Error) && typeof error !== 'object') {
+    return `${prefix}${String(error)}`;
+  }
+
+  const err = error as {
+    cause?: {
+      description?: string;
+      response?: { status?: number; body?: unknown };
+    };
+    response?: {
+      status?: number;
+      body?: { message?: string; error?: string };
+    };
+    code?: string;
+    message?: string | object;
+  };
+
+  // GitBeaker style: error.cause.description
+  if (err.cause?.description) {
+    return `${prefix}${err.cause.description}`;
+  }
+
+  // HTTP response body message
+  if (err.response?.body) {
+    const body = err.response.body;
+    if (typeof body === 'object' && body !== null) {
+      if ('message' in body && body.message) {
+        return `${prefix}${body.message}`;
+      }
+      if ('error' in body && body.error) {
+        return `${prefix}${body.error}`;
+      }
+    }
+  }
+
+  // HTTP status codes
+  if (err.response?.status) {
+    const status = err.response.status;
+    const statusMessages: Record<number, string> = {
+      400: 'Bad request - check parameters',
+      401: 'Authentication failed - check token',
+      403: 'Permission denied - insufficient privileges',
+      404: 'Resource not found',
+      429: 'Rate limit exceeded - try again later',
+      500: 'Server error',
+      502: 'Bad gateway',
+      503: 'Service unavailable',
+    };
+    return `${prefix}${statusMessages[status] || `HTTP error ${status}`}`;
+  }
+
+  // Network errors
+  if (err.code) {
+    const networkMessages: Record<string, string> = {
+      ECONNREFUSED: 'Connection refused - service not reachable',
+      ETIMEDOUT: 'Connection timeout - service not responding',
+      ENOTFOUND: 'Host not found - check URL',
+    };
+    if (networkMessages[err.code]) {
+      return `${prefix}${networkMessages[err.code]}`;
+    }
+  }
+
+  // Standard error message
+  if (err.message) {
+    if (typeof err.message === 'object') {
+      return `${prefix}${JSON.stringify(err.message)}`;
+    }
+    return `${prefix}${err.message}`;
+  }
+
+  return `${prefix}Unknown error`;
+}
+
+//═══════════════════════════════════════════════════════════════════════════════
+// HTTP Bridge Functions
+//═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Call a worker tool via HTTP bridge
+ * @param service Service name (slack, sharepoint, redmine, gitlab, gemini)
+ * @param toolName Tool name to call
+ * @param params Tool parameters
+ * @param options Optional configuration (timeoutMs for custom timeout)
+ * @param options.timeoutMs - Custom timeout in milliseconds for this specific call
+ * @returns Tool result
+ */
+export async function callWorker<T = unknown>(
+  service: string,
+  toolName: string,
+  params: Record<string, unknown>,
+  options?: { timeoutMs?: number }
+): Promise<T> {
+  const url = getWorkerUrl(service);
+
+  if (!url) {
+    throw new Error(`Unknown service: ${service}`);
+  }
+
+  const requestId = randomUUID();
+  const timeout = options?.timeoutMs ?? TIMEOUTS.WORKER_REQUEST_MS;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const authToken = getAuthToken(service);
+    if (authToken) {
+      headers['Authorization'] = `Bearer ${authToken}`;
+    }
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: requestId,
+        method: 'tools/call',
+        params: {
+          name: toolName,
+          arguments: params,
+        },
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`Worker ${service} returned ${response.status}: ${response.statusText}`);
+    }
+
+    const result = (await response.json()) as JSONRPCResponse;
+
+    if (result.error) {
+      throw new Error(`Worker ${service} error: ${result.error.message}`);
+    }
+
+    // Extract text content from MCP response
+    const content = result.result?.content;
+    if (content && content.length > 0 && content[0].text) {
+      const text = content[0].text;
+
+      // Check if worker returned an error (e.g., "Redmine not configured. Run: speedwave setup redmine")
+      // errorResult() sets isError: true and wraps message in "Error: " prefix
+      if (result.result?.isError) {
+        throw new Error(text);
+      }
+
+      // Try to parse as JSON (normal response)
+      try {
+        return JSON.parse(text) as T;
+      } catch (parseError) {
+        const preview = text.length > 100 ? text.substring(0, 100) + '...' : text;
+        console.error(
+          `${ts()} [http-bridge] Worker ${service} returned invalid JSON:`,
+          `Preview: "${preview}"`,
+          `Parse error: ${parseError instanceof Error ? parseError.message : parseError}`
+        );
+        throw new Error(
+          `Worker ${service} returned invalid response format. Expected JSON but received: ${preview}`
+        );
+      }
+    }
+
+    return result.result as T;
+  } catch (error: unknown) {
+    clearTimeout(timeoutId);
+
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`Worker ${service} timeout after ${timeout}ms`);
+    }
+
+    console.error(
+      `${ts()} [http-bridge] callWorker(${service}, ${toolName}) failed:`,
+      error instanceof Error ? error.message : error
+    );
+    throw error;
+  }
+}
+
+//═══════════════════════════════════════════════════════════════════════════════
+// Service-Specific Bridge Functions (for executor.ts compatibility)
+//═══════════════════════════════════════════════════════════════════════════════
+
+/** Create Slack bridge for executor sandbox. */
+export function createSlackBridge() {
+  return buildServiceBridge('slack', callWorker);
+}
+
+/** Create SharePoint bridge for executor sandbox. */
+export function createSharePointBridge() {
+  return buildServiceBridge('sharepoint', callWorker);
+}
+
+/** Create Redmine bridge for executor sandbox. */
+export function createRedmineBridge() {
+  return buildServiceBridge('redmine', callWorker);
+}
+
+/** Create GitLab bridge for executor sandbox. */
+export function createGitLabBridge() {
+  return buildServiceBridge('gitlab', callWorker);
+}
+
+/** Create Gemini bridge for executor sandbox. */
+export function createGeminiBridge() {
+  return buildServiceBridge('gemini', callWorker);
+}
+
+/** Create OS bridge for executor sandbox (Reminders, Calendar, Mail, Notes). */
+export function createOsBridge() {
+  return buildServiceBridge('os', callWorker);
+}
+
+//═══════════════════════════════════════════════════════════════════════════════
+// Create All Bridges (Lazy Initialization)
+//═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * All service bridges combined
+ */
+export interface AllBridges {
+  /** Slack service bridge */
+  slack: ReturnType<typeof createSlackBridge> | null;
+  /** SharePoint service bridge */
+  sharepoint: ReturnType<typeof createSharePointBridge> | null;
+  /** Redmine service bridge */
+  redmine: ReturnType<typeof createRedmineBridge> | null;
+  /** GitLab service bridge */
+  gitlab: ReturnType<typeof createGitLabBridge> | null;
+  /** Gemini service bridge */
+  gemini: ReturnType<typeof createGeminiBridge> | null;
+  /** OS service bridge (Reminders, Calendar, Mail, Notes) */
+  os: ReturnType<typeof createOsBridge> | null;
+}
+
+/**
+ * Initialize all service bridges
+ *
+ * IMPORTANT: Bridges are always created regardless of worker availability.
+ * Each bridge call checks worker health lazily - if a worker becomes available
+ * after Hub startup, it will work on the next call.
+ *
+ * This fixes the race condition where Hub starts before workers are ready.
+ * @returns All initialized bridges
+ */
+export async function initializeAllBridges(): Promise<AllBridges> {
+  console.log(`${ts()} 🔗 Initializing HTTP bridges to workers (lazy mode)...`);
+
+  const enabledServices = getEnabledServices();
+
+  const bridges: AllBridges = {
+    slack: enabledServices.has('slack') ? createSlackBridge() : null,
+    sharepoint: enabledServices.has('sharepoint') ? createSharePointBridge() : null,
+    redmine: enabledServices.has('redmine') ? createRedmineBridge() : null,
+    gitlab: enabledServices.has('gitlab') ? createGitLabBridge() : null,
+    gemini: enabledServices.has('gemini') ? createGeminiBridge() : null,
+    os: enabledServices.has('os') ? createOsBridge() : null,
+  };
+
+  // Check initial status for logging only
+  const activeServices = SERVICES.filter((s) => enabledServices.has(s));
+  const statusChecks = await Promise.all(activeServices.map((s) => isWorkerAvailable(s)));
+  const workerStatus = Object.fromEntries(activeServices.map((s, i) => [s, statusChecks[i]]));
+
+  const enabledCount = statusChecks.filter(Boolean).length;
+
+  console.log(
+    `${ts()} \n📊 Workers available at startup: ${enabledCount}/${activeServices.length}`
+  );
+  for (const service of SERVICES) {
+    if (!enabledServices.has(service)) {
+      console.log(
+        `${ts()}    ${service.charAt(0).toUpperCase() + service.slice(1).padEnd(10)}: disabled`
+      );
+    } else {
+      const status = workerStatus[service] ? '✅' : '⏳ (will retry on use)';
+      console.log(
+        `${ts()}    ${service.charAt(0).toUpperCase() + service.slice(1).padEnd(10)}: ${status}`
+      );
+    }
+  }
+
+  return bridges;
+}
+
+/**
+ * Get bridge status (checks current worker availability)
+ * @returns Object mapping service names to their availability status
+ */
+export async function getBridgeStatusAsync(): Promise<Record<string, boolean>> {
+  const statusChecks = await Promise.all(SERVICES.map((s) => isWorkerAvailable(s)));
+  return Object.fromEntries(SERVICES.map((s, i) => [s, statusChecks[i]]));
+}
+
+/**
+ * Get bridge status (synchronous, uses cached status)
+ * @deprecated Use getBridgeStatusAsync for accurate status
+ * @param _bridges - Bridges object (unused)
+ * @returns Object mapping service names to their cached availability (null if unknown)
+ */
+export function getBridgeStatus(_bridges: AllBridges): Record<string, boolean | null> {
+  const result: Record<string, boolean | null> = {};
+  for (const service of getConfiguredServices()) {
+    const cached = workerStatusCache.get(service);
+    // Return null when status unknown (no cache), false when unavailable, true when available
+    result[service] = cached?.available ?? null;
+  }
+  return result;
+}

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/v4.4.0/schemas/config.json",
+  "release-type": "node",
+  "draft": true,
+  "force-tag-creation": true,
+  "include-v-in-tag": true,
+  "include-component-in-tag": false,
+  "bump-minor-pre-major": true,
+  "bootstrap-sha": "f70a6a998fd4b9dc8033a905efd8112657485a4e",
+  "changelog-sections": [
+    { "type": "feat", "section": "Features" },
+    { "type": "fix", "section": "Bug Fixes" },
+    { "type": "perf", "section": "Performance" },
+    { "type": "refactor", "section": "Code Refactoring" },
+    { "type": "docs", "section": "Documentation", "hidden": true },
+    { "type": "ci", "section": "CI/CD", "hidden": true },
+    { "type": "test", "section": "Tests", "hidden": true }
+  ],
+  "exclude-paths": [".github/"],
+  "packages": {
+    ".": {
+      "extra-files": [
+        "desktop/src/package.json",
+        "desktop/src-tauri/tauri.conf.json",
+        "desktop/src/package-lock.json",
+        "mcp-servers/hub/package.json",
+        "mcp-servers/shared/package.json",
+        "mcp-servers/slack/package.json",
+        "mcp-servers/sharepoint/package.json",
+        "mcp-servers/redmine/package.json",
+        "mcp-servers/gitlab/package.json",
+        "mcp-servers/gemini/package.json",
+        "mcp-servers/os/package.json",
+        {
+          "type": "toml",
+          "path": "crates/speedwave-runtime/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "crates/speedwave-cli/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "desktop/src-tauri/Cargo.toml",
+          "jsonpath": "$.package.version"
+        }
+      ]
+    }
+  }
+}

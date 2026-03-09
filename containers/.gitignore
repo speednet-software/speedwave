@@ -1,0 +1,5 @@
+# Generated per-project compose files (created by render_compose())
+# Only compose.template.yml should be committed
+docker-compose.*.yml
+compose.*.yml
+!compose.template.yml

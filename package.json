@@ -1,0 +1,23 @@
+{
+  "name": "speedwave",
+  "version": "0.0.1",
+  "private": true,
+  "description": "AI platform connecting Claude Code with external services",
+  "license": "Apache-2.0",
+  "author": "Speednet",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/speednet-software/speedwave.git"
+  },
+  "type": "module",
+  "scripts": {
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "husky": "^9",
+    "lint-staged": "^16",
+    "@commitlint/cli": "^20",
+    "@commitlint/config-conventional": "^20",
+    "prettier": "^3"
+  }
+}

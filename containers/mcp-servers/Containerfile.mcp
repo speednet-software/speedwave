@@ -1,0 +1,18 @@
+# OCI Containerfile for Speedwave MCP server containers
+# Multi-stage build: node:24-alpine for minimal image size
+# Works with nerdctl build (OCI Containerfile format)
+
+FROM node:24-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm install --production
+COPY . .
+RUN npm run build --if-present
+
+FROM node:24-alpine
+RUN addgroup -S speedwave && adduser -S speedwave -G speedwave
+WORKDIR /app
+COPY --from=builder /app .
+USER speedwave
+EXPOSE 3000
+CMD ["node", "dist/index.js"]

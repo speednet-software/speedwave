@@ -1,0 +1,19 @@
+{
+  "mcp-servers/*/src/**/*.ts": [
+    "prettier --write",
+    "eslint --config mcp-servers/eslint.config.js --fix"
+  ],
+  "desktop/src/src/**/*.ts": [
+    "prettier --write",
+    "eslint --config desktop/src/eslint.config.js --fix"
+  ],
+  "desktop/src/**/*.html": [
+    "prettier --write"
+  ],
+  "*.rs": [
+    "rustfmt"
+  ],
+  "*.md": [
+    "prettier --write"
+  ]
+}

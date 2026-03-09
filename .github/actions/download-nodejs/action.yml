@@ -1,0 +1,88 @@
+name: 'Download Node.js for Bundling'
+description: 'Downloads and verifies Node.js binary for Desktop app bundling'
+inputs:
+  platform:
+    description: 'Target platform (darwin, linux, or win)'
+    required: true
+  arch:
+    description: 'Target architecture (arm64 or x64)'
+    required: true
+runs:
+  using: 'composite'
+  steps:
+    - name: Download Node.js for bundling
+      shell: bash
+      run: |
+        # Read version from SSOT
+        NODE_VERSION=$(cat .node-version)
+        PLATFORM="${{ inputs.platform }}"
+        ARCH="${{ inputs.arch }}"
+
+        if [ "$PLATFORM" = "win" ]; then
+          ARCHIVE="node-v${NODE_VERSION}-${PLATFORM}-${ARCH}.zip"
+        else
+          ARCHIVE="node-v${NODE_VERSION}-${PLATFORM}-${ARCH}.tar.gz"
+        fi
+
+        BASE_URL="https://nodejs.org/dist/v${NODE_VERSION}"
+        URL="${BASE_URL}/${ARCHIVE}"
+        SUMS_URL="${BASE_URL}/SHASUMS256.txt"
+
+        mkdir -p desktop/src-tauri/THIRD-PARTY-LICENSES
+        if [ "$PLATFORM" = "win" ]; then
+          mkdir -p desktop/src-tauri/nodejs
+        else
+          mkdir -p desktop/src-tauri/nodejs/bin
+        fi
+
+        echo "Downloading ${URL}"
+        curl -fsSL "$URL" -o /tmp/nodejs-archive
+        curl -fsSL "$SUMS_URL" -o /tmp/SHASUMS256.txt
+
+        # Verify SHA256
+        EXPECTED=$(grep "$ARCHIVE" /tmp/SHASUMS256.txt | awk '{print $1}')
+        if [ -z "$EXPECTED" ]; then
+          echo "::error::Could not find checksum for ${ARCHIVE} in SHASUMS256.txt"
+          exit 1
+        fi
+        if command -v shasum >/dev/null 2>&1; then
+          ACTUAL=$(shasum -a 256 /tmp/nodejs-archive | awk '{print $1}')
+        else
+          ACTUAL=$(sha256sum /tmp/nodejs-archive | awk '{print $1}')
+        fi
+        if [ "$EXPECTED" != "$ACTUAL" ]; then
+          echo "::error::SHA256 mismatch: expected ${EXPECTED}, got ${ACTUAL}"
+          exit 1
+        fi
+        echo "SHA256 verified: ${ACTUAL}"
+
+        # Extract only the node binary
+        if [ "$PLATFORM" = "win" ]; then
+          unzip -q /tmp/nodejs-archive "node-v${NODE_VERSION}-${PLATFORM}-${ARCH}/node.exe" -d /tmp/nodejs-extract
+          cp "/tmp/nodejs-extract/node-v${NODE_VERSION}-${PLATFORM}-${ARCH}/node.exe" desktop/src-tauri/nodejs/node.exe
+        else
+          tar -xzf /tmp/nodejs-archive --strip-components=2 -C desktop/src-tauri/nodejs/bin/ \
+            "node-v${NODE_VERSION}-${PLATFORM}-${ARCH}/bin/node"
+          chmod +x desktop/src-tauri/nodejs/bin/node
+        fi
+
+        # Extract LICENSE for compliance (MIT)
+        if [ "$PLATFORM" = "win" ]; then
+          unzip -q /tmp/nodejs-archive "node-v${NODE_VERSION}-${PLATFORM}-${ARCH}/LICENSE" -d /tmp/nodejs-extract 2>/dev/null || true
+          if [ -f "/tmp/nodejs-extract/node-v${NODE_VERSION}-${PLATFORM}-${ARCH}/LICENSE" ]; then
+            cp "/tmp/nodejs-extract/node-v${NODE_VERSION}-${PLATFORM}-${ARCH}/LICENSE" \
+              desktop/src-tauri/THIRD-PARTY-LICENSES/nodejs-LICENSE
+          fi
+        else
+          tar -xzf /tmp/nodejs-archive --strip-components=1 -C /tmp/ \
+            "node-v${NODE_VERSION}-${PLATFORM}-${ARCH}/LICENSE" 2>/dev/null || true
+          if [ -f /tmp/LICENSE ]; then
+            cp /tmp/LICENSE desktop/src-tauri/THIRD-PARTY-LICENSES/nodejs-LICENSE
+          fi
+        fi
+
+        # Clean up
+        rm -f /tmp/nodejs-archive /tmp/SHASUMS256.txt /tmp/LICENSE
+        rm -rf /tmp/nodejs-extract
+
+        echo "Node.js v${NODE_VERSION} (${PLATFORM}-${ARCH}) bundled successfully"

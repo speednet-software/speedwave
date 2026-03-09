@@ -1,0 +1,24 @@
+# Tauri updater public key ID (minisign key fingerprint inside base64-encoded pubkey)
+# This is a PUBLIC key embedded in tauri.conf.json — not a secret.
+desktop/src-tauri/tauri.conf.json:generic-api-key:38
+
+# Log sanitizer test fixtures — fake secrets used to verify redaction works.
+crates/speedwave-runtime/src/log_sanitizer.rs:private-key:17
+crates/speedwave-runtime/src/log_sanitizer.rs:private-key:340
+crates/speedwave-runtime/src/log_sanitizer.rs:private-key:650
+crates/speedwave-runtime/src/log_sanitizer.rs:generic-api-key:282
+crates/speedwave-runtime/src/log_sanitizer.rs:generic-api-key:330
+crates/speedwave-runtime/src/log_sanitizer.rs:generic-api-key:620
+crates/speedwave-runtime/src/log_sanitizer.rs:gitlab-pat:783
+crates/speedwave-runtime/src/log_sanitizer.rs:slack-legacy-workspace-token:486
+crates/speedwave-runtime/src/log_sanitizer.rs:slack-legacy-workspace-token:500
+crates/speedwave-runtime/src/log_sanitizer.rs:jwt:230
+
+# Sanitizer test fixtures in Desktop test modules — fake secrets.
+desktop/src-tauri/src/ide_bridge.rs:generic-api-key:1803
+desktop/src-tauri/src/main.rs:generic-api-key:3498
+desktop/src-tauri/src/main.rs:jwt:3684
+
+# PII tokenizer test — fake API key in test fixture.
+desktop/src-tauri/build-context/mcp-servers/hub/src/pii-tokenizer.test.ts:generic-api-key:87
+mcp-servers/hub/src/pii-tokenizer.test.ts:generic-api-key:87

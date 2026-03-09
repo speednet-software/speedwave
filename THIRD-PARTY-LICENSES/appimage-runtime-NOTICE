@@ -1,0 +1,48 @@
+AppImage Type 2 Static Runtime — Third-Party Notices
+=====================================================
+
+The AppImage static type2-runtime bundled in Speedwave is a pre-built binary
+from the AppImage/type2-runtime project. It serves as the AppImage header that
+mounts the SquashFS payload (Speedwave application) without requiring libfuse2
+on the host system.
+
+Source: https://github.com/AppImage/type2-runtime
+
+The runtime statically links the following libraries:
+
+1. type2-runtime
+   License: MIT
+   Source:  https://github.com/AppImage/type2-runtime
+
+2. libfuse3 (3.15.0)
+   License: LGPL-2.1
+   Source:  https://github.com/libfuse/libfuse
+   Note:    Statically linked into the runtime binary. Full source code
+            (including build scripts) is available in the type2-runtime
+            repository. Users may rebuild the runtime with modified libfuse.
+            See appimage-runtime-LGPL-2.1.txt for the full license text.
+
+3. squashfuse (0.5.2)
+   License: BSD-2-Clause
+   Copyright (c) 2012 Dave Vasilevsky <dave@vasilevsky.ca>
+                       Phillip Lougher <phillip@squashfs.org.uk>
+   Source:  https://github.com/vasi/squashfuse
+   See appimage-runtime-squashfuse-BSD-2.txt for the full license text.
+
+4. zstd
+   License: BSD-3-Clause
+   Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
+   Source:  https://github.com/facebook/zstd
+   See appimage-runtime-zstd-BSD-3.txt for the full license text.
+
+5. zlib
+   License: zlib License
+   Source:  https://github.com/madler/zlib
+
+6. musl libc
+   License: MIT
+   Source:  https://musl.libc.org/
+
+7. mimalloc
+   License: MIT
+   Source:  https://github.com/microsoft/mimalloc

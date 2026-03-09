@@ -1,0 +1,752 @@
+use crate::runtime::ContainerRuntime;
+use std::path::PathBuf;
+
+/// A container image definition used by `build_all_images`.
+pub struct ImageDef {
+    /// Docker/OCI tag, e.g. `"speedwave-claude:latest"`.
+    pub tag: &'static str,
+    /// Context directory relative to the build root (as resolved by `resolve_build_root()`).
+    pub context_dir: &'static str,
+    /// Containerfile path relative to the build root.
+    pub containerfile: &'static str,
+}
+
+/// SSOT for all container images — used by both Desktop (setup wizard) and the update flow.
+///
+/// All paths are relative to the build root returned by `resolve_build_root()`.
+pub const IMAGES: &[ImageDef] = &[
+    ImageDef {
+        tag: "speedwave-claude:latest",
+        context_dir: "containers",
+        containerfile: "containers/Containerfile.claude",
+    },
+    ImageDef {
+        tag: "speedwave-mcp-hub:latest",
+        context_dir: "mcp-servers",
+        containerfile: "mcp-servers/hub/Containerfile",
+    },
+    ImageDef {
+        tag: "speedwave-mcp-slack:latest",
+        context_dir: "mcp-servers",
+        containerfile: "mcp-servers/slack/Dockerfile",
+    },
+    ImageDef {
+        tag: "speedwave-mcp-sharepoint:latest",
+        context_dir: "mcp-servers",
+        containerfile: "mcp-servers/sharepoint/Dockerfile",
+    },
+    ImageDef {
+        tag: "speedwave-mcp-redmine:latest",
+        context_dir: "mcp-servers",
+        containerfile: "mcp-servers/redmine/Dockerfile",
+    },
+    ImageDef {
+        tag: "speedwave-mcp-gitlab:latest",
+        context_dir: "mcp-servers",
+        containerfile: "mcp-servers/gitlab/Dockerfile",
+    },
+    ImageDef {
+        tag: "speedwave-mcp-gemini:latest",
+        context_dir: "mcp-servers",
+        containerfile: "mcp-servers/gemini/Dockerfile",
+    },
+];
+
+/// Resolves the root directory containing container build context (`containers/`, `mcp-servers/`).
+///
+/// Resolution order:
+/// 1. `SPEEDWAVE_RESOURCES_DIR` env var → `<dir>/build-context/` (production — Tauri sets this)
+/// 2. `~/.speedwave/resources-dir` marker file → `<dir>/build-context/` (CLI reads Desktop's marker)
+/// 3. `CARGO_MANIFEST_DIR` parent chain (baked at compile time — works only in dev or when
+///    source tree still exists at the compile-time path)
+pub fn resolve_build_root() -> anyhow::Result<PathBuf> {
+    resolve_build_root_with_home(dirs::home_dir())
+}
+
+/// Internal implementation that accepts an explicit home directory for testability.
+fn resolve_build_root_with_home(home: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    // 1. SPEEDWAVE_RESOURCES_DIR/build-context/ (production — Tauri sets this)
+    if let Ok(res) = std::env::var(crate::consts::BUNDLE_RESOURCES_ENV) {
+        let bundled = PathBuf::from(&res).join("build-context");
+        if bundled.join("containers").exists() {
+            return Ok(bundled);
+        }
+        log::warn!(
+            "{} set to '{}' but build-context/containers/ not found",
+            crate::consts::BUNDLE_RESOURCES_ENV,
+            res
+        );
+    }
+
+    // 2. ~/.speedwave/resources-dir marker (written by Desktop app, read by CLI)
+    if let Some(ref home) = home {
+        if let Some(root) = resolve_from_marker(home) {
+            return Ok(root);
+        }
+    }
+
+    // 3. CARGO_MANIFEST_DIR parent chain (baked at compile time — dev only)
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf());
+    if let Some(ref root) = dev {
+        if root.join("containers").exists() {
+            return Ok(root.clone());
+        }
+    }
+
+    anyhow::bail!(
+        "Container build context not found. \
+         Ensure Speedwave Desktop is installed or run from source tree."
+    )
+}
+
+/// Resolves the path to the mcp-os `index.js` entry point.
+///
+/// Resolution order (same as `resolve_build_root`):
+/// 1. `SPEEDWAVE_RESOURCES_DIR` env var → `<dir>/mcp-os/os/dist/index.js`
+/// 2. `~/.speedwave/resources-dir` marker → `<dir>/mcp-os/os/dist/index.js`
+/// 3. `CARGO_MANIFEST_DIR` parent chain → `<repo>/mcp-servers/os/dist/index.js`
+pub fn resolve_mcp_os_script() -> Option<std::path::PathBuf> {
+    resolve_mcp_os_script_with_home(dirs::home_dir())
+}
+
+/// Internal implementation that accepts an explicit home directory for testability.
+fn resolve_mcp_os_script_with_home(home: Option<PathBuf>) -> Option<std::path::PathBuf> {
+    // 1. SPEEDWAVE_RESOURCES_DIR (production — Tauri bundle)
+    if let Ok(res) = std::env::var(crate::consts::BUNDLE_RESOURCES_ENV) {
+        let p = PathBuf::from(&res)
+            .join("mcp-os")
+            .join("os")
+            .join("dist")
+            .join("index.js");
+        if p.exists() {
+            return Some(p);
+        }
+        log::warn!("mcp-os not found at bundled path: {}", p.display());
+    }
+
+    // 2. Marker file (CLI reads Desktop's resources path)
+    if let Some(ref home) = home {
+        let marker = home
+            .join(crate::consts::DATA_DIR)
+            .join(crate::consts::RESOURCES_MARKER);
+        if let Ok(dir) = std::fs::read_to_string(&marker) {
+            let p = PathBuf::from(dir.trim())
+                .join("mcp-os")
+                .join("os")
+                .join("dist")
+                .join("index.js");
+            if p.is_absolute() && p.exists() {
+                return Some(p);
+            }
+            log::warn!("mcp-os not found at marker path: {}", p.display());
+        }
+    }
+
+    // 3. Dev fallback — path baked at compile time via env!(), validated at runtime
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|repo| repo.join("mcp-servers/os/dist/index.js"));
+    match dev {
+        Some(ref p) if p.exists() => dev,
+        Some(ref p) => {
+            log::warn!("mcp-os not found at dev path: {}", p.display());
+            None
+        }
+        None => {
+            log::warn!("mcp-os: could not determine dev path from CARGO_MANIFEST_DIR");
+            None
+        }
+    }
+}
+
+/// Reads the `~/.speedwave/resources-dir` marker file and returns the build-context
+/// path if the marker points to a valid directory containing `containers/`.
+///
+/// Consumer: called by `resolve_build_root()`. Writer: Desktop app `main.rs` on startup
+/// via `write_resources_marker()`.
+fn resolve_from_marker(home: &std::path::Path) -> Option<PathBuf> {
+    let marker = home
+        .join(crate::consts::DATA_DIR)
+        .join(crate::consts::RESOURCES_MARKER);
+    match std::fs::read_to_string(&marker) {
+        Ok(dir) => {
+            let path = PathBuf::from(dir.trim());
+            if !path.is_absolute() {
+                log::warn!(
+                    "marker {} contains a relative path '{}', ignoring",
+                    marker.display(),
+                    path.display()
+                );
+                return None;
+            }
+            let bundled = path.join("build-context");
+            if bundled.join("containers").exists() {
+                Some(bundled)
+            } else {
+                log::warn!(
+                    "marker {} points to {}, but containers/ not found",
+                    marker.display(),
+                    bundled.display()
+                );
+                None
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            log::warn!("could not read marker {}: {e}", marker.display());
+            None
+        }
+    }
+}
+
+/// Writes the `~/.speedwave/resources-dir` marker file atomically.
+///
+/// Uses write-to-tmp + rename to prevent the CLI from reading a partial path.
+/// Called by the Desktop app on startup so the CLI can locate bundled resources.
+pub fn write_resources_marker(resources_dir: &std::path::Path) -> anyhow::Result<()> {
+    write_resources_marker_to(
+        resources_dir,
+        &dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?,
+    )
+}
+
+/// Internal implementation that accepts an explicit home directory for testability.
+fn write_resources_marker_to(
+    resources_dir: &std::path::Path,
+    home: &std::path::Path,
+) -> anyhow::Result<()> {
+    let marker_dir = home.join(crate::consts::DATA_DIR);
+    let marker = marker_dir.join(crate::consts::RESOURCES_MARKER);
+    std::fs::create_dir_all(&marker_dir)?;
+    let tmp = marker_dir.join(format!("{}.tmp", crate::consts::RESOURCES_MARKER));
+    std::fs::write(&tmp, resources_dir.to_string_lossy().as_bytes())?;
+    std::fs::rename(&tmp, &marker)?;
+    Ok(())
+}
+
+/// Rebuilds all container images from their Containerfiles.
+///
+/// Calls `runtime.prepare_build_context()` to translate the host build-root into
+/// a path accessible by the container engine (e.g. copy into `~` for Lima VM,
+/// convert `C:\` → `/mnt/c/` for WSL).
+///
+/// Returns the number of images successfully built.
+#[allow(clippy::print_stderr)]
+pub fn build_all_images(runtime: &dyn ContainerRuntime) -> anyhow::Result<u32> {
+    let root = resolve_build_root()?;
+    let vm_root = runtime.prepare_build_context(&root)?;
+    let needs_cleanup = vm_root != root;
+
+    let result = (|| -> anyhow::Result<u32> {
+        let mut built = 0u32;
+        for img in IMAGES {
+            let abs_context = vm_root.join(img.context_dir);
+            let abs_containerfile = vm_root.join(img.containerfile);
+            runtime.build_image(
+                img.tag,
+                &abs_context.to_string_lossy(),
+                &abs_containerfile.to_string_lossy(),
+            )?;
+            built += 1;
+        }
+        Ok(built)
+    })();
+
+    // Clean up temporary build-cache on both success and failure
+    if needs_cleanup && vm_root.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&vm_root) {
+            log::warn!("failed to remove build cache {}: {e}", vm_root.display());
+        }
+    }
+
+    result
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_images_constant_has_entries() {
+        assert!(!IMAGES.is_empty());
+    }
+
+    #[test]
+    fn test_images_tags_are_latest() {
+        for img in IMAGES {
+            assert!(
+                img.tag.ends_with(":latest"),
+                "image tag '{}' should end with :latest",
+                img.tag
+            );
+        }
+    }
+
+    #[test]
+    fn test_images_containerfiles_exist() {
+        let root = resolve_build_root().unwrap();
+        for img in IMAGES {
+            let path = root.join(img.containerfile);
+            assert!(
+                path.exists(),
+                "Containerfile for '{}' not found at {}",
+                img.tag,
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn test_images_context_dirs_exist() {
+        let root = resolve_build_root().unwrap();
+        for img in IMAGES {
+            let path = root.join(img.context_dir);
+            assert!(
+                path.is_dir(),
+                "context dir for '{}' not found at {}",
+                img.tag,
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_build_root_dev_mode() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+        // Pass None for home to skip marker file — avoids interference from real ~/.speedwave/
+        let root = resolve_build_root_with_home(None).unwrap();
+        assert!(root.join("Cargo.toml").exists());
+        assert!(root.join("crates").is_dir());
+        assert!(root.join("containers").is_dir());
+    }
+
+    #[test]
+    fn test_resolve_build_root_with_home_none_falls_to_dev() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+        let root = resolve_build_root_with_home(None).unwrap();
+        assert!(root.join("containers").is_dir());
+    }
+
+    #[test]
+    fn test_resolve_build_root_from_resources_env() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let bc = tmp.path().join("build-context").join("containers");
+        std::fs::create_dir_all(&bc).unwrap();
+        std::env::set_var(
+            crate::consts::BUNDLE_RESOURCES_ENV,
+            tmp.path().to_string_lossy().as_ref(),
+        );
+        let root = resolve_build_root().unwrap();
+        assert_eq!(root, tmp.path().join("build-context"));
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+    }
+
+    #[test]
+    fn test_resolve_build_root_env_wins_over_marker() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Set up env var path
+        let env_resources = tmp.path().join("env-resources");
+        std::fs::create_dir_all(env_resources.join("build-context").join("containers")).unwrap();
+        std::env::set_var(
+            crate::consts::BUNDLE_RESOURCES_ENV,
+            env_resources.to_string_lossy().as_ref(),
+        );
+
+        // Set up competing marker path
+        let fake_home = tmp.path().join("home");
+        let marker_resources = tmp.path().join("marker-resources");
+        std::fs::create_dir_all(marker_resources.join("build-context").join("containers")).unwrap();
+        let marker_dir = fake_home.join(crate::consts::DATA_DIR);
+        std::fs::create_dir_all(&marker_dir).unwrap();
+        std::fs::write(
+            marker_dir.join(crate::consts::RESOURCES_MARKER),
+            marker_resources.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+
+        let root = resolve_build_root_with_home(Some(fake_home)).unwrap();
+        assert_eq!(root, env_resources.join("build-context"));
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+    }
+
+    #[test]
+    fn test_resolve_build_root_fallback_when_no_build_context() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var(
+            crate::consts::BUNDLE_RESOURCES_ENV,
+            tmp.path().to_string_lossy().as_ref(),
+        );
+        // Falls back to dev (source tree) since bundled path doesn't have containers/
+        let root = resolve_build_root_with_home(None).unwrap();
+        assert!(root.join("containers").is_dir());
+        assert!(root.join("Cargo.toml").exists());
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+    }
+
+    #[test]
+    fn test_resolve_from_marker_with_valid_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let fake_resources = tmp.path().join("fake-resources");
+
+        std::fs::create_dir_all(fake_resources.join("build-context").join("containers")).unwrap();
+
+        let marker_dir = fake_home.join(crate::consts::DATA_DIR);
+        std::fs::create_dir_all(&marker_dir).unwrap();
+        std::fs::write(
+            marker_dir.join(crate::consts::RESOURCES_MARKER),
+            fake_resources.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+
+        let result = resolve_from_marker(&fake_home);
+        assert_eq!(result, Some(fake_resources.join("build-context")));
+    }
+
+    #[test]
+    fn test_resolve_from_marker_missing_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        std::fs::create_dir_all(&fake_home).unwrap();
+
+        let result = resolve_from_marker(&fake_home);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_from_marker_invalid_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+
+        let marker_dir = fake_home.join(crate::consts::DATA_DIR);
+        std::fs::create_dir_all(&marker_dir).unwrap();
+        std::fs::write(
+            marker_dir.join(crate::consts::RESOURCES_MARKER),
+            "/nonexistent/path",
+        )
+        .unwrap();
+
+        let result = resolve_from_marker(&fake_home);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_from_marker_rejects_relative_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+
+        let marker_dir = fake_home.join(crate::consts::DATA_DIR);
+        std::fs::create_dir_all(&marker_dir).unwrap();
+        std::fs::write(
+            marker_dir.join(crate::consts::RESOURCES_MARKER),
+            "relative/path",
+        )
+        .unwrap();
+
+        let result = resolve_from_marker(&fake_home);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_from_marker_with_trailing_whitespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let fake_resources = tmp.path().join("fake-resources");
+
+        std::fs::create_dir_all(fake_resources.join("build-context").join("containers")).unwrap();
+
+        let marker_dir = fake_home.join(crate::consts::DATA_DIR);
+        std::fs::create_dir_all(&marker_dir).unwrap();
+        std::fs::write(
+            marker_dir.join(crate::consts::RESOURCES_MARKER),
+            format!("{}\n", fake_resources.to_string_lossy()),
+        )
+        .unwrap();
+
+        let result = resolve_from_marker(&fake_home);
+        assert_eq!(result, Some(fake_resources.join("build-context")));
+    }
+
+    #[test]
+    fn test_resolve_build_root_with_home_uses_marker() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let fake_resources = tmp.path().join("fake-resources");
+
+        std::fs::create_dir_all(fake_resources.join("build-context").join("containers")).unwrap();
+
+        let marker_dir = fake_home.join(crate::consts::DATA_DIR);
+        std::fs::create_dir_all(&marker_dir).unwrap();
+        std::fs::write(
+            marker_dir.join(crate::consts::RESOURCES_MARKER),
+            fake_resources.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+
+        let root = resolve_build_root_with_home(Some(fake_home)).unwrap();
+        assert_eq!(root, fake_resources.join("build-context"));
+    }
+
+    #[test]
+    fn test_resolve_build_root_marker_priority_over_dev() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let fake_resources = tmp.path().join("fake-resources");
+
+        std::fs::create_dir_all(fake_resources.join("build-context").join("containers")).unwrap();
+
+        let marker_dir = fake_home.join(crate::consts::DATA_DIR);
+        std::fs::create_dir_all(&marker_dir).unwrap();
+        std::fs::write(
+            marker_dir.join(crate::consts::RESOURCES_MARKER),
+            fake_resources.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+
+        let root = resolve_build_root_with_home(Some(fake_home)).unwrap();
+        assert_ne!(
+            root,
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf()
+        );
+        assert_eq!(root, fake_resources.join("build-context"));
+    }
+
+    #[test]
+    fn test_write_resources_marker_creates_and_reads_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let fake_resources = tmp.path().join("fake-resources");
+
+        std::fs::create_dir_all(fake_resources.join("build-context").join("containers")).unwrap();
+
+        write_resources_marker_to(&fake_resources, &fake_home).unwrap();
+
+        let result = resolve_from_marker(&fake_home);
+        assert_eq!(result, Some(fake_resources.join("build-context")));
+    }
+
+    #[test]
+    fn test_write_resources_marker_overwrites_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let old_resources = tmp.path().join("old-resources");
+        let new_resources = tmp.path().join("new-resources");
+
+        std::fs::create_dir_all(old_resources.join("build-context").join("containers")).unwrap();
+        std::fs::create_dir_all(new_resources.join("build-context").join("containers")).unwrap();
+
+        write_resources_marker_to(&old_resources, &fake_home).unwrap();
+        write_resources_marker_to(&new_resources, &fake_home).unwrap();
+
+        let result = resolve_from_marker(&fake_home);
+        assert_eq!(result, Some(new_resources.join("build-context")));
+    }
+
+    #[test]
+    fn test_write_resources_marker_no_stale_tmp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let fake_resources = tmp.path().join("fake-resources");
+
+        write_resources_marker_to(&fake_resources, &fake_home).unwrap();
+
+        let tmp_marker = fake_home
+            .join(crate::consts::DATA_DIR)
+            .join(format!("{}.tmp", crate::consts::RESOURCES_MARKER));
+        assert!(!tmp_marker.exists(), "stale .tmp file should not remain");
+    }
+
+    #[test]
+    fn test_resolve_mcp_os_script_dev_mode() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+        // In dev mode with None home, it falls through to CARGO_MANIFEST_DIR.
+        // The script may or may not exist depending on whether mcp-os was built.
+        let result = resolve_mcp_os_script_with_home(None);
+        // Just verify it doesn't panic — existence depends on build state
+        let _ = result;
+    }
+
+    #[test]
+    fn test_resolve_mcp_os_script_from_env() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let script_path = tmp
+            .path()
+            .join("mcp-os")
+            .join("os")
+            .join("dist")
+            .join("index.js");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(&script_path, "// stub").unwrap();
+        std::env::set_var(
+            crate::consts::BUNDLE_RESOURCES_ENV,
+            tmp.path().to_string_lossy().as_ref(),
+        );
+        let result = resolve_mcp_os_script_with_home(None);
+        assert_eq!(result, Some(script_path));
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+    }
+
+    #[test]
+    fn test_resolve_mcp_os_script_from_marker() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let fake_resources = tmp.path().join("fake-resources");
+
+        let script_path = fake_resources
+            .join("mcp-os")
+            .join("os")
+            .join("dist")
+            .join("index.js");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(&script_path, "// stub").unwrap();
+
+        write_resources_marker_to(&fake_resources, &fake_home).unwrap();
+
+        let result = resolve_mcp_os_script_with_home(Some(fake_home));
+        assert_eq!(result, Some(script_path));
+    }
+
+    #[test]
+    fn test_images_count() {
+        assert_eq!(IMAGES.len(), 7);
+    }
+
+    #[test]
+    fn test_build_all_images_calls_prepare_build_context() {
+        use serde_json::Value;
+        use std::process::Command;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Call {
+            tag: String,
+            context_dir: String,
+            containerfile: String,
+        }
+
+        struct MockRuntime {
+            translated_root: PathBuf,
+            build_calls: Arc<Mutex<Vec<Call>>>,
+            prepare_called: Arc<Mutex<bool>>,
+        }
+
+        impl ContainerRuntime for MockRuntime {
+            fn compose_up(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn compose_down(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<Value>> {
+                Ok(vec![])
+            }
+            fn container_exec(&self, _: &str, _: &[&str]) -> Command {
+                Command::new("true")
+            }
+            fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
+                Ok(Command::new("true"))
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn ensure_ready(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn build_image(
+                &self,
+                tag: &str,
+                context_dir: &str,
+                containerfile: &str,
+            ) -> anyhow::Result<()> {
+                self.build_calls.lock().unwrap().push(Call {
+                    tag: tag.to_string(),
+                    context_dir: context_dir.to_string(),
+                    containerfile: containerfile.to_string(),
+                });
+                Ok(())
+            }
+            fn prepare_build_context(
+                &self,
+                _build_root: &std::path::Path,
+            ) -> anyhow::Result<PathBuf> {
+                *self.prepare_called.lock().unwrap() = true;
+                Ok(self.translated_root.clone())
+            }
+            fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        let build_calls = Arc::new(Mutex::new(Vec::new()));
+        let prepare_called = Arc::new(Mutex::new(false));
+        let translated = PathBuf::from("/home/user/.speedwave/build-cache");
+
+        let rt = MockRuntime {
+            translated_root: translated.clone(),
+            build_calls: Arc::clone(&build_calls),
+            prepare_called: Arc::clone(&prepare_called),
+        };
+
+        // build_all_images resolves the real build root, then calls prepare_build_context.
+        // Since our mock overrides prepare_build_context, the translated path should be used.
+        let result = build_all_images(&rt);
+        assert!(result.is_ok());
+
+        assert!(
+            *prepare_called.lock().unwrap(),
+            "prepare_build_context should be called"
+        );
+
+        let calls = build_calls.lock().unwrap();
+        assert_eq!(calls.len(), IMAGES.len());
+
+        for (call, img) in calls.iter().zip(IMAGES.iter()) {
+            assert_eq!(call.tag, img.tag);
+            assert!(
+                call.context_dir
+                    .starts_with(&translated.to_string_lossy().to_string()),
+                "context_dir should use translated root, got: {}",
+                call.context_dir
+            );
+            assert!(
+                call.containerfile
+                    .starts_with(&translated.to_string_lossy().to_string()),
+                "containerfile should use translated root, got: {}",
+                call.containerfile
+            );
+        }
+    }
+}
