@@ -41,7 +41,7 @@
     "@tauri-apps/cli": "^2.10.1",
     "@vitest/coverage-v8": "^4.0.18",
     "angular-eslint": "^19",
-    "eslint": "^9",
+    "eslint": "^10",
     "eslint-config-prettier": "^10",
     "eslint-plugin-jsdoc": "^50",
     "eslint-plugin-prettier": "^5",
