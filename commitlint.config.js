@@ -34,7 +34,7 @@ export default {
         'ide-bridge',
         'lint',
         'config',
-        'daemon',
+        'native',
       ],
     ],
     'scope-empty': [1, 'never'],
