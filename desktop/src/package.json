@@ -40,7 +40,7 @@
     "@angular/compiler-cli": "^21.2.1",
     "@tauri-apps/cli": "^2.10.1",
     "@vitest/coverage-v8": "^4.0.18",
-    "angular-eslint": "^19",
+    "angular-eslint": "^21",
     "eslint": "^9",
     "eslint-config-prettier": "^10",
     "eslint-plugin-jsdoc": "^50",
