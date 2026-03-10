@@ -23,7 +23,6 @@ import { toolMetadata as slackTools } from './tools/slack/index.js';
 import { toolMetadata as sharepointTools } from './tools/sharepoint/index.js';
 import { toolMetadata as redmineTools } from './tools/redmine/index.js';
 import { toolMetadata as gitlabTools } from './tools/gitlab/index.js';
-import { toolMetadata as geminiTools } from './tools/gemini/index.js';
 import { toolMetadata as osTools } from './tools/os/index.js';
 import { ts, TIMEOUTS } from '../../shared/dist/index.js';
 
@@ -50,7 +49,6 @@ export const TOOL_REGISTRY = Object.freeze({
   sharepoint: Object.freeze(sharepointTools),
   redmine: Object.freeze(redmineTools),
   gitlab: Object.freeze(gitlabTools),
-  gemini: Object.freeze(geminiTools),
   os: Object.freeze(osTools),
 }) as Readonly<Record<string, Readonly<Record<string, ToolMetadata>>>>;
 

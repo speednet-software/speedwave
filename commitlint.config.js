@@ -25,7 +25,6 @@ export default {
         'mcp-sharepoint',
         'mcp-redmine',
         'mcp-gitlab',
-        'mcp-gemini',
         'mcp-os',
         'containers',
         'ci',

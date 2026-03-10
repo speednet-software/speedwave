@@ -15,7 +15,6 @@ import { createToolDefinitions as createRedmineTools } from '../../redmine/dist/
 import { createToolDefinitions as createGitlabTools } from '../../gitlab/dist/tools/index.js';
 import { createToolDefinitions as createSharepointTools } from '../../sharepoint/dist/tools/index.js';
 import { createToolDefinitions as createSlackTools } from '../../slack/dist/tools/index.js';
-import { createToolDefinitions as createGeminiTools } from '../../gemini/dist/tools/index.js';
 
 /**
  * Get tool names from each MCP server.
@@ -26,7 +25,6 @@ const MCP_SERVERS: Record<string, () => string[]> = {
   gitlab: () => createGitlabTools(null).map((t) => t.tool.name),
   sharepoint: () => createSharepointTools(null).map((t) => t.tool.name),
   slack: () => createSlackTools(null).map((t) => t.tool.name),
-  gemini: () => createGeminiTools(null).map((t) => t.tool.name),
 };
 
 /**

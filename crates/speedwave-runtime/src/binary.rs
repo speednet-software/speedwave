@@ -64,11 +64,37 @@ pub fn resolve_binary(cmd: &str) -> String {
 
 /// Creates a `Command` for the given binary with bundled-binary resolution.
 ///
-/// For `limactl`, also sets `LIMA_HOME` to the isolated Speedwave directory
-/// and ensures that directory exists.
+/// - For `limactl`, sets `LIMA_HOME` to the isolated Speedwave directory.
+/// - For bundled binaries, prepends their parent directory to `PATH` so that
+///   child processes (e.g. `buildctl` spawned by `nerdctl build`) can find
+///   sibling binaries in the same bundle.
 pub fn command(cmd: &str) -> Command {
     let resolved = resolve_binary(cmd);
     let mut command = Command::new(&resolved);
+
+    // If the resolved path is absolute (= bundled), prepend its parent dir to PATH
+    // and set CNI_PATH for nerdctl-full bundles (CNI plugins live in libexec/cni/).
+    let resolved_path = std::path::Path::new(&resolved);
+    if resolved_path.is_absolute() {
+        if let Some(bin_dir) = resolved_path.parent() {
+            let system_path = std::env::var("PATH").unwrap_or_default();
+            let bin_dir_str = bin_dir.to_string_lossy();
+            if !system_path.split(':').any(|p| p == bin_dir_str.as_ref()) {
+                command.env("PATH", format!("{bin_dir_str}:{system_path}"));
+            }
+
+            // nerdctl-full bundles CNI plugins in <bundle>/libexec/cni/.
+            // Without CNI_PATH, nerdctl defaults to /opt/cni/bin which doesn't
+            // exist on systems where nerdctl-full is installed as a .deb resource.
+            if let Some(bundle_root) = bin_dir.parent() {
+                let cni_dir = bundle_root.join("libexec").join("cni");
+                if cni_dir.is_dir() {
+                    command.env("CNI_PATH", &cni_dir);
+                }
+            }
+        }
+    }
+
     if cmd == "limactl" {
         match lima_home() {
             Some(home) => {
@@ -307,6 +333,115 @@ pub(crate) mod tests {
             limactl_path.to_string_lossy().to_string(),
             "command() should use the bundled binary path"
         );
+        env::remove_var(BUNDLE_RESOURCES_ENV);
+    }
+
+    #[test]
+    fn command_bundled_nerdctl_prepends_bin_dir_to_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = tmp
+            .path()
+            .join(crate::consts::NERDCTL_FULL_SUBDIR)
+            .join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("mkdir");
+        std::fs::write(bin_dir.join("nerdctl"), "fake").expect("write");
+
+        env::set_var(BUNDLE_RESOURCES_ENV, tmp.path().to_string_lossy().as_ref());
+        let cmd = command("nerdctl");
+
+        let path_env = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "PATH")
+            .expect("PATH should be set for bundled binary");
+        let path_value = path_env
+            .1
+            .expect("PATH should have a value")
+            .to_string_lossy();
+        let bin_dir_str = bin_dir.to_string_lossy();
+        assert!(
+            path_value.starts_with(bin_dir_str.as_ref()),
+            "PATH should start with bundled bin dir {}, got: {}",
+            bin_dir_str,
+            path_value
+        );
+
+        env::remove_var(BUNDLE_RESOURCES_ENV);
+    }
+
+    #[test]
+    fn command_system_binary_does_not_modify_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        env::remove_var(BUNDLE_RESOURCES_ENV);
+
+        let cmd = command("nerdctl");
+        let path_env = cmd.get_envs().find(|(k, _)| *k == "PATH");
+        assert!(
+            path_env.is_none(),
+            "PATH should not be modified for system-resolved binaries"
+        );
+    }
+
+    #[test]
+    fn command_bundled_nerdctl_sets_cni_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = tmp
+            .path()
+            .join(crate::consts::NERDCTL_FULL_SUBDIR)
+            .join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("mkdir");
+        std::fs::write(bin_dir.join("nerdctl"), "fake").expect("write");
+
+        // Create the libexec/cni directory that nerdctl-full bundles include
+        let cni_dir = tmp
+            .path()
+            .join(crate::consts::NERDCTL_FULL_SUBDIR)
+            .join("libexec")
+            .join("cni");
+        std::fs::create_dir_all(&cni_dir).expect("mkdir cni");
+
+        env::set_var(BUNDLE_RESOURCES_ENV, tmp.path().to_string_lossy().as_ref());
+        let cmd = command("nerdctl");
+
+        let cni_env = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "CNI_PATH")
+            .expect("CNI_PATH should be set for bundled nerdctl with libexec/cni");
+        let cni_value = cni_env
+            .1
+            .expect("CNI_PATH should have a value")
+            .to_string_lossy();
+        assert_eq!(
+            cni_value,
+            cni_dir.to_string_lossy(),
+            "CNI_PATH should point to nerdctl-full/libexec/cni/"
+        );
+
+        env::remove_var(BUNDLE_RESOURCES_ENV);
+    }
+
+    #[test]
+    fn command_bundled_nerdctl_no_cni_path_without_cni_dir() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = tmp
+            .path()
+            .join(crate::consts::NERDCTL_FULL_SUBDIR)
+            .join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("mkdir");
+        std::fs::write(bin_dir.join("nerdctl"), "fake").expect("write");
+        // No libexec/cni directory
+
+        env::set_var(BUNDLE_RESOURCES_ENV, tmp.path().to_string_lossy().as_ref());
+        let cmd = command("nerdctl");
+
+        let cni_env = cmd.get_envs().find(|(k, _)| *k == "CNI_PATH");
+        assert!(
+            cni_env.is_none(),
+            "CNI_PATH should not be set when libexec/cni does not exist"
+        );
+
         env::remove_var(BUNDLE_RESOURCES_ENV);
     }
 }

@@ -4,7 +4,6 @@ import {
   createSlackBridge,
   createSharePointBridge,
   createRedmineBridge,
-  createGeminiBridge,
   createOsBridge,
   callWorker,
   isWorkerAvailable,
@@ -272,7 +271,7 @@ describe('http-bridge', () => {
 
       const services = await getAvailableServices();
 
-      expect(services.length).toBe(6);
+      expect(services.length).toBe(5);
       expect(services).toContain('gitlab');
       expect(services).toContain('slack');
       expect(services).toContain('os');
@@ -292,7 +291,6 @@ describe('http-bridge', () => {
       expect(services).toContain('slack');
       expect(services).not.toContain('redmine');
       expect(services).not.toContain('sharepoint');
-      expect(services).not.toContain('gemini');
     });
   });
 
@@ -588,15 +586,6 @@ describe('http-bridge', () => {
       expect(bridge).toHaveProperty('listRelations');
       expect(bridge).toHaveProperty('createRelation');
       expect(bridge).toHaveProperty('deleteRelation');
-    });
-  });
-
-  describe('createGeminiBridge', () => {
-    it('should define all Gemini methods', () => {
-      const bridge = createGeminiBridge();
-
-      expect(bridge).toHaveProperty('chat');
-      expect(Object.keys(bridge).length).toBe(1);
     });
   });
 

@@ -718,23 +718,6 @@ describe('createCodeExecutorHandlers', () => {
       });
     });
 
-    it('should use extended timeout for gemini.chat operations', async () => {
-      vi.mocked(executorModule.executeCode).mockResolvedValue(
-        createMockExecuteResult({ content: 'generated' }, 45000)
-      );
-
-      const handlers = createCodeExecutorHandlers(mockConfig);
-      await handlers.handleExecuteCode({
-        code: 'await gemini.chat({ prompt: "test" })',
-      });
-
-      // Should use LONG_OPERATION_MS (300000) as default for gemini.chat
-      expect(executorModule.executeCode).toHaveBeenCalledWith({
-        code: 'await gemini.chat({ prompt: "test" })',
-        timeoutMs: TIMEOUTS.LONG_OPERATION_MS,
-      });
-    });
-
     it('should use standard timeout for regular operations', async () => {
       vi.mocked(executorModule.executeCode).mockResolvedValue(
         createMockExecuteResult({ issues: [] }, 500)

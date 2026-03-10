@@ -154,7 +154,7 @@ interface AuditContext {
 /**
  * Create audit context for tracking tool executions
  * Logs each tool call with timestamp, category, and parameters
- * Note: Sensitive data is protected by PII Tokenizer before reaching Claude/Gemini.
+ * Note: Sensitive data is protected by PII Tokenizer before reaching Claude.
  * Local console logs are not sanitized as they stay within Docker container.
  * @returns A new audit context instance
  */
@@ -391,7 +391,6 @@ function createToolWrappers(
     sharepoint: tools.sharepoint,
     redmine: tools.redmine,
     gitlab: tools.gitlab,
-    gemini: tools.gemini,
     os: tools.os,
   };
 }
@@ -480,7 +479,6 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
     sharepoint: tools.sharepoint,
     redmine: tools.redmine,
     gitlab: tools.gitlab,
-    gemini: tools.gemini,
     os: tools.os,
     console: {
       log: (...args: unknown[]) => console.log(`${ts()} [sandbox]`, ...args),

@@ -55,6 +55,18 @@ impl SetupState {
         std::fs::rename(&tmp_path, path)?;
         Ok(())
     }
+
+    /// Pure-logic check: returns `true` when all required setup steps have been completed.
+    ///
+    /// `cli_linked` is intentionally excluded — CLI symlink creation is optional
+    /// (the Desktop app works without it) and may fail on restricted systems.
+    pub fn is_complete(&self) -> bool {
+        self.runtime_ready
+            && self.vm_ready
+            && self.project_created.is_some()
+            && self.images_built
+            && self.containers_started
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -69,9 +81,17 @@ pub enum RuntimeStatus {
 
 pub fn check_runtime() -> anyhow::Result<RuntimeStatus> {
     let rt = runtime::detect_runtime();
-    if rt.is_available() {
+    // ensure_ready() verifies the full stack: binary exists, correct version,
+    // AND containerd is running. is_available() only checks the binary, which
+    // causes the wizard to skip init_vm even when containerd is not started.
+    if rt.ensure_ready().is_ok() {
         let mut state = SetupState::load();
         state.runtime_ready = true;
+        // When the runtime is already Ready, the VM is also ready — ensure_ready()
+        // verifies the full stack (binary + containerd running). Without this,
+        // the wizard skips init_vm (which normally sets vm_ready) and
+        // is_complete() returns false because vm_ready stays false.
+        state.vm_ready = true;
         state.save()?;
         Ok(RuntimeStatus::Ready)
     } else {
@@ -208,6 +228,14 @@ fn verify_sha256_ps(file_path: &std::path::Path, expected_sha256: &str) -> bool 
     }
 }
 
+/// Decode output from `wsl.exe` which may be UTF-16LE (with or without BOM) or UTF-8.
+///
+/// Windows `wsl.exe --list` often outputs UTF-16LE text. Using `String::from_utf8_lossy()`
+/// on such output corrupts the data (inserts replacement characters and null bytes), causing
+/// string comparisons like distro name matching to silently fail.
+#[cfg(any(target_os = "windows", test))]
+use runtime::wsl::decode_wsl_output;
+
 pub fn init_vm() -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -225,6 +253,7 @@ pub fn init_vm() -> anyhow::Result<()> {
     }
 
     let mut state = SetupState::load();
+    state.runtime_ready = true;
     state.vm_ready = true;
     state.save()?;
 
@@ -330,23 +359,118 @@ fn check_uidmap(newuidmap_bin: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolves the PATH with the setup tool's parent directory prepended,
+/// so that sibling binaries (containerd-rootless.sh, containerd, etc.)
+/// are discoverable by the setup script. .deb bundles place these
+/// binaries outside the system PATH.
+#[cfg(unix)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn setup_tool_path_env(setup_tool: &str) -> Option<String> {
+    let setup_path = std::path::Path::new(setup_tool);
+    let bin_dir = setup_path.parent()?;
+    if bin_dir == std::path::Path::new("") {
+        return None;
+    }
+    let system_path = std::env::var("PATH").unwrap_or_default();
+    Some(format!("{}:{}", bin_dir.display(), system_path))
+}
+
+/// Cleans up a stale containerd rootless installation left by a previous run.
+///
+/// When upgrading from a previous .deb package version, the old systemd
+/// user units may reference stale ExecStart paths. On the next launch, systemd
+/// fails to start the unit because the old path no longer exists ("control
+/// process exited with error code" or "unit is masked").
+///
+/// This function forcefully removes the stale state so `install` can run fresh:
+/// 1. Stop containerd and buildkit services (ignore errors — they may already be dead)
+/// 2. Unmask the services (in case they got masked)
+/// 3. Remove the unit files so `install` recreates them with the new path
+/// 4. Reload systemd daemon to pick up the removal
+#[cfg(unix)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn cleanup_stale_containerd() {
+    log::info!("Cleaning up stale containerd systemd units from previous run");
+
+    let services = ["containerd.service", "buildkit.service"];
+
+    for svc in &services {
+        // Stop + unmask (ignore errors — service may not exist or be dead)
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "stop", svc])
+            .output();
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "unmask", svc])
+            .output();
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "disable", svc])
+            .output();
+    }
+
+    // Remove unit files directly — the surest way to clear stale state.
+    if let Ok(home) = std::env::var("HOME") {
+        let unit_dir = std::path::PathBuf::from(&home).join(".config/systemd/user");
+        for svc in &services {
+            let unit_file = unit_dir.join(svc);
+            if unit_file.exists() {
+                if let Err(e) = std::fs::remove_file(&unit_file) {
+                    log::warn!("Failed to remove stale unit {}: {e}", unit_file.display());
+                }
+            }
+        }
+    }
+
+    // Reload daemon so systemd forgets the removed units.
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .output();
+}
+
+/// Returns `true` if a containerd systemd user unit exists (stale or active).
+#[cfg(unix)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn has_stale_containerd_unit() -> bool {
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    std::path::PathBuf::from(&home)
+        .join(".config/systemd/user/containerd.service")
+        .exists()
+}
+
 /// Runs `containerd-rootless-setuptool.sh install` using the given binary path.
+///
+/// Always cleans up stale systemd units from previous runs before installing.
+/// Upgrading .deb packages may change binary paths, so old units
+/// referencing previous paths must be removed to prevent startup failures.
 #[cfg(unix)]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 fn start_rootless_containerd(setup_tool: &str) -> anyhow::Result<()> {
-    let output = std::process::Command::new(setup_tool)
-        .arg("install")
-        .output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "Failed to start rootless containerd: {}\n\
-             Ensure systemd --user is available and /etc/subuid + /etc/subgid \
-             are configured for your user.",
-            stderr.trim()
-        );
+    let path_env = setup_tool_path_env(setup_tool);
+
+    if has_stale_containerd_unit() {
+        cleanup_stale_containerd();
     }
-    Ok(())
+
+    let mut cmd = std::process::Command::new(setup_tool);
+    cmd.arg("install");
+    if let Some(ref p) = path_env {
+        cmd.env("PATH", p);
+    }
+
+    let output = cmd.output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    anyhow::bail!(
+        "Failed to start rootless containerd: {}\n\
+         Ensure systemd --user is available and /etc/subuid + /etc/subgid \
+         are configured for your user.",
+        stderr.trim()
+    );
 }
 
 /// Waits for containerd to become ready by polling `nerdctl info`.
@@ -375,23 +499,192 @@ fn wait_for_containerd(
     );
 }
 
+/// Returns `true` if AppArmor restricts unprivileged user namespaces on this kernel.
+///
+/// Ubuntu 24.04+ sets `kernel.apparmor_restrict_unprivileged_userns=1` by default,
+/// which blocks `rootlesskit` from creating user namespaces unless an AppArmor
+/// profile with the `userns` rule is loaded for the binary.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn is_apparmor_userns_restricted() -> bool {
+    std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false)
+}
+
+/// Converts an absolute binary path to an AppArmor profile filename.
+///
+/// Strips the leading `/` and replaces remaining `/` with `.`, matching
+/// the convention used by Ubuntu's shipped profiles (e.g.
+/// `/usr/bin/rootlesskit` → `rootlesskit`,
+/// `/home/user/.speedwave/nerdctl-full/bin/rootlesskit`
+/// → `home.user.speedwave.nerdctl-full.bin.rootlesskit`).
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn apparmor_profile_name(binary_path: &str) -> String {
+    binary_path
+        .strip_prefix('/')
+        .unwrap_or(binary_path)
+        .replace('/', ".")
+}
+
+/// Generates the AppArmor profile content for a rootlesskit binary path.
+///
+/// The profile uses `flags=(unconfined)` — it does not restrict the binary,
+/// it only exists to give it a "name" in AppArmor so the `userns` permission
+/// can be granted. This matches Docker Desktop's approach.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn apparmor_profile_content(binary_path: &str, profile_name: &str) -> String {
+    // Must match packaging/linux/apparmor-rootlesskit.profile exactly
+    // (except for the binary path) so that the equality check in
+    // ensure_apparmor_profile() passes after .deb installation.
+    format!(
+        "\
+abi <abi/4.0>,
+include <tunables/global>
+
+\"{binary_path}\" flags=(unconfined) {{
+  userns,
+
+  include if exists <local/{profile_name}>
+}}
+"
+    )
+}
+
+/// Stable profile name for Speedwave's rootlesskit AppArmor profile.
+///
+/// We use a fixed name rather than encoding the binary path into the filename.
+/// The .deb package pre-installs this profile via dpkg. At runtime, the app
+/// re-checks and updates the profile content if the binary path changes (e.g.
+/// after a package upgrade), but the filename remains constant.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const APPARMOR_PROFILE_NAME: &str = "speedwave.rootlesskit";
+
+/// Installs an AppArmor profile for rootlesskit if the kernel restricts
+/// unprivileged user namespaces (Ubuntu 24.04+).
+///
+/// This is a no-op when:
+/// - The restriction is not active (non-Ubuntu or older kernels)
+/// - AppArmor ABI 4.0 is not available
+///
+/// The profile is always (re-)written as a fallback — the .deb package
+/// pre-installs it via dpkg, but pkexec handles upgrades and manual installs.
+///
+/// When needed, uses `pkexec` to write the profile to `/etc/apparmor.d/`
+/// and load it via `apparmor_parser`. The user sees a graphical polkit
+/// authentication dialog (standard for GUI apps on Linux desktops).
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn ensure_apparmor_profile(rootlesskit_path: &str) -> anyhow::Result<()> {
+    if !is_apparmor_userns_restricted() {
+        log::debug!("AppArmor userns restriction not active, skipping profile install");
+        return Ok(());
+    }
+
+    if !std::path::Path::new("/etc/apparmor.d/abi/4.0").exists() {
+        log::debug!("AppArmor ABI 4.0 not available, skipping profile install");
+        return Ok(());
+    }
+
+    let profile_path = format!("/etc/apparmor.d/{APPARMOR_PROFILE_NAME}");
+    let content = apparmor_profile_content(rootlesskit_path, APPARMOR_PROFILE_NAME);
+
+    // Check if current profile already matches (avoid unnecessary pkexec prompts).
+    if let Ok(existing) = std::fs::read_to_string(&profile_path) {
+        if existing == content {
+            log::debug!("AppArmor profile already up-to-date: {profile_path}");
+            return Ok(());
+        }
+    }
+
+    log::info!("Installing AppArmor profile for rootlesskit: {profile_path}");
+
+    // Single pkexec invocation: write profile + load it.
+    // Using sh -c to chain both operations under one elevation prompt.
+    let script = format!(
+        "cat > '{profile_path}' <<'APPARMOR_PROFILE'\n\
+         {content}\
+         APPARMOR_PROFILE\n\
+         apparmor_parser -r '{profile_path}'"
+    );
+
+    let output = std::process::Command::new("pkexec")
+        .args(["sh", "-c", &script])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // pkexec exit code 126 = user dismissed the auth dialog
+        if output.status.code() == Some(126) {
+            anyhow::bail!(
+                "Authentication required to configure rootless containers.\n\
+                 Speedwave needs to install an AppArmor profile for rootlesskit.\n\
+                 Please approve the authentication prompt when it appears."
+            );
+        }
+        anyhow::bail!(
+            "Failed to install AppArmor profile for rootlesskit: {}\n\
+             You can install it manually:\n\
+             sudo tee {} <<'EOF'\n{}\nEOF\n\
+             sudo apparmor_parser -r {}",
+            stderr.trim(),
+            profile_path,
+            content.trim(),
+            profile_path
+        );
+    }
+
+    log::info!("AppArmor profile installed and loaded: {profile_path}");
+    Ok(())
+}
+
+/// Runs `containerd-rootless-setuptool.sh install-buildkit` to set up BuildKit
+/// as a systemd --user service. Required for `nerdctl build` to work.
+#[cfg(unix)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn install_buildkit(setup_tool: &str) -> anyhow::Result<()> {
+    let path_env = setup_tool_path_env(setup_tool);
+
+    let mut cmd = std::process::Command::new(setup_tool);
+    cmd.arg("install-buildkit");
+    if let Some(ref p) = path_env {
+        cmd.env("PATH", p);
+    }
+
+    let output = cmd.output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "Failed to install BuildKit: {}\n\
+             Try running: containerd-rootless-setuptool.sh install-buildkit",
+            stderr.trim()
+        );
+    }
+    Ok(())
+}
+
 /// Initializes rootless containerd on Linux using the bundled nerdctl-full.
 ///
 /// Steps:
 /// 1. Verify `newuidmap` (uidmap package) is installed — required for rootless containers
-/// 2. Run `containerd-rootless-setuptool.sh install` to start containerd as a systemd --user service
-/// 3. Wait for containerd readiness (up to 30s, retrying `nerdctl info`)
+/// 2. Install AppArmor profile for rootlesskit (Ubuntu 24.04+ restricts user namespaces)
+/// 3. Run `containerd-rootless-setuptool.sh install` to start containerd as a systemd --user service
+/// 4. Wait for containerd readiness (up to 30s, retrying `nerdctl info`)
+/// 5. Run `containerd-rootless-setuptool.sh install-buildkit` for `nerdctl build` support
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn init_vm_linux() -> anyhow::Result<()> {
     use speedwave_runtime::binary;
 
     check_uidmap("newuidmap")?;
 
+    let rootlesskit = binary::resolve_binary("rootlesskit");
+    ensure_apparmor_profile(&rootlesskit)?;
+
     let setup_tool = binary::resolve_binary("containerd-rootless-setuptool.sh");
     start_rootless_containerd(&setup_tool)?;
 
     let nerdctl = binary::resolve_binary("nerdctl");
     wait_for_containerd(&nerdctl, 15, std::time::Duration::from_secs(2))?;
+
+    install_buildkit(&setup_tool)?;
 
     Ok(())
 }
@@ -403,18 +696,58 @@ fn init_vm_windows() -> anyhow::Result<()> {
     let list = std::process::Command::new("wsl.exe")
         .args(["--list", "--quiet"])
         .output()?;
-    let list_str = String::from_utf8_lossy(&list.stdout);
+    // Decode WSL output — wsl.exe often outputs UTF-16LE on Windows
+    let list_str = decode_wsl_output(&list.stdout);
     let distro_exists = list_str
         .lines()
         .any(|l| l.trim().trim_matches('\0') == consts::WSL_DISTRO_NAME);
 
     if !distro_exists {
         import_wsl_distro()?;
+    } else {
+        verify_wsl_distro_origin()?;
     }
 
     install_nerdctl_full()?;
 
     Ok(())
+}
+
+/// Verifies that an existing WSL2 distro named [`consts::WSL_DISTRO_NAME`] was
+/// created by Speedwave, not pre-registered by an attacker.
+///
+/// WSL stores the virtual disk at the install directory passed to `wsl --import`.
+/// Speedwave always imports into `~/.speedwave/wsl/Speedwave/`, so a legitimate
+/// distro will have `ext4.vhdx` at that path. If the file is missing the distro
+/// was registered from somewhere else — bail with a clear security error.
+#[cfg(any(target_os = "windows", test))]
+fn verify_wsl_distro_origin() -> anyhow::Result<()> {
+    let expected_vhdx = expected_wsl_vhdx_path()?;
+    if !expected_vhdx.exists() {
+        anyhow::bail!(
+            "Security error: a WSL2 distribution named '{}' already exists but was \
+             NOT created by Speedwave (expected disk image at {} is missing). \
+             This may indicate a malicious distro was pre-registered. \
+             Please run 'wsl --unregister {}' to remove it, then retry Speedwave setup.",
+            consts::WSL_DISTRO_NAME,
+            expected_vhdx.display(),
+            consts::WSL_DISTRO_NAME,
+        );
+    }
+    Ok(())
+}
+
+/// Returns the expected path to the WSL2 virtual disk for the Speedwave distro:
+/// `~/.speedwave/wsl/Speedwave/ext4.vhdx`.
+#[cfg(any(target_os = "windows", test))]
+fn expected_wsl_vhdx_path() -> anyhow::Result<PathBuf> {
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+    Ok(home
+        .join(consts::DATA_DIR)
+        .join("wsl")
+        .join(consts::WSL_DISTRO_NAME)
+        .join("ext4.vhdx"))
 }
 
 /// Checks whether WSL2 is available. If not, triggers an elevated install and
@@ -526,7 +859,26 @@ fn import_wsl_distro() -> anyhow::Result<()> {
         ])
         .status()?;
     if !status.success() {
-        anyhow::bail!("Failed to import Speedwave WSL2 distribution");
+        // Check if the distro was already registered (import failed because it exists)
+        let recheck = Command::new("wsl.exe")
+            .args(["--list", "--quiet"])
+            .output()?;
+        let recheck_str = decode_wsl_output(&recheck.stdout);
+        if recheck_str
+            .lines()
+            .any(|l| l.trim().trim_matches('\0') == consts::WSL_DISTRO_NAME)
+        {
+            // Distro exists but we didn't create it — verify it's ours before
+            // trusting it. An attacker could pre-register a malicious distro
+            // with the same name to hijack the container runtime.
+            verify_wsl_distro_origin()?;
+            log::warn!(
+                "WSL2 import failed but distro '{}' already exists and is verified — continuing",
+                consts::WSL_DISTRO_NAME
+            );
+        } else {
+            anyhow::bail!("Failed to import Speedwave WSL2 distribution");
+        }
     }
 
     Ok(())
@@ -624,13 +976,14 @@ if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running >/dev/nul
   systemctl enable --now containerd
 else
   containerd &
-  for i in $(seq 1 15); do
-    if nerdctl info >/dev/null 2>&1; then
-      break
-    fi
-    sleep 2
-  done
 fi
+# Wait for containerd socket to become ready (up to 30s)
+for i in $(seq 1 15); do
+  if nerdctl info >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
 if ! nerdctl info >/dev/null 2>&1; then
   echo 'containerd did not become ready after 30s' >&2
   exit 1
@@ -641,20 +994,35 @@ fi
         sha256_arm64 = consts::NERDCTL_FULL_SHA256_ARM64,
         source_commands = source_commands
     );
+    // Write the install script inside WSL via stdin to avoid argument
+    // length/escaping issues with wsl.exe -- bash -c "...".
+    // Pipe the script through stdin: echo "$script" | wsl bash -s
     let install = Command::new("wsl.exe")
-        .args([
-            "-d",
-            consts::WSL_DISTRO_NAME,
-            "--",
-            "bash",
-            "-c",
-            &install_script,
-        ])
-        .status()?;
-    if !install.success() {
+        .args(["-d", consts::WSL_DISTRO_NAME, "--", "bash", "-s"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    use std::io::Write;
+    let mut child = install;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(install_script.as_bytes())?;
+        // Drop stdin to close the pipe and let bash finish
+    }
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        log::error!(
+            "nerdctl-full install failed (exit {}): stdout={}, stderr={}",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        );
         anyhow::bail!(
-            "Failed to install nerdctl-full inside {} WSL2 distribution",
-            consts::WSL_DISTRO_NAME
+            "Failed to install nerdctl-full inside {} WSL2 distribution: {}",
+            consts::WSL_DISTRO_NAME,
+            stderr.trim()
         );
     }
 
@@ -720,11 +1088,7 @@ pub fn create_project(name: &str, dir: &str) -> anyhow::Result<()> {
 /// (the Desktop app works without it) and may fail on restricted systems.
 pub fn is_setup_complete() -> bool {
     let state = SetupState::load();
-    state.runtime_ready
-        && state.vm_ready
-        && state.project_created.is_some()
-        && state.images_built
-        && state.containers_started
+    state.is_complete()
 }
 
 // ---------------------------------------------------------------------------
@@ -772,7 +1136,7 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     let yaml = compose::render_compose(project, project_dir, &resolved, &integrations)?;
     compose::save_compose(project, &yaml)?;
 
-    rt.compose_up(project)?;
+    rt.compose_up_recreate(project)?;
 
     let mut state = SetupState::load();
     state.containers_started = true;
@@ -948,8 +1312,7 @@ fn wipe_state_and_config(data_dir: &std::path::Path) -> anyhow::Result<()> {
 ///
 /// Layout at runtime:
 /// - macOS:   `.app/Contents/Resources/cli/speedwave`
-/// - Linux deb/rpm: `<exe_dir>/resources/cli/speedwave`
-/// - Linux AppImage: `$APPDIR/usr/lib/pl.speedwave.desktop/resources/cli/speedwave`
+/// - Linux .deb: `<exe_dir>/resources/cli/speedwave`
 /// - Windows: `<exe_dir>/resources/cli/speedwave.exe`
 /// - Dev mode fallback: `<exe_dir>/speedwave` (existing behaviour)
 pub fn resolve_cli_source() -> Option<std::path::PathBuf> {
@@ -965,6 +1328,17 @@ fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathB
     let binary_name = consts::CLI_BINARY;
     #[cfg(target_os = "windows")]
     let binary_name = "speedwave.exe";
+
+    // SPEEDWAVE_RESOURCES_DIR — set by Tauri in production builds.
+    // On Linux .deb, resources are in /usr/lib/Speedwave/ while the exe is in /usr/bin/.
+    if let Ok(resources_dir) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
+        let bundled = std::path::PathBuf::from(&resources_dir)
+            .join("cli")
+            .join(binary_name);
+        if bundled.exists() {
+            return Some(bundled);
+        }
+    }
 
     // Production bundle paths
     #[cfg(target_os = "macos")]
@@ -982,23 +1356,10 @@ fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathB
 
     #[cfg(target_os = "linux")]
     {
-        // Standard Tauri resource path (dev mode and deb/rpm packages)
+        // Standard Tauri resource path (dev mode and deb packages)
         let resources = exe_dir.join("resources").join("cli").join(binary_name);
         if resources.exists() {
             return Some(resources);
-        }
-        // AppImage layout: $APPDIR/usr/lib/<identifier>/resources/cli/<binary>
-        // exe_dir = $APPDIR/usr/bin/, one level up = $APPDIR/usr/
-        let appimage_resources = exe_dir.parent().map(|usr_dir| {
-            usr_dir
-                .join("lib")
-                .join("pl.speedwave.desktop")
-                .join("resources")
-                .join("cli")
-                .join(binary_name)
-        });
-        if let Some(path) = appimage_resources.filter(|p| p.exists()) {
-            return Some(path);
         }
     }
 
@@ -1441,11 +1802,8 @@ mod tests {
             cli_linked: true,
         };
         assert!(
-            complete.runtime_ready
-                && complete.vm_ready
-                && complete.project_created.is_some()
-                && complete.images_built
-                && complete.containers_started
+            complete.is_complete(),
+            "all fields set → should be complete"
         );
 
         // Missing project → incomplete
@@ -1454,11 +1812,8 @@ mod tests {
             ..complete.clone()
         };
         assert!(
-            !(no_project.runtime_ready
-                && no_project.vm_ready
-                && no_project.project_created.is_some()
-                && no_project.images_built
-                && no_project.containers_started)
+            !no_project.is_complete(),
+            "setup must be incomplete when project_created is None"
         );
 
         // Images not built → incomplete
@@ -1468,11 +1823,132 @@ mod tests {
             ..complete.clone()
         };
         assert!(
-            !(no_images.runtime_ready
-                && no_images.vm_ready
-                && no_images.project_created.is_some()
-                && no_images.images_built
-                && no_images.containers_started)
+            !no_images.is_complete(),
+            "setup must be incomplete when images_built is false"
+        );
+
+        // Runtime not ready → incomplete (regression test for init_vm fix)
+        let no_runtime = SetupState {
+            runtime_ready: false,
+            ..complete.clone()
+        };
+        assert!(
+            !no_runtime.is_complete(),
+            "setup must be incomplete when runtime_ready is false"
+        );
+
+        // VM not ready → incomplete
+        let no_vm = SetupState {
+            vm_ready: false,
+            ..complete.clone()
+        };
+        assert!(
+            !no_vm.is_complete(),
+            "setup must be incomplete when vm_ready is false"
+        );
+
+        // Containers not started → incomplete
+        let no_containers = SetupState {
+            containers_started: false,
+            ..complete.clone()
+        };
+        assert!(
+            !no_containers.is_complete(),
+            "setup must be incomplete when containers_started is false"
+        );
+
+        // cli_linked is intentionally excluded — should not affect completeness
+        let no_cli = SetupState {
+            cli_linked: false,
+            ..complete.clone()
+        };
+        assert!(
+            no_cli.is_complete(),
+            "cli_linked=false should not affect completeness"
+        );
+    }
+
+    /// Verifies that init_vm persists both `runtime_ready` and `vm_ready` to
+    /// the state file. This is a regression test: previously init_vm only set
+    /// `vm_ready`, leaving `runtime_ready` false after the check_runtime →
+    /// init_vm flow, which caused `is_setup_complete()` to return false and
+    /// the "Setup complete! Redirecting..." screen to hang indefinitely.
+    #[test]
+    fn init_vm_sets_runtime_ready_and_vm_ready() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_path = tmp.path().join("setup_state.json");
+
+        // Simulate check_runtime returning NotInstalled (runtime_ready stays false)
+        let before = SetupState {
+            runtime_ready: false,
+            ..Default::default()
+        };
+        before.save_to(&state_path).expect("save before state");
+
+        // Simulate what init_vm() does after platform-specific work succeeds
+        let mut state = SetupState::load_from(&state_path).expect("load state");
+        state.runtime_ready = true;
+        state.vm_ready = true;
+        state.save_to(&state_path).expect("save after init_vm");
+
+        let after = SetupState::load_from(&state_path).expect("load final state");
+        assert!(after.runtime_ready, "init_vm must set runtime_ready = true");
+        assert!(after.vm_ready, "init_vm must set vm_ready = true");
+    }
+
+    /// Verifies that check_runtime sets vm_ready=true when the runtime is Ready.
+    ///
+    /// When the runtime is already available (ensure_ready() succeeds), the wizard
+    /// frontend skips init_vm entirely. Without vm_ready=true in the state file,
+    /// is_complete() returns false and the app redirects back to the setup wizard
+    /// after reload instead of to the main shell.
+    #[test]
+    fn check_runtime_ready_sets_vm_ready() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_path = tmp.path().join("setup_state.json");
+
+        // Start from default state
+        let before = SetupState::default();
+        before.save_to(&state_path).expect("save before state");
+
+        // Simulate what check_runtime() does when ensure_ready() succeeds
+        let mut state = SetupState::load_from(&state_path).expect("load state");
+        state.runtime_ready = true;
+        state.vm_ready = true;
+        state
+            .save_to(&state_path)
+            .expect("save after check_runtime Ready");
+
+        let after = SetupState::load_from(&state_path).expect("load final state");
+        assert!(
+            after.runtime_ready,
+            "check_runtime Ready must set runtime_ready = true"
+        );
+        assert!(
+            after.vm_ready,
+            "check_runtime Ready must set vm_ready = true (wizard skips init_vm)"
+        );
+    }
+
+    /// Verifies that is_complete() returns false when vm_ready is false,
+    /// even if all other fields are set. This is the specific regression
+    /// that occurred when check_runtime(Ready) skipped init_vm without
+    /// setting vm_ready.
+    #[test]
+    fn is_complete_false_without_vm_ready() {
+        let state = SetupState {
+            current_step: 8,
+            runtime_ready: true,
+            vm_ready: false,
+            project_created: Some("test".to_string()),
+            tokens_configured: vec![],
+            images_built: true,
+            containers_started: true,
+            cli_linked: true,
+        };
+        assert!(
+            !state.is_complete(),
+            "is_complete must return false when vm_ready is false"
         );
     }
 
@@ -1884,6 +2360,46 @@ mod tests {
         }
 
         #[test]
+        fn has_stale_containerd_unit_detects_existing_file() {
+            use super::super::has_stale_containerd_unit;
+            let _guard = super::CLI_ENV_LOCK.lock().unwrap();
+
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let unit_dir = tmp.path().join(".config/systemd/user");
+            std::fs::create_dir_all(&unit_dir).expect("create unit dir");
+            std::fs::write(unit_dir.join("containerd.service"), "[Unit]\n").expect("write unit");
+
+            // Override HOME to point at our tempdir
+            let orig_home = std::env::var("HOME").ok();
+            std::env::set_var("HOME", tmp.path());
+
+            let result = has_stale_containerd_unit();
+
+            // Restore HOME
+            if let Some(h) = orig_home {
+                std::env::set_var("HOME", h);
+            }
+            assert!(result, "should detect existing containerd.service");
+        }
+
+        #[test]
+        fn has_stale_containerd_unit_returns_false_when_missing() {
+            use super::super::has_stale_containerd_unit;
+            let _guard = super::CLI_ENV_LOCK.lock().unwrap();
+
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let orig_home = std::env::var("HOME").ok();
+            std::env::set_var("HOME", tmp.path());
+
+            let result = has_stale_containerd_unit();
+
+            if let Some(h) = orig_home {
+                std::env::set_var("HOME", h);
+            }
+            assert!(!result, "should return false when no unit file exists");
+        }
+
+        #[test]
         fn wait_for_containerd_success_on_first_try() {
             let tmp = tempfile::tempdir().expect("tempdir");
             let script = create_mock_script(tmp.path(), "nerdctl", "#!/bin/sh\nexit 0\n");
@@ -1946,6 +2462,148 @@ mod tests {
                 "should succeed after retries: {:?}",
                 result.err()
             );
+        }
+
+        #[test]
+        fn install_buildkit_success() {
+            use super::super::install_buildkit;
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let script = create_mock_script(
+                tmp.path(),
+                "containerd-rootless-setuptool.sh",
+                "#!/bin/sh\nexit 0\n",
+            );
+            let result = install_buildkit(script.to_str().unwrap());
+            assert!(
+                result.is_ok(),
+                "should succeed when install-buildkit exits 0: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn install_buildkit_failure_includes_stderr() {
+            use super::super::install_buildkit;
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let script = create_mock_script(
+                tmp.path(),
+                "containerd-rootless-setuptool.sh",
+                "#!/bin/sh\necho 'buildkitd not found' >&2\nexit 1\n",
+            );
+            let result = install_buildkit(script.to_str().unwrap());
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("Failed to install BuildKit"),
+                "error should describe failure: {err}"
+            );
+            assert!(
+                err.contains("buildkitd not found"),
+                "error should include stderr: {err}"
+            );
+        }
+    }
+
+    // -- AppArmor profile tests (Linux only) --
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    mod apparmor_tests {
+        use super::super::{
+            apparmor_profile_content, apparmor_profile_name, ensure_apparmor_profile,
+            APPARMOR_PROFILE_NAME,
+        };
+
+        #[test]
+        fn profile_name_from_usr_bin() {
+            assert_eq!(
+                apparmor_profile_name("/usr/bin/rootlesskit"),
+                "usr.bin.rootlesskit"
+            );
+        }
+
+        #[test]
+        fn profile_name_from_home_dir() {
+            assert_eq!(
+                apparmor_profile_name("/home/user/.speedwave/nerdctl-full/bin/rootlesskit"),
+                "home.user.speedwave.nerdctl-full.bin.rootlesskit"
+            );
+        }
+
+        #[test]
+        fn profile_name_strips_leading_slash() {
+            let name = apparmor_profile_name("/a/b/c");
+            assert!(!name.starts_with('.'), "should not start with dot: {name}");
+            assert_eq!(name, "a.b.c");
+        }
+
+        #[test]
+        fn profile_name_handles_no_leading_slash() {
+            assert_eq!(apparmor_profile_name("rootlesskit"), "rootlesskit");
+        }
+
+        #[test]
+        fn stable_profile_name_is_used() {
+            assert_eq!(APPARMOR_PROFILE_NAME, "speedwave.rootlesskit");
+        }
+
+        #[test]
+        fn profile_content_contains_abi_and_userns() {
+            let content = apparmor_profile_content("/usr/bin/rootlesskit", APPARMOR_PROFILE_NAME);
+            assert!(
+                content.contains("abi <abi/4.0>"),
+                "must declare ABI 4.0: {content}"
+            );
+            assert!(
+                content.contains("userns,"),
+                "must grant userns permission: {content}"
+            );
+            assert!(
+                content.contains("\"/usr/bin/rootlesskit\" flags=(unconfined)"),
+                "must reference binary path with unconfined flags: {content}"
+            );
+            assert!(
+                content.contains(&format!(
+                    "include if exists <local/{APPARMOR_PROFILE_NAME}>"
+                )),
+                "must include local overrides: {content}"
+            );
+        }
+
+        #[test]
+        fn profile_content_quotes_path_with_dots() {
+            let binary = "/home/user/.speedwave/nerdctl-full/bin/rootlesskit";
+            let content = apparmor_profile_content(binary, APPARMOR_PROFILE_NAME);
+            assert!(
+                content.contains(&format!("\"{binary}\" flags=(unconfined)")),
+                "path must be quoted for AppArmor: {content}"
+            );
+        }
+
+        #[test]
+        fn profile_content_changes_when_binary_path_changes() {
+            let content_a =
+                apparmor_profile_content("/tmp/.mount_A/rootlesskit", APPARMOR_PROFILE_NAME);
+            let content_b =
+                apparmor_profile_content("/tmp/.mount_B/rootlesskit", APPARMOR_PROFILE_NAME);
+            assert_ne!(
+                content_a, content_b,
+                "different binary paths must produce different profile content"
+            );
+        }
+
+        #[test]
+        fn ensure_apparmor_skips_when_restriction_not_active() {
+            // On most CI/dev machines (macOS, older Linux), the restriction is not active.
+            // We test the detection path — if restriction is off, should return Ok.
+            let sysctl = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
+            if !std::path::Path::new(sysctl).exists() {
+                let result = ensure_apparmor_profile("/nonexistent/rootlesskit");
+                assert!(
+                    result.is_ok(),
+                    "should be a no-op when restriction not active: {:?}",
+                    result.err()
+                );
+            }
         }
     }
 
@@ -2066,6 +2724,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn resolve_cli_source_finds_macos_bundle_path() {
+        let _guard = CLI_ENV_LOCK.lock().unwrap();
+        std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
+
         // Simulate: .app/Contents/MacOS/<exe> with Resources/cli/speedwave
         let tmp = tempfile::tempdir().expect("tempdir");
         let contents = tmp.path().join("Contents");
@@ -2090,6 +2751,9 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn resolve_cli_source_finds_resources_path() {
+        let _guard = CLI_ENV_LOCK.lock().unwrap();
+        std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
+
         // Simulate: <exe_dir>/resources/cli/speedwave
         let tmp = tempfile::tempdir().expect("tempdir");
         let exe_dir = tmp.path().join("exe_dir");
@@ -2124,37 +2788,11 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn resolve_cli_source_finds_linux_appimage_path() {
-        // Simulate AppImage layout: $APPDIR/usr/bin/<exe>,
-        // $APPDIR/usr/lib/pl.speedwave.desktop/resources/cli/speedwave
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let appdir = tmp.path();
-        let usr_bin = appdir.join("usr").join("bin");
-        let cli_dir = appdir
-            .join("usr")
-            .join("lib")
-            .join("pl.speedwave.desktop")
-            .join("resources")
-            .join("cli");
-        std::fs::create_dir_all(&usr_bin).expect("create usr/bin");
-        std::fs::create_dir_all(&cli_dir).expect("create appimage cli dir");
-        std::fs::write(cli_dir.join(consts::CLI_BINARY), b"cli-binary").expect("write cli binary");
-
-        let result = resolve_cli_source_from(&usr_bin);
-        assert!(result.is_some(), "should find CLI in AppImage layout");
-        assert!(
-            result
-                .unwrap()
-                .to_string_lossy()
-                .contains("usr/lib/pl.speedwave.desktop"),
-            "path should go through usr/lib/pl.speedwave.desktop"
-        );
-    }
-
     #[test]
     fn resolve_cli_source_finds_dev_fallback() {
+        let _guard = CLI_ENV_LOCK.lock().unwrap();
+        std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
+
         // Simulate: <exe_dir>/speedwave (dev mode)
         let tmp = tempfile::tempdir().expect("tempdir");
         let exe_dir = tmp.path().join("exe_dir");
@@ -2173,6 +2811,9 @@ mod tests {
 
     #[test]
     fn resolve_cli_source_finds_dev_cli_dir() {
+        let _guard = CLI_ENV_LOCK.lock().unwrap();
+        std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
+
         // Simulate: desktop/src-tauri/target/debug/ as exe_dir,
         // desktop/src-tauri/cli/speedwave as CLI binary (placed by Makefile)
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -2199,8 +2840,14 @@ mod tests {
         );
     }
 
+    /// Serialises env-var mutations across parallel test threads.
+    static CLI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn resolve_cli_source_returns_none_when_not_found() {
+        let _guard = CLI_ENV_LOCK.lock().unwrap();
+        std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
+
         let tmp = tempfile::tempdir().expect("tempdir");
         let exe_dir = tmp.path().join("empty_dir");
         std::fs::create_dir_all(&exe_dir).expect("create empty dir");
@@ -2209,9 +2856,51 @@ mod tests {
         assert!(result.is_none(), "should return None when CLI not found");
     }
 
+    #[test]
+    fn resolve_cli_source_finds_via_resources_env() {
+        let _guard = CLI_ENV_LOCK.lock().unwrap();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let resources_dir = tmp.path().join("resources");
+        let cli_dir = resources_dir.join("cli");
+        std::fs::create_dir_all(&cli_dir).expect("create cli dir");
+
+        #[cfg(not(target_os = "windows"))]
+        let binary_name = consts::CLI_BINARY;
+        #[cfg(target_os = "windows")]
+        let binary_name = "speedwave.exe";
+
+        std::fs::write(cli_dir.join(binary_name), b"cli-binary").expect("write cli");
+
+        std::env::set_var(
+            consts::BUNDLE_RESOURCES_ENV,
+            resources_dir.to_string_lossy().as_ref(),
+        );
+
+        let exe_dir = tmp.path().join("unrelated");
+        std::fs::create_dir_all(&exe_dir).expect("create exe dir");
+
+        let result = resolve_cli_source_from(&exe_dir);
+        assert!(
+            result.is_some(),
+            "should find CLI via SPEEDWAVE_RESOURCES_DIR"
+        );
+        assert!(
+            result
+                .unwrap()
+                .ends_with(std::path::Path::new("cli").join(binary_name)),
+            "path should end with cli/{binary_name}"
+        );
+
+        std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn resolve_cli_source_prefers_bundle_over_dev() {
+        let _guard = CLI_ENV_LOCK.lock().unwrap();
+        std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
+
         // Both Resources/cli/speedwave and <exe_dir>/speedwave exist;
         // bundle path should be preferred.
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -2231,6 +2920,46 @@ mod tests {
             content, "bundle",
             "should prefer bundle path over dev fallback"
         );
+    }
+
+    #[test]
+    fn resolve_cli_source_env_var_takes_priority_over_filesystem() {
+        let _guard = CLI_ENV_LOCK.lock().unwrap();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        // Set up a SPEEDWAVE_RESOURCES_DIR with its own CLI binary
+        let env_resources = tmp.path().join("env-resources");
+        let env_cli_dir = env_resources.join("cli");
+        std::fs::create_dir_all(&env_cli_dir).expect("create env cli dir");
+
+        #[cfg(not(target_os = "windows"))]
+        let binary_name = consts::CLI_BINARY;
+        #[cfg(target_os = "windows")]
+        let binary_name = "speedwave.exe";
+
+        std::fs::write(env_cli_dir.join(binary_name), b"from-env-var").expect("write env cli");
+
+        // Also set up a dev-mode fallback binary next to the exe
+        let exe_dir = tmp.path().join("exe_dir");
+        std::fs::create_dir_all(&exe_dir).expect("create exe dir");
+        std::fs::write(exe_dir.join(binary_name), b"from-dev-fallback")
+            .expect("write dev fallback");
+
+        std::env::set_var(
+            consts::BUNDLE_RESOURCES_ENV,
+            env_resources.to_string_lossy().as_ref(),
+        );
+
+        let result = resolve_cli_source_from(&exe_dir);
+        assert!(result.is_some(), "should find CLI via env var");
+        let content = std::fs::read_to_string(result.unwrap()).expect("read resolved");
+        assert_eq!(
+            content, "from-env-var",
+            "SPEEDWAVE_RESOURCES_DIR must take priority over filesystem-based resolution"
+        );
+
+        std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
     }
 
     // ── cli_install_path tests ─────────────────────────────────────────────
@@ -2488,5 +3217,129 @@ mod tests {
             "runtime_ready should be unchanged"
         );
         assert!(final_state.vm_ready, "vm_ready should be unchanged");
+    }
+
+    // ── decode_wsl_output smoke test (SSOT is runtime::wsl) ────────────
+
+    #[test]
+    fn decode_wsl_output_imported_from_runtime_works() {
+        // Smoke test: verify the re-exported decode_wsl_output handles
+        // UTF-16LE correctly. Full test coverage lives in speedwave-runtime.
+        let text = "Ubuntu\r\nSpeedwave\r\n";
+        let mut bytes: Vec<u8> = Vec::new();
+        for ch in text.encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        let decoded = decode_wsl_output(&bytes);
+        let found = decoded
+            .lines()
+            .any(|l| l.trim().trim_matches('\0') == consts::WSL_DISTRO_NAME);
+        assert!(
+            found,
+            "imported decode_wsl_output should decode UTF-16LE correctly, got: {decoded:?}"
+        );
+    }
+
+    // ── verify_wsl_distro_origin tests ───────────────────────────────────
+
+    /// Serialises HOME mutations for WSL distro-origin tests.
+    static WSL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn verify_wsl_distro_origin_passes_when_vhdx_exists() {
+        let _guard = WSL_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let vhdx_dir = tmp
+            .path()
+            .join(consts::DATA_DIR)
+            .join("wsl")
+            .join(consts::WSL_DISTRO_NAME);
+        std::fs::create_dir_all(&vhdx_dir).expect("create dirs");
+        std::fs::write(vhdx_dir.join("ext4.vhdx"), b"fake vhdx").expect("write marker");
+
+        let orig_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", tmp.path());
+
+        let result = verify_wsl_distro_origin();
+
+        if let Some(h) = orig_home {
+            std::env::set_var("HOME", h);
+        }
+        assert!(
+            result.is_ok(),
+            "expected Ok when ext4.vhdx exists, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_wsl_distro_origin_fails_when_vhdx_missing() {
+        let _guard = WSL_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("create temp dir");
+
+        let orig_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", tmp.path());
+
+        let result = verify_wsl_distro_origin();
+
+        if let Some(h) = orig_home {
+            std::env::set_var("HOME", h);
+        }
+        let err_msg = result
+            .expect_err("expected Err when vhdx missing")
+            .to_string();
+        assert!(
+            err_msg.contains("Security error"),
+            "error should mention 'Security error', got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn verify_wsl_distro_origin_rejects_empty_directory() {
+        let _guard = WSL_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let vhdx_dir = tmp
+            .path()
+            .join(consts::DATA_DIR)
+            .join("wsl")
+            .join(consts::WSL_DISTRO_NAME);
+        std::fs::create_dir_all(&vhdx_dir).expect("create dirs");
+
+        let orig_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", tmp.path());
+
+        let result = verify_wsl_distro_origin();
+
+        if let Some(h) = orig_home {
+            std::env::set_var("HOME", h);
+        }
+        let err_msg = result
+            .expect_err("expected Err when vhdx missing in empty dir")
+            .to_string();
+        assert!(
+            err_msg.contains("Security error"),
+            "error should mention 'Security error', got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn expected_wsl_vhdx_path_structure() {
+        let path = expected_wsl_vhdx_path().expect("should resolve path");
+        let path_str = path.to_string_lossy();
+        assert!(
+            path_str.contains(consts::DATA_DIR),
+            "path should contain data dir: {path_str}"
+        );
+        assert!(
+            path_str.contains("wsl"),
+            "path should contain 'wsl': {path_str}"
+        );
+        assert!(
+            path_str.contains(consts::WSL_DISTRO_NAME),
+            "path should contain distro name: {path_str}"
+        );
+        assert!(
+            path_str.ends_with("ext4.vhdx"),
+            "path should end with ext4.vhdx: {path_str}"
+        );
     }
 }

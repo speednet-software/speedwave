@@ -7,7 +7,7 @@ Speedwave supports macOS, Linux, and Windows with platform-specific VM, containe
 | OS      | VM              | Containers              | mcp-os                    | Installer |
 | ------- | --------------- | ----------------------- | ------------------------- | --------- |
 | macOS   | Lima + Apple VZ | nerdctl                 | AppleScript / EventKit    | .dmg      |
-| Linux   | none (native)   | nerdctl (rootless)      | CalDAV (EDS via zbus)     | AppImage  |
+| Linux   | none (native)   | nerdctl (rootless)      | CalDAV (EDS via zbus)     | .deb      |
 | Windows | WSL2 + Hyper-V  | nerdctl (wsl.exe proxy) | WinRT + mapi-rs (Outlook) | .exe      |
 
 ## macOS
@@ -16,7 +16,7 @@ Speedwave supports macOS, Linux, and Windows with platform-specific VM, containe
 
 ## Linux
 
-<!-- Content to be written: nerdctl-full bundled in AppImage, rootless containerd, systemd --user, system requirements -->
+<!-- Content to be written: nerdctl-full bundled in .deb package, rootless containerd, systemd --user, system requirements -->
 
 ## Windows
 

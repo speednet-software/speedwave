@@ -25,14 +25,19 @@ import { ProjectList } from '../models/update';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (needsRestart) {
-      <div class="restart-banner">
+      <div class="restart-banner" data-testid="integrations-restart-banner">
         <div class="restart-info">
           <span>Changes require container restart to take effect</span>
           @if (restarting) {
             <span class="restart-hint">This may take a minute while containers are recreated</span>
           }
         </div>
-        <button class="restart-btn" (click)="restartContainers()" [disabled]="restarting">
+        <button
+          class="restart-btn"
+          data-testid="integrations-restart"
+          (click)="restartContainers()"
+          [disabled]="restarting"
+        >
           @if (restarting) {
             <span class="restart-spinner"></span> Restarting...
           } @else {
@@ -46,10 +51,10 @@ import { ProjectList } from '../models/update';
       <h1>Integrations</h1>
 
       @if (error) {
-        <div class="error-banner">{{ error }}</div>
+        <div class="error-banner" data-testid="integrations-error">{{ error }}</div>
       }
 
-      <section class="section">
+      <section class="section" data-testid="integrations-ide-bridge">
         <h2>IDE Bridge</h2>
         @if (lastEvent) {
           <div class="event-banner" [class.fading]="eventFading">
@@ -105,10 +110,10 @@ import { ProjectList } from '../models/update';
         </div>
       </section>
 
-      <section class="section">
+      <section class="section" data-testid="integrations-services">
         <h2>Services</h2>
         @for (svc of services; track svc.service) {
-          <div class="card">
+          <div class="card" [attr.data-testid]="'integrations-service-' + svc.service">
             <div class="card-header">
               <button class="card-header-btn" type="button" (click)="toggleExpand(svc.service)">
                 <span class="service-name">{{ svc.display_name }}</span>
@@ -131,6 +136,7 @@ import { ProjectList } from '../models/update';
                     [checked]="svc.enabled"
                     [disabled]="!svc.configured"
                     (change)="toggleService(svc, $event)"
+                    [attr.data-testid]="'integrations-toggle-' + svc.service"
                   />
                   <span class="slider"></span>
                 </label>
@@ -193,8 +199,19 @@ import { ProjectList } from '../models/update';
                   }
 
                   <div class="form-actions">
-                    <button type="submit" class="btn-save">Save</button>
-                    <button type="button" class="btn-cancel" (click)="deleteCredentials(svc)">
+                    <button
+                      type="submit"
+                      class="btn-save"
+                      [attr.data-testid]="'integrations-save-' + svc.service"
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      class="btn-cancel"
+                      [attr.data-testid]="'integrations-remove-' + svc.service"
+                      (click)="deleteCredentials(svc)"
+                    >
                       Remove Credentials
                     </button>
                   </div>
@@ -205,7 +222,7 @@ import { ProjectList } from '../models/update';
         }
       </section>
 
-      <section class="section">
+      <section class="section" data-testid="integrations-os">
         <h2>OS Integrations</h2>
         @for (os of osIntegrations; track os.service) {
           <div class="card os-card">

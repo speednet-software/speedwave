@@ -1,6 +1,6 @@
 # Base Containerfile for MCP servers
 # Multi-stage build: node:24-alpine for minimal image size
-# Used by all MCP server images (hub, slack, sharepoint, redmine, gitlab, gemini)
+# Used by all MCP server images (hub, slack, sharepoint, redmine, gitlab)
 
 # Stage 1: Build
 FROM node:24-alpine AS builder

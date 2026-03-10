@@ -28,7 +28,7 @@ import { TIMEOUTS, ts } from '../../shared/dist/index.js';
  * List of all supported MCP worker services.
  * Adding a new service: add to this array and create corresponding bridge function.
  */
-export const SERVICES = ['slack', 'sharepoint', 'redmine', 'gitlab', 'gemini', 'os'] as const;
+export const SERVICES = ['slack', 'sharepoint', 'redmine', 'gitlab', 'os'] as const;
 
 /** Union type of all supported service names derived from SERVICES array. */
 export type ServiceName = (typeof SERVICES)[number];
@@ -311,7 +311,7 @@ export function parseServiceError(error: unknown, serviceName: string): string {
 
 /**
  * Call a worker tool via HTTP bridge
- * @param service Service name (slack, sharepoint, redmine, gitlab, gemini)
+ * @param service Service name (slack, sharepoint, redmine, gitlab)
  * @param toolName Tool name to call
  * @param params Tool parameters
  * @param options Optional configuration (timeoutMs for custom timeout)
@@ -437,11 +437,6 @@ export function createGitLabBridge() {
   return buildServiceBridge('gitlab', callWorker);
 }
 
-/** Create Gemini bridge for executor sandbox. */
-export function createGeminiBridge() {
-  return buildServiceBridge('gemini', callWorker);
-}
-
 /** Create OS bridge for executor sandbox (Reminders, Calendar, Mail, Notes). */
 export function createOsBridge() {
   return buildServiceBridge('os', callWorker);
@@ -463,8 +458,6 @@ export interface AllBridges {
   redmine: ReturnType<typeof createRedmineBridge> | null;
   /** GitLab service bridge */
   gitlab: ReturnType<typeof createGitLabBridge> | null;
-  /** Gemini service bridge */
-  gemini: ReturnType<typeof createGeminiBridge> | null;
   /** OS service bridge (Reminders, Calendar, Mail, Notes) */
   os: ReturnType<typeof createOsBridge> | null;
 }
@@ -489,7 +482,6 @@ export async function initializeAllBridges(): Promise<AllBridges> {
     sharepoint: enabledServices.has('sharepoint') ? createSharePointBridge() : null,
     redmine: enabledServices.has('redmine') ? createRedmineBridge() : null,
     gitlab: enabledServices.has('gitlab') ? createGitLabBridge() : null,
-    gemini: enabledServices.has('gemini') ? createGeminiBridge() : null,
     os: enabledServices.has('os') ? createOsBridge() : null,
   };
 

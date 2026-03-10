@@ -40,8 +40,9 @@
   },
   "bundle": {
     "active": true,
+    "useLocalToolsDir": true,
     "targets": [
-      "appimage",
+      "deb",
       "nsis",
       "msi",
       "app",

@@ -384,6 +384,24 @@ impl ContainerRuntime for LimaRuntime {
         Ok(())
     }
 
+    fn system_prune(&self) -> anyhow::Result<()> {
+        self.require_running()?;
+        self.runner.run(
+            "limactl",
+            &[
+                "shell",
+                consts::LIMA_VM_NAME,
+                "--",
+                "sudo",
+                "nerdctl",
+                "system",
+                "prune",
+                "--force",
+            ],
+        )?;
+        Ok(())
+    }
+
     fn ensure_ready(&self) -> anyhow::Result<()> {
         let version_output = self.runner.run("limactl", &["--version"]).map_err(|_| {
             anyhow::anyhow!(
@@ -1024,5 +1042,47 @@ mod tests {
         let path = home.join("projects").join("speedwave");
         let result = rt.prepare_build_context(&path).unwrap();
         assert_eq!(result, path);
+    }
+
+    #[test]
+    fn test_system_prune_shells_out_to_lima() {
+        let (recorded, runner) = make_recording_runner();
+        let rt = LimaRuntime::with_runner(runner);
+        assert!(
+            rt.system_prune().is_ok(),
+            "LimaRuntime::system_prune should succeed"
+        );
+
+        let commands = recorded.lock().unwrap();
+        assert_eq!(
+            commands.len(),
+            1,
+            "system_prune should issue exactly 1 command, got: {:?}",
+            *commands
+        );
+        assert!(
+            commands[0].contains("nerdctl system prune --force"),
+            "system_prune should run nerdctl system prune --force, got: {}",
+            commands[0]
+        );
+    }
+
+    #[test]
+    fn test_system_prune_fails_when_vm_stopped() {
+        let runner = MockRunner::new()
+            .with_response("limactl --version", "limactl version 1.0.0")
+            .with_response(
+                &format!(
+                    "limactl list --format {{{{.Status}}}} {}",
+                    consts::LIMA_VM_NAME
+                ),
+                "Stopped",
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let err = rt.system_prune().unwrap_err();
+        assert!(
+            err.to_string().contains("not running"),
+            "should report VM not running, got: {err}"
+        );
     }
 }

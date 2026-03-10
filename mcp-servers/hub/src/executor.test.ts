@@ -223,7 +223,6 @@ describe('executor', () => {
           deleteTag: vi.fn(),
           createRelease: vi.fn(),
         },
-        gemini: { chat: vi.fn() },
       };
       _setBridgesForTesting(mockBridges);
 
@@ -322,7 +321,7 @@ describe('executor', () => {
 
     beforeEach(() => {
       resetServiceCaches();
-      process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,gitlab,gemini,os';
+      process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,gitlab,os';
     });
 
     afterEach(() => {
@@ -423,7 +422,6 @@ describe('executor', () => {
           deleteTag: vi.fn(),
           createRelease: vi.fn(),
         },
-        gemini: { chat: vi.fn() },
       };
       _setBridgesForTesting(mockBridges);
 
@@ -530,7 +528,6 @@ describe('executor', () => {
           deleteTag: vi.fn(),
           createRelease: vi.fn(),
         },
-        gemini: { chat: vi.fn() },
       };
       _setBridgesForTesting(mockBridges);
 
@@ -633,7 +630,6 @@ describe('executor', () => {
           deleteTag: vi.fn(),
           createRelease: vi.fn(),
         },
-        gemini: { chat: vi.fn() },
       };
       _setBridgesForTesting(mockBridges);
 
@@ -709,7 +705,7 @@ describe('executor', () => {
   });
 
   // Note: sanitizeParamsForLogging tests removed - functionality moved to PII Tokenizer
-  // Sensitive data protection for Claude/Gemini is handled by pii-tokenizer.ts (SENSITIVE_FIELD type)
+  // Sensitive data protection for Claude is handled by pii-tokenizer.ts (SENSITIVE_FIELD type)
   // Local Docker logs are not sanitized as they don't leave the container
 
   describe('batch helper (through executeCode)', () => {
@@ -800,7 +796,6 @@ describe('executor', () => {
         deleteTag: vi.fn(),
         createRelease: vi.fn(),
       },
-      gemini: { chat: vi.fn() },
     };
 
     beforeEach(() => {

@@ -1,4 +1,10 @@
-import { ChangeDetectionStrategy, ChangeDetectorRef, Component, inject } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  Component,
+  inject,
+  NgZone,
+} from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
@@ -20,7 +26,7 @@ interface SetupStep {
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div class="wizard-container">
+    <div class="wizard-container" data-testid="setup-wizard">
       <div class="wizard-header">
         <h1>Speedwave Setup</h1>
         <p class="subtitle">Prepare your development environment</p>
@@ -35,7 +41,9 @@ interface SetupStep {
             <li>4 CPU, 8 GB RAM, 30 GB disk</li>
             <li>macOS: Apple Virtualization.framework (native performance)</li>
           </ul>
-          <button class="btn btn-primary" (click)="startSetup()">Start Setup</button>
+          <button class="btn btn-primary" data-testid="setup-start-btn" (click)="startSetup()">
+            Start Setup
+          </button>
         </div>
       }
 
@@ -73,7 +81,12 @@ interface SetupStep {
             <div class="form-group">
               <label
                 >Project name
-                <input type="text" [(ngModel)]="projectName" placeholder="acme-corp" />
+                <input
+                  type="text"
+                  [(ngModel)]="projectName"
+                  placeholder="acme-corp"
+                  data-testid="setup-project-name"
+                />
               </label>
             </div>
             <div class="form-group">
@@ -83,11 +96,13 @@ interface SetupStep {
                   type="text"
                   [(ngModel)]="projectDir"
                   placeholder="/Users/you/projects/acme-corp"
+                  data-testid="setup-project-dir"
                 />
               </label>
             </div>
             <button
               class="btn btn-primary"
+              data-testid="setup-create-project-btn"
               (click)="createProject()"
               [disabled]="busy || !projectName || !projectDir"
             >
@@ -97,10 +112,22 @@ interface SetupStep {
 
           <!-- Error state -->
           @if (error) {
-            <div class="error-banner">{{ error }}</div>
+            <div class="error-banner" data-testid="setup-error">{{ error }}</div>
             <div class="retry-actions">
-              <button class="btn btn-primary" (click)="retryCurrentStep()">Retry</button>
-              <button class="btn btn-secondary" (click)="backToWelcome()">Back to Start</button>
+              <button
+                class="btn btn-primary"
+                data-testid="setup-retry-btn"
+                (click)="retryCurrentStep()"
+              >
+                Retry
+              </button>
+              <button
+                class="btn btn-secondary"
+                data-testid="setup-back-btn"
+                (click)="backToWelcome()"
+              >
+                Back to Start
+              </button>
             </div>
           }
         </div>
@@ -109,7 +136,9 @@ interface SetupStep {
       <!-- Phase: Complete -->
       @if (phase === 'complete') {
         <div class="wizard-body success-body">
-          <p class="success-text">Setup complete! Redirecting to settings...</p>
+          <p class="success-text" data-testid="setup-success">
+            Setup complete! Redirecting to settings...
+          </p>
         </div>
       }
     </div>
@@ -350,13 +379,15 @@ export class SetupWizardComponent {
   projectDir = '';
 
   private cdr = inject(ChangeDetectorRef);
+  private zone = inject(NgZone);
   private router = inject(Router);
   private tauri = inject(TauriService);
 
-  // 6 steps: environment setup only, no auth/token configuration
+  // 6 steps: environment setup only, no auth/token configuration.
+  // Descriptions are platform-specific — updated in constructor via get_platform.
   steps: SetupStep[] = [
-    { title: 'Check Runtime', description: 'Verify Lima / nerdctl / WSL2', status: 'pending' },
-    { title: 'Initialize VM', description: 'Create and start the VM (macOS)', status: 'pending' },
+    { title: 'Check Runtime', description: 'Verify container runtime', status: 'pending' },
+    { title: 'Initialize VM', description: 'Set up container environment', status: 'pending' },
     { title: 'Build Images', description: 'Build container images', status: 'pending' },
     { title: 'Create Project', description: 'Set up your first project', status: 'pending' },
     { title: 'Start Containers', description: 'Launch project containers', status: 'pending' },
@@ -365,6 +396,34 @@ export class SetupWizardComponent {
 
   // Track which step index we're on for retry
   private currentStepIndex = 0;
+
+  /** Detect host platform and customize step descriptions. */
+  constructor() {
+    this.detectPlatform();
+  }
+
+  private async detectPlatform(): Promise<void> {
+    try {
+      const platform = await this.tauri.invoke<string>('get_platform');
+      switch (platform) {
+        case 'macos':
+          this.steps[0].description = 'Verify Lima / nerdctl';
+          this.steps[1].description = 'Create and start the Lima VM';
+          break;
+        case 'windows':
+          this.steps[0].description = 'Verify WSL2 / nerdctl';
+          this.steps[1].description = 'Set up WSL2 distribution';
+          break;
+        case 'linux':
+          this.steps[0].description = 'Verify nerdctl (rootless)';
+          this.steps[1].description = 'Set up rootless containerd';
+          break;
+      }
+      this.cdr.markForCheck();
+    } catch {
+      // Fallback: keep generic descriptions
+    }
+  }
 
   /** Begins the setup process by transitioning to the progress phase and running auto steps. */
   async startSetup(): Promise<void> {
@@ -442,7 +501,10 @@ export class SetupWizardComponent {
     // All done
     this.phase = 'complete';
     this.cdr.markForCheck();
-    setTimeout(() => this.router.navigate(['/settings'], { replaceUrl: true }), 1500);
+    setTimeout(
+      () => this.zone.run(() => this.router.navigate(['/settings'], { replaceUrl: true })),
+      1500
+    );
   }
 
   private async executeStep(index: number): Promise<boolean> {

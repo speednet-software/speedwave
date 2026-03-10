@@ -6,25 +6,25 @@
 
 ## Context
 
-The previous Linux strategy (ADR-003 v1) declared Podman as a `.deb`/`.rpm` package dependency. This approach had three fundamental problems:
+The previous Linux strategy (ADR-003 v1) declared Podman as a `.deb` package dependency. This approach had three fundamental problems:
 
-1. **Prevented AppImage distribution.** AppImage is a single-file, distribution-agnostic format that works on any Linux distro without installation.[^1] Packaging as `.deb`/`.rpm` means separate release artifacts per distro family, and requires packaging Speedwave into each distro's repository or using a custom package source — significant ongoing maintenance burden.
+1. **Prevented single-file distribution.** `.deb` is the standard Linux packaging format that declares system dependencies and integrates with package managers.[^1] Packaging as `.deb` means separate release artifacts, and requires packaging Speedwave into the distro's repository or using a custom package source — significant ongoing maintenance burden.
 
-2. **Prevented auto-update via Tauri updater.** Tauri's built-in updater supports AppImage on Linux.[^2] It does not support `.deb`/`.rpm` — those formats delegate updates to the system package manager (`apt`, `dnf`). Users on `.deb`/`.rpm` installs would need to manually download each release or set up a custom repository. AppImage is the only format that enables seamless in-app updates on Linux matching the macOS `.dmg` experience.
+2. **Limited update options.** Tauri's built-in updater supports only AppImage on Linux (now superseded — see ADR-025).[^2] It does not support `.deb` — that format delegates updates to the system package manager (`apt`). Users on `.deb` installs would need to manually download each release or set up a custom repository.
 
 3. **Inconsistent container runtime across platforms.** macOS uses nerdctl (via Lima). Windows uses nerdctl (via WSL2). Linux using Podman meant a different CLI, different compose behavior (`podman-compose` vs `nerdctl compose`), and two separate `ContainerRuntime` implementations to maintain and test. This violates DRY and increases the risk of platform-specific bugs.
 
 ## Decision
 
-Bundle **nerdctl-full** (rootless containerd) inside the AppImage instead of declaring Podman as a system package dependency.
+Bundle **nerdctl-full** (rootless containerd) inside the .deb package instead of declaring Podman as a system package dependency.
 
 ### Distribution Format
 
-The Linux release artifact is an **AppImage** (not `.deb` or `.rpm`). A single `Speedwave-x86_64.AppImage` or `Speedwave-aarch64.AppImage` file works on any systemd-based Linux distribution without requiring FUSE. See [ADR-023](ADR-023-appimage-static-runtime-for-fuse-independence.md).
+The Linux release artifact is **.deb** (Debian/Ubuntu). See [ADR-025](ADR-025-linux-deb-packaging.md) for the migration from AppImage.
 
 ### Bundled Contents
 
-nerdctl-full is bundled at `<AppImage>/usr/share/speedwave/nerdctl-full/`.[^3] The tarball includes:
+nerdctl-full is bundled at `/usr/lib/Speedwave/nerdctl-full/`.[^3] The tarball includes:
 
 - `containerd` + `containerd-shim-runc-v2`
 - `nerdctl` (CLI and compose)
@@ -51,18 +51,18 @@ This registers `containerd` as a `systemd --user` service (`containerd.service`)
 
 ### Auto-Update
 
-AppImage supports the Tauri updater protocol.[^2] When a new Speedwave version is released on GitHub Releases, the app detects the update, downloads the new AppImage in the background, and prompts the user to restart. No system package manager or root privileges are needed.
+Auto-update on Linux is handled via version check + download link to GitHub Releases (see ADR-025). The Tauri updater does not support .deb.[^2]
 
 ## System Requirements
 
-The following must be present on the host system and are **not bundled** (they are OS-level primitives that cannot be shipped inside an AppImage):
+The following must be present on the host system and are **not bundled** (they are declared as package dependencies in .deb — see ADR-025):
 
-| Requirement                                    | Purpose                                   | Notes                                                                                                               |
-| ---------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `uidmap` package (`newuidmap` / `newgidmap`)   | Rootless user namespace mapping[^5]       | `apt install uidmap` / `dnf install shadow-utils`                                                                   |
-| `systemd --user`                               | containerd service unit[^4]               | Required; excludes Alpine, Void, OpenRC-based distros                                                               |
-| `/etc/subuid` + `/etc/subgid` entries for user | UID/GID range for rootless containers[^6] | Configured automatically by `containerd-rootless-setuptool.sh` if missing                                           |
-| ~~FUSE / `libfuse2`~~                          | ~~AppImage mounting~~                     | No longer required — static type2-runtime since [ADR-023](ADR-023-appimage-static-runtime-for-fuse-independence.md) |
+| Requirement                                    | Purpose                                   | Notes                                                                       |
+| ---------------------------------------------- | ----------------------------------------- | --------------------------------------------------------------------------- |
+| `uidmap` package (`newuidmap` / `newgidmap`)   | Rootless user namespace mapping[^5]       | `apt install uidmap` / `dnf install shadow-utils`                           |
+| `systemd --user`                               | containerd service unit[^4]               | Required; excludes Alpine, Void, OpenRC-based distros                       |
+| `/etc/subuid` + `/etc/subgid` entries for user | UID/GID range for rootless containers[^6] | Configured automatically by `containerd-rootless-setuptool.sh` if missing   |
+| `dbus-user-session`                            | D-Bus user session bus[^3]                | Required for rootless containers; declared as .deb dependency (see ADR-025) |
 
 Speedwave's Setup Wizard checks the three active requirements on first launch and guides the user through any missing steps with clear error messages.
 
@@ -70,28 +70,28 @@ Speedwave's Setup Wizard checks the three active requirements on first launch an
 
 ### Positive
 
-- **Full auto-update support.** The Tauri updater works out of the box with AppImage — same experience as macOS.
+- **Dependencies declared.** .deb packages declare required system packages (uidmap, dbus-user-session).
 - **Offline install.** Everything needed to run containers is bundled. Users in air-gapped environments or with restricted internet access can install from a USB drive without any network calls.
-- **Distribution-agnostic.** One AppImage works on Ubuntu, Debian, Fedora, Arch, openSUSE, and any other systemd-based distro — no separate packaging per distro.
+- **Standard package format.** .deb works on Debian/Ubuntu/derivatives — covering the majority of desktop Linux users.
 - **Unified container runtime.** All three platforms (macOS, Linux, Windows) use `nerdctl compose`. The `ContainerRuntime` trait needs only two implementations: `LimaRuntime` (wraps nerdctl-in-VM) and `NerdctlRuntime` / `WslRuntime` (call nerdctl directly). No Podman code path to maintain.
 - **Rootless by default.** nerdctl with rootless containerd runs without root privileges and without a setuid daemon — matching the security posture of Podman.
 
 ### Negative / Trade-offs
 
-- **AppImage size ~300 MB.** The nerdctl-full tarball (containerd + nerdctl + BuildKit + CNI plugins) is approximately 250–300 MB compressed.[^3] This is larger than a minimal `.deb` that declares Podman as a dependency, but comparable to other developer tools distributed as AppImages (e.g., JetBrains IDEs, VS Code).
+- **Package size ~300 MB.** The nerdctl-full tarball (containerd + nerdctl + BuildKit + CNI plugins) is approximately 250–300 MB compressed.[^3] This is larger than a minimal `.deb` that declares Podman as a dependency, but comparable to other developer tools distributed as packages (e.g., VS Code, Docker Desktop).
 - **systemd required.** Distributions using OpenRC, runit, s6, or other init systems are not supported. This excludes Alpine Linux, Void Linux, Artix Linux, and similar. These distros are rare in desktop use and represent a negligible share of the target user base.
-- **~~FUSE required.~~** No longer applicable — the AppImage is repacked with a static type2-runtime that bundles libfuse. See [ADR-023](ADR-023-appimage-static-runtime-for-fuse-independence.md).
+- **No in-app auto-update on Linux.** Users must download new `.deb` from GitHub Releases manually. The app detects new versions and shows a download link (see ADR-025).
 - **One-time extraction on first launch.** The user sees a brief "Setting up Speedwave..." screen on first launch while the tarball is extracted and containerd is registered as a systemd service. This is a one-time cost.
 
 ## Rejected Alternatives
 
-### 1. Podman as .deb/.rpm package dependency
+### 1. Podman as .deb package dependency
 
 The previous approach. Rejected because:
 
-- Prevents AppImage distribution → prevents auto-update and offline install.
+- Adds external runtime dependency. Requires maintaining a separate container runtime implementation.
 - Requires maintaining a separate `PodmanRuntime` implementation alongside `NerdctlRuntime`, increasing the maintenance surface.
-- `.deb`/`.rpm` require either separate packaging per distro family or a custom package repository — significant ongoing maintenance burden.
+- Requires either separate packaging per distro family or a custom package repository — significant ongoing maintenance burden.
 
 ### 2. Lima + QEMU on Linux
 
@@ -105,9 +105,9 @@ Lima also supports Linux (using QEMU instead of Apple Virtualization Framework).
 
 Rejected because Docker requires a root-owned daemon (`dockerd`) running as a system service, which requires `sudo` or membership in the `docker` group (equivalent to root access).[^9] This violates the security principle of minimal privilege. Podman and nerdctl both support rootless operation without a privileged daemon.
 
-### 4. Flatpak instead of AppImage
+### 4. Flatpak instead of .deb
 
-Rejected because Flatpak's Bubblewrap sandbox restricts access to Linux namespaces, cgroups, and `/run/user/<uid>/` — all of which rootless containerd requires.[^10] Running containers inside a Flatpak sandbox is not supported without disabling the sandbox entirely, which defeats its purpose.
+Rejected because Flatpak's Bubblewrap sandbox restricts access to Linux namespaces, cgroups, and `/run/user/<uid>/` — all of which rootless containerd requires.[^10] Running containers inside a Flatpak sandbox is not supported without disabling the sandbox entirely, which defeats its purpose. See also [ADR-025](ADR-025-linux-deb-packaging.md).
 
 ### 5. Snap
 
@@ -115,7 +115,7 @@ Rejected for similar reasons to Flatpak. Snap's confinement model blocks the ker
 
 ---
 
-[^1]: [AppImage — Linux apps that run anywhere](https://appimage.org/)
+[^1]: [Debian package management — .deb format](https://www.debian.org/doc/debian-policy/ch-relationships.html)
 
 [^2]: [Tauri Updater — AppImage support on Linux](https://tauri.app/plugin/updater/)
 

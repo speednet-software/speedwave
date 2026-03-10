@@ -89,7 +89,7 @@ All three are **Apache 2.0** — fully permissive.[^6][^7][^8]
 
 ### nerdctl-full (Linux)
 
-nerdctl is **Apache 2.0**.[^10] Same requirements as Lima + nerdctl + containerd above — attribution required, binary redistribution permitted, no source disclosure needed. nerdctl-full is bundled inside the AppImage (see ADR-003 and ADR-021).
+nerdctl is **Apache 2.0**.[^10] Same requirements as Lima + nerdctl + containerd above — attribution required, binary redistribution permitted, no source disclosure needed. nerdctl-full is bundled inside the .deb package (see ADR-003, ADR-021, and ADR-025).
 
 **crun note:** containerd defaults to runc (Apache 2.0) as its OCI runtime, so there is no GPL exposure from the bundled nerdctl-full. If the system has crun installed, containerd may use it as a subprocess — this is **not a licensing concern** for Speedwave: invoking a GPL binary as a subprocess does not trigger copyleft obligations.[^10a] This is analogous to any application calling `/usr/bin/bash` (GPL v3) — the caller is not a derivative work.
 

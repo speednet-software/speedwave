@@ -221,6 +221,23 @@ fn main() -> anyhow::Result<()> {
         })
         .init();
 
+    // If SPEEDWAVE_RESOURCES_DIR is not set, try reading the marker file written
+    // by the Desktop app (e.g. ~/.speedwave/resources-dir → "/usr/lib/Speedwave").
+    // This lets the CLI find bundled binaries (nerdctl, node) without inheriting
+    // the Desktop's environment.
+    if std::env::var(consts::BUNDLE_RESOURCES_ENV).is_err() {
+        if let Some(home) = dirs::home_dir() {
+            let marker = home.join(consts::DATA_DIR).join(consts::RESOURCES_MARKER);
+            if let Ok(contents) = std::fs::read_to_string(&marker) {
+                let resources_dir = contents.trim();
+                if !resources_dir.is_empty() {
+                    log::debug!("loaded resources dir from marker: {resources_dir}");
+                    std::env::set_var(consts::BUNDLE_RESOURCES_ENV, resources_dir);
+                }
+            }
+        }
+    }
+
     let args: Vec<String> = std::env::args().collect();
 
     let action = parse_action(&args).unwrap_or_else(|msg| {
@@ -598,5 +615,26 @@ mod tests {
         assert_eq!(REPO_OWNER, "speednet-software");
         assert_eq!(REPO_NAME, "speedwave");
         assert_eq!(UPDATE_CHECK_INTERVAL_SECS, 86400);
+    }
+
+    #[test]
+    fn resources_marker_constant_is_correct() {
+        assert_eq!(consts::RESOURCES_MARKER, "resources-dir");
+    }
+
+    #[test]
+    fn resources_marker_parsing_trims_whitespace() {
+        // Simulate the marker-reading logic: contents are trimmed before use
+        let raw = "  /usr/lib/Speedwave  \n";
+        let resources_dir = raw.trim();
+        assert_eq!(resources_dir, "/usr/lib/Speedwave");
+        assert!(!resources_dir.is_empty());
+    }
+
+    #[test]
+    fn resources_marker_empty_content_is_ignored() {
+        let raw = "  \n";
+        let resources_dir = raw.trim();
+        assert!(resources_dir.is_empty());
     }
 }

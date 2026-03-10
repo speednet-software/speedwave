@@ -19,11 +19,11 @@ GitHub Releases as an update server eliminates the need for dedicated update inf
 
 GitHub Releases hosts the following platform-specific artifacts (see ADR-021):
 
-| Platform | Artifact                    | Contents                                                                                   |
-| -------- | --------------------------- | ------------------------------------------------------------------------------------------ |
-| macOS    | `Speedwave-x.y.z.dmg`       | `.app` bundle with Lima binaries in `Contents/Resources/lima/`                             |
-| Linux    | `speedwave_x.y.z.AppImage`  | Self-contained AppImage with nerdctl-full bundled (supports auto-update via Tauri updater) |
-| Windows  | `Speedwave-x.y.z-setup.exe` | NSIS installer with WSL2 rootfs and auto-install logic                                     |
+| Platform | Artifact                    | Contents                                                       |
+| -------- | --------------------------- | -------------------------------------------------------------- |
+| macOS    | `Speedwave-x.y.z.dmg`       | `.app` bundle with Lima binaries in `Contents/Resources/lima/` |
+| Linux    | `speedwave_x.y.z_amd64.deb` | .deb package with nerdctl-full bundled (see ADR-025)           |
+| Windows  | `Speedwave-x.y.z-setup.exe` | NSIS installer with WSL2 rootfs and auto-install logic         |
 
 ## SHA256 Verification in CI
 

@@ -3,10 +3,15 @@
 # Multi-arch: linux/amd64 + linux/arm64 (Apple Silicon)
 FROM node:24-bookworm-slim
 
-# Security: create unprivileged user
-# node:24-bookworm-slim already has uid/gid 1000 (user "node"), so reuse it
-RUN usermod -l speedwave -d /home/speedwave -m node && \
-    groupmod -n speedwave node
+# Security: container user is set per-platform via compose `user:` field.
+# macOS/Windows: "1000:1000" (unprivileged, containerd runs as root).
+# Linux rootless nerdctl: "0:0" (root in user namespace = host user UID;
+# UID 1000 maps to subuid ~101000, breaking bind-mount access).
+# The base image has uid/gid 1000 ("node"). Rootless BuildKit cannot modify
+# /etc/passwd or /etc/group (overlayfs restrictions). We skip user renaming:
+# the container only needs a writable home at /home/speedwave.
+ENV HOME=/home/speedwave
+RUN mkdir -p /home/speedwave && chown 1000:1000 /home/speedwave
 
 # Install minimal runtime dependencies
 RUN apt-get update && \
@@ -19,11 +24,11 @@ RUN apt-get update && \
 
 # Create directories for resources (read-only mount point)
 RUN mkdir -p /speedwave/resources && \
-    chown -R speedwave:speedwave /speedwave
+    chown -R 1000:1000 /speedwave
 
 # Create workspace directory (read-only mount point for project)
 RUN mkdir -p /workspace && \
-    chown speedwave:speedwave /workspace
+    chown 1000:1000 /workspace
 
 # Install Claude Code as speedwave user, then copy binary to image layer.
 # `claude install` puts the binary at ~/.local/bin/claude (~210MB) and
@@ -32,7 +37,7 @@ RUN mkdir -p /workspace && \
 # Virtualization hypervisor spike). Fix: install as speedwave, then copy the
 # resolved binary to /usr/local/bin which lives on the VM's ext4 disk.
 ARG CLAUDE_VERSION=latest
-USER speedwave
+USER 1000
 RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}"
 USER root
 RUN CLAUDE_BIN=$(readlink -f /home/speedwave/.local/bin/claude) && \
@@ -46,7 +51,7 @@ RUN CLAUDE_BIN=$(readlink -f /home/speedwave/.local/bin/claude) && \
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Final: run as unprivileged user
-USER speedwave
+USER 1000
 WORKDIR /home/speedwave
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

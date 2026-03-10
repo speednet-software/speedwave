@@ -24,7 +24,12 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
     <div class="health-container">
       <div class="health-header">
         <h2>System Health</h2>
-        <button class="refresh-btn" (click)="refresh()" [disabled]="loading">
+        <button
+          class="refresh-btn"
+          data-testid="health-refresh"
+          (click)="refresh()"
+          [disabled]="loading"
+        >
           {{ loading ? 'Checking...' : 'Refresh' }}
         </button>
       </div>
@@ -192,10 +197,21 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
                   max="10000"
                 />
               </label>
-              <button class="log-btn" (click)="fetchLogs()" [disabled]="logLoading">
+              <button
+                class="log-btn"
+                data-testid="health-logs-refresh"
+                (click)="fetchLogs()"
+                [disabled]="logLoading"
+              >
                 {{ logLoading ? 'Loading...' : 'Refresh' }}
               </button>
-              <button class="log-btn close-btn" (click)="closeLogs()">Close</button>
+              <button
+                class="log-btn close-btn"
+                data-testid="health-logs-close"
+                (click)="closeLogs()"
+              >
+                Close
+              </button>
             </div>
           </div>
 

@@ -21,7 +21,9 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 log = "0.4"
 open = "5"
 tauri-plugin-log = "2"
+tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
+tauri-plugin-webdriver = { version = "0.2", optional = true }
 url = "2"
 tokio-tungstenite = "0.28"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
@@ -36,6 +38,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Memory",
     "Win32_Foundation",
 ] }
+
+[features]
+# Enable WebDriver server (port 4445) in release builds for E2E testing.
+# Usage: cargo tauri build --features e2e
+e2e = ["dep:tauri-plugin-webdriver"]
 
 [dev-dependencies]
 tempfile = "3"

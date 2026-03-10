@@ -137,7 +137,6 @@ const ALLOWED_CREDENTIAL_FILES: &[(&str, &[&str])] = &[
         ],
     ),
     ("gitlab", &["token", "host_url"]),
-    ("gemini", &["api_key"]),
 ];
 
 const SECRET_FIELDS: &[&str] = &[
@@ -250,12 +249,6 @@ fn get_auth_fields(service: &str) -> Vec<AuthField> {
                 placeholder: "https://gitlab.com".into(),
             },
         ],
-        "gemini" => vec![AuthField {
-            key: "api_key".into(),
-            label: "API Key".into(),
-            field_type: "password".into(),
-            placeholder: "AIza...".into(),
-        }],
         _ => vec![],
     }
 }
@@ -631,6 +624,20 @@ fn open_url(url: String) -> Result<(), String> {
     }
     let parsed = validate_url(&url)?;
     open::that(parsed.as_str()).map_err(|e| e.to_string())
+}
+
+/// Returns the current platform as a string ("macos", "linux", or "windows").
+#[tauri::command]
+fn get_platform() -> String {
+    if cfg!(target_os = "macos") {
+        "macos".to_string()
+    } else if cfg!(target_os = "linux") {
+        "linux".to_string()
+    } else if cfg!(target_os = "windows") {
+        "windows".to_string()
+    } else {
+        "unknown".to_string()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2221,6 +2228,53 @@ fn cleanup_log_dir(log_dir: &std::path::Path, max_files: usize) {
     }
 }
 
+/// Resolves the bundled resources directory from the executable's parent path.
+///
+/// Platform conventions:
+/// - macOS: `<exe>/../../Resources` (inside .app bundle)
+/// - Linux: `<exe>/../lib/Speedwave` (.deb — Tauri convention)
+/// - Windows: `<exe>/resources` (NSIS installer)
+///
+/// Returns `None` in dev mode (no bundle structure present).
+fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std::path::PathBuf> {
+    let candidates: Vec<std::path::PathBuf> = if cfg!(target_os = "macos") {
+        exe_parent
+            .parent()
+            .map(|p| vec![p.join("Resources")])
+            .unwrap_or_default()
+    } else if cfg!(target_os = "linux") {
+        // .deb: resources at <exe>/../lib/<productName>/
+        let lib_path = exe_parent.parent().map(|p| p.join("lib").join("Speedwave"));
+        let mut paths = Vec::new();
+        if let Some(p) = lib_path {
+            paths.push(p);
+        }
+        // Fallback: <exe>/resources (dev builds / non-standard layouts)
+        paths.push(exe_parent.join("resources"));
+        paths
+    } else {
+        // Windows NSIS: resources are installed alongside the .exe (no subdirectory).
+        // Fallback: <exe>/resources (dev builds / non-standard layouts).
+        vec![exe_parent.to_path_buf(), exe_parent.join("resources")]
+    };
+
+    // Verify the candidate actually contains bundled resources (not just that
+    // the directory exists — exe_parent always exists).  Check for a known
+    // bundled file to confirm it's the right directory.
+    //
+    // On Windows, check for the actual CLI binary (cli/speedwave.exe) to avoid
+    // false positives from an empty cli/ directory. On Unix, check for the
+    // directory since the binary name is platform-constant.
+    candidates.into_iter().find(|p| {
+        let has_cli = if cfg!(target_os = "windows") {
+            p.join("cli").join("speedwave.exe").exists()
+        } else {
+            p.join("cli").exists()
+        };
+        has_cli || p.join("mcp-os").exists() || p.join("build-context").exists()
+    })
+}
+
 fn main() {
     // Panic hook — sanitize panic payload before logging
     let default_hook = std::panic::take_hook();
@@ -2239,23 +2293,13 @@ fn main() {
         }
     }));
 
-    // Bundled binary resolution for .app bundles.
-    // Dev mode: exe not inside bundle → env var not set → PATH fallback.
+    // Bundled binary resolution for app bundles.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
-            let resources = if cfg!(target_os = "macos") {
-                parent.parent().map(|p| p.join("Resources"))
-            } else {
-                Some(parent.join("resources"))
-            };
-            if let Some(ref res) = resources {
-                if res.exists() {
-                    std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, res);
-                    // Write marker so CLI `speedwave update` can find bundled resources.
-                    // Consumed by speedwave_runtime::build::resolve_from_marker().
-                    if let Err(e) = speedwave_runtime::build::write_resources_marker(res) {
-                        log::warn!("could not write resources-dir marker: {e}");
-                    }
+            if let Some(res) = resolve_resources_dir(parent) {
+                std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, &res);
+                if let Err(e) = speedwave_runtime::build::write_resources_marker(&res) {
+                    log::warn!("could not write resources-dir marker: {e}");
                 }
             }
         }
@@ -2279,8 +2323,20 @@ fn main() {
     let auto_check_exit = auto_check_handle.clone();
     let update_version_setup = update_version.clone();
 
+    let mut builder = tauri::Builder::default();
+
+    // WebDriver server for E2E tests — only present when the "e2e" feature is
+    // enabled. The plugin embeds a W3C WebDriver server on 127.0.0.1:4445 so
+    // E2E specs can drive the real app via WebdriverIO.
+    // Production releases are built without the feature — the crate is not
+    // compiled or linked, so zero attack surface.
+    #[cfg(feature = "e2e")]
+    {
+        builder = builder.plugin(tauri_plugin_webdriver::init());
+    }
+
     #[allow(clippy::expect_used)]
-    tauri::Builder::default()
+    builder
         .plugin({
             use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
             tauri_plugin_log::Builder::new()
@@ -2311,6 +2367,15 @@ fn main() {
                 .build()
         })
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // Second instance tried to launch — focus the existing window instead.
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                let _ = window.set_focus();
+                if let Ok(false) = window.is_visible() {
+                    let _ = window.show();
+                }
+            }
+        }))
         .manage(initial_session)
         .manage(ide_bridge.clone())
         .setup(move |app| {
@@ -2636,6 +2701,8 @@ fn main() {
             get_auth_status,
             // URL opener
             open_url,
+            // Platform
+            get_platform,
             open_auth_terminal,
             // Chat
             start_chat,
@@ -3132,13 +3199,17 @@ mod tests {
 
     #[test]
     fn validate_url_blocks_decimal_ip_loopback() {
-        // Some parsers treat 0x7f000001 or 2130706433 as IPs — url crate doesn't,
-        // but if it did parse, the IP would be caught by is_private_or_reserved.
-        // With the url crate, these are treated as domains and pass (this is OK
-        // since DNS resolution is not performed here; documented limitation).
+        // The url crate parses decimal integers (e.g. 2130706433 = 0x7F000001) as
+        // IPv4 addresses. This must be blocked by is_private_or_reserved.
         let result = validate_url("https://2130706433/");
-        // This either fails to parse or is treated as a domain — either is acceptable
-        assert!(result.is_ok() || result.is_err());
+        assert!(
+            result.is_err(),
+            "decimal IP 2130706433 (127.0.0.1) must be blocked as loopback"
+        );
+        assert!(
+            result.unwrap_err().contains("private"),
+            "error should indicate private/reserved IP"
+        );
     }
 
     // -- set_log_level / get_log_level tests --
@@ -3964,7 +4035,6 @@ mod tests {
         assert!(get_allowed_fields("sharepoint").is_some());
         assert!(get_allowed_fields("redmine").is_some());
         assert!(get_allowed_fields("gitlab").is_some());
-        assert!(get_allowed_fields("gemini").is_some());
     }
 
     #[test]
@@ -4068,7 +4138,7 @@ mod tests {
 
     #[test]
     fn set_service_all_known_keys() {
-        for key in &["slack", "sharepoint", "redmine", "gitlab", "gemini"] {
+        for key in &["slack", "sharepoint", "redmine", "gitlab"] {
             let mut cfg = config::IntegrationsConfig::default();
             let ic = config::IntegrationConfig {
                 enabled: Some(true),
@@ -4137,5 +4207,225 @@ mod tests {
                 svc.config_key
             );
         }
+    }
+
+    // -- resolve_resources_dir --
+
+    #[cfg(target_os = "macos")]
+    mod resolve_resources_dir_tests {
+        use super::super::resolve_resources_dir;
+        use tempfile::TempDir;
+
+        /// Helper: create a marker subdirectory so the resource probe succeeds.
+        fn mark_as_resources(dir: &std::path::Path) {
+            std::fs::create_dir_all(dir.join("cli")).unwrap();
+        }
+
+        #[test]
+        fn macos_app_bundle_resolves_resources() {
+            let tmp = TempDir::new().unwrap();
+            let exe_parent = tmp.path().join("Contents").join("MacOS");
+            let resources = tmp.path().join("Contents").join("Resources");
+            std::fs::create_dir_all(&exe_parent).unwrap();
+            std::fs::create_dir_all(&resources).unwrap();
+            mark_as_resources(&resources);
+
+            let result = resolve_resources_dir(&exe_parent);
+            assert_eq!(result, Some(resources));
+        }
+
+        #[test]
+        fn macos_returns_none_when_resources_dir_empty() {
+            let tmp = TempDir::new().unwrap();
+            let exe_parent = tmp.path().join("Contents").join("MacOS");
+            let resources = tmp.path().join("Contents").join("Resources");
+            std::fs::create_dir_all(&exe_parent).unwrap();
+            std::fs::create_dir_all(&resources).unwrap();
+            // Resources dir exists but has no marker → should return None
+
+            assert_eq!(resolve_resources_dir(&exe_parent), None);
+        }
+
+        #[test]
+        fn macos_dev_mode_returns_none() {
+            let tmp = TempDir::new().unwrap();
+            let exe_parent = tmp.path().join("target").join("debug");
+            std::fs::create_dir_all(&exe_parent).unwrap();
+
+            assert_eq!(resolve_resources_dir(&exe_parent), None);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    mod resolve_resources_dir_tests {
+        use super::super::resolve_resources_dir;
+        use tempfile::TempDir;
+
+        fn mark_as_resources(dir: &std::path::Path) {
+            std::fs::create_dir_all(dir.join("cli")).unwrap();
+        }
+
+        #[test]
+        fn linux_deb_layout_resolves_lib_speedwave() {
+            let tmp = TempDir::new().unwrap();
+            let exe_parent = tmp.path().join("usr").join("bin");
+            let lib_dir = tmp.path().join("usr").join("lib").join("Speedwave");
+            std::fs::create_dir_all(&exe_parent).unwrap();
+            std::fs::create_dir_all(&lib_dir).unwrap();
+            mark_as_resources(&lib_dir);
+
+            let result = resolve_resources_dir(&exe_parent);
+            assert_eq!(result, Some(lib_dir));
+        }
+
+        #[test]
+        fn linux_dev_mode_returns_none() {
+            let tmp = TempDir::new().unwrap();
+            let exe_parent = tmp.path().join("target").join("debug");
+            std::fs::create_dir_all(&exe_parent).unwrap();
+
+            assert_eq!(resolve_resources_dir(&exe_parent), None);
+        }
+
+        #[test]
+        fn linux_fallback_to_resources_subdir() {
+            let tmp = TempDir::new().unwrap();
+            let exe_parent = tmp.path().join("target").join("debug");
+            let resources = exe_parent.join("resources");
+            std::fs::create_dir_all(&resources).unwrap();
+            mark_as_resources(&resources);
+
+            let result = resolve_resources_dir(&exe_parent);
+            assert_eq!(result, Some(resources));
+        }
+
+        #[test]
+        fn linux_returns_none_when_lib_dir_empty() {
+            let tmp = TempDir::new().unwrap();
+            let exe_parent = tmp.path().join("usr").join("bin");
+            let lib_dir = tmp.path().join("usr").join("lib").join("Speedwave");
+            std::fs::create_dir_all(&exe_parent).unwrap();
+            std::fs::create_dir_all(&lib_dir).unwrap();
+            // lib dir exists but has no marker → should return None
+
+            assert_eq!(resolve_resources_dir(&exe_parent), None);
+        }
+
+        #[test]
+        fn linux_lib_speedwave_takes_priority_over_resources() {
+            let tmp = TempDir::new().unwrap();
+            let exe_parent = tmp.path().join("usr").join("bin");
+            let lib_dir = tmp.path().join("usr").join("lib").join("Speedwave");
+            let resources = exe_parent.join("resources");
+            std::fs::create_dir_all(&exe_parent).unwrap();
+            std::fs::create_dir_all(&lib_dir).unwrap();
+            std::fs::create_dir_all(&resources).unwrap();
+            mark_as_resources(&lib_dir);
+            mark_as_resources(&resources);
+
+            let result = resolve_resources_dir(&exe_parent);
+            assert_eq!(result, Some(lib_dir));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    mod resolve_resources_dir_tests {
+        use super::super::resolve_resources_dir;
+        use tempfile::TempDir;
+
+        fn mark_as_resources(dir: &std::path::Path) {
+            let cli_dir = dir.join("cli");
+            std::fs::create_dir_all(&cli_dir).unwrap();
+            std::fs::write(cli_dir.join("speedwave.exe"), b"fake-cli").unwrap();
+        }
+
+        #[test]
+        fn windows_nsis_resolves_exe_parent_when_resources_alongside() {
+            // NSIS installs resources (cli/, mcp-os/, wsl/) directly alongside
+            // the .exe — there is no `resources/` subdirectory.
+            let tmp = TempDir::new().unwrap();
+            let exe_parent = tmp.path().to_path_buf();
+            mark_as_resources(&exe_parent);
+
+            let result = resolve_resources_dir(&exe_parent);
+            assert_eq!(result, Some(exe_parent));
+        }
+
+        #[test]
+        fn windows_fallback_to_resources_subdir() {
+            // Some layouts may use a resources/ subdirectory (e.g., dev builds).
+            let tmp = TempDir::new().unwrap();
+            let exe_parent = tmp.path().to_path_buf();
+            let resources = exe_parent.join("resources");
+            std::fs::create_dir_all(&resources).unwrap();
+            mark_as_resources(&resources);
+
+            let result = resolve_resources_dir(&exe_parent);
+            // exe_parent itself has no marker, so resources/ should win
+            assert_eq!(result, Some(resources));
+        }
+
+        #[test]
+        fn windows_exe_parent_takes_priority_over_resources_subdir() {
+            // When both exe_parent and exe_parent/resources have markers,
+            // exe_parent (NSIS layout) wins because it is checked first.
+            let tmp = TempDir::new().unwrap();
+            let exe_parent = tmp.path().to_path_buf();
+            let resources = exe_parent.join("resources");
+            std::fs::create_dir_all(&resources).unwrap();
+            mark_as_resources(&exe_parent);
+            mark_as_resources(&resources);
+
+            let result = resolve_resources_dir(&exe_parent);
+            assert_eq!(result, Some(exe_parent));
+        }
+
+        #[test]
+        fn windows_returns_none_when_no_markers() {
+            // Empty directory — neither exe_parent nor resources/ has bundled assets.
+            let tmp = TempDir::new().unwrap();
+            let exe_parent = tmp.path().to_path_buf();
+            // exe_parent exists but has no cli/, mcp-os/, or build-context/
+
+            assert_eq!(resolve_resources_dir(&exe_parent), None);
+        }
+
+        #[test]
+        fn windows_dev_mode_returns_none() {
+            let tmp = TempDir::new().unwrap();
+            let exe_parent = tmp.path().join("target").join("debug");
+            std::fs::create_dir_all(&exe_parent).unwrap();
+
+            assert_eq!(resolve_resources_dir(&exe_parent), None);
+        }
+
+        #[test]
+        fn windows_detects_mcp_os_marker() {
+            let tmp = TempDir::new().unwrap();
+            let exe_parent = tmp.path().to_path_buf();
+            std::fs::create_dir_all(exe_parent.join("mcp-os")).unwrap();
+
+            let result = resolve_resources_dir(&exe_parent);
+            assert_eq!(result, Some(exe_parent));
+        }
+
+        #[test]
+        fn windows_detects_build_context_marker() {
+            let tmp = TempDir::new().unwrap();
+            let exe_parent = tmp.path().to_path_buf();
+            std::fs::create_dir_all(exe_parent.join("build-context")).unwrap();
+
+            let result = resolve_resources_dir(&exe_parent);
+            assert_eq!(result, Some(exe_parent));
+        }
+    }
+
+    #[test]
+    fn get_platform_returns_known_value() {
+        let platform = get_platform();
+        assert!(
+            ["macos", "linux", "windows"].contains(&platform.as_str()),
+            "get_platform() returned unexpected value: {platform}"
+        );
     }
 }

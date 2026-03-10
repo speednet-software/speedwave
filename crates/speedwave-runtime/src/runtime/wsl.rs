@@ -4,6 +4,54 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Decodes raw bytes from `wsl.exe` output, handling UTF-16LE (with or without BOM)
+/// which is the default encoding for `wsl.exe --list` on Windows.
+///
+/// Falls back to `String::from_utf8_lossy` for plain UTF-8 output.
+pub fn decode_wsl_output(bytes: &[u8]) -> String {
+    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+        // UTF-16LE with BOM — skip the 2-byte BOM
+        let u16s: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&u16s)
+    } else if bytes.len() >= 2 && looks_like_utf16le(bytes) {
+        // UTF-16LE without BOM (common on Windows)
+        let u16s: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&u16s)
+    } else {
+        String::from_utf8_lossy(bytes).to_string()
+    }
+}
+
+/// Checks whether `bytes` look like UTF-16LE-encoded text (without BOM).
+///
+/// Uses a UTF-16LE ASCII pattern check: for ASCII text encoded as UTF-16LE,
+/// every odd-indexed byte (high byte of each code unit) should be 0x00.
+/// We check up to the first 10 code units (20 bytes) and require at least
+/// 30% of the high bytes to be null. This is stronger than a general null-byte
+/// ratio because it specifically checks the UTF-16LE byte pattern, catching
+/// cases where non-ASCII distro names appear at the start of the output.
+fn looks_like_utf16le(bytes: &[u8]) -> bool {
+    if bytes.len() < 2 || !bytes.len().is_multiple_of(2) {
+        return false;
+    }
+    let sample_code_units = (bytes.len() / 2).min(10);
+    let sample_bytes = sample_code_units * 2;
+    let null_high_bytes = bytes[..sample_bytes]
+        .chunks_exact(2)
+        .filter(|pair| pair[1] == 0x00)
+        .count();
+    // For ASCII-range UTF-16LE, 100% of high bytes are null.
+    // A 30% threshold catches mixed ASCII/non-ASCII UTF-16LE reliably
+    // while rejecting plain UTF-8 or binary garbage.
+    null_high_bytes > sample_code_units * 3 / 10
+}
+
 pub struct WslRuntime {
     runner: Box<dyn CommandRunner>,
 }
@@ -147,6 +195,7 @@ impl ContainerRuntime for WslRuntime {
     }
 
     fn container_exec_piped(&self, container: &str, cmd: &[&str]) -> anyhow::Result<Command> {
+        let path_env = format!("PATH={}", consts::CONTAINER_PATH);
         let mut command = Command::new("wsl.exe");
         command.args([
             "-d",
@@ -155,6 +204,8 @@ impl ContainerRuntime for WslRuntime {
             "nerdctl",
             "exec",
             "-i",
+            "-e",
+            &path_env,
             container,
         ]);
         command.args(cmd);
@@ -163,8 +214,9 @@ impl ContainerRuntime for WslRuntime {
 
     fn is_available(&self) -> bool {
         self.runner
-            .run("wsl.exe", &["--list", "--quiet"])
-            .map(|output| {
+            .run_raw_stdout("wsl.exe", &["--list", "--quiet"])
+            .map(|raw| {
+                let output = decode_wsl_output(&raw);
                 output
                     .lines()
                     .any(|line| line.trim().trim_matches('\0') == consts::WSL_DISTRO_NAME)
@@ -257,10 +309,26 @@ impl ContainerRuntime for WslRuntime {
         Ok(())
     }
 
+    fn system_prune(&self) -> anyhow::Result<()> {
+        self.runner.run(
+            "wsl.exe",
+            &[
+                "-d",
+                consts::WSL_DISTRO_NAME,
+                "--",
+                "nerdctl",
+                "system",
+                "prune",
+                "--force",
+            ],
+        )?;
+        Ok(())
+    }
+
     fn ensure_ready(&self) -> anyhow::Result<()> {
-        let output = self
+        let raw = self
             .runner
-            .run("wsl.exe", &["--list", "--quiet"])
+            .run_raw_stdout("wsl.exe", &["--list", "--quiet"])
             .map_err(|_| {
                 anyhow::anyhow!(
                     "WSL2 not available. Ensure Windows Subsystem for Linux is enabled.\n\
@@ -268,6 +336,7 @@ impl ContainerRuntime for WslRuntime {
                 )
             })?;
 
+        let output = decode_wsl_output(&raw);
         let distro_exists = output
             .lines()
             .any(|line| line.trim().trim_matches('\0') == consts::WSL_DISTRO_NAME);
@@ -311,20 +380,47 @@ mod tests {
     }
 
     #[test]
-    fn test_is_available_handles_null_bytes() {
-        // WSL output often has null bytes between characters
-        let runner = MockRunner::new()
-            .with_response("wsl.exe --list --quiet", "S\0p\0e\0e\0d\0f\0l\0o\0w\02\0\n");
+    fn test_is_available_handles_utf16le_output() {
+        // Real wsl.exe outputs UTF-16LE: "Speedwave\r\n" with each char as 2 bytes
+        let text = "Ubuntu\r\nSpeedwave\r\n";
+        let mut bytes: Vec<u8> = Vec::new();
+        for ch in text.encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        let runner = MockRunner::new().with_raw_response("wsl.exe --list --quiet", bytes);
         let rt = WslRuntime::with_runner(Box::new(runner));
-        // After trim_matches('\0'), "S\0p\0..." won't match "Speedwave"
-        // because trim_matches only trims leading/trailing, not internal nulls.
-        // This tests the real behavior: internal nulls prevent matching.
-        assert!(!rt.is_available());
+        assert!(rt.is_available());
+    }
+
+    #[test]
+    fn test_is_available_handles_utf16le_with_bom() {
+        let text = "Speedwave\r\n";
+        let mut bytes: Vec<u8> = vec![0xFF, 0xFE]; // BOM
+        for ch in text.encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        let runner = MockRunner::new().with_raw_response("wsl.exe --list --quiet", bytes);
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        assert!(rt.is_available());
     }
 
     #[test]
     fn test_is_available_distro_with_trailing_null() {
         let runner = MockRunner::new().with_response("wsl.exe --list --quiet", "Speedwave\0\n");
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        assert!(rt.is_available());
+    }
+
+    #[test]
+    fn test_is_available_utf16le_non_ascii_distro_before_speedwave() {
+        // Non-ASCII distro name before Speedwave — verifies the heuristic
+        // catches UTF-16LE even when the first bytes aren't ASCII
+        let text = "\u{5F00}\u{53D1}\r\nSpeedwave\r\n"; // "开发\r\nSpeedwave\r\n"
+        let mut bytes: Vec<u8> = Vec::new();
+        for ch in text.encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        let runner = MockRunner::new().with_raw_response("wsl.exe --list --quiet", bytes);
         let rt = WslRuntime::with_runner(Box::new(runner));
         assert!(rt.is_available());
     }
@@ -419,6 +515,14 @@ mod tests {
             .map(|a| a.to_string_lossy().to_string())
             .collect();
 
+        // Verify PATH env is set for the speedwave user
+        let path_env = format!("PATH={}", consts::CONTAINER_PATH);
+        assert!(
+            args.contains(&path_env),
+            "container_exec_piped should set PATH env, got args: {:?}",
+            args
+        );
+
         assert!(
             args.contains(&"-i".to_string()),
             "container_exec_piped should use -i for stdin forwarding, got args: {:?}",
@@ -507,5 +611,234 @@ mod tests {
             result,
             PathBuf::from("/mnt/c/Program Files/Speedwave/build-context")
         );
+    }
+
+    #[test]
+    fn test_system_prune_calls_nerdctl_in_wsl() {
+        let runner = MockRunner::new()
+            .with_response("wsl.exe -d Speedwave -- nerdctl system prune --force", "");
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        assert!(
+            rt.system_prune().is_ok(),
+            "WslRuntime::system_prune should succeed"
+        );
+    }
+
+    #[test]
+    fn test_system_prune_propagates_error() {
+        let runner = MockRunner::new().with_error(
+            "wsl.exe -d Speedwave -- nerdctl system prune --force",
+            "prune failed",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let result = rt.system_prune();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("prune failed"));
+    }
+
+    // ── ensure_ready UTF-16LE tests ─────────────────────────────────────
+
+    #[test]
+    fn test_ensure_ready_handles_utf16le_output() {
+        let text = "Ubuntu\r\nSpeedwave\r\n";
+        let mut bytes: Vec<u8> = Vec::new();
+        for ch in text.encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        let runner = MockRunner::new().with_raw_response("wsl.exe --list --quiet", bytes);
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        assert!(rt.ensure_ready().is_ok());
+    }
+
+    #[test]
+    fn test_ensure_ready_utf16le_distro_missing() {
+        let text = "Ubuntu\r\nDebian\r\n";
+        let mut bytes: Vec<u8> = Vec::new();
+        for ch in text.encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        let runner = MockRunner::new().with_raw_response("wsl.exe --list --quiet", bytes);
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let result = rt.ensure_ready();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Speedwave"));
+        assert!(err.contains("setup wizard"));
+    }
+
+    // ── decode_wsl_output unit tests ────────────────────────────────────
+
+    #[test]
+    fn test_decode_wsl_output_handles_utf8() {
+        let input = b"Speedwave\nUbuntu\n";
+        let result = decode_wsl_output(input);
+        assert_eq!(result, "Speedwave\nUbuntu\n");
+    }
+
+    #[test]
+    fn test_decode_wsl_output_handles_utf16le_with_bom() {
+        let text = "Speedwave\r\n";
+        let mut bytes: Vec<u8> = vec![0xFF, 0xFE];
+        for ch in text.encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        let result = decode_wsl_output(&bytes);
+        assert!(
+            result.contains("Speedwave"),
+            "should decode UTF-16LE with BOM correctly, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_decode_wsl_output_handles_utf16le_without_bom() {
+        let text = "Speedwave\r\n";
+        let mut bytes: Vec<u8> = Vec::new();
+        for ch in text.encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        assert!(
+            bytes.iter().any(|&b| b == 0),
+            "UTF-16LE of ASCII text should contain null bytes"
+        );
+        let result = decode_wsl_output(&bytes);
+        assert!(
+            result.contains("Speedwave"),
+            "should decode UTF-16LE without BOM correctly, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_decode_wsl_output_empty_input() {
+        let result = decode_wsl_output(b"");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_decode_wsl_output_single_byte_input() {
+        let result = decode_wsl_output(b"X");
+        assert_eq!(result, "X");
+    }
+
+    #[test]
+    fn test_decode_wsl_output_utf16le_distro_name_matches_after_trim() {
+        let text = "Speedwave\r\n";
+        let mut bytes: Vec<u8> = vec![0xFF, 0xFE];
+        for ch in text.encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        let decoded = decode_wsl_output(&bytes);
+        let found = decoded
+            .lines()
+            .any(|l| l.trim().trim_matches('\0') == consts::WSL_DISTRO_NAME);
+        assert!(
+            found,
+            "distro name '{}' should be found in decoded output, lines: {:?}",
+            consts::WSL_DISTRO_NAME,
+            decoded.lines().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_decode_wsl_output_utf16le_without_bom_distro_name_matches() {
+        let text = "Ubuntu\r\nSpeedwave\r\n";
+        let mut bytes: Vec<u8> = Vec::new();
+        for ch in text.encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        let decoded = decode_wsl_output(&bytes);
+        let found = decoded
+            .lines()
+            .any(|l| l.trim().trim_matches('\0') == consts::WSL_DISTRO_NAME);
+        assert!(
+            found,
+            "distro name '{}' should be found in decoded UTF-16LE (no BOM) output, lines: {:?}",
+            consts::WSL_DISTRO_NAME,
+            decoded.lines().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_decode_wsl_output_odd_length_treated_as_utf8() {
+        let input = b"AB\0CD\0E"; // 7 bytes — odd length
+        let result = decode_wsl_output(input);
+        assert_eq!(result, "AB\0CD\0E");
+    }
+
+    #[test]
+    fn test_decode_wsl_output_binary_garbage_with_stray_nulls() {
+        let input: &[u8] = &[0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x00, 0x57, 0x6F, 0x72, 0x64];
+        let result = decode_wsl_output(input);
+        assert!(
+            result.contains("Hello"),
+            "binary data with sparse nulls should be decoded as UTF-8, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_decode_wsl_output_non_ascii_utf16le() {
+        // "开发\r\nSpeedwave\r\n" encoded as UTF-16LE without BOM
+        let text = "\u{5F00}\u{53D1}\r\nSpeedwave\r\n";
+        let mut bytes: Vec<u8> = Vec::new();
+        for ch in text.encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        let decoded = decode_wsl_output(&bytes);
+        assert!(
+            decoded.contains("Speedwave"),
+            "should decode UTF-16LE with non-ASCII chars, got: {decoded:?}"
+        );
+        assert!(
+            decoded.contains('\u{5F00}'),
+            "should preserve non-ASCII chars, got: {decoded:?}"
+        );
+    }
+
+    // ── looks_like_utf16le unit tests ───────────────────────────────────
+
+    #[test]
+    fn test_looks_like_utf16le_ascii_encoded() {
+        // "AB" as UTF-16LE: [0x41, 0x00, 0x42, 0x00]
+        assert!(looks_like_utf16le(&[0x41, 0x00, 0x42, 0x00]));
+    }
+
+    #[test]
+    fn test_looks_like_utf16le_rejects_plain_ascii() {
+        assert!(!looks_like_utf16le(b"Hello World!"));
+    }
+
+    #[test]
+    fn test_looks_like_utf16le_rejects_odd_length() {
+        assert!(!looks_like_utf16le(&[0x41, 0x00, 0x42]));
+    }
+
+    #[test]
+    fn test_looks_like_utf16le_rejects_empty() {
+        assert!(!looks_like_utf16le(b""));
+    }
+
+    #[test]
+    fn test_looks_like_utf16le_rejects_single_byte() {
+        assert!(!looks_like_utf16le(b"\0"));
+    }
+
+    #[test]
+    fn test_looks_like_utf16le_sparse_nulls_below_threshold() {
+        // 1 null high byte out of 5 code units = 20%, below the 30% threshold
+        let data: &[u8] = &[0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x00, 0x57, 0x6F, 0x72, 0x64];
+        assert!(!looks_like_utf16le(data));
+    }
+
+    #[test]
+    fn test_looks_like_utf16le_non_ascii_start() {
+        // "开" (U+5F00) as UTF-16LE is [0x00, 0x5F] — high byte is 0x5F, not 0x00
+        // "S" as UTF-16LE is [0x53, 0x00] — high byte is 0x00
+        // Mixed content should still be detected if enough ASCII chars follow
+        let text = "S\u{5F00}Spe";
+        let mut bytes: Vec<u8> = Vec::new();
+        for ch in text.encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        // 3 out of 4 code units have null high byte — 75% > 30%
+        assert!(looks_like_utf16le(&bytes));
     }
 }

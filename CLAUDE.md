@@ -2,7 +2,7 @@
 
 ## Project Goal
 
-Speedwave is an AI platform that connects Claude Code with external services (Slack, SharePoint, GitLab, Redmine, Mail, Calendar) without requiring Docker Desktop. It ships as a single installable application (.dmg on macOS, .exe on Windows, AppImage on Linux).
+Speedwave is an AI platform that connects Claude Code with external services (Slack, SharePoint, GitLab, Redmine, Mail, Calendar) without requiring Docker Desktop. It ships as a single installable application (.dmg on macOS, .exe on Windows, .deb on Linux).
 
 ## Product Principles
 
@@ -165,7 +165,7 @@ Config merges three levels: defaults → repo `.speedwave.json` → user `~/.spe
 | OS      | VM              | Containers              | mcp-os                    | Installer       |
 | ------- | --------------- | ----------------------- | ------------------------- | --------------- |
 | macOS   | Lima + Apple VZ | nerdctl                 | AppleScript / EventKit    | .dmg            |
-| Linux   | none (native)   | nerdctl (rootless)      | CalDAV (EDS via zbus)     | AppImage        |
+| Linux   | none (native)   | nerdctl (rootless)      | CalDAV (EDS via zbus)     | .deb            |
 | Windows | WSL2 + Hyper-V  | nerdctl (wsl.exe proxy) | WinRT + mapi-rs (Outlook) | .exe (NSIS/MSI) |
 
 ### Platform Notes
@@ -178,7 +178,7 @@ Config merges three levels: defaults → repo `.speedwave.json` → user `~/.spe
 
 **Linux:**
 
-- nerdctl-full (rootless) is bundled inside the AppImage — no system package dependencies for the container runtime
+- nerdctl-full (rootless) is bundled inside the .deb package — no additional system package dependencies for the container runtime
 - On first launch, nerdctl-full is extracted to `~/.speedwave/nerdctl-full/` and containerd starts as a systemd --user service
 - System requirements: uidmap, systemd --user, /etc/subuid + /etc/subgid
 - Optional: `libappindicator3-1` or `libayatana-appindicator3-1` for system tray icon support (app works without it — falls back to a regular visible window)
@@ -412,4 +412,4 @@ If CI fails — **fix the CI**, even if the failure is pre-existing or unrelated
 3. **Chat UI** — `claude -p` subprocess + Angular streaming component
 4. **CLI thin client** — `crates/speedwave-cli/`
 5. **Native OS CLI + mcp-os worker** — `swift-*/`, `mcp-servers/os/`, hub integration
-6. **Installer** — platform installers (.dmg, .exe, AppImage)
+6. **Installer** — platform installers (.dmg, .exe, .deb)
