@@ -91,6 +91,20 @@ pub const UIDMAP_MISSING_MSG: &str = "newuidmap not found. Install the uidmap pa
      - Fedora/RHEL:   sudo dnf install -y shadow-utils\n\
      - openSUSE:      sudo zypper install -y shadow";
 
+/// Descriptor for a single auth/credential field of an MCP service.
+pub struct McpAuthFieldDescriptor {
+    /// Field key used as filename in the tokens directory (e.g. "bot_token").
+    pub key: &'static str,
+    /// Human-readable label for the UI (e.g. "Bot Token").
+    pub label: &'static str,
+    /// HTML input type: "password", "text", or "url".
+    pub field_type: &'static str,
+    /// Placeholder text for the input field.
+    pub placeholder: &'static str,
+    /// Whether this field contains a secret (token, key, etc.).
+    pub is_secret: bool,
+}
+
 /// Descriptor for a toggleable MCP service.
 pub struct McpServiceDescriptor {
     /// Config key used in integrations config (e.g. "slack").
@@ -103,6 +117,11 @@ pub struct McpServiceDescriptor {
     pub display_name: &'static str,
     /// Short description for the UI.
     pub description: &'static str,
+    /// Auth/credential fields for this service.
+    pub auth_fields: &'static [McpAuthFieldDescriptor],
+    /// Credential file names allowed for this service (superset of auth field keys,
+    /// may include extra files like "config.json").
+    pub credential_files: &'static [&'static str],
 }
 
 /// Toggleable MCP services — Single Source of Truth for service metadata.
@@ -114,6 +133,23 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         worker_env: "WORKER_SLACK_URL",
         display_name: "Slack",
         description: "Team messaging and notifications",
+        auth_fields: &[
+            McpAuthFieldDescriptor {
+                key: "bot_token",
+                label: "Bot Token",
+                field_type: "password",
+                placeholder: "xoxb-...",
+                is_secret: true,
+            },
+            McpAuthFieldDescriptor {
+                key: "user_token",
+                label: "User Token",
+                field_type: "password",
+                placeholder: "xoxp-...",
+                is_secret: true,
+            },
+        ],
+        credential_files: &["bot_token", "user_token"],
     },
     McpServiceDescriptor {
         config_key: "sharepoint",
@@ -121,6 +157,58 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         worker_env: "WORKER_SHAREPOINT_URL",
         display_name: "SharePoint",
         description: "Microsoft 365 document management",
+        auth_fields: &[
+            McpAuthFieldDescriptor {
+                key: "access_token",
+                label: "Access Token",
+                field_type: "password",
+                placeholder: "eyJ0...",
+                is_secret: true,
+            },
+            McpAuthFieldDescriptor {
+                key: "refresh_token",
+                label: "Refresh Token",
+                field_type: "password",
+                placeholder: "0.AR...",
+                is_secret: true,
+            },
+            McpAuthFieldDescriptor {
+                key: "client_id",
+                label: "Client ID",
+                field_type: "text",
+                placeholder: "00000000-0000-...",
+                is_secret: false,
+            },
+            McpAuthFieldDescriptor {
+                key: "tenant_id",
+                label: "Tenant ID",
+                field_type: "text",
+                placeholder: "00000000-0000-...",
+                is_secret: false,
+            },
+            McpAuthFieldDescriptor {
+                key: "site_id",
+                label: "Site ID",
+                field_type: "text",
+                placeholder: "site-id",
+                is_secret: false,
+            },
+            McpAuthFieldDescriptor {
+                key: "base_path",
+                label: "Base Path",
+                field_type: "text",
+                placeholder: "/sites/MySite",
+                is_secret: false,
+            },
+        ],
+        credential_files: &[
+            "access_token",
+            "refresh_token",
+            "client_id",
+            "tenant_id",
+            "site_id",
+            "base_path",
+        ],
     },
     McpServiceDescriptor {
         config_key: "redmine",
@@ -128,6 +216,43 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         worker_env: "WORKER_REDMINE_URL",
         display_name: "Redmine",
         description: "Project management and issue tracking",
+        auth_fields: &[
+            McpAuthFieldDescriptor {
+                key: "api_key",
+                label: "API Key",
+                field_type: "password",
+                placeholder: "abcdef1234567890...",
+                is_secret: true,
+            },
+            McpAuthFieldDescriptor {
+                key: "host_url",
+                label: "Redmine URL",
+                field_type: "url",
+                placeholder: "https://redmine.company.com",
+                is_secret: false,
+            },
+            McpAuthFieldDescriptor {
+                key: "project_id",
+                label: "Project ID",
+                field_type: "text",
+                placeholder: "my-project",
+                is_secret: false,
+            },
+            McpAuthFieldDescriptor {
+                key: "project_name",
+                label: "Project Name",
+                field_type: "text",
+                placeholder: "My Project",
+                is_secret: false,
+            },
+        ],
+        credential_files: &[
+            "api_key",
+            "config.json",
+            "host_url",
+            "project_id",
+            "project_name",
+        ],
     },
     McpServiceDescriptor {
         config_key: "gitlab",
@@ -135,8 +260,32 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         worker_env: "WORKER_GITLAB_URL",
         display_name: "GitLab",
         description: "Git repository and CI/CD platform",
+        auth_fields: &[
+            McpAuthFieldDescriptor {
+                key: "token",
+                label: "Personal Access Token",
+                field_type: "password",
+                placeholder: "glpat-...",
+                is_secret: true,
+            },
+            McpAuthFieldDescriptor {
+                key: "host_url",
+                label: "GitLab URL",
+                field_type: "url",
+                placeholder: "https://gitlab.com",
+                is_secret: false,
+            },
+        ],
+        credential_files: &["token", "host_url"],
     },
 ];
+
+/// Look up a toggleable MCP service by config key.
+pub fn find_mcp_service(config_key: &str) -> Option<&'static McpServiceDescriptor> {
+    TOGGLEABLE_MCP_SERVICES
+        .iter()
+        .find(|s| s.config_key == config_key)
+}
 
 /// Built-in services defined in containers/compose.template.yml.
 /// Used by security checks and image build lists.
@@ -295,5 +444,99 @@ mod tests {
                 });
             }
         }
+    }
+
+    #[test]
+    fn test_auth_fields_count_per_service() {
+        let expected: &[(&str, usize)] = &[
+            ("slack", 2),
+            ("sharepoint", 6),
+            ("redmine", 4),
+            ("gitlab", 2),
+        ];
+        for &(key, count) in expected {
+            let svc =
+                find_mcp_service(key).unwrap_or_else(|| panic!("service '{}' not found", key));
+            assert_eq!(
+                svc.auth_fields.len(),
+                count,
+                "service '{}' expected {} auth fields, got {}",
+                key,
+                count,
+                svc.auth_fields.len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_every_service_has_auth_fields() {
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            assert!(
+                !svc.auth_fields.is_empty(),
+                "service '{}' must have at least one auth field",
+                svc.config_key
+            );
+        }
+    }
+
+    #[test]
+    fn test_every_service_has_credential_files() {
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            assert!(
+                !svc.credential_files.is_empty(),
+                "service '{}' must have at least one credential file",
+                svc.config_key
+            );
+        }
+    }
+
+    #[test]
+    fn test_auth_field_keys_subset_of_credential_files() {
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            for field in svc.auth_fields {
+                assert!(
+                    svc.credential_files.contains(&field.key),
+                    "auth field '{}' for service '{}' not in credential_files",
+                    field.key,
+                    svc.config_key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_secret_fields_have_password_type() {
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            for field in svc.auth_fields {
+                if field.is_secret {
+                    assert_eq!(
+                        field.field_type, "password",
+                        "secret field '{}' in service '{}' must use field_type 'password'",
+                        field.key, svc.config_key
+                    );
+                } else {
+                    assert_ne!(
+                        field.field_type, "password",
+                        "non-secret field '{}' in service '{}' must not use field_type 'password'",
+                        field.key, svc.config_key
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_find_mcp_service_found() {
+        assert!(find_mcp_service("slack").is_some());
+        assert!(find_mcp_service("sharepoint").is_some());
+        assert!(find_mcp_service("redmine").is_some());
+        assert!(find_mcp_service("gitlab").is_some());
+    }
+
+    #[test]
+    fn test_find_mcp_service_not_found() {
+        assert!(find_mcp_service("unknown").is_none());
+        assert!(find_mcp_service("").is_none());
+        assert!(find_mcp_service("os").is_none());
     }
 }
