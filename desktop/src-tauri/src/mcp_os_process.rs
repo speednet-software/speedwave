@@ -227,6 +227,7 @@ impl McpOsProcess {
 
     /// Remove the token, port, and PID files from disk.
     /// Note: mcp-os.log is intentionally NOT deleted — it persists for diagnostics.
+    ///
     pub fn cleanup_files(&self) {
         let _ = std::fs::remove_file(&self.token_path);
         let _ = std::fs::remove_file(&self.port_path);
@@ -236,6 +237,7 @@ impl McpOsProcess {
     /// Stop the old process and spawn a fresh one at the same script path.
     ///
     /// Carefully prevents Drop from deleting files written by the new process:
+    ///
     /// the old child is taken (so Drop.stop() is a no-op) and paths are cleared
     /// (so Drop.cleanup_files() deletes nothing).
     pub fn respawn(&mut self) -> anyhow::Result<u16> {
@@ -261,6 +263,9 @@ impl McpOsProcess {
     /// Check process liveness using PID + TCP port probe.
     /// More thorough than health_check() — detects "alive but not listening".
     pub fn is_alive(&self) -> bool {
+        if self.child.is_none() {
+            return false;
+        }
         crate::health::is_mcp_os_alive()
     }
 }

@@ -2550,45 +2550,48 @@ fn main() {
                         break;
                     }
 
-                    let is_alive = match mcp_os_watchdog.lock() {
-                        Ok(guard) => guard.as_ref().is_some_and(|p| p.is_alive()),
-                        Err(_) => false,
-                    };
-
-                    if is_alive {
-                        consecutive_unhealthy = 0;
-                        continue;
-                    }
-
-                    consecutive_unhealthy += 1;
-
-                    if consecutive_unhealthy >= MAX_UNHEALTHY {
-                        log::error!(
-                            "mcp-os watchdog: unhealthy for {MAX_UNHEALTHY} consecutive checks, cooling down"
-                        );
-                        std::thread::sleep(COOLDOWN);
-                        consecutive_unhealthy = 0;
-                        continue;
-                    }
-
-                    log::warn!(
-                        "mcp-os watchdog: process unhealthy ({consecutive_unhealthy}/{MAX_UNHEALTHY}), respawning"
-                    );
                     match mcp_os_watchdog.lock() {
-                        Ok(mut guard) => {
-                            if let Some(ref mut proc) = *guard {
+                        Ok(mut guard) => match *guard {
+                            None => break, // mcp-os was never started — watchdog not needed
+                            Some(ref mut proc) => {
+                                if proc.is_alive() {
+                                    consecutive_unhealthy = 0;
+                                    continue;
+                                }
+
+                                consecutive_unhealthy += 1;
+
+                                if consecutive_unhealthy >= MAX_UNHEALTHY {
+                                    log::error!(
+                                        "mcp-os watchdog: unhealthy for {MAX_UNHEALTHY} consecutive checks, cooling down"
+                                    );
+                                    std::thread::sleep(COOLDOWN);
+                                    consecutive_unhealthy = 0;
+                                    continue;
+                                }
+
+                                log::warn!(
+                                    "mcp-os watchdog: process unhealthy ({consecutive_unhealthy}/{MAX_UNHEALTHY}), respawning"
+                                );
                                 match proc.respawn() {
                                     Ok(port) => {
-                                        log::info!("mcp-os watchdog: respawned (port {port})");
+                                        log::info!(
+                                            "mcp-os watchdog: respawned (port {port})"
+                                        );
                                         reconcile_compose_port(&watchdog_handle);
                                     }
                                     Err(e) => {
-                                        log::error!("mcp-os watchdog: respawn failed: {e}");
+                                        log::error!(
+                                            "mcp-os watchdog: respawn failed: {e}"
+                                        );
                                     }
                                 }
                             }
+                        },
+                        Err(e) => {
+                            log::error!("mcp-os watchdog: mutex poisoned: {e}");
+                            break;
                         }
-                        Err(e) => log::error!("mcp-os watchdog: mutex poisoned: {e}"),
                     }
                 }
                 log::info!("mcp-os watchdog: stopped");
@@ -4075,12 +4078,23 @@ mod tests {
     // -- WATCHDOG_STOP flag test --
 
     #[test]
-    fn watchdog_stop_flag_prevents_action() {
-        // Reset flag (tests run in parallel, so use a local check)
-        let flag = std::sync::atomic::AtomicBool::new(false);
-        assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
-        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-        assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
+    fn run_exit_cleanup_sets_watchdog_stop() {
+        // Reset global flag before test
+        WATCHDOG_STOP.store(false, Ordering::Relaxed);
+
+        let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
+        let mcp_os: Arc<Mutex<Option<mcp_os_process::McpOsProcess>>> = Arc::new(Mutex::new(None));
+        let auto_check: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
+
+        run_exit_cleanup(&ide_bridge, &mcp_os, &auto_check);
+
+        assert!(
+            WATCHDOG_STOP.load(Ordering::Relaxed),
+            "run_exit_cleanup must set WATCHDOG_STOP to true"
+        );
+
+        // Reset for other tests
+        WATCHDOG_STOP.store(false, Ordering::Relaxed);
     }
 
     // -- diagnostics with mcp-os log --

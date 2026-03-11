@@ -148,6 +148,12 @@ pub(crate) fn is_mcp_os_alive() -> bool {
         return false;
     };
     let data_dir = home.join(speedwave_runtime::consts::DATA_DIR);
+    check_mcp_os_alive_in(&data_dir)
+}
+
+/// Testable inner implementation: checks PID liveness + TCP port probe
+/// against files in the given `data_dir`.
+pub(crate) fn check_mcp_os_alive_in(data_dir: &std::path::Path) -> bool {
     let token_path = data_dir.join(speedwave_runtime::consts::MCP_OS_AUTH_TOKEN_FILE);
     let pid_path = data_dir.join(speedwave_runtime::consts::MCP_OS_PID_FILE);
     let port_path = data_dir.join(speedwave_runtime::consts::MCP_OS_PORT_FILE);
@@ -1160,65 +1166,38 @@ mod tests {
         assert!(running, "should report running for alive PID");
     }
 
-    // ── is_mcp_os_alive tests (TCP + PID) ──────────────────────────────
-
-    /// Tests exercise the shared is_mcp_os_alive logic inline because the
-    /// function reads from the real home dir (~/.speedwave/).
+    // ── is_mcp_os_alive tests (via check_mcp_os_alive_in) ──────────────
 
     #[test]
     fn is_mcp_os_alive_false_when_pid_alive_port_closed() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        let token_path = data_dir.join("mcp-os-auth-token");
-        let pid_path = data_dir.join("mcp-os-pid");
-        let port_path = data_dir.join("mcp-os-port");
-        std::fs::write(&token_path, "test-token").unwrap();
-        std::fs::write(&pid_path, std::process::id().to_string()).unwrap();
-        // Port 64999 is not listening
-        std::fs::write(&port_path, "64999").unwrap();
+        std::fs::write(data_dir.join("mcp-os-auth-token"), "test-token").unwrap();
+        std::fs::write(data_dir.join("mcp-os-pid"), std::process::id().to_string()).unwrap();
+        std::fs::write(data_dir.join("mcp-os-port"), "64999").unwrap();
 
-        // Replicate is_mcp_os_alive logic with custom data_dir
-        let pid: u32 = std::fs::read_to_string(&pid_path)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        assert!(super::is_pid_alive(pid));
-        let port: u16 = std::fs::read_to_string(&port_path)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-        let alive = super::is_pid_alive(pid)
-            && std::net::TcpStream::connect_timeout(&addr, super::MCP_OS_POLL_TIMEOUT).is_ok();
-        assert!(!alive, "PID alive + port not listening should return false");
+        assert!(
+            !super::check_mcp_os_alive_in(data_dir),
+            "PID alive + port not listening should return false"
+        );
     }
 
     #[test]
     fn is_mcp_os_alive_true_when_pid_alive_port_open() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        let token_path = data_dir.join("mcp-os-auth-token");
-        let pid_path = data_dir.join("mcp-os-pid");
-        let port_path = data_dir.join("mcp-os-port");
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        std::fs::write(&token_path, "test-token").unwrap();
-        std::fs::write(&pid_path, std::process::id().to_string()).unwrap();
-        std::fs::write(&port_path, port.to_string()).unwrap();
+        std::fs::write(data_dir.join("mcp-os-auth-token"), "test-token").unwrap();
+        std::fs::write(data_dir.join("mcp-os-pid"), std::process::id().to_string()).unwrap();
+        std::fs::write(data_dir.join("mcp-os-port"), port.to_string()).unwrap();
 
-        let pid: u32 = std::fs::read_to_string(&pid_path)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-        let alive = super::is_pid_alive(pid)
-            && std::net::TcpStream::connect_timeout(&addr, super::MCP_OS_POLL_TIMEOUT).is_ok();
-        assert!(alive, "PID alive + port listening should return true");
+        assert!(
+            super::check_mcp_os_alive_in(data_dir),
+            "PID alive + port listening should return true"
+        );
         drop(listener);
     }
 
@@ -1226,31 +1205,13 @@ mod tests {
     fn is_mcp_os_alive_false_when_no_port_file() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        let token_path = data_dir.join("mcp-os-auth-token");
-        let pid_path = data_dir.join("mcp-os-pid");
-        let port_path = data_dir.join("mcp-os-port");
-        std::fs::write(&token_path, "test-token").unwrap();
-        std::fs::write(&pid_path, std::process::id().to_string()).unwrap();
+        std::fs::write(data_dir.join("mcp-os-auth-token"), "test-token").unwrap();
+        std::fs::write(data_dir.join("mcp-os-pid"), std::process::id().to_string()).unwrap();
         // No port file
 
-        let pid: u32 = std::fs::read_to_string(&pid_path)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        let alive = super::is_pid_alive(pid) && {
-            match std::fs::read_to_string(&port_path) {
-                Ok(s) => {
-                    let port: u16 = s.trim().parse().unwrap_or(0);
-                    port > 0 && {
-                        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-                        std::net::TcpStream::connect_timeout(&addr, super::MCP_OS_POLL_TIMEOUT)
-                            .is_ok()
-                    }
-                }
-                Err(_) => false,
-            }
-        };
-        assert!(!alive, "missing port file should return false");
+        assert!(
+            !super::check_mcp_os_alive_in(data_dir),
+            "missing port file should return false"
+        );
     }
 }
