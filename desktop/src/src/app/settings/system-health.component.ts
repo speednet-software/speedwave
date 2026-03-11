@@ -584,6 +584,10 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
   /** Starts periodic health polling and subscribes to IDE bridge events. */
   ngOnInit(): void {
     this.refresh();
+    // 15s balances responsiveness with resource usage: health checks shell out to
+    // nerdctl compose ps (VM round-trip on macOS/Windows) which is expensive at
+    // high frequency. 5s caused noticeable CPU overhead on low-power machines.
+    // IDE bridge events provide instant feedback for the most common status changes.
     this.intervalId = setInterval(() => this.refresh(), 15000);
 
     this.tauri

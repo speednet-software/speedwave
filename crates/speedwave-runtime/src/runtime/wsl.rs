@@ -11,21 +11,21 @@ use std::process::Command;
 pub fn decode_wsl_output(bytes: &[u8]) -> String {
     if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
         // UTF-16LE with BOM — skip the 2-byte BOM
-        let u16s: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        String::from_utf16_lossy(&u16s)
+        decode_utf16le(&bytes[2..])
     } else if bytes.len() >= 2 && looks_like_utf16le(bytes) {
         // UTF-16LE without BOM (common on Windows)
-        let u16s: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        String::from_utf16_lossy(&u16s)
+        decode_utf16le(bytes)
     } else {
         String::from_utf8_lossy(bytes).to_string()
     }
+}
+
+fn decode_utf16le(bytes: &[u8]) -> String {
+    let u16s: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    String::from_utf16_lossy(&u16s)
 }
 
 /// Checks whether `bytes` look like UTF-16LE-encoded text (without BOM).

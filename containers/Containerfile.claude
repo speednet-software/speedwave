@@ -10,6 +10,8 @@ FROM node:24-bookworm-slim
 # The base image has uid/gid 1000 ("node"). Rootless BuildKit cannot modify
 # /etc/passwd or /etc/group (overlayfs restrictions). We skip user renaming:
 # the container only needs a writable home at /home/speedwave.
+# See also: crates/speedwave-runtime/src/consts.rs (CONTAINER_USER_UNPRIVILEGED,
+# CONTAINER_USER_ROOTLESS) and compose.template.yml (user: "${CONTAINER_USER}").
 ENV HOME=/home/speedwave
 RUN mkdir -p /home/speedwave && chown 1000:1000 /home/speedwave
 

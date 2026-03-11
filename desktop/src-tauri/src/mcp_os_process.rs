@@ -351,7 +351,7 @@ fn write_restricted_file(path: &PathBuf, content: &str) -> anyhow::Result<()> {
         // Restrict to current user only via Windows ACLs.
         // icacls /inheritance:r removes inherited ACEs, then /grant:r adds
         // full-control for the current user only — equivalent of chmod 600.
-        let _ = speedwave_runtime::binary::system_command("icacls")
+        let status = speedwave_runtime::binary::system_command("icacls")
             .args([
                 path.as_os_str(),
                 "/inheritance:r".as_ref(),
@@ -364,6 +364,23 @@ fn write_restricted_file(path: &PathBuf, content: &str) -> anyhow::Result<()> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(s) => log::warn!(
+                "icacls failed (exit {}): {} may have overly permissive ACLs",
+                s,
+                path.display()
+            ),
+            Err(e) => log::warn!(
+                "failed to run icacls on {}: {} — file may have overly permissive ACLs",
+                path.display(),
+                e
+            ),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        compile_error!("write_restricted_file: unsupported platform — add file permission logic for this target");
     }
     Ok(())
 }

@@ -5,6 +5,13 @@ use crate::consts;
 
 use crate::consts::BUNDLE_RESOURCES_ENV;
 
+/// Platform-specific PATH environment variable separator.
+/// Windows uses `;`, all other platforms use `:`.
+#[cfg(windows)]
+const PATH_SEP: char = ';';
+#[cfg(not(windows))]
+const PATH_SEP: char = ':';
+
 /// Resolves the path to a binary command.
 ///
 /// Lima (macOS), nerdctl-full (Linux), and Node.js (all platforms) binaries
@@ -101,8 +108,11 @@ pub fn command(cmd: &str) -> Command {
         if let Some(bin_dir) = resolved_path.parent() {
             let system_path = std::env::var("PATH").unwrap_or_default();
             let bin_dir_str = bin_dir.to_string_lossy();
-            if !system_path.split(':').any(|p| p == bin_dir_str.as_ref()) {
-                command.env("PATH", format!("{bin_dir_str}:{system_path}"));
+            if !system_path
+                .split(PATH_SEP)
+                .any(|p| p == bin_dir_str.as_ref())
+            {
+                command.env("PATH", format!("{bin_dir_str}{PATH_SEP}{system_path}"));
             }
 
             // nerdctl-full bundles CNI plugins in <bundle>/libexec/cni/.
@@ -483,5 +493,32 @@ pub(crate) mod tests {
         );
 
         env::remove_var(BUNDLE_RESOURCES_ENV);
+    }
+
+    #[test]
+    fn system_command_returns_correct_program() {
+        let cmd = system_command("wsl.exe");
+        assert_eq!(
+            cmd.get_program().to_string_lossy(),
+            "wsl.exe",
+            "system_command should use the given program name verbatim"
+        );
+    }
+
+    #[test]
+    fn system_command_does_not_modify_path() {
+        let cmd = system_command("powershell.exe");
+        let path_env = cmd.get_envs().find(|(k, _)| *k == "PATH");
+        assert!(path_env.is_none(), "system_command should not modify PATH");
+    }
+
+    #[test]
+    fn system_command_does_not_set_lima_home() {
+        let cmd = system_command("limactl");
+        let lima_home_env = cmd.get_envs().find(|(k, _)| *k == "LIMA_HOME");
+        assert!(
+            lima_home_env.is_none(),
+            "system_command should not set LIMA_HOME even for 'limactl'"
+        );
     }
 }

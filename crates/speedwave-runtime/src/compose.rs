@@ -3286,4 +3286,30 @@ services:
             container_user()
         );
     }
+
+    #[test]
+    fn to_engine_path_returns_path_unchanged_on_non_windows() {
+        let path = std::path::Path::new("/home/user/projects/acme");
+        let result = to_engine_path(path).unwrap();
+        assert_eq!(result, "/home/user/projects/acme");
+    }
+
+    #[test]
+    fn str_to_engine_path_returns_path_unchanged_on_non_windows() {
+        let result = str_to_engine_path("/home/user/projects/acme").unwrap();
+        assert_eq!(result, "/home/user/projects/acme");
+    }
+
+    #[test]
+    fn to_engine_path_handles_path_with_spaces() {
+        let path = std::path::Path::new("/home/user/my projects/acme corp");
+        let result = to_engine_path(path).unwrap();
+        assert_eq!(result, "/home/user/my projects/acme corp");
+    }
+
+    #[test]
+    fn str_to_engine_path_handles_absolute_path() {
+        let result = str_to_engine_path("/usr/local/share/speedwave").unwrap();
+        assert_eq!(result, "/usr/local/share/speedwave");
+    }
 }

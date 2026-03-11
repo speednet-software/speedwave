@@ -132,6 +132,10 @@ pub(crate) fn is_pid_alive(pid: u32) -> bool {
             })
             .unwrap_or(false)
     }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
 }
 
 pub struct HealthMonitor;

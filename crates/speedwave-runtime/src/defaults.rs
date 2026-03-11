@@ -73,7 +73,11 @@ mod tests {
         assert_eq!(
             env.get("IS_SANDBOX").map(|s| s.as_str()),
             Some("1"),
-            "IS_SANDBOX must be set for Linux rootless nerdctl (UID 0 in container)"
+            "IS_SANDBOX=1 is required for Linux rootless nerdctl where containers run as \
+             UID 0 (mapped to host user via user namespace). Without it, Claude Code refuses \
+             --dangerously-skip-permissions as root. Defense-in-depth: container isolation \
+             (cap_drop ALL, read-only FS, no tokens, per-project network) makes this safe. \
+             See ADR-026 for full security analysis."
         );
     }
 

@@ -18,26 +18,18 @@
 
 set -euo pipefail
 
-# -- Configuration -------------------------------------------------------------
+# -- Configuration (shared) ----------------------------------------------------
 
-# Linux: SSH-based (no Parallels needed)
-LINUX_HOST="${SPEEDWAVE_LINUX_HOST:-limes@100.90.218.98}"
-LINUX_SSH_OPTS="-o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=e2e-common.sh
+source "${SCRIPT_DIR}/e2e-common.sh"
 
-# Windows: SSH-based via native Windows OpenSSH (port 22).
-# SSH gives us a cmd.exe/PowerShell shell directly on the Windows side.
-# WSL2 is invoked via wsl.exe when bash/Linux tooling is needed.
-WINDOWS_HOST="${SPEEDWAVE_WINDOWS_HOST:-jakub@100.82.138.67}"
-WINDOWS_SSH_PORT="${SPEEDWAVE_WINDOWS_SSH_PORT:-22}"
-WINDOWS_SSH_OPTS="-o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -p $WINDOWS_SSH_PORT"
-WINDOWS_WSL_DISTRO="${SPEEDWAVE_WINDOWS_WSL_DISTRO:-Ubuntu-22.04}"
-
-# macOS: SSH-based (real machine or VM via Tailscale/network)
-MACOS_HOST="${SPEEDWAVE_MACOS_HOST:-limes@100.104.82.7}"
-MACOS_SSH_OPTS="-o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
+# Override SSH opts with keepalive for long-running test sessions.
+LINUX_SSH_OPTS="$SSH_OPTS_BASE -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
+WINDOWS_SSH_OPTS="$SSH_OPTS_BASE -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -p $WINDOWS_SSH_PORT"
+MACOS_SSH_OPTS="$SSH_OPTS_BASE -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
 
 # Host repo path — resolved from git root of this script's location.
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HOST_REPO_DIR="${SPEEDWAVE_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 # Staging dir on host for passing artifacts between phases
@@ -45,12 +37,6 @@ HOST_REPO_DIR="${SPEEDWAVE_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # No local staging needed — avoids 352 MB+ round-trip transfers over Tailscale.
 
 # -- Helper functions: SSH (Linux) ---------------------------------------------
-
-# Run a command on the Linux machine via SSH.
-linux_ssh() {
-    # shellcheck disable=SC2086
-    ssh $LINUX_SSH_OPTS "$LINUX_HOST" "$@"
-}
 
 # Copy files to the Linux machine via rsync-over-ssh.
 linux_rsync_to() {
@@ -126,12 +112,6 @@ CLEAN
 # The Windows build dir is C:\speedwave-e2e.
 # The Windows install dir is C:\Speedwave.
 WINDOWS_WSL_STAGING="/home/windows/speedwave-e2e"
-
-# Run a command on the Windows machine via SSH (cmd.exe shell).
-windows_ssh() {
-    # shellcheck disable=SC2086
-    ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "$@"
-}
 
 # Run a PowerShell script on the Windows host.
 # Writes the script to a .ps1 temp file via sftp, then executes via -File.
@@ -319,12 +299,6 @@ CLEAN
 }
 
 # -- Helper functions: SSH (macOS) ---------------------------------------------
-
-# Run a command on the macOS machine via SSH.
-macos_ssh() {
-    # shellcheck disable=SC2086
-    ssh $MACOS_SSH_OPTS "$MACOS_HOST" "$@"
-}
 
 # Copy files to the macOS machine via rsync-over-ssh.
 macos_rsync_to() {

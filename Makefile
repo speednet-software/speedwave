@@ -367,8 +367,7 @@ _e2e-run:
 		if [ -d "$$1" ]; then rm -rf "$$2"; mv "$$1" "$$2"; fi; \
 	}; \
 	restore_dir() { \
-		rm -rf "$$1" 2>/dev/null || true; \
-		if [ -d "$$2" ]; then mv "$$2" "$$1"; fi; \
+		if [ -d "$$2" ]; then rm -rf "$$1" 2>/dev/null || true; mv "$$2" "$$1"; fi; \
 	}; \
 	backup_dir "$$HOME/.speedwave" "$$E2E_BAK"; \
 	if [ "$$(uname)" = "Darwin" ]; then \

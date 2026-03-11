@@ -1,4 +1,4 @@
-# ADR-024: Desktop E2E Testing via Parallels VMs
+# ADR-024: Desktop E2E Testing Strategy
 
 ## Status
 
@@ -26,18 +26,19 @@ A critical gap is that Speedwave relies on platform-specific infrastructure — 
 
 4. **Docker container with tauri-driver** — Builds the Tauri application inside a clean Ubuntu container with `webkit2gtk-driver` and `xvfb`[^7], then runs `tauri-driver`[^1] + WebdriverIO[^4] tests against the built binary. Rejected: while it provides filesystem isolation, it cannot test the full Speedwave flow — Docker containers lack systemd, which is required for nerdctl rootless mode[^8], and cannot run nested VMs (Lima, WSL2). This means setup wizard, runtime installation, and container lifecycle are untestable.
 
-5. **Parallels Desktop VMs (chosen)** — 3 VMs (Ubuntu, Windows, macOS) managed by Parallels Desktop Pro[^9] with clean snapshots. Each VM runs a real OS with full systemd, kernel, and virtualization support. Tests exercise the complete user experience from first launch through container orchestration. See Decision for details.
+5. **Parallels Desktop VMs (originally chosen, later evolved)** — 3 VMs (Ubuntu, Windows, macOS) managed by Parallels Desktop Pro[^9] with clean snapshots. Each VM runs a real OS with full systemd, kernel, and virtualization support. Tests exercise the complete user experience from first launch through container orchestration. This approach was the initial decision but evolved to use SSH-based orchestration to real machines (see Decision).
 
 ## Decision
 
-We use **Parallels Desktop VMs**[^9] with per-platform WebDriver mechanisms and **WebdriverIO**[^4] for desktop E2E testing:
+We use **SSH-based orchestration to real machines** with per-platform WebDriver mechanisms and **WebdriverIO**[^4] for desktop E2E testing.
 
-### VM Configuration
+> **Evolution note:** This ADR originally described Parallels Desktop VMs with `prlctl snapshot-switch` for state management. The implementation evolved to use SSH connections to real machines (physical or VM) reachable via Tailscale or direct network, as this proved more flexible across all three platforms and did not require Parallels Desktop on the orchestrating host.
 
-- **3 VMs**: Ubuntu (latest LTS), Windows 11, macOS (matching host major version)
-- **"tests-ready" snapshots**: Each VM has a saved snapshot containing a clean OS installation plus development toolchain (Rust, Node.js, system dependencies for Tauri[^1]) but no Speedwave state — no `~/.speedwave/`, no built binaries, no tokens
-- **Before each test run**: `prlctl snapshot-switch`[^10] restores the VM to its clean snapshot state, guaranteeing zero state leakage between runs
-- **Repo access**: The host repository is shared via Parallels Shared Folders[^11], then copied to the VM's local disk before build to avoid filesystem performance overhead from the shared mount
+### Machine Configuration
+
+- **3 target machines**: Ubuntu (latest LTS), Windows 11, macOS — connected via SSH (configured via `SPEEDWAVE_LINUX_HOST`, `SPEEDWAVE_WINDOWS_HOST`, `SPEEDWAVE_MACOS_HOST` environment variables)
+- **Clean state before each run**: Platform-specific clean-state functions (`linux_clean_state`, `windows_clean_state`, `macos_clean_state`) uninstall any previous Speedwave installation and remove user data (`~/.speedwave/`, built binaries, tokens), guaranteeing zero state leakage between runs
+- **Repo access**: The repository is copied to the remote machine via `rsync` (Linux/macOS) or `scp` (Windows) before building
 
 ### Per-Platform WebDriver
 
@@ -51,9 +52,9 @@ All platforms use **WebdriverIO**[^4] as the test runner, connecting via the W3C
 
 ### Orchestration
 
-- **`scripts/e2e-vm.sh`**: Orchestrates the full cycle per VM — snapshot restore via `prlctl snapshot-switch`[^10], copy repo to local disk via `prlctl exec`[^10], build the Tauri app, start the WebDriver, run WebdriverIO tests, collect results
-- **`make test-e2e-all`**: Runs `scripts/e2e-vm.sh` for all 3 VMs in parallel (requires Parallels Desktop Pro/Business[^9] on macOS host)
-- **`make test-e2e-desktop`**: Runs E2E tests on the current machine only (no VM orchestration) — useful for local development on any platform
+- **`scripts/e2e-vm.sh`**: Orchestrates the full cycle per platform via SSH — clean previous state, copy repo to remote machine, build the full release artifact (.deb / NSIS / .dmg), install, launch app, run WebdriverIO tests, collect results
+- **`make test-e2e-all`**: Runs `scripts/e2e-vm.sh` for all 3 platforms in parallel (requires SSH access to each target machine)
+- **`make test-e2e-desktop`**: Runs E2E tests on the current machine only (no SSH orchestration) — useful for local development on any platform
 
 ### Selectors
 
@@ -62,20 +63,20 @@ All platforms use **WebdriverIO**[^4] as the test runner, connecting via the W3C
 
 ### Security
 
-- **Full OS-level isolation**: Each VM has its own kernel, filesystem, and network stack — a compromised test cannot affect the host or other VMs
-- **Snapshot-based state reset**: `prlctl snapshot-switch`[^10] restores VMs to a known-clean state before every test run, ensuring no state leakage (tokens, configuration, container images) between runs
-- **`tauri-plugin-webdriver` compiled only in debug builds**: The `#[cfg(debug_assertions)]`[^5] gate ensures the embedded WebDriver server is never included in release binaries. Only macOS VMs use this plugin; Linux and Windows use the external `tauri-driver` process which is never shipped
+- **Full OS-level isolation**: Each target machine has its own kernel, filesystem, and network stack — a compromised test cannot affect the orchestrating host or other target machines
+- **Clean-state reset**: Platform-specific clean-state functions remove all Speedwave state (binaries, `~/.speedwave/`, tokens, container images) before every test run, ensuring no state leakage between runs
+- **`tauri-plugin-webdriver` compiled only in debug builds**: The `#[cfg(debug_assertions)]`[^5] gate ensures the embedded WebDriver server is never included in release binaries. Only macOS targets use this plugin; Linux and Windows use the external `tauri-driver` process which is never shipped
 - **No token access**: WebDriver commands operate in the webview context only — they cannot access Tauri backend state, tokens, or host filesystem
 - **Standard protocol**: Uses the well-audited W3C WebDriver specification[^6] rather than a custom wire protocol
 
 ## Consequences
 
-- **Requires Parallels Desktop Pro/Business**[^9] on the macOS host machine for cross-platform testing. Parallels Pro is needed for `prlctl` CLI access and headless VM operation
-- **First run per VM takes ~15–20 minutes** due to full Rust compilation of the Tauri app from source. Subsequent runs take ~5 minutes with incremental compilation (Cargo build cache persists within the VM between snapshot restores if snapshots are taken post-toolchain-install)
-- **Full user experience tested**: fresh OS → build → setup wizard → runtime install (Lima/nerdctl/WSL2) → container lifecycle → chat UI — the complete Speedwave flow that no other testing approach can cover
-- **3 platforms tested in parallel**: `make test-e2e-all` runs Ubuntu, Windows, and macOS VMs concurrently, limited only by host hardware resources
-- **`make test-e2e-desktop`** runs on the current machine without VMs — available on any platform for local development iteration
-- Tests are NOT part of the default `make test` target due to requiring Parallels and a full Tauri build
+- **Requires SSH access** to target machines (Linux, Windows, macOS) for cross-platform testing. Machines can be physical, cloud VMs, or local VMs reachable via Tailscale or direct network — no dependency on a specific hypervisor
+- **First run per machine takes ~15–20 minutes** due to full Rust compilation of the Tauri app from source. Subsequent runs take ~5 minutes with incremental compilation (Cargo build cache persists on the target machine between runs)
+- **Full user experience tested**: clean state → build → install artifact → setup wizard → runtime install (Lima/nerdctl/WSL2) → container lifecycle → chat UI — the complete Speedwave flow that no other testing approach can cover
+- **3 platforms tested in parallel**: `make test-e2e-all` runs tests on Ubuntu, Windows, and macOS machines concurrently via SSH
+- **`make test-e2e-desktop`** runs on the current machine without SSH orchestration — available on any platform for local development iteration
+- Tests are NOT part of the default `make test` target due to requiring SSH-accessible target machines and a full Tauri build
 - All Angular component templates include `data-testid` attributes on interactive elements
 
 ## References

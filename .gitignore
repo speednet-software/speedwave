@@ -17,6 +17,9 @@ Desktop.ini
 *.swo
 *~
 
+# Claude Code
+.claude/scheduled_tasks.lock
+
 # Environment / secrets
 .env
 .env.*

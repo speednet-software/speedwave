@@ -270,6 +270,8 @@ fn try_build_all(runtime: &dyn ContainerRuntime, vm_root: &std::path::Path) -> a
         "build_all_images: building {total} images from {}",
         vm_root.display()
     );
+    let root_str = vm_root.to_string_lossy();
+    let root_str = root_str.trim_end_matches('/');
     for (i, img) in IMAGES.iter().enumerate() {
         log::info!(
             "build_all_images: [{}/{}] building {} (context={}, file={})",
@@ -281,10 +283,8 @@ fn try_build_all(runtime: &dyn ContainerRuntime, vm_root: &std::path::Path) -> a
         );
         // Use string concatenation with "/" instead of PathBuf::join because vm_root
         // may be a WSL/Linux path (e.g. "/mnt/c/Speedwave/build-context") running on
-        // a Windows host. PathBuf::join on Windows doesn't handle Unix-style paths
-        // correctly — it can concatenate without inserting a separator.
-        let root_str = vm_root.to_string_lossy();
-        let root_str = root_str.trim_end_matches('/');
+        // a Windows host. PathBuf::join treats `/`-prefixed paths as absolute roots
+        // on Windows, replacing the base entirely instead of appending.
         let abs_context = format!("{}/{}", root_str, img.context_dir);
         let abs_containerfile = format!("{}/{}", root_str, img.containerfile);
         runtime.build_image(img.tag, &abs_context, &abs_containerfile)?;
@@ -1055,6 +1055,52 @@ mod tests {
         assert_eq!(
             prune_count, 0,
             "system_prune should NOT be called for generic errors"
+        );
+    }
+
+    #[test]
+    fn bundle_scripts_service_lists_are_in_sync() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+
+        let sh_content = std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.sh"))
+            .expect("bundle-build-context.sh should exist");
+
+        let ps1_content =
+            std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.ps1"))
+                .expect("bundle-build-context.ps1 should exist");
+
+        // Extract: MCP_SERVICES="shared hub slack sharepoint redmine gitlab"
+        let sh_services: Vec<&str> = sh_content
+            .lines()
+            .find(|l| l.starts_with("MCP_SERVICES="))
+            .expect("MCP_SERVICES= line should exist in .sh")
+            .trim_start_matches("MCP_SERVICES=")
+            .trim_matches('"')
+            .split_whitespace()
+            .collect();
+
+        // Extract: $services = @('shared','hub','slack','sharepoint','redmine','gitlab')
+        let ps1_line = ps1_content
+            .lines()
+            .find(|l| l.contains("$services = @("))
+            .expect("$services = @(...) line should exist in .ps1");
+        let ps1_services: Vec<&str> = ps1_line
+            .split("@(")
+            .nth(1)
+            .unwrap()
+            .trim_end_matches(')')
+            .split(',')
+            .map(|s| s.trim().trim_matches('\''))
+            .collect();
+
+        assert_eq!(
+            sh_services, ps1_services,
+            "bundle-build-context.sh MCP_SERVICES and bundle-build-context.ps1 $services \
+             must list the same services in the same order"
         );
     }
 

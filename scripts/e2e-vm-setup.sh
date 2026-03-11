@@ -19,34 +19,12 @@
 
 set -euo pipefail
 
-# -- Configuration -------------------------------------------------------------
+# -- Configuration (shared) ----------------------------------------------------
 
-# Linux: SSH-based (no Parallels needed)
-LINUX_HOST="${SPEEDWAVE_LINUX_HOST:-limes@100.90.218.98}"
-LINUX_SSH_OPTS="-o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-
-# Windows: SSH-based via native Windows OpenSSH (port 22)
-WINDOWS_HOST="${SPEEDWAVE_WINDOWS_HOST:-jakub@100.82.138.67}"
-WINDOWS_SSH_PORT="${SPEEDWAVE_WINDOWS_SSH_PORT:-22}"
-WINDOWS_SSH_OPTS="-o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -p $WINDOWS_SSH_PORT"
-
-# macOS: SSH-based (real machine or VM via Tailscale/network)
-MACOS_HOST="${SPEEDWAVE_MACOS_HOST:-limes@100.104.82.7}"
-MACOS_SSH_OPTS="-o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+# shellcheck source=e2e-common.sh
+source "$(dirname "$0")/e2e-common.sh"
 
 # -- Helper functions ----------------------------------------------------------
-
-# Run a command on the Linux machine via SSH.
-linux_ssh() {
-    # shellcheck disable=SC2086
-    ssh $LINUX_SSH_OPTS "$LINUX_HOST" "$@"
-}
-
-# Run a command on the Windows machine via SSH (cmd.exe shell).
-windows_ssh() {
-    # shellcheck disable=SC2086
-    ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "$@"
-}
 
 # Run a PowerShell script on the Windows host via SSH.
 # Writes the script to a .ps1 temp file via scp, then executes via -File.
@@ -69,12 +47,6 @@ windows_ps() {
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "del \"${tmpfile_win}\"" 2>/dev/null || true
     return $exit_code
-}
-
-# Run a command on the macOS machine via SSH.
-macos_ssh() {
-    # shellcheck disable=SC2086
-    ssh $MACOS_SSH_OPTS "$MACOS_HOST" "$@"
 }
 
 # -- Ubuntu (SSH) --------------------------------------------------------------

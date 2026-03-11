@@ -959,66 +959,42 @@ rm -rf /tmp/nerdctl-install
 if ! command -v iptables >/dev/null 2>&1; then
   apt-get update -qq && apt-get install -y -qq iptables >/dev/null
 fi
-# Configure containerd as a system service so it starts on every WSL session
-mkdir -p /etc/systemd/system
-cat > /etc/systemd/system/containerd.service <<UNIT
+# install_service NAME EXEC AFTER REQUIRES CHECK_CMD [CHECK_ARGS...]
+# Installs a systemd service unit file, starts it, and waits up to 30s for readiness.
+install_service() {{
+  local name="$1" exec="$2" after="$3" requires="$4"
+  shift 4
+  local check_cmd="$@"
+  mkdir -p /etc/systemd/system
+  cat > "/etc/systemd/system/${{name}}.service" <<UNIT
 [Unit]
-Description=containerd container runtime
-After=network.target
+Description=${{name}} daemon
+${{after:+After=$after}}
+${{requires:+Requires=$requires}}
 [Service]
-ExecStart=/usr/local/bin/containerd
+ExecStart=$exec
 Restart=always
 [Install]
 WantedBy=multi-user.target
 UNIT
-# Enable and start — works under both systemd and legacy init
-if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
-  systemctl daemon-reload
-  systemctl enable --now containerd
-else
-  containerd &
-fi
-# Wait for containerd socket to become ready (up to 30s)
-for i in $(seq 1 15); do
-  if nerdctl info >/dev/null 2>&1; then
-    break
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
+    systemctl daemon-reload
+    systemctl enable --now "$name"
+  else
+    $exec &
   fi
-  sleep 2
-done
-if ! nerdctl info >/dev/null 2>&1; then
-  echo 'containerd did not become ready after 30s' >&2
+  for i in $(seq 1 15); do
+    if $check_cmd >/dev/null 2>&1; then return 0; fi
+    sleep 2
+  done
+  echo "$name did not become ready after 30s" >&2
   exit 1
-fi
+}}
+# Configure containerd as a system service so it starts on every WSL session
+install_service containerd /usr/local/bin/containerd network.target "" nerdctl info
 # Start buildkitd — required for `nerdctl build` (image building).
 # On WSL2 we run as root (not rootless), so install as a systemd system service.
-cat > /etc/systemd/system/buildkit.service <<BKUNIT
-[Unit]
-Description=BuildKit builder daemon
-After=containerd.service
-Requires=containerd.service
-[Service]
-ExecStart=/usr/local/bin/buildkitd --oci-worker=false --containerd-worker=true
-Restart=always
-[Install]
-WantedBy=multi-user.target
-BKUNIT
-if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
-  systemctl daemon-reload
-  systemctl enable --now buildkit
-else
-  buildkitd --oci-worker=false --containerd-worker=true &
-fi
-# Wait for buildkitd socket (up to 30s)
-for i in $(seq 1 15); do
-  if buildctl debug workers >/dev/null 2>&1; then
-    break
-  fi
-  sleep 2
-done
-if ! buildctl debug workers >/dev/null 2>&1; then
-  echo 'buildkitd did not become ready after 30s' >&2
-  exit 1
-fi
+install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containerd-worker=true" containerd.service containerd.service buildctl debug workers
 "#,
         version = consts::NERDCTL_FULL_VERSION,
         sha256_amd64 = consts::NERDCTL_FULL_SHA256_AMD64,
