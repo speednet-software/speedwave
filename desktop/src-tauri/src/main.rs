@@ -4440,4 +4440,14 @@ mod tests {
             "get_platform() returned unexpected value: {platform}"
         );
     }
+
+    // -- OS integration platform guards --
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn set_os_integration_enabled_rejects_on_non_macos() {
+        let result = set_os_integration_enabled("test".into(), "reminders".into(), true);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("only available on macOS"));
+    }
 }

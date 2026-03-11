@@ -252,6 +252,8 @@ import { ProjectList } from '../models/update';
   styleUrl: './integrations.component.css',
 })
 export class IntegrationsComponent implements OnInit, OnDestroy {
+  private static readonly HIDDEN_SERVICES = new Set(['slack', 'sharepoint']);
+
   /** List of container-based MCP service integrations. */
   services: IntegrationStatusEntry[] = [];
   /** List of native OS integrations (reminders, calendar, mail, notes). */
@@ -360,8 +362,10 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       const response = await this.tauri.invoke<IntegrationsResponse>('get_integrations', {
         project: this.activeProject,
       });
-      const hiddenServices = new Set(['slack', 'sharepoint']);
-      this.services = response.services.filter((s) => !hiddenServices.has(s.service));
+      // Slack and SharePoint are not yet publicly available (#91)
+      this.services = response.services.filter(
+        (s) => !IntegrationsComponent.HIDDEN_SERVICES.has(s.service)
+      );
       this.osIntegrations = response.os;
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
