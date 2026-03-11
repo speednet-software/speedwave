@@ -83,9 +83,11 @@ impl McpOsProcess {
             }
         }
 
+        cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
+        // HOME is a Unix convention; Windows uses USERPROFILE (already in WINDOWS_SYSTEM_ENV_VARS).
+        #[cfg(not(target_os = "windows"))]
+        cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
         let mut child = cmd
-            .env("PATH", std::env::var("PATH").unwrap_or_default())
-            .env("HOME", std::env::var("HOME").unwrap_or_default())
             .env("PORT", "0")
             .env("MCP_OS_AUTH_TOKEN", &token)
             .stdout(std::process::Stdio::piped())
@@ -796,11 +798,14 @@ srv.listen(0, '127.0.0.1', () => {
 
         std::env::set_var("SUPER_SECRET_TOKEN", "do-not-leak");
 
-        let result = Command::new("node")
+        let mut test_cmd = Command::new("node");
+        test_cmd
             .arg(&script)
             .env_clear()
-            .env("PATH", std::env::var("PATH").unwrap_or_default())
-            .env("HOME", std::env::var("HOME").unwrap_or_default())
+            .env("PATH", std::env::var("PATH").unwrap_or_default());
+        #[cfg(not(target_os = "windows"))]
+        test_cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
+        let result = test_cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .output();
@@ -1016,9 +1021,10 @@ process.stdout.write(JSON.stringify({ leaked }));
             }
         }
 
+        cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
+        #[cfg(not(target_os = "windows"))]
+        cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
         let result = cmd
-            .env("PATH", std::env::var("PATH").unwrap_or_default())
-            .env("HOME", std::env::var("HOME").unwrap_or_default())
             .env("PORT", "0")
             .env("MCP_OS_AUTH_TOKEN", "test-token")
             .stdout(std::process::Stdio::piped())

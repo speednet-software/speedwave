@@ -217,15 +217,23 @@ impl HealthMonitor {
 
     pub fn check_mcp_os() -> McpOsHealth {
         // mcp-os is a child process managed by Tauri (mcp_os_process.rs).
-        // Reports mcp-os as running if the auth token file exists on disk,
-        // indicating it was started by Tauri.
-        let token_path = dirs::home_dir().map(|h| {
-            h.join(speedwave_runtime::consts::DATA_DIR)
-                .join("mcp-os-auth-token")
-        });
-        McpOsHealth {
-            running: token_path.is_some_and(|p| p.exists()),
+        // Cross-check: token file must exist AND the recorded PID must be alive.
+        // Without the PID check, a SIGKILL'd mcp-os would appear healthy indefinitely.
+        let home = match dirs::home_dir() {
+            Some(h) => h,
+            None => return McpOsHealth { running: false },
+        };
+        let data_dir = home.join(speedwave_runtime::consts::DATA_DIR);
+        let token_path = data_dir.join("mcp-os-auth-token");
+        if !token_path.exists() {
+            return McpOsHealth { running: false };
         }
+        let pid_path = data_dir.join(speedwave_runtime::consts::MCP_OS_PID_FILE);
+        let running = std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .is_some_and(is_pid_alive);
+        McpOsHealth { running }
     }
 
     pub fn check_ide_bridge() -> IdeBridgeHealth {

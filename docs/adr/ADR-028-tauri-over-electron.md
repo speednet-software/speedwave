@@ -1,4 +1,4 @@
-# ADR-025: Tauri v2 over Electron for Desktop Shell
+# ADR-028: Tauri v2 over Electron for Desktop Shell
 
 > **Status:** Accepted
 
