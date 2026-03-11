@@ -18,6 +18,7 @@ crates/speedwave-runtime/src/log_sanitizer.rs:jwt:230
 desktop/src-tauri/src/ide_bridge.rs:generic-api-key:1803
 desktop/src-tauri/src/main.rs:generic-api-key:3498
 desktop/src-tauri/src/main.rs:jwt:3684
+desktop/src-tauri/src/diagnostics.rs:jwt:276
 
 # PII tokenizer test — fake API key in test fixture.
 desktop/src-tauri/build-context/mcp-servers/hub/src/pii-tokenizer.test.ts:generic-api-key:87
