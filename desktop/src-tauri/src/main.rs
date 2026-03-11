@@ -29,7 +29,7 @@ mod updater;
 mod url_validation;
 mod window;
 
-use types::*;
+use types::{check_project, ProjectEntry, ProjectList};
 
 use chat::{ChatSession, SharedChatSession};
 use health::HealthMonitor;
@@ -38,12 +38,10 @@ use speedwave_runtime::config;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::Manager;
 
-/// Shared handle for the background auto-update check task.
-type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>;
+use reconcile::{SharedAutoCheckHandle, SharedIdeBridge};
 
 /// Tracks the latest available update version for the system tray menu.
 type SharedUpdateVersion = Arc<Mutex<Option<String>>>;
@@ -239,8 +237,6 @@ async fn get_health(project: String) -> Result<health::HealthReport, String> {
 // IDE Bridge commands
 // ---------------------------------------------------------------------------
 
-type SharedIdeBridge = Arc<Mutex<Option<ide_bridge::IdeBridge>>>;
-
 #[derive(Serialize)]
 struct BridgeStatus {
     port: u16,
@@ -395,7 +391,7 @@ fn main() {
     // Bundled binary resolution for app bundles.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
-            if let Some(res) = resolve_resources_dir(parent) {
+            if let Some(res) = reconcile::resolve_resources_dir(parent) {
                 std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, &res);
                 if let Err(e) = speedwave_runtime::build::write_resources_marker(&res) {
                     log::warn!("could not write resources-dir marker: {e}");
@@ -556,7 +552,7 @@ fn main() {
                         // If containers are already running, regenerate compose with the
                         // new mcp-os port and recreate them. Without this, the hub would
                         // keep connecting to the old (dead) port from the previous session.
-                        reconcile_compose_port(app.handle());
+                        reconcile::reconcile_compose_port(app.handle());
                     }
                     Err(e) => log::error!("mcp-os spawn error: {e}"),
                 }
@@ -589,7 +585,7 @@ fn main() {
 
             // Build system tray. If creation fails, fall back to visible
             // window (see Linux safety net above).
-            let tray_menu = build_tray_menu(app.handle(), &None)?;
+            let tray_menu = tray::build_tray_menu(app.handle(), &None)?;
             let update_version_tray = update_version_setup.clone();
             let tray_icon = app
                 .default_window_icon()
@@ -768,7 +764,7 @@ fn main() {
                             Ok(mut guard) => *guard = Some(version.clone()),
                             Err(e) => log::warn!("update version mutex poisoned: {e}"),
                         }
-                        refresh_tray_menu(&app_handle_listener, &Some(version));
+                        tray::refresh_tray_menu(&app_handle_listener, &Some(version));
                     }
                     Err(e) => {
                         log::warn!("tray: failed to deserialize update_available payload: {e}");
@@ -818,22 +814,22 @@ fn main() {
             // Health
             get_health,
             // Container logs
-            get_container_logs,
-            get_compose_logs,
+            log_commands::get_container_logs,
+            log_commands::get_compose_logs,
             // IDE Bridge
             list_available_ides,
             select_ide,
             get_selected_ide,
             get_bridge_status,
             // Container updates
-            update_containers,
-            rollback_containers,
+            update_commands::update_containers,
+            update_commands::rollback_containers,
             // Update
-            check_for_update,
-            install_update,
-            get_update_settings,
-            set_update_settings,
-            restart_app,
+            update_commands::check_for_update,
+            update_commands::install_update,
+            update_commands::get_update_settings,
+            update_commands::set_update_settings,
+            update_commands::restart_app,
             // Logging
             set_log_level,
             get_log_level,
@@ -864,441 +860,11 @@ fn main() {
                     if !should_run_cleanup(window.label()) {
                         return;
                     }
-                    run_exit_cleanup(&ide_bridge_exit, &mcp_os_exit, &auto_check_exit);
+                    reconcile::run_exit_cleanup(&ide_bridge_exit, &mcp_os_exit, &auto_check_exit);
                 }
                 _ => {}
             }
         })
         .run(tauri::generate_context!())
         .expect("fatal: Tauri application failed to start");
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    // -- Container name validation (get_container_logs logic) --
-
-    #[test]
-    fn container_name_requires_compose_prefix() {
-        let prefix = speedwave_runtime::consts::COMPOSE_PREFIX;
-        let valid = format!("{}_acme_claude", prefix);
-        assert!(valid.starts_with(&format!("{}_", prefix)));
-
-        // Without prefix
-        assert!(!"random_container".starts_with(&format!("{}_", prefix)));
-    }
-
-    #[test]
-    fn container_name_rejects_shell_characters() {
-        let name = "speedwave_acme;rm -rf /";
-        let has_invalid = !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.');
-        assert!(has_invalid, "semicolons should be rejected");
-    }
-
-    #[test]
-    fn container_name_rejects_path_traversal() {
-        let name = "speedwave_../etc/passwd";
-        let has_invalid = !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.');
-        assert!(has_invalid, "slashes should be rejected");
-    }
-
-    // -- set_log_level / get_log_level tests --
-    //
-    // These functions mutate global state (`log::set_max_level`), so we
-    // serialize all log-level tests through a single mutex.
-
-    // -- Log sanitization tests (get_container_logs / get_compose_logs) --
-
-    #[test]
-    fn container_logs_sanitize_bearer_token() {
-        let raw = "2024-01-15 INFO  Calling API with Bearer sk-ant-api03-secret123\nDone.";
-        let sanitized = speedwave_runtime::log_sanitizer::sanitize(raw);
-        assert!(
-            !sanitized.contains("sk-ant-api03-secret123"),
-            "Bearer token should be redacted in container logs: {sanitized}"
-        );
-        assert!(
-            sanitized.contains("Bearer ***REDACTED***"),
-            "Should contain redacted marker: {sanitized}"
-        );
-        assert!(
-            sanitized.contains("Done."),
-            "Non-secret content should remain: {sanitized}"
-        );
-    }
-
-    #[test]
-    fn container_logs_sanitize_slack_token() {
-        let raw = "mcp-hub | Connecting with token xoxb-1234567890-abcdefghij";
-        let sanitized = speedwave_runtime::log_sanitizer::sanitize(raw);
-        assert!(
-            !sanitized.contains("xoxb-1234567890-abcdefghij"),
-            "Slack token should be redacted in container logs: {sanitized}"
-        );
-        assert!(
-            sanitized.contains("***REDACTED_SLACK_TOKEN***"),
-            "Should contain Slack redacted marker: {sanitized}"
-        );
-    }
-
-    #[test]
-    fn container_logs_sanitize_api_key_assignment() {
-        let raw = "Config loaded: api_key=sk-proj-abc123def456 endpoint=https://api.example.com";
-        let sanitized = speedwave_runtime::log_sanitizer::sanitize(raw);
-        assert!(
-            !sanitized.contains("sk-proj-abc123def456"),
-            "API key should be redacted in container logs: {sanitized}"
-        );
-        assert!(
-            sanitized.contains("api_key=***REDACTED***"),
-            "Should contain redacted api_key: {sanitized}"
-        );
-        assert!(
-            sanitized.contains("https://api.example.com"),
-            "Non-secret content should remain: {sanitized}"
-        );
-    }
-
-    #[test]
-    fn compose_logs_sanitize_bearer_token() {
-        let raw = concat!(
-            "claude_1  | Starting session\n",
-            "mcp_hub_1 | Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig123\n",
-            "mcp_hub_1 | Ready\n"
-        );
-        let sanitized = speedwave_runtime::log_sanitizer::sanitize(raw);
-        assert!(
-            !sanitized.contains("eyJhbGciOiJIUzI1NiJ9"),
-            "JWT in compose logs should be redacted: {sanitized}"
-        );
-        assert!(
-            sanitized.contains("Starting session"),
-            "Non-secret lines should remain: {sanitized}"
-        );
-        assert!(
-            sanitized.contains("Ready"),
-            "Non-secret lines should remain: {sanitized}"
-        );
-    }
-
-    #[test]
-    fn compose_logs_sanitize_multiple_secrets() {
-        let raw = concat!(
-            "hub | password=hunter2 connecting\n",
-            "hub | using token xoxb-slack-secret-token\n",
-            "hub | Bearer my-bearer-token in header\n",
-        );
-        let sanitized = speedwave_runtime::log_sanitizer::sanitize(raw);
-        assert!(
-            !sanitized.contains("hunter2"),
-            "Password should be redacted: {sanitized}"
-        );
-        assert!(
-            !sanitized.contains("xoxb-slack-secret-token"),
-            "Slack token should be redacted: {sanitized}"
-        );
-        assert!(
-            !sanitized.contains("my-bearer-token"),
-            "Bearer token should be redacted: {sanitized}"
-        );
-    }
-
-    #[test]
-    fn container_logs_sanitize_plain_text_unchanged() {
-        let raw = "2024-01-15 INFO  Container started successfully on port 4000\nHealthcheck OK";
-        let sanitized = speedwave_runtime::log_sanitizer::sanitize(raw);
-        assert_eq!(
-            sanitized, raw,
-            "Plain log lines without secrets should pass through unchanged"
-        );
-    }
-
-    // -- IntegrationsConfig::set_service tests --
-
-    #[test]
-    fn set_service_known_key_returns_true() {
-        let mut cfg = config::IntegrationsConfig::default();
-        let ic = config::IntegrationConfig {
-            enabled: Some(true),
-        };
-        assert!(cfg.set_service("slack", ic));
-        assert_eq!(cfg.slack.unwrap().enabled, Some(true));
-    }
-
-    #[test]
-    fn set_service_all_known_keys() {
-        for key in &["slack", "sharepoint", "redmine", "gitlab"] {
-            let mut cfg = config::IntegrationsConfig::default();
-            let ic = config::IntegrationConfig {
-                enabled: Some(true),
-            };
-            assert!(
-                cfg.set_service(key, ic),
-                "set_service should accept '{}'",
-                key
-            );
-        }
-    }
-
-    #[test]
-    fn set_service_unknown_key_returns_false() {
-        let mut cfg = config::IntegrationsConfig::default();
-        let ic = config::IntegrationConfig {
-            enabled: Some(true),
-        };
-        assert!(!cfg.set_service("unknown", ic));
-        assert!(!cfg.set_service(
-            "os",
-            config::IntegrationConfig {
-                enabled: Some(true)
-            }
-        ));
-    }
-
-    #[test]
-    fn set_service_overwrite() {
-        let mut cfg = config::IntegrationsConfig::default();
-        cfg.set_service(
-            "slack",
-            config::IntegrationConfig {
-                enabled: Some(true),
-            },
-        );
-        cfg.set_service(
-            "slack",
-            config::IntegrationConfig {
-                enabled: Some(false),
-            },
-        );
-        assert_eq!(cfg.slack.unwrap().enabled, Some(false));
-    }
-
-    // -- resolve_resources_dir --
-
-    #[cfg(target_os = "macos")]
-    mod resolve_resources_dir_tests {
-        use super::super::resolve_resources_dir;
-        use tempfile::TempDir;
-
-        /// Helper: create a marker subdirectory so the resource probe succeeds.
-        fn mark_as_resources(dir: &std::path::Path) {
-            std::fs::create_dir_all(dir.join("cli")).unwrap();
-        }
-
-        #[test]
-        fn macos_app_bundle_resolves_resources() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("Contents").join("MacOS");
-            let resources = tmp.path().join("Contents").join("Resources");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-            std::fs::create_dir_all(&resources).unwrap();
-            mark_as_resources(&resources);
-
-            let result = resolve_resources_dir(&exe_parent);
-            assert_eq!(result, Some(resources));
-        }
-
-        #[test]
-        fn macos_returns_none_when_resources_dir_empty() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("Contents").join("MacOS");
-            let resources = tmp.path().join("Contents").join("Resources");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-            std::fs::create_dir_all(&resources).unwrap();
-            // Resources dir exists but has no marker → should return None
-
-            assert_eq!(resolve_resources_dir(&exe_parent), None);
-        }
-
-        #[test]
-        fn macos_dev_mode_returns_none() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("target").join("debug");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-
-            assert_eq!(resolve_resources_dir(&exe_parent), None);
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    mod resolve_resources_dir_tests {
-        use super::super::resolve_resources_dir;
-        use tempfile::TempDir;
-
-        fn mark_as_resources(dir: &std::path::Path) {
-            std::fs::create_dir_all(dir.join("cli")).unwrap();
-        }
-
-        #[test]
-        fn linux_deb_layout_resolves_lib_speedwave() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("usr").join("bin");
-            let lib_dir = tmp.path().join("usr").join("lib").join("Speedwave");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-            std::fs::create_dir_all(&lib_dir).unwrap();
-            mark_as_resources(&lib_dir);
-
-            let result = resolve_resources_dir(&exe_parent);
-            assert_eq!(result, Some(lib_dir));
-        }
-
-        #[test]
-        fn linux_dev_mode_returns_none() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("target").join("debug");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-
-            assert_eq!(resolve_resources_dir(&exe_parent), None);
-        }
-
-        #[test]
-        fn linux_fallback_to_resources_subdir() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("target").join("debug");
-            let resources = exe_parent.join("resources");
-            std::fs::create_dir_all(&resources).unwrap();
-            mark_as_resources(&resources);
-
-            let result = resolve_resources_dir(&exe_parent);
-            assert_eq!(result, Some(resources));
-        }
-
-        #[test]
-        fn linux_returns_none_when_lib_dir_empty() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("usr").join("bin");
-            let lib_dir = tmp.path().join("usr").join("lib").join("Speedwave");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-            std::fs::create_dir_all(&lib_dir).unwrap();
-            // lib dir exists but has no marker → should return None
-
-            assert_eq!(resolve_resources_dir(&exe_parent), None);
-        }
-
-        #[test]
-        fn linux_lib_speedwave_takes_priority_over_resources() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("usr").join("bin");
-            let lib_dir = tmp.path().join("usr").join("lib").join("Speedwave");
-            let resources = exe_parent.join("resources");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-            std::fs::create_dir_all(&lib_dir).unwrap();
-            std::fs::create_dir_all(&resources).unwrap();
-            mark_as_resources(&lib_dir);
-            mark_as_resources(&resources);
-
-            let result = resolve_resources_dir(&exe_parent);
-            assert_eq!(result, Some(lib_dir));
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    mod resolve_resources_dir_tests {
-        use super::super::resolve_resources_dir;
-        use tempfile::TempDir;
-
-        fn mark_as_resources(dir: &std::path::Path) {
-            let cli_dir = dir.join("cli");
-            std::fs::create_dir_all(&cli_dir).unwrap();
-            std::fs::write(cli_dir.join("speedwave.exe"), b"fake-cli").unwrap();
-        }
-
-        #[test]
-        fn windows_nsis_resolves_exe_parent_when_resources_alongside() {
-            // NSIS installs resources (cli/, mcp-os/, wsl/) directly alongside
-            // the .exe — there is no `resources/` subdirectory.
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().to_path_buf();
-            mark_as_resources(&exe_parent);
-
-            let result = resolve_resources_dir(&exe_parent);
-            assert_eq!(result, Some(exe_parent));
-        }
-
-        #[test]
-        fn windows_fallback_to_resources_subdir() {
-            // Some layouts may use a resources/ subdirectory (e.g., dev builds).
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().to_path_buf();
-            let resources = exe_parent.join("resources");
-            std::fs::create_dir_all(&resources).unwrap();
-            mark_as_resources(&resources);
-
-            let result = resolve_resources_dir(&exe_parent);
-            // exe_parent itself has no marker, so resources/ should win
-            assert_eq!(result, Some(resources));
-        }
-
-        #[test]
-        fn windows_exe_parent_takes_priority_over_resources_subdir() {
-            // When both exe_parent and exe_parent/resources have markers,
-            // exe_parent (NSIS layout) wins because it is checked first.
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().to_path_buf();
-            let resources = exe_parent.join("resources");
-            std::fs::create_dir_all(&resources).unwrap();
-            mark_as_resources(&exe_parent);
-            mark_as_resources(&resources);
-
-            let result = resolve_resources_dir(&exe_parent);
-            assert_eq!(result, Some(exe_parent));
-        }
-
-        #[test]
-        fn windows_returns_none_when_no_markers() {
-            // Empty directory — neither exe_parent nor resources/ has bundled assets.
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().to_path_buf();
-            // exe_parent exists but has no cli/, mcp-os/, or build-context/
-
-            assert_eq!(resolve_resources_dir(&exe_parent), None);
-        }
-
-        #[test]
-        fn windows_dev_mode_returns_none() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().join("target").join("debug");
-            std::fs::create_dir_all(&exe_parent).unwrap();
-
-            assert_eq!(resolve_resources_dir(&exe_parent), None);
-        }
-
-        #[test]
-        fn windows_detects_mcp_os_marker() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().to_path_buf();
-            std::fs::create_dir_all(exe_parent.join("mcp-os")).unwrap();
-
-            let result = resolve_resources_dir(&exe_parent);
-            assert_eq!(result, Some(exe_parent));
-        }
-
-        #[test]
-        fn windows_detects_build_context_marker() {
-            let tmp = TempDir::new().unwrap();
-            let exe_parent = tmp.path().to_path_buf();
-            std::fs::create_dir_all(exe_parent.join("build-context")).unwrap();
-
-            let result = resolve_resources_dir(&exe_parent);
-            assert_eq!(result, Some(exe_parent));
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn set_os_integration_enabled_rejects_on_non_macos() {
-        let result = set_os_integration_enabled("test".into(), "reminders".into(), true);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("only available on macOS"));
-    }
 }
