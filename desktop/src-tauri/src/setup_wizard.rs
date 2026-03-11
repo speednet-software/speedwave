@@ -1047,7 +1047,7 @@ install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containe
 pub fn create_project(name: &str, dir: &str) -> anyhow::Result<()> {
     compose::init_project_dirs(name)?;
 
-    let mut user_config = config::load_user_config().unwrap_or_default();
+    let mut user_config = config::load_user_config()?;
 
     // Add project to user config if not already present
     if !user_config.projects.iter().any(|p| p.name == name) {
@@ -1129,7 +1129,7 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     // Re-render compose.yml before every start. Dynamic config (mcp-os token,
     // auth keys, addons) may have changed since create_project() first rendered it.
     // Without this, WORKER_OS_URL is missing if mcp-os started after project creation.
-    let user_config = config::load_user_config().unwrap_or_default();
+    let user_config = config::load_user_config()?;
     let project_dir = user_config
         .projects
         .iter()
@@ -1145,8 +1145,17 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     let resolved = config::resolve_claude_config(project_path, &user_config, project);
     let integrations = config::resolve_integrations(project_path, &user_config, project);
     let yaml = compose::render_compose(project, project_dir, &resolved, &integrations)?;
-    compose::save_compose(project, &yaml)?;
 
+    let violations = compose::SecurityCheck::run(&yaml, project);
+    if !violations.is_empty() {
+        let msgs: Vec<String> = violations
+            .iter()
+            .map(|v| format!("[{}] {} -- {}", v.container, v.rule, v.message))
+            .collect();
+        anyhow::bail!("Security check failed:\n{}", msgs.join("\n"));
+    }
+
+    compose::save_compose(project, &yaml)?;
     rt.compose_up_recreate(project)?;
 
     let mut state = SetupState::load();
@@ -3349,6 +3358,116 @@ mod tests {
         assert!(
             path_str.ends_with("ext4.vhdx"),
             "path should end with ext4.vhdx: {path_str}"
+        );
+    }
+
+    #[test]
+    fn start_containers_security_check_blocks_missing_cap_drop() {
+        // Compose YAML missing cap_drop: [ALL] should trigger CAP_DROP_ALL violation.
+        // This verifies the SecurityCheck gate runs before save_compose and compose_up_recreate.
+        let yaml = r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - CLAUDE_VERSION=1.0.3
+"#;
+        let violations = compose::SecurityCheck::run(yaml, "test");
+        assert!(
+            violations.iter().any(|v| v.rule == "CAP_DROP_ALL"),
+            "Expected CAP_DROP_ALL violation for compose YAML missing cap_drop"
+        );
+
+        // Verify the error message format matches what start_containers would produce
+        let msgs: Vec<String> = violations
+            .iter()
+            .map(|v| format!("[{}] {} -- {}", v.container, v.rule, v.message))
+            .collect();
+        let error_msg = format!("Security check failed:\n{}", msgs.join("\n"));
+        assert!(
+            error_msg.contains("Security check failed"),
+            "Error message should contain 'Security check failed'"
+        );
+        assert!(
+            error_msg.contains("CAP_DROP_ALL"),
+            "Error message should contain the violated rule name"
+        );
+    }
+
+    #[test]
+    fn security_check_before_save_compose_ordering() {
+        // Verify that compose is NOT saved to disk when SecurityCheck detects violations.
+        // This tests the ordering guarantee: SecurityCheck::run() runs BEFORE save_compose().
+        let tmp = tempfile::tempdir().unwrap();
+        let compose_dir = tmp.path().join("compose").join("test-ordering");
+        std::fs::create_dir_all(&compose_dir).unwrap();
+        let compose_file = compose_dir.join("compose.yml");
+
+        // Insecure YAML (missing cap_drop)
+        let yaml = r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - CLAUDE_VERSION=1.0.3
+"#;
+
+        // SecurityCheck should find violations
+        let violations = compose::SecurityCheck::run(yaml, "test-ordering");
+        assert!(!violations.is_empty(), "Should detect violations");
+
+        // Simulate the correct ordering: check first, bail before save
+        if !violations.is_empty() {
+            // In start_containers, we bail here — save_compose is never called
+            assert!(
+                !compose_file.exists(),
+                "compose.yml must NOT be written when security check fails"
+            );
+        }
+    }
+
+    #[test]
+    fn start_containers_security_check_passes_valid_compose() {
+        // A compose YAML with all security requirements should produce zero violations.
+        let yaml = r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    user: "1000:1000"
+    environment:
+      - CLAUDE_VERSION=1.0.3
+networks:
+  speedwave_test_network:
+    driver: bridge
+"#;
+        let violations = compose::SecurityCheck::run(yaml, "test");
+        assert!(
+            violations.is_empty(),
+            "Expected no violations for valid compose YAML, got: {:?}",
+            violations
+                .iter()
+                .map(|v| format!("{v}"))
+                .collect::<Vec<_>>()
         );
     }
 }

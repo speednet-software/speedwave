@@ -11,7 +11,7 @@
  * - Config: 2 tools (get_mappings, get_config)
  */
 
-import { ToolDefinition } from '../../../shared/dist/index.js';
+import { ToolDefinition } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 import { createIssueTools } from './issue-tools.js';
 import { createTimeEntryTools } from './time-entry-tools.js';

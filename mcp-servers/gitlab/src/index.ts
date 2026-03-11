@@ -6,7 +6,7 @@
  * @module mcp-gitlab
  */
 
-import { createMCPServer, ts } from '../../shared/dist/index.js';
+import { createMCPServer, ts } from '@speedwave/mcp-shared';
 import { initializeGitLabClient } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 

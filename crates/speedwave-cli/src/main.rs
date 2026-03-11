@@ -263,7 +263,10 @@ fn main() -> anyhow::Result<()> {
         if !runtime.is_available() {
             runtime_not_available();
         }
-        let user_config = config::load_user_config().unwrap_or_default();
+        let user_config = config::load_user_config().unwrap_or_else(|e| {
+            eprintln!("Failed to load config: {e}");
+            std::process::exit(1);
+        });
         let project_name = resolve_project(&user_config)?;
         println!("Updating containers for project '{}'...", project_name);
         match update::update_containers(runtime.as_ref(), &project_name) {
@@ -304,7 +307,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Load config once — used for both project resolution and compose rendering
-    let user_config = config::load_user_config().unwrap_or_default();
+    let user_config = config::load_user_config().unwrap_or_else(|e| {
+        eprintln!("Failed to load config: {e}");
+        std::process::exit(1);
+    });
 
     let project_name = resolve_project(&user_config)?;
 

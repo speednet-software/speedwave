@@ -1,13 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { SettingsComponent } from './settings.component';
+import { UpdateSectionComponent } from './update-section/update-section.component';
 import { TauriService } from '../services/tauri.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
-import { RouterModule } from '@angular/router';
 
-describe('SettingsComponent — container updates', () => {
-  let component: SettingsComponent;
-  let fixture: ComponentFixture<SettingsComponent>;
+describe('UpdateSectionComponent — container updates (compat)', () => {
+  let component: UpdateSectionComponent;
+  let fixture: ComponentFixture<UpdateSectionComponent>;
   let mockTauri: MockTauriService;
 
   beforeEach(async () => {
@@ -15,39 +14,25 @@ describe('SettingsComponent — container updates', () => {
 
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
-        case 'list_projects':
-          return { projects: [{ name: 'acme', dir: '/tmp/acme' }], active_project: 'acme' };
-        case 'get_llm_config':
-          return { provider: 'anthropic', model: null, base_url: null, api_key_env: null };
         case 'get_update_settings':
           return { auto_check: true, check_interval_hours: 24 };
-        case 'get_auth_status':
-          return { api_key_configured: false, oauth_authenticated: false };
+        case 'get_platform':
+          return 'darwin';
         case 'update_containers':
           return { success: true, images_rebuilt: 3, containers_recreated: 2, error: null };
         case 'rollback_containers':
           return undefined;
-        case 'get_health':
-          return {
-            containers: [],
-            vm: { running: false, vm_type: 'lima' },
-            mcp_os: { running: false },
-            ide_bridge: { running: false, port: null, ws_url: null, detected_ides: [] },
-            overall_healthy: false,
-          };
-        case 'get_bridge_status':
-          return null;
         default:
           return undefined;
       }
     };
 
     await TestBed.configureTestingModule({
-      imports: [SettingsComponent, RouterModule.forRoot([])],
+      imports: [UpdateSectionComponent],
       providers: [{ provide: TauriService, useValue: mockTauri }],
     }).compileComponents();
 
-    fixture = TestBed.createComponent(SettingsComponent);
+    fixture = TestBed.createComponent(UpdateSectionComponent);
     component = fixture.componentInstance;
   });
 
@@ -82,13 +67,6 @@ describe('SettingsComponent — container updates', () => {
     it('handles update failure', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'update_containers') throw new Error('pull failed');
-        if (cmd === 'list_projects')
-          return { projects: [{ name: 'acme', dir: '/tmp/acme' }], active_project: 'acme' };
-        if (cmd === 'get_llm_config')
-          return { provider: 'anthropic', model: null, base_url: null, api_key_env: null };
-        if (cmd === 'get_update_settings') return { auto_check: true, check_interval_hours: 24 };
-        if (cmd === 'get_auth_status')
-          return { api_key_configured: false, oauth_authenticated: false };
         return undefined;
       };
       component.activeProject = 'acme';
@@ -106,26 +84,24 @@ describe('SettingsComponent — container updates', () => {
   });
 
   describe('hidden sections', () => {
-    it('hides LLM Provider and Container Updates by default', async () => {
+    it('hides Container Updates by default', async () => {
+      component.showAdvancedSections = false;
       component.ngOnInit();
       await fixture.whenStable();
       fixture.detectChanges();
       const headings = fixture.nativeElement.querySelectorAll('h2');
       const texts = Array.from(headings).map((h: Element) => h.textContent?.trim());
-      expect(texts).not.toContain('LLM Provider');
       expect(texts).not.toContain('Container Updates');
       expect(texts).toContain('Updates');
-      expect(texts).toContain('Logging');
     });
 
-    it('shows LLM Provider and Container Updates when showAdvancedSections is true', async () => {
+    it('shows Container Updates when showAdvancedSections is true', async () => {
       component.showAdvancedSections = true;
       component.ngOnInit();
       await fixture.whenStable();
       fixture.detectChanges();
       const headings = fixture.nativeElement.querySelectorAll('h2');
       const texts = Array.from(headings).map((h: Element) => h.textContent?.trim());
-      expect(texts).toContain('LLM Provider');
       expect(texts).toContain('Container Updates');
     });
   });

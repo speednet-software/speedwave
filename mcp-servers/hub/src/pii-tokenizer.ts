@@ -33,7 +33,7 @@
 
 import { PIIType, PIITokenEntry } from './hub-types.js';
 import crypto from 'crypto';
-import { ts } from '../../shared/dist/index.js';
+import { ts } from '@speedwave/mcp-shared';
 
 /**
  * PII context for a single execution

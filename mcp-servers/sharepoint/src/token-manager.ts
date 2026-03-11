@@ -5,7 +5,7 @@
 
 import fs from 'fs/promises';
 import path from 'path';
-import { TIMEOUTS, ts } from '../../shared/dist/index.js';
+import { TIMEOUTS, ts } from '@speedwave/mcp-shared';
 
 /**
  * OAuth token response from Microsoft identity platform

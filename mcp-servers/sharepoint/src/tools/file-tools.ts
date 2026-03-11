@@ -3,7 +3,7 @@
  */
 
 import * as fs from 'fs/promises';
-import { Tool, ToolDefinition, ts } from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition, ts } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
 import { SharePointClient } from '../client.js';
 import { handleSyncDirectory } from './sync-tools.js';

@@ -10,7 +10,7 @@ import path from 'path';
 
 // Mock dependencies
 vi.mock('fs/promises');
-vi.mock('../../shared/dist/index.js', () => ({
+vi.mock('@speedwave/mcp-shared', () => ({
   loadToken: vi.fn(),
   ts: () => '[00:00:00]',
   TIMEOUTS: {
@@ -27,7 +27,7 @@ vi.mock('../../shared/dist/index.js', () => ({
 }));
 
 const mockFs = vi.mocked(fs);
-const { loadToken } = await import('../../shared/dist/index.js');
+const { loadToken } = await import('@speedwave/mcp-shared');
 const mockLoadToken = vi.mocked(loadToken);
 
 // Test configuration

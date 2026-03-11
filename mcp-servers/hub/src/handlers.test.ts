@@ -8,7 +8,7 @@ import { createCodeExecutorHandlers } from './handlers.js';
 import * as searchToolsModule from './search-tools.js';
 import * as executorModule from './executor.js';
 import * as toolRegistryModule from './tool-registry.js';
-import { TIMEOUTS } from '../../shared/dist/index.js';
+import { TIMEOUTS } from '@speedwave/mcp-shared';
 
 // Helper factory for mock execute results
 function createMockExecuteResult(data: unknown, executionMs = 100) {

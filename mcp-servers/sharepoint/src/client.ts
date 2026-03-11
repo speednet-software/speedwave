@@ -9,7 +9,7 @@ import path from 'path';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import { Mutex } from 'async-mutex';
-import { loadToken, TIMEOUTS, ts } from '../../shared/dist/index.js';
+import { loadToken, TIMEOUTS, ts } from '@speedwave/mcp-shared';
 import { TokenManager } from './token-manager.js';
 import { PathValidator } from './path-validator.js';
 import {

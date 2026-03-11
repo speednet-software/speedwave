@@ -1,13 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { SettingsComponent } from './settings.component';
+import { UpdateSectionComponent } from './update-section/update-section.component';
 import { TauriService } from '../services/tauri.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
-import { RouterModule } from '@angular/router';
 
-describe('SettingsComponent — update settings', () => {
-  let component: SettingsComponent;
-  let fixture: ComponentFixture<SettingsComponent>;
+describe('UpdateSectionComponent — update settings (compat)', () => {
+  let component: UpdateSectionComponent;
+  let fixture: ComponentFixture<UpdateSectionComponent>;
   let mockTauri: MockTauriService;
 
   beforeEach(async () => {
@@ -15,25 +14,11 @@ describe('SettingsComponent — update settings', () => {
 
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
-        case 'list_projects':
-          return { projects: [], active_project: null };
-        case 'get_llm_config':
-          return { provider: 'anthropic', model: null, base_url: null, api_key_env: null };
         case 'get_update_settings':
           return { auto_check: true, check_interval_hours: 24 };
         case 'set_update_settings':
           return undefined;
         case 'check_for_update':
-          return null;
-        case 'get_health':
-          return {
-            containers: [],
-            vm: { running: false, vm_type: 'lima' },
-            mcp_os: { running: false },
-            ide_bridge: { running: false, port: null, ws_url: null, detected_ides: [] },
-            overall_healthy: false,
-          };
-        case 'get_bridge_status':
           return null;
         case 'get_platform':
           return 'macos';
@@ -43,11 +28,11 @@ describe('SettingsComponent — update settings', () => {
     };
 
     await TestBed.configureTestingModule({
-      imports: [SettingsComponent, RouterModule.forRoot([])],
+      imports: [UpdateSectionComponent],
       providers: [{ provide: TauriService, useValue: mockTauri }],
     }).compileComponents();
 
-    fixture = TestBed.createComponent(SettingsComponent);
+    fixture = TestBed.createComponent(UpdateSectionComponent);
     component = fixture.componentInstance;
   });
 
@@ -209,24 +194,8 @@ describe('SettingsComponent — update settings', () => {
         switch (cmd) {
           case 'get_platform':
             return 'linux';
-          case 'list_projects':
-            return { projects: [], active_project: null };
-          case 'get_llm_config':
-            return { provider: 'anthropic', model: null, base_url: null, api_key_env: null };
           case 'get_update_settings':
             return { auto_check: true, check_interval_hours: 24 };
-          case 'check_for_update':
-            return null;
-          case 'get_health':
-            return {
-              containers: [],
-              vm: { running: false, vm_type: 'lima' },
-              mcp_os: { running: false },
-              ide_bridge: { running: false, port: null, ws_url: null, detected_ides: [] },
-              overall_healthy: false,
-            };
-          case 'get_bridge_status':
-            return null;
           default:
             return undefined;
         }
@@ -234,11 +203,11 @@ describe('SettingsComponent — update settings', () => {
 
       await TestBed.resetTestingModule();
       await TestBed.configureTestingModule({
-        imports: [SettingsComponent, RouterModule.forRoot([])],
+        imports: [UpdateSectionComponent],
         providers: [{ provide: TauriService, useValue: linuxMock }],
       }).compileComponents();
 
-      const linuxFixture = TestBed.createComponent(SettingsComponent);
+      const linuxFixture = TestBed.createComponent(UpdateSectionComponent);
       const linuxComponent = linuxFixture.componentInstance;
       linuxComponent.ngOnInit();
       await new Promise((resolve) => setTimeout(resolve, 50));

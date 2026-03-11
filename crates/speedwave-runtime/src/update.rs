@@ -100,7 +100,7 @@ pub fn update_containers(
     validate_project_name(project)?;
 
     // 1. Load config and resolve
-    let user_config = config::load_user_config().unwrap_or_default();
+    let user_config = config::load_user_config()?;
     let project_dir = user_config
         .projects
         .iter()

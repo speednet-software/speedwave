@@ -10,7 +10,7 @@
  */
 
 import { ToolMetadata } from '../../hub-types.js';
-import { ts } from '../../../../shared/dist/index.js';
+import { ts } from '@speedwave/mcp-shared';
 
 export const metadata: ToolMetadata = {
   name: 'deleteRelation',

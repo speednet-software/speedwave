@@ -13,7 +13,7 @@
 
 import { ToolMetadata } from '../../hub-types.js';
 import { REDMINE_RELATION_TYPES, IssueRelation } from './types.js';
-import { ts } from '../../../../shared/dist/index.js';
+import { ts } from '@speedwave/mcp-shared';
 
 // Re-export types for backward compatibility
 export { RelationType, IssueRelation } from './types.js';

@@ -27,7 +27,7 @@
 import { IToolResult, ToolCategory } from './hub-types.js';
 import { tokenizePII, detokenizePII, createPIIContext, PIIContext } from './pii-tokenizer.js';
 import { type AllBridges, initializeAllBridges, callWorker } from './http-bridge.js';
-import { TIMEOUTS, ts } from '../../shared/dist/index.js';
+import { TIMEOUTS, ts } from '@speedwave/mcp-shared';
 import { addAutoReturn } from './auto-return.js';
 import {
   paginate,

@@ -80,22 +80,19 @@ describe('SettingsComponent', () => {
     expect(healthEl).not.toBeNull();
   });
 
-  it('does not render AuthTerminalComponent when activeProject is null even with oauth method', () => {
-    component.authMethod = 'oauth';
-    component.llmProvider = 'anthropic';
-    fixture.detectChanges();
-    const authEl = fixture.nativeElement.querySelector('app-auth-terminal');
-    expect(authEl).toBeNull();
-  });
-
-  it('renders AuthTerminalComponent when activeProject is set and authMethod is oauth', async () => {
+  it('renders AuthSectionComponent', async () => {
     component.ngOnInit();
     await fixture.whenStable();
-    component.authMethod = 'oauth';
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
-    const authEl = fixture.nativeElement.querySelector('app-auth-terminal');
+    const authEl = fixture.nativeElement.querySelector('app-auth-section');
     expect(authEl).not.toBeNull();
+  });
+
+  it('renders AdvancedSectionComponent', () => {
+    fixture.detectChanges();
+    const advancedEl = fixture.nativeElement.querySelector('app-advanced-section');
+    expect(advancedEl).not.toBeNull();
   });
 
   it('reloads project info on project_switched event', async () => {

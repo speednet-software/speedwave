@@ -5,7 +5,7 @@
 
 import path from 'path';
 import { minimatch } from 'minimatch';
-import { ts } from '../../shared/dist/index.js';
+import { ts } from '@speedwave/mcp-shared';
 
 /**
  * Validates paths for security to prevent path traversal attacks and unauthorized access

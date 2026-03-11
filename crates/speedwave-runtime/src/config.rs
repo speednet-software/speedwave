@@ -254,7 +254,9 @@ pub(crate) fn save_user_config_to(config: &SpeedwaveUserConfig, path: &Path) -> 
         std::fs::create_dir_all(parent)?;
     }
     let content = serde_json::to_string_pretty(config)?;
-    std::fs::write(path, content)?;
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, &content)?;
+    std::fs::rename(&tmp_path, path)?;
     Ok(())
 }
 
@@ -516,6 +518,80 @@ mod tests {
 
         save_user_config_to(&config, &config_path).unwrap();
         assert!(config_path.exists());
+    }
+
+    #[test]
+    fn test_save_user_config_atomic_no_tmp_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+
+        let config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "test".to_string(),
+                dir: "/tmp/test".to_string(),
+                claude: None,
+                integrations: None,
+            }],
+            active_project: Some("test".to_string()),
+            selected_ide: None,
+            log_level: None,
+        };
+
+        save_user_config_to(&config, &config_path).unwrap();
+
+        assert!(config_path.exists(), "config file should exist");
+        assert!(
+            !config_path.with_extension("json.tmp").exists(),
+            "tmp file should not exist after atomic write"
+        );
+
+        let loaded = load_user_config_from(&config_path).unwrap();
+        assert_eq!(loaded.projects.len(), 1);
+        assert_eq!(loaded.projects[0].name, "test");
+        assert_eq!(loaded.active_project, Some("test".to_string()));
+    }
+
+    #[test]
+    fn test_save_user_config_atomic_preserves_existing_on_overwrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+
+        // Write initial config
+        let config_v1 = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "v1".to_string(),
+                dir: "/tmp/v1".to_string(),
+                claude: None,
+                integrations: None,
+            }],
+            active_project: Some("v1".to_string()),
+            selected_ide: None,
+            log_level: None,
+        };
+        save_user_config_to(&config_v1, &config_path).unwrap();
+
+        // Overwrite with v2
+        let config_v2 = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "v2".to_string(),
+                dir: "/tmp/v2".to_string(),
+                claude: None,
+                integrations: None,
+            }],
+            active_project: Some("v2".to_string()),
+            selected_ide: None,
+            log_level: None,
+        };
+        save_user_config_to(&config_v2, &config_path).unwrap();
+
+        let loaded = load_user_config_from(&config_path).unwrap();
+        assert_eq!(loaded.projects.len(), 1);
+        assert_eq!(loaded.projects[0].name, "v2");
+        assert_eq!(loaded.active_project, Some("v2".to_string()));
+        assert!(
+            !config_path.with_extension("json.tmp").exists(),
+            "tmp file should not exist after atomic write"
+        );
     }
 
     #[test]
@@ -859,5 +935,28 @@ mod tests {
                 enabled: Some(true)
             }
         ));
+    }
+
+    #[test]
+    fn test_load_corrupt_config_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        std::fs::write(&config_path, "{{not valid json!!!").unwrap();
+
+        let result = load_user_config_from(&config_path);
+        assert!(
+            result.is_err(),
+            "corrupt config should return an error, not silently default"
+        );
+    }
+
+    #[test]
+    fn test_load_missing_config_returns_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("nonexistent-config.json");
+
+        let result = load_user_config_from(&config_path).unwrap();
+        assert!(result.projects.is_empty());
+        assert!(result.active_project.is_none());
     }
 }
