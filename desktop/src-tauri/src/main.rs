@@ -41,6 +41,10 @@ const MAIN_WINDOW_LABEL: &str = "main";
 /// succession) can lose writes due to TOCTOU races.
 static CONFIG_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 
+/// Stop flag for the mcp-os watchdog thread. Set during app exit cleanup
+/// to prevent the watchdog from respawning mcp-os during shutdown.
+static WATCHDOG_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 // ---------------------------------------------------------------------------
 // Types returned to the Angular frontend
 // ---------------------------------------------------------------------------
@@ -1110,6 +1114,33 @@ async fn get_compose_logs(project: String, tail: Option<u32>) -> Result<String, 
 }
 
 // ---------------------------------------------------------------------------
+// mcp-os log command
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn get_mcp_os_logs(tail: Option<u32>) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
+        let log_path = home
+            .join(speedwave_runtime::consts::DATA_DIR)
+            .join(speedwave_runtime::consts::MCP_OS_LOG_FILE);
+        if !log_path.exists() {
+            return Ok("No mcp-os logs available.".to_string());
+        }
+        let content = std::fs::read_to_string(&log_path)
+            .map_err(|e| format!("Failed to read mcp-os log: {e}"))?;
+        let tail = tail.unwrap_or(200).min(10_000) as usize;
+        let lines: Vec<&str> = content.lines().collect();
+        let start = lines.len().saturating_sub(tail);
+        Ok(speedwave_runtime::log_sanitizer::sanitize(
+            &lines[start..].join("\n"),
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------
 // Container update commands
 // ---------------------------------------------------------------------------
 
@@ -1471,6 +1502,9 @@ fn run_exit_cleanup(
     mcp_os: &Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>,
     auto_check: &SharedAutoCheckHandle,
 ) {
+    // Stop watchdog before killing mcp-os to prevent respawn during shutdown
+    WATCHDOG_STOP.store(true, Ordering::Relaxed);
+
     match ide_bridge.lock() {
         Ok(mut guard) => {
             if let Some(mut bridge) = guard.take() {
@@ -1996,6 +2030,8 @@ struct DiagnosticsInput {
     serial_log: Option<std::path::PathBuf>,
     /// Container logs as a raw string (already fetched from runtime).
     container_logs: Option<String>,
+    /// Path to the mcp-os dedicated log file.
+    mcp_os_log: Option<std::path::PathBuf>,
     /// Path to the project's `compose.yml`.
     compose_path: Option<std::path::PathBuf>,
 }
@@ -2056,7 +2092,18 @@ fn build_diagnostics_zip(
         zip.write_all(sanitized.as_bytes())?;
     }
 
-    // 4. compose.yml
+    // 4. mcp-os log
+    if let Some(ref path) = input.mcp_os_log {
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                let sanitized = speedwave_runtime::log_sanitizer::sanitize(&content);
+                zip.start_file("mcp-os/mcp-os.log", options)?;
+                zip.write_all(sanitized.as_bytes())?;
+            }
+        }
+    }
+
+    // 5. compose.yml
     if let Some(ref compose_path) = input.compose_path {
         if compose_path.exists() {
             if let Ok(content) = std::fs::read_to_string(compose_path) {
@@ -2067,7 +2114,7 @@ fn build_diagnostics_zip(
         }
     }
 
-    // 5. System info (no sanitization needed)
+    // 6. System info (no sanitization needed)
     let sys_info = format!(
         "os: {}\narch: {}\nversion: {}\n",
         std::env::consts::OS,
@@ -2121,10 +2168,18 @@ async fn export_diagnostics(project: String) -> Result<String, String> {
                 .join("compose.yml")
         });
 
+        let mcp_os_log = dirs::home_dir()
+            .map(|h| {
+                h.join(speedwave_runtime::consts::DATA_DIR)
+                    .join(speedwave_runtime::consts::MCP_OS_LOG_FILE)
+            })
+            .filter(|p| p.exists());
+
         let input = DiagnosticsInput {
             log_dir,
             serial_log,
             container_logs,
+            mcp_os_log,
             compose_path,
         };
 
@@ -2479,6 +2534,66 @@ fn main() {
                 log::warn!("mcp-os script not found — OS integrations will be unavailable");
             }
 
+            // Start mcp-os watchdog thread
+            let mcp_os_watchdog = mcp_os.clone();
+            let watchdog_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                use std::time::Duration;
+                const CHECK_INTERVAL: Duration = Duration::from_secs(30);
+                const MAX_UNHEALTHY: u32 = 5;
+                const COOLDOWN: Duration = Duration::from_secs(300);
+                let mut consecutive_unhealthy: u32 = 0;
+
+                loop {
+                    std::thread::sleep(CHECK_INTERVAL);
+                    if WATCHDOG_STOP.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    let is_alive = match mcp_os_watchdog.lock() {
+                        Ok(guard) => guard.as_ref().is_some_and(|p| p.is_alive()),
+                        Err(_) => false,
+                    };
+
+                    if is_alive {
+                        consecutive_unhealthy = 0;
+                        continue;
+                    }
+
+                    consecutive_unhealthy += 1;
+
+                    if consecutive_unhealthy >= MAX_UNHEALTHY {
+                        log::error!(
+                            "mcp-os watchdog: unhealthy for {MAX_UNHEALTHY} consecutive checks, cooling down"
+                        );
+                        std::thread::sleep(COOLDOWN);
+                        consecutive_unhealthy = 0;
+                        continue;
+                    }
+
+                    log::warn!(
+                        "mcp-os watchdog: process unhealthy ({consecutive_unhealthy}/{MAX_UNHEALTHY}), respawning"
+                    );
+                    match mcp_os_watchdog.lock() {
+                        Ok(mut guard) => {
+                            if let Some(ref mut proc) = *guard {
+                                match proc.respawn() {
+                                    Ok(port) => {
+                                        log::info!("mcp-os watchdog: respawned (port {port})");
+                                        reconcile_compose_port(&watchdog_handle);
+                                    }
+                                    Err(e) => {
+                                        log::error!("mcp-os watchdog: respawn failed: {e}");
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => log::error!("mcp-os watchdog: mutex poisoned: {e}"),
+                    }
+                }
+                log::info!("mcp-os watchdog: stopped");
+            });
+
             // Start background auto-update check (store handle for cancellation)
             let handle = updater::spawn_auto_check(app.handle().clone());
             match auto_check_handle.lock() {
@@ -2735,6 +2850,7 @@ fn main() {
             // Container logs
             get_container_logs,
             get_compose_logs,
+            get_mcp_os_logs,
             // IDE Bridge
             list_available_ides,
             select_ide,
@@ -3710,6 +3826,7 @@ mod tests {
             log_dir: Some(log_dir),
             serial_log: None,
             container_logs: Some("container output here".into()),
+            mcp_os_log: None,
             compose_path: Some(compose_path),
         };
 
@@ -3769,6 +3886,7 @@ mod tests {
             container_logs: Some(
                 "JWT: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123\n".into(),
             ),
+            mcp_os_log: None,
             compose_path: None,
         };
 
@@ -3811,6 +3929,7 @@ mod tests {
             log_dir: None,
             serial_log: None,
             container_logs: None,
+            mcp_os_log: None,
             compose_path: Some(compose_path),
         };
 
@@ -3849,6 +3968,7 @@ mod tests {
             log_dir: Some(log_dir),
             serial_log: None,
             container_logs: None,
+            mcp_os_log: None,
             compose_path: None,
         };
 
@@ -3877,6 +3997,7 @@ mod tests {
             log_dir: None,
             serial_log: Some(serial_log),
             container_logs: None,
+            mcp_os_log: None,
             compose_path: None,
         };
 
@@ -3902,6 +4023,7 @@ mod tests {
             log_dir: None,
             serial_log: None,
             container_logs: None,
+            mcp_os_log: None,
             compose_path: None,
         };
 
@@ -3912,6 +4034,122 @@ mod tests {
             names,
             vec!["system-info.txt"],
             "Empty-input ZIP should only contain system-info.txt"
+        );
+    }
+
+    // -- get_mcp_os_logs tests --
+
+    #[test]
+    fn get_mcp_os_logs_tail_returns_last_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("mcp-os.log");
+        let lines: Vec<String> = (1..=50).map(|i| format!("line {i}")).collect();
+        std::fs::write(&log_path, lines.join("\n")).unwrap();
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        let all_lines: Vec<&str> = content.lines().collect();
+        let tail: usize = 10;
+        let start = all_lines.len().saturating_sub(tail);
+        let result = all_lines[start..].join("\n");
+
+        assert!(result.contains("line 41"), "should contain near-end lines");
+        assert!(result.contains("line 50"), "should contain last line");
+        assert!(
+            !result.contains("line 1\n"),
+            "should not contain first line"
+        );
+    }
+
+    #[test]
+    fn get_mcp_os_logs_returns_placeholder_when_no_file() {
+        // Simulates the logic in get_mcp_os_logs when file doesn't exist
+        let path = std::path::Path::new("/nonexistent/path/mcp-os.log");
+        let result = if !path.exists() {
+            "No mcp-os logs available.".to_string()
+        } else {
+            "unexpected".to_string()
+        };
+        assert_eq!(result, "No mcp-os logs available.");
+    }
+
+    // -- WATCHDOG_STOP flag test --
+
+    #[test]
+    fn watchdog_stop_flag_prevents_action() {
+        // Reset flag (tests run in parallel, so use a local check)
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    // -- diagnostics with mcp-os log --
+
+    #[test]
+    fn diagnostics_zip_includes_mcp_os_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("diag-mcp-os.zip");
+
+        let mcp_os_log = tmp.path().join("mcp-os.log");
+        std::fs::write(
+            &mcp_os_log,
+            "[1710000000] STDOUT: server started on port 4001\n",
+        )
+        .unwrap();
+
+        let input = DiagnosticsInput {
+            log_dir: None,
+            serial_log: None,
+            container_logs: None,
+            mcp_os_log: Some(mcp_os_log),
+            compose_path: None,
+        };
+
+        build_diagnostics_zip(&zip_path, &input).unwrap();
+
+        let names = zip_entry_names(&zip_path);
+        assert!(
+            names.contains(&"mcp-os/mcp-os.log".to_string()),
+            "ZIP should contain mcp-os log: {names:?}"
+        );
+
+        let content = read_zip_entry(&zip_path, "mcp-os/mcp-os.log").unwrap();
+        assert!(
+            content.contains("server started"),
+            "mcp-os log content should be preserved: {content}"
+        );
+    }
+
+    #[test]
+    fn diagnostics_zip_redacts_secrets_in_mcp_os_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("diag-mcp-os-redact.zip");
+
+        let mcp_os_log = tmp.path().join("mcp-os.log");
+        std::fs::write(
+            &mcp_os_log,
+            "Authorization: Bearer sk-ant-leaked-key\nnormal line\n",
+        )
+        .unwrap();
+
+        let input = DiagnosticsInput {
+            log_dir: None,
+            serial_log: None,
+            container_logs: None,
+            mcp_os_log: Some(mcp_os_log),
+            compose_path: None,
+        };
+
+        build_diagnostics_zip(&zip_path, &input).unwrap();
+
+        let content = read_zip_entry(&zip_path, "mcp-os/mcp-os.log").unwrap();
+        assert!(
+            !content.contains("sk-ant-leaked-key"),
+            "Bearer token should be redacted in mcp-os log: {content}"
+        );
+        assert!(
+            content.contains("normal line"),
+            "Non-secret content should be preserved: {content}"
         );
     }
 

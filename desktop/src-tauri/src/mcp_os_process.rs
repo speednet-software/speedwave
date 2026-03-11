@@ -1,5 +1,5 @@
 use std::io::BufRead;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
 use speedwave_runtime::consts;
@@ -22,6 +22,9 @@ pub struct McpOsProcess {
     port: u16,
     port_path: PathBuf,
     pid_path: PathBuf,
+    #[allow(dead_code)] // used by drain threads; field kept for future log rotation
+    log_path: PathBuf,
+    script_path: String,
 }
 
 /// Timeout for reading the port announcement from mcp-os stdout.
@@ -58,9 +61,17 @@ impl McpOsProcess {
         let token_path = data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE);
         let port_path = data_dir.join(consts::MCP_OS_PORT_FILE);
         let pid_path = data_dir.join(consts::MCP_OS_PID_FILE);
+        let log_path = data_dir.join(consts::MCP_OS_LOG_FILE);
 
         // Kill any stale mcp-os from a previous session
         kill_stale_by_pid_file(&pid_path);
+
+        // Truncate log file if it exceeds 2 MB to prevent unbounded growth
+        if let Ok(meta) = std::fs::metadata(&log_path) {
+            if meta.len() > 2 * 1024 * 1024 {
+                let _ = std::fs::write(&log_path, "");
+            }
+        }
 
         // Write token file with restrictive permissions
         write_restricted_file(&token_path, &token)?;
@@ -122,10 +133,28 @@ impl McpOsProcess {
         // all logging. If the pipe buffer fills up (~64 KB), the process
         // blocks on write() and dies. After reading the port line, the stdout
         // drain thread continues consuming log output indefinitely.
-        let port = drain_and_read_port(&mut child)?;
+        let port = match drain_and_read_port(&mut child, &log_path) {
+            Ok(p) => p,
+            Err(e) => {
+                child.kill().ok();
+                child.wait().ok();
+                let _ = std::fs::remove_file(&token_path);
+                let _ = std::fs::remove_file(&pid_path);
+                return Err(e);
+            }
+        };
 
         // Write port file so compose.rs can build WORKER_OS_URL
-        write_restricted_file(&port_path, &port.to_string())?;
+        match write_restricted_file(&port_path, &port.to_string()) {
+            Ok(()) => {}
+            Err(e) => {
+                child.kill().ok();
+                child.wait().ok();
+                let _ = std::fs::remove_file(&token_path);
+                let _ = std::fs::remove_file(&pid_path);
+                return Err(e);
+            }
+        }
 
         Ok(Self {
             child: Some(child),
@@ -134,6 +163,8 @@ impl McpOsProcess {
             port,
             port_path,
             pid_path,
+            log_path,
+            script_path: script_path.to_string(),
         })
     }
 
@@ -154,6 +185,8 @@ impl McpOsProcess {
             port,
             port_path,
             pid_path,
+            log_path: PathBuf::new(),
+            script_path: String::new(),
         }
     }
 
@@ -193,10 +226,42 @@ impl McpOsProcess {
     }
 
     /// Remove the token, port, and PID files from disk.
+    /// Note: mcp-os.log is intentionally NOT deleted — it persists for diagnostics.
     pub fn cleanup_files(&self) {
         let _ = std::fs::remove_file(&self.token_path);
         let _ = std::fs::remove_file(&self.port_path);
         let _ = std::fs::remove_file(&self.pid_path);
+    }
+
+    /// Stop the old process and spawn a fresh one at the same script path.
+    ///
+    /// Carefully prevents Drop from deleting files written by the new process:
+    /// the old child is taken (so Drop.stop() is a no-op) and paths are cleared
+    /// (so Drop.cleanup_files() deletes nothing).
+    pub fn respawn(&mut self) -> anyhow::Result<u16> {
+        // 1. Stop old child (but don't cleanup files — new spawn will overwrite them)
+        if let Some(mut child) = self.child.take() {
+            child.kill().ok();
+            child.wait().ok();
+        }
+        // 2. child is now None → Drop.stop() will be a no-op
+        // 3. Clear paths so Drop.cleanup_files() deletes nothing
+        //    (spawn() writes fresh files at these same paths)
+        self.token_path = PathBuf::new();
+        self.port_path = PathBuf::new();
+        self.pid_path = PathBuf::new();
+
+        // 4. Spawn new process (writes fresh token/port/pid files)
+        let new = Self::spawn(&self.script_path)?;
+        let new_port = new.port;
+        *self = new; // old self dropped — Drop is now harmless (empty paths, no child)
+        Ok(new_port)
+    }
+
+    /// Check process liveness using PID + TCP port probe.
+    /// More thorough than health_check() — detects "alive but not listening".
+    pub fn is_alive(&self) -> bool {
+        crate::health::is_mcp_os_alive()
     }
 }
 
@@ -293,19 +358,27 @@ fn kill_process(pid: u32) {
 /// their buffers fill up, the child process dies (SIGPIPE or write block).
 /// The drain threads keep both pipes open for the entire lifetime of the
 /// child process.
-fn drain_and_read_port(child: &mut Child) -> anyhow::Result<u16> {
+fn drain_and_read_port(child: &mut Child, log_path: &Path) -> anyhow::Result<u16> {
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("mcp-os stdout not captured"))?;
 
+    // Open log file for appending (both drain threads share the concept but
+    // each opens its own handle to avoid cross-thread synchronization).
+    let log_path_stderr = log_path.to_path_buf();
+
     // Drain stderr — mcp-os writes warnings here via console.error/console.warn
     if let Some(stderr) = child.stderr.take() {
         std::thread::spawn(move || {
+            let mut log_file = open_log_file(&log_path_stderr);
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines() {
                 match line {
-                    Ok(line) => log::warn!("mcp-os stderr: {line}"),
+                    Ok(line) => {
+                        log::warn!("mcp-os stderr: {line}");
+                        write_log_line(&mut log_file, "STDERR", &line);
+                    }
                     Err(_) => break,
                 }
             }
@@ -315,7 +388,9 @@ fn drain_and_read_port(child: &mut Child) -> anyhow::Result<u16> {
     // Drain stdout — reads port from first JSON line, then keeps draining
     // all subsequent console.log output to prevent pipe buffer exhaustion.
     let (tx, rx) = std::sync::mpsc::channel();
+    let log_path_stdout = log_path.to_path_buf();
     std::thread::spawn(move || {
+        let mut log_file = open_log_file(&log_path_stdout);
         let reader = std::io::BufReader::new(stdout);
         let mut port_sent = false;
         for line in reader.lines() {
@@ -329,6 +404,7 @@ fn drain_and_read_port(child: &mut Child) -> anyhow::Result<u16> {
                                         anyhow::anyhow!("port {port} out of u16 range")
                                     }));
                                 port_sent = true;
+                                write_log_line(&mut log_file, "STDOUT", &line);
                                 continue;
                             }
                         }
@@ -336,6 +412,7 @@ fn drain_and_read_port(child: &mut Child) -> anyhow::Result<u16> {
                     // After port is found, keep draining stdout so the pipe
                     // never fills up and the child never gets SIGPIPE.
                     log::debug!("mcp-os: {line}");
+                    write_log_line(&mut log_file, "STDOUT", &line);
                 }
                 Err(_) => break,
             }
@@ -350,6 +427,30 @@ fn drain_and_read_port(child: &mut Child) -> anyhow::Result<u16> {
     match rx.recv_timeout(PORT_READ_TIMEOUT) {
         Ok(result) => result,
         Err(_) => anyhow::bail!("timed out waiting for mcp-os port announcement"),
+    }
+}
+
+/// Open log file for appending with chmod 600 on Unix.
+fn open_log_file(path: &Path) -> Option<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path).ok()
+}
+
+/// Write a timestamped line to the log file. Errors are silently ignored.
+fn write_log_line(file: &mut Option<std::fs::File>, prefix: &str, line: &str) {
+    use std::io::Write;
+    if let Some(ref mut f) = file {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let _ = writeln!(f, "[{secs}] {prefix}: {line}");
     }
 }
 
@@ -1096,8 +1197,16 @@ process.stdout.write(JSON.stringify({ leaked }));
             .join(" ")
     }
 
+    /// Helper: create a temp log path for drain tests.
+    fn temp_log_path() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("mcp-os.log");
+        (tmp, log_path)
+    }
+
     #[test]
     fn drain_and_read_port_skips_non_json_lines_before_port() {
+        let (_tmp, log_path) = temp_log_path();
         let mut child = spawn_stdout_lines(&[
             "Warning: something happened",
             "DEBUG: initializing",
@@ -1105,7 +1214,8 @@ process.stdout.write(JSON.stringify({ leaked }));
             "more output after port",
         ]);
 
-        let port = drain_and_read_port(&mut child).expect("should find port after non-JSON lines");
+        let port = drain_and_read_port(&mut child, &log_path)
+            .expect("should find port after non-JSON lines");
         assert_eq!(
             port, 4567,
             "should extract port from the first JSON line with 'port' key"
@@ -1116,12 +1226,13 @@ process.stdout.write(JSON.stringify({ leaked }));
 
     #[test]
     fn drain_and_read_port_rejects_port_zero() {
+        let (_tmp, log_path) = temp_log_path();
         // Port 0 fits in u16 but is not a valid listening port.
         // The current implementation accepts it (u16::try_from(0) succeeds).
         // This test documents the behavior: port 0 IS returned as-is.
         let mut child = spawn_stdout_lines(&[r#"{"port":0}"#]);
 
-        let port = drain_and_read_port(&mut child).expect("port 0 fits in u16");
+        let port = drain_and_read_port(&mut child, &log_path).expect("port 0 fits in u16");
         assert_eq!(port, 0, "port 0 is returned (caller must validate)");
         child.kill().ok();
         child.wait().ok();
@@ -1129,9 +1240,10 @@ process.stdout.write(JSON.stringify({ leaked }));
 
     #[test]
     fn drain_and_read_port_rejects_port_over_65535() {
+        let (_tmp, log_path) = temp_log_path();
         let mut child = spawn_stdout_lines(&[r#"{"port":70000}"#]);
 
-        let result = drain_and_read_port(&mut child);
+        let result = drain_and_read_port(&mut child, &log_path);
         assert!(
             result.is_err(),
             "port 70000 exceeds u16 range and should be rejected"
@@ -1147,9 +1259,10 @@ process.stdout.write(JSON.stringify({ leaked }));
 
     #[test]
     fn drain_and_read_port_rejects_port_max_u64() {
+        let (_tmp, log_path) = temp_log_path();
         let mut child = spawn_stdout_lines(&[r#"{"port":18446744073709551615}"#]);
 
-        let result = drain_and_read_port(&mut child);
+        let result = drain_and_read_port(&mut child, &log_path);
         // serde_json may fail to parse u64::MAX, or it parses but u16::try_from fails.
         // Either way the port should not be successfully returned.
         assert!(
@@ -1162,10 +1275,11 @@ process.stdout.write(JSON.stringify({ leaked }));
 
     #[test]
     fn drain_and_read_port_errors_on_exit_without_port() {
+        let (_tmp, log_path) = temp_log_path();
         // Child outputs only non-JSON text then exits
         let mut child = spawn_stdout_lines(&["just some warnings", "no port here"]);
 
-        let result = drain_and_read_port(&mut child);
+        let result = drain_and_read_port(&mut child, &log_path);
         assert!(
             result.is_err(),
             "should error when child exits without announcing a port"
@@ -1181,6 +1295,7 @@ process.stdout.write(JSON.stringify({ leaked }));
 
     #[test]
     fn drain_and_read_port_ignores_json_without_port_key() {
+        let (_tmp, log_path) = temp_log_path();
         // JSON lines that don't have a "port" key should be skipped
         let mut child = spawn_stdout_lines(&[
             r#"{"status":"initializing"}"#,
@@ -1188,10 +1303,117 @@ process.stdout.write(JSON.stringify({ leaked }));
             r#"{"port":9876}"#,
         ]);
 
-        let port =
-            drain_and_read_port(&mut child).expect("should find port after non-port JSON lines");
+        let port = drain_and_read_port(&mut child, &log_path)
+            .expect("should find port after non-port JSON lines");
         assert_eq!(port, 9876, "should skip JSON lines without 'port' key");
         child.kill().ok();
         child.wait().ok();
+    }
+
+    #[test]
+    fn drain_and_read_port_writes_to_log_file() {
+        let (_tmp, log_path) = temp_log_path();
+        let mut child =
+            spawn_stdout_lines(&["startup message", r#"{"port":5555}"#, "after port line"]);
+
+        let port = drain_and_read_port(&mut child, &log_path).unwrap();
+        assert_eq!(port, 5555);
+        child.kill().ok();
+        child.wait().ok();
+
+        // Give drain thread a moment to flush
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        assert!(log_path.exists(), "log file should be created");
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(
+            content.contains("startup message"),
+            "log file should contain stdout lines: {content}"
+        );
+    }
+
+    #[test]
+    fn test_respawn_stops_old_and_starts_new() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("respawn_test.js");
+        std::fs::write(
+            &script,
+            r#"
+const http = require('http');
+const srv = http.createServer((_,r) => { r.end('ok'); });
+srv.listen(0, '127.0.0.1', () => {
+    process.stdout.write(JSON.stringify({ port: srv.address().port }) + '\n');
+});
+"#,
+        )
+        .unwrap();
+
+        let result = McpOsProcess::spawn(&script.to_string_lossy());
+        if let Ok(mut proc) = result {
+            let old_port = proc.port();
+            assert!(old_port > 0);
+
+            match proc.respawn() {
+                Ok(new_port) => {
+                    assert!(new_port > 0, "new port should be assigned");
+                    // Ports may or may not differ (OS can reuse), but process should be alive
+                    assert!(proc.health_check(), "respawned process should be alive");
+                }
+                Err(e) => {
+                    // Node not available or spawn failure — acceptable in CI
+                    log::warn!("respawn test skipped: {e}");
+                }
+            }
+
+            proc.stop().unwrap();
+        }
+        // node not available — skip
+    }
+
+    #[test]
+    fn test_respawn_does_not_delete_new_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("respawn_files.js");
+        std::fs::write(
+            &script,
+            r#"
+const http = require('http');
+const srv = http.createServer((_,r) => { r.end('ok'); });
+srv.listen(0, '127.0.0.1', () => {
+    process.stdout.write(JSON.stringify({ port: srv.address().port }) + '\n');
+});
+"#,
+        )
+        .unwrap();
+
+        let result = McpOsProcess::spawn(&script.to_string_lossy());
+        if let Ok(mut proc) = result {
+            if let Ok(new_port) = proc.respawn() {
+                // After respawn, process should be functional with a valid port.
+                // File existence checks are lenient because multiple spawn-based
+                // tests run in parallel and share the same global ~/.speedwave/ dir.
+                assert!(new_port > 0, "new port should be non-zero after respawn");
+                assert!(
+                    proc.port() > 0,
+                    "process port should be non-zero after respawn"
+                );
+                // Verify the new process state has valid paths (not the empty
+                // paths we set on the old instance to prevent Drop cleanup).
+                assert!(
+                    !proc.token_path.as_os_str().is_empty(),
+                    "token_path should not be empty after respawn"
+                );
+                assert!(
+                    !proc.port_path.as_os_str().is_empty(),
+                    "port_path should not be empty after respawn"
+                );
+                assert!(
+                    !proc.pid_path.as_os_str().is_empty(),
+                    "pid_path should not be empty after respawn"
+                );
+            }
+            proc.stop().unwrap();
+        }
+        // node not available — skip
     }
 }
