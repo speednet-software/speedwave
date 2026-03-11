@@ -880,7 +880,7 @@ fn list_projects() -> Result<ProjectList, String> {
 }
 
 #[tauri::command]
-fn switch_project(name: String) -> Result<(), String> {
+fn switch_project(name: String, app: tauri::AppHandle) -> Result<(), String> {
     let _lock = CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
     let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
 
@@ -889,9 +889,12 @@ fn switch_project(name: String) -> Result<(), String> {
         return Err(format!("Project '{}' not found", name));
     }
 
-    user_config.active_project = Some(name);
+    user_config.active_project = Some(name.clone());
 
     config::save_user_config(&user_config).map_err(|e| e.to_string())?;
+
+    use tauri::Emitter;
+    let _ = app.emit("project_switched", &name);
 
     Ok(())
 }

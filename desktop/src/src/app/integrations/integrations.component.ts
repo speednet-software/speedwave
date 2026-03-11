@@ -291,6 +291,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private ideIntervalId: ReturnType<typeof setInterval> | null = null;
   private eventTimerId: ReturnType<typeof setTimeout> | null = null;
   private unlistenEvent: (() => void) | null = null;
+  private unlistenProjectSwitch: (() => void) | null = null;
   private nextMappingId = 0;
 
   /** Loads the active project, integrations, and starts IDE polling on init. */
@@ -300,6 +301,18 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     await this.loadSelectedIde();
     this.pollIdes();
     this.ideIntervalId = setInterval(() => this.pollIdes(), 5000);
+    this.tauri
+      .listen<string>('project_switched', async () => {
+        await this.loadActiveProject();
+        await this.loadIntegrations();
+      })
+      .then((unlisten) => {
+        this.unlistenProjectSwitch = unlisten;
+      })
+      .catch(() => {
+        // Tauri event listener not available outside desktop context
+      });
+
     this.tauri
       .listen<{ kind: string; detail: string }>('ide_bridge_event', (event) => {
         this.lastEvent = `${event.payload.kind}: ${event.payload.detail}`;
@@ -338,6 +351,10 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     if (this.unlistenEvent) {
       this.unlistenEvent();
       this.unlistenEvent = null;
+    }
+    if (this.unlistenProjectSwitch) {
+      this.unlistenProjectSwitch();
+      this.unlistenProjectSwitch = null;
     }
   }
 
