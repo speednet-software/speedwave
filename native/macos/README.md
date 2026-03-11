@@ -17,4 +17,4 @@ make build-native-macos
 
 Per [ADR-010](../../docs/adr/ADR-010-mcp-os-as-host-process-per-platform.md), these are called by the `mcp-os` host process at runtime.
 
-See [ADR-024](../../docs/adr/ADR-024-native-directory-structure.md) for the directory structure rationale.
+See [ADR-027](../../docs/adr/ADR-027-native-directory-structure.md) for the directory structure rationale.

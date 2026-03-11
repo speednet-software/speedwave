@@ -1,4 +1,4 @@
-# ADR-024: Native Directory Structure
+# ADR-027: Native Directory Structure
 
 > **Status:** Accepted
 

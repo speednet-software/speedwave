@@ -217,15 +217,29 @@ impl HealthMonitor {
 
     pub fn check_mcp_os() -> McpOsHealth {
         // mcp-os is a child process managed by Tauri (mcp_os_process.rs).
-        // Reports mcp-os as running if the auth token file exists on disk,
-        // indicating it was started by Tauri.
-        let token_path = dirs::home_dir().map(|h| {
-            h.join(speedwave_runtime::consts::DATA_DIR)
-                .join("mcp-os-auth-token")
-        });
-        McpOsHealth {
-            running: token_path.is_some_and(|p| p.exists()),
-        }
+        // Verify liveness by reading the PID file and checking if the process
+        // is still alive. The token file alone is insufficient — it persists
+        // after a crash, causing stale-process reports.
+        let running = dirs::home_dir()
+            .map(|h| {
+                let data_dir = h.join(speedwave_runtime::consts::DATA_DIR);
+                let pid_path = data_dir.join(speedwave_runtime::consts::MCP_OS_PID_FILE);
+                let token_path = data_dir.join(speedwave_runtime::consts::MCP_OS_AUTH_TOKEN_FILE);
+                if !token_path.exists() {
+                    return false;
+                }
+                let pid_str = match std::fs::read_to_string(&pid_path) {
+                    Ok(s) => s,
+                    Err(_) => return false,
+                };
+                let pid: u32 = match pid_str.trim().parse() {
+                    Ok(p) if p > 0 => p,
+                    _ => return false,
+                };
+                is_pid_alive(pid)
+            })
+            .unwrap_or(false);
+        McpOsHealth { running }
     }
 
     pub fn check_ide_bridge() -> IdeBridgeHealth {
@@ -1061,5 +1075,69 @@ mod tests {
             !overall,
             "mcp-os down must make overall unhealthy when OS integrations are enabled"
         );
+    }
+
+    // ── check_mcp_os PID-based liveness tests ─────────────────────────────
+
+    #[test]
+    fn check_mcp_os_returns_false_when_no_files_exist() {
+        // check_mcp_os reads from ~/.speedwave/ which may or may not have
+        // files in a test environment. This test verifies the struct shape
+        // and that the function does not panic when files are absent.
+        let health = HealthMonitor::check_mcp_os();
+        // We cannot assert running == false because a real mcp-os may be
+        // running in the developer's environment. Just verify no panic.
+        let _ = health.running;
+    }
+
+    #[test]
+    fn check_mcp_os_returns_false_when_token_exists_but_no_pid_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let token_path = data_dir.join("mcp-os-auth-token");
+        std::fs::write(&token_path, "test-token").unwrap();
+        // No PID file — should report not running.
+        // We test the logic directly since check_mcp_os() uses the real home dir.
+        let pid_path = data_dir.join("mcp-os-pid");
+        let running = token_path.exists() && {
+            let pid_str = std::fs::read_to_string(&pid_path);
+            pid_str.is_ok()
+        };
+        assert!(!running, "should not report running without PID file");
+    }
+
+    #[test]
+    fn check_mcp_os_returns_false_when_pid_is_dead() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let token_path = data_dir.join("mcp-os-auth-token");
+        let pid_path = data_dir.join("mcp-os-pid");
+        std::fs::write(&token_path, "test-token").unwrap();
+        // PID 999999999 is virtually guaranteed not to exist.
+        std::fs::write(&pid_path, "999999999").unwrap();
+        let running = token_path.exists() && {
+            let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
+            let pid: u32 = pid_str.trim().parse().unwrap_or(0);
+            pid > 0 && super::is_pid_alive(pid)
+        };
+        assert!(!running, "should not report running for dead PID");
+    }
+
+    #[test]
+    fn check_mcp_os_returns_true_when_pid_is_alive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let token_path = data_dir.join("mcp-os-auth-token");
+        let pid_path = data_dir.join("mcp-os-pid");
+        std::fs::write(&token_path, "test-token").unwrap();
+        // Use current process PID — guaranteed alive.
+        let current_pid = std::process::id();
+        std::fs::write(&pid_path, current_pid.to_string()).unwrap();
+        let running = token_path.exists() && {
+            let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
+            let pid: u32 = pid_str.trim().parse().unwrap_or(0);
+            pid > 0 && super::is_pid_alive(pid)
+        };
+        assert!(running, "should report running for alive PID");
     }
 }

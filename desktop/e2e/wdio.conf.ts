@@ -24,7 +24,9 @@ export const config = {
 
   framework: 'mocha',
   mochaOpts: {
-    timeout: 1_800_000,
+    // Default per-test timeout. Individual specs override with this.timeout().
+    // 45 min accommodates slow first-time builds on cold machines.
+    timeout: 2_700_000,
     ui: 'bdd',
   },
 

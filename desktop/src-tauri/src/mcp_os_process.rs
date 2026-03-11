@@ -65,9 +65,24 @@ impl McpOsProcess {
         // Write token file with restrictive permissions
         write_restricted_file(&token_path, &token)?;
 
-        // binary::command() resolves bundled node path + sets CREATE_NO_WINDOW on Windows.
-        // env_clear() below intentionally wipes binary::command()'s PATH/CNI_PATH setup
-        // because mcp-os needs a minimal, controlled environment.
+        // Safety of env_clear() with binary::command():
+        //
+        // 1. binary::command() resolves "node" to an absolute path (e.g.
+        //    /path/to/bundled/node) and stores it as the Command's program.
+        //    Command::program is unaffected by env_clear() — the OS uses the
+        //    absolute path directly, no PATH lookup required.
+        //
+        // 2. env_clear() intentionally wipes ALL inherited environment variables
+        //    for security. This prevents secrets (API keys, tokens, credentials)
+        //    from leaking to the mcp-os child process. The child runs with a
+        //    minimal, explicitly-controlled environment.
+        //
+        // 3. PATH is re-added explicitly from the parent process below,
+        //    sufficient for the Node.js runtime to locate shared libraries
+        //    and spawn subprocesses.
+        //
+        // 4. The bundled node binary is already resolved to an absolute path
+        //    by binary::command(), so it executes correctly even without PATH.
         let mut cmd = speedwave_runtime::binary::command("node");
         cmd.arg(script_path).env_clear();
 
@@ -83,9 +98,16 @@ impl McpOsProcess {
             }
         }
 
+        cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
+
+        // HOME is set on Unix (macOS/Linux) but typically not on Windows, where
+        // USERPROFILE is the equivalent. Setting HOME to an empty string on
+        // Windows would break Node.js path resolution (e.g. os.homedir()).
+        // USERPROFILE is already forwarded via WINDOWS_SYSTEM_ENV_VARS above.
+        #[cfg(not(target_os = "windows"))]
+        cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
+
         let mut child = cmd
-            .env("PATH", std::env::var("PATH").unwrap_or_default())
-            .env("HOME", std::env::var("HOME").unwrap_or_default())
             .env("PORT", "0")
             .env("MCP_OS_AUTH_TOKEN", &token)
             .stdout(std::process::Stdio::piped())
@@ -796,11 +818,13 @@ srv.listen(0, '127.0.0.1', () => {
 
         std::env::set_var("SUPER_SECRET_TOKEN", "do-not-leak");
 
-        let result = Command::new("node")
-            .arg(&script)
+        let mut cmd = Command::new("node");
+        cmd.arg(&script)
             .env_clear()
-            .env("PATH", std::env::var("PATH").unwrap_or_default())
-            .env("HOME", std::env::var("HOME").unwrap_or_default())
+            .env("PATH", std::env::var("PATH").unwrap_or_default());
+        #[cfg(not(target_os = "windows"))]
+        cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
+        let result = cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .output();
@@ -1016,9 +1040,10 @@ process.stdout.write(JSON.stringify({ leaked }));
             }
         }
 
+        cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
+        #[cfg(not(target_os = "windows"))]
+        cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
         let result = cmd
-            .env("PATH", std::env::var("PATH").unwrap_or_default())
-            .env("HOME", std::env::var("HOME").unwrap_or_default())
             .env("PORT", "0")
             .env("MCP_OS_AUTH_TOKEN", "test-token")
             .stdout(std::process::Stdio::piped())

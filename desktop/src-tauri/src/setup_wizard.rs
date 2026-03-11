@@ -518,7 +518,7 @@ fn is_apparmor_userns_restricted() -> bool {
 /// `/usr/bin/rootlesskit` → `rootlesskit`,
 /// `/home/user/.speedwave/nerdctl-full/bin/rootlesskit`
 /// → `home.user.speedwave.nerdctl-full.bin.rootlesskit`).
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(all(test, not(any(target_os = "macos", target_os = "windows"))))]
 fn apparmor_profile_name(binary_path: &str) -> String {
     binary_path
         .strip_prefix('/')
@@ -597,13 +597,17 @@ fn ensure_apparmor_profile(rootlesskit_path: &str) -> anyhow::Result<()> {
 
     log::info!("Installing AppArmor profile for rootlesskit: {profile_path}");
 
-    // Single pkexec invocation: write profile + load it.
-    // Using sh -c to chain both operations under one elevation prompt.
+    // Write profile content to a temp file first, then use pkexec to copy it
+    // into /etc/apparmor.d/. This avoids passing untrusted content through a
+    // shell heredoc, which could be exploited if the content contained the
+    // heredoc delimiter or shell metacharacters.
+    let tmp = tempfile::NamedTempFile::new()?;
+    std::fs::write(tmp.path(), &content)?;
     let script = format!(
-        "cat > '{profile_path}' <<'APPARMOR_PROFILE'\n\
-         {content}\
-         APPARMOR_PROFILE\n\
-         apparmor_parser -r '{profile_path}'"
+        "cp '{}' '{}' && apparmor_parser -r '{}'",
+        tmp.path().display(),
+        profile_path,
+        profile_path
     );
 
     let output = std::process::Command::new("pkexec")

@@ -42,11 +42,11 @@ We use **SSH-based orchestration to real machines** with per-platform WebDriver 
 
 ### Per-Platform WebDriver
 
-| Platform       | WebDriver mechanism                      | Display                     | Notes                                                                                                                  |
-| -------------- | ---------------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Linux (Ubuntu) | `tauri-driver`[^1] (official)            | `xvfb-run`[^7] for headless | `webkit2gtk-driver` required                                                                                           |
-| Windows        | `tauri-driver`[^1] (official)            | Native desktop              | Uses `msedgedriver` for WebView2                                                                                       |
-| macOS          | `tauri-plugin-webdriver`[^3] (community) | Native desktop              | `tauri-driver` does not work on WKWebView[^2]; plugin compiled only in debug builds via `#[cfg(debug_assertions)]`[^5] |
+| Platform       | WebDriver mechanism                      | Display                     | Notes                                                                                                                                                                 |
+| -------------- | ---------------------------------------- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Linux (Ubuntu) | `tauri-driver`[^1] (official)            | `xvfb-run`[^7] for headless | `webkit2gtk-driver` required                                                                                                                                          |
+| Windows        | `tauri-driver`[^1] (official)            | Native desktop              | Uses `msedgedriver` for WebView2                                                                                                                                      |
+| macOS          | `tauri-plugin-webdriver`[^3] (community) | Native desktop              | `tauri-driver` does not work on WKWebView[^2]; plugin compiled only when `--features e2e` is passed; production releases omit the feature, so zero attack surface[^5] |
 
 All platforms use **WebdriverIO**[^4] as the test runner, connecting via the W3C WebDriver protocol[^6].
 
@@ -65,7 +65,7 @@ All platforms use **WebdriverIO**[^4] as the test runner, connecting via the W3C
 
 - **Full OS-level isolation**: Each target machine has its own kernel, filesystem, and network stack — a compromised test cannot affect the orchestrating host or other target machines
 - **Clean-state reset**: Platform-specific clean-state functions remove all Speedwave state (binaries, `~/.speedwave/`, tokens, container images) before every test run, ensuring no state leakage between runs
-- **`tauri-plugin-webdriver` compiled only in debug builds**: The `#[cfg(debug_assertions)]`[^5] gate ensures the embedded WebDriver server is never included in release binaries. Only macOS targets use this plugin; Linux and Windows use the external `tauri-driver` process which is never shipped
+- **`tauri-plugin-webdriver` gated behind a Cargo feature flag**: The `#[cfg(feature = "e2e")]`[^5] gate ensures the embedded WebDriver server is never included in production releases — only builds with `--features e2e` include it. Only macOS targets use this plugin; Linux and Windows use the external `tauri-driver` process which is never shipped
 - **No token access**: WebDriver commands operate in the webview context only — they cannot access Tauri backend state, tokens, or host filesystem
 - **Standard protocol**: Uses the well-audited W3C WebDriver specification[^6] rather than a custom wire protocol
 
@@ -89,7 +89,7 @@ All platforms use **WebdriverIO**[^4] as the test runner, connecting via the W3C
 
 [^4]: WebdriverIO — Next-gen WebDriver test framework for Node.js. https://webdriver.io/
 
-[^5]: Rust conditional compilation — cfg(debug_assertions). https://doc.rust-lang.org/reference/conditional-compilation.html#debug_assertions
+[^5]: Cargo features — conditional compilation via feature flags. https://doc.rust-lang.org/cargo/reference/features.html
 
 [^6]: W3C WebDriver specification. https://www.w3.org/TR/webdriver2/
 

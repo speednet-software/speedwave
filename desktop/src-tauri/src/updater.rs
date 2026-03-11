@@ -170,11 +170,11 @@ pub async fn install_update(app: &AppHandle, expected_version: String) -> Result
         // Suppress unused-variable warnings for `update` on Linux — it was
         // already consumed for version verification above.
         let _ = &update;
-        return Err(format!(
+        Err(format!(
             "Auto-update is not available for .deb packages. \
              Download v{expected_version} from GitHub Releases: \
              https://github.com/speednet-software/speedwave/releases"
-        ));
+        ))
     }
 
     #[cfg(not(target_os = "linux"))]
