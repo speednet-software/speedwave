@@ -7,13 +7,13 @@ import { MockTauriService } from '../testing/mock-tauri.service';
 const MOCK_INTEGRATIONS = {
   services: [
     {
-      service: 'slack',
+      service: 'gitlab',
       enabled: true,
       configured: true,
-      display_name: 'Slack',
-      description: 'Team messaging',
+      display_name: 'GitLab',
+      description: 'Code hosting',
       auth_fields: [
-        { key: 'bot_token', label: 'Bot Token', field_type: 'password', placeholder: 'xoxb-...' },
+        { key: 'token', label: 'Token', field_type: 'password', placeholder: 'glpat-...' },
       ],
       current_values: {},
       mappings: undefined,
@@ -99,6 +99,57 @@ describe('IntegrationsComponent', () => {
     expect(component.osIntegrations).toHaveLength(1);
   });
 
+  it('should filter out hidden services (slack, sharepoint)', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      switch (cmd) {
+        case 'list_projects':
+          return {
+            projects: [{ name: 'test-project', dir: '/tmp/test' }],
+            active_project: 'test-project',
+          };
+        case 'get_integrations':
+          return {
+            services: [
+              ...cloneMockIntegrations().services,
+              {
+                service: 'slack',
+                enabled: true,
+                configured: true,
+                display_name: 'Slack',
+                description: 'Team messaging',
+                auth_fields: [],
+                current_values: {},
+                mappings: undefined,
+              },
+              {
+                service: 'sharepoint',
+                enabled: false,
+                configured: false,
+                display_name: 'SharePoint',
+                description: 'Documents',
+                auth_fields: [],
+                current_values: {},
+                mappings: undefined,
+              },
+            ],
+            os: [],
+          };
+        case 'list_available_ides':
+          return [];
+        case 'get_selected_ide':
+          return null;
+        default:
+          return undefined;
+      }
+    };
+    await component.ngOnInit();
+    const serviceNames = component.services.map((s) => s.service);
+    expect(serviceNames).not.toContain('slack');
+    expect(serviceNames).not.toContain('sharepoint');
+    expect(serviceNames).toContain('gitlab');
+    expect(serviceNames).toContain('redmine');
+  });
+
   it('should set error when loadIntegrations fails', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'list_projects') return { projects: [], active_project: 'test' };
@@ -121,18 +172,18 @@ describe('IntegrationsComponent', () => {
 
   describe('toggleExpand()', () => {
     it('expands a service', () => {
-      component.toggleExpand('slack');
-      expect(component.expandedService).toBe('slack');
+      component.toggleExpand('gitlab');
+      expect(component.expandedService).toBe('gitlab');
     });
 
     it('collapses an already expanded service', () => {
-      component.expandedService = 'slack';
-      component.toggleExpand('slack');
+      component.expandedService = 'gitlab';
+      component.toggleExpand('gitlab');
       expect(component.expandedService).toBeNull();
     });
 
     it('switches to a different service', () => {
-      component.expandedService = 'slack';
+      component.expandedService = 'gitlab';
       component.toggleExpand('redmine');
       expect(component.expandedService).toBe('redmine');
     });
@@ -140,27 +191,27 @@ describe('IntegrationsComponent', () => {
 
   describe('getFieldValue()', () => {
     it('returns edited value when present', () => {
-      component.editedValues = { slack: { bot_token: 'edited-token' } };
+      component.editedValues = { gitlab: { token: 'edited-token' } };
       const svc = MOCK_INTEGRATIONS.services[0];
-      expect(component.getFieldValue(svc, 'bot_token')).toBe('edited-token');
+      expect(component.getFieldValue(svc, 'token')).toBe('edited-token');
     });
 
     it('returns current_values when no edit', () => {
-      const svc = { ...MOCK_INTEGRATIONS.services[0], current_values: { bot_token: 'existing' } };
-      expect(component.getFieldValue(svc, 'bot_token')).toBe('existing');
+      const svc = { ...MOCK_INTEGRATIONS.services[0], current_values: { token: 'existing' } };
+      expect(component.getFieldValue(svc, 'token')).toBe('existing');
     });
 
     it('returns empty string when no value anywhere', () => {
       const svc = MOCK_INTEGRATIONS.services[0];
-      expect(component.getFieldValue(svc, 'bot_token')).toBe('');
+      expect(component.getFieldValue(svc, 'token')).toBe('');
     });
   });
 
   describe('setFieldValue()', () => {
     it('stores edited value', () => {
       const event = { target: { value: 'new-val' } } as unknown as Event;
-      component.setFieldValue('slack', 'bot_token', event);
-      expect(component.editedValues['slack']['bot_token']).toBe('new-val');
+      component.setFieldValue('gitlab', 'token', event);
+      expect(component.editedValues['gitlab']['token']).toBe('new-val');
     });
   });
 
@@ -180,7 +231,7 @@ describe('IntegrationsComponent', () => {
       await component.toggleService(component.services[0], event);
       expect(invokeSpy).toHaveBeenCalledWith('set_integration_enabled', {
         project: 'test-project',
-        service: 'slack',
+        service: 'gitlab',
         enabled: true,
       });
     });
@@ -225,18 +276,18 @@ describe('IntegrationsComponent', () => {
   describe('saveCredentials()', () => {
     it('invokes save_integration_credentials and reloads', async () => {
       await component.ngOnInit();
-      component.editedValues = { slack: { bot_token: 'xoxb-test' } };
+      component.editedValues = { gitlab: { token: 'glpat-test' } };
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       const event = { preventDefault: vi.fn() } as unknown as Event;
       await component.saveCredentials(component.services[0], event);
       expect(event.preventDefault).toHaveBeenCalled();
       expect(invokeSpy).toHaveBeenCalledWith('save_integration_credentials', {
         project: 'test-project',
-        service: 'slack',
-        credentials: { bot_token: 'xoxb-test' },
+        service: 'gitlab',
+        credentials: { token: 'glpat-test' },
       });
       expect(component.needsRestart).toBe(true);
-      expect(component.editedValues['slack']).toEqual({});
+      expect(component.editedValues['gitlab']).toEqual({});
     });
 
     it('does nothing when no credentials entered', async () => {
@@ -263,7 +314,7 @@ describe('IntegrationsComponent', () => {
 
     it('sets error on failure', async () => {
       await component.ngOnInit();
-      component.editedValues = { slack: { bot_token: 'xoxb-test' } };
+      component.editedValues = { gitlab: { token: 'glpat-test' } };
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'save_integration_credentials') throw new Error('save failed');
         return undefined;
@@ -281,7 +332,7 @@ describe('IntegrationsComponent', () => {
       await component.deleteCredentials(component.services[0]);
       expect(invokeSpy).toHaveBeenCalledWith('delete_integration_credentials', {
         project: 'test-project',
-        service: 'slack',
+        service: 'gitlab',
       });
       expect(component.needsRestart).toBe(true);
     });
@@ -356,12 +407,12 @@ describe('IntegrationsComponent', () => {
       await component.ngOnInit();
       fixture.changeDetectorRef.markForCheck();
       fixture.detectChanges();
-      const slack = component.services.find((s) => s.service === 'slack')!;
-      expect(slack.configured).toBe(true);
+      const gitlab = component.services.find((s) => s.service === 'gitlab')!;
+      expect(gitlab.configured).toBe(true);
       const cards = fixture.nativeElement.querySelectorAll('.section:nth-of-type(2) .card');
-      const slackCard = cards[0];
-      const toggle = slackCard.querySelector('.toggle');
-      const checkbox = slackCard.querySelector('input[type="checkbox"]');
+      const gitlabCard = cards[0];
+      const toggle = gitlabCard.querySelector('.toggle');
+      const checkbox = gitlabCard.querySelector('input[type="checkbox"]');
       expect(checkbox.disabled).toBe(false);
       expect(toggle.classList.contains('disabled')).toBe(false);
     });
@@ -383,7 +434,7 @@ describe('IntegrationsComponent', () => {
       await component.deleteCredentials(component.services[0]);
       expect(invokeSpy).toHaveBeenCalledWith('set_integration_enabled', {
         project: 'test-project',
-        service: 'slack',
+        service: 'gitlab',
         enabled: false,
       });
     });
@@ -434,6 +485,43 @@ describe('IntegrationsComponent', () => {
         const checkbox = card.querySelector('input[type="checkbox"]');
         expect(checkbox.disabled).toBe(false);
       }
+    });
+  });
+
+  describe('OS section visibility', () => {
+    it('should hide OS section when backend returns empty os array', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return {
+              projects: [{ name: 'test-project', dir: '/tmp/test' }],
+              active_project: 'test-project',
+            };
+          case 'get_integrations':
+            return { ...cloneMockIntegrations(), os: [] };
+          case 'list_available_ides':
+            return [];
+          case 'get_selected_ide':
+            return null;
+          default:
+            return undefined;
+        }
+      };
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const osSection = fixture.nativeElement.querySelector('[data-testid="integrations-os"]');
+      expect(osSection).toBeNull();
+      expect(component.osIntegrations).toHaveLength(0);
+    });
+
+    it('should show OS section when backend returns os entries', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const osSection = fixture.nativeElement.querySelector('[data-testid="integrations-os"]');
+      expect(osSection).not.toBeNull();
+      expect(component.osIntegrations.length).toBeGreaterThan(0);
     });
   });
 
