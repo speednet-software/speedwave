@@ -800,6 +800,92 @@ describe('http-bridge', () => {
     });
   });
 
+  describe('SSRF protection', () => {
+    let fetchMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      clearWorkerCache();
+      fetchMock = vi.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('should reject cloud metadata URL in callWorker', async () => {
+      process.env.WORKER_GITLAB_URL = 'http://169.254.169.254:80';
+
+      await expect(callWorker('gitlab', 'list_branches', {})).rejects.toThrow(
+        'Unknown service: gitlab'
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('should reject external hostname in isWorkerAvailable', async () => {
+      process.env.WORKER_SLACK_URL = 'http://evil.com:4001';
+
+      const result = await isWorkerAvailable('slack');
+
+      expect(result).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('should reject URL with pathname in callWorker', async () => {
+      process.env.WORKER_REDMINE_URL = 'http://mcp-redmine:4001/admin/exec';
+
+      await expect(callWorker('redmine', 'list_issues', {})).rejects.toThrow(
+        'Unknown service: redmine'
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('should accept host gateway URL for OS worker', async () => {
+      process.env.WORKER_OS_URL = 'http://host.lima.internal:4007';
+
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: '123',
+          result: {
+            content: [{ type: 'text', text: '{"ok":true}' }],
+          },
+        }),
+      });
+
+      const result = await callWorker('os', 'listReminders', {});
+
+      expect(fetchMock).toHaveBeenCalled();
+      expect(result).toEqual({ ok: true });
+    });
+
+    it('should pass redirect: error in callWorker fetch', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: '123',
+          result: {
+            content: [{ type: 'text', text: '{}' }],
+          },
+        }),
+      });
+
+      await callWorker('gitlab', 'test', {});
+
+      expect(fetchMock.mock.calls[0][1].redirect).toBe('error');
+    });
+
+    it('should pass redirect: error in isWorkerAvailable fetch', async () => {
+      fetchMock.mockResolvedValue({ ok: true });
+
+      await isWorkerAvailable('gitlab');
+
+      expect(fetchMock.mock.calls[0][1].redirect).toBe('error');
+    });
+  });
+
   describe('parseServiceError', () => {
     it('should extract GitBeaker cause.description', () => {
       const error = { cause: { description: 'Invalid parameter: ref' } };

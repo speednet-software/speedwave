@@ -18,7 +18,7 @@
 import { randomUUID } from 'crypto';
 import { buildServiceBridge, getEnabledServices } from './tool-registry.js';
 import { getAuthToken } from './auth-tokens.js';
-import { TIMEOUTS, ts } from '../../shared/dist/index.js';
+import { TIMEOUTS, ts, validateWorkerUrl } from '../../shared/dist/index.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Configuration
@@ -39,7 +39,15 @@ export type ServiceName = (typeof SERVICES)[number];
  * @param service - service name (e.g. 'slack', 'gitlab')
  */
 function getWorkerUrl(service: string): string | undefined {
-  return process.env[`WORKER_${service.toUpperCase()}_URL`] || undefined;
+  const url = process.env[`WORKER_${service.toUpperCase()}_URL`] || undefined;
+  if (!url) return undefined;
+
+  if (!validateWorkerUrl(url)) {
+    console.error(`${ts()} [http-bridge] SSRF protection: rejected worker URL for ${service}`);
+    return undefined;
+  }
+
+  return url;
 }
 
 /**
@@ -144,6 +152,7 @@ export async function isWorkerAvailable(service: string): Promise<boolean> {
 
     const response = await fetch(`${url}/health`, {
       signal: controller.signal,
+      redirect: 'error',
     });
 
     clearTimeout(timeoutId);
@@ -356,6 +365,7 @@ export async function callWorker<T = unknown>(
         },
       }),
       signal: controller.signal,
+      redirect: 'error',
     });
 
     clearTimeout(timeoutId);
@@ -509,29 +519,4 @@ export async function initializeAllBridges(): Promise<AllBridges> {
   }
 
   return bridges;
-}
-
-/**
- * Get bridge status (checks current worker availability)
- * @returns Object mapping service names to their availability status
- */
-export async function getBridgeStatusAsync(): Promise<Record<string, boolean>> {
-  const statusChecks = await Promise.all(SERVICES.map((s) => isWorkerAvailable(s)));
-  return Object.fromEntries(SERVICES.map((s, i) => [s, statusChecks[i]]));
-}
-
-/**
- * Get bridge status (synchronous, uses cached status)
- * @deprecated Use getBridgeStatusAsync for accurate status
- * @param _bridges - Bridges object (unused)
- * @returns Object mapping service names to their cached availability (null if unknown)
- */
-export function getBridgeStatus(_bridges: AllBridges): Record<string, boolean | null> {
-  const result: Record<string, boolean | null> = {};
-  for (const service of getConfiguredServices()) {
-    const cached = workerStatusCache.get(service);
-    // Return null when status unknown (no cache), false when unavailable, true when available
-    result[service] = cached?.available ?? null;
-  }
-  return result;
 }
