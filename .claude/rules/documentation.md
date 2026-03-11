@@ -1,5 +1,8 @@
 ---
 paths:
+  - 'crates/**/*.rs'
+  - 'desktop/src-tauri/**/*.rs'
+  - 'mcp-servers/**/*.ts'
   - 'docs/**/*.md'
   - '*.md'
 ---
