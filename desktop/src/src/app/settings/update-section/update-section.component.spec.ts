@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { UpdateSectionComponent } from './update-section/update-section.component';
-import { TauriService } from '../services/tauri.service';
-import { MockTauriService } from '../testing/mock-tauri.service';
+import { UpdateSectionComponent } from './update-section.component';
+import { TauriService } from '../../services/tauri.service';
+import { MockTauriService } from '../../testing/mock-tauri.service';
 
-describe('UpdateSectionComponent — update settings (compat)', () => {
+describe('UpdateSectionComponent', () => {
   let component: UpdateSectionComponent;
   let fixture: ComponentFixture<UpdateSectionComponent>;
   let mockTauri: MockTauriService;
@@ -34,6 +34,16 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
 
     fixture = TestBed.createComponent(UpdateSectionComponent);
     component = fixture.componentInstance;
+  });
+
+  it('should create', () => {
+    expect(component).toBeTruthy();
+  });
+
+  it('loads version on init', async () => {
+    component.ngOnInit();
+    await fixture.whenStable();
+    expect(component.currentVersion).toBe('1.0.0');
   });
 
   describe('toggleAutoCheck()', () => {
@@ -159,13 +169,16 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
       expect(component.updateResult).toBe('up-to-date');
     });
 
-    it('sets error on failure', async () => {
+    it('sets error on failure and emits errorOccurred', async () => {
+      const errorSpy = vi.fn();
+      component.errorOccurred.subscribe(errorSpy);
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'check_for_update') throw new Error('network failed');
         return undefined;
       };
       await component.checkForUpdate();
       expect(component.error).toBe('network failed');
+      expect(errorSpy).toHaveBeenCalledWith('network failed');
     });
 
     it('sets updateChecking during check', async () => {
@@ -227,6 +240,94 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
     it('does not throw when invoke fails', async () => {
       vi.spyOn(mockTauri, 'invoke').mockRejectedValue(new Error('not in tauri'));
       await expect(component.openReleasesPage()).resolves.toBeUndefined();
+    });
+  });
+
+  describe('updateContainers()', () => {
+    it('calls update_containers with active project', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'update_containers')
+          return { success: true, images_rebuilt: 3, containers_recreated: 2, error: null };
+        return undefined;
+      };
+      component.activeProject = 'acme';
+      await component.updateContainers();
+      expect(invokeSpy).toHaveBeenCalledWith('update_containers', { project: 'acme' });
+    });
+
+    it('sets containerUpdating during update', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'update_containers')
+          return { success: true, images_rebuilt: 3, containers_recreated: 2, error: null };
+        return undefined;
+      };
+      component.activeProject = 'acme';
+      const promise = component.updateContainers();
+      expect(component.containerUpdating).toBe(true);
+      await promise;
+      expect(component.containerUpdating).toBe(false);
+    });
+
+    it('sets containerUpdateResult on success', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'update_containers')
+          return { success: true, images_rebuilt: 3, containers_recreated: 2, error: null };
+        return undefined;
+      };
+      component.activeProject = 'acme';
+      await component.updateContainers();
+      expect(component.containerUpdateResult).toEqual({
+        success: true,
+        images_rebuilt: 3,
+        containers_recreated: 2,
+        error: null,
+      });
+      expect(component.containerUpdateDone).toBe(true);
+    });
+
+    it('handles update failure and emits errorOccurred', async () => {
+      const errorSpy = vi.fn();
+      component.errorOccurred.subscribe(errorSpy);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'update_containers') throw new Error('pull failed');
+        return undefined;
+      };
+      component.activeProject = 'acme';
+      await component.updateContainers();
+      expect(component.error).toBe('pull failed');
+      expect(errorSpy).toHaveBeenCalledWith('pull failed');
+      expect(component.containerUpdating).toBe(false);
+    });
+
+    it('does nothing without active project', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      component.activeProject = null;
+      await component.updateContainers();
+      expect(invokeSpy).not.toHaveBeenCalledWith('update_containers', expect.anything());
+    });
+  });
+
+  describe('rollbackContainers()', () => {
+    it('calls rollback_containers on rollback', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      component.activeProject = 'acme';
+      await component.rollbackContainers();
+      expect(invokeSpy).toHaveBeenCalledWith('rollback_containers', { project: 'acme' });
+    });
+
+    it('clears containerUpdateResult after rollback', async () => {
+      component.activeProject = 'acme';
+      component.containerUpdateDone = true;
+      component.containerUpdateResult = {
+        success: true,
+        images_rebuilt: 3,
+        containers_recreated: 2,
+        error: null,
+      };
+      await component.rollbackContainers();
+      expect(component.containerUpdateResult).toBeNull();
+      expect(component.containerUpdateDone).toBe(false);
     });
   });
 });
