@@ -910,12 +910,16 @@ async fn get_health(project: String) -> Result<health::HealthReport, String> {
             .iter()
             .find(|p| p.name == project)
             .map(|p| std::path::PathBuf::from(&p.dir));
-        let any_os_enabled = project_dir
-            .map(|dir| {
-                let resolved = config::resolve_integrations(&dir, &user_config, &project);
-                resolved.any_os_enabled()
-            })
-            .unwrap_or(false);
+        let any_os_enabled = if cfg!(target_os = "macos") {
+            project_dir
+                .map(|dir| {
+                    let resolved = config::resolve_integrations(&dir, &user_config, &project);
+                    resolved.any_os_enabled()
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        };
         Ok(HealthMonitor::check_all(&project, any_os_enabled))
     })
     .await
@@ -1626,32 +1630,36 @@ fn get_integrations(project: String) -> Result<IntegrationsResponse, String> {
         });
     }
 
-    let os = vec![
-        OsIntegrationStatusEntry {
-            service: "reminders".into(),
-            enabled: integrations.os_reminders,
-            display_name: "Reminders".into(),
-            description: "Native OS reminders and tasks".into(),
-        },
-        OsIntegrationStatusEntry {
-            service: "calendar".into(),
-            enabled: integrations.os_calendar,
-            display_name: "Calendar".into(),
-            description: "Native OS calendar events".into(),
-        },
-        OsIntegrationStatusEntry {
-            service: "mail".into(),
-            enabled: integrations.os_mail,
-            display_name: "Mail".into(),
-            description: "Native OS email client".into(),
-        },
-        OsIntegrationStatusEntry {
-            service: "notes".into(),
-            enabled: integrations.os_notes,
-            display_name: "Notes".into(),
-            description: "Native OS notes".into(),
-        },
-    ];
+    let os = if cfg!(target_os = "macos") {
+        vec![
+            OsIntegrationStatusEntry {
+                service: "reminders".into(),
+                enabled: integrations.os_reminders,
+                display_name: "Reminders".into(),
+                description: "Native OS reminders and tasks".into(),
+            },
+            OsIntegrationStatusEntry {
+                service: "calendar".into(),
+                enabled: integrations.os_calendar,
+                display_name: "Calendar".into(),
+                description: "Native OS calendar events".into(),
+            },
+            OsIntegrationStatusEntry {
+                service: "mail".into(),
+                enabled: integrations.os_mail,
+                display_name: "Mail".into(),
+                description: "Native OS email client".into(),
+            },
+            OsIntegrationStatusEntry {
+                service: "notes".into(),
+                enabled: integrations.os_notes,
+                display_name: "Notes".into(),
+                description: "Native OS notes".into(),
+            },
+        ]
+    } else {
+        vec![]
+    };
 
     Ok(IntegrationsResponse {
         services: service_entries,
@@ -1720,6 +1728,9 @@ fn set_os_integration_enabled(
     service: String,
     enabled: bool,
 ) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("OS integrations are only available on macOS".to_string());
+    }
     check_project(&project)?;
     log::info!("set_os_integration_enabled: project={project} service={service} enabled={enabled}");
     let _lock = CONFIG_LOCK.lock().map_err(|e| e.to_string())?;

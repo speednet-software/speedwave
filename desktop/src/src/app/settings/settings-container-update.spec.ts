@@ -105,6 +105,31 @@ describe('SettingsComponent — container updates', () => {
     });
   });
 
+  describe('hidden sections', () => {
+    it('hides LLM Provider and Container Updates by default', async () => {
+      component.ngOnInit();
+      await fixture.whenStable();
+      fixture.detectChanges();
+      const headings = fixture.nativeElement.querySelectorAll('h2');
+      const texts = Array.from(headings).map((h: Element) => h.textContent?.trim());
+      expect(texts).not.toContain('LLM Provider');
+      expect(texts).not.toContain('Container Updates');
+      expect(texts).toContain('Updates');
+      expect(texts).toContain('Logging');
+    });
+
+    it('shows LLM Provider and Container Updates when showAdvancedSections is true', async () => {
+      component.showAdvancedSections = true;
+      component.ngOnInit();
+      await fixture.whenStable();
+      fixture.detectChanges();
+      const headings = fixture.nativeElement.querySelectorAll('h2');
+      const texts = Array.from(headings).map((h: Element) => h.textContent?.trim());
+      expect(texts).toContain('LLM Provider');
+      expect(texts).toContain('Container Updates');
+    });
+  });
+
   describe('rollbackContainers()', () => {
     it('calls rollback_containers on rollback', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');

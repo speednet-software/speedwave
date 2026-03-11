@@ -60,76 +60,78 @@ interface AuthStatusResponse {
         </div>
       </section>
 
-      <!-- LLM Provider -->
-      <section class="section">
-        <h2>LLM Provider</h2>
-        <div class="info-card">
-          <div class="form-row">
-            <label class="form-label" for="llm-provider">Provider</label>
-            <select
-              id="llm-provider"
-              [(ngModel)]="llmProvider"
-              class="form-select"
-              data-testid="settings-llm-provider"
-            >
-              <option value="anthropic">Anthropic (default)</option>
-              <option value="ollama">Ollama (local)</option>
-              <option value="external">External (LiteLLM proxy)</option>
-            </select>
-          </div>
-          <div class="form-row">
-            <label class="form-label" for="llm-model">Model</label>
-            <input
-              id="llm-model"
-              type="text"
-              [(ngModel)]="llmModel"
-              [placeholder]="modelPlaceholder()"
-              class="form-input"
-              data-testid="settings-llm-model"
-            />
-          </div>
-          @if (llmProvider === 'ollama' || llmProvider === 'external') {
+      <!-- LLM Provider (temporarily hidden) -->
+      @if (showAdvancedSections) {
+        <section class="section">
+          <h2>LLM Provider</h2>
+          <div class="info-card">
             <div class="form-row">
-              <label class="form-label" for="llm-base-url">Base URL</label>
+              <label class="form-label" for="llm-provider">Provider</label>
+              <select
+                id="llm-provider"
+                [(ngModel)]="llmProvider"
+                class="form-select"
+                data-testid="settings-llm-provider"
+              >
+                <option value="anthropic">Anthropic (default)</option>
+                <option value="ollama">Ollama (local)</option>
+                <option value="external">External (LiteLLM proxy)</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label class="form-label" for="llm-model">Model</label>
               <input
-                id="llm-base-url"
+                id="llm-model"
                 type="text"
-                [(ngModel)]="llmBaseUrl"
-                placeholder="http://host.docker.internal:11434"
+                [(ngModel)]="llmModel"
+                [placeholder]="modelPlaceholder()"
                 class="form-input"
-                data-testid="settings-llm-base-url"
+                data-testid="settings-llm-model"
               />
             </div>
-          }
-          @if (llmProvider === 'external') {
-            <div class="form-row">
-              <label class="form-label" for="llm-api-key-env">API Key env var</label>
-              <input
-                id="llm-api-key-env"
-                type="text"
-                [(ngModel)]="llmApiKeyEnv"
-                placeholder="OPENAI_API_KEY"
-                class="form-input"
-                data-testid="settings-llm-api-key-env"
-              />
-            </div>
-          }
-          <div class="form-actions">
-            <button
-              class="btn-save"
-              data-testid="settings-llm-save"
-              (click)="saveLlmConfig()"
-              [disabled]="llmSaving"
-            >
-              {{ llmSaving ? 'Saving...' : 'Save' }}
-            </button>
-            @if (llmSaved) {
-              <span class="save-feedback" data-testid="settings-llm-saved">Saved!</span>
+            @if (llmProvider === 'ollama' || llmProvider === 'external') {
+              <div class="form-row">
+                <label class="form-label" for="llm-base-url">Base URL</label>
+                <input
+                  id="llm-base-url"
+                  type="text"
+                  [(ngModel)]="llmBaseUrl"
+                  placeholder="http://host.docker.internal:11434"
+                  class="form-input"
+                  data-testid="settings-llm-base-url"
+                />
+              </div>
             }
+            @if (llmProvider === 'external') {
+              <div class="form-row">
+                <label class="form-label" for="llm-api-key-env">API Key env var</label>
+                <input
+                  id="llm-api-key-env"
+                  type="text"
+                  [(ngModel)]="llmApiKeyEnv"
+                  placeholder="OPENAI_API_KEY"
+                  class="form-input"
+                  data-testid="settings-llm-api-key-env"
+                />
+              </div>
+            }
+            <div class="form-actions">
+              <button
+                class="btn-save"
+                data-testid="settings-llm-save"
+                (click)="saveLlmConfig()"
+                [disabled]="llmSaving"
+              >
+                {{ llmSaving ? 'Saving...' : 'Save' }}
+              </button>
+              @if (llmSaved) {
+                <span class="save-feedback" data-testid="settings-llm-saved">Saved!</span>
+              }
+            </div>
+            <p class="note">Changes take effect on next container restart.</p>
           </div>
-          <p class="note">Changes take effect on next container restart.</p>
-        </div>
-      </section>
+        </section>
+      }
 
       <!-- Authentication -->
       @if (llmProvider === 'anthropic') {
@@ -293,48 +295,50 @@ interface AuthStatusResponse {
         </div>
       </section>
 
-      <!-- Container Updates -->
-      <section class="section">
-        <h2>Container Updates</h2>
-        <div class="info-card">
-          <p class="note" style="margin-top: 0">
-            Rebuild container images and recreate containers. User data on host volumes is
-            preserved.
-          </p>
-          <div class="form-actions">
-            <button
-              class="btn-save"
-              data-testid="settings-update-containers"
-              (click)="updateContainers()"
-              [disabled]="containerUpdating || !activeProject"
-            >
-              {{ containerUpdating ? 'Updating...' : 'Update containers' }}
-            </button>
-            <button
-              class="btn-cancel"
-              data-testid="settings-rollback"
-              (click)="rollbackContainers()"
-              [disabled]="containerUpdating || !containerUpdateDone || !activeProject"
-            >
-              Rollback
-            </button>
-          </div>
-          @if (containerUpdateResult) {
-            @if (containerUpdateResult.success) {
-              <p class="save-feedback" style="margin-top: 8px">
-                Updated {{ containerUpdateResult.containers_recreated }} containers ({{
-                  containerUpdateResult.images_rebuilt
-                }}
-                images rebuilt)
-              </p>
-            } @else {
-              <p class="error-banner" style="margin-top: 8px">
-                {{ containerUpdateResult.error }}
-              </p>
+      <!-- Container Updates (temporarily hidden) -->
+      @if (showAdvancedSections) {
+        <section class="section">
+          <h2>Container Updates</h2>
+          <div class="info-card">
+            <p class="note" style="margin-top: 0">
+              Rebuild container images and recreate containers. User data on host volumes is
+              preserved.
+            </p>
+            <div class="form-actions">
+              <button
+                class="btn-save"
+                data-testid="settings-update-containers"
+                (click)="updateContainers()"
+                [disabled]="containerUpdating || !activeProject"
+              >
+                {{ containerUpdating ? 'Updating...' : 'Update containers' }}
+              </button>
+              <button
+                class="btn-cancel"
+                data-testid="settings-rollback"
+                (click)="rollbackContainers()"
+                [disabled]="containerUpdating || !containerUpdateDone || !activeProject"
+              >
+                Rollback
+              </button>
+            </div>
+            @if (containerUpdateResult) {
+              @if (containerUpdateResult.success) {
+                <p class="save-feedback" style="margin-top: 8px">
+                  Updated {{ containerUpdateResult.containers_recreated }} containers ({{
+                    containerUpdateResult.images_rebuilt
+                  }}
+                  images rebuilt)
+                </p>
+              } @else {
+                <p class="error-banner" style="margin-top: 8px">
+                  {{ containerUpdateResult.error }}
+                </p>
+              }
             }
-          }
-        </div>
-      </section>
+          </div>
+        </section>
+      }
 
       <!-- Logging -->
       <section class="section">
@@ -673,6 +677,8 @@ interface AuthStatusResponse {
   ],
 })
 export class SettingsComponent implements OnInit {
+  /** When false, hides LLM Provider and Container Updates sections (temporary). */
+  showAdvancedSections = false;
   activeProject: string | null = null;
   projectDir = '';
   error = '';

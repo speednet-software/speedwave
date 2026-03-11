@@ -222,29 +222,31 @@ import { ProjectList } from '../models/update';
         }
       </section>
 
-      <section class="section" data-testid="integrations-os">
-        <h2>OS Integrations</h2>
-        @for (os of osIntegrations; track os.service) {
-          <div class="card os-card">
-            <div class="card-header no-expand">
-              <div class="card-title">
-                <span class="service-name">{{ os.display_name }}</span>
+      @if (osIntegrations.length > 0) {
+        <section class="section" data-testid="integrations-os">
+          <h2>OS Integrations</h2>
+          @for (os of osIntegrations; track os.service) {
+            <div class="card os-card">
+              <div class="card-header no-expand">
+                <div class="card-title">
+                  <span class="service-name">{{ os.display_name }}</span>
+                </div>
+                <div class="card-actions">
+                  <label class="toggle">
+                    <input
+                      type="checkbox"
+                      [checked]="os.enabled"
+                      (change)="toggleOsService(os, $event)"
+                    />
+                    <span class="slider"></span>
+                  </label>
+                </div>
               </div>
-              <div class="card-actions">
-                <label class="toggle">
-                  <input
-                    type="checkbox"
-                    [checked]="os.enabled"
-                    (change)="toggleOsService(os, $event)"
-                  />
-                  <span class="slider"></span>
-                </label>
-              </div>
+              <p class="card-description">{{ os.description }}</p>
             </div>
-            <p class="card-description">{{ os.description }}</p>
-          </div>
-        }
-      </section>
+          }
+        </section>
+      }
     </div>
   `,
   styleUrl: './integrations.component.css',
@@ -358,7 +360,8 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       const response = await this.tauri.invoke<IntegrationsResponse>('get_integrations', {
         project: this.activeProject,
       });
-      this.services = response.services;
+      const hiddenServices = new Set(['slack', 'sharepoint']);
+      this.services = response.services.filter((s) => !hiddenServices.has(s.service));
       this.osIntegrations = response.os;
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
