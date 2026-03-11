@@ -65,8 +65,10 @@ impl McpOsProcess {
         // Write token file with restrictive permissions
         write_restricted_file(&token_path, &token)?;
 
-        let node = speedwave_runtime::binary::resolve_binary("node");
-        let mut cmd = Command::new(&node);
+        // binary::command() resolves bundled node path + sets CREATE_NO_WINDOW on Windows.
+        // env_clear() below intentionally wipes binary::command()'s PATH/CNI_PATH setup
+        // because mcp-os needs a minimal, controlled environment.
+        let mut cmd = speedwave_runtime::binary::command("node");
         cmd.arg(script_path).env_clear();
 
         // On Windows, Node.js (OpenSSL) needs certain system environment variables
@@ -227,7 +229,7 @@ fn is_node_process(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn is_node_process(pid: u32) -> bool {
-    let output = Command::new("tasklist")
+    let output = speedwave_runtime::binary::system_command("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .output();
     match output {
@@ -256,7 +258,7 @@ fn kill_process(pid: u32) {
 
 #[cfg(windows)]
 fn kill_process(pid: u32) {
-    let _ = Command::new("taskkill")
+    let _ = speedwave_runtime::binary::system_command("taskkill")
         .args(["/F", "/PID", &pid.to_string()])
         .status();
 }
@@ -343,13 +345,13 @@ fn write_restricted_file(path: &PathBuf, content: &str) -> anyhow::Result<()> {
             .open(path)?;
         file.write_all(content.as_bytes())?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
         std::fs::write(path, content)?;
         // Restrict to current user only via Windows ACLs.
         // icacls /inheritance:r removes inherited ACEs, then /grant:r adds
         // full-control for the current user only — equivalent of chmod 600.
-        let _ = std::process::Command::new("icacls")
+        let _ = speedwave_runtime::binary::system_command("icacls")
             .args([
                 path.as_os_str(),
                 "/inheritance:r".as_ref(),

@@ -4,6 +4,28 @@ use crate::consts;
 use crate::defaults;
 use std::path::PathBuf;
 
+/// Converts a host path to the path seen by the container engine.
+///
+/// On Windows, nerdctl runs inside WSL2 so host paths must be translated
+/// from `C:\Users\...` to `/mnt/c/Users/...`. On macOS and Linux the
+/// container engine runs on the host so paths are returned unchanged.
+fn to_engine_path(path: &std::path::Path) -> anyhow::Result<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let wsl = crate::runtime::wsl::windows_to_wsl_path(path)?;
+        Ok(wsl.to_string_lossy().to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(path.to_string_lossy().to_string())
+    }
+}
+
+/// Like `to_engine_path` but takes a string (convenience for `project_dir`).
+fn str_to_engine_path(path: &str) -> anyhow::Result<String> {
+    to_engine_path(std::path::Path::new(path))
+}
+
 /// Default compose template embedded at compile time from containers/compose.template.yml (SSOT).
 const COMPOSE_TEMPLATE: &str = include_str!("../../../containers/compose.template.yml");
 
@@ -32,10 +54,10 @@ pub fn render_compose(
     let mut yaml = COMPOSE_TEMPLATE.to_string();
     yaml = yaml.replace("${COMPOSE_PREFIX}", consts::COMPOSE_PREFIX);
     yaml = yaml.replace("${PROJECT_NAME}", project_name);
-    yaml = yaml.replace("${PROJECT_DIR}", project_dir);
-    yaml = yaml.replace("${CLAUDE_HOME}", &claude_home.to_string_lossy());
-    yaml = yaml.replace("${RESOURCES_DIR}", &resources_dir.to_string_lossy());
-    yaml = yaml.replace("${TOKENS_DIR}", &tokens_dir.to_string_lossy());
+    yaml = yaml.replace("${PROJECT_DIR}", &str_to_engine_path(project_dir)?);
+    yaml = yaml.replace("${CLAUDE_HOME}", &to_engine_path(&claude_home)?);
+    yaml = yaml.replace("${RESOURCES_DIR}", &to_engine_path(&resources_dir)?);
+    yaml = yaml.replace("${TOKENS_DIR}", &to_engine_path(&tokens_dir)?);
     yaml = yaml.replace("${NETWORK_NAME}", &network_name);
     yaml = yaml.replace("${CLAUDE_VERSION}", defaults::CLAUDE_VERSION);
     yaml = yaml.replace("${PORT_HUB}", &port_hub.to_string());
@@ -48,7 +70,7 @@ pub fn render_compose(
     // Mount it as /home/speedwave/.claude/ide/ — no copying needed.
     let ide_lock_dir = home.join(consts::DATA_DIR).join("ide-bridge");
     std::fs::create_dir_all(&ide_lock_dir)?;
-    yaml = yaml.replace("${IDE_LOCK_DIR}", &ide_lock_dir.to_string_lossy());
+    yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
     yaml = yaml.replace("${HOST_GATEWAY}", host_gateway_ip());
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
     yaml = yaml.replace("${CONTAINER_USER}", container_user());
@@ -227,7 +249,7 @@ deploy:
                 project = project_name,
                 container_user = container_user(),
                 port = proxy_port,
-                env_file = llm_env_file.to_string_lossy(),
+                env_file = to_engine_path(&llm_env_file)?,
                 token = proxy_token,
                 network = network_name,
             ))?;
@@ -308,7 +330,7 @@ fn apply_addons(yaml: &str, project_name: &str) -> anyhow::Result<String> {
         if addon_resources.exists() {
             let mount = format!(
                 "{}:/speedwave/addons/{}:ro",
-                addon_resources.to_string_lossy(),
+                to_engine_path(&addon_resources)?,
                 addon_manifest.name
             );
             add_claude_volume(&mut doc, &mount);
@@ -486,7 +508,7 @@ fn apply_mcp_os_config_with_path(
     inject_worker_env(&mut doc, "WORKER_OS_URL", &worker_os_url);
     add_hub_volume(
         &mut doc,
-        &format!("{}:/secrets/os-auth-token:ro", token_path.to_string_lossy()),
+        &format!("{}:/secrets/os-auth-token:ro", to_engine_path(token_path)?),
     );
     Ok(serde_yaml_ng::to_string(&doc)?)
 }

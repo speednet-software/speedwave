@@ -62,15 +62,37 @@ pub fn resolve_binary(cmd: &str) -> String {
     cmd.to_string()
 }
 
+/// Windows process creation flag that prevents a visible console window from
+/// being allocated for child processes. Applied to all background subprocesses
+/// so that `wsl.exe`, `powershell.exe`, `node.exe`, etc. do not flash a black
+/// console window over the Desktop app's UI.
+///
+/// **Warning:** `Command::creation_flags()` is a setter, not OR. Calling it
+/// twice replaces the previous value. If you need additional flags, OR them
+/// with this constant.
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Creates a `Command` for the given binary with bundled-binary resolution.
 ///
+/// - Applies `CREATE_NO_WINDOW` on Windows to prevent console window flashing.
 /// - For `limactl`, sets `LIMA_HOME` to the isolated Speedwave directory.
 /// - For bundled binaries, prepends their parent directory to `PATH` so that
 ///   child processes (e.g. `buildctl` spawned by `nerdctl build`) can find
 ///   sibling binaries in the same bundle.
+///
+/// **Note:** `container_exec()` methods intentionally bypass this function
+/// and use raw `Command::new()` because interactive TTY sessions need a
+/// console window on Windows.
 pub fn command(cmd: &str) -> Command {
     let resolved = resolve_binary(cmd);
     let mut command = Command::new(&resolved);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
 
     // If the resolved path is absolute (= bundled), prepend its parent dir to PATH
     // and set CNI_PATH for nerdctl-full bundles (CNI plugins live in libexec/cni/).
@@ -111,6 +133,24 @@ pub fn command(cmd: &str) -> Command {
                 log::error!("LIMA_HOME not set: could not determine home directory");
             }
         }
+    }
+    command
+}
+
+/// Creates a `Command` for a system binary (no bundled-binary resolution).
+///
+/// Use this for system utilities like `wsl.exe`, `powershell.exe`, `tasklist`,
+/// `taskkill`, `icacls`, etc. that are never bundled in the app resources.
+///
+/// Applies `CREATE_NO_WINDOW` on Windows to prevent console window flashing.
+/// For interactive TTY commands, use raw `Command::new()` instead.
+pub fn system_command(program: &str) -> Command {
+    #[allow(unused_mut)] // mut needed on Windows for creation_flags()
+    let mut command = Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
     }
     command
 }

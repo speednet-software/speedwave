@@ -2323,6 +2323,7 @@ fn main() {
     let auto_check_exit = auto_check_handle.clone();
     let update_version_setup = update_version.clone();
 
+    #[allow(unused_mut)] // mut needed when "e2e" feature is enabled
     let mut builder = tauri::Builder::default();
 
     // WebDriver server for E2E tests — only present when the "e2e" feature is

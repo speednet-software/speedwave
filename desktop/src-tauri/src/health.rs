@@ -117,13 +117,13 @@ pub(crate) fn is_pid_alive(pid: u32) -> bool {
                 .unwrap_or(false)
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
         // `tasklist /FI "PID eq N" /NH` prints "INFO: No tasks are running..."
         // when the PID does not exist. Check for absence of that message rather
         // than substring-matching the PID (which could false-positive on process
         // names, session numbers, or memory columns that contain the same digits).
-        std::process::Command::new("tasklist")
+        speedwave_runtime::binary::system_command("tasklist")
             .args(["/FI", &format!("PID eq {}", pid), "/NH"])
             .output()
             .map(|o| {
@@ -379,9 +379,9 @@ mod tests {
         {
             (std::os::unix::process::parent_id(), None)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            let child = std::process::Command::new("cmd")
+            let child = speedwave_runtime::binary::system_command("cmd")
                 .args(["/C", "timeout /T 30 /NOBREAK >NUL"])
                 .spawn()
                 .expect("failed to spawn external process for test");

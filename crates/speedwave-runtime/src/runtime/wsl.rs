@@ -79,7 +79,7 @@ impl WslRuntime {
 ///
 /// Returns an error for UNC paths (`\\server\share`) and extended-length prefixes
 /// (`\\?\C:\...`) which cannot be mapped to WSL mount points.
-fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
+pub fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
     let s = path.to_string_lossy();
     let bytes = s.as_bytes();
 
@@ -107,9 +107,19 @@ fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
+/// Returns the compose file path translated to a WSL mount path.
+///
+/// `compose_file_path()` returns a Windows path (e.g. `C:\Users\...\compose.yml`);
+/// nerdctl inside WSL2 needs it as `/mnt/c/Users/.../compose.yml`.
+fn wsl_compose_file_path(project: &str) -> anyhow::Result<String> {
+    let win_path = super::compose_file_path(project)?;
+    let wsl_path = windows_to_wsl_path(Path::new(&win_path))?;
+    Ok(wsl_path.to_string_lossy().to_string())
+}
+
 impl ContainerRuntime for WslRuntime {
     fn compose_up(&self, project: &str) -> anyhow::Result<()> {
-        let compose_file = super::compose_file_path(project)?;
+        let compose_file = wsl_compose_file_path(project)?;
         self.runner.run(
             "wsl.exe",
             &[
@@ -131,7 +141,7 @@ impl ContainerRuntime for WslRuntime {
     }
 
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
-        let compose_file = super::compose_file_path(project)?;
+        let compose_file = wsl_compose_file_path(project)?;
         self.runner.run(
             "wsl.exe",
             &[
@@ -151,7 +161,7 @@ impl ContainerRuntime for WslRuntime {
     }
 
     fn compose_ps(&self, project: &str) -> anyhow::Result<Vec<Value>> {
-        let compose_file = super::compose_file_path(project)?;
+        let compose_file = wsl_compose_file_path(project)?;
         let output = self.runner.run(
             "wsl.exe",
             &[
@@ -174,6 +184,8 @@ impl ContainerRuntime for WslRuntime {
 
     fn container_exec(&self, container: &str, cmd: &[&str]) -> Command {
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
+        // Raw Command::new — intentionally bypasses binary::system_command() because
+        // interactive TTY sessions need a console window on Windows.
         let mut command = Command::new("wsl.exe");
         command.args([
             "-d",
@@ -196,7 +208,7 @@ impl ContainerRuntime for WslRuntime {
 
     fn container_exec_piped(&self, container: &str, cmd: &[&str]) -> anyhow::Result<Command> {
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
-        let mut command = Command::new("wsl.exe");
+        let mut command = crate::binary::system_command("wsl.exe");
         command.args([
             "-d",
             consts::WSL_DISTRO_NAME,
@@ -265,7 +277,7 @@ impl ContainerRuntime for WslRuntime {
     }
 
     fn compose_logs(&self, project: &str, tail: u32) -> anyhow::Result<String> {
-        let compose_file = super::compose_file_path(project)?;
+        let compose_file = wsl_compose_file_path(project)?;
         let tail_str = tail.to_string();
         self.runner.run_with_stderr(
             "wsl.exe",
@@ -287,7 +299,7 @@ impl ContainerRuntime for WslRuntime {
     }
 
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
-        let compose_file = super::compose_file_path(project)?;
+        let compose_file = wsl_compose_file_path(project)?;
         self.runner.run(
             "wsl.exe",
             &[
@@ -634,6 +646,36 @@ mod tests {
         let result = rt.system_prune();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("prune failed"));
+    }
+
+    // ── wsl_compose_file_path tests ────────────────────────────────────
+
+    #[test]
+    fn test_wsl_compose_file_path_returns_unix_path() {
+        // On macOS/Linux, compose_file_path already returns a Unix path,
+        // so wsl_compose_file_path passes it through unchanged.
+        let result = wsl_compose_file_path("test-project").unwrap();
+        assert!(
+            result.contains("/compose/test-project/compose.yml"),
+            "should contain compose path structure, got: {}",
+            result
+        );
+        assert!(
+            !result.contains('\\'),
+            "WSL compose path should use forward slashes, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_converts_compose_file() {
+        // Simulates what happens on Windows: compose_file_path returns a Windows path
+        let win_path = Path::new(r"C:\Users\jakub\.speedwave\compose\e2e-test\compose.yml");
+        let wsl = windows_to_wsl_path(win_path).unwrap();
+        assert_eq!(
+            wsl,
+            PathBuf::from("/mnt/c/Users/jakub/.speedwave/compose/e2e-test/compose.yml")
+        );
     }
 
     // ── ensure_ready UTF-16LE tests ─────────────────────────────────────

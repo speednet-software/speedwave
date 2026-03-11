@@ -577,13 +577,14 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private eventTimerId: ReturnType<typeof setTimeout> | null = null;
   private unlistenEvent: (() => void) | null = null;
+  private unlistenReconciled: (() => void) | null = null;
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
 
   /** Starts periodic health polling and subscribes to IDE bridge events. */
   ngOnInit(): void {
     this.refresh();
-    this.intervalId = setInterval(() => this.refresh(), 5000);
+    this.intervalId = setInterval(() => this.refresh(), 15000);
 
     this.tauri
       .listen<{ kind: string; detail: string }>('ide_bridge_event', (event) => {
@@ -607,6 +608,17 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
       .then((unlisten) => {
         this.unlistenEvent = unlisten;
       });
+
+    this.tauri
+      .listen('containers_reconciled', () => {
+        this.refresh();
+      })
+      .then((unlisten) => {
+        this.unlistenReconciled = unlisten;
+      })
+      .catch(() => {
+        // Tauri event listener not available outside desktop context
+      });
   }
 
   /** Clears polling interval, event timers, and unsubscribes from IDE bridge events. */
@@ -622,6 +634,10 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
     if (this.unlistenEvent) {
       this.unlistenEvent();
       this.unlistenEvent = null;
+    }
+    if (this.unlistenReconciled) {
+      this.unlistenReconciled();
+      this.unlistenReconciled = null;
     }
   }
 

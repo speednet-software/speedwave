@@ -216,7 +216,7 @@ fn verify_sha256_ps(file_path: &std::path::Path, expected_sha256: &str) -> bool 
         "(Get-FileHash -Path '{}' -Algorithm SHA256).Hash.ToLower()",
         escaped
     );
-    let output = std::process::Command::new("powershell")
+    let output = speedwave_runtime::binary::system_command("powershell")
         .args(["-NoProfile", "-Command", &cmd])
         .output();
     match output {
@@ -693,7 +693,7 @@ fn init_vm_linux() -> anyhow::Result<()> {
 fn init_vm_windows() -> anyhow::Result<()> {
     ensure_wsl2_available()?;
 
-    let list = std::process::Command::new("wsl.exe")
+    let list = speedwave_runtime::binary::system_command("wsl.exe")
         .args(["--list", "--quiet"])
         .output()?;
     // Decode WSL output — wsl.exe often outputs UTF-16LE on Windows
@@ -754,14 +754,14 @@ fn expected_wsl_vhdx_path() -> anyhow::Result<PathBuf> {
 /// bails with a restart prompt.
 #[cfg(target_os = "windows")]
 fn ensure_wsl2_available() -> anyhow::Result<()> {
-    let wsl_available = std::process::Command::new("wsl.exe")
+    let wsl_available = speedwave_runtime::binary::system_command("wsl.exe")
         .args(["--status"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
 
     if !wsl_available {
-        let status = std::process::Command::new("powershell")
+        let status = speedwave_runtime::binary::system_command("powershell")
             .args([
                 "-Command",
                 "Start-Process wsl.exe -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait",
@@ -786,8 +786,6 @@ fn ensure_wsl2_available() -> anyhow::Result<()> {
 /// install), then falls back to cached download, then fresh download.
 #[cfg(target_os = "windows")]
 fn import_wsl_distro() -> anyhow::Result<()> {
-    use std::process::Command;
-
     let data_dir = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
         .join(consts::DATA_DIR);
@@ -836,7 +834,7 @@ fn import_wsl_distro() -> anyhow::Result<()> {
             escaped_rootfs,
             expected_sha256
         );
-        let download = Command::new("powershell")
+        let download = speedwave_runtime::binary::system_command("powershell")
             .args(["-NoProfile", "-Command", &download_and_verify])
             .status()?;
         if !download.success() {
@@ -850,7 +848,7 @@ fn import_wsl_distro() -> anyhow::Result<()> {
 
     let install_dir = wsl_dir.join(consts::WSL_DISTRO_NAME);
     std::fs::create_dir_all(&install_dir)?;
-    let status = Command::new("wsl.exe")
+    let status = speedwave_runtime::binary::system_command("wsl.exe")
         .args([
             "--import",
             consts::WSL_DISTRO_NAME,
@@ -860,7 +858,7 @@ fn import_wsl_distro() -> anyhow::Result<()> {
         .status()?;
     if !status.success() {
         // Check if the distro was already registered (import failed because it exists)
-        let recheck = Command::new("wsl.exe")
+        let recheck = speedwave_runtime::binary::system_command("wsl.exe")
             .args(["--list", "--quiet"])
             .output()?;
         let recheck_str = decode_wsl_output(&recheck.stdout);
@@ -889,9 +887,7 @@ fn import_wsl_distro() -> anyhow::Result<()> {
 /// tarball first (offline install), falling back to download if not found.
 #[cfg(target_os = "windows")]
 fn install_nerdctl_full() -> anyhow::Result<()> {
-    use std::process::Command;
-
-    let nerdctl_check = Command::new("wsl.exe")
+    let nerdctl_check = speedwave_runtime::binary::system_command("wsl.exe")
         .args(["-d", consts::WSL_DISTRO_NAME, "--", "nerdctl", "--version"])
         .output()?;
     if nerdctl_check.status.success() {
@@ -906,7 +902,7 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
     if let Some(bundled) = find_bundled_resource("wsl/nerdctl-full.tar.gz") {
         if verify_sha256_ps(&bundled, expected_sha256) {
             let win_path = bundled.to_string_lossy().to_string();
-            let wslpath_output = Command::new("wsl.exe")
+            let wslpath_output = speedwave_runtime::binary::system_command("wsl.exe")
                 .args([
                     "-d",
                     consts::WSL_DISTRO_NAME,
@@ -958,6 +954,11 @@ if [ "$EXPECTED" != "$ACTUAL" ]; then
 fi
 tar -C /usr/local -xzf "/tmp/nerdctl-install/${{TARBALL}}"
 rm -rf /tmp/nerdctl-install
+# Install iptables — required by CNI bridge plugin for container networking.
+# nerdctl-full bundles CNI plugins but iptables is a system dependency.
+if ! command -v iptables >/dev/null 2>&1; then
+  apt-get update -qq && apt-get install -y -qq iptables >/dev/null
+fi
 # Configure containerd as a system service so it starts on every WSL session
 mkdir -p /etc/systemd/system
 cat > /etc/systemd/system/containerd.service <<UNIT
@@ -988,6 +989,36 @@ if ! nerdctl info >/dev/null 2>&1; then
   echo 'containerd did not become ready after 30s' >&2
   exit 1
 fi
+# Start buildkitd — required for `nerdctl build` (image building).
+# On WSL2 we run as root (not rootless), so install as a systemd system service.
+cat > /etc/systemd/system/buildkit.service <<BKUNIT
+[Unit]
+Description=BuildKit builder daemon
+After=containerd.service
+Requires=containerd.service
+[Service]
+ExecStart=/usr/local/bin/buildkitd --oci-worker=false --containerd-worker=true
+Restart=always
+[Install]
+WantedBy=multi-user.target
+BKUNIT
+if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
+  systemctl daemon-reload
+  systemctl enable --now buildkit
+else
+  buildkitd --oci-worker=false --containerd-worker=true &
+fi
+# Wait for buildkitd socket (up to 30s)
+for i in $(seq 1 15); do
+  if buildctl debug workers >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+if ! buildctl debug workers >/dev/null 2>&1; then
+  echo 'buildkitd did not become ready after 30s' >&2
+  exit 1
+fi
 "#,
         version = consts::NERDCTL_FULL_VERSION,
         sha256_amd64 = consts::NERDCTL_FULL_SHA256_AMD64,
@@ -997,7 +1028,7 @@ fi
     // Write the install script inside WSL via stdin to avoid argument
     // length/escaping issues with wsl.exe -- bash -c "...".
     // Pipe the script through stdin: echo "$script" | wsl bash -s
-    let install = Command::new("wsl.exe")
+    let install = speedwave_runtime::binary::system_command("wsl.exe")
         .args(["-d", consts::WSL_DISTRO_NAME, "--", "bash", "-s"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1512,8 +1543,6 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
 
     #[cfg(target_os = "windows")]
     {
-        use std::process::Command;
-
         let cli_dir = home.join(consts::DATA_DIR).join("bin");
 
         let cli_dir_str = cli_dir.to_string_lossy().to_string();
@@ -1552,7 +1581,7 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
             dir = cli_dir_str
         );
 
-        let status = Command::new("powershell")
+        let status = speedwave_runtime::binary::system_command("powershell")
             .args([
                 "-NoProfile",
                 "-ExecutionPolicy",

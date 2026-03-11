@@ -78,6 +78,8 @@ impl ContainerRuntime for NerdctlRuntime {
     fn container_exec(&self, container: &str, cmd: &[&str]) -> Command {
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
         let nerdctl = crate::binary::resolve_binary("nerdctl");
+        // Raw Command::new — intentionally bypasses binary::command() because
+        // interactive TTY sessions need a console window on Windows.
         let mut command = Command::new(&nerdctl);
         command.args([
             "exec",
@@ -96,8 +98,7 @@ impl ContainerRuntime for NerdctlRuntime {
 
     fn container_exec_piped(&self, container: &str, cmd: &[&str]) -> anyhow::Result<Command> {
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
-        let nerdctl = crate::binary::resolve_binary("nerdctl");
-        let mut command = Command::new(&nerdctl);
+        let mut command = crate::binary::command("nerdctl");
         command.args(["exec", "-i", "-e", &path_env, container]);
         command.args(cmd);
         Ok(command)

@@ -33,6 +33,11 @@ foreach ($svc in $services) {
     if (Test-Path "mcp-servers\$svc\tsconfig.json") {
         Copy-Item "mcp-servers\$svc\tsconfig.json" "$svcDest\"
     }
+    foreach ($f in @('Dockerfile','Containerfile')) {
+        if (Test-Path "mcp-servers\$svc\$f") {
+            Copy-Item "mcp-servers\$svc\$f" "$svcDest\"
+        }
+    }
 }
 
 # -- mcp-os (host-side TypeScript worker) -------------------------------------

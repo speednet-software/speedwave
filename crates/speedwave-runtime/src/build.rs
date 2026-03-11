@@ -279,13 +279,15 @@ fn try_build_all(runtime: &dyn ContainerRuntime, vm_root: &std::path::Path) -> a
             img.context_dir,
             img.containerfile
         );
-        let abs_context = vm_root.join(img.context_dir);
-        let abs_containerfile = vm_root.join(img.containerfile);
-        runtime.build_image(
-            img.tag,
-            &abs_context.to_string_lossy(),
-            &abs_containerfile.to_string_lossy(),
-        )?;
+        // Use string concatenation with "/" instead of PathBuf::join because vm_root
+        // may be a WSL/Linux path (e.g. "/mnt/c/Speedwave/build-context") running on
+        // a Windows host. PathBuf::join on Windows doesn't handle Unix-style paths
+        // correctly — it can concatenate without inserting a separator.
+        let root_str = vm_root.to_string_lossy();
+        let root_str = root_str.trim_end_matches('/');
+        let abs_context = format!("{}/{}", root_str, img.context_dir);
+        let abs_containerfile = format!("{}/{}", root_str, img.containerfile);
+        runtime.build_image(img.tag, &abs_context, &abs_containerfile)?;
         built += 1;
         log::info!(
             "build_all_images: [{}/{}] {} built OK",
