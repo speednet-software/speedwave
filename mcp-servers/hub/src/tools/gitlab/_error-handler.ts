@@ -5,7 +5,7 @@
  * Use handleExecutionError() in catch blocks for uniform error handling.
  */
 
-import { ts } from '../../../../shared/dist/index.js';
+import { ts } from '@speedwave/mcp-shared';
 
 /**
  * Formats an error into a user-friendly string message.

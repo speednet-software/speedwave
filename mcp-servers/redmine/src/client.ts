@@ -17,7 +17,7 @@
 import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import fs from 'fs/promises';
 import path from 'path';
-import { TIMEOUTS, ts } from '../../shared/dist/index.js';
+import { TIMEOUTS, ts } from '@speedwave/mcp-shared';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Axios Retry Config Extension

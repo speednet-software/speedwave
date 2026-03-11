@@ -2,13 +2,7 @@
  * Pipeline Tools - 5 tools for GitLab CI/CD pipelines
  */
 
-import {
-  Tool,
-  ToolDefinition,
-  jsonResult,
-  textResult,
-  errorResult,
-} from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition, jsonResult, textResult, errorResult } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
 

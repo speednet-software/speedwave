@@ -6,7 +6,7 @@
  * @module mcp-sharepoint
  */
 
-import { createMCPServer, ts } from '../../shared/dist/index.js';
+import { createMCPServer, ts } from '@speedwave/mcp-shared';
 import { initializeSharePointClient } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 

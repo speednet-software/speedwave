@@ -17,7 +17,7 @@
  */
 
 import { ToolMetadata } from '../../hub-types.js';
-import { TIMEOUTS } from '../../../../shared/dist/index.js';
+import { TIMEOUTS } from '@speedwave/mcp-shared';
 
 export const metadata: ToolMetadata = {
   name: 'getFileFull',

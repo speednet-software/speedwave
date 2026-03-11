@@ -18,7 +18,7 @@
 import { randomUUID } from 'crypto';
 import { buildServiceBridge, getEnabledServices } from './tool-registry.js';
 import { getAuthToken } from './auth-tokens.js';
-import { TIMEOUTS, ts, validateWorkerUrl } from '../../shared/dist/index.js';
+import { TIMEOUTS, ts, validateWorkerUrl } from '@speedwave/mcp-shared';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Configuration

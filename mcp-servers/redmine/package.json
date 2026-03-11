@@ -24,6 +24,7 @@
   "author": "Speednet",
   "license": "Apache-2.0",
   "dependencies": {
+    "@speedwave/mcp-shared": "file:../shared",
     "axios": "^1.6.0"
   },
   "devDependencies": {

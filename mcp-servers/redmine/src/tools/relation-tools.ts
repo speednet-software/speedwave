@@ -2,7 +2,7 @@
  * Relation Tools - 3 tools for Redmine issue relations
  */
 
-import { Tool, ToolDefinition, jsonResult, errorResult } from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition, jsonResult, errorResult } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 
 const listRelationsTool: Tool = {

@@ -2,7 +2,7 @@
  * Project Tools - 3 tools for Redmine project operations
  */
 
-import { Tool, ToolDefinition, jsonResult, errorResult } from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition, jsonResult, errorResult } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 
 const listProjectIdsTool: Tool = {

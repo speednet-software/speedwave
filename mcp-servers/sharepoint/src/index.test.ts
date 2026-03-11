@@ -5,10 +5,9 @@ const { createMCPServerMock, initializeSharePointClientMock } = vi.hoisted(() =>
   initializeSharePointClientMock: vi.fn(),
 }));
 
-vi.mock('../../shared/dist/index.js', async () => {
-  const actual = await vi.importActual<typeof import('../../shared/dist/index.js')>(
-    '../../shared/dist/index.js'
-  );
+vi.mock('@speedwave/mcp-shared', async () => {
+  const actual =
+    await vi.importActual<typeof import('@speedwave/mcp-shared')>('@speedwave/mcp-shared');
   return {
     ...actual,
     createMCPServer: createMCPServerMock,

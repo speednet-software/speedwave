@@ -24,7 +24,7 @@ import { toolMetadata as sharepointTools } from './tools/sharepoint/index.js';
 import { toolMetadata as redmineTools } from './tools/redmine/index.js';
 import { toolMetadata as gitlabTools } from './tools/gitlab/index.js';
 import { toolMetadata as osTools } from './tools/os/index.js';
-import { ts, TIMEOUTS } from '../../shared/dist/index.js';
+import { ts, TIMEOUTS } from '@speedwave/mcp-shared';
 
 /**
  * Escape special regex characters in a string to prevent regex injection.

@@ -34,7 +34,7 @@ import {
   Tool,
   TIMEOUTS,
   ts,
-} from '../../shared/dist/index.js';
+} from '@speedwave/mcp-shared';
 
 // Import handlers
 import { createCodeExecutorHandlers } from './handlers.js';

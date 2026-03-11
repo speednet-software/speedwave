@@ -2,7 +2,7 @@
  * Journal Tools - 3 tools for Redmine journal/comments
  */
 
-import { Tool, ToolDefinition, jsonResult, errorResult } from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition, jsonResult, errorResult } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 
 const listJournalsTool: Tool = {

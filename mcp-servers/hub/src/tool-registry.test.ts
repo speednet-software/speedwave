@@ -23,7 +23,7 @@ import {
   validateRegistry,
   getRegistryStats,
 } from './tool-registry.js';
-import { TIMEOUTS } from '../../shared/dist/index.js';
+import { TIMEOUTS } from '@speedwave/mcp-shared';
 
 describe('tool-registry', () => {
   describe('TOOL_REGISTRY', () => {

@@ -6,7 +6,7 @@
  * @module mcp-slack
  */
 
-import { createMCPServer, ts } from '../../shared/dist/index.js';
+import { createMCPServer, ts } from '@speedwave/mcp-shared';
 import { initializeSlackClients } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 

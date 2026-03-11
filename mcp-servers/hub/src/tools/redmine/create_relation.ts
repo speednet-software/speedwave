@@ -19,7 +19,7 @@
 
 import { ToolMetadata } from '../../hub-types.js';
 import { REDMINE_RELATION_TYPES, IssueRelation, isValidRelationType } from './types.js';
-import { ts } from '../../../../shared/dist/index.js';
+import { ts } from '@speedwave/mcp-shared';
 
 export const metadata: ToolMetadata = {
   name: 'createRelation',

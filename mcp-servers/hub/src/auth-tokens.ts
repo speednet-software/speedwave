@@ -11,7 +11,7 @@
 
 import { readFileSync, existsSync } from 'fs';
 import { SERVICES } from './http-bridge.js';
-import { ts } from '../../shared/dist/index.js';
+import { ts } from '@speedwave/mcp-shared';
 
 const AUTH_TOKENS: Map<string, string> = new Map();
 
