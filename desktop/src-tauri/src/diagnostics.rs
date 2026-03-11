@@ -9,6 +9,8 @@ pub(crate) struct DiagnosticsInput {
     pub serial_log: Option<std::path::PathBuf>,
     /// Container logs as a raw string (already fetched from runtime).
     pub container_logs: Option<String>,
+    /// Path to the mcp-os dedicated log file.
+    pub mcp_os_log: Option<std::path::PathBuf>,
     /// Path to the project's `compose.yml`.
     pub compose_path: Option<std::path::PathBuf>,
 }
@@ -69,7 +71,18 @@ pub(crate) fn build_diagnostics_zip(
         zip.write_all(sanitized.as_bytes())?;
     }
 
-    // 4. compose.yml
+    // 4. mcp-os log
+    if let Some(ref path) = input.mcp_os_log {
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                let sanitized = speedwave_runtime::log_sanitizer::sanitize(&content);
+                zip.start_file("mcp-os/mcp-os.log", options)?;
+                zip.write_all(sanitized.as_bytes())?;
+            }
+        }
+    }
+
+    // 5. compose.yml
     if let Some(ref compose_path) = input.compose_path {
         if compose_path.exists() {
             if let Ok(content) = std::fs::read_to_string(compose_path) {
@@ -80,7 +93,7 @@ pub(crate) fn build_diagnostics_zip(
         }
     }
 
-    // 5. System info (no sanitization needed)
+    // 6. System info (no sanitization needed)
     let sys_info = format!(
         "os: {}\narch: {}\nversion: {}\n",
         std::env::consts::OS,
@@ -134,10 +147,18 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
                 .join("compose.yml")
         });
 
+        let mcp_os_log = dirs::home_dir()
+            .map(|h| {
+                h.join(speedwave_runtime::consts::DATA_DIR)
+                    .join(speedwave_runtime::consts::MCP_OS_LOG_FILE)
+            })
+            .filter(|p| p.exists());
+
         let input = DiagnosticsInput {
             log_dir,
             serial_log,
             container_logs,
+            mcp_os_log,
             compose_path,
         };
 
@@ -216,6 +237,7 @@ mod tests {
             log_dir: Some(log_dir),
             serial_log: None,
             container_logs: Some("container output here".into()),
+            mcp_os_log: None,
             compose_path: Some(compose_path),
         };
 
@@ -275,6 +297,7 @@ mod tests {
             container_logs: Some(
                 "JWT: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123\n".into(),
             ),
+            mcp_os_log: None,
             compose_path: None,
         };
 
@@ -317,6 +340,7 @@ mod tests {
             log_dir: None,
             serial_log: None,
             container_logs: None,
+            mcp_os_log: None,
             compose_path: Some(compose_path),
         };
 
@@ -355,6 +379,7 @@ mod tests {
             log_dir: Some(log_dir),
             serial_log: None,
             container_logs: None,
+            mcp_os_log: None,
             compose_path: None,
         };
 
@@ -383,6 +408,7 @@ mod tests {
             log_dir: None,
             serial_log: Some(serial_log),
             container_logs: None,
+            mcp_os_log: None,
             compose_path: None,
         };
 
@@ -408,6 +434,7 @@ mod tests {
             log_dir: None,
             serial_log: None,
             container_logs: None,
+            mcp_os_log: None,
             compose_path: None,
         };
 

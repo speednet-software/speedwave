@@ -8,6 +8,7 @@ pub const PORT_BASE: u16 = 4000;
 pub const MCP_OS_AUTH_TOKEN_FILE: &str = "mcp-os-auth-token";
 pub const MCP_OS_PORT_FILE: &str = "mcp-os-port";
 pub const MCP_OS_PID_FILE: &str = "mcp-os-pid";
+pub const MCP_OS_LOG_FILE: &str = "mcp-os.log";
 pub const CLAUDE_BINARY: &str = "/usr/local/bin/claude";
 
 /// PATH set inside containers for the `speedwave` user.
@@ -331,6 +332,14 @@ mod tests {
                 hash
             );
         }
+    }
+
+    #[test]
+    fn test_mcp_os_log_file_is_non_empty() {
+        assert!(
+            !MCP_OS_LOG_FILE.is_empty(),
+            "MCP_OS_LOG_FILE must not be empty"
+        );
     }
 
     #[test]

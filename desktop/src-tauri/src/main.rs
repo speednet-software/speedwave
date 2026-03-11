@@ -53,6 +53,10 @@ const MAIN_WINDOW_LABEL: &str = "main";
 /// succession) can lose writes due to TOCTOU races.
 static CONFIG_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 
+/// Stop flag for the mcp-os watchdog thread. Set during app exit cleanup
+/// to prevent the watchdog from respawning mcp-os during shutdown.
+static WATCHDOG_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 // ---------------------------------------------------------------------------
 // Chat commands
 // ---------------------------------------------------------------------------
@@ -560,6 +564,69 @@ fn main() {
                 log::warn!("mcp-os script not found — OS integrations will be unavailable");
             }
 
+            // Start mcp-os watchdog thread
+            let mcp_os_watchdog = mcp_os.clone();
+            let watchdog_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                use std::time::Duration;
+                const CHECK_INTERVAL: Duration = Duration::from_secs(30);
+                const MAX_UNHEALTHY: u32 = 5;
+                const COOLDOWN: Duration = Duration::from_secs(300);
+                let mut consecutive_unhealthy: u32 = 0;
+
+                loop {
+                    std::thread::sleep(CHECK_INTERVAL);
+                    if WATCHDOG_STOP.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    match mcp_os_watchdog.lock() {
+                        Ok(mut guard) => match *guard {
+                            None => break, // mcp-os was never started — watchdog not needed
+                            Some(ref mut proc) => {
+                                if proc.is_alive() {
+                                    consecutive_unhealthy = 0;
+                                    continue;
+                                }
+
+                                consecutive_unhealthy += 1;
+
+                                if consecutive_unhealthy >= MAX_UNHEALTHY {
+                                    log::error!(
+                                        "mcp-os watchdog: unhealthy for {MAX_UNHEALTHY} consecutive checks, cooling down"
+                                    );
+                                    std::thread::sleep(COOLDOWN);
+                                    consecutive_unhealthy = 0;
+                                    continue;
+                                }
+
+                                log::warn!(
+                                    "mcp-os watchdog: process unhealthy ({consecutive_unhealthy}/{MAX_UNHEALTHY}), respawning"
+                                );
+                                match proc.respawn() {
+                                    Ok(port) => {
+                                        log::info!(
+                                            "mcp-os watchdog: respawned (port {port})"
+                                        );
+                                        reconcile::reconcile_compose_port(&watchdog_handle);
+                                    }
+                                    Err(e) => {
+                                        log::error!(
+                                            "mcp-os watchdog: respawn failed: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            log::error!("mcp-os watchdog: mutex poisoned: {e}");
+                            break;
+                        }
+                    }
+                }
+                log::info!("mcp-os watchdog: stopped");
+            });
+
             // Start background auto-update check (store handle for cancellation)
             let handle = updater::spawn_auto_check(app.handle().clone());
             match auto_check_handle.lock() {
@@ -816,6 +883,7 @@ fn main() {
             // Container logs
             log_commands::get_container_logs,
             log_commands::get_compose_logs,
+            log_commands::get_mcp_os_logs,
             // IDE Bridge
             list_available_ides,
             select_ide,

@@ -52,6 +52,29 @@ pub(crate) async fn get_compose_logs(project: String, tail: Option<u32>) -> Resu
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+pub(crate) async fn get_mcp_os_logs(tail: Option<u32>) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
+        let log_path = home
+            .join(speedwave_runtime::consts::DATA_DIR)
+            .join(speedwave_runtime::consts::MCP_OS_LOG_FILE);
+        if !log_path.exists() {
+            return Ok("No mcp-os logs available.".to_string());
+        }
+        let content = std::fs::read_to_string(&log_path)
+            .map_err(|e| format!("Failed to read mcp-os log: {e}"))?;
+        let tail = tail.unwrap_or(200).min(10_000) as usize;
+        let lines: Vec<&str> = content.lines().collect();
+        let start = lines.len().saturating_sub(tail);
+        Ok(speedwave_runtime::log_sanitizer::sanitize(
+            &lines[start..].join("\n"),
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

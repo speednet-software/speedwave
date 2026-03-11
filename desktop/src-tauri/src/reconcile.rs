@@ -175,6 +175,9 @@ pub(crate) fn run_exit_cleanup(
     mcp_os: &Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>,
     auto_check: &SharedAutoCheckHandle,
 ) {
+    // Stop watchdog before killing mcp-os to prevent respawn during shutdown
+    crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+
     match ide_bridge.lock() {
         Ok(mut guard) => {
             if let Some(mut bridge) = guard.take() {

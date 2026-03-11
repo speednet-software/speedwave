@@ -99,16 +99,31 @@ fn resolve_build_root_with_home(home: Option<PathBuf>) -> anyhow::Result<PathBuf
 
 /// Resolves the path to the mcp-os `index.js` entry point.
 ///
-/// Resolution order (same as `resolve_build_root`):
+/// Resolution order:
 /// 1. `SPEEDWAVE_RESOURCES_DIR` env var → `<dir>/mcp-os/os/dist/index.js`
-/// 2. `~/.speedwave/resources-dir` marker → `<dir>/mcp-os/os/dist/index.js`
-/// 3. `CARGO_MANIFEST_DIR` parent chain → `<repo>/mcp-servers/os/dist/index.js`
+/// 2. `CARGO_MANIFEST_DIR` source tree → `<repo>/mcp-servers/os/dist/index.js`
+/// 3. `~/.speedwave/resources-dir` marker → `<dir>/mcp-os/os/dist/index.js`
+///
+/// Step 2 before 3 ensures `make dev` uses local sources (with hoisted
+/// `node_modules`) instead of a stale bundle path written by the installed app.
 pub fn resolve_mcp_os_script() -> Option<std::path::PathBuf> {
     resolve_mcp_os_script_with_home(dirs::home_dir())
 }
 
 /// Internal implementation that accepts an explicit home directory for testability.
 fn resolve_mcp_os_script_with_home(home: Option<PathBuf>) -> Option<std::path::PathBuf> {
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|repo| repo.join("mcp-servers/os/dist/index.js"));
+    resolve_mcp_os_script_inner(home, dev)
+}
+
+/// Core resolution logic, separated for testability (dev_path can be overridden).
+fn resolve_mcp_os_script_inner(
+    home: Option<PathBuf>,
+    dev_path: Option<PathBuf>,
+) -> Option<std::path::PathBuf> {
     // 1. SPEEDWAVE_RESOURCES_DIR (production — Tauri bundle)
     if let Ok(res) = std::env::var(crate::consts::BUNDLE_RESOURCES_ENV) {
         let p = PathBuf::from(&res)
@@ -122,7 +137,15 @@ fn resolve_mcp_os_script_with_home(home: Option<PathBuf>) -> Option<std::path::P
         log::warn!("mcp-os not found at bundled path: {}", p.display());
     }
 
-    // 2. Marker file (CLI reads Desktop's resources path)
+    // 2. Dev source tree — prefer local sources over marker so `make dev`
+    //    picks up hoisted node_modules from the workspace
+    if let Some(ref p) = dev_path {
+        if p.exists() {
+            return dev_path;
+        }
+    }
+
+    // 3. Marker file (CLI reads Desktop's resources path)
     if let Some(ref home) = home {
         let marker = home
             .join(crate::consts::DATA_DIR)
@@ -140,22 +163,11 @@ fn resolve_mcp_os_script_with_home(home: Option<PathBuf>) -> Option<std::path::P
         }
     }
 
-    // 3. Dev fallback — path baked at compile time via env!(), validated at runtime
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|repo| repo.join("mcp-servers/os/dist/index.js"));
-    match dev {
-        Some(ref p) if p.exists() => dev,
-        Some(ref p) => {
-            log::warn!("mcp-os not found at dev path: {}", p.display());
-            None
-        }
-        None => {
-            log::warn!("mcp-os: could not determine dev path from CARGO_MANIFEST_DIR");
-            None
-        }
+    if let Some(ref p) = dev_path {
+        log::warn!("mcp-os not found at dev path: {}", p.display());
     }
+
+    None
 }
 
 /// Reads the `~/.speedwave/resources-dir` marker file and returns the build-context
@@ -663,7 +675,7 @@ mod tests {
             crate::consts::BUNDLE_RESOURCES_ENV,
             tmp.path().to_string_lossy().as_ref(),
         );
-        let result = resolve_mcp_os_script_with_home(None);
+        let result = resolve_mcp_os_script_inner(None, None);
         assert_eq!(result, Some(script_path));
         std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
     }
@@ -687,8 +699,38 @@ mod tests {
 
         write_resources_marker_to(&fake_resources, &fake_home).unwrap();
 
-        let result = resolve_mcp_os_script_with_home(Some(fake_home));
+        // Pass None as dev_path to test marker fallback in isolation
+        let result = resolve_mcp_os_script_inner(Some(fake_home), None);
         assert_eq!(result, Some(script_path));
+    }
+
+    #[test]
+    fn test_resolve_mcp_os_script_dev_path_beats_marker() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let fake_resources = tmp.path().join("fake-resources");
+        let fake_dev = tmp.path().join("dev-repo");
+
+        // Set up marker script
+        let marker_script = fake_resources
+            .join("mcp-os")
+            .join("os")
+            .join("dist")
+            .join("index.js");
+        std::fs::create_dir_all(marker_script.parent().unwrap()).unwrap();
+        std::fs::write(&marker_script, "// marker").unwrap();
+        write_resources_marker_to(&fake_resources, &fake_home).unwrap();
+
+        // Set up dev script
+        let dev_script = fake_dev.join("mcp-servers/os/dist/index.js");
+        std::fs::create_dir_all(dev_script.parent().unwrap()).unwrap();
+        std::fs::write(&dev_script, "// dev").unwrap();
+
+        let result = resolve_mcp_os_script_inner(Some(fake_home), Some(dev_script.clone()));
+        assert_eq!(result, Some(dev_script), "dev path should win over marker");
     }
 
     #[test]
