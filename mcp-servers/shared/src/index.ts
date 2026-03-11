@@ -62,6 +62,7 @@ export {
   validateParams,
   validateSessionId,
   validateToolName,
+  validateWorkerUrl,
 } from './security.js';
 
 // Session
