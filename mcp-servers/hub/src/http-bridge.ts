@@ -18,7 +18,7 @@
 import { randomUUID } from 'crypto';
 import { buildServiceBridge, getEnabledServices } from './tool-registry.js';
 import { getAuthToken } from './auth-tokens.js';
-import { TIMEOUTS, ts } from '../../shared/dist/index.js';
+import { TIMEOUTS, ts, validateWorkerUrl } from '../../shared/dist/index.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Configuration
@@ -39,7 +39,15 @@ export type ServiceName = (typeof SERVICES)[number];
  * @param service - service name (e.g. 'slack', 'gitlab')
  */
 function getWorkerUrl(service: string): string | undefined {
-  return process.env[`WORKER_${service.toUpperCase()}_URL`] || undefined;
+  const url = process.env[`WORKER_${service.toUpperCase()}_URL`] || undefined;
+  if (!url) return undefined;
+
+  if (!validateWorkerUrl(url)) {
+    console.error(`${ts()} [http-bridge] SSRF protection: rejected worker URL for ${service}`);
+    return undefined;
+  }
+
+  return url;
 }
 
 /**
@@ -144,6 +152,7 @@ export async function isWorkerAvailable(service: string): Promise<boolean> {
 
     const response = await fetch(`${url}/health`, {
       signal: controller.signal,
+      redirect: 'error',
     });
 
     clearTimeout(timeoutId);
@@ -356,6 +365,7 @@ export async function callWorker<T = unknown>(
         },
       }),
       signal: controller.signal,
+      redirect: 'error',
     });
 
     clearTimeout(timeoutId);

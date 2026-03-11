@@ -54,6 +54,20 @@ When implementing any feature, ask these questions:
 - **Container ↔ Container**: per-project network isolation (`speedwave_<project>_network`)
 - **Worker ↔ Worker**: token isolation — each worker has access only to its own service credentials
 
+## SSRF Protection (SEC-015)
+
+The MCP Hub HTTP bridge validates all outbound worker URLs at the single resolution
+point (`getWorkerUrl()`) before any `fetch()` call:
+
+- **Canonical URL allowlist**: Only Docker internal service names (`mcp-*`) and
+  platform host gateways (`host.{lima,docker,containers,speedwave}.internal`) are accepted
+- **Port enforcement**: Port must be present and in range 1-65535
+- **Protocol enforcement**: Only `http:` (internal Docker network, no TLS needed)
+- **No pathname/query**: Worker URLs must be bare endpoints
+- **Redirect blocking**: All `fetch()` calls use `redirect: 'error'`
+
+Invalid URLs are treated as unconfigured services (fail-closed).
+
 ## See Also
 
 - [ADR-009: Per-Project Isolation Preserved](../adr/ADR-009-per-project-isolation-preserved.md)
