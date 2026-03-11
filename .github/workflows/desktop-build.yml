@@ -2,7 +2,7 @@ name: Desktop Build
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, dev]
     paths:
       - "desktop/**"
       - "crates/**"
@@ -11,7 +11,7 @@ on:
       - ".node-version"
       - ".github/actions/download-nodejs/**"
   push:
-    branches: [main]
+    branches: [main, dev]
     paths:
       - "desktop/**"
       - "crates/**"
