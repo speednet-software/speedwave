@@ -936,4 +936,27 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn test_load_corrupt_config_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        std::fs::write(&config_path, "{{not valid json!!!").unwrap();
+
+        let result = load_user_config_from(&config_path);
+        assert!(
+            result.is_err(),
+            "corrupt config should return an error, not silently default"
+        );
+    }
+
+    #[test]
+    fn test_load_missing_config_returns_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("nonexistent-config.json");
+
+        let result = load_user_config_from(&config_path).unwrap();
+        assert!(result.projects.is_empty());
+        assert!(result.active_project.is_none());
+    }
 }

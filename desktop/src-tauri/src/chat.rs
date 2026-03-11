@@ -168,19 +168,16 @@ impl ChatSession {
         }
 
         let rt = runtime::detect_runtime();
-        let user_config = config::load_user_config().unwrap_or_default();
+        let user_config = config::load_user_config()?;
 
         let project_dir = user_config
             .projects
             .iter()
             .find(|p| p.name == self.project_name)
             .map(|p| std::path::PathBuf::from(&p.dir))
-            .unwrap_or_else(|| {
-                dirs::home_dir()
-                    .unwrap_or_default()
-                    .join("projects")
-                    .join(&self.project_name)
-            });
+            .ok_or_else(|| {
+                anyhow::anyhow!("project '{}' not found in config", self.project_name)
+            })?;
 
         let resolved =
             config::resolve_claude_config(&project_dir, &user_config, &self.project_name);
