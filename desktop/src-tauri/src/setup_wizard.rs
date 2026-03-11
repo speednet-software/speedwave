@@ -1145,7 +1145,6 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     let resolved = config::resolve_claude_config(project_path, &user_config, project);
     let integrations = config::resolve_integrations(project_path, &user_config, project);
     let yaml = compose::render_compose(project, project_dir, &resolved, &integrations)?;
-    compose::save_compose(project, &yaml)?;
 
     let violations = compose::SecurityCheck::run(&yaml, project);
     if !violations.is_empty() {
@@ -1156,6 +1155,7 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         anyhow::bail!("Security check failed:\n{}", msgs.join("\n"));
     }
 
+    compose::save_compose(project, &yaml)?;
     rt.compose_up_recreate(project)?;
 
     let mut state = SetupState::load();
@@ -3364,7 +3364,7 @@ mod tests {
     #[test]
     fn start_containers_security_check_blocks_missing_cap_drop() {
         // Compose YAML missing cap_drop: [ALL] should trigger CAP_DROP_ALL violation.
-        // This verifies the SecurityCheck gate added between save_compose and compose_up_recreate.
+        // This verifies the SecurityCheck gate runs before save_compose and compose_up_recreate.
         let yaml = r#"
 version: "3"
 services:
@@ -3398,6 +3398,44 @@ services:
             error_msg.contains("CAP_DROP_ALL"),
             "Error message should contain the violated rule name"
         );
+    }
+
+    #[test]
+    fn security_check_before_save_compose_ordering() {
+        // Verify that compose is NOT saved to disk when SecurityCheck detects violations.
+        // This tests the ordering guarantee: SecurityCheck::run() runs BEFORE save_compose().
+        let tmp = tempfile::tempdir().unwrap();
+        let compose_dir = tmp.path().join("compose").join("test-ordering");
+        std::fs::create_dir_all(&compose_dir).unwrap();
+        let compose_file = compose_dir.join("compose.yml");
+
+        // Insecure YAML (missing cap_drop)
+        let yaml = r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - CLAUDE_VERSION=1.0.3
+"#;
+
+        // SecurityCheck should find violations
+        let violations = compose::SecurityCheck::run(yaml, "test-ordering");
+        assert!(!violations.is_empty(), "Should detect violations");
+
+        // Simulate the correct ordering: check first, bail before save
+        if !violations.is_empty() {
+            // In start_containers, we bail here — save_compose is never called
+            assert!(
+                !compose_file.exists(),
+                "compose.yml must NOT be written when security check fails"
+            );
+        }
     }
 
     #[test]

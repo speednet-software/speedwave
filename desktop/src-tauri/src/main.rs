@@ -366,9 +366,9 @@ fn get_selected_ide() -> Result<Option<speedwave_runtime::config::SelectedIde>, 
 
 use diagnostics::export_diagnostics;
 use logging_cmd::{cleanup_old_logs, get_log_level, parse_log_level, set_log_level};
-use window::{
-    hide_main_window, should_debounce, should_prevent_close, should_run_cleanup, show_main_window,
-};
+#[cfg(not(target_os = "linux"))]
+use window::should_debounce;
+use window::{hide_main_window, should_prevent_close, should_run_cleanup, show_main_window};
 
 // ---------------------------------------------------------------------------
 // Application entry point
