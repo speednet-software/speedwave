@@ -44,4 +44,4 @@ Use the next available number and follow the naming convention:
 ADR-NNN-short-kebab-case-title.md
 ```
 
-Then add the new entry to the index table above. See [ADR Writing Standards](../../CLAUDE.md#adr-writing-standards) for the footnotes requirement — every factual claim must have a source URL.
+Then add the new entry to the index table above. See [ADR Writing Standards](../../.claude/rules/documentation.md#adr-writing-standards) for the footnotes requirement — every factual claim must have a source URL.
