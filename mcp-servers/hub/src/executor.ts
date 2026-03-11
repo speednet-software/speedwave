@@ -26,7 +26,7 @@
 
 import { IToolResult, ToolCategory } from './hub-types.js';
 import { tokenizePII, detokenizePII, createPIIContext, PIIContext } from './pii-tokenizer.js';
-import { AllBridges, initializeAllBridges, getBridgeStatus, callWorker } from './http-bridge.js';
+import { type AllBridges, initializeAllBridges, callWorker } from './http-bridge.js';
 import { TIMEOUTS, ts } from '../../shared/dist/index.js';
 import { addAutoReturn } from './auto-return.js';
 import {
@@ -53,7 +53,6 @@ import {
 // Global Bridge State
 //═══════════════════════════════════════════════════════════════════════════════
 
-let bridges: AllBridges | null = null;
 let bridgesInitialized = false;
 
 /**
@@ -65,7 +64,7 @@ export async function initializeBridges(): Promise<void> {
   if (bridgesInitialized) return;
 
   try {
-    bridges = await initializeAllBridges();
+    await initializeAllBridges();
     bridgesInitialized = true;
   } catch (error) {
     console.error(`${ts()} Failed to initialize HTTP bridges:`, error);
@@ -78,17 +77,7 @@ export async function initializeBridges(): Promise<void> {
  * @param testBridges - Bridge instances to use for testing, or null to clear
  */
 export function _setBridgesForTesting(testBridges: AllBridges | null): void {
-  bridges = testBridges;
   bridgesInitialized = testBridges !== null;
-}
-
-/**
- * Get bridge status for health checks
- * @returns Object mapping service names to their availability status (null = unknown)
- */
-export function getWorkerStatus(): Record<string, boolean | null> {
-  if (!bridges) return {};
-  return getBridgeStatus(bridges);
 }
 
 /**

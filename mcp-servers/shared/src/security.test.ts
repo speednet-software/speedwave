@@ -325,7 +325,7 @@ describe('security', () => {
       expect(validateToolName(longName)).toBe(false);
     });
 
-    it('accepts names exactly 100 characters', () => {
+    it('accepts names at max length (99 characters)', () => {
       const exactName = 'a'.repeat(99);
       expect(validateToolName(exactName)).toBe(true);
     });
@@ -456,6 +456,10 @@ describe('security', () => {
 
     it('rejects URL with auth credentials', () => {
       expect(validateWorkerUrl('http://user:pass@mcp-slack:4001')).toBe(false);
+    });
+
+    it('rejects URL with fragment', () => {
+      expect(validateWorkerUrl('http://mcp-slack:4001#frag')).toBe(false);
     });
   });
 });

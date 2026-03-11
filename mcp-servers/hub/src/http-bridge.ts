@@ -520,28 +520,3 @@ export async function initializeAllBridges(): Promise<AllBridges> {
 
   return bridges;
 }
-
-/**
- * Get bridge status (checks current worker availability)
- * @returns Object mapping service names to their availability status
- */
-export async function getBridgeStatusAsync(): Promise<Record<string, boolean>> {
-  const statusChecks = await Promise.all(SERVICES.map((s) => isWorkerAvailable(s)));
-  return Object.fromEntries(SERVICES.map((s, i) => [s, statusChecks[i]]));
-}
-
-/**
- * Get bridge status (synchronous, uses cached status)
- * @deprecated Use getBridgeStatusAsync for accurate status
- * @param _bridges - Bridges object (unused)
- * @returns Object mapping service names to their cached availability (null if unknown)
- */
-export function getBridgeStatus(_bridges: AllBridges): Record<string, boolean | null> {
-  const result: Record<string, boolean | null> = {};
-  for (const service of getConfiguredServices()) {
-    const cached = workerStatusCache.get(service);
-    // Return null when status unknown (no cache), false when unavailable, true when available
-    result[service] = cached?.available ?? null;
-  }
-  return result;
-}
