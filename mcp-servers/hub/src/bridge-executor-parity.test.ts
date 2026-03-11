@@ -18,7 +18,6 @@ import {
   createSharePointBridge,
   createRedmineBridge,
   createGitLabBridge,
-  createGeminiBridge,
   createOsBridge,
 } from './http-bridge.js';
 import {
@@ -43,7 +42,7 @@ describe('Bridge-Executor Parity (SSOT)', () => {
     });
 
     it('should contain all expected services', () => {
-      const expectedServices = ['slack', 'sharepoint', 'redmine', 'gitlab', 'gemini', 'os'];
+      const expectedServices = ['slack', 'sharepoint', 'redmine', 'gitlab', 'os'];
       for (const service of expectedServices) {
         expect(SERVICE_NAMES).toContain(service);
         expect(TOOL_REGISTRY[service]).toBeDefined();
@@ -73,12 +72,6 @@ describe('Bridge-Executor Parity (SSOT)', () => {
     it('GitLab bridge should match registry', () => {
       const bridgeMethods = getBridgeMethods(createGitLabBridge()).sort();
       const registryMethods = getServiceMethods('gitlab').sort();
-      expect(bridgeMethods).toEqual(registryMethods);
-    });
-
-    it('Gemini bridge should match registry', () => {
-      const bridgeMethods = getBridgeMethods(createGeminiBridge()).sort();
-      const registryMethods = getServiceMethods('gemini').sort();
       expect(bridgeMethods).toEqual(registryMethods);
     });
 
@@ -121,7 +114,6 @@ describe('Bridge-Executor Parity (SSOT)', () => {
         sharepoint: createSharePointBridge(),
         redmine: createRedmineBridge(),
         gitlab: createGitLabBridge(),
-        gemini: createGeminiBridge(),
         os: createOsBridge(),
       };
 

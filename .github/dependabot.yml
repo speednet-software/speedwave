@@ -128,12 +128,3 @@ updates:
     open-pull-requests-limit: 3
     labels:
       - dependencies
-
-  - package-ecosystem: docker
-    directory: /mcp-servers/gemini
-    target-branch: dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 3
-    labels:
-      - dependencies

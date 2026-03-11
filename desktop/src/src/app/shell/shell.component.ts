@@ -19,11 +19,15 @@ import { UpdateNotificationComponent } from '../update-notification/update-notif
     <div class="app-layout">
       <app-update-notification />
       <header class="app-header">
-        <span class="app-title">Speedwave</span>
+        <span class="app-title" data-testid="shell-title">Speedwave</span>
         <nav class="app-nav">
-          <a routerLink="/chat" routerLinkActive="active">Chat</a>
-          <a routerLink="/integrations" routerLinkActive="active">Integrations</a>
-          <a routerLink="/settings" routerLinkActive="active">Settings</a>
+          <a routerLink="/chat" routerLinkActive="active" data-testid="nav-chat">Chat</a>
+          <a routerLink="/integrations" routerLinkActive="active" data-testid="nav-integrations"
+            >Integrations</a
+          >
+          <a routerLink="/settings" routerLinkActive="active" data-testid="nav-settings"
+            >Settings</a
+          >
         </nav>
         <app-project-switcher />
       </header>

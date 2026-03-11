@@ -30,7 +30,7 @@ export interface SearchToolsParams {
   query: string;
   /** Level of detail to return: names_only, with_descriptions, or full_schema */
   detailLevel: 'names_only' | 'with_descriptions' | 'full_schema';
-  /** Optional service name to filter results (slack, sharepoint, redmine, gitlab, gemini) */
+  /** Optional service name to filter results (slack, sharepoint, redmine, gitlab) */
   service?: string;
   /** Include deferred tools in results (default: true). Set false to get only core tools. */
   includeDeferred?: boolean;

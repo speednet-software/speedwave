@@ -8,11 +8,11 @@ Speedwave uses an open-core model: Apache-2.0-licensed core with proprietary add
 
 **Open-core split:**
 
-| Layer                                                                                           | License            | Repository              |
-| ----------------------------------------------------------------------------------------------- | ------------------ | ----------------------- |
-| Speedwave core (hub, slack, gitlab, redmine, sharepoint, gemini, mcp-os, runtime, CLI, Desktop) | MIT                | Public GitHub           |
-| Presale addon                                                                                   | Proprietary        | Private repo (Speednet) |
-| Future addons (e.g. JIRA, SAP)                                                                  | Proprietary / paid | Separate private repos  |
+| Layer                                                                                   | License            | Repository              |
+| --------------------------------------------------------------------------------------- | ------------------ | ----------------------- |
+| Speedwave core (hub, slack, gitlab, redmine, sharepoint, mcp-os, runtime, CLI, Desktop) | MIT                | Public GitHub           |
+| Presale addon                                                                           | Proprietary        | Private repo (Speednet) |
+| Future addons (e.g. JIRA, SAP)                                                          | Proprietary / paid | Separate private repos  |
 
 This model is identical to GitLab CE/EE[^29] and Metabase[^30] — MIT core for maximum adoption, proprietary extensions for monetization.
 

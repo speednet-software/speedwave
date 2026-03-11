@@ -78,6 +78,8 @@ impl ContainerRuntime for NerdctlRuntime {
     fn container_exec(&self, container: &str, cmd: &[&str]) -> Command {
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
         let nerdctl = crate::binary::resolve_binary("nerdctl");
+        // Raw Command::new — intentionally bypasses binary::command() because
+        // interactive TTY sessions need a console window on Windows.
         let mut command = Command::new(&nerdctl);
         command.args([
             "exec",
@@ -96,8 +98,7 @@ impl ContainerRuntime for NerdctlRuntime {
 
     fn container_exec_piped(&self, container: &str, cmd: &[&str]) -> anyhow::Result<Command> {
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
-        let nerdctl = crate::binary::resolve_binary("nerdctl");
-        let mut command = Command::new(&nerdctl);
+        let mut command = crate::binary::command("nerdctl");
         command.args(["exec", "-i", "-e", &path_env, container]);
         command.args(cmd);
         Ok(command)
@@ -161,6 +162,12 @@ impl ContainerRuntime for NerdctlRuntime {
         Ok(())
     }
 
+    fn system_prune(&self) -> anyhow::Result<()> {
+        self.runner
+            .run("nerdctl", &["system", "prune", "--force"])?;
+        Ok(())
+    }
+
     fn ensure_ready(&self) -> anyhow::Result<()> {
         // (1) Check uidmap (required for rootless nerdctl)
         // Use `command -v` — newuidmap has no --help flag and exits non-zero on any invocation
@@ -192,12 +199,24 @@ impl ContainerRuntime for NerdctlRuntime {
         }
 
         // (3) Check containerd is running
-        self.runner.run("nerdctl", &["info"]).map_err(|_| {
+        let info_output = self.runner.run("nerdctl", &["info"]).map_err(|_| {
             anyhow::anyhow!(
                 "containerd is not running. Start it with: \
                      systemctl --user start containerd"
             )
         })?;
+
+        // (4) Verify rootless mode — Speedwave requires rootless nerdctl on Linux.
+        // In rootless mode, containers run inside a user namespace where UID 0
+        // maps to the host user's UID. If rootful nerdctl is detected, UID 0
+        // in containers would be real root on the host — a security risk.
+        if !info_output.contains("rootless") {
+            anyhow::bail!(
+                "Speedwave requires rootless nerdctl on Linux. \
+                 Detected rootful containerd — containers would run as real root. \
+                 Set up rootless containerd: containerd-rootless-setuptool.sh install"
+            );
+        }
 
         Ok(())
     }
@@ -284,7 +303,10 @@ mod tests {
                 "usage: newuidmap ...",
             )
             .with_response("nerdctl --version", "nerdctl version 2.0.3")
-            .with_response("nerdctl info", "containerd: running");
+            .with_response(
+                "nerdctl info",
+                "containerd: running\nSecurity Options: rootless",
+            );
         let rt = NerdctlRuntime::with_runner(Box::new(runner));
         assert!(rt.ensure_ready().is_ok());
     }
@@ -307,6 +329,42 @@ mod tests {
             "error should mention containerd, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_ensure_ready_rootful_rejected() {
+        let runner = MockRunner::new()
+            .with_response(
+                "sh -c command -v newuidmap >/dev/null 2>&1",
+                "usage: newuidmap ...",
+            )
+            .with_response("nerdctl --version", "nerdctl version 2.0.3")
+            .with_response("nerdctl info", "Server Version: 2.0.3\nDriver: overlayfs");
+        let rt = NerdctlRuntime::with_runner(Box::new(runner));
+        let result = rt.ensure_ready();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("rootless"),
+            "error should mention rootless, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_ensure_ready_rootless_accepted() {
+        let runner = MockRunner::new()
+            .with_response(
+                "sh -c command -v newuidmap >/dev/null 2>&1",
+                "usage: newuidmap ...",
+            )
+            .with_response("nerdctl --version", "nerdctl version 2.0.3")
+            .with_response(
+                "nerdctl info",
+                "Server Version: 2.0.3\nSecurity Options: rootless\nDriver: overlayfs",
+            );
+        let rt = NerdctlRuntime::with_runner(Box::new(runner));
+        assert!(rt.ensure_ready().is_ok());
     }
 
     #[test]
@@ -530,6 +588,22 @@ mod tests {
         let rt = NerdctlRuntime::with_runner(Box::new(runner));
         let logs = rt.compose_logs("acme", 200).unwrap();
         assert_eq!(logs, "hub | started\nclaude | ready");
+    }
+
+    #[test]
+    fn test_system_prune() {
+        let runner = MockRunner::new().with_response("nerdctl system prune --force", "");
+        let rt = NerdctlRuntime::with_runner(Box::new(runner));
+        assert!(rt.system_prune().is_ok());
+    }
+
+    #[test]
+    fn test_system_prune_propagates_error() {
+        let runner = MockRunner::new().with_error("nerdctl system prune --force", "prune failed");
+        let rt = NerdctlRuntime::with_runner(Box::new(runner));
+        let result = rt.system_prune();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("prune failed"));
     }
 
     #[test]

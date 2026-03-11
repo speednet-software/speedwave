@@ -36,7 +36,7 @@ interface AuthStatusResponse {
       <h1>Settings</h1>
 
       @if (error) {
-        <div class="error-banner">{{ error }}</div>
+        <div class="error-banner" data-testid="settings-error">{{ error }}</div>
       }
 
       <!-- Active project info -->
@@ -45,7 +45,9 @@ interface AuthStatusResponse {
         <div class="info-card">
           <div class="info-row">
             <span class="info-label">Active project</span>
-            <span class="info-value">{{ activeProject || 'None' }}</span>
+            <span class="info-value" data-testid="settings-active-project">{{
+              activeProject || 'None'
+            }}</span>
           </div>
           <div class="info-row">
             <span class="info-label">Directory</span>
@@ -64,7 +66,12 @@ interface AuthStatusResponse {
         <div class="info-card">
           <div class="form-row">
             <label class="form-label" for="llm-provider">Provider</label>
-            <select id="llm-provider" [(ngModel)]="llmProvider" class="form-select">
+            <select
+              id="llm-provider"
+              [(ngModel)]="llmProvider"
+              class="form-select"
+              data-testid="settings-llm-provider"
+            >
               <option value="anthropic">Anthropic (default)</option>
               <option value="ollama">Ollama (local)</option>
               <option value="external">External (LiteLLM proxy)</option>
@@ -78,6 +85,7 @@ interface AuthStatusResponse {
               [(ngModel)]="llmModel"
               [placeholder]="modelPlaceholder()"
               class="form-input"
+              data-testid="settings-llm-model"
             />
           </div>
           @if (llmProvider === 'ollama' || llmProvider === 'external') {
@@ -89,6 +97,7 @@ interface AuthStatusResponse {
                 [(ngModel)]="llmBaseUrl"
                 placeholder="http://host.docker.internal:11434"
                 class="form-input"
+                data-testid="settings-llm-base-url"
               />
             </div>
           }
@@ -101,15 +110,21 @@ interface AuthStatusResponse {
                 [(ngModel)]="llmApiKeyEnv"
                 placeholder="OPENAI_API_KEY"
                 class="form-input"
+                data-testid="settings-llm-api-key-env"
               />
             </div>
           }
           <div class="form-actions">
-            <button class="btn-save" (click)="saveLlmConfig()" [disabled]="llmSaving">
+            <button
+              class="btn-save"
+              data-testid="settings-llm-save"
+              (click)="saveLlmConfig()"
+              [disabled]="llmSaving"
+            >
               {{ llmSaving ? 'Saving...' : 'Save' }}
             </button>
             @if (llmSaved) {
-              <span class="save-feedback">Saved!</span>
+              <span class="save-feedback" data-testid="settings-llm-saved">Saved!</span>
             }
           </div>
           <p class="note">Changes take effect on next container restart.</p>
@@ -135,7 +150,12 @@ interface AuthStatusResponse {
             </div>
             <div class="form-row">
               <label class="form-label" for="auth-method">Method</label>
-              <select id="auth-method" [(ngModel)]="authMethod" class="form-select">
+              <select
+                id="auth-method"
+                [(ngModel)]="authMethod"
+                class="form-select"
+                data-testid="settings-auth-method"
+              >
                 <option value="api_key">API Key</option>
                 <option value="oauth">Login via claude.ai</option>
               </select>
@@ -149,17 +169,24 @@ interface AuthStatusResponse {
                   [(ngModel)]="apiKeyInput"
                   placeholder="sk-ant-..."
                   class="form-input"
+                  data-testid="settings-api-key"
                 />
               </div>
               <div class="form-actions">
                 <button
                   class="btn-save"
+                  data-testid="settings-api-key-save"
                   (click)="saveApiKey()"
                   [disabled]="apiKeySaving || !apiKeyInput"
                 >
                   {{ apiKeySaving ? 'Saving...' : 'Save Key' }}
                 </button>
-                <button class="btn-cancel" (click)="deleteApiKey()" [disabled]="!apiKeyConfigured">
+                <button
+                  class="btn-cancel"
+                  data-testid="settings-api-key-remove"
+                  (click)="deleteApiKey()"
+                  [disabled]="!apiKeyConfigured"
+                >
                   Remove Key
                 </button>
                 @if (apiKeySaved) {
@@ -229,6 +256,7 @@ interface AuthStatusResponse {
           <div class="form-actions">
             <button
               class="btn-save"
+              data-testid="settings-check-update"
               (click)="checkForUpdate()"
               [disabled]="updateChecking || updateInstalling"
             >
@@ -239,9 +267,24 @@ interface AuthStatusResponse {
             }
             @if (updateResult === 'available') {
               <span class="update-available">v{{ updateAvailableVersion }} available</span>
-              <button class="btn-restart" (click)="installUpdate()" [disabled]="updateInstalling">
-                {{ updateInstalling ? 'Installing...' : 'Install & Restart' }}
-              </button>
+              @if (isLinux) {
+                <button
+                  class="btn-restart"
+                  data-testid="settings-download-update"
+                  (click)="openReleasesPage()"
+                >
+                  Download v{{ updateAvailableVersion }}
+                </button>
+              } @else {
+                <button
+                  class="btn-restart"
+                  data-testid="settings-install-update"
+                  (click)="installUpdate()"
+                  [disabled]="updateInstalling"
+                >
+                  {{ updateInstalling ? 'Installing...' : 'Install & Restart' }}
+                </button>
+              }
             }
           </div>
           @if (updateInstallError) {
@@ -261,6 +304,7 @@ interface AuthStatusResponse {
           <div class="form-actions">
             <button
               class="btn-save"
+              data-testid="settings-update-containers"
               (click)="updateContainers()"
               [disabled]="containerUpdating || !activeProject"
             >
@@ -268,6 +312,7 @@ interface AuthStatusResponse {
             </button>
             <button
               class="btn-cancel"
+              data-testid="settings-rollback"
               (click)="rollbackContainers()"
               [disabled]="containerUpdating || !containerUpdateDone || !activeProject"
             >
@@ -302,6 +347,7 @@ interface AuthStatusResponse {
               [ngModel]="logLevel"
               (ngModelChange)="setLogLevel($event)"
               class="form-select"
+              data-testid="settings-log-level"
             >
               <option value="error">Error</option>
               <option value="warn">Warn</option>
@@ -317,6 +363,7 @@ interface AuthStatusResponse {
           <div class="form-actions">
             <button
               class="btn-save"
+              data-testid="settings-export-diagnostics"
               (click)="exportDiagnostics()"
               [disabled]="diagnosticsExporting || !activeProject"
             >
@@ -352,15 +399,30 @@ interface AuthStatusResponse {
           </div>
           <div class="danger-actions">
             @if (!confirmReset) {
-              <button class="btn-danger" (click)="confirmReset = true" [disabled]="resetting">
+              <button
+                class="btn-danger"
+                data-testid="settings-reset-btn"
+                (click)="confirmReset = true"
+                [disabled]="resetting"
+              >
                 Reset
               </button>
             } @else {
               <div class="confirm-actions">
-                <button class="btn-danger" (click)="resetEnvironment()" [disabled]="resetting">
+                <button
+                  class="btn-danger"
+                  data-testid="settings-confirm-reset"
+                  (click)="resetEnvironment()"
+                  [disabled]="resetting"
+                >
                   {{ resetting ? 'Resetting...' : 'Confirm Reset' }}
                 </button>
-                <button class="btn-cancel" (click)="confirmReset = false" [disabled]="resetting">
+                <button
+                  class="btn-cancel"
+                  data-testid="settings-cancel-reset"
+                  (click)="confirmReset = false"
+                  [disabled]="resetting"
+                >
                   Cancel
                 </button>
               </div>
@@ -635,6 +697,7 @@ export class SettingsComponent implements OnInit {
   updateResult: 'none' | 'up-to-date' | 'available' = 'none';
   updateAvailableVersion = '';
   updateInstalling = false;
+  isLinux = false;
   updateInstallError = '';
   containerUpdating = false;
   containerUpdateDone = false;
@@ -654,6 +717,7 @@ export class SettingsComponent implements OnInit {
     this.loadCurrentVersion();
     this.loadUpdateSettings();
     this.loadLogLevel();
+    this.detectPlatform();
   }
 
   private async loadProjectInfo(): Promise<void> {
@@ -871,6 +935,28 @@ export class SettingsComponent implements OnInit {
     }
     this.updateInstalling = false;
     this.cdr.markForCheck();
+  }
+
+  /** Detects the current platform for platform-specific UI. */
+  private async detectPlatform(): Promise<void> {
+    try {
+      const platform = await this.tauri.invoke<string>('get_platform');
+      this.isLinux = platform === 'linux';
+      this.cdr.markForCheck();
+    } catch {
+      // Not running inside Tauri
+    }
+  }
+
+  /** Opens the GitHub Releases page for manual download (Linux .deb). */
+  async openReleasesPage(): Promise<void> {
+    try {
+      await this.tauri.invoke('open_url', {
+        url: 'https://github.com/speednet-software/speedwave/releases',
+      });
+    } catch {
+      // Fallback: not running inside Tauri
+    }
   }
 
   /** Rebuilds images and recreates containers for the active project. */

@@ -26,8 +26,9 @@ LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
 
 .PHONY: all build test check clean dev install-deps setup-dev install-hooks \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
-        build-swift build-os-cli \
+        build-native-macos build-os-cli \
         test-rust test-cli test-desktop test-angular test-mcp test-os test-e2e test-entrypoint test-desktop-build \
+        test-e2e-desktop _e2e-macos _e2e-linux _e2e-windows test-e2e-all setup-e2e-vms \
         check-clippy check-desktop-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
         coverage coverage-rust coverage-mcp coverage-html \
@@ -187,9 +188,10 @@ build-cli:
 build-desktop:
 	cd desktop/src-tauri && cargo build
 
-build-tauri: build-cli build-angular download-nodejs
+build-tauri: build-cli build-angular build-mcp download-nodejs
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) download-lima; fi
 	@if [ "$$(uname)" = "Linux" ]; then $(MAKE) download-nerdctl-full; fi
+	@scripts/bundle-build-context.sh
 	mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
@@ -199,18 +201,18 @@ endif
 	cd desktop/src-tauri && cargo tauri build
 	@echo "\n✅ Tauri production bundle built"
 
-# ── Swift / native OS CLI builds ─────────────────────────────────────────────
+# ── Native OS CLI builds (macOS: Swift, Linux/Windows: Rust — planned) ───────
 
-build-swift:
-	@if [ "$$(uname)" != "Darwin" ]; then echo "⬚  Skipping Swift build (not macOS)"; exit 0; fi
-	@echo "🔨 Building Swift CLI binaries..."
-	cd swift-reminders && swift build -c release
-	cd swift-calendar && swift build -c release
-	cd swift-mail && swift build -c release
-	cd swift-notes && swift build -c release
-	@echo "✅ Swift CLI binaries built"
+build-native-macos:
+	@if [ "$$(uname)" != "Darwin" ]; then echo "⬚  Skipping macOS native build (not macOS)"; exit 0; fi
+	@echo "🔨 Building macOS native CLI binaries..."
+	cd native/macos/reminders && swift build -c release
+	cd native/macos/calendar && swift build -c release
+	cd native/macos/mail && swift build -c release
+	cd native/macos/notes && swift build -c release
+	@echo "✅ macOS native CLI binaries built"
 
-build-os-cli: build-swift
+build-os-cli: build-native-macos
 
 # ── MCP servers ──────────────────────────────────────────────────────────────
 
@@ -259,7 +261,7 @@ test-mcp: build-mcp
 	cd mcp-servers && npm test
 	@echo "✅ MCP server tests passed"
 
-test-os:
+test-os: build-mcp
 	cd mcp-servers/os && npx vitest run
 	@echo "✅ OS MCP server tests passed"
 
@@ -311,6 +313,113 @@ test-desktop-build: build-angular build-mcp
 	bats _tests/desktop/bundle-build-context.bats
 	@echo "✅ Desktop build tests passed"
 
+# ── Desktop E2E tests ────────────────────────────────────────────────────────
+# Per-platform: builds debug binary and runs WebdriverIO E2E tests.
+# App embeds tauri-plugin-webdriver on port 4445 — no external driver needed.
+
+# Build only: download deps, compile CLI + MCP + Tauri binary. No test run.
+# Used by e2e-vm.sh (build as root, test as desktop user with display access).
+test-e2e-desktop-build: build-cli build-mcp
+	@if [ "$$(uname)" = "Darwin" ] && [ ! -f desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
+	@if [ "$$(uname)" = "Linux" ] && [ ! -d desktop/src-tauri/nerdctl-full ]; then $(MAKE) download-nerdctl-full; fi
+	@if [ ! -f desktop/src-tauri/nodejs/bin/node ] && [ ! -f desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
+	@scripts/bundle-build-context.sh
+	@mkdir -p desktop/src-tauri/cli
+	@cargo build -p speedwave-cli --release
+	@cp target/release/speedwave desktop/src-tauri/cli/speedwave 2>/dev/null || \
+	  cp target/release/speedwave.exe desktop/src-tauri/cli/speedwave.exe 2>/dev/null || true
+	@echo "── Building release binary with bundle (e2e feature = WebDriver on :4445)..."
+	cd desktop/src-tauri && cargo tauri build --features e2e $(if $(TAURI_SIGNING_PRIVATE_KEY),,--no-sign)
+	@echo "── Installing E2E deps..."
+	cd desktop/e2e && npm install --prefer-offline
+
+# Full E2E: build + run tests using the installed app artifact.
+test-e2e-desktop: test-e2e-desktop-build
+	@echo "── Running E2E specs..."
+	@$(MAKE) _e2e-run
+	@echo "✅ Desktop E2E tests passed"
+
+E2E_BINARY = desktop/src-tauri/target/release/speedwave-desktop
+
+# All platforms: app embeds tauri-plugin-webdriver on port 4445.
+# Launch app, wait for WebDriver ready, run wdio, cleanup.
+#
+# Moves ALL Speedwave state aside so the app sees a completely fresh system,
+# then restores everything after the test (success or failure, including Ctrl-C).
+#
+# State directories per platform:
+#   macOS:  ~/.speedwave/, ~/Library/Caches/lima/
+#   Linux:  ~/.speedwave/, ~/.local/share/{containerd,buildkit,nerdctl}/,
+#           ~/.config/systemd/user/containerd.service
+#   Windows: not supported for local E2E (use scripts/e2e-vm.sh windows)
+_e2e-run:
+	@echo "── Killing any existing Speedwave instances..."
+	@pkill -f speedwave-desktop 2>/dev/null || true
+	@pkill -f 'mcp-os.*index.js' 2>/dev/null || true
+	@pkill -9 -f limactl 2>/dev/null || true
+	@if [ "$$(uname)" = "Linux" ]; then \
+		systemctl --user stop containerd 2>/dev/null || true; \
+	fi
+	@sleep 1
+	@mkdir -p /tmp/speedwave-e2e-project
+	@E2E_BAK=$$HOME/.speedwave.e2e-bak; \
+	backup_dir() { \
+		if [ -d "$$1" ]; then rm -rf "$$2"; mv "$$1" "$$2"; fi; \
+	}; \
+	restore_dir() { \
+		if [ -d "$$2" ]; then rm -rf "$$1" 2>/dev/null || true; mv "$$2" "$$1"; fi; \
+	}; \
+	backup_dir "$$HOME/.speedwave" "$$E2E_BAK"; \
+	if [ "$$(uname)" = "Darwin" ]; then \
+		backup_dir "$$HOME/Library/Caches/lima" "$$HOME/Library/Caches/lima.e2e-bak"; \
+	elif [ "$$(uname)" = "Linux" ]; then \
+		backup_dir "$$HOME/.local/share/containerd" "$$HOME/.local/share/containerd.e2e-bak"; \
+		backup_dir "$$HOME/.local/share/buildkit" "$$HOME/.local/share/buildkit.e2e-bak"; \
+		backup_dir "$$HOME/.local/share/nerdctl" "$$HOME/.local/share/nerdctl.e2e-bak"; \
+		if [ -f "$$HOME/.config/systemd/user/containerd.service" ]; then \
+			mv "$$HOME/.config/systemd/user/containerd.service" "$$HOME/.config/systemd/user/containerd.service.e2e-bak"; \
+		fi; \
+	fi; \
+	restore_state() { \
+		pkill -f speedwave-desktop 2>/dev/null || true; \
+		pkill -f 'mcp-os.*index.js' 2>/dev/null || true; \
+		pkill -9 -f limactl 2>/dev/null || true; \
+		if [ "$$(uname)" = "Linux" ]; then \
+			systemctl --user stop containerd 2>/dev/null || true; \
+		fi; \
+		sleep 1; \
+		restore_dir "$$HOME/.speedwave" "$$E2E_BAK"; \
+		if [ "$$(uname)" = "Darwin" ]; then \
+			restore_dir "$$HOME/Library/Caches/lima" "$$HOME/Library/Caches/lima.e2e-bak"; \
+		elif [ "$$(uname)" = "Linux" ]; then \
+			restore_dir "$$HOME/.local/share/containerd" "$$HOME/.local/share/containerd.e2e-bak"; \
+			restore_dir "$$HOME/.local/share/buildkit" "$$HOME/.local/share/buildkit.e2e-bak"; \
+			restore_dir "$$HOME/.local/share/nerdctl" "$$HOME/.local/share/nerdctl.e2e-bak"; \
+			if [ -f "$$HOME/.config/systemd/user/containerd.service.e2e-bak" ]; then \
+				mv "$$HOME/.config/systemd/user/containerd.service.e2e-bak" "$$HOME/.config/systemd/user/containerd.service"; \
+			fi; \
+			systemctl --user daemon-reload 2>/dev/null || true; \
+			systemctl --user start containerd 2>/dev/null || true; \
+		fi; \
+	}; \
+	$(E2E_BINARY) & APP_PID=$$!; \
+	trap "kill $$APP_PID 2>/dev/null; restore_state" EXIT; \
+	for i in $$(seq 1 30); do curl -sf http://127.0.0.1:4445/status >/dev/null 2>&1 && break; sleep 1; done; \
+	cd desktop/e2e && E2E_PROJECT_DIR=/tmp/speedwave-e2e-project npx wdio run wdio.conf.ts; \
+	E2E_EXIT=$$?; \
+	kill $$APP_PID 2>/dev/null; \
+	restore_state; \
+	trap - EXIT; \
+	exit $$E2E_EXIT
+
+# Run E2E on all platforms via SSH to dedicated test machines (Tailscale network)
+test-e2e-all:
+	@scripts/e2e-vm.sh all
+
+# Provision test machines for E2E testing (one-time setup)
+setup-e2e-vms:
+	@scripts/e2e-vm-setup.sh all
+
 # ── Linting ──────────────────────────────────────────────────────────────────
 
 check-clippy:
@@ -327,7 +436,7 @@ check-desktop-clippy: build-angular build-mcp
 check-mcp:
 	@echo "  Building mcp-servers/shared (required by other workspaces)..."
 	@cd mcp-servers/shared && npx tsc
-	@for ws in shared hub slack sharepoint redmine gitlab gemini os; do \
+	@for ws in shared hub slack sharepoint redmine gitlab os; do \
 		echo "  tsc --noEmit mcp-servers/$$ws"; \
 		(cd mcp-servers/$$ws && npx tsc --noEmit) || exit 1; \
 	done
@@ -464,7 +573,7 @@ download-nodejs:
 clean-nodejs:
 	rm -rf desktop/src-tauri/nodejs
 
-# ── nerdctl-full bundling (Linux Desktop AppImage only) ──────────────────────
+# ── nerdctl-full bundling (Linux Desktop .deb only) ──────────────────────────
 
 NERDCTL_FULL_VERSION     := $(shell grep -A1 '^pub const NERDCTL_FULL_VERSION' crates/speedwave-runtime/src/consts.rs | grep '"' | sed 's/.*"\(.*\)".*/\1/')
 NERDCTL_FULL_SHA256_AMD64 := $(shell grep -A1 '^pub const NERDCTL_FULL_SHA256_AMD64' crates/speedwave-runtime/src/consts.rs | grep '"' | sed 's/.*"\(.*\)".*/\1/')
@@ -529,7 +638,7 @@ clean-wsl-resources:
 
 # ── Development ──────────────────────────────────────────────────────────────
 
-dev: build-cli build-swift build-mcp
+dev: build-cli build-native-macos build-mcp
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@echo "Preparing build context..."
 	@scripts/bundle-build-context.sh

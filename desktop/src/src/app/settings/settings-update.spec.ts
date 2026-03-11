@@ -35,6 +35,8 @@ describe('SettingsComponent — update settings', () => {
           };
         case 'get_bridge_status':
           return null;
+        case 'get_platform':
+          return 'macos';
         default:
           return undefined;
       }
@@ -193,6 +195,69 @@ describe('SettingsComponent — update settings', () => {
       resolveFn();
       await promise;
       expect(component.updateChecking).toBe(false);
+    });
+  });
+
+  describe('isLinux platform detection', () => {
+    it('defaults to false', () => {
+      expect(component.isLinux).toBe(false);
+    });
+
+    it('is set to true when platform is linux', async () => {
+      const linuxMock = new MockTauriService();
+      linuxMock.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'get_platform':
+            return 'linux';
+          case 'list_projects':
+            return { projects: [], active_project: null };
+          case 'get_llm_config':
+            return { provider: 'anthropic', model: null, base_url: null, api_key_env: null };
+          case 'get_update_settings':
+            return { auto_check: true, check_interval_hours: 24 };
+          case 'check_for_update':
+            return null;
+          case 'get_health':
+            return {
+              containers: [],
+              vm: { running: false, vm_type: 'lima' },
+              mcp_os: { running: false },
+              ide_bridge: { running: false, port: null, ws_url: null, detected_ides: [] },
+              overall_healthy: false,
+            };
+          case 'get_bridge_status':
+            return null;
+          default:
+            return undefined;
+        }
+      };
+
+      await TestBed.resetTestingModule();
+      await TestBed.configureTestingModule({
+        imports: [SettingsComponent, RouterModule.forRoot([])],
+        providers: [{ provide: TauriService, useValue: linuxMock }],
+      }).compileComponents();
+
+      const linuxFixture = TestBed.createComponent(SettingsComponent);
+      const linuxComponent = linuxFixture.componentInstance;
+      linuxComponent.ngOnInit();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(linuxComponent.isLinux).toBe(true);
+    });
+  });
+
+  describe('openReleasesPage()', () => {
+    it('invokes open_url with GitHub Releases URL', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
+      await component.openReleasesPage();
+      expect(invokeSpy).toHaveBeenCalledWith('open_url', {
+        url: 'https://github.com/speednet-software/speedwave/releases',
+      });
+    });
+
+    it('does not throw when invoke fails', async () => {
+      vi.spyOn(mockTauri, 'invoke').mockRejectedValue(new Error('not in tauri'));
+      await expect(component.openReleasesPage()).resolves.toBeUndefined();
     });
   });
 });

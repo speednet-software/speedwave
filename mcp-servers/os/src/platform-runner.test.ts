@@ -52,13 +52,13 @@ describe('platform-runner', () => {
       const paths = resolvePaths();
 
       if (process.platform === 'darwin') {
-        expect(paths.reminders).toContain('swift-reminders');
+        expect(paths.reminders).toContain(path.join('native', 'macos', 'reminders'));
         expect(paths.reminders).toContain('reminders-cli');
-        expect(paths.calendar).toContain('swift-calendar');
+        expect(paths.calendar).toContain(path.join('native', 'macos', 'calendar'));
         expect(paths.calendar).toContain('calendar-cli');
-        expect(paths.mail).toContain('swift-mail');
+        expect(paths.mail).toContain(path.join('native', 'macos', 'mail'));
         expect(paths.mail).toContain('mail-cli');
-        expect(paths.notes).toContain('swift-notes');
+        expect(paths.notes).toContain(path.join('native', 'macos', 'notes'));
         expect(paths.notes).toContain('notes-cli');
       } else {
         expect(paths.reminders).toContain('native-os-cli');

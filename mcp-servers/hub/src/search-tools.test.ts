@@ -17,7 +17,7 @@ describe('searchTools', () => {
 
   beforeEach(() => {
     resetServiceCaches();
-    process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,gitlab,gemini,os';
+    process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,gitlab,os';
   });
 
   afterEach(() => {
@@ -353,13 +353,6 @@ describe('getServiceTools', () => {
     expect(tools.length).toBeGreaterThan(0);
   });
 
-  it('returns all tools for valid service - gemini', () => {
-    const tools = getServiceTools('gemini');
-
-    expect(Array.isArray(tools)).toBe(true);
-    expect(tools.length).toBeGreaterThan(0);
-  });
-
   it('returns all tools for valid service - os', () => {
     const tools = getServiceTools('os');
 
@@ -450,11 +443,6 @@ describe('tool counts per service (regression)', () => {
     expect(tools.length).toBe(5); // listFileIds, getFileFull, sync, syncDirectory, getCurrentUser
   });
 
-  it('gemini has expected number of tools', () => {
-    const tools = getServiceTools('gemini');
-    expect(tools.length).toBe(1); // After refactor: only chat tool (removed scanDirectory, searchGrounded)
-  });
-
   it('os has expected number of tools', () => {
     const tools = getServiceTools('os');
     expect(tools.length).toBe(25); // 5 reminders + 6 calendar + 7 mail + 7 notes
@@ -497,7 +485,6 @@ describe('searchTools ENABLED_SERVICES filtering', () => {
     expect(services.has('redmine')).toBe(false);
     expect(services.has('gitlab')).toBe(false);
     expect(services.has('sharepoint')).toBe(false);
-    expect(services.has('gemini')).toBe(false);
   });
 
   it('excludes disabled OS categories from search results', async () => {
@@ -556,7 +543,6 @@ describe('searchTools ENABLED_SERVICES filtering', () => {
     expect(services.has('redmine')).toBe(false);
     expect(services.has('gitlab')).toBe(false);
     expect(services.has('sharepoint')).toBe(false);
-    expect(services.has('gemini')).toBe(false);
     expect(services.has('os')).toBe(false);
   });
 });

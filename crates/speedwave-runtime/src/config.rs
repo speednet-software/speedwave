@@ -37,7 +37,6 @@ pub struct IntegrationsConfig {
     pub sharepoint: Option<IntegrationConfig>,
     pub redmine: Option<IntegrationConfig>,
     pub gitlab: Option<IntegrationConfig>,
-    pub gemini: Option<IntegrationConfig>,
     pub os: Option<OsIntegrationsConfig>,
 }
 
@@ -50,7 +49,6 @@ impl IntegrationsConfig {
             "sharepoint" => self.sharepoint = Some(cfg),
             "redmine" => self.redmine = Some(cfg),
             "gitlab" => self.gitlab = Some(cfg),
-            "gemini" => self.gemini = Some(cfg),
             _ => return false,
         }
         true
@@ -63,7 +61,6 @@ pub struct ResolvedIntegrationsConfig {
     pub sharepoint: bool,
     pub redmine: bool,
     pub gitlab: bool,
-    pub gemini: bool,
     pub os_reminders: bool,
     pub os_calendar: bool,
     pub os_mail: bool,
@@ -81,7 +78,6 @@ impl ResolvedIntegrationsConfig {
             "sharepoint" => Some(self.sharepoint),
             "redmine" => Some(self.redmine),
             "gitlab" => Some(self.gitlab),
-            "gemini" => Some(self.gemini),
             _ => None,
         }
     }
@@ -201,7 +197,6 @@ fn apply_integrations_layer(result: &mut ResolvedIntegrationsConfig, layer: &Int
     apply_toggle(&mut result.sharepoint, &layer.sharepoint);
     apply_toggle(&mut result.redmine, &layer.redmine);
     apply_toggle(&mut result.gitlab, &layer.gitlab);
-    apply_toggle(&mut result.gemini, &layer.gemini);
     if let Some(ref os) = layer.os {
         apply_toggle(&mut result.os_reminders, &os.reminders);
         apply_toggle(&mut result.os_calendar, &os.calendar);
@@ -548,7 +543,6 @@ mod tests {
         assert!(!r.sharepoint, "sharepoint should be disabled");
         assert!(!r.redmine, "redmine should be disabled");
         assert!(!r.gitlab, "gitlab should be disabled");
-        assert!(!r.gemini, "gemini should be disabled");
         assert!(!r.os_reminders, "os_reminders should be disabled");
         assert!(!r.os_calendar, "os_calendar should be disabled");
         assert!(!r.os_mail, "os_mail should be disabled");
@@ -572,7 +566,6 @@ mod tests {
                 enabled: Some(true),
             }),
             gitlab: None,
-            gemini: None,
             os: Some(OsIntegrationsConfig {
                 reminders: Some(IntegrationConfig {
                     enabled: Some(false),
@@ -625,7 +618,6 @@ mod tests {
                     sharepoint: None,
                     redmine: None,
                     gitlab: None,
-                    gemini: None,
                     os: None,
                 }),
             }],
@@ -652,7 +644,6 @@ mod tests {
                     sharepoint: None,
                     redmine: None,
                     gitlab: None,
-                    gemini: None,
                     os: Some(OsIntegrationsConfig {
                         reminders: Some(IntegrationConfig {
                             enabled: Some(false),
@@ -692,7 +683,6 @@ mod tests {
                     sharepoint: None,
                     redmine: None,
                     gitlab: None,
-                    gemini: None,
                     os: None,
                 }),
             }],
@@ -707,7 +697,6 @@ mod tests {
         assert!(!resolved.sharepoint);
         assert!(!resolved.redmine);
         assert!(!resolved.gitlab);
-        assert!(!resolved.gemini);
         assert!(!resolved.os_reminders);
         assert!(!resolved.os_calendar);
         assert!(!resolved.os_mail);
@@ -760,14 +749,12 @@ mod tests {
         let r = ResolvedIntegrationsConfig {
             slack: true,
             gitlab: false,
-            gemini: true,
             ..Default::default()
         };
         assert_eq!(r.is_service_enabled("slack"), Some(true));
         assert_eq!(r.is_service_enabled("sharepoint"), Some(false));
         assert_eq!(r.is_service_enabled("redmine"), Some(false));
         assert_eq!(r.is_service_enabled("gitlab"), Some(false));
-        assert_eq!(r.is_service_enabled("gemini"), Some(true));
     }
 
     #[test]
@@ -854,14 +841,7 @@ mod tests {
                 enabled: Some(true)
             }
         ));
-        assert!(cfg.set_service(
-            "gemini",
-            IntegrationConfig {
-                enabled: Some(true)
-            }
-        ));
         assert_eq!(cfg.slack.unwrap().enabled, Some(true));
-        assert_eq!(cfg.gemini.unwrap().enabled, Some(true));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # ADR-023: AppImage Static Runtime for FUSE Independence
 
-> **Status:** Accepted
+> **Status:** Superseded by [ADR-025](ADR-025-linux-deb-packaging.md)
 
 ---
 
@@ -117,7 +117,7 @@ Users can set `APPIMAGE_EXTRACT_AND_RUN=1` to bypass FUSE entirely — the AppIm
 Ship only a `.deb` package, avoiding the FUSE dependency entirely. Rejected because:
 
 - `.deb` does not support auto-update via the Tauri updater — users must manually download each release or configure a custom APT repository.[^15]
-- Requires separate packaging per distribution family (`.deb` for Debian/Ubuntu, `.rpm` for Fedora/RHEL).
+- Requires separate packaging per distribution family (`.deb` for Debian/Ubuntu).
 - Loses the "single file works everywhere" property of AppImage.
 
 ### 3. .tar.gz + manual installation

@@ -72,7 +72,7 @@ const TOOLS: Tool[] = [
     description: `Search available MCP tools by keyword. Returns tool names, descriptions, and optionally full schemas.
 Use this to discover tools before executing code. Start with 'names_only' for efficiency.
 
-Available services: slack, sharepoint, redmine, gitlab, gemini, os
+Available services: slack, sharepoint, redmine, gitlab, os
 
 Examples:
 - search_tools({ query: "slack", detail_level: "names_only" })
@@ -94,7 +94,7 @@ Examples:
         },
         service: {
           type: 'string',
-          enum: ['slack', 'sharepoint', 'redmine', 'gitlab', 'gemini', 'os'],
+          enum: ['slack', 'sharepoint', 'redmine', 'gitlab', 'os'],
           description: 'Limit search to specific service (optional)',
         },
         include_deferred: {
@@ -177,7 +177,7 @@ return { total: results.length, failed: errors.length };
         },
         timeout_ms: {
           type: 'number',
-          description: `Execution timeout in milliseconds (default: ${TIMEOUTS.EXECUTION_MS}ms, max: ${TIMEOUTS.EXECUTION_MS}ms). For long operations (sharepoint.sync, gemini.generateContent) timeout auto-extends to ${TIMEOUTS.LONG_OPERATION_MS}ms.`,
+          description: `Execution timeout in milliseconds (default: ${TIMEOUTS.EXECUTION_MS}ms, max: ${TIMEOUTS.EXECUTION_MS}ms). For long operations (sharepoint.sync) timeout auto-extends to ${TIMEOUTS.LONG_OPERATION_MS}ms.`,
         },
       },
       required: ['code'],

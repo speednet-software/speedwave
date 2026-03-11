@@ -26,7 +26,9 @@ describe('SystemHealthComponent', () => {
   let fixture: ComponentFixture<SystemHealthComponent>;
   let mockTauri: MockTauriService;
   let listenCallback: (event: { payload: { kind: string; detail: string } }) => void;
+  let reconciledCallback: () => void;
   const mockUnlisten = vi.fn();
+  const mockUnlistenReconciled = vi.fn();
 
   function setupDefaultHandler(): void {
     mockTauri.invokeHandler = async (cmd: string) => {
@@ -49,11 +51,18 @@ describe('SystemHealthComponent', () => {
     mockTauri = new MockTauriService();
     setupDefaultHandler();
 
+    mockUnlistenReconciled.mockReset();
+
     mockTauri.listen = async (_event: string, handler: unknown) => {
       if (_event === 'ide_bridge_event') {
         listenCallback = handler as (event: { payload: { kind: string; detail: string } }) => void;
+        return mockUnlisten;
       }
-      return mockUnlisten;
+      if (_event === 'containers_reconciled') {
+        reconciledCallback = handler as () => void;
+        return mockUnlistenReconciled;
+      }
+      return vi.fn();
     };
 
     await TestBed.configureTestingModule({
@@ -86,7 +95,7 @@ describe('SystemHealthComponent', () => {
   });
 
   describe('polling', () => {
-    it('starts a 5s interval that calls refresh via ngOnInit', async () => {
+    it('starts a 15s interval that calls refresh via ngOnInit', async () => {
       vi.useFakeTimers();
       const refreshSpy = vi.spyOn(component, 'refresh').mockResolvedValue();
 
@@ -95,11 +104,11 @@ describe('SystemHealthComponent', () => {
 
       refreshSpy.mockClear();
 
-      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(15000);
       expect(refreshSpy.mock.calls.length).toBeGreaterThanOrEqual(1);
 
       const afterFirst = refreshSpy.mock.calls.length;
-      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(15000);
       expect(refreshSpy.mock.calls.length).toBeGreaterThan(afterFirst);
 
       component.ngOnDestroy();
@@ -112,7 +121,7 @@ describe('SystemHealthComponent', () => {
 
       component.ngOnInit();
       await vi.advanceTimersByTimeAsync(0);
-      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(15000);
 
       component.ngOnDestroy();
 
@@ -481,7 +490,7 @@ describe('SystemHealthComponent', () => {
 
     it('clears interval on destroy', () => {
       const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
-      (component as never as Private)['intervalId'] = setInterval(() => {}, 5000);
+      (component as never as Private)['intervalId'] = setInterval(() => {}, 15000);
 
       component.ngOnDestroy();
 
@@ -509,6 +518,81 @@ describe('SystemHealthComponent', () => {
 
       expect(mockUnlisten).toHaveBeenCalled();
       expect((component as never as Private)['unlistenEvent']).toBeNull();
+    });
+
+    it('calls unlistenReconciled on destroy', async () => {
+      vi.spyOn(component, 'refresh').mockResolvedValue();
+      component.ngOnInit();
+      await new Promise((r) => queueMicrotask(r));
+      await new Promise((r) => queueMicrotask(r));
+
+      component.ngOnDestroy();
+
+      expect(mockUnlistenReconciled).toHaveBeenCalled();
+      expect((component as never as Private)['unlistenReconciled']).toBeNull();
+    });
+  });
+
+  describe('containers_reconciled event', () => {
+    it('triggers refresh when containers_reconciled event fires', async () => {
+      const refreshSpy = vi.spyOn(component, 'refresh').mockResolvedValue();
+      component.ngOnInit();
+      await new Promise((r) => queueMicrotask(r));
+      await new Promise((r) => queueMicrotask(r));
+
+      refreshSpy.mockClear();
+      reconciledCallback();
+
+      expect(refreshSpy).toHaveBeenCalledOnce();
+    });
+
+    it('does not call refresh after ngOnDestroy', async () => {
+      const refreshSpy = vi.spyOn(component, 'refresh').mockResolvedValue();
+      component.ngOnInit();
+      await new Promise((r) => queueMicrotask(r));
+      await new Promise((r) => queueMicrotask(r));
+
+      component.ngOnDestroy();
+      refreshSpy.mockClear();
+
+      expect(mockUnlistenReconciled).toHaveBeenCalled();
+      expect(refreshSpy).not.toHaveBeenCalled();
+    });
+
+    it('handles listen rejection gracefully', async () => {
+      mockTauri.listen = async (_event: string, handler: unknown) => {
+        if (_event === 'ide_bridge_event') {
+          listenCallback = handler as (event: {
+            payload: { kind: string; detail: string };
+          }) => void;
+          return mockUnlisten;
+        }
+        if (_event === 'containers_reconciled') {
+          throw new Error('listen failed');
+        }
+        return vi.fn();
+      };
+
+      expect(() => component.ngOnInit()).not.toThrow();
+      await new Promise((r) => queueMicrotask(r));
+      await new Promise((r) => queueMicrotask(r));
+
+      expect((component as never as Private)['unlistenReconciled']).toBeNull();
+      expect(() => component.ngOnDestroy()).not.toThrow();
+    });
+
+    it('handles refresh() error inside reconciled handler', async () => {
+      const refreshSpy = vi
+        .spyOn(component, 'refresh')
+        .mockRejectedValueOnce(new Error('refresh failed'));
+      component.ngOnInit();
+      await new Promise((r) => queueMicrotask(r));
+      await new Promise((r) => queueMicrotask(r));
+
+      refreshSpy.mockClear();
+      refreshSpy.mockRejectedValueOnce(new Error('refresh failed'));
+
+      expect(() => reconciledCallback()).not.toThrow();
     });
   });
 });

@@ -1,6 +1,6 @@
 import { defineWorkspace } from 'vitest/config';
 
-const workspaces = ['shared', 'hub', 'slack', 'gitlab', 'gemini', 'redmine', 'sharepoint', 'os'];
+const workspaces = ['shared', 'hub', 'slack', 'gitlab', 'redmine', 'sharepoint', 'os'];
 
 export default defineWorkspace(
   workspaces.map((name) => ({
