@@ -582,7 +582,7 @@ describe('IntegrationsComponent', () => {
       };
 
       mockTauri.dispatchEvent('project_switched', 'other-project');
-      await new Promise((r) => setTimeout(r, 0));
+      await fixture.whenStable();
       expect(component.activeProject).toBe('other-project');
       expect(component.services).toHaveLength(0);
     });
