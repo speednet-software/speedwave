@@ -11,26 +11,10 @@ on:
     #   - "src/**/*.jsx"
 
 jobs:
-  debug-context:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Print event context for debugging
-        run: |
-          echo "head_repo: ${{ github.event.pull_request.head.repo.full_name }}"
-          echo "repository: ${{ github.repository }}"
-          echo "user_login: ${{ github.event.pull_request.user.login }}"
-          echo "author_association: ${{ github.event.pull_request.author_association }}"
-          echo "actor: ${{ github.actor }}"
-          echo "repo_eq: ${{ github.event.pull_request.head.repo.full_name == github.repository }}"
-          echo "not_dependabot: ${{ github.event.pull_request.user.login != 'dependabot[bot]' }}"
-          echo "assoc_check: ${{ contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}"
-
   claude-review:
-    needs: debug-context
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.login != 'dependabot[bot]' &&
-      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+      contains(fromJSON('["slawomir-it"]'), github.event.pull_request.user.login)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
