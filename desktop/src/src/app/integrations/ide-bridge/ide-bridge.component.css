@@ -1,0 +1,121 @@
+.section {
+  margin-bottom: 24px;
+}
+
+h2 {
+  font-size: 15px;
+  color: #e0e0e0;
+  margin: 0 0 12px 0;
+}
+
+.error-banner {
+  margin-bottom: 16px;
+  padding: 8px 12px;
+  background: #3d0000;
+  border: 1px solid #e94560;
+  border-radius: 4px;
+  color: #e94560;
+  font-size: 13px;
+}
+
+.card {
+  background: #16213e;
+  border: 1px solid #0f3460;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+}
+.card-header.no-expand {
+  cursor: default;
+}
+.card-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.service-name {
+  font-weight: 600;
+  font-size: 16px;
+}
+
+.event-banner {
+  margin-bottom: 16px;
+  padding: 8px 12px;
+  background: #1a2840;
+  border: 1px solid #0f3460;
+  border-radius: 4px;
+  color: #aac;
+  font-family: monospace;
+  font-size: 12px;
+  transition: opacity 1s ease-out;
+}
+.event-banner.fading {
+  opacity: 0;
+}
+.no-data {
+  color: #888;
+  font-size: 13px;
+  padding: 8px 0;
+}
+.ide-card .card-header {
+  cursor: default;
+}
+.ide-card-body {
+  padding: 0 20px 16px;
+}
+.ide-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ide-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: #1a1a2e;
+  border-radius: 4px;
+}
+.ide-row.selected {
+  border-left: 3px solid #2ecc71;
+}
+.ide-row-name {
+  flex: 1;
+  font-family: monospace;
+  font-size: 13px;
+  color: #e0e0e0;
+}
+.port-badge {
+  font-family: monospace;
+  font-size: 12px;
+  color: #2ecc71;
+}
+.connect-btn {
+  padding: 4px 12px;
+  background: #0f3460;
+  color: #e0e0e0;
+  border: 1px solid #0f3460;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: monospace;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.connect-btn:hover:not(:disabled) {
+  background: #1a4a7a;
+}
+.connect-btn.active {
+  background: #1a5c3a;
+  border-color: #2ecc71;
+  color: #2ecc71;
+}
+.connect-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
