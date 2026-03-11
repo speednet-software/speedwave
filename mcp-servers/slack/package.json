@@ -28,7 +28,7 @@
     "@speedwave/mcp-shared": "file:../shared"
   },
   "devDependencies": {
-    "@eslint/js": "^9.16.0",
+    "@eslint/js": "^10.0.1",
     "@types/express": "^4.17.21",
     "@types/node": "^24.0.0",
     "@vitest/coverage-v8": "^4.0.16",
