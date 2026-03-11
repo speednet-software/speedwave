@@ -41,6 +41,22 @@ pub trait ContainerRuntime: Send + Sync {
     fn compose_logs(&self, project: &str, tail: u32) -> anyhow::Result<String>;
     /// Recreates all containers using `--force-recreate --remove-orphans`.
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()>;
+
+    /// Removes dangling images and build cache (not tagged images).
+    ///
+    /// Used by `build_all_images` to recover from stale overlayfs snapshotter
+    /// state on containerd (containerd bug — "failed to rename:
+    /// file exists" during layer extraction). Only removes dangling
+    /// (untagged) images and build cache, so successfully-built tagged
+    /// images survive a partial-build retry.
+    ///
+    /// This bug affects all containerd overlayfs setups, including native
+    /// Linux (NerdctlRuntime), Lima VM (LimaRuntime), and WSL2 (WslRuntime).
+    /// All three override this method. The default no-op exists only as a
+    /// fallback for future runtimes that may not use containerd.
+    fn system_prune(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 pub trait CommandRunner: Send + Sync {
@@ -56,6 +72,13 @@ pub trait CommandRunner: Send + Sync {
     /// `CommandRunner` implementations (including mocks) work unchanged.
     fn run_with_stderr(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
         self.run(cmd, args)
+    }
+
+    /// Like `run`, but returns raw stdout bytes without UTF-8 conversion.
+    /// Needed for commands like `wsl.exe --list` that output UTF-16LE.
+    fn run_raw_stdout(&self, cmd: &str, args: &[&str]) -> anyhow::Result<Vec<u8>> {
+        // Default: delegate to run() and return as UTF-8 bytes
+        self.run(cmd, args).map(|s| s.into_bytes())
     }
 }
 
@@ -100,6 +123,17 @@ impl CommandRunner for RealRunner {
         if output.status.success() {
             Ok(combine_outputs(&stdout, &stderr))
         } else {
+            anyhow::bail!("{} failed: {}", cmd, combine_outputs(&stderr, &stdout));
+        }
+    }
+
+    fn run_raw_stdout(&self, cmd: &str, args: &[&str]) -> anyhow::Result<Vec<u8>> {
+        let output = Self::prepare_command(cmd, args).output()?;
+        if output.status.success() {
+            Ok(output.stdout)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
             anyhow::bail!("{} failed: {}", cmd, combine_outputs(&stderr, &stdout));
         }
     }
@@ -183,12 +217,14 @@ pub(crate) mod test_support {
 
     pub struct MockRunner {
         pub responses: std::collections::HashMap<String, anyhow::Result<String>>,
+        pub raw_responses: std::collections::HashMap<String, anyhow::Result<Vec<u8>>>,
     }
 
     impl MockRunner {
         pub fn new() -> Self {
             Self {
                 responses: std::collections::HashMap::new(),
+                raw_responses: std::collections::HashMap::new(),
             }
         }
 
@@ -201,6 +237,11 @@ pub(crate) mod test_support {
         pub fn with_error(mut self, key: &str, msg: &str) -> Self {
             self.responses
                 .insert(key.to_string(), Err(anyhow::anyhow!(msg.to_string())));
+            self
+        }
+
+        pub fn with_raw_response(mut self, key: &str, bytes: Vec<u8>) -> Self {
+            self.raw_responses.insert(key.to_string(), Ok(bytes));
             self
         }
 
@@ -217,6 +258,18 @@ pub(crate) mod test_support {
                 Some(Err(e)) => Err(anyhow::anyhow!("{}", e)),
                 None => Err(anyhow::anyhow!("unexpected command: {}", key)),
             }
+        }
+
+        fn run_raw_stdout(&self, cmd: &str, args: &[&str]) -> anyhow::Result<Vec<u8>> {
+            let key = Self::make_key(cmd, args);
+            // Check raw_responses first, fall back to run().into_bytes()
+            if let Some(result) = self.raw_responses.get(&key) {
+                return match result {
+                    Ok(val) => Ok(val.clone()),
+                    Err(e) => Err(anyhow::anyhow!("{}", e)),
+                };
+            }
+            self.run(cmd, args).map(|s| s.into_bytes())
         }
     }
 }
@@ -380,5 +433,51 @@ mod tests {
     #[test]
     fn combine_outputs_both_empty() {
         assert_eq!(combine_outputs("", ""), "");
+    }
+
+    #[test]
+    fn test_run_raw_stdout_default_delegates_to_run() {
+        struct StubRunner;
+        impl CommandRunner for StubRunner {
+            fn run(&self, _cmd: &str, _args: &[&str]) -> anyhow::Result<String> {
+                Ok("from_run".to_string())
+            }
+            // run_raw_stdout NOT overridden — uses default impl
+        }
+
+        let runner = StubRunner;
+        let result = runner
+            .run_raw_stdout("echo", &["hello"])
+            .expect("run_raw_stdout");
+        assert_eq!(
+            result, b"from_run",
+            "default run_raw_stdout should delegate to run() and return bytes"
+        );
+    }
+
+    #[test]
+    fn test_mock_runner_raw_response_takes_priority() {
+        let runner = test_support::MockRunner::new()
+            .with_response("cmd --flag", "text_response")
+            .with_raw_response("cmd --flag", vec![0xFF, 0xFE, 0x41, 0x00]);
+
+        // run() returns text response
+        assert_eq!(runner.run("cmd", &["--flag"]).unwrap(), "text_response");
+        // run_raw_stdout() returns raw bytes (raw_response takes priority)
+        assert_eq!(
+            runner.run_raw_stdout("cmd", &["--flag"]).unwrap(),
+            vec![0xFF, 0xFE, 0x41, 0x00]
+        );
+    }
+
+    #[test]
+    fn test_mock_runner_raw_fallback_to_run() {
+        let runner = test_support::MockRunner::new().with_response("cmd --flag", "hello");
+
+        // No raw_response set, so run_raw_stdout falls back to run().into_bytes()
+        assert_eq!(
+            runner.run_raw_stdout("cmd", &["--flag"]).unwrap(),
+            b"hello".to_vec()
+        );
     }
 }

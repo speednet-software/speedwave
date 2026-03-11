@@ -68,7 +68,7 @@ jobs:
         working-directory: mcp-servers
         run: |
           (cd shared && npx tsc)
-          for ws in hub slack sharepoint redmine gitlab gemini os; do
+          for ws in hub slack sharepoint redmine gitlab os; do
             echo "tsc --noEmit $ws"
             (cd "$ws" && npx tsc --noEmit)
           done

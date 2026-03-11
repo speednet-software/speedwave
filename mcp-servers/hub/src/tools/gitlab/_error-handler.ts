@@ -43,7 +43,7 @@ export function formatError(error: unknown): string {
  * Handles execution errors with logging and formatted response.
  * Use this in catch blocks of all GitLab hub tools for consistent error handling.
  *
- * Note: Sensitive data is protected by PII Tokenizer before reaching Claude/Gemini.
+ * Note: Sensitive data is protected by PII Tokenizer before reaching Claude.
  * Local container logs are not sanitized as they don't leave the Docker environment.
  * @param toolName - Name of the tool (for logging context)
  * @param params - Tool parameters

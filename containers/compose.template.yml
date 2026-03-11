@@ -7,7 +7,7 @@ services:
     image: speedwave-claude:latest
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_claude
     read_only: true
-    user: "1000:1000"
+    user: "${CONTAINER_USER}"
     cap_drop:
       - ALL
     security_opt:
@@ -41,7 +41,7 @@ services:
     image: speedwave-mcp-hub:latest
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_hub
     read_only: true
-    user: "1000:1000"
+    user: "${CONTAINER_USER}"
     cap_drop:
       - ALL
     security_opt:
@@ -54,7 +54,6 @@ services:
       - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:${PORT_SHAREPOINT}
       - WORKER_REDMINE_URL=http://mcp-redmine:${PORT_REDMINE}
       - WORKER_GITLAB_URL=http://mcp-gitlab:${PORT_GITLAB}
-      - WORKER_GEMINI_URL=http://mcp-gemini:${PORT_GEMINI}
     networks:
       - ${NETWORK_NAME}
     deploy:
@@ -67,7 +66,7 @@ services:
     image: speedwave-mcp-slack:latest
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_slack
     read_only: true
-    user: "1000:1000"
+    user: "${CONTAINER_USER}"
     cap_drop:
       - ALL
     security_opt:
@@ -90,7 +89,7 @@ services:
     image: speedwave-mcp-sharepoint:latest
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_sharepoint
     read_only: true
-    user: "1000:1000"
+    user: "${CONTAINER_USER}"
     cap_drop:
       - ALL
     security_opt:
@@ -115,7 +114,7 @@ services:
     image: speedwave-mcp-redmine:latest
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_redmine
     read_only: true
-    user: "1000:1000"
+    user: "${CONTAINER_USER}"
     cap_drop:
       - ALL
     security_opt:
@@ -138,7 +137,7 @@ services:
     image: speedwave-mcp-gitlab:latest
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_gitlab
     read_only: true
-    user: "1000:1000"
+    user: "${CONTAINER_USER}"
     cap_drop:
       - ALL
     security_opt:
@@ -149,29 +148,6 @@ services:
       - ${TOKENS_DIR}/gitlab:/tokens:ro
     environment:
       - PORT=${PORT_GITLAB}
-    networks:
-      - ${NETWORK_NAME}
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256m
-
-  mcp-gemini:
-    image: speedwave-mcp-gemini:latest
-    container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_gemini
-    read_only: true
-    user: "1000:1000"
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    tmpfs:
-      - /tmp:noexec,nosuid,size=64m
-    volumes:
-      - ${TOKENS_DIR}/gemini:/tokens:ro
-    environment:
-      - PORT=${PORT_GEMINI}
     networks:
       - ${NETWORK_NAME}
     deploy:

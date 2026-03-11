@@ -29,6 +29,15 @@ pub const NERDCTL_LINUX_HOST_IP: &str = "10.0.2.2";
 /// IP of the Windows host as seen from inside WSL2 containers.
 pub const WSL_HOST_IP: &str = "192.168.65.1";
 
+/// Container user for unprivileged mode (macOS Lima, Windows WSL2).
+/// containerd runs as root → UID 1000 maps to UID 1000 on host.
+pub const CONTAINER_USER_UNPRIVILEGED: &str = "1000:1000";
+/// Container user for rootless nerdctl (Linux native).
+/// In rootless mode, UID 0 in container maps to the host user's UID.
+/// UID 1000 would map to subuid range (~101000) and cannot access bind mounts.
+/// Security maintained by: cap_drop ALL, no-new-privileges, read_only, user namespace.
+pub const CONTAINER_USER_ROOTLESS: &str = "0:0";
+
 /// Subdirectory within resources for nerdctl-full binaries.
 pub const NERDCTL_FULL_SUBDIR: &str = "nerdctl-full";
 
@@ -65,17 +74,6 @@ pub const WSL_ROOTFS_SHA256_AMD64: &str =
     "2a790896740b14d637dbdc583cce1ba081ac53b9e9cdb46dc09a2f73abbd9934";
 pub const WSL_ROOTFS_SHA256_ARM64: &str =
     "e113b8c49af3ab49b992b8e29550fc921e689f211abc338176f8243786173a32";
-
-/// SHA256 checksum for the static AppImage type2-runtime (x86_64).
-/// This runtime statically links libfuse, eliminating the libfuse2 system dependency.
-/// Source: https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
-pub const APPIMAGE_RUNTIME_SHA256_X86_64: &str =
-    "27ddd3f78e483fc5f7856e413d7c17092917f8c35bfe3318a0d378aa9435ad17";
-
-/// SHA256 checksum for appimagetool used to repack AppImages with the static runtime.
-/// Source: https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-pub const APPIMAGETOOL_SHA256_X86_64: &str =
-    "a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0";
 
 /// Environment variable set by the Tauri app to point at bundled resources.
 /// Used by `binary::resolve_binary()`, `build::resolve_build_root()`, and
@@ -138,13 +136,6 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         display_name: "GitLab",
         description: "Git repository and CI/CD platform",
     },
-    McpServiceDescriptor {
-        config_key: "gemini",
-        compose_name: "mcp-gemini",
-        worker_env: "WORKER_GEMINI_URL",
-        display_name: "Gemini",
-        description: "Google AI content analysis",
-    },
 ];
 
 /// Built-in services defined in containers/compose.template.yml.
@@ -156,7 +147,6 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
     "mcp-sharepoint",
     "mcp-redmine",
     "mcp-gitlab",
-    "mcp-gemini",
 ];
 
 #[cfg(test)]
@@ -241,27 +231,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_appimage_runtime_sha256_are_64_hex_chars() {
-        for (name, hash) in [
-            (
-                "APPIMAGE_RUNTIME_SHA256_X86_64",
-                APPIMAGE_RUNTIME_SHA256_X86_64,
-            ),
-            ("APPIMAGETOOL_SHA256_X86_64", APPIMAGETOOL_SHA256_X86_64),
-        ] {
-            assert_eq!(
-                hash.len(),
-                64,
-                "{name}: SHA256 must be 64 hex chars, got: {hash}"
-            );
-            assert!(
-                hash.chars().all(|c| c.is_ascii_hexdigit()),
-                "{name}: SHA256 must be hex only, got: {hash}"
-            );
-        }
-    }
-
     /// Guard against service list drift: TOGGLEABLE_MCP_SERVICES count must match
     /// the number of non-OS boolean fields in ResolvedIntegrationsConfig.
     /// If this test fails, a new service was added to one but not the other.
@@ -274,7 +243,6 @@ mod tests {
             resolved.sharepoint,
             resolved.redmine,
             resolved.gitlab,
-            resolved.gemini,
         ]
         .len();
         assert_eq!(
@@ -304,6 +272,28 @@ mod tests {
                 svc.config_key,
                 svc.worker_env
             );
+        }
+    }
+
+    #[test]
+    fn test_container_user_constants_are_valid_uid_gid() {
+        for (name, value) in [
+            ("CONTAINER_USER_UNPRIVILEGED", CONTAINER_USER_UNPRIVILEGED),
+            ("CONTAINER_USER_ROOTLESS", CONTAINER_USER_ROOTLESS),
+        ] {
+            let parts: Vec<&str> = value.split(':').collect();
+            assert_eq!(
+                parts.len(),
+                2,
+                "{} must be UID:GID format, got: {}",
+                name,
+                value
+            );
+            for part in &parts {
+                part.parse::<u32>().unwrap_or_else(|_| {
+                    panic!("{} components must be numeric, got: {}", name, value)
+                });
+            }
         }
     }
 }

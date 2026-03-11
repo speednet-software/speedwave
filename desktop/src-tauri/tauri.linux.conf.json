@@ -1,5 +1,6 @@
 {
   "bundle": {
+    "createUpdaterArtifacts": false,
     "resources": {
       "nerdctl-full/bin/": "nerdctl-full/bin/",
       "nerdctl-full/lib/": "nerdctl-full/lib/",
@@ -11,6 +12,16 @@
       "nodejs/bin/node": "nodejs/bin/node",
       "mcp-os/": "mcp-os/",
       "cli/speedwave": "cli/speedwave"
+    },
+    "linux": {
+      "deb": {
+        "depends": ["uidmap", "dbus-user-session"],
+        "section": "utils",
+        "priority": "optional",
+        "files": {
+          "/etc/apparmor.d/speedwave.rootlesskit": "packaging/linux/apparmor-rootlesskit.profile"
+        }
+      }
     }
   }
 }

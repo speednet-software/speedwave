@@ -13,13 +13,11 @@ import { toolMetadata as slackTools } from './slack/index.js';
 import { toolMetadata as sharepointTools } from './sharepoint/index.js';
 import { toolMetadata as redmineTools } from './redmine/index.js';
 import { toolMetadata as gitlabTools } from './gitlab/index.js';
-import { toolMetadata as geminiTools } from './gemini/index.js';
 
 export * as slack from './slack/index.js';
 export * as sharepoint from './sharepoint/index.js';
 export * as redmine from './redmine/index.js';
 export * as gitlab from './gitlab/index.js';
-export * as gemini from './gemini/index.js';
 
 /**
  * Service metadata including tool count and description
@@ -51,10 +49,6 @@ export const services: Record<string, ServiceMetadata> = {
   gitlab: {
     count: Object.keys(gitlabTools).length,
     description: 'GitLab repository, MR, and CI/CD management',
-  },
-  gemini: {
-    count: Object.keys(geminiTools).length,
-    description: 'Gemini AI codebase analysis and web search',
   },
 } as const;
 

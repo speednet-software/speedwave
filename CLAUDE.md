@@ -2,7 +2,7 @@
 
 ## Project Goal
 
-Speedwave is an AI platform that connects Claude Code with external services (Slack, SharePoint, GitLab, Redmine, Mail, Calendar) without requiring Docker Desktop. It ships as a single installable application (.dmg on macOS, .exe on Windows, AppImage on Linux).
+Speedwave is an AI platform that connects Claude Code with external services (Slack, SharePoint, GitLab, Redmine, Mail, Calendar) without requiring Docker Desktop. It ships as a single installable application (.dmg on macOS, .exe on Windows, .deb on Linux).
 
 ## Product Principles
 
@@ -22,24 +22,56 @@ Speedwave is an AI platform that connects Claude Code with external services (Sl
 ## Repository Structure
 
 ```
-speedwave-v2/
+speedwave/
 ├── crates/
 │   ├── speedwave-runtime/   # SSOT: ContainerRuntime trait + implementations
-│   └── speedwave-cli/       # CLI client (~340 lines + tests)
-├── swift-reminders/         # macOS: EventKit Reminders CLI (Swift)
-├── swift-calendar/          # macOS: EventKit Calendar CLI (Swift)
-├── swift-mail/              # macOS: AppleScript Mail CLI (Swift)
-├── swift-notes/             # macOS: AppleScript Notes CLI (Swift)
+│   └── speedwave-cli/       # CLI client (~640 lines + tests)
+├── native/
+│   ├── macos/               # macOS: Swift CLI binaries
+│   │   ├── reminders/       # EventKit Reminders CLI (Package.swift + Sources/ + Tests/)
+│   │   ├── calendar/        # EventKit Calendar CLI
+│   │   ├── mail/            # AppleScript Mail CLI
+│   │   └── notes/           # AppleScript Notes CLI
+│   ├── linux/               # Linux: Rust native-os-cli (planned)
+│   └── windows/             # Windows: Rust native-os-cli (planned)
 ├── desktop/
+│   ├── e2e/                 # WebdriverIO E2E tests (cross-platform desktop testing)
 │   ├── src-tauri/           # Rust backend (Tauri) — includes IDE Bridge + mcp-os process
 │   └── src/                 # Angular frontend
 ├── mcp-servers/             # TypeScript MCP servers (hub, slack, sharepoint, os, etc.)
+│   ├── shared/              # Shared MCP protocol utilities (SSOT)
+│   ├── hub/                 # MCP hub — single entry point Claude sees
+│   ├── slack/               # Slack integration
+│   ├── sharepoint/          # SharePoint integration
+│   ├── redmine/             # Redmine integration
+│   ├── gitlab/              # GitLab integration
 │   └── os/                  # mcp-os worker — runs on host, calls native CLI binaries
 ├── containers/              # OCI Containerfiles, compose.template.yml (nerdctl compose, all platforms)
-├── scripts/                 # Build/CI helper scripts (bundle-build-context.sh)
+│   ├── claude-resources/    # Claude Code output styles and resources
+│   └── mcp-servers/         # Containerfile.mcp-base (shared base for MCP images)
+├── _tests/                  # Integration / E2E test fixtures (BATS)
+│   ├── desktop/             # Desktop build verification tests
+│   ├── e2e/                 # CLI E2E tests (speedwave.bats)
+│   └── entrypoint/          # Container entrypoint tests
+├── scripts/                 # Build/CI helper scripts
+│   ├── bundle-build-context.sh   # Bundle MCP sources into Tauri resources (macOS/Linux)
+│   ├── bundle-build-context.ps1  # Bundle MCP sources into Tauri resources (Windows)
+│   ├── e2e-common.sh        # Shared SSH config for E2E scripts
+│   ├── e2e-vm.sh            # Run E2E tests on remote machines via SSH
+│   └── e2e-vm-setup.sh      # Provision E2E test environments
 ├── docs/
-│   └── adr/                 # Architecture Decision Records
+│   ├── adr/                 # Architecture Decision Records
+│   ├── architecture/        # System architecture documentation
+│   ├── contributing/        # Developer setup and testing guides
+│   ├── getting-started/     # Quickstart and installation
+│   └── guides/              # CLI, desktop, integrations, IDE bridge
+├── .github/                 # CI workflows, custom actions, issue templates
+│   ├── workflows/           # test, release-please, desktop-build, desktop-release, code-review
+│   └── actions/             # download-lima, download-nerdctl-full, download-nodejs
 ├── .lima-version            # SSOT for pinned Lima version
+├── Makefile                 # Build/test/check orchestration (use this, not cargo/npm directly)
+├── Cargo.toml               # Rust workspace manifest
+├── release-please-config.json # Release automation
 └── CLAUDE.md
 ```
 
@@ -49,7 +81,7 @@ speedwave-v2/
 Speedwave.app (host — core of the system)
 ├── Tauri app (host process)
 │   ├── spawns: node mcp-servers/os/dist/index.js  ← mcp-os (TypeScript MCP worker)
-│   │   ├── macOS:   swift-*/reminders-cli, calendar-cli, mail-cli, notes-cli (Swift, EventKit + AppleScript)
+│   │   ├── macOS:   native/macos/{reminders,calendar,mail,notes}/*-cli (Swift, EventKit + AppleScript)
 │   │   ├── Linux:   native-os-cli (Rust, zbus D-Bus + CalDAV) — planned, not yet implemented
 │   │   └── Windows: native-os-cli.exe (Rust, windows-rs WinRT + mapi-rs MAPI) — planned, not yet implemented
 │   ├── IDE Bridge (Rust module in src-tauri/)
@@ -91,13 +123,19 @@ trait ContainerRuntime: Send + Sync {
     fn compose_down(&self, project: &str) -> anyhow::Result<()>;
     fn compose_ps(&self, project: &str) -> anyhow::Result<Vec<Value>>;
     fn container_exec(&self, container: &str, cmd: &[&str]) -> Command;
-    fn container_exec_piped(&self, container: &str, cmd: &[&str]) -> Command;
+    fn container_exec_piped(&self, container: &str, cmd: &[&str]) -> anyhow::Result<Command>;
     fn is_available(&self) -> bool;
     fn ensure_ready(&self) -> anyhow::Result<()>;
     fn build_image(&self, tag: &str, context_dir: &str, containerfile: &str) -> anyhow::Result<()>;
+    /// Translates host build-root path for the container engine (default: identity for native Linux;
+    /// Lima copies to build-cache when outside ~, WSL converts Windows paths).
+    fn prepare_build_context(&self, build_root: &Path) -> anyhow::Result<PathBuf> { /* default: Ok(identity) */ }
     fn container_logs(&self, container: &str, tail: u32) -> anyhow::Result<String>;
     fn compose_logs(&self, project: &str, tail: u32) -> anyhow::Result<String>;
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()>;
+    /// Removes dangling images and build cache to recover from stale containerd overlayfs state.
+    /// Default: no-op. All current runtimes (Lima, Nerdctl, WSL) override this.
+    fn system_prune(&self) -> anyhow::Result<()> { /* default: Ok(()) */ }
 }
 // Implementations: LimaRuntime, NerdctlRuntime, WslRuntime
 ```
@@ -135,7 +173,7 @@ Speedwave.app acts as a proxy:
 
 ### User Configuration
 
-Users can configure per-project environment variables and LLM provider:
+Users can configure per-project environment variables, LLM provider, and integrations:
 
 ```json
 {
@@ -149,12 +187,29 @@ Users can configure per-project environment variables and LLM provider:
           "CUSTOM_VAR": "value"
         },
         "llm": {
-          "provider": "anthropic"
+          "provider": "anthropic",
+          "model": "claude-sonnet-4-6",
+          "base_url": null,
+          "api_key_env": null
+        }
+      },
+      "integrations": {
+        "slack": { "enabled": true },
+        "sharepoint": { "enabled": false },
+        "redmine": { "enabled": false },
+        "gitlab": { "enabled": true },
+        "os": {
+          "reminders": { "enabled": true },
+          "calendar": { "enabled": true },
+          "mail": { "enabled": false },
+          "notes": { "enabled": false }
         }
       }
     }
   ],
-  "active_project": "acme-corp"
+  "active_project": "acme-corp",
+  "selected_ide": null,
+  "log_level": null
 }
 ```
 
@@ -165,7 +220,7 @@ Config merges three levels: defaults → repo `.speedwave.json` → user `~/.spe
 | OS      | VM              | Containers              | mcp-os                    | Installer       |
 | ------- | --------------- | ----------------------- | ------------------------- | --------------- |
 | macOS   | Lima + Apple VZ | nerdctl                 | AppleScript / EventKit    | .dmg            |
-| Linux   | none (native)   | nerdctl (rootless)      | CalDAV (EDS via zbus)     | AppImage        |
+| Linux   | none (native)   | nerdctl (rootless)      | CalDAV (EDS via zbus)     | .deb            |
 | Windows | WSL2 + Hyper-V  | nerdctl (wsl.exe proxy) | WinRT + mapi-rs (Outlook) | .exe (NSIS/MSI) |
 
 ### Platform Notes
@@ -178,7 +233,7 @@ Config merges three levels: defaults → repo `.speedwave.json` → user `~/.spe
 
 **Linux:**
 
-- nerdctl-full (rootless) is bundled inside the AppImage — no system package dependencies for the container runtime
+- nerdctl-full (rootless) is bundled inside the .deb package — no additional system package dependencies for the container runtime
 - On first launch, nerdctl-full is extracted to `~/.speedwave/nerdctl-full/` and containerd starts as a systemd --user service
 - System requirements: uidmap, systemd --user, /etc/subuid + /etc/subgid
 - Optional: `libappindicator3-1` or `libayatana-appindicator3-1` for system tray icon support (app works without it — falls back to a regular visible window)
@@ -199,7 +254,7 @@ Config merges three levels: defaults → repo `.speedwave.json` → user `~/.spe
 
 ### Security principles inherited from v1 (non-negotiable)
 
-- Claude container: no tokens, no container socket, unprivileged user `speedwave`
+- Claude container: no tokens, no container socket, per-platform container user (UID 1000 on macOS/Windows, UID 0 in Linux rootless user namespace — see ADR-026)
 - OWASP container hardening: `cap_drop: ALL`, `no-new-privileges`, `read_only` filesystem, `tmpfs: /tmp:noexec,nosuid`
 - Token isolation: each MCP worker mounts **only its own** service credentials at `/tokens` read-only — a compromised worker exposes only that service. Exception: SharePoint uses `:rw` for OAuth token refresh (see ADR-009)
 - Hub has zero tokens — compromise of the hub exposes nothing
@@ -252,7 +307,7 @@ When adding a new secret pattern to `log_sanitizer.rs`:
 
 ```bash
 make setup-dev      # first-time: check prerequisites + install all dependencies
-make test           # run all tests (Rust + MCP)
+make test           # run all tests (Rust + Angular + MCP + entrypoint + desktop)
 make check          # lint + clippy + type-check + format
 make check-all      # full quality gate: check + test + coverage + audit
 make coverage-html  # generate HTML coverage reports and open in browser
@@ -263,7 +318,15 @@ make fmt            # format all code
 make status         # quick health check
 ```
 
-Granular targets: `make test-rust`, `make test-cli`, `make test-mcp`, `make test-os`, `make test-e2e`, `make test-desktop-build`, `make build-runtime`, `make build-cli`, `make build-swift`, `make build-os-cli`, `make build-mcp`, `make build-angular`, `make build-tauri`, `make download-lima`, `make check-clippy`, `make check-angular`, `make audit-rust`, `make audit-mcp`, `make coverage-rust`, `make coverage-mcp`.
+Granular targets:
+
+- **Test:** `test-rust`, `test-cli`, `test-angular`, `test-mcp`, `test-os`, `test-desktop`, `test-e2e`, `test-entrypoint`, `test-desktop-build`, `test-e2e-desktop`, `test-e2e-all`, `setup-e2e-vms`
+- **Build:** `build-runtime`, `build-cli`, `build-desktop`, `build-native-macos`, `build-os-cli`, `build-mcp`, `build-angular`, `build-tauri`
+- **Check:** `check-clippy`, `check-desktop-clippy`, `check-fmt`, `check-mcp`, `check-mcp-lint`, `check-angular`, `check-angular-lint`
+- **Coverage:** `coverage-rust`, `coverage-mcp`, `coverage-angular`
+- **Audit:** `audit-rust`, `audit-mcp`
+- **Download:** `download-lima`, `download-nodejs`, `download-nerdctl-full`, `download-wsl-resources` (+ `clean-*` variants)
+- **Other:** `lint`, `install-deps`, `install-hooks`, `clean`
 
 ## Engineering Principles
 
@@ -275,7 +338,7 @@ Speedwave is a **thin orchestration layer**, not a reimplementation of Lima, ner
 
 - If you're writing more than ~100 lines for something that already exists as a CLI tool — stop and reconsider
 - Avoid clever abstractions; prefer obvious code that a new contributor understands in 5 minutes
-- `speedwave` binary: starts containers, launches Claude, plus `check`/`update`/`self-update`/`addon install` subcommands — that's it
+- `speedwave` binary: starts containers, launches Claude, plus `check`/`update`/`self-update`/`addon install` subcommands — nothing more
 
 ### YAGNI — You Aren't Gonna Need It
 
@@ -405,11 +468,21 @@ If CI fails — **fix the CI**, even if the failure is pre-existing or unrelated
 - Never leave `TODO`, `FIXME`, `HACK`, `XXX`, or similar marker comments in code — either implement the fix now or report it to the user. Marker comments rot and become invisible tech debt.
 - Link commits to GitHub issues when they exist
 
-## Implementation Phases
+## CLI Subcommands
 
-1. **ContainerRuntime trait** — `crates/speedwave-runtime/`
-2. **IDE Bridge** — `desktop/src-tauri/src/ide_bridge.rs`
-3. **Chat UI** — `claude -p` subprocess + Angular streaming component
-4. **CLI thin client** — `crates/speedwave-cli/`
-5. **Native OS CLI + mcp-os worker** — `swift-*/`, `mcp-servers/os/`, hub integration
-6. **Installer** — platform installers (.dmg, .exe, AppImage)
+```
+speedwave                      # default: compose_up + exec claude in container
+speedwave check                # run security checks, exit 0/1
+speedwave update               # rebuild images + recreate containers
+speedwave self-update           # download latest CLI from GitHub Releases
+speedwave addon install <path>  # install addon from ZIP
+```
+
+## Addons
+
+Addons extend Speedwave with additional MCP servers via ZIP packages:
+
+- `speedwave addon install <path.zip>` → extracts to `~/.speedwave/addons/<name>/`
+- Each addon contains an `addon.json` manifest + optional `compose.addon.yml`
+- `compose.rs` merges addon compose fragments into the main compose document
+- Addon services get injected `WORKER_<ADDON>_URL` in the hub environment

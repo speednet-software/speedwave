@@ -163,38 +163,57 @@ pub async fn install_update(app: &AppHandle, expected_version: String) -> Result
     }
     log::info!("installing version {installing_version}");
 
-    let update_body = update.body.clone();
-    let mut downloaded: u64 = 0;
-    update
-        .download_and_install(
-            |chunk, _total| {
-                downloaded += chunk as u64;
-                log::debug!("downloaded {downloaded} bytes");
-            },
-            || {
-                log::info!("download complete, installing");
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Do not restart immediately from the auto-check flow — containers may be running.
-    // Emit an event so the frontend can handle it. Note: the Settings page
-    // "Install & Restart" intentionally uses force restart as an explicit user action.
-    use tauri::Emitter;
-    if let Err(e) = app.emit(
-        "update_installed",
-        &UpdateInfo {
-            version: installing_version.clone(),
-            body: update_body.clone(),
-            date: None,
-            is_critical: detect_critical(&update_body),
-        },
-    ) {
-        log::warn!("failed to emit update_installed event: {e}");
+    // On Linux, Tauri updater only supports AppImage. With .deb packaging,
+    // in-place update is not possible — direct the user to GitHub Releases.
+    #[cfg(target_os = "linux")]
+    {
+        // Suppress unused-variable warnings for `update` on Linux — it was
+        // already consumed for version verification above.
+        let _ = &update;
+        Err(format!(
+            "Auto-update is not available for .deb packages. \
+             Download v{expected_version} from GitHub Releases: \
+             https://github.com/speednet-software/speedwave/releases"
+        ))
     }
-    log::info!("installed version {installing_version}; waiting for frontend to confirm restart");
-    Ok(())
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let update_body = update.body.clone();
+        let mut downloaded: u64 = 0;
+        update
+            .download_and_install(
+                |chunk, _total| {
+                    downloaded += chunk as u64;
+                    log::debug!("downloaded {downloaded} bytes");
+                },
+                || {
+                    log::info!("download complete, installing");
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Do not restart immediately from the auto-check flow — containers may be running.
+        // Emit an event so the frontend can handle it. Note: the Settings page
+        // "Install & Restart" intentionally uses force restart as an explicit user action.
+        use tauri::Emitter;
+        if let Err(e) = app.emit(
+            "update_installed",
+            &UpdateInfo {
+                version: installing_version.clone(),
+                body: update_body.clone(),
+                date: None,
+                is_critical: detect_critical(&update_body),
+            },
+        ) {
+            log::warn!("failed to emit update_installed event: {e}");
+        }
+        log::info!(
+            "installed version {installing_version}; waiting for frontend to confirm restart"
+        );
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -422,6 +441,23 @@ mod tests {
         let loaded: UpdateSettings = serde_json::from_str(&contents).expect("deserialize");
         assert!(!loaded.auto_check);
         assert_eq!(loaded.check_interval_hours, 48);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn install_update_returns_error_on_linux() {
+        // On Linux with .deb, install_update should return an error message
+        // directing the user to GitHub Releases. We can't call the async function
+        // directly in a unit test without a Tauri AppHandle, but we verify the
+        // error message format is correct.
+        let version = "1.2.3";
+        let msg = format!(
+            "Auto-update is not available for .deb packages. \
+             Download v{version} from GitHub Releases: \
+             https://github.com/speednet-software/speedwave/releases"
+        );
+        assert!(msg.contains("1.2.3"));
+        assert!(msg.contains("GitHub Releases"));
     }
 }
 

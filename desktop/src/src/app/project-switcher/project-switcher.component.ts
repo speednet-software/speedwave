@@ -27,16 +27,17 @@ interface ProjectList {
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="switcher">
-      <button class="current-project" (click)="toggleDropdown()">
+      <button class="current-project" data-testid="project-switcher-btn" (click)="toggleDropdown()">
         {{ activeProject || 'No project' }}
         <span class="arrow">&#x25BE;</span>
       </button>
       @if (isOpen) {
-        <div class="dropdown">
+        <div class="dropdown" data-testid="project-switcher-dropdown">
           @for (project of projects; track project.name) {
             <button
               class="project-item"
               [class.active]="project.name === activeProject"
+              [attr.data-testid]="'project-switcher-item-' + project.name"
               (click)="switchProject(project.name)"
             >
               {{ project.name }}

@@ -285,38 +285,9 @@ jobs:
           prerelease: false
           args: ${{ matrix.args }}
 
-      - name: Repack AppImage with static runtime
+      - name: Install Linux packaging tools
         if: matrix.platform == 'ubuntu-22.04'
-        uses: ./.github/actions/repack-appimage-static-runtime
-
-      - name: Re-sign AppImage updater tarball
-        if: matrix.platform == 'ubuntu-22.04'
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          BUNDLE_DIR="desktop/src-tauri/target/release/bundle/appimage"
-          TARBALL=$(find "$BUNDLE_DIR" -maxdepth 1 -name '*.AppImage.tar.gz' | head -1)
-          [ -n "$TARBALL" ] || { echo "::error::No .AppImage.tar.gz found in $BUNDLE_DIR"; exit 1; }
-          npx --prefix desktop/src @tauri-apps/cli signer sign "$TARBALL"
-
-      - name: Re-upload repacked AppImage to release
-        if: matrix.platform == 'ubuntu-22.04'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ needs.resolve.outputs.tag_name }}
-          REPO: ${{ github.repository }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          BUNDLE_DIR="desktop/src-tauri/target/release/bundle/appimage"
-          # Upload repacked AppImage, tarball, and new signature (overwrite originals)
-          for f in "$BUNDLE_DIR"/*.AppImage "$BUNDLE_DIR"/*.AppImage.tar.gz "$BUNDLE_DIR"/*.AppImage.tar.gz.sig; do
-            [ -f "$f" ] || { echo "::error::Expected file not found: $f"; exit 1; }
-            gh release upload "$TAG_NAME" "$f" --repo "$REPO" --clobber
-          done
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev
 
   # ── CLI binary cross-compilation ─────────────────────────────────────────
   # Runs after publish-tauri so the GitHub release already exists

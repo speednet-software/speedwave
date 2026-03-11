@@ -29,7 +29,6 @@
         "mcp-servers/sharepoint/package.json",
         "mcp-servers/redmine/package.json",
         "mcp-servers/gitlab/package.json",
-        "mcp-servers/gemini/package.json",
         "mcp-servers/os/package.json",
         {
           "type": "toml",

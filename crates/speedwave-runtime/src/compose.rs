@@ -4,6 +4,28 @@ use crate::consts;
 use crate::defaults;
 use std::path::PathBuf;
 
+/// Converts a host path to the path seen by the container engine.
+///
+/// On Windows, nerdctl runs inside WSL2 so host paths must be translated
+/// from `C:\Users\...` to `/mnt/c/Users/...`. On macOS and Linux the
+/// container engine runs on the host so paths are returned unchanged.
+fn to_engine_path(path: &std::path::Path) -> anyhow::Result<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let wsl = crate::runtime::wsl::windows_to_wsl_path(path)?;
+        Ok(wsl.to_string_lossy().to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(path.to_string_lossy().to_string())
+    }
+}
+
+/// Like `to_engine_path` but takes a string (convenience for `project_dir`).
+fn str_to_engine_path(path: &str) -> anyhow::Result<String> {
+    to_engine_path(std::path::Path::new(path))
+}
+
 /// Default compose template embedded at compile time from containers/compose.template.yml (SSOT).
 const COMPOSE_TEMPLATE: &str = include_str!("../../../containers/compose.template.yml");
 
@@ -28,15 +50,14 @@ pub fn render_compose(
     let port_sharepoint = consts::PORT_BASE + 2;
     let port_redmine = consts::PORT_BASE + 3;
     let port_gitlab = consts::PORT_BASE + 4;
-    let port_gemini = consts::PORT_BASE + 5;
 
     let mut yaml = COMPOSE_TEMPLATE.to_string();
     yaml = yaml.replace("${COMPOSE_PREFIX}", consts::COMPOSE_PREFIX);
     yaml = yaml.replace("${PROJECT_NAME}", project_name);
-    yaml = yaml.replace("${PROJECT_DIR}", project_dir);
-    yaml = yaml.replace("${CLAUDE_HOME}", &claude_home.to_string_lossy());
-    yaml = yaml.replace("${RESOURCES_DIR}", &resources_dir.to_string_lossy());
-    yaml = yaml.replace("${TOKENS_DIR}", &tokens_dir.to_string_lossy());
+    yaml = yaml.replace("${PROJECT_DIR}", &str_to_engine_path(project_dir)?);
+    yaml = yaml.replace("${CLAUDE_HOME}", &to_engine_path(&claude_home)?);
+    yaml = yaml.replace("${RESOURCES_DIR}", &to_engine_path(&resources_dir)?);
+    yaml = yaml.replace("${TOKENS_DIR}", &to_engine_path(&tokens_dir)?);
     yaml = yaml.replace("${NETWORK_NAME}", &network_name);
     yaml = yaml.replace("${CLAUDE_VERSION}", defaults::CLAUDE_VERSION);
     yaml = yaml.replace("${PORT_HUB}", &port_hub.to_string());
@@ -44,15 +65,15 @@ pub fn render_compose(
     yaml = yaml.replace("${PORT_SHAREPOINT}", &port_sharepoint.to_string());
     yaml = yaml.replace("${PORT_REDMINE}", &port_redmine.to_string());
     yaml = yaml.replace("${PORT_GITLAB}", &port_gitlab.to_string());
-    yaml = yaml.replace("${PORT_GEMINI}", &port_gemini.to_string());
 
     // Bridge writes lock files directly to ~/.speedwave/ide-bridge/
     // Mount it as /home/speedwave/.claude/ide/ — no copying needed.
     let ide_lock_dir = home.join(consts::DATA_DIR).join("ide-bridge");
     std::fs::create_dir_all(&ide_lock_dir)?;
-    yaml = yaml.replace("${IDE_LOCK_DIR}", &ide_lock_dir.to_string_lossy());
+    yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
     yaml = yaml.replace("${HOST_GATEWAY}", host_gateway_ip());
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
+    yaml = yaml.replace("${CONTAINER_USER}", container_user());
 
     // Inject Claude environment variables from resolved config
     yaml = inject_claude_env(&yaml, &resolved_config.env);
@@ -87,7 +108,6 @@ pub fn init_project_dirs(project: &str) -> anyhow::Result<()> {
         data_dir.join("tokens").join(project).join("sharepoint"),
         data_dir.join("tokens").join(project).join("redmine"),
         data_dir.join("tokens").join(project).join("gitlab"),
-        data_dir.join("tokens").join(project).join("gemini"),
         data_dir.join("compose").join(project),
         data_dir.join("context").join(project),
         data_dir.join("claude-home").join(project),
@@ -202,6 +222,7 @@ fn apply_llm_config(yaml: &str, project_name: &str, llm: &LlmConfig) -> anyhow::
                 r#"
 image: ghcr.io/berriai/litellm:latest
 container_name: {prefix}_{project}_llm_proxy
+user: "{container_user}"
 cap_drop:
   - ALL
 security_opt:
@@ -226,8 +247,9 @@ deploy:
 "#,
                 prefix = consts::COMPOSE_PREFIX,
                 project = project_name,
+                container_user = container_user(),
                 port = proxy_port,
-                env_file = llm_env_file.to_string_lossy(),
+                env_file = to_engine_path(&llm_env_file)?,
                 token = proxy_token,
                 network = network_name,
             ))?;
@@ -308,7 +330,7 @@ fn apply_addons(yaml: &str, project_name: &str) -> anyhow::Result<String> {
         if addon_resources.exists() {
             let mount = format!(
                 "{}:/speedwave/addons/{}:ro",
-                addon_resources.to_string_lossy(),
+                to_engine_path(&addon_resources)?,
                 addon_manifest.name
             );
             add_claude_volume(&mut doc, &mount);
@@ -486,7 +508,7 @@ fn apply_mcp_os_config_with_path(
     inject_worker_env(&mut doc, "WORKER_OS_URL", &worker_os_url);
     add_hub_volume(
         &mut doc,
-        &format!("{}:/secrets/os-auth-token:ro", token_path.to_string_lossy()),
+        &format!("{}:/secrets/os-auth-token:ro", to_engine_path(token_path)?),
     );
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
@@ -547,6 +569,23 @@ pub fn host_gateway_ip() -> &'static str {
     }
 }
 
+/// Returns the UID:GID to set as `user:` in compose services.
+///
+/// Linux (rootless nerdctl): "0:0" — UID 0 in user namespace maps to host user UID.
+///   UID 1000 would map to subuid range (~101000), breaking bind-mount access.
+/// macOS (Lima) / Windows (WSL2): "1000:1000" — containerd runs as root,
+///   so UID 1000 maps directly to UID 1000. Unprivileged user as defense-in-depth.
+pub fn container_user() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        consts::CONTAINER_USER_ROOTLESS // "0:0"
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        consts::CONTAINER_USER_UNPRIVILEGED // "1000:1000"
+    }
+}
+
 /// Returns the hostname Claude Code should use for IDE WebSocket connections.
 /// Set as `CLAUDE_CODE_IDE_HOST_OVERRIDE` in the container environment.
 ///
@@ -578,7 +617,8 @@ fn merge_compose_fragment(
 ) -> anyhow::Result<()> {
     let resolved = fragment
         .replace("${PROJECT_NAME}", project_name)
-        .replace("${COMPOSE_PREFIX}", consts::COMPOSE_PREFIX);
+        .replace("${COMPOSE_PREFIX}", consts::COMPOSE_PREFIX)
+        .replace("${CONTAINER_USER}", container_user());
 
     let fragment_doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&resolved)?;
 
@@ -708,6 +748,7 @@ impl SecurityCheck {
             // NO_PORTS_WORKERS: built-in services must not expose ports at all.
             // May fire alongside PORTS_LOCALHOST — intentional defense-in-depth.
             Self::check_no_ports_on_workers(&doc),
+            Self::check_container_user(&doc),
         ]
         .into_iter()
         .flatten()
@@ -1100,6 +1141,45 @@ impl SecurityCheck {
         }
         violations
     }
+
+    /// All services must have a valid `user:` field matching the platform-expected value.
+    /// This prevents addons from overriding the container user to gain elevated access.
+    fn check_container_user(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        let services = match get_services(doc) {
+            Some(s) => s,
+            None => return violations,
+        };
+
+        let expected = container_user();
+        for (name, service) in services {
+            match service.get("user").and_then(|v| v.as_str()) {
+                Some(user) if user == expected => {}
+                Some(user) => {
+                    violations.push(SecurityViolation {
+                        container: name.clone(),
+                        rule: "CONTAINER_USER",
+                        message: format!(
+                            "user: \"{}\" does not match expected \"{}\" for this platform",
+                            user, expected
+                        ),
+                        remediation: "Use user: \"${CONTAINER_USER}\" in compose fragments. \
+                                      Do not hardcode user values.",
+                    });
+                }
+                None => {
+                    violations.push(SecurityViolation {
+                        container: name.clone(),
+                        rule: "CONTAINER_USER",
+                        message: "Missing user: field — container would run as image default user"
+                            .into(),
+                        remediation: "Add user: \"${CONTAINER_USER}\" to the service definition.",
+                    });
+                }
+            }
+        }
+        violations
+    }
 }
 
 /// Helper: extract services as Vec<(name, &Value)> from a compose YAML doc
@@ -1136,6 +1216,16 @@ mod tests {
             .map(|s| s[prefix.len()..].to_string())
     }
 
+    /// Returns VALID_COMPOSE with hardcoded user values replaced by the
+    /// platform-correct value from `container_user()`. This ensures tests
+    /// pass on all platforms (Linux uses "0:0", macOS/Windows use "1000:1000").
+    fn valid_compose_yaml() -> String {
+        VALID_COMPOSE.replace(
+            "user: \"1000:1000\"",
+            &format!("user: \"{}\"", container_user()),
+        )
+    }
+
     const VALID_COMPOSE: &str = r#"
 version: "3"
 services:
@@ -1165,6 +1255,7 @@ services:
     image: speedwave-mcp-hub:latest
     container_name: speedwave_test_mcp_hub
     read_only: true
+    user: "1000:1000"
     cap_drop:
       - ALL
     security_opt:
@@ -1177,13 +1268,13 @@ services:
       - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:4002
       - WORKER_REDMINE_URL=http://mcp-redmine:4003
       - WORKER_GITLAB_URL=http://mcp-gitlab:4004
-      - WORKER_GEMINI_URL=http://mcp-gemini:4005
     networks:
       - speedwave_test_network
 
   mcp-slack:
     image: speedwave-mcp-slack:latest
     container_name: speedwave_test_mcp_slack
+    user: "1000:1000"
     cap_drop:
       - ALL
     security_opt:
@@ -1202,7 +1293,8 @@ networks:
 
     #[test]
     fn test_security_check_valid_compose() {
-        let violations = SecurityCheck::run(VALID_COMPOSE, "test");
+        let yaml = valid_compose_yaml();
+        let violations = SecurityCheck::run(&yaml, "test");
         assert!(
             violations.is_empty(),
             "Expected no violations, got: {:?}",
@@ -1399,7 +1491,6 @@ services:
             data_dir.join("tokens").join(project).join("sharepoint"),
             data_dir.join("tokens").join(project).join("redmine"),
             data_dir.join("tokens").join(project).join("gitlab"),
-            data_dir.join("tokens").join(project).join("gemini"),
             data_dir.join("compose").join(project),
             data_dir.join("context").join(project),
             data_dir.join("claude-home").join(project),
@@ -1661,14 +1752,17 @@ services:
 
     #[test]
     fn test_merged_addon_passes_security_check() {
-        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
+        let yaml = valid_compose_yaml();
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
 
-        // Add a well-formed addon service
-        let fragment = r#"
+        // Add a well-formed addon service (with correct user field)
+        let fragment = format!(
+            r#"
 services:
   mcp-presale:
     image: registry.example.com/speedwave/mcp-presale:latest
     container_name: speedwave_test_mcp_presale
+    user: "{user}"
     cap_drop:
       - ALL
     security_opt:
@@ -1677,8 +1771,10 @@ services:
       - "127.0.0.1:4006:4006"
     networks:
       - speedwave_test_network
-"#;
-        merge_compose_fragment(&mut doc, fragment, "test").unwrap();
+"#,
+            user = container_user()
+        );
+        merge_compose_fragment(&mut doc, &fragment, "test").unwrap();
         inject_worker_env(&mut doc, "WORKER_PRESALE_URL", "http://mcp-presale:4006");
         add_claude_env_var(&mut doc, "SPEEDWAVE_ADDONS", "presale");
 
@@ -2328,10 +2424,82 @@ services:
     #[test]
     fn test_security_check_hub_worker_urls_allowed() {
         // WORKER_*_URL vars in hub env should pass the security check.
-        let violations = SecurityCheck::run(VALID_COMPOSE, "test");
+        let yaml = valid_compose_yaml();
+        let violations = SecurityCheck::run(&yaml, "test");
         assert!(
             !violations.iter().any(|v| v.rule == "NO_TOKENS_HUB"),
             "WORKER_*_URL in hub env should NOT trigger NO_TOKENS_HUB"
+        );
+    }
+
+    #[test]
+    fn test_security_check_missing_user_field() {
+        let yaml = r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - CLAUDE_VERSION=1.0.3
+"#;
+        let violations = SecurityCheck::run(yaml, "test");
+        assert!(
+            violations.iter().any(|v| v.rule == "CONTAINER_USER"),
+            "Should flag missing user field"
+        );
+    }
+
+    #[test]
+    fn test_security_check_wrong_user_value() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  evil-addon:
+    image: evil:latest
+    user: "root"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+"#
+        );
+        let violations = SecurityCheck::run(&yaml, "test");
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == "CONTAINER_USER" && v.container == "evil-addon"),
+            "Should flag wrong user value"
+        );
+    }
+
+    #[test]
+    fn test_security_check_correct_user_passes() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  my-addon:
+    image: addon:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+"#,
+            user = container_user()
+        );
+        let violations = SecurityCheck::run(&yaml, "test");
+        assert!(
+            !violations.iter().any(|v| v.rule == "CONTAINER_USER"),
+            "Correct user should not trigger violation"
         );
     }
 
@@ -2393,6 +2561,57 @@ services:
             COMPOSE_TEMPLATE.contains("${HOST_GATEWAY}"),
             "compose.template.yml must contain ${{HOST_GATEWAY}} placeholder for extra_hosts"
         );
+    }
+
+    #[test]
+    fn test_container_user_returns_platform_value() {
+        let user = container_user();
+        #[cfg(target_os = "linux")]
+        assert_eq!(user, "0:0", "Linux rootless must use 0:0");
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(user, "1000:1000", "macOS/Windows must use 1000:1000");
+    }
+
+    #[test]
+    fn test_compose_template_has_container_user_placeholder() {
+        assert!(
+            COMPOSE_TEMPLATE.contains("${CONTAINER_USER}"),
+            "compose.template.yml must contain ${{CONTAINER_USER}} placeholder"
+        );
+        assert!(
+            !COMPOSE_TEMPLATE.contains("user: \"1000:1000\""),
+            "compose.template.yml must not contain hardcoded user: \"1000:1000\""
+        );
+    }
+
+    #[test]
+    fn test_render_compose_substitutes_container_user() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: vec![],
+            llm: crate::config::LlmConfig::default(),
+        };
+        let result = render_compose(
+            "test-project",
+            "/workspace",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+        )
+        .unwrap();
+        assert!(
+            !result.contains("${CONTAINER_USER}"),
+            "render_compose must substitute ${{CONTAINER_USER}}"
+        );
+        // After serde_yaml_ng roundtrip, the user field is parsed into a
+        // service mapping. Verify via structured parse instead of string matching.
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let claude_user = doc
+            .get("services")
+            .and_then(|s| s.get("claude"))
+            .and_then(|c| c.get("user"))
+            .and_then(|u| u.as_str())
+            .expect("claude service must have user field");
+        assert_eq!(claude_user, container_user());
     }
 
     #[test]
@@ -2516,7 +2735,6 @@ services:
             "mcp-sharepoint",
             "mcp-redmine",
             "mcp-gitlab",
-            "mcp-gemini",
         ] {
             let yaml = format!(
                 r#"
@@ -2726,7 +2944,6 @@ services:
         assert!(enabled_var.contains("sharepoint"));
         assert!(enabled_var.contains("gitlab"));
         assert!(!enabled_var.contains("redmine"));
-        assert!(!enabled_var.contains("gemini"));
         assert!(enabled_var.contains("os"));
     }
 
@@ -2737,7 +2954,6 @@ services:
             sharepoint: false,
             redmine: false,
             gitlab: false,
-            gemini: false,
             os_reminders: false,
             os_calendar: false,
             os_mail: false,
@@ -2802,7 +3018,7 @@ services:
         integrations.sharepoint = true;
         integrations.gitlab = true;
         integrations.os_calendar = true;
-        // slack, redmine, gemini remain disabled (default)
+        // slack, redmine remain disabled (default)
         // os_reminders, os_mail, os_notes remain disabled (default)
 
         let result = render_compose(
@@ -2918,7 +3134,8 @@ services:
     #[test]
     fn test_all_disabled_passes_security_check() {
         let integrations = ResolvedIntegrationsConfig::default(); // all false
-        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let yaml = valid_compose_yaml();
+        let filtered = apply_integrations_filter(&yaml, &integrations).unwrap();
         let violations = SecurityCheck::run(&filtered, "test");
         assert!(
             violations.is_empty(),
@@ -2972,5 +3189,127 @@ services:
             worker_urls
         );
         assert!(worker_urls[0].starts_with("WORKER_SLACK_URL="));
+    }
+
+    #[test]
+    fn test_render_compose_all_services_have_container_user() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: vec![],
+            llm: crate::config::LlmConfig::default(),
+        };
+        // Enable all integrations so no services are filtered out
+        let integrations = ResolvedIntegrationsConfig {
+            slack: true,
+            sharepoint: true,
+            redmine: true,
+            gitlab: true,
+            ..ResolvedIntegrationsConfig::default()
+        };
+        let result = render_compose("test-project", "/workspace", &config, &integrations).unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let expected = container_user();
+
+        for service_name in crate::consts::BUILT_IN_SERVICES {
+            let user = doc
+                .get("services")
+                .and_then(|s| s.get(service_name))
+                .and_then(|c| c.get("user"))
+                .and_then(|u| u.as_str());
+            assert_eq!(
+                user,
+                Some(expected),
+                "Service '{}' must have user: \"{}\"",
+                service_name,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_compose_fragment_substitutes_container_user() {
+        let base_yaml = VALID_COMPOSE;
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(base_yaml).unwrap();
+
+        let fragment = r#"
+services:
+  mcp-custom:
+    image: custom:latest
+    container_name: speedwave_${PROJECT_NAME}_mcp_custom
+    user: "${CONTAINER_USER}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+"#;
+
+        merge_compose_fragment(&mut doc, fragment, "test").unwrap();
+
+        let custom = doc.get("services").unwrap().get("mcp-custom").unwrap();
+        let user = custom.get("user").and_then(|u| u.as_str()).unwrap();
+        assert_eq!(
+            user,
+            container_user(),
+            "merge_compose_fragment must substitute ${{CONTAINER_USER}}"
+        );
+    }
+
+    #[test]
+    fn test_render_compose_llm_proxy_has_container_user() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig {
+                provider: Some("openai".to_string()),
+                model: Some("gpt-4o".to_string()),
+                base_url: None,
+                api_key_env: Some("OPENAI_API_KEY".to_string()),
+            },
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let proxy_user = doc
+            .get("services")
+            .and_then(|s| s.get("llm-proxy"))
+            .and_then(|p| p.get("user"))
+            .and_then(|u| u.as_str());
+        assert_eq!(
+            proxy_user,
+            Some(container_user()),
+            "llm-proxy service must have user: \"{}\"",
+            container_user()
+        );
+    }
+
+    #[test]
+    fn to_engine_path_returns_path_unchanged_on_non_windows() {
+        let path = std::path::Path::new("/home/user/projects/acme");
+        let result = to_engine_path(path).unwrap();
+        assert_eq!(result, "/home/user/projects/acme");
+    }
+
+    #[test]
+    fn str_to_engine_path_returns_path_unchanged_on_non_windows() {
+        let result = str_to_engine_path("/home/user/projects/acme").unwrap();
+        assert_eq!(result, "/home/user/projects/acme");
+    }
+
+    #[test]
+    fn to_engine_path_handles_path_with_spaces() {
+        let path = std::path::Path::new("/home/user/my projects/acme corp");
+        let result = to_engine_path(path).unwrap();
+        assert_eq!(result, "/home/user/my projects/acme corp");
+    }
+
+    #[test]
+    fn str_to_engine_path_handles_absolute_path() {
+        let result = str_to_engine_path("/usr/local/share/speedwave").unwrap();
+        assert_eq!(result, "/usr/local/share/speedwave");
     }
 }

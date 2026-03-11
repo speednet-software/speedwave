@@ -28,7 +28,7 @@ mkdir -p "$DEST/build-context/mcp-servers"
 cp "$REPO_ROOT/mcp-servers/tsconfig.base.json" "$DEST/build-context/mcp-servers/"
 
 # os is intentionally excluded — it runs on the host and is bundled separately as mcp-os/
-MCP_SERVICES="shared hub slack sharepoint redmine gitlab gemini"
+MCP_SERVICES="shared hub slack sharepoint redmine gitlab"
 
 for svc in $MCP_SERVICES; do
   svc_src="$REPO_ROOT/mcp-servers/$svc"
@@ -54,16 +54,8 @@ mkdir -p "$DEST/mcp-os/os" "$DEST/mcp-os/shared"
 cp -r "$REPO_ROOT/mcp-servers/os/dist" "$DEST/mcp-os/os/"
 cp -r "$REPO_ROOT/mcp-servers/shared/dist" "$DEST/mcp-os/shared/"
 
-if [[ "${1:-}" == "--ci" ]]; then
-  # Install production-only dependencies for shared (lockfile is at workspace root)
-  cp "$REPO_ROOT/mcp-servers/shared/package.json" "$DEST/mcp-os/shared/"
-  cp "$REPO_ROOT/mcp-servers/package-lock.json" "$DEST/mcp-os/shared/"
-  (cd "$DEST/mcp-os/shared" && npm ci --omit=dev)
-else
-  # Dev mode: copy existing node_modules if available
-  if [ -d "$REPO_ROOT/mcp-servers/shared/node_modules" ]; then
-    cp -r "$REPO_ROOT/mcp-servers/shared/node_modules" "$DEST/mcp-os/shared/"
-  else
-    echo "warning: mcp-servers/shared/node_modules not found — run 'make build-mcp' first" >&2
-  fi
-fi
+# Always install production deps (works in both dev and CI — workspace hoisting
+# means mcp-servers/shared/node_modules/ is empty, so copying it never worked)
+cp "$REPO_ROOT/mcp-servers/shared/package.json" "$DEST/mcp-os/shared/"
+cp "$REPO_ROOT/mcp-servers/package-lock.json" "$DEST/mcp-os/shared/"
+(cd "$DEST/mcp-os/shared" && npm ci --omit=dev --ignore-scripts)

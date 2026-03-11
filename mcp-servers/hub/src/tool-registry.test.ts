@@ -28,7 +28,7 @@ import { TIMEOUTS } from '../../shared/dist/index.js';
 describe('tool-registry', () => {
   describe('TOOL_REGISTRY', () => {
     it('should contain all expected services', () => {
-      const expectedServices = ['slack', 'sharepoint', 'redmine', 'gitlab', 'gemini', 'os'];
+      const expectedServices = ['slack', 'sharepoint', 'redmine', 'gitlab', 'os'];
       for (const service of expectedServices) {
         expect(TOOL_REGISTRY[service]).toBeDefined();
         expect(Object.keys(TOOL_REGISTRY[service]).length).toBeGreaterThan(0);
@@ -87,8 +87,6 @@ describe('tool-registry', () => {
       // Verify known long-running tools are included
       expect(longTools).toContainEqual({ service: 'sharepoint', method: 'sync' });
       expect(longTools).toContainEqual({ service: 'sharepoint', method: 'syncDirectory' });
-      expect(longTools).toContainEqual({ service: 'gemini', method: 'chat' });
-      // presale removed (addon in v2, not built-in)
     });
 
     it('should not include standard timeout tools', () => {
@@ -124,12 +122,6 @@ describe('tool-registry', () => {
 
     it('should detect sharepoint.syncDirectory as long', () => {
       expect(getRequiredTimeoutClass('await sharepoint.syncDirectory({ path: "/test" })')).toBe(
-        'long'
-      );
-    });
-
-    it('should detect gemini.chat as long', () => {
-      expect(getRequiredTimeoutClass('const result = await gemini.chat({ prompt: "test" })')).toBe(
         'long'
       );
     });
@@ -189,7 +181,7 @@ describe('tool-registry', () => {
 
     it('should ignore custom default for long operations', () => {
       const customDefault = 30000; // Even with short custom default
-      const result = getExecutionTimeout('await gemini.chat({ prompt: "test" })', customDefault);
+      const result = getExecutionTimeout('await sharepoint.sync()', customDefault);
 
       // Long operations always use LONG_OPERATION_MS
       expect(result.timeoutMs).toBe(TIMEOUTS.LONG_OPERATION_MS);
@@ -585,10 +577,6 @@ describe('tool-registry', () => {
       expect(sharepointMethods).toContain('getFileFull');
       expect(sharepointMethods).toContain('sync');
       expect(sharepointMethods).toContain('getCurrentUser');
-
-      // Gemini methods
-      const geminiMethods = getServiceMethods('gemini');
-      expect(geminiMethods).toContain('chat');
     });
   });
 
@@ -621,7 +609,6 @@ describe('tool-registry', () => {
       expect(enabled.has('gitlab')).toBe(true);
       expect(enabled.has('redmine')).toBe(false);
       expect(enabled.has('sharepoint')).toBe(false);
-      expect(enabled.has('gemini')).toBe(false);
       expect(enabled.has('os')).toBe(false);
     });
 
