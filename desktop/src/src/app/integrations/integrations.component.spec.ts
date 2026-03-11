@@ -555,6 +555,47 @@ describe('IntegrationsComponent', () => {
     });
   });
 
+  describe('project_switched event', () => {
+    it('reloads active project and integrations on project_switched', async () => {
+      await component.ngOnInit();
+      expect(component.activeProject).toBe('test-project');
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return {
+              projects: [
+                { name: 'test-project', dir: '/tmp/test' },
+                { name: 'other-project', dir: '/tmp/other' },
+              ],
+              active_project: 'other-project',
+            };
+          case 'get_integrations':
+            return { services: [], os: [] };
+          case 'list_available_ides':
+            return [];
+          case 'get_selected_ide':
+            return null;
+          default:
+            return undefined;
+        }
+      };
+
+      mockTauri.dispatchEvent('project_switched', 'other-project');
+      await fixture.whenStable();
+      expect(component.activeProject).toBe('other-project');
+      expect(component.services).toHaveLength(0);
+    });
+
+    it('cleans up project_switched listener on destroy', async () => {
+      await component.ngOnInit();
+      expect(mockTauri.listenHandlers['project_switched']).toBeDefined();
+
+      component.ngOnDestroy();
+      expect(mockTauri.listenHandlers['project_switched']).toBeUndefined();
+    });
+  });
+
   describe('IDE Bridge', () => {
     it('loads available IDEs on init', async () => {
       const mockIdes = [

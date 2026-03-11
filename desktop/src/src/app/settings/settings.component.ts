@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  OnDestroy,
   OnInit,
   inject,
 } from '@angular/core';
@@ -197,8 +198,8 @@ interface AuthStatusResponse {
               </div>
               <p class="note">Restart containers after saving for changes to take effect.</p>
             }
-            @if (authMethod === 'oauth') {
-              <app-auth-terminal [project]="activeProject!" (done)="onOAuthDone($event)" />
+            @if (authMethod === 'oauth' && activeProject) {
+              <app-auth-terminal [project]="activeProject" (done)="onOAuthDone($event)" />
             }
           </div>
         </section>
@@ -385,10 +386,12 @@ interface AuthStatusResponse {
       </section>
 
       <!-- System Health -->
-      <section class="section">
-        <h2>System Health</h2>
-        <app-system-health [project]="activeProject" />
-      </section>
+      @if (activeProject) {
+        <section class="section">
+          <h2>System Health</h2>
+          <app-system-health [project]="activeProject" />
+        </section>
+      }
 
       <!-- Danger zone -->
       <section class="section danger-zone">
@@ -676,7 +679,7 @@ interface AuthStatusResponse {
     `,
   ],
 })
-export class SettingsComponent implements OnInit {
+export class SettingsComponent implements OnInit, OnDestroy {
   /** When false, hides LLM Provider and Container Updates sections (temporary). */
   showAdvancedSections = false;
   activeProject: string | null = null;
@@ -715,6 +718,7 @@ export class SettingsComponent implements OnInit {
   private router = inject(Router);
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
+  private unlistenProjectSwitch: (() => void) | null = null;
 
   /** Loads project information on component initialization. */
   ngOnInit(): void {
@@ -724,6 +728,25 @@ export class SettingsComponent implements OnInit {
     this.loadUpdateSettings();
     this.loadLogLevel();
     this.detectPlatform();
+
+    this.tauri
+      .listen<string>('project_switched', () => {
+        this.loadProjectInfo();
+      })
+      .then((unlisten) => {
+        this.unlistenProjectSwitch = unlisten;
+      })
+      .catch(() => {
+        // Tauri event listener not available outside desktop context
+      });
+  }
+
+  /** Unsubscribes from the project_switched event listener. */
+  ngOnDestroy(): void {
+    if (this.unlistenProjectSwitch) {
+      this.unlistenProjectSwitch();
+      this.unlistenProjectSwitch = null;
+    }
   }
 
   private async loadProjectInfo(): Promise<void> {
