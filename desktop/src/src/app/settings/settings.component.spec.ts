@@ -89,6 +89,12 @@ describe('SettingsComponent', () => {
     expect(authEl).not.toBeNull();
   });
 
+  it('renders AdvancedSectionComponent', () => {
+    fixture.detectChanges();
+    const advancedEl = fixture.nativeElement.querySelector('app-advanced-section');
+    expect(advancedEl).not.toBeNull();
+  });
+
   it('reloads project info on project_switched event', async () => {
     component.ngOnInit();
     await fixture.whenStable();
