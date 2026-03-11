@@ -735,6 +735,9 @@ export class SettingsComponent implements OnInit, OnDestroy {
       })
       .then((unlisten) => {
         this.unlistenProjectSwitch = unlisten;
+      })
+      .catch(() => {
+        // Tauri event listener not available outside desktop context
       });
   }
 
