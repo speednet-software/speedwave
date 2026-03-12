@@ -814,10 +814,15 @@ Write-Host "── Launching $appExe in interactive session..."
 $taskName = "SpeedwaveE2E"
 schtasks /Create /TN $taskName /TR $appExe /SC ONCE /ST 00:00 /IT /F /RL HIGHEST | Out-Null
 schtasks /Run /TN $taskName | Out-Null
-Start-Sleep -Seconds 2
 schtasks /Delete /TN $taskName /F | Out-Null
-# Find the process launched in the interactive session
-$app = Get-Process -Name "speedwave-desktop" -ErrorAction SilentlyContinue | Select-Object -First 1
+# Wait for the process to appear (retry loop for slow VMs)
+$app = $null
+for ($attempt = 1; $attempt -le 3; $attempt++) {
+    Start-Sleep -Seconds 2
+    $app = Get-Process -Name "speedwave-desktop" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($app) { break }
+    Write-Host "Waiting for speedwave-desktop to start (attempt $attempt/3)..."
+}
 if (-not $app) { Write-Error "speedwave-desktop not found after interactive launch"; exit 1 }
 
 # Default to failure — if npx wdio throws a terminating exception, $e2eExit

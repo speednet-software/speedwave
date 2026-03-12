@@ -245,6 +245,8 @@ if (\$installed) {
     Write-Host "WSL2 distro \$distro already installed"
 } else {
     Write-Host "Installing \$distro..."
+    # --no-launch skips first-boot user creation. This is fine — the E2E
+    # scripts only use this distro for file operations via /mnt/c.
     wsl.exe --install -d \$distro --no-launch
     if (\$LASTEXITCODE -ne 0) { Write-Error "Failed to install WSL2 distro \$distro"; exit 1 }
     Write-Host "WSL2 distro \$distro installed"

@@ -88,10 +88,12 @@ impl WslRuntime {
             return Ok(());
         }
         // Service not ready — try starting it and wait briefly
-        let _ = self.runner.run(
+        if let Err(e) = self.runner.run(
             "wsl.exe",
             &["-d", distro, "--", "systemctl", "start", service_name],
-        );
+        ) {
+            eprintln!("warning: systemctl start {service_name} failed: {e}");
+        }
         std::thread::sleep(std::time::Duration::from_secs(3));
         self.runner.run("wsl.exe", &args).map_err(|_| {
             anyhow::anyhow!(
@@ -389,10 +391,10 @@ impl ContainerRuntime for WslRuntime {
             );
         }
 
-        // Verify containerd is running inside the WSL distro.
+        // Verify containerd and buildkitd are running inside the WSL distro.
         // After a WSL session closes, the VM may restart and systemd services
-        // need time to come up. Retry with backoff (up to ~30s in production,
-        // instant in tests where the runner responds immediately).
+        // need time to come up. check_service() tries once, attempts
+        // `systemctl start` on failure, waits 3s, and retries once.
         let distro = consts::WSL_DISTRO_NAME;
         self.check_service(distro, &["nerdctl", "info"], "containerd")?;
         self.check_service(distro, &["buildctl", "debug", "workers"], "buildkitd")?;
