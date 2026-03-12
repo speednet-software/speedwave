@@ -71,14 +71,16 @@ pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(&snapshot)?;
     let tmp_path = path.with_extension("json.tmp");
     std::fs::write(&tmp_path, &json)?;
-    std::fs::rename(&tmp_path, &path)?;
 
-    // Restrict snapshot file permissions (may contain sensitive compose config)
+    // Restrict permissions before rename to avoid TOCTOU window where the file
+    // briefly exists with umask-derived permissions after atomic rename.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
     }
+
+    std::fs::rename(&tmp_path, &path)?;
 
     Ok(())
 }
@@ -281,16 +283,48 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_snapshot_directory_permissions() {
+    fn test_snapshot_permissions_after_save() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = tempfile::tempdir().unwrap();
-        let snap_dir = dir.path().join("test-perms");
-        std::fs::create_dir_all(&snap_dir).unwrap();
+        let project = format!(
+            "perms-test-{}",
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .subsec_nanos()
+        );
 
-        std::fs::set_permissions(&snap_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let perms = std::fs::metadata(&snap_dir).unwrap().permissions();
-        assert_eq!(perms.mode() & 0o777, 0o700);
+        let compose_path = compose::compose_output_path(&project).unwrap();
+        let snap_path = snapshot_path(&project).unwrap();
+
+        struct Cleanup {
+            paths: Vec<std::path::PathBuf>,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                for p in &self.paths {
+                    let _ = std::fs::remove_dir_all(p);
+                }
+            }
+        }
+        let _cleanup = Cleanup {
+            paths: vec![
+                compose_path.parent().unwrap().to_path_buf(),
+                snap_path.parent().unwrap().to_path_buf(),
+            ],
+        };
+
+        std::fs::create_dir_all(compose_path.parent().unwrap()).unwrap();
+        std::fs::write(&compose_path, "version: '3'\nservices: {}\n").unwrap();
+
+        save_snapshot(&project).unwrap();
+
+        let perms = std::fs::metadata(&snap_path).unwrap().permissions();
+        assert_eq!(
+            perms.mode() & 0o777,
+            0o600,
+            "snapshot.json must be 0o600 after save_snapshot"
+        );
     }
 
     #[test]
@@ -354,6 +388,18 @@ mod tests {
         let loaded = load_snapshot(&project).unwrap();
         assert_eq!(loaded.project, project);
         assert_eq!(loaded.compose_yml, "version: '3'\nservices: {}\n");
+
+        // Verify file permissions (unix only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::metadata(&snap_path).unwrap().permissions();
+            assert_eq!(
+                perms.mode() & 0o777,
+                0o600,
+                "snapshot.json must be 0o600 after save_snapshot"
+            );
+        }
     }
 
     #[test]
