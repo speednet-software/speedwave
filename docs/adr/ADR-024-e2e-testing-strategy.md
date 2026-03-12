@@ -32,7 +32,7 @@ A critical gap is that Speedwave relies on platform-specific infrastructure — 
 
 We use **SSH-based orchestration to real machines** with per-platform WebDriver mechanisms and **WebdriverIO**[^4] for desktop E2E testing.
 
-> **Evolution note:** This ADR originally described Parallels Desktop VMs with `prlctl snapshot-switch` for state management. The implementation evolved to use SSH connections to real machines (physical or VM) reachable via Tailscale or direct network, as this proved more flexible across all three platforms and did not require Parallels Desktop on the orchestrating host.
+> **Evolution note:** This ADR originally described Parallels Desktop VMs with `prlctl snapshot-switch` for state management. The implementation evolved to use SSH connections to real machines (physical or VM) reachable via the network, as this proved more flexible across all three platforms and did not require Parallels Desktop on the orchestrating host.
 
 ### Machine Configuration
 
@@ -71,7 +71,7 @@ All platforms use **WebdriverIO**[^4] as the test runner, connecting via the W3C
 
 ## Consequences
 
-- **Requires SSH access** to target machines (Linux, Windows, macOS) for cross-platform testing. Machines can be physical, cloud VMs, or local VMs reachable via Tailscale or direct network — no dependency on a specific hypervisor
+- **Requires SSH access** to target machines (Linux, Windows, macOS) for cross-platform testing. Machines can be physical, cloud VMs, or local VMs reachable via the network — no dependency on a specific hypervisor
 - **First run per machine takes ~15–20 minutes** due to full Rust compilation of the Tauri app from source. Subsequent runs take ~5 minutes with incremental compilation (Cargo build cache persists on the target machine between runs)
 - **Full user experience tested**: clean state → build → install artifact → setup wizard → runtime install (Lima/nerdctl/WSL2) → container lifecycle → chat UI — the complete Speedwave flow that no other testing approach can cover
 - **3 platforms tested in parallel**: `make test-e2e-all` runs tests on Ubuntu, Windows, and macOS machines concurrently via SSH
