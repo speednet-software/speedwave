@@ -10,23 +10,8 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { searchTools, getServiceTools, getToolMetadata } from './search-tools.js';
-import { TOOL_REGISTRY, resetServiceCaches, _resetRegistryForTesting } from './tool-registry.js';
-import { SUPPORTED_SERVICES, getServicePolicies } from './hub-tool-policy.js';
-import { buildSkeletonFromPolicy } from './tool-discovery.js';
-
-/**
- * Populate registry with skeleton entries from policies.
- * This simulates what initializeRegistry() does when workers are unavailable.
- */
-function populateRegistryFromPolicies(): void {
-  for (const service of SUPPORTED_SERVICES) {
-    const policies = getServicePolicies(service);
-    TOOL_REGISTRY[service] = {};
-    for (const [methodName, policy] of Object.entries(policies)) {
-      TOOL_REGISTRY[service][methodName] = buildSkeletonFromPolicy(service, methodName, policy);
-    }
-  }
-}
+import { resetServiceCaches } from './tool-registry.js';
+import { populateRegistryFromPolicies, _resetRegistryForTesting } from './test-helpers.js';
 
 describe('searchTools', () => {
   const savedEnabledServices = process.env.ENABLED_SERVICES;

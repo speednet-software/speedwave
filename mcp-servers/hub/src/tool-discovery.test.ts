@@ -31,6 +31,14 @@ describe('tool-discovery', () => {
     it('handles already camelCase', () => {
       expect(toCamelCase('createIssue')).toBe('createIssue');
     });
+
+    it('handles uppercase letters after underscore', () => {
+      expect(toCamelCase('get_MR_changes')).toBe('getMRChanges');
+    });
+
+    it('handles digits after underscore', () => {
+      expect(toCamelCase('get_v2_api')).toBe('getV2Api');
+    });
   });
 
   describe('discoverServiceTools', () => {
@@ -157,13 +165,13 @@ describe('tool-discovery', () => {
       expect(result.inputSchema).toEqual(baseTool.inputSchema);
     });
 
-    it('uses worker category over policy category when present', () => {
+    it('uses policy category (hub-authoritative) regardless of worker category', () => {
       const tool: Tool = { ...baseTool, category: 'delete' };
       const result = mergeToolWithPolicy(tool, basePolicy, 'redmine', 'createIssue');
-      expect(result.category).toBe('delete');
+      expect(result.category).toBe('write'); // policy.category, not tool.category
     });
 
-    it('falls back to policy category when worker has none', () => {
+    it('uses policy category when worker has none', () => {
       const tool: Tool = { ...baseTool, category: undefined };
       const result = mergeToolWithPolicy(tool, basePolicy, 'redmine', 'createIssue');
       expect(result.category).toBe('write');
@@ -206,7 +214,7 @@ describe('tool-discovery', () => {
       expect(result.category).toBe('read');
       expect(result.deferLoading).toBe(true);
       expect(result.description).toContain('listIssueIds');
-      expect(result.description).toContain('not yet available');
+      expect(result.description).not.toContain('not yet available');
       expect(result.keywords).toEqual([]);
       expect(result.inputSchema).toEqual({ type: 'object', properties: {} });
     });

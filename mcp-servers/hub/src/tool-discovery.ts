@@ -6,9 +6,10 @@
  * Merges worker tool data with hub policy to produce ToolMetadata.
  *
  * Workers are the SSOT for: name, description, inputSchema, inputExamples,
- * category, keywords, example, outputSchema.
+ * keywords, example, outputSchema.
  *
- * Hub policy provides: deferLoading, timeoutClass, timeoutMs, osCategory, service.
+ * Hub policy is authoritative for: category (audit), deferLoading, timeoutClass,
+ * timeoutMs, osCategory, service.
  */
 
 import { randomUUID } from 'crypto';
@@ -26,7 +27,7 @@ import { validateWorkerUrl } from '@speedwave/mcp-shared';
  * @param str - snake_case string to convert
  */
 export function toCamelCase(str: string): string {
-  return str.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+  return str.replace(/_([a-zA-Z0-9])/g, (_, c: string) => c.toUpperCase());
 }
 
 /**
@@ -48,7 +49,7 @@ export async function discoverServiceTools(service: string): Promise<Tool[]> {
 
   const requestId = randomUUID();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.HEALTH_CHECK_MS);
+  const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.TOOL_DISCOVERY_MS);
 
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -125,7 +126,7 @@ export function mergeToolWithPolicy(
     inputExamples: tool.inputExamples,
     service,
     deferLoading: policy.deferLoading,
-    category: tool.category ?? policy.category,
+    category: policy.category,
     timeoutClass: policy.timeoutClass,
     timeoutMs: policy.timeoutMs,
     osCategory: policy.osCategory,
@@ -147,7 +148,7 @@ export function buildSkeletonFromPolicy(
 ): ToolMetadata {
   return {
     name: methodName,
-    description: `${methodName} (worker not yet available)`,
+    description: `${methodName} — use search_tools for full schema`,
     keywords: [],
     inputSchema: { type: 'object', properties: {} },
     example: '',
@@ -229,7 +230,16 @@ export async function discoverAndMergeService(
     const workerTool = toolsByMethod.get(methodName);
 
     if (workerTool) {
-      result[methodName] = mergeToolWithPolicy(workerTool, policy, service, methodName);
+      const merged = mergeToolWithPolicy(workerTool, policy, service, methodName);
+      const errors = validateMergeResult(service, methodName, merged);
+      if (errors.length > 0) {
+        console.warn(
+          `${ts()} [tool-discovery] Validation errors for ${service}.${methodName}: ${errors.join('; ')} — using skeleton`
+        );
+        result[methodName] = buildSkeletonFromPolicy(service, methodName, policy);
+      } else {
+        result[methodName] = merged;
+      }
     } else {
       console.warn(
         `${ts()} [tool-discovery] Tool ${service}.${methodName} not found in worker, using skeleton`

@@ -62,9 +62,10 @@ export function getRegistry(): Readonly<Record<string, Readonly<Record<string, T
 
 /**
  * Backward-compatible alias: consumers that used TOOL_REGISTRY directly.
- * Now a getter that returns the current registry snapshot.
+ * Typed as Readonly for production safety. Tests cast to mutable via _resetRegistryForTesting.
  */
-export const TOOL_REGISTRY: Record<string, Record<string, ToolMetadata>> = _registry;
+export const TOOL_REGISTRY: Readonly<Record<string, Readonly<Record<string, ToolMetadata>>>> =
+  _registry;
 
 /**
  * List of all service names in the registry
@@ -86,6 +87,7 @@ export const SERVICE_NAMES: readonly string[] = [...SUPPORTED_SERVICES];
  */
 export async function initializeRegistry(): Promise<void> {
   if (_initialized) return;
+  _initialized = true; // Set immediately to prevent concurrent double-initialization
 
   console.log(`${ts()} [tool-registry] Initializing dynamic registry...`);
 
@@ -110,8 +112,6 @@ export async function initializeRegistry(): Promise<void> {
       _populateSkeletons(service);
     }
   }
-
-  _initialized = true;
 
   // Start background refresh (every 5 minutes)
   _startBackgroundRefresh();
@@ -153,6 +153,11 @@ export async function refreshServiceTools(service: string): Promise<void> {
 }
 
 /**
+ * Whether a background refresh is currently in progress
+ */
+let _refreshInProgress = false;
+
+/**
  * Start background refresh of all enabled services.
  */
 function _startBackgroundRefresh(): void {
@@ -160,11 +165,17 @@ function _startBackgroundRefresh(): void {
 
   const REFRESH_MS = 5 * 60 * 1000; // 5 minutes
   _refreshInterval = setInterval(async () => {
-    const enabled = getEnabledServices();
-    for (const service of SUPPORTED_SERVICES) {
-      if (enabled.has(service)) {
-        await refreshServiceTools(service);
+    if (_refreshInProgress) return; // Skip overlapping refresh
+    _refreshInProgress = true;
+    try {
+      const enabled = getEnabledServices();
+      for (const service of SUPPORTED_SERVICES) {
+        if (enabled.has(service)) {
+          await refreshServiceTools(service);
+        }
       }
+    } finally {
+      _refreshInProgress = false;
     }
   }, REFRESH_MS);
 
@@ -192,6 +203,7 @@ export function _resetRegistryForTesting(): void {
     delete _registry[key];
   }
   _initialized = false;
+  _refreshInProgress = false;
   stopBackgroundRefresh();
 }
 

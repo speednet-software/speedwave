@@ -1,24 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { executeCode, _setBridgesForTesting, _formatErrorMessage } from './executor.js';
 import type { AllBridges } from './http-bridge.js';
-import {
-  TOOL_REGISTRY,
-  resetServiceCaches,
-  _resetRegistryForTesting,
-  stopBackgroundRefresh,
-} from './tool-registry.js';
-import { SUPPORTED_SERVICES, getServicePolicies } from './hub-tool-policy.js';
-import { buildSkeletonFromPolicy } from './tool-discovery.js';
-
-function populateRegistryFromPolicies(): void {
-  for (const service of SUPPORTED_SERVICES) {
-    const policies = getServicePolicies(service);
-    TOOL_REGISTRY[service] = {};
-    for (const [methodName, policy] of Object.entries(policies)) {
-      TOOL_REGISTRY[service][methodName] = buildSkeletonFromPolicy(service, methodName, policy);
-    }
-  }
-}
+import { resetServiceCaches, stopBackgroundRefresh } from './tool-registry.js';
+import { populateRegistryFromPolicies, _resetRegistryForTesting } from './test-helpers.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Tests for Code Executor
