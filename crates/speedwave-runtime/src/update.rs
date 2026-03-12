@@ -306,20 +306,44 @@ mod tests {
     #[test]
     fn test_snapshot_atomic_write_no_tmp_residue() {
         // Call the real save_snapshot() by setting up the compose output file it reads.
-        // save_snapshot reads from compose_output_path(project) = $HOME/.speedwave/compose/<project>/compose.yml
-        // and writes to snapshot_path(project) = $HOME/.speedwave/snapshots/<project>/snapshot.json
-        let project = "atomic-write-test";
+        // Uses a unique project name to avoid collisions in parallel test runs.
+        let project = format!(
+            "atomic-write-test-{}",
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .subsec_nanos()
+        );
 
         // Set up the compose file that save_snapshot() will read
-        let compose_path = compose::compose_output_path(project).unwrap();
+        let compose_path = compose::compose_output_path(&project).unwrap();
+        let snap_path = snapshot_path(&project).unwrap();
+
+        // RAII guard: clean up $HOME/.speedwave/ subdirs even on panic
+        struct Cleanup {
+            paths: Vec<std::path::PathBuf>,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                for p in &self.paths {
+                    let _ = std::fs::remove_dir_all(p);
+                }
+            }
+        }
+        let _cleanup = Cleanup {
+            paths: vec![
+                compose_path.parent().unwrap().to_path_buf(),
+                snap_path.parent().unwrap().to_path_buf(),
+            ],
+        };
+
         std::fs::create_dir_all(compose_path.parent().unwrap()).unwrap();
         std::fs::write(&compose_path, "version: '3'\nservices: {}\n").unwrap();
 
         // Call the real function
-        save_snapshot(project).unwrap();
+        save_snapshot(&project).unwrap();
 
         // Verify no .json.tmp residue remains
-        let snap_path = snapshot_path(project).unwrap();
         let tmp_path = snap_path.with_extension("json.tmp");
         assert!(
             !tmp_path.exists(),
@@ -327,32 +351,33 @@ mod tests {
         );
 
         // Verify content was written correctly
-        let loaded = load_snapshot(project).unwrap();
+        let loaded = load_snapshot(&project).unwrap();
         assert_eq!(loaded.project, project);
         assert_eq!(loaded.compose_yml, "version: '3'\nservices: {}\n");
-
-        // Clean up
-        let _ = std::fs::remove_dir_all(snap_path.parent().unwrap());
-        let _ = std::fs::remove_dir_all(compose_path.parent().unwrap());
     }
 
     #[test]
     fn test_build_before_compose_down_in_update_containers() {
-        // Verify that build_all_images is called BEFORE compose_down in the source code.
-        // Reading the source directly guards against reordering — if someone swaps
-        // the calls, this test fails regardless of error message wording.
+        // Verify that build_all_images is called BEFORE compose_down in update_containers().
+        // Searches only within the function body to avoid false matches from
+        // rollback_containers or other functions that may also call compose_down.
         let source = include_str!("update.rs");
 
-        let build_pos = source
+        let fn_start = source
+            .find("fn update_containers(")
+            .expect("update_containers function must exist");
+        let fn_body = &source[fn_start..];
+
+        let build_pos = fn_body
             .find("build::build_all_images")
-            .expect("build_all_images call must exist in update.rs");
-        let down_pos = source
+            .expect("build_all_images call must exist in update_containers");
+        let down_pos = fn_body
             .find("runtime.compose_down(project)")
-            .expect("compose_down call must exist in update.rs");
+            .expect("compose_down call must exist in update_containers");
 
         assert!(
             build_pos < down_pos,
-            "build_all_images (byte {}) must appear before compose_down (byte {}) in update_containers",
+            "build_all_images (offset {}) must appear before compose_down (offset {}) in update_containers",
             build_pos,
             down_pos
         );
