@@ -305,50 +305,56 @@ mod tests {
 
     #[test]
     fn test_snapshot_atomic_write_no_tmp_residue() {
-        let dir = tempfile::tempdir().unwrap();
-        let snap_dir = dir.path().join("snapshots").join("atomic-test");
-        std::fs::create_dir_all(&snap_dir).unwrap();
+        // Call the real save_snapshot() by setting up the compose output file it reads.
+        // save_snapshot reads from compose_output_path(project) = $HOME/.speedwave/compose/<project>/compose.yml
+        // and writes to snapshot_path(project) = $HOME/.speedwave/snapshots/<project>/snapshot.json
+        let project = "atomic-write-test";
 
-        let path = snap_dir.join("snapshot.json");
-        let tmp_path = path.with_extension("json.tmp");
+        // Set up the compose file that save_snapshot() will read
+        let compose_path = compose::compose_output_path(project).unwrap();
+        std::fs::create_dir_all(compose_path.parent().unwrap()).unwrap();
+        std::fs::write(&compose_path, "version: '3'\nservices: {}\n").unwrap();
 
-        let snapshot = UpdateSnapshot {
-            project: "atomic-test".to_string(),
-            compose_yml: "version: '3'\nservices: {}\n".to_string(),
-        };
+        // Call the real function
+        save_snapshot(project).unwrap();
 
-        let json = serde_json::to_string_pretty(&snapshot).unwrap();
-        std::fs::write(&tmp_path, &json).unwrap();
-        std::fs::rename(&tmp_path, &path).unwrap();
+        // Verify no .json.tmp residue remains
+        let snap_path = snapshot_path(project).unwrap();
+        let tmp_path = snap_path.with_extension("json.tmp");
+        assert!(
+            !tmp_path.exists(),
+            ".json.tmp must not remain after atomic rename"
+        );
 
-        // tmp file must not remain after atomic rename
-        assert!(!tmp_path.exists(), ".json.tmp must not remain after rename");
-
-        // final file must contain correct content
-        let loaded: UpdateSnapshot =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(loaded.project, "atomic-test");
+        // Verify content was written correctly
+        let loaded = load_snapshot(project).unwrap();
+        assert_eq!(loaded.project, project);
         assert_eq!(loaded.compose_yml, "version: '3'\nservices: {}\n");
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(snap_path.parent().unwrap());
+        let _ = std::fs::remove_dir_all(compose_path.parent().unwrap());
     }
 
     #[test]
-    fn test_build_failure_does_not_stop_containers() {
-        // Verify that the error message from build failure indicates containers
-        // are still running (confirming build happens BEFORE compose_down).
-        let err = anyhow::anyhow!(
-            "Image rebuild failed: {}. Containers are still running with the previous version.",
-            "disk full"
-        );
-        let msg = err.to_string();
+    fn test_build_before_compose_down_in_update_containers() {
+        // Verify that build_all_images is called BEFORE compose_down in the source code.
+        // Reading the source directly guards against reordering — if someone swaps
+        // the calls, this test fails regardless of error message wording.
+        let source = include_str!("update.rs");
+
+        let build_pos = source
+            .find("build::build_all_images")
+            .expect("build_all_images call must exist in update.rs");
+        let down_pos = source
+            .find("runtime.compose_down(project)")
+            .expect("compose_down call must exist in update.rs");
+
         assert!(
-            msg.contains("Containers are still running"),
-            "Build failure error must indicate containers are still running, got: {}",
-            msg
-        );
-        assert!(
-            !msg.contains("Containers are stopped"),
-            "Build failure error must NOT say containers are stopped, got: {}",
-            msg
+            build_pos < down_pos,
+            "build_all_images (byte {}) must appear before compose_down (byte {}) in update_containers",
+            build_pos,
+            down_pos
         );
     }
 
