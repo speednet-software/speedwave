@@ -412,7 +412,7 @@ _e2e-run:
 	trap - EXIT; \
 	exit $$E2E_EXIT
 
-# Run E2E on all platforms via SSH to dedicated test machines (Tailscale network)
+# Run E2E on all platforms via SSH to dedicated test machines
 test-e2e-all:
 	@scripts/e2e-vm.sh all
 
