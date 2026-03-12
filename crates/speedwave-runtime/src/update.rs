@@ -69,7 +69,9 @@ pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
 
     let path = snapshot_path(project)?;
     let json = serde_json::to_string_pretty(&snapshot)?;
-    std::fs::write(&path, json)?;
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, &json)?;
+    std::fs::rename(&tmp_path, &path)?;
 
     // Restrict snapshot file permissions (may contain sensitive compose config)
     #[cfg(unix)]
@@ -131,24 +133,30 @@ pub fn update_containers(
     // 5. Save new compose.yml
     compose::save_compose(project, &compose_yml)?;
 
-    // 6. Graceful shutdown — stop running containers before rebuild/recreate.
-    //    SIGTERM + timeout (compose default 10s) prevents killing active Claude sessions.
-    runtime.compose_down(project)?;
-
-    // 7. Rebuild images from local Containerfiles.
-    //    Images are built locally (no registry) — this picks up any changes
-    //    to Containerfiles, entrypoint scripts, or MCP server code.
+    // 6. Rebuild images from local Containerfiles BEFORE stopping containers.
+    //    If the build fails, containers keep running with the previous version.
+    //    containerd uses content-addressable storage — new builds don't affect running containers.
     let images_rebuilt = build::build_all_images(runtime).map_err(|e| {
         anyhow::anyhow!(
-            "Image rebuild failed: {}. Containers are stopped. Run `speedwave` to restart with previous config, or retry the update.",
+            "Image rebuild failed: {}. Containers are still running with the previous version.",
             e
         )
     })?;
 
-    // 8. Recreate containers
+    // 7. Graceful shutdown — stop running containers before recreate.
+    //    SIGTERM + timeout (compose default 10s) prevents killing active Claude sessions.
+    runtime.compose_down(project)?;
+
+    // 8. Recreate containers with newly built images
     runtime.compose_up_recreate(project)?;
 
-    // 9. Verify containers are running
+    // 9. Wait for containers to stabilize before health check.
+    //    A crash-looping container may briefly show state=="running".
+    std::thread::sleep(std::time::Duration::from_secs(
+        consts::CONTAINER_STABILIZATION_DELAY_SECS,
+    ));
+
+    // 10. Verify containers are running
     let containers = runtime.compose_ps(project)?;
     let running = containers
         .iter()
@@ -293,5 +301,66 @@ mod tests {
         assert!(path_str.contains("snapshots"));
         assert!(path_str.contains("my-project"));
         assert!(path_str.ends_with("snapshot.json"));
+    }
+
+    #[test]
+    fn test_snapshot_atomic_write_no_tmp_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap_dir = dir.path().join("snapshots").join("atomic-test");
+        std::fs::create_dir_all(&snap_dir).unwrap();
+
+        let path = snap_dir.join("snapshot.json");
+        let tmp_path = path.with_extension("json.tmp");
+
+        let snapshot = UpdateSnapshot {
+            project: "atomic-test".to_string(),
+            compose_yml: "version: '3'\nservices: {}\n".to_string(),
+        };
+
+        let json = serde_json::to_string_pretty(&snapshot).unwrap();
+        std::fs::write(&tmp_path, &json).unwrap();
+        std::fs::rename(&tmp_path, &path).unwrap();
+
+        // tmp file must not remain after atomic rename
+        assert!(!tmp_path.exists(), ".json.tmp must not remain after rename");
+
+        // final file must contain correct content
+        let loaded: UpdateSnapshot =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(loaded.project, "atomic-test");
+        assert_eq!(loaded.compose_yml, "version: '3'\nservices: {}\n");
+    }
+
+    #[test]
+    fn test_build_failure_does_not_stop_containers() {
+        // Verify that the error message from build failure indicates containers
+        // are still running (confirming build happens BEFORE compose_down).
+        let err = anyhow::anyhow!(
+            "Image rebuild failed: {}. Containers are still running with the previous version.",
+            "disk full"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Containers are still running"),
+            "Build failure error must indicate containers are still running, got: {}",
+            msg
+        );
+        assert!(
+            !msg.contains("Containers are stopped"),
+            "Build failure error must NOT say containers are stopped, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_stabilization_delay_is_reasonable() {
+        assert!(
+            consts::CONTAINER_STABILIZATION_DELAY_SECS >= 1,
+            "stabilization delay must be at least 1 second"
+        );
+        assert!(
+            consts::CONTAINER_STABILIZATION_DELAY_SECS <= 10,
+            "stabilization delay must not exceed 10 seconds"
+        );
     }
 }

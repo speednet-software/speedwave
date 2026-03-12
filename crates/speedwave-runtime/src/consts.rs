@@ -92,6 +92,10 @@ pub const UIDMAP_MISSING_MSG: &str = "newuidmap not found. Install the uidmap pa
      - Fedora/RHEL:   sudo dnf install -y shadow-utils\n\
      - openSUSE:      sudo zypper install -y shadow";
 
+/// Delay in seconds after `compose_up_recreate` before checking container health.
+/// Allows crash-looping containers to exit before `compose_ps` reports state.
+pub const CONTAINER_STABILIZATION_DELAY_SECS: u64 = 3;
+
 /// Descriptor for a single auth/credential field of an MCP service.
 pub struct McpAuthFieldDescriptor {
     /// Field key used as filename in the tokens directory (e.g. "bot_token").
