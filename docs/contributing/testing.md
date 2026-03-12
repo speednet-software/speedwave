@@ -99,7 +99,7 @@ Prerequisites depend on the platform:
 
 ### Cross-platform E2E (`make test-e2e-all`)
 
-Runs Desktop E2E tests on all three platforms via SSH to dedicated test machines on a Tailscale network. The machines are configured via environment variables: `SPEEDWAVE_LINUX_HOST`, `SPEEDWAVE_WINDOWS_HOST`, `SPEEDWAVE_MACOS_HOST`.
+Runs Desktop E2E tests on all three platforms via SSH to dedicated test machines. The machines are configured via environment variables: `SPEEDWAVE_LINUX_HOST`, `SPEEDWAVE_WINDOWS_HOST`, `SPEEDWAVE_MACOS_HOST`.
 
 The `scripts/e2e-vm.sh` script orchestrates the following three-phase flow for each platform (Ubuntu, Windows, macOS) **in parallel**:
 

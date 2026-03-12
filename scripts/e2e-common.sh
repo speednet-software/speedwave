@@ -2,13 +2,17 @@
 # e2e-common.sh — Shared configuration for E2E testing scripts.
 # Sourced by e2e-vm.sh and e2e-vm-setup.sh.
 
-# -- SSH Targets ---------------------------------------------------------------
-# Override via environment variables for different test machines.
+# -- Load .env if present ------------------------------------------------------
+# shellcheck disable=SC1091
+[[ -f "${BASH_SOURCE[0]%/*}/../.env" ]] && source "${BASH_SOURCE[0]%/*}/../.env"
 
-LINUX_HOST="${SPEEDWAVE_LINUX_HOST:-limes@100.90.218.98}"
-WINDOWS_HOST="${SPEEDWAVE_WINDOWS_HOST:-jakub@100.82.138.67}"
+# -- SSH Targets ---------------------------------------------------------------
+# Required environment variables. See .env.example for documentation.
+
+LINUX_HOST="${SPEEDWAVE_LINUX_HOST:?Set SPEEDWAVE_LINUX_HOST (e.g. user@host)}"
+WINDOWS_HOST="${SPEEDWAVE_WINDOWS_HOST:?Set SPEEDWAVE_WINDOWS_HOST (e.g. user@host)}"
 WINDOWS_SSH_PORT="${SPEEDWAVE_WINDOWS_SSH_PORT:-22}"
-MACOS_HOST="${SPEEDWAVE_MACOS_HOST:-limes@100.104.82.7}"
+MACOS_HOST="${SPEEDWAVE_MACOS_HOST:?Set SPEEDWAVE_MACOS_HOST (e.g. user@host)}"
 
 # -- SSH Options ---------------------------------------------------------------
 # Base options shared by all scripts. e2e-vm.sh appends keepalive options for

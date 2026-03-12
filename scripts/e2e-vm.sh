@@ -34,7 +34,7 @@ HOST_REPO_DIR="${SPEEDWAVE_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 # Staging dir on host for passing artifacts between phases
 # Artifacts are kept on each remote machine's ~/Desktop/ (survives clean_state).
-# No local staging needed — avoids 352 MB+ round-trip transfers over Tailscale.
+# No local staging needed — avoids 352 MB+ round-trip transfers over the network.
 
 # -- Helper functions: SSH (Linux) ---------------------------------------------
 
@@ -524,7 +524,7 @@ run_windows() {
 
     # Copy from WSL2 filesystem to Windows filesystem, then build.
     # Each phase is a separate windows_ps call to avoid SSH timeouts —
-    # long-running builds (cargo ~15 min) can exceed Tailscale/NAT idle
+    # long-running builds (cargo ~15 min) can exceed NAT idle
     # timeouts even with SSH keepalives.
 
     # -- Step 1: Copy repo and install npm dependencies --
