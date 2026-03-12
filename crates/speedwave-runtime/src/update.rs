@@ -71,14 +71,16 @@ pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(&snapshot)?;
     let tmp_path = path.with_extension("json.tmp");
     std::fs::write(&tmp_path, &json)?;
-    std::fs::rename(&tmp_path, &path)?;
 
-    // Restrict snapshot file permissions (may contain sensitive compose config)
+    // Restrict permissions before rename to avoid TOCTOU window where the file
+    // briefly exists with umask-derived permissions after atomic rename.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
     }
+
+    std::fs::rename(&tmp_path, &path)?;
 
     Ok(())
 }
