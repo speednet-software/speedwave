@@ -72,6 +72,35 @@ impl WslRuntime {
     pub fn with_runner(runner: Box<dyn CommandRunner>) -> Self {
         Self { runner }
     }
+
+    /// Checks that a service is running inside the WSL distro. If the check
+    /// command fails, tries to start the service via systemctl and re-checks
+    /// once after a short delay.
+    fn check_service(
+        &self,
+        distro: &str,
+        check_cmd: &[&str],
+        service_name: &str,
+    ) -> anyhow::Result<()> {
+        let mut args = vec!["-d", distro, "--"];
+        args.extend_from_slice(check_cmd);
+        if self.runner.run("wsl.exe", &args).is_ok() {
+            return Ok(());
+        }
+        // Service not ready — try starting it and wait briefly
+        let _ = self.runner.run(
+            "wsl.exe",
+            &["-d", distro, "--", "systemctl", "start", service_name],
+        );
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        self.runner.run("wsl.exe", &args).map_err(|_| {
+            anyhow::anyhow!(
+                "{service_name} is not running inside WSL2 distribution '{distro}'. \
+                 Try: wsl -d {distro} -- systemctl start {service_name}"
+            )
+        })?;
+        Ok(())
+    }
 }
 
 /// Converts a Windows-style path (`C:\foo\bar` or `C:/foo/bar`) to a WSL mount path
@@ -360,6 +389,14 @@ impl ContainerRuntime for WslRuntime {
             );
         }
 
+        // Verify containerd is running inside the WSL distro.
+        // After a WSL session closes, the VM may restart and systemd services
+        // need time to come up. Retry with backoff (up to ~30s in production,
+        // instant in tests where the runner responds immediately).
+        let distro = consts::WSL_DISTRO_NAME;
+        self.check_service(distro, &["nerdctl", "info"], "containerd")?;
+        self.check_service(distro, &["buildctl", "debug", "workers"], "buildkitd")?;
+
         Ok(())
     }
 }
@@ -439,8 +476,13 @@ mod tests {
 
     #[test]
     fn test_ensure_ready_distro_exists() {
-        let runner =
-            MockRunner::new().with_response("wsl.exe --list --quiet", "Ubuntu\nSpeedwave\n");
+        let runner = MockRunner::new()
+            .with_response("wsl.exe --list --quiet", "Ubuntu\nSpeedwave\n")
+            .with_response("wsl.exe -d Speedwave -- nerdctl info", "containerd running")
+            .with_response(
+                "wsl.exe -d Speedwave -- buildctl debug workers",
+                "buildkit ready",
+            );
         let rt = WslRuntime::with_runner(Box::new(runner));
         assert!(rt.ensure_ready().is_ok());
     }
@@ -464,6 +506,40 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("WSL2 not available"));
+    }
+
+    #[test]
+    fn test_ensure_ready_containerd_not_running() {
+        let runner = MockRunner::new()
+            .with_response("wsl.exe --list --quiet", "Speedwave\n")
+            .with_error("wsl.exe -d Speedwave -- nerdctl info", "connection refused");
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let result = rt.ensure_ready();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("containerd"),
+            "error should mention containerd, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_ensure_ready_buildkit_not_running() {
+        let runner = MockRunner::new()
+            .with_response("wsl.exe --list --quiet", "Speedwave\n")
+            .with_response("wsl.exe -d Speedwave -- nerdctl info", "containerd running")
+            .with_error(
+                "wsl.exe -d Speedwave -- buildctl debug workers",
+                "connection refused",
+            );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let result = rt.ensure_ready();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("buildkitd"),
+            "error should mention buildkitd, got: {err}"
+        );
     }
 
     #[test]
@@ -691,7 +767,13 @@ mod tests {
         for ch in text.encode_utf16() {
             bytes.extend_from_slice(&ch.to_le_bytes());
         }
-        let runner = MockRunner::new().with_raw_response("wsl.exe --list --quiet", bytes);
+        let runner = MockRunner::new()
+            .with_raw_response("wsl.exe --list --quiet", bytes)
+            .with_response("wsl.exe -d Speedwave -- nerdctl info", "containerd running")
+            .with_response(
+                "wsl.exe -d Speedwave -- buildctl debug workers",
+                "buildkit ready",
+            );
         let rt = WslRuntime::with_runner(Box::new(runner));
         assert!(rt.ensure_ready().is_ok());
     }

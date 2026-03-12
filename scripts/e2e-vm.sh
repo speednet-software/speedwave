@@ -81,7 +81,7 @@ linux_rsync_to() {
     # shellcheck disable=SC2086
     rsync -az -e "ssh $LINUX_SSH_OPTS" --delete \
         --exclude node_modules --exclude target --exclude dist \
-        --exclude .e2e-artifacts --exclude .git \
+        --exclude .e2e-artifacts --exclude .git --exclude build-context \
         "$src" "${LINUX_HOST}:${dst}"
 }
 
@@ -160,10 +160,13 @@ windows_ps() {
     tmpname="e2e-$$.ps1"
     tmpfile_win="C:\\Windows\\Temp\\${tmpname}"
     tmpfile_local=$(mktemp)
+    # Inject $WINDOWS_WSL_DISTRO so PS heredocs can reference it without
+    # switching to unquoted heredocs (which would require escaping all PS $vars).
+    local ps_prefix="\$WINDOWS_WSL_DISTRO = '${WINDOWS_WSL_DISTRO}'"
     # Write with UTF-8 BOM — PowerShell on Windows defaults to the system
     # locale (e.g., Windows-1252) when reading .ps1 files without a BOM.
     # UTF-8 multi-byte characters (em-dashes, etc.) would corrupt strings.
-    printf '\xEF\xBB\xBF%s\n' "$ps_script" > "$tmpfile_local"
+    printf '\xEF\xBB\xBF%s\n%s\n' "$ps_prefix" "$ps_script" > "$tmpfile_local"
     # Upload the script via scp (scp uses -P for port, not -p)
     scp -q -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
         -P "$WINDOWS_SSH_PORT" "$tmpfile_local" "${WINDOWS_HOST}:C:\\Windows\\Temp\\${tmpname}"
@@ -192,7 +195,7 @@ windows_rsync_to() {
     local src="$1" dst="$2"
     # --no-mac-metadata and --exclude='._*' prevent macOS resource forks (._file)
     # from being included — these cause "not valid UTF-8" errors in Tauri builds.
-    local -a tar_excludes=(--exclude=node_modules --exclude=target --exclude=dist --exclude=.e2e-artifacts --exclude=.git '--exclude=._*' --exclude=.angular --exclude=.build)
+    local -a tar_excludes=(--exclude=node_modules --exclude=target --exclude=dist --exclude=.e2e-artifacts --exclude=.git '--exclude=._*' --exclude=.angular --exclude=.build --exclude=build-context)
     local -a tar_flags=(--no-mac-metadata)
     # Ensure the WSL distro is running before proceeding — wsl.exe may need
     # time to restart after a --unregister of another distro shut down the VM.
@@ -302,6 +305,9 @@ if ($distroExists) {
     $containers | ForEach-Object {
         wsl.exe -d Speedwave -- nerdctl rm -f $_.Line 2>$null
     }
+    # Remove leftover CNI networks — stale bridge interfaces cause
+    # "already has an IP address different from ..." on next run.
+    wsl.exe -d Speedwave -- nerdctl network prune -f 2>$null
 }
 
 # Uninstall Speedwave if present (NSIS uninstaller)
@@ -319,6 +325,17 @@ wsl.exe --unregister Speedwave 2>$null
 # with "The system cannot find the path specified" until it restarts.
 Start-Sleep -Seconds 5
 
+# Remove stale CNI bridge interfaces left behind by unregistered distro.
+# These live in the WSL2 kernel (shared) and cause "already has an IP
+# address different from ..." errors on the next run.
+$bridges = wsl.exe -d $WINDOWS_WSL_DISTRO -u root -- bash -c "ip -o link show type bridge 2>/dev/null | grep -o 'br-[^:@]*'" 2>$null
+if ($bridges) {
+    $bridges -split "`n" | ForEach-Object {
+        $br = $_.Trim()
+        if ($br) { wsl.exe -d $WINDOWS_WSL_DISTRO -u root -- ip link delete $br 2>$null }
+    }
+}
+
 # Remove install dir, user data
 Remove-Item -Recurse -Force "C:\Speedwave" -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force "$env:USERPROFILE\.speedwave" -ErrorAction SilentlyContinue
@@ -326,10 +343,7 @@ Remove-Item -Recurse -Force "C:\speedwave-e2e" -ErrorAction SilentlyContinue
 Remove-Item -Force "C:\speedwave-setup.exe" -ErrorAction SilentlyContinue
 
 # Remove WSL-side staging dir (in the build distro, not Speedwave distro).
-# Must specify the distro explicitly — this runs inside a single-quoted
-# PowerShell heredoc where the bash variable $WINDOWS_WSL_DISTRO is not
-# available. If you change WINDOWS_WSL_DISTRO above, update this line too.
-wsl.exe -d Ubuntu-22.04 -- rm -rf /home/windows/speedwave-e2e
+wsl.exe -d $WINDOWS_WSL_DISTRO -- rm -rf /home/windows/speedwave-e2e
 
 Write-Host "Clean state ready"
 CLEAN
@@ -343,7 +357,7 @@ macos_rsync_to() {
     # shellcheck disable=SC2086
     rsync -az -e "ssh $MACOS_SSH_OPTS" --delete \
         --exclude node_modules --exclude target --exclude dist \
-        --exclude .e2e-artifacts --exclude .git \
+        --exclude .e2e-artifacts --exclude .git --exclude build-context \
         "$src" "${MACOS_HOST}:${dst}"
 }
 
@@ -580,7 +594,7 @@ Start-Sleep -Seconds 2
 
 for ($attempt = 1; $attempt -le 3; $attempt++) {
     Remove-Item -Recurse -Force "C:\speedwave-e2e" -ErrorAction SilentlyContinue
-    wsl.exe -d Ubuntu-22.04 -- rm -rf /mnt/c/speedwave-e2e
+    wsl.exe -d $WINDOWS_WSL_DISTRO -- rm -rf /mnt/c/speedwave-e2e
     if (-not (Test-Path "C:\speedwave-e2e")) { break }
     Write-Host "  Retry $attempt -- some files still locked, waiting..."
     Start-Sleep -Seconds 3
@@ -590,7 +604,7 @@ if (Test-Path "C:\speedwave-e2e") {
     exit 1
 }
 
-wsl.exe -d Ubuntu-22.04 -- cp -rT /home/windows/speedwave-e2e /mnt/c/speedwave-e2e
+wsl.exe -d $WINDOWS_WSL_DISTRO -- cp -rT /home/windows/speedwave-e2e /mnt/c/speedwave-e2e
 Assert-ExitCode
 
 Set-Location C:\speedwave-e2e
@@ -639,13 +653,15 @@ function Assert-ExitCode { if ($LASTEXITCODE -ne 0) { Write-Error "Command faile
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 $env:INCLUDE = [System.Environment]::GetEnvironmentVariable("INCLUDE","Machine")
 $env:LIB = [System.Environment]::GetEnvironmentVariable("LIB","Machine")
+$env:CARGO_TARGET_DIR = 'C:\cargo-build'
+New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
 Set-Location C:\speedwave-e2e
 
 Write-Host "── Building CLI binary..."
 New-Item -ItemType Directory -Path desktop\src-tauri\cli -Force | Out-Null
 cargo build -p speedwave-cli --release
 Assert-ExitCode
-Copy-Item target\release\speedwave.exe desktop\src-tauri\cli\speedwave.exe
+Copy-Item $env:CARGO_TARGET_DIR\release\speedwave.exe desktop\src-tauri\cli\speedwave.exe
 Write-Host "Step 3 DONE"
 SCRIPT
 
@@ -657,6 +673,8 @@ function Assert-ExitCode { if ($LASTEXITCODE -ne 0) { Write-Error "Command faile
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 $env:INCLUDE = [System.Environment]::GetEnvironmentVariable("INCLUDE","Machine")
 $env:LIB = [System.Environment]::GetEnvironmentVariable("LIB","Machine")
+$env:CARGO_TARGET_DIR = 'C:\cargo-build'
+New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
 Set-Location C:\speedwave-e2e
 
 Write-Host "── Building Tauri release with NSIS bundle (e2e feature = WebDriver on :4445)..."
@@ -673,7 +691,7 @@ SCRIPT
 $ErrorActionPreference = "Stop"
 Set-Location C:\speedwave-e2e
 
-$installer = Get-ChildItem "desktop\src-tauri\target\release\bundle\nsis\*.exe" -Recurse | Select-Object -First 1
+$installer = Get-ChildItem "C:\cargo-build\release\bundle\nsis\*.exe" -Recurse | Select-Object -First 1
 if (-not $installer) { Write-Error "NSIS installer not found"; exit 1 }
 Write-Host "Found: $($installer.FullName)"
 Copy-Item $installer.FullName "C:\speedwave-setup.exe"
@@ -709,8 +727,8 @@ SCRIPT
 $ErrorActionPreference = "Stop"
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 Remove-Item -Recurse -Force "C:\speedwave-e2e" -ErrorAction SilentlyContinue
-wsl.exe -d Ubuntu-22.04 -- rm -rf /mnt/c/speedwave-e2e
-wsl.exe -d Ubuntu-22.04 -- cp -rT /home/windows/speedwave-e2e /mnt/c/speedwave-e2e
+wsl.exe -d $WINDOWS_WSL_DISTRO -- rm -rf /mnt/c/speedwave-e2e
+wsl.exe -d $WINDOWS_WSL_DISTRO -- cp -rT /home/windows/speedwave-e2e /mnt/c/speedwave-e2e
 Set-Location C:\speedwave-e2e
 npm ci
 SCRIPT
@@ -750,8 +768,8 @@ SCRIPT
 $ErrorActionPreference = "Stop"
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 Remove-Item -Recurse -Force "C:\speedwave-e2e" -ErrorAction SilentlyContinue
-wsl.exe -d Ubuntu-22.04 -- rm -rf /mnt/c/speedwave-e2e
-wsl.exe -d Ubuntu-22.04 -- cp -rT /home/windows/speedwave-e2e /mnt/c/speedwave-e2e
+wsl.exe -d $WINDOWS_WSL_DISTRO -- rm -rf /mnt/c/speedwave-e2e
+wsl.exe -d $WINDOWS_WSL_DISTRO -- cp -rT /home/windows/speedwave-e2e /mnt/c/speedwave-e2e
 Set-Location C:\speedwave-e2e
 npm ci
 SCRIPT
@@ -790,8 +808,17 @@ $e2eProjectDir = "$env:TEMP\speedwave-e2e-project"
 New-Item -ItemType Directory -Path $e2eProjectDir -Force | Out-Null
 $env:E2E_PROJECT_DIR = $e2eProjectDir
 
-Write-Host "── Launching $appExe..."
-$app = Start-Process -FilePath $appExe -PassThru
+Write-Host "── Launching $appExe in interactive session..."
+# SSH runs in session 0 (services) which has no desktop.
+# Use schtasks /IT to launch the app in the console session where the GUI lives.
+$taskName = "SpeedwaveE2E"
+schtasks /Create /TN $taskName /TR $appExe /SC ONCE /ST 00:00 /IT /F /RL HIGHEST | Out-Null
+schtasks /Run /TN $taskName | Out-Null
+Start-Sleep -Seconds 2
+schtasks /Delete /TN $taskName /F | Out-Null
+# Find the process launched in the interactive session
+$app = Get-Process -Name "speedwave-desktop" -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $app) { Write-Error "speedwave-desktop not found after interactive launch"; exit 1 }
 
 # Default to failure — if npx wdio throws a terminating exception, $e2eExit
 # would remain unset and `exit $e2eExit` would exit 0 (false pass).

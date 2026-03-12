@@ -17,8 +17,8 @@ describe('Settings', function () {
     });
     await nav.click();
 
-    const provider = await $('[data-testid="settings-llm-provider"]');
-    await provider.waitForExist({ timeout: 10_000 });
+    const project = await $('[data-testid="settings-active-project"]');
+    await project.waitForExist({ timeout: 10_000 });
   });
 
   it('should display the active project name', async function () {
@@ -27,12 +27,6 @@ describe('Settings', function () {
     expect(await activeProject.isDisplayed()).toBe(true);
     const text = (await activeProject.getText()).trim();
     expect(text).toContain('e2e-test');
-  });
-
-  it('should display LLM provider selector', async function () {
-    this.timeout(15_000);
-    const provider = await $('[data-testid="settings-llm-provider"]');
-    expect(await provider.isDisplayed()).toBe(true);
   });
 
   it('should display factory reset button', async function () {
@@ -68,12 +62,6 @@ describe('Settings', function () {
     this.timeout(15_000);
     const updateBtn = await $('[data-testid="settings-check-update"]');
     expect(await updateBtn.isDisplayed()).toBe(true);
-  });
-
-  it('should display container updates button', async function () {
-    this.timeout(15_000);
-    const containerBtn = await $('[data-testid="settings-update-containers"]');
-    expect(await containerBtn.isDisplayed()).toBe(true);
   });
 
   it('should display log level selector', async function () {

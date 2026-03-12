@@ -36,7 +36,9 @@ windows_ps() {
     tmpname="e2e-setup-$$.ps1"
     tmpfile_win="C:\\Windows\\Temp\\${tmpname}"
     tmpfile_local=$(mktemp)
-    printf '%s\n' "$ps_script" > "$tmpfile_local"
+    # UTF-8 BOM — PowerShell on Windows defaults to the system locale
+    # (e.g., Windows-1252) when reading .ps1 files without a BOM.
+    printf '\xEF\xBB\xBF%s\n' "$ps_script" > "$tmpfile_local"
     # shellcheck disable=SC2086
     scp -q -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
         -P "$WINDOWS_SSH_PORT" "$tmpfile_local" "${WINDOWS_HOST}:C:\\Windows\\Temp\\${tmpname}"
@@ -86,6 +88,47 @@ SCRIPT
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo install tauri-driver --locked
 cargo install tauri-cli --locked
+SCRIPT
+
+    echo "[linux] Configuring rootless containers (subuid/subgid + userns)..."
+    linux_ssh bash <<'SCRIPT'
+set -euo pipefail
+USER=$(whoami)
+# Ensure subuid/subgid entries exist for the current user
+if ! grep -q "^${USER}:" /etc/subuid 2>/dev/null; then
+    sudo usermod --add-subuids 100000-165535 "$USER"
+fi
+if ! grep -q "^${USER}:" /etc/subgid 2>/dev/null; then
+    sudo usermod --add-subgids 100000-165535 "$USER"
+fi
+# Enable unprivileged user namespaces (required by rootlesskit)
+if [ -f /proc/sys/kernel/unprivileged_userns_clone ]; then
+    echo 1 | sudo tee /proc/sys/kernel/unprivileged_userns_clone
+    echo 'kernel.unprivileged_userns_clone=1' | sudo tee /etc/sysctl.d/99-userns.conf
+    sudo sysctl --system
+fi
+# Ubuntu 24.04+ uses AppArmor to restrict userns — allow it
+if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+    echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+    echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/99-userns-apparmor.conf
+    sudo sysctl --system
+fi
+# AppArmor profile for rootlesskit at the Speedwave install path
+# (default profile only covers /usr/bin/rootlesskit)
+ROOTLESSKIT_PATH="/usr/lib/Speedwave/nerdctl-full/bin/rootlesskit"
+if [ -f "$ROOTLESSKIT_PATH" ] && command -v apparmor_parser >/dev/null 2>&1; then
+    sudo tee /etc/apparmor.d/speedwave-rootlesskit > /dev/null <<AAEOF
+abi <abi/4.0>,
+include <tunables/global>
+
+profile speedwave-rootlesskit ${ROOTLESSKIT_PATH} flags=(unconfined) {
+  userns,
+  include if exists <local/rootlesskit>
+}
+AAEOF
+    sudo apparmor_parser -r /etc/apparmor.d/speedwave-rootlesskit
+fi
+echo "Rootless containers configured"
 SCRIPT
 
     echo "[linux] Verifying installation..."
@@ -185,7 +228,27 @@ $ErrorActionPreference = 'Stop'
 $env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User')
 $env:INCLUDE = [System.Environment]::GetEnvironmentVariable('INCLUDE','Machine')
 $env:LIB = [System.Environment]::GetEnvironmentVariable('LIB','Machine')
+# Use a non-temp directory for cargo builds to avoid AppLocker blocking
+# executables in %TEMP% (Windows Application Control error 4551).
+$env:CARGO_TARGET_DIR = 'C:\cargo-build'
+New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
 cargo install tauri-cli --locked
+SCRIPT
+
+    echo "[windows] Installing WSL2 distro $WINDOWS_WSL_DISTRO..."
+    local wsl_distro="$WINDOWS_WSL_DISTRO"
+    windows_ps <<SCRIPT
+\$ErrorActionPreference = 'Stop'
+\$distro = '${wsl_distro}'
+\$installed = wsl.exe -l -q 2>\$null | Where-Object { \$_ -match [regex]::Escape(\$distro) }
+if (\$installed) {
+    Write-Host "WSL2 distro \$distro already installed"
+} else {
+    Write-Host "Installing \$distro..."
+    wsl.exe --install -d \$distro --no-launch
+    if (\$LASTEXITCODE -ne 0) { Write-Error "Failed to install WSL2 distro \$distro"; exit 1 }
+    Write-Host "WSL2 distro \$distro installed"
+}
 SCRIPT
 
     echo "[windows] Verifying installation..."
