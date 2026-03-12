@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import {
   createGitLabBridge,
   createSlackBridge,
@@ -12,8 +12,25 @@ import {
   parseServiceError,
   getRequestTimeout,
 } from './http-bridge.js';
-import { getServiceMethods } from './tool-registry.js';
+import {
+  TOOL_REGISTRY,
+  getServiceMethods,
+  _resetRegistryForTesting,
+  stopBackgroundRefresh,
+} from './tool-registry.js';
+import { SUPPORTED_SERVICES, getServicePolicies } from './hub-tool-policy.js';
+import { buildSkeletonFromPolicy } from './tool-discovery.js';
 import { SERVICES } from './http-bridge.js';
+
+function populateRegistryFromPolicies(): void {
+  for (const service of SUPPORTED_SERVICES) {
+    const policies = getServicePolicies(service);
+    TOOL_REGISTRY[service] = {};
+    for (const [methodName, policy] of Object.entries(policies)) {
+      TOOL_REGISTRY[service][methodName] = buildSkeletonFromPolicy(service, methodName, policy);
+    }
+  }
+}
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Tests for HTTP Bridge
@@ -25,6 +42,15 @@ import { SERVICES } from './http-bridge.js';
 //═══════════════════════════════════════════════════════════════════════════════
 
 describe('http-bridge', () => {
+  beforeAll(() => {
+    _resetRegistryForTesting();
+    populateRegistryFromPolicies();
+  });
+
+  afterAll(() => {
+    stopBackgroundRefresh();
+  });
+
   const savedEnv: Record<string, string | undefined> = {};
 
   beforeEach(() => {

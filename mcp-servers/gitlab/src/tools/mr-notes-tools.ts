@@ -9,6 +9,10 @@ import { withValidation } from './validation.js';
 const listMrCommitsTool: Tool = {
   name: 'listMrCommits',
   description: 'List commits in a merge request',
+  category: 'read',
+  keywords: ['gitlab', 'merge', 'request', 'commits', 'history'],
+  example:
+    'const commits = await gitlab.listMrCommits({ project_id: "speedwave/core", mr_iid: 42 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -18,11 +22,41 @@ const listMrCommitsTool: Tool = {
     },
     required: ['project_id', 'mr_iid'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      commits: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            title: { type: 'string' },
+            author_name: { type: 'string' },
+            created_at: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'List MR commits',
+      input: { project_id: 'my-group/my-project', mr_iid: 123 },
+    },
+  ],
 };
 
 const listMrPipelinesTool: Tool = {
   name: 'listMrPipelines',
   description: 'List pipelines associated with a merge request',
+  category: 'read',
+  keywords: ['gitlab', 'merge', 'request', 'pipelines', 'ci'],
+  example:
+    'const pipelines = await gitlab.listMrPipelines({ project_id: "speedwave/core", mr_iid: 42 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -32,11 +66,40 @@ const listMrPipelinesTool: Tool = {
     },
     required: ['project_id', 'mr_iid'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      pipelines: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'number' },
+            status: { type: 'string' },
+            ref: { type: 'string' },
+            created_at: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'List MR pipelines',
+      input: { project_id: 'my-group/my-project', mr_iid: 123 },
+    },
+  ],
 };
 
 const listMrNotesTool: Tool = {
   name: 'listMrNotes',
   description: 'List notes/comments on a merge request',
+  category: 'read',
+  keywords: ['gitlab', 'merge', 'request', 'notes', 'comments'],
+  example: 'const notes = await gitlab.listMrNotes({ project_id: "speedwave/core", mr_iid: 42 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -46,11 +109,40 @@ const listMrNotesTool: Tool = {
     },
     required: ['project_id', 'mr_iid'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      notes: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'number' },
+            body: { type: 'string' },
+            author: { type: 'object' },
+            created_at: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'List MR notes',
+      input: { project_id: 'my-group/my-project', mr_iid: 123 },
+    },
+  ],
 };
 
 const createMrNoteTool: Tool = {
   name: 'createMrNote',
   description: 'Add a comment/note to a merge request',
+  category: 'write',
+  keywords: ['gitlab', 'merge', 'request', 'comment', 'note'],
+  example: 'await gitlab.createMrNote({ project_id: "speedwave/core", mr_iid: 42, body: "LGTM!" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -60,6 +152,32 @@ const createMrNoteTool: Tool = {
     },
     required: ['project_id', 'mr_iid', 'body'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      note: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' },
+          body: { type: 'string' },
+          author: { type: 'object' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Add comment to MR',
+      input: {
+        project_id: 'my-group/my-project',
+        mr_iid: 123,
+        body: 'Looks good!',
+      },
+    },
+  ],
 };
 
 /**

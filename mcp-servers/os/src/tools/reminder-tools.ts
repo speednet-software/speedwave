@@ -56,15 +56,43 @@ interface CompleteReminderParams {
 const listReminderListsTool: Tool = {
   name: 'listReminderLists',
   description: 'List all reminder lists/groups available on this device',
+  category: 'read',
+  keywords: ['os', 'reminders', 'lists', 'calendars', 'groups', 'categories'],
+  example: 'const lists = await os.listReminderLists()',
   inputSchema: {
     type: 'object',
     properties: {},
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      lists: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Unique list identifier' },
+            name: { type: 'string', description: 'List name' },
+            color: { type: 'string', description: 'List color (hex)' },
+          },
+        },
+      },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'List all reminder lists (no params)',
+      input: {},
+    },
+  ],
 };
 
 const listRemindersTool: Tool = {
   name: 'listReminders',
   description: 'List reminders, optionally filtered by list',
+  category: 'read',
+  keywords: ['os', 'reminders', 'list', 'tasks', 'todo', 'due'],
+  example: 'const { reminders } = await os.listReminders({ completed: false, limit: 20 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -76,11 +104,43 @@ const listRemindersTool: Tool = {
       },
     },
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      reminders: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            name: { type: 'string' },
+            due_date: { type: 'string', description: 'ISO8601 date' },
+            completed: { type: 'boolean' },
+            priority: { type: 'number', description: '0=none, 1=high, 5=medium, 9=low' },
+            list_id: { type: 'string' },
+          },
+        },
+      },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: list all incomplete reminders',
+      input: { completed: false },
+    },
+    {
+      description: 'Full: list from specific list with limit',
+      input: { list_id: 'abc-123', completed: false, limit: 10 },
+    },
+  ],
 };
 
 const getReminderTool: Tool = {
   name: 'getReminder',
   description: 'Get a specific reminder by ID',
+  category: 'read',
+  keywords: ['os', 'reminder', 'get', 'detail', 'show'],
+  example: 'const reminder = await os.getReminder({ id: "abc-123" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -88,11 +148,35 @@ const getReminderTool: Tool = {
     },
     required: ['id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      id: { type: 'string' },
+      name: { type: 'string' },
+      notes: { type: 'string', description: 'Reminder notes/body' },
+      due_date: { type: 'string', description: 'ISO8601 date' },
+      completed: { type: 'boolean' },
+      completed_date: { type: 'string', description: 'ISO8601 date' },
+      priority: { type: 'number' },
+      list_id: { type: 'string' },
+      list_name: { type: 'string' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Get reminder by ID',
+      input: { id: 'abc-123' },
+    },
+  ],
 };
 
 const createReminderTool: Tool = {
   name: 'createReminder',
   description: 'Create a new reminder',
+  category: 'write',
+  keywords: ['os', 'reminder', 'create', 'new', 'add', 'task', 'todo'],
+  example:
+    'const { id } = await os.createReminder({ name: "Review PR #42", due_date: "2025-01-15T10:00:00Z", priority: 1 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -107,11 +191,37 @@ const createReminderTool: Tool = {
     },
     required: ['name'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'ID of created reminder' },
+      status: { type: 'string', description: '"created"' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: create with name only',
+      input: { name: 'Buy groceries' },
+    },
+    {
+      description: 'Full: create with all fields',
+      input: {
+        name: 'Review PR #42',
+        list_id: 'work-list',
+        due_date: '2025-01-15T10:00:00Z',
+        priority: 1,
+        notes: 'Check test coverage',
+      },
+    },
+  ],
 };
 
 const completeReminderTool: Tool = {
   name: 'completeReminder',
   description: 'Mark a reminder as completed',
+  category: 'write',
+  keywords: ['os', 'reminder', 'complete', 'done', 'finish', 'check'],
+  example: 'await os.completeReminder({ id: "abc-123" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -119,6 +229,18 @@ const completeReminderTool: Tool = {
     },
     required: ['id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      status: { type: 'string', description: '"completed"' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Complete a reminder',
+      input: { id: 'abc-123' },
+    },
+  ],
 };
 
 //=============================================================================

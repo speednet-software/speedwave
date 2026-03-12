@@ -12,7 +12,7 @@
  * 3. Registry consistency with tool files
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import {
   createSlackBridge,
   createSharePointBridge,
@@ -25,7 +25,21 @@ import {
   SERVICE_NAMES,
   getServiceMethods,
   validateRegistry,
+  _resetRegistryForTesting,
+  stopBackgroundRefresh,
 } from './tool-registry.js';
+import { SUPPORTED_SERVICES, getServicePolicies } from './hub-tool-policy.js';
+import { buildSkeletonFromPolicy } from './tool-discovery.js';
+
+function populateRegistryFromPolicies(): void {
+  for (const service of SUPPORTED_SERVICES) {
+    const policies = getServicePolicies(service);
+    TOOL_REGISTRY[service] = {};
+    for (const [methodName, policy] of Object.entries(policies)) {
+      TOOL_REGISTRY[service][methodName] = buildSkeletonFromPolicy(service, methodName, policy);
+    }
+  }
+}
 
 /**
  * Extract method names from a bridge object
@@ -35,6 +49,15 @@ function getBridgeMethods(bridge: Record<string, unknown>): string[] {
 }
 
 describe('Bridge-Executor Parity (SSOT)', () => {
+  beforeAll(() => {
+    _resetRegistryForTesting();
+    populateRegistryFromPolicies();
+  });
+
+  afterAll(() => {
+    stopBackgroundRefresh();
+  });
+
   describe('Registry Validation', () => {
     it('should have no validation errors', () => {
       const errors = validateRegistry();
