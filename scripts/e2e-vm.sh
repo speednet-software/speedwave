@@ -36,6 +36,43 @@ HOST_REPO_DIR="${SPEEDWAVE_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # Artifacts are kept on each remote machine's ~/Desktop/ (survives clean_state).
 # No local staging needed — avoids 352 MB+ round-trip transfers over the network.
 
+# -- Auto-provisioning ---------------------------------------------------------
+# Check if remote machine has required tools; run setup if not.
+
+ensure_provisioned_linux() {
+    if linux_ssh "command -v npm && command -v cargo" >/dev/null 2>&1; then
+        echo "[linux] Provisioning: OK (npm + cargo found)"
+        return
+    fi
+    echo "[linux] Provisioning: missing tools — running setup..."
+    "${SCRIPT_DIR}/e2e-vm-setup.sh" ubuntu
+}
+
+ensure_provisioned_windows() {
+    # Check that WSL2 distro exists and PowerShell can find node + cargo
+    local ok=1
+    # shellcheck disable=SC2086
+    ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- echo ready" >/dev/null 2>&1 || ok=0
+    if [ "$ok" -eq 1 ]; then
+        echo 'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { exit 1 }' | windows_ps >/dev/null 2>&1 || ok=0
+    fi
+    if [ "$ok" -eq 1 ]; then
+        echo "[windows] Provisioning: OK (WSL2 + node + cargo found)"
+        return
+    fi
+    echo "[windows] Provisioning: missing tools — running setup..."
+    "${SCRIPT_DIR}/e2e-vm-setup.sh" windows
+}
+
+ensure_provisioned_macos() {
+    if macos_ssh "command -v npm && command -v cargo" >/dev/null 2>&1; then
+        echo "[macos] Provisioning: OK (npm + cargo found)"
+        return
+    fi
+    echo "[macos] Provisioning: missing tools — running setup..."
+    "${SCRIPT_DIR}/e2e-vm-setup.sh" macos
+}
+
 # -- Helper functions: SSH (Linux) ---------------------------------------------
 
 # Copy files to the Linux machine via rsync-over-ssh.
@@ -362,6 +399,7 @@ CLEAN
 
 run_linux() {
     linux_wait_ssh
+    ensure_provisioned_linux
 
     # -- Phase 1: Build .deb package --------------------------------------------
     # Copy the repo source to the Linux machine and produce a release .deb
@@ -512,6 +550,7 @@ SCRIPT
 
 run_windows() {
     windows_wait_ssh
+    ensure_provisioned_windows
 
     # -- Phase 1: Build NSIS installer -----------------------------------------
     # Copy the repo source to the Windows machine and produce a release NSIS
@@ -793,6 +832,7 @@ SCRIPT
 
 run_macos() {
     macos_wait_ssh
+    ensure_provisioned_macos
 
     # -- Phase 1: Build .dmg package --------------------------------------------
     # Copy the repo source to the macOS machine and produce a release .dmg
