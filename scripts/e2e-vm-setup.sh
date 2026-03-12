@@ -123,7 +123,7 @@ include <tunables/global>
 
 profile speedwave-rootlesskit ${ROOTLESSKIT_PATH} flags=(unconfined) {
   userns,
-  include if exists <local/rootlesskit>
+  include if exists <local/speedwave.rootlesskit>
 }
 AAEOF
     sudo apparmor_parser -r /etc/apparmor.d/speedwave-rootlesskit
