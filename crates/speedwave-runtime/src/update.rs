@@ -69,7 +69,9 @@ pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
 
     let path = snapshot_path(project)?;
     let json = serde_json::to_string_pretty(&snapshot)?;
-    std::fs::write(&path, json)?;
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, &json)?;
+    std::fs::rename(&tmp_path, &path)?;
 
     // Restrict snapshot file permissions (may contain sensitive compose config)
     #[cfg(unix)]
@@ -131,24 +133,30 @@ pub fn update_containers(
     // 5. Save new compose.yml
     compose::save_compose(project, &compose_yml)?;
 
-    // 6. Graceful shutdown — stop running containers before rebuild/recreate.
-    //    SIGTERM + timeout (compose default 10s) prevents killing active Claude sessions.
-    runtime.compose_down(project)?;
-
-    // 7. Rebuild images from local Containerfiles.
-    //    Images are built locally (no registry) — this picks up any changes
-    //    to Containerfiles, entrypoint scripts, or MCP server code.
+    // 6. Rebuild images from local Containerfiles BEFORE stopping containers.
+    //    If the build fails, containers keep running with the previous version.
+    //    containerd uses content-addressable storage — new builds don't affect running containers.
     let images_rebuilt = build::build_all_images(runtime).map_err(|e| {
         anyhow::anyhow!(
-            "Image rebuild failed: {}. Containers are stopped. Run `speedwave` to restart with previous config, or retry the update.",
+            "Image rebuild failed: {}. Containers are still running with the previous version.",
             e
         )
     })?;
 
-    // 8. Recreate containers
+    // 7. Graceful shutdown — stop running containers before recreate.
+    //    SIGTERM + timeout (compose default 10s) prevents killing active Claude sessions.
+    runtime.compose_down(project)?;
+
+    // 8. Recreate containers with newly built images
     runtime.compose_up_recreate(project)?;
 
-    // 9. Verify containers are running
+    // 9. Wait for containers to stabilize before health check.
+    //    A crash-looping container may briefly show state=="running".
+    std::thread::sleep(std::time::Duration::from_secs(
+        consts::CONTAINER_STABILIZATION_DELAY_SECS,
+    ));
+
+    // 10. Verify containers are running
     let containers = runtime.compose_ps(project)?;
     let running = containers
         .iter()
@@ -293,5 +301,97 @@ mod tests {
         assert!(path_str.contains("snapshots"));
         assert!(path_str.contains("my-project"));
         assert!(path_str.ends_with("snapshot.json"));
+    }
+
+    #[test]
+    fn test_snapshot_atomic_write_no_tmp_residue() {
+        // Call the real save_snapshot() by setting up the compose output file it reads.
+        // Uses a unique project name to avoid collisions in parallel test runs.
+        let project = format!(
+            "atomic-write-test-{}",
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .subsec_nanos()
+        );
+
+        // Set up the compose file that save_snapshot() will read
+        let compose_path = compose::compose_output_path(&project).unwrap();
+        let snap_path = snapshot_path(&project).unwrap();
+
+        // RAII guard: clean up $HOME/.speedwave/ subdirs even on panic
+        struct Cleanup {
+            paths: Vec<std::path::PathBuf>,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                for p in &self.paths {
+                    let _ = std::fs::remove_dir_all(p);
+                }
+            }
+        }
+        let _cleanup = Cleanup {
+            paths: vec![
+                compose_path.parent().unwrap().to_path_buf(),
+                snap_path.parent().unwrap().to_path_buf(),
+            ],
+        };
+
+        std::fs::create_dir_all(compose_path.parent().unwrap()).unwrap();
+        std::fs::write(&compose_path, "version: '3'\nservices: {}\n").unwrap();
+
+        // Call the real function
+        save_snapshot(&project).unwrap();
+
+        // Verify no .json.tmp residue remains
+        let tmp_path = snap_path.with_extension("json.tmp");
+        assert!(
+            !tmp_path.exists(),
+            ".json.tmp must not remain after atomic rename"
+        );
+
+        // Verify content was written correctly
+        let loaded = load_snapshot(&project).unwrap();
+        assert_eq!(loaded.project, project);
+        assert_eq!(loaded.compose_yml, "version: '3'\nservices: {}\n");
+    }
+
+    #[test]
+    fn test_build_before_compose_down_in_update_containers() {
+        // Verify that build_all_images is called BEFORE compose_down in update_containers().
+        // Searches only within the function body to avoid false matches from
+        // rollback_containers or other functions that may also call compose_down.
+        let source = include_str!("update.rs");
+
+        let fn_start = source
+            .find("fn update_containers(")
+            .expect("update_containers function must exist");
+        let fn_body = &source[fn_start..];
+
+        let build_pos = fn_body
+            .find("build::build_all_images")
+            .expect("build_all_images call must exist in update_containers");
+        let down_pos = fn_body
+            .find("runtime.compose_down(project)")
+            .expect("compose_down call must exist in update_containers");
+
+        assert!(
+            build_pos < down_pos,
+            "build_all_images (offset {}) must appear before compose_down (offset {}) in update_containers",
+            build_pos,
+            down_pos
+        );
+    }
+
+    #[test]
+    fn test_stabilization_delay_is_reasonable() {
+        assert!(
+            consts::CONTAINER_STABILIZATION_DELAY_SECS >= 1,
+            "stabilization delay must be at least 1 second"
+        );
+        assert!(
+            consts::CONTAINER_STABILIZATION_DELAY_SECS <= 10,
+            "stabilization delay must not exceed 10 seconds"
+        );
     }
 }

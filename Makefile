@@ -412,6 +412,16 @@ _e2e-run:
 	trap - EXIT; \
 	exit $$E2E_EXIT
 
+# Run E2E on a single platform via SSH to dedicated test machines
+_e2e-macos:
+	@scripts/e2e-vm.sh macos
+
+_e2e-linux:
+	@scripts/e2e-vm.sh ubuntu
+
+_e2e-windows:
+	@scripts/e2e-vm.sh windows
+
 # Run E2E on all platforms via SSH to dedicated test machines
 test-e2e-all:
 	@scripts/e2e-vm.sh all
