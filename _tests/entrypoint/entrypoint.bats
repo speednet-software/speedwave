@@ -476,6 +476,99 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+@test "SPEEDWAVE_PLUGINS rejects invalid slug with path traversal" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="../etc/passwd" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # Verify warning was printed
+    [[ "$output" == *"WARNING: Skipping invalid plugin slug: ../etc/passwd"* ]]
+
+    # No symlinks should be created
+    [ ! -e "${TEST_HOME}/.claude/commands/../etc/passwd" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "SPEEDWAVE_PLUGINS rejects slug with uppercase" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="MyPlugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # Verify warning was printed
+    [[ "$output" == *"WARNING: Skipping invalid plugin slug: MyPlugin"* ]]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "SPEEDWAVE_PLUGINS rejects slug starting with digit" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="1badslug" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    [[ "$output" == *"WARNING: Skipping invalid plugin slug: 1badslug"* ]]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "SPEEDWAVE_PLUGINS rejects slug with special characters" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="my_plugin;rm -rf /" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    [[ "$output" == *"WARNING: Skipping invalid plugin slug:"* ]]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "SPEEDWAVE_PLUGINS accepts valid slugs and rejects invalid in same list" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    # Create a valid plugin
+    mkdir -p "${plugins_dir}/good-plugin/commands"
+    echo "cmd" > "${plugins_dir}/good-plugin/commands/cmd.md"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="good-plugin,../BAD,also-good" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # Valid plugin should be symlinked
+    [ -L "${TEST_HOME}/.claude/commands/cmd.md" ]
+
+    # Invalid slug should have produced a warning
+    [[ "$output" == *"WARNING: Skipping invalid plugin slug: ../BAD"* ]]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
 @test "SPEEDWAVE_PLUGINS skips non-existent plugin directory" {
     local plugins_dir
     plugins_dir="$(mktemp -d)"

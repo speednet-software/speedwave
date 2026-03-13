@@ -81,13 +81,18 @@ fi
 # Symlink plugin resources if any plugins are configured
 if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
     for plugin in ${SPEEDWAVE_PLUGINS//,/ }; do
+        # Validate slug: lowercase alphanumeric + hyphens, 1-64 chars, starts with letter
+        if ! echo "${plugin}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
+            echo "WARNING: Skipping invalid plugin slug: ${plugin}" >&2
+            continue
+        fi
         plugin_path="/speedwave/plugins/${plugin}"
         if [ -d "${plugin_path}" ]; then
             for resource_type in commands agents skills hooks; do
                 if [ -d "${plugin_path}/${resource_type}" ]; then
                     mkdir -p "${HOME}/.claude/${resource_type}"
-                    for file in "${plugin_path}/${resource_type}"/*; do
-                        [ -f "${file}" ] && ln -sf "${file}" "${HOME}/.claude/${resource_type}/$(basename "${file}")"
+                    for entry in "${plugin_path}/${resource_type}"/*; do
+                        [ -e "${entry}" ] && ln -sfn "${entry}" "${HOME}/.claude/${resource_type}/$(basename "${entry}")"
                     done
                 fi
             done
