@@ -20,6 +20,7 @@ mod integrations_cmd;
 mod log_commands;
 mod logging_cmd;
 mod mcp_os_process;
+mod plugin_cmd;
 mod reconcile;
 mod setup_wizard;
 mod tray;
@@ -911,6 +912,15 @@ fn main() {
             integrations_cmd::save_redmine_mappings,
             integrations_cmd::delete_integration_credentials,
             integrations_cmd::restart_integration_containers,
+            // Plugins
+            plugin_cmd::get_plugins,
+            plugin_cmd::install_plugin,
+            plugin_cmd::remove_plugin,
+            plugin_cmd::set_plugin_enabled,
+            plugin_cmd::save_plugin_credentials,
+            plugin_cmd::delete_plugin_credentials,
+            plugin_cmd::plugin_save_settings,
+            plugin_cmd::plugin_load_settings,
         ])
         .on_window_event(move |window, event| {
             match event {

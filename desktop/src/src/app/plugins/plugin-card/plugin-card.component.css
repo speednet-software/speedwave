@@ -1,0 +1,185 @@
+.card {
+  background: #16213e;
+  border: 1px solid #0f3460;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+}
+.card-header-btn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  cursor: pointer;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 0;
+}
+.service-name {
+  font-weight: 600;
+  font-size: 16px;
+}
+.version-badge {
+  font-size: 11px;
+  color: #888;
+  font-family: monospace;
+}
+.card-description {
+  padding: 0 20px 12px;
+  color: #999;
+  font-size: 13px;
+  margin: 0;
+}
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+.badge.configured {
+  background: #1b4332;
+  color: #95d5b2;
+}
+.badge.not-configured {
+  background: #3d2c2c;
+  color: #e09090;
+}
+
+.toggle {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+}
+.toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #555;
+  border-radius: 24px;
+  transition: 0.3s;
+}
+.slider:before {
+  position: absolute;
+  content: '';
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background: white;
+  border-radius: 50%;
+  transition: 0.3s;
+}
+.toggle input:checked + .slider {
+  background: #e94560;
+}
+.toggle input:checked + .slider:before {
+  transform: translateX(20px);
+}
+.toggle.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.toggle.disabled input {
+  cursor: not-allowed;
+}
+
+.card-body {
+  padding: 0 20px 20px;
+  border-top: 1px solid #0f3460;
+}
+.form-group {
+  margin: 16px 0;
+}
+.form-group label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: #aaa;
+}
+.form-input {
+  width: 100%;
+  padding: 10px 12px;
+  background: #1a1a2e;
+  border: 1px solid #0f3460;
+  border-radius: 4px;
+  color: #e0e0e0;
+  font-size: 14px;
+  font-family: monospace;
+  box-sizing: border-box;
+}
+.form-input:focus {
+  border-color: #e94560;
+  outline: none;
+}
+
+.form-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+}
+.btn-save {
+  padding: 6px 20px;
+  background: transparent;
+  color: #e94560;
+  border: 1px solid #e94560;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: monospace;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-save:hover:not(:disabled) {
+  background: #e94560;
+  color: #1a1a2e;
+}
+.btn-cancel {
+  padding: 6px 20px;
+  background: transparent;
+  color: #e09090;
+  border: 1px solid #e09090;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: monospace;
+  cursor: pointer;
+}
+.btn-remove {
+  padding: 6px 20px;
+  background: transparent;
+  color: #e09090;
+  border: 1px solid #e09090;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: monospace;
+  cursor: pointer;
+}
+
+.token-mount-info {
+  font-size: 11px;
+  color: #888;
+  margin-top: 8px;
+  font-family: monospace;
+}

@@ -1,0 +1,128 @@
+:host {
+  display: block;
+  background: #1a1a2e;
+  min-height: 100vh;
+  padding: 24px;
+  color: #e0e0e0;
+}
+
+h1 {
+  font-size: 20px;
+  color: #e94560;
+  margin: 0 0 24px 0;
+}
+h2 {
+  font-size: 15px;
+  color: #e0e0e0;
+  margin: 0 0 12px 0;
+}
+
+.error-banner {
+  margin-bottom: 16px;
+  padding: 8px 12px;
+  background: #3d0000;
+  border: 1px solid #e94560;
+  border-radius: 4px;
+  color: #e94560;
+  font-size: 13px;
+}
+
+.success-banner {
+  margin-bottom: 16px;
+  padding: 8px 12px;
+  background: #1b4332;
+  border: 1px solid #95d5b2;
+  border-radius: 4px;
+  color: #95d5b2;
+  font-size: 13px;
+}
+
+.restart-banner {
+  background: #e94560;
+  color: white;
+  padding: 12px 20px;
+  border-radius: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+.restart-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.restart-hint {
+  font-size: 11px;
+  opacity: 0.8;
+}
+.restart-btn {
+  background: white;
+  color: #e94560;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+  font-family: monospace;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.restart-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.restart-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(233, 69, 96, 0.3);
+  border-top-color: #e94560;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.section {
+  margin-bottom: 24px;
+}
+
+.install-section {
+  margin-bottom: 24px;
+}
+.install-btn {
+  padding: 8px 20px;
+  background: transparent;
+  color: #e94560;
+  border: 1px dashed #e94560;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: monospace;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.install-btn:hover:not(:disabled) {
+  background: #e94560;
+  color: #1a1a2e;
+}
+.install-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.hidden-input {
+  display: none;
+}
+
+.empty-state {
+  color: #888;
+  font-size: 13px;
+  padding: 20px 0;
+  text-align: center;
+}

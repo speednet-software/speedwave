@@ -26,11 +26,11 @@ describe('ShellComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  it('should render nav with Chat, Integrations, Settings', () => {
+  it('should render nav with Chat, Integrations, Plugins, Settings', () => {
     const nav = fixture.nativeElement.querySelector('.app-nav');
     const links = Array.from(nav.querySelectorAll('a')) as HTMLAnchorElement[];
     const labels = links.map((a) => a.textContent?.trim());
-    expect(labels).toEqual(['Chat', 'Integrations', 'Settings']);
+    expect(labels).toEqual(['Chat', 'Integrations', 'Plugins', 'Settings']);
   });
 
   it('should NOT render a Setup link', () => {

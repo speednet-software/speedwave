@@ -25,6 +25,7 @@ import { UpdateNotificationComponent } from '../update-notification/update-notif
           <a routerLink="/integrations" routerLinkActive="active" data-testid="nav-integrations"
             >Integrations</a
           >
+          <a routerLink="/plugins" routerLinkActive="active" data-testid="nav-plugins">Plugins</a>
           <a routerLink="/settings" routerLinkActive="active" data-testid="nav-settings"
             >Settings</a
           >

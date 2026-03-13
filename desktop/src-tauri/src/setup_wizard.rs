@@ -1080,7 +1080,10 @@ pub fn create_project(name: &str, dir: &str) -> anyhow::Result<()> {
     let project_path = std::path::Path::new(dir);
     let resolved = config::resolve_claude_config(project_path, &user_config, name);
     let integrations = config::resolve_integrations(project_path, &user_config, name);
-    let yaml = compose::render_compose(name, dir, &resolved, &integrations, None)?;
+    let rt = runtime::detect_runtime();
+    let rt_ref: Option<&dyn speedwave_runtime::runtime::ContainerRuntime> =
+        if rt.is_available() { Some(&*rt) } else { None };
+    let yaml = compose::render_compose(name, dir, &resolved, &integrations, rt_ref)?;
     compose::save_compose(name, &yaml)?;
 
     let mut state = SetupState::load();
@@ -1145,9 +1148,16 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     let project_path = std::path::Path::new(project_dir);
     let resolved = config::resolve_claude_config(project_path, &user_config, project);
     let integrations = config::resolve_integrations(project_path, &user_config, project);
-    let yaml = compose::render_compose(project, project_dir, &resolved, &integrations, None)?;
+    let yaml = compose::render_compose(
+        project,
+        project_dir,
+        &resolved,
+        &integrations,
+        Some(rt.as_ref()),
+    )?;
 
-    let violations = compose::SecurityCheck::run(&yaml, project, &[]);
+    let manifests = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_default();
+    let violations = compose::SecurityCheck::run(&yaml, project, &manifests);
     if !violations.is_empty() {
         let msgs: Vec<String> = violations
             .iter()

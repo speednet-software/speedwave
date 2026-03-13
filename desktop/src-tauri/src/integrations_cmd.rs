@@ -432,11 +432,12 @@ pub async fn restart_integration_containers(project: String) -> Result<(), Strin
             &project_dir,
             &resolved,
             &integrations,
-            None,
+            Some(&*rt),
         )
         .map_err(|e| e.to_string())?;
 
-        let violations = speedwave_runtime::compose::SecurityCheck::run(&yaml, &project, &[]);
+        let manifests = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_default();
+        let violations = speedwave_runtime::compose::SecurityCheck::run(&yaml, &project, &manifests);
         if !violations.is_empty() {
             let msgs: Vec<String> = violations
                 .iter()
