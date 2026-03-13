@@ -375,13 +375,7 @@ function createToolWrappers(
     }
   }
 
-  return {
-    slack: tools.slack,
-    sharepoint: tools.sharepoint,
-    redmine: tools.redmine,
-    gitlab: tools.gitlab,
-    os: tools.os,
-  };
+  return tools;
 }
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -462,13 +456,9 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
   // Create tool wrappers with timeout context
   const tools = createToolWrappers(piiContext, auditContext, startTime, timeoutMs);
 
-  // Prepare sandbox context
-  const sandboxContext = {
-    slack: tools.slack,
-    sharepoint: tools.sharepoint,
-    redmine: tools.redmine,
-    gitlab: tools.gitlab,
-    os: tools.os,
+  // Prepare sandbox context — spread all service tools (built-in + plugins) dynamically
+  const sandboxContext: Record<string, unknown> = {
+    ...tools,
     console: {
       log: (...args: unknown[]) => console.log(`${ts()} [sandbox]`, ...args),
       warn: (...args: unknown[]) => console.warn(`${ts()} [sandbox]`, ...args),

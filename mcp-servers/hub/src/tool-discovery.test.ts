@@ -232,6 +232,107 @@ describe('tool-discovery', () => {
     });
   });
 
+  describe('discoverAndMergeService (plugin)', () => {
+    const originalEnv = { ...process.env };
+
+    beforeEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    afterEach(() => {
+      process.env = { ...originalEnv };
+    });
+
+    it('accepts all worker tools for plugin services', async () => {
+      process.env.WORKER_PRESALE_URL = 'http://mcp-presale:4010';
+
+      const mockTools: Tool[] = [
+        {
+          name: 'search_customers',
+          description: 'Search CRM customers',
+          inputSchema: { type: 'object', properties: { query: { type: 'string' } } },
+          category: 'read',
+          keywords: ['crm', 'customer'],
+        },
+        {
+          name: 'create_order',
+          description: 'Create a new order',
+          inputSchema: {
+            type: 'object',
+            properties: { customer_id: { type: 'string' } },
+            required: ['customer_id'],
+          },
+          category: 'write',
+        },
+      ];
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            jsonrpc: '2.0',
+            id: 'test-id',
+            result: { tools: mockTools },
+          }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const result = await discoverAndMergeService('presale');
+
+      expect(Object.keys(result)).toHaveLength(2);
+      expect(result['searchCustomers']).toBeDefined();
+      expect(result['searchCustomers'].category).toBe('read');
+      expect(result['searchCustomers'].service).toBe('presale');
+      expect(result['createOrder']).toBeDefined();
+      expect(result['createOrder'].category).toBe('write');
+    });
+
+    it('returns empty result for plugin with no worker tools', async () => {
+      process.env.WORKER_PRESALE_URL = 'http://mcp-presale:4010';
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            jsonrpc: '2.0',
+            id: 'test-id',
+            result: { tools: [] },
+          }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const result = await discoverAndMergeService('presale');
+      expect(Object.keys(result)).toHaveLength(0);
+    });
+
+    it('defaults plugin tool category to read when not set', async () => {
+      process.env.WORKER_PRESALE_URL = 'http://mcp-presale:4010';
+
+      const mockTools: Tool[] = [
+        {
+          name: 'get_status',
+          description: 'Get status',
+          inputSchema: { type: 'object', properties: {} },
+          // no category
+        },
+      ];
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            jsonrpc: '2.0',
+            id: 'test-id',
+            result: { tools: mockTools },
+          }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const result = await discoverAndMergeService('presale');
+      expect(result['getStatus'].category).toBe('read');
+    });
+  });
+
   describe('validateMergeResult', () => {
     const validMetadata: ToolMetadata = {
       name: 'createIssue',

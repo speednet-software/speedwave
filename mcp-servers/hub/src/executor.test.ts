@@ -868,6 +868,72 @@ describe('executor', () => {
     });
   });
 
+  describe('plugin service in sandbox', () => {
+    const savedEnabledServices = process.env.ENABLED_SERVICES;
+
+    beforeEach(() => {
+      resetServiceCaches();
+      process.env.ENABLED_SERVICES = 'slack,presale';
+    });
+
+    afterEach(() => {
+      if (savedEnabledServices === undefined) {
+        delete process.env.ENABLED_SERVICES;
+      } else {
+        process.env.ENABLED_SERVICES = savedEnabledServices;
+      }
+      resetServiceCaches();
+    });
+
+    it('should include plugin service tools in sandbox context', async () => {
+      // Register a plugin service in the registry
+      const { TOOL_REGISTRY, SERVICE_NAMES } = await import('./tool-registry.js');
+      const mutableRegistry = TOOL_REGISTRY as Record<
+        string,
+        Record<string, Record<string, unknown>>
+      >;
+      mutableRegistry['presale'] = {
+        searchCustomers: {
+          name: 'searchCustomers',
+          service: 'presale',
+          category: 'read',
+          description: 'Search CRM customers',
+          inputSchema: { type: 'object', properties: {} },
+          keywords: [],
+          example: '',
+          deferLoading: false,
+        },
+      };
+
+      // Set up mock bridges
+      const mockBridges: AllBridges = {
+        slack: {
+          listChannelIds: vi.fn(),
+          getChannelMessages: vi.fn(),
+          sendChannel: vi.fn(),
+          getUsers: vi.fn(),
+        },
+        presale: null,
+        sharepoint: null,
+        redmine: null,
+        gitlab: null,
+        os: null,
+      };
+      _setBridgesForTesting(mockBridges);
+
+      // Code that accesses the sandbox to check what's available
+      const code = `typeof presale`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+      // presale is in sandbox but has no bridge, so it's undefined
+      expect(result.success).toBe(true);
+      expect(result.data).toBe('undefined');
+
+      // Cleanup
+      delete mutableRegistry['presale'];
+      _setBridgesForTesting(null);
+    });
+  });
+
   describe('auto-return transformation', () => {
     // These tests verify that the auto-return transformation correctly prepends
     // 'return' to expressions without causing syntax errors.

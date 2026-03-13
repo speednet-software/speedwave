@@ -13,8 +13,10 @@
  * Hub owns the policy (how to present/execute tools).
  */
 
+import type { Tool } from '@speedwave/mcp-shared';
 import { ToolCategory, TimeoutClass } from './hub-types.js';
 import { TIMEOUTS } from '@speedwave/mcp-shared';
+import { BUILT_IN_SERVICES as _BUILT_IN_SERVICES } from './service-list.js';
 
 /**
  * Hub-side policy for a single tool.
@@ -35,9 +37,9 @@ export interface ToolPolicy {
 }
 
 /**
- * Supported service names
+ * Supported service names (re-exported from service-list for backward compatibility)
  */
-export const SUPPORTED_SERVICES = ['slack', 'sharepoint', 'redmine', 'gitlab', 'os'] as const;
+export const SUPPORTED_SERVICES = _BUILT_IN_SERVICES;
 /**
  * Union type of all supported service names.
  */
@@ -316,4 +318,19 @@ export function getToolPolicy(service: string, methodName: string): ToolPolicy |
  */
 export function getServicePolicies(service: string): Readonly<Record<string, ToolPolicy>> {
   return TOOL_POLICIES[service] ?? {};
+}
+
+/**
+ * Get tool policy for a plugin tool.
+ * Uses the worker-provided Tool.category field (types.ts:228) if available,
+ * defaults to 'read' for safety. Plugin tools are always eagerly loaded
+ * (deferLoading: false) since we have no hub-side policy data for them.
+ * @param workerTool - Optional worker Tool definition with category field
+ */
+export function getPluginToolPolicy(workerTool?: Tool): ToolPolicy {
+  const category: ToolCategory = workerTool?.category ?? 'read';
+  return {
+    category,
+    deferLoading: false,
+  };
 }

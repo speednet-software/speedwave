@@ -12,7 +12,12 @@ import {
   parseServiceError,
   getRequestTimeout,
 } from './http-bridge.js';
-import { getServiceMethods, stopBackgroundRefresh } from './tool-registry.js';
+import {
+  getServiceMethods,
+  stopBackgroundRefresh,
+  TOOL_REGISTRY,
+  buildServiceBridge,
+} from './tool-registry.js';
 import { SERVICES } from './http-bridge.js';
 import { populateRegistryFromPolicies, _resetRegistryForTesting } from './test-helpers.js';
 
@@ -637,6 +642,39 @@ describe('http-bridge', () => {
       expect(bridge).toHaveProperty('createNote');
       expect(bridge).toHaveProperty('updateNote');
       expect(bridge).toHaveProperty('deleteNote');
+    });
+  });
+
+  describe('plugin service bridge', () => {
+    it('should create bridge for plugin service when registered', () => {
+      // Manually register a plugin service in the registry for testing
+      const mutableRegistry = TOOL_REGISTRY as Record<
+        string,
+        Record<string, Record<string, unknown>>
+      >;
+      mutableRegistry['presale'] = {
+        searchCustomers: {
+          name: 'searchCustomers',
+          service: 'presale',
+          category: 'read',
+          description: 'Search CRM customers',
+          inputSchema: { type: 'object', properties: {} },
+          keywords: ['crm'],
+          example: '',
+          deferLoading: false,
+        },
+      };
+
+      process.env.WORKER_PRESALE_URL = 'http://mcp-presale:4010';
+
+      const bridge = buildServiceBridge('presale', callWorker);
+
+      expect(bridge).toHaveProperty('searchCustomers');
+      expect(typeof bridge.searchCustomers).toBe('function');
+
+      // Cleanup
+      delete mutableRegistry['presale'];
+      delete process.env.WORKER_PRESALE_URL;
     });
   });
 
