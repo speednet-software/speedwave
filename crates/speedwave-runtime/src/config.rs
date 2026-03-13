@@ -1010,4 +1010,83 @@ mod tests {
         assert!(result.projects.is_empty());
         assert!(result.active_project.is_none());
     }
+
+    #[test]
+    fn test_set_plugin_enabled() {
+        let mut cfg = IntegrationsConfig::default();
+        assert!(cfg.plugins.is_none());
+
+        cfg.set_plugin_enabled("presale", true);
+        let plugins = cfg.plugins.as_ref().unwrap();
+        assert_eq!(plugins.get("presale").unwrap().enabled, Some(true));
+
+        cfg.set_plugin_enabled("presale", false);
+        let plugins = cfg.plugins.as_ref().unwrap();
+        assert_eq!(plugins.get("presale").unwrap().enabled, Some(false));
+    }
+
+    #[test]
+    fn test_is_plugin_enabled() {
+        let resolved = ResolvedIntegrationsConfig {
+            plugins: HashMap::from([
+                ("presale".to_string(), true),
+                ("analytics".to_string(), false),
+            ]),
+            ..Default::default()
+        };
+        assert!(resolved.is_plugin_enabled("presale"));
+        assert!(!resolved.is_plugin_enabled("analytics"));
+        assert!(!resolved.is_plugin_enabled("unknown"));
+    }
+
+    #[test]
+    fn test_enabled_plugin_service_ids() {
+        let resolved = ResolvedIntegrationsConfig {
+            plugins: HashMap::from([
+                ("presale".to_string(), true),
+                ("analytics".to_string(), false),
+                ("reporting".to_string(), true),
+            ]),
+            ..Default::default()
+        };
+        let mut enabled = resolved.enabled_plugin_service_ids();
+        enabled.sort();
+        assert_eq!(enabled, vec!["presale", "reporting"]);
+    }
+
+    #[test]
+    fn test_resolve_integrations_with_plugins() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No repo config (no .speedwave.json)
+
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "test-project".to_string(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: Some(IntegrationsConfig {
+                    slack: None,
+                    sharepoint: None,
+                    redmine: None,
+                    gitlab: None,
+                    os: None,
+                    plugins: Some(HashMap::from([(
+                        "presale".to_string(),
+                        IntegrationConfig {
+                            enabled: Some(true),
+                        },
+                    )])),
+                }),
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        };
+
+        let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
+        assert!(resolved.is_plugin_enabled("presale"));
+        assert!(!resolved.is_plugin_enabled("unknown"));
+        assert_eq!(resolved.enabled_plugin_service_ids(), vec!["presale"]);
+    }
 }

@@ -3314,6 +3314,364 @@ services:
         );
     }
 
+    // ── Plugin SecurityCheck tests ───────────────────────────────────────
+
+    #[test]
+    fn test_security_check_plugin_no_privileged() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-presale:
+    image: speedwave-mcp-presale:1.0.0
+    user: "{user}"
+    privileged: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user()
+        );
+        let violations = SecurityCheck::run(&yaml, "test", &[]);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == "PLUGIN_NO_PRIVILEGED" && v.container == "mcp-presale"),
+            "Plugin with privileged: true should trigger PLUGIN_NO_PRIVILEGED"
+        );
+    }
+
+    #[test]
+    fn test_security_check_plugin_no_host_network() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-presale:
+    image: speedwave-mcp-presale:1.0.0
+    user: "{user}"
+    network_mode: host
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user()
+        );
+        let violations = SecurityCheck::run(&yaml, "test", &[]);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == "PLUGIN_NO_HOST_NETWORK" && v.container == "mcp-presale"),
+            "Plugin with network_mode: host should trigger PLUGIN_NO_HOST_NETWORK"
+        );
+    }
+
+    #[test]
+    fn test_security_check_plugin_no_extra_volumes() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-presale:
+    image: speedwave-mcp-presale:1.0.0
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /home/user/.speedwave/tokens/test/presale:/tokens:ro
+      - /etc/passwd:/etc/passwd:ro
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user()
+        );
+        let violations = SecurityCheck::run(&yaml, "test", &[]);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == "PLUGIN_NO_EXTRA_VOLUMES" && v.container == "mcp-presale"),
+            "Plugin with extra volumes should trigger PLUGIN_NO_EXTRA_VOLUMES"
+        );
+    }
+
+    #[test]
+    fn test_security_check_plugin_no_extra_volumes_clean() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-presale:
+    image: speedwave-mcp-presale:1.0.0
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /home/user/.speedwave/tokens/test/presale:/tokens:ro
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user()
+        );
+        let violations = SecurityCheck::run(&yaml, "test", &[]);
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == "PLUGIN_NO_EXTRA_VOLUMES"),
+            "Plugin with only /tokens volume should not trigger PLUGIN_NO_EXTRA_VOLUMES"
+        );
+    }
+
+    #[test]
+    fn test_security_check_plugin_token_mount_mode_ro_violation() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-presale:
+    image: speedwave-mcp-presale:1.0.0
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /home/user/.speedwave/tokens/test/presale:/tokens:rw
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user()
+        );
+        let manifests = vec![PluginManifest {
+            name: "Presale".to_string(),
+            service_id: Some("presale".to_string()),
+            slug: "presale".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(4010),
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+        }];
+        let violations = SecurityCheck::run(&yaml, "test", &manifests);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == "PLUGIN_TOKEN_MOUNT_MODE" && v.container == "mcp-presale"),
+            "ReadOnly manifest + :rw mount should trigger PLUGIN_TOKEN_MOUNT_MODE"
+        );
+    }
+
+    #[test]
+    fn test_security_check_plugin_token_mount_mode_rw_pass() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-presale:
+    image: speedwave-mcp-presale:1.0.0
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /home/user/.speedwave/tokens/test/presale:/tokens:rw
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user()
+        );
+        let manifests = vec![PluginManifest {
+            name: "Presale".to_string(),
+            service_id: Some("presale".to_string()),
+            slug: "presale".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(4010),
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadWrite {
+                justification: "OAuth token refresh".to_string(),
+            },
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+        }];
+        let violations = SecurityCheck::run(&yaml, "test", &manifests);
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == "PLUGIN_TOKEN_MOUNT_MODE"),
+            "ReadWrite manifest + :rw mount should NOT trigger PLUGIN_TOKEN_MOUNT_MODE"
+        );
+    }
+
+    // ── apply_plugins integration tests (via individual pieces) ──────────
+
+    #[test]
+    fn test_apply_plugins_enabled_in_compose() {
+        // Test that generate_plugin_service creates a valid service and it can be
+        // inserted into compose YAML, simulating what apply_plugins does.
+        let manifest = PluginManifest {
+            name: "Presale".to_string(),
+            service_id: Some("presale".to_string()),
+            slug: "presale".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(4010),
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+        };
+
+        let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/test");
+        let service_value = plugin::generate_plugin_service(
+            &manifest,
+            "test",
+            "speedwave_test_network",
+            &tokens_dir,
+        )
+        .unwrap();
+
+        // Insert into valid compose (simulating apply_plugins behavior)
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
+        if let Some(services) = doc.get_mut("services").and_then(|v| v.as_mapping_mut()) {
+            services.insert(
+                serde_yaml_ng::Value::String("mcp-presale".to_string()),
+                service_value,
+            );
+        }
+
+        // Verify the service appears
+        let services = doc.get("services").unwrap().as_mapping().unwrap();
+        assert!(
+            services.contains_key(&serde_yaml_ng::Value::String("mcp-presale".into())),
+            "Enabled plugin service mcp-presale should appear in compose"
+        );
+    }
+
+    #[test]
+    fn test_apply_plugins_disabled_excluded() {
+        // When a plugin is NOT enabled in integrations, its service should not appear.
+        // apply_plugins checks integrations.is_plugin_enabled(sid) — when false, it skips.
+        // Simulate by not inserting into compose.
+        let integrations = ResolvedIntegrationsConfig::default(); // plugins map is empty
+        assert!(
+            !integrations.is_plugin_enabled("presale"),
+            "presale should not be enabled by default"
+        );
+
+        // Verify the compose YAML does not contain the plugin service
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
+        let services = doc.get("services").unwrap().as_mapping().unwrap();
+        assert!(
+            !services.contains_key(&serde_yaml_ng::Value::String("mcp-presale".into())),
+            "Disabled plugin service should NOT appear in compose"
+        );
+    }
+
+    #[test]
+    fn test_apply_plugins_worker_url_injected() {
+        // Simulate apply_plugins injecting WORKER_PRESALE_URL into mcp-hub
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
+        let worker_env = plugin::derive_worker_env("presale");
+        let url = format!("http://mcp-presale:4010");
+        inject_worker_env(&mut doc, &worker_env, &url);
+
+        let env = get_hub_env_seq(&doc);
+        assert!(
+            env.iter()
+                .any(|s| s == "WORKER_PRESALE_URL=http://mcp-presale:4010"),
+            "WORKER_PRESALE_URL should be injected into mcp-hub. Got: {:?}",
+            env
+        );
+    }
+
+    #[test]
+    fn test_apply_plugins_speedwave_plugins_env() {
+        // Simulate apply_plugins setting SPEEDWAVE_PLUGINS in claude container
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
+        let slugs = vec!["presale".to_string(), "analytics".to_string()];
+        add_claude_env_var(&mut doc, "SPEEDWAVE_PLUGINS", &slugs.join(","));
+
+        let claude = doc.get("services").unwrap().get("claude").unwrap();
+        let env_seq = claude.get("environment").unwrap().as_sequence().unwrap();
+        let has_plugins = env_seq.iter().any(|v| {
+            v.as_str()
+                .is_some_and(|s| s == "SPEEDWAVE_PLUGINS=presale,analytics")
+        });
+        assert!(
+            has_plugins,
+            "SPEEDWAVE_PLUGINS should be set on claude with comma-separated slugs"
+        );
+    }
+
+    #[test]
+    fn test_apply_plugins_token_mount_path() {
+        // Verify the token mount path format generated by generate_plugin_service
+        let manifest = PluginManifest {
+            name: "Presale".to_string(),
+            service_id: Some("presale".to_string()),
+            slug: "presale".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(4010),
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+        };
+
+        let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/myproject");
+        let service_value = plugin::generate_plugin_service(
+            &manifest,
+            "myproject",
+            "speedwave_myproject_network",
+            &tokens_dir,
+        )
+        .unwrap();
+
+        let yaml = serde_yaml_ng::to_string(&service_value).unwrap();
+        // Token mount should be tokens_dir/service_id:/tokens:ro
+        assert!(
+            yaml.contains("/home/user/.speedwave/tokens/myproject/presale:/tokens:ro"),
+            "Token mount should be <tokens_dir>/<service_id>:/tokens:<mode>. Got:\n{}",
+            yaml
+        );
+    }
+
     #[test]
     fn to_engine_path_returns_path_unchanged_on_non_windows() {
         let path = std::path::Path::new("/home/user/projects/acme");

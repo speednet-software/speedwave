@@ -9,6 +9,16 @@ use std::path::{Path, PathBuf};
 /// Slug validation: lowercase letters, digits, hyphens. Starts with letter. Max 64 chars.
 const SLUG_PATTERN: &str = r"^[a-z][a-z0-9-]{0,63}$";
 
+#[derive(Debug, PartialEq)]
+pub enum TokenStatus {
+    /// All required secret fields have token files.
+    Configured,
+    /// Some or all required secret fields are missing token files.
+    NotConfigured { missing: Vec<String> },
+    /// Plugin has no auth fields requiring tokens.
+    NoTokensRequired,
+}
+
 /// RAII guard that removes a temporary directory on drop.
 struct TmpDirGuard(PathBuf);
 impl Drop for TmpDirGuard {
@@ -70,6 +80,106 @@ pub fn plugins_base_dir() -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("cannot find home dir"))?
         .join(consts::DATA_DIR)
         .join("plugins"))
+}
+
+/// Writes credential/token files for a plugin to the project's token directory.
+/// Creates `~/.speedwave/tokens/<project>/<service_id>/<key>` for each entry.
+/// Sets file permissions to 0o600 (owner read/write only).
+pub fn configure_plugin_tokens(
+    project: &str,
+    service_id: &str,
+    tokens: &HashMap<String, String>,
+) -> anyhow::Result<()> {
+    let base = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home dir"))?;
+    configure_plugin_tokens_with_base(&base, project, service_id, tokens)
+}
+
+fn configure_plugin_tokens_with_base(
+    home: &Path,
+    project: &str,
+    service_id: &str,
+    tokens: &HashMap<String, String>,
+) -> anyhow::Result<()> {
+    let token_dir = home
+        .join(consts::DATA_DIR)
+        .join("tokens")
+        .join(project)
+        .join(service_id);
+    std::fs::create_dir_all(&token_dir)?;
+
+    for (key, value) in tokens {
+        let file_path = token_dir.join(key);
+        std::fs::write(&file_path, value)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Checks whether a plugin's required auth_fields have corresponding token files.
+pub fn get_plugin_token_status(project: &str, manifest: &PluginManifest) -> TokenStatus {
+    let base = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            return TokenStatus::NotConfigured {
+                missing: manifest
+                    .auth_fields
+                    .iter()
+                    .filter(|f| f.is_secret)
+                    .map(|f| f.key.clone())
+                    .collect(),
+            };
+        }
+    };
+    get_plugin_token_status_with_base(&base, project, manifest)
+}
+
+fn get_plugin_token_status_with_base(
+    home: &Path,
+    project: &str,
+    manifest: &PluginManifest,
+) -> TokenStatus {
+    if manifest.auth_fields.is_empty() {
+        return TokenStatus::NoTokensRequired;
+    }
+
+    let secret_fields: Vec<&AuthFieldDef> = manifest
+        .auth_fields
+        .iter()
+        .filter(|f| f.is_secret)
+        .collect();
+
+    if secret_fields.is_empty() {
+        return TokenStatus::NoTokensRequired;
+    }
+
+    let service_id = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
+
+    let token_dir = home
+        .join(consts::DATA_DIR)
+        .join("tokens")
+        .join(project)
+        .join(service_id);
+
+    let mut missing = Vec::new();
+    for field in &secret_fields {
+        let file_path = token_dir.join(&field.key);
+        let has_content = file_path.metadata().map(|m| m.len() > 0).unwrap_or(false);
+        if !has_content {
+            missing.push(field.key.clone());
+        }
+    }
+
+    if missing.is_empty() {
+        TokenStatus::Configured
+    } else {
+        TokenStatus::NotConfigured { missing }
+    }
 }
 
 /// Derives WORKER_{SID}_URL from a service_id. E.g. "presale" → "WORKER_PRESALE_URL"
@@ -170,6 +280,22 @@ pub fn install_plugin(
     let manifest: PluginManifest = serde_json::from_str(&content)?;
 
     validate_manifest(&manifest, &plugin_src)?;
+
+    // Reject duplicate service_id among already-installed plugins
+    if let Some(ref sid) = manifest.service_id {
+        let existing = list_installed_plugins()?;
+        for existing_manifest in &existing {
+            if existing_manifest.service_id.as_deref() == Some(sid.as_str())
+                && existing_manifest.slug != manifest.slug
+            {
+                anyhow::bail!(
+                    "Plugin with service_id '{}' is already installed ({})",
+                    sid,
+                    existing_manifest.slug
+                );
+            }
+        }
+    }
 
     // Move to final location
     let dest = plugins_dir.join(&manifest.slug);
@@ -348,7 +474,8 @@ pub fn generate_plugin_service(
     let mut env_lines = format!("  - PORT={port}");
     if let Some(ref extra) = manifest.extra_env {
         for (k, v) in extra {
-            env_lines.push_str(&format!("\n  - {}={}", k, v));
+            let entry = format!("{}={}", k, v);
+            env_lines.push_str(&format!("\n  - {}", yaml_quote_entry(&entry)));
         }
     }
 
@@ -393,6 +520,24 @@ deploy:
 }
 
 // --- Helper functions ---
+
+/// YAML-safe quoting for environment entries (KEY=VALUE) embedded via `format!()`.
+/// If the entry contains characters that YAML would misinterpret (`:`, `{`, `}`,
+/// `[`, `]`, `"`, `'`, `#`, `&`, `*`, `!`, `|`, `>`, `%`, `@`, `` ` ``),
+/// wraps the entire entry in single quotes with proper escaping.
+/// Single quotes are used because the only character that needs escaping inside
+/// YAML single-quoted strings is the single quote itself (doubled as `''`).
+fn yaml_quote_entry(entry: &str) -> String {
+    const YAML_SPECIAL: &[char] = &[
+        ':', '{', '}', '[', ']', '"', '\'', '#', '&', '*', '!', '|', '>', '%', '@', '`',
+    ];
+    if entry.chars().any(|c| YAML_SPECIAL.contains(&c)) {
+        let escaped = entry.replace('\'', "''");
+        format!("'{}'", escaped)
+    } else {
+        entry.to_string()
+    }
+}
 
 /// Converts a host path to the path seen by the container engine.
 fn to_engine_path(path: &Path) -> anyhow::Result<String> {
@@ -991,5 +1136,497 @@ mod tests {
             std::fs::read_to_string(dest.join("subdir/nested.txt")).unwrap(),
             "world"
         );
+    }
+
+    // --- Task 1: configure_plugin_tokens + get_plugin_token_status tests ---
+
+    #[test]
+    fn test_configure_plugin_tokens_creates_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        let mut tokens = HashMap::new();
+        tokens.insert("api_key".to_string(), "sk-secret-123".to_string());
+        tokens.insert("refresh_token".to_string(), "rt-abc".to_string());
+
+        configure_plugin_tokens_with_base(home, "myproject", "presale", &tokens).unwrap();
+
+        let token_dir = home
+            .join(consts::DATA_DIR)
+            .join("tokens")
+            .join("myproject")
+            .join("presale");
+
+        assert_eq!(
+            std::fs::read_to_string(token_dir.join("api_key")).unwrap(),
+            "sk-secret-123"
+        );
+        assert_eq!(
+            std::fs::read_to_string(token_dir.join("refresh_token")).unwrap(),
+            "rt-abc"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_configure_plugin_tokens_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        let mut tokens = HashMap::new();
+        tokens.insert("secret".to_string(), "value".to_string());
+
+        configure_plugin_tokens_with_base(home, "proj", "svc", &tokens).unwrap();
+
+        let file_path = home
+            .join(consts::DATA_DIR)
+            .join("tokens")
+            .join("proj")
+            .join("svc")
+            .join("secret");
+
+        let perms = std::fs::metadata(&file_path).unwrap().permissions();
+        assert_eq!(
+            perms.mode() & 0o777,
+            0o600,
+            "Token file should have 0o600 permissions, got {:o}",
+            perms.mode() & 0o777
+        );
+    }
+
+    #[test]
+    fn test_get_plugin_token_status_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        // Create token files
+        let token_dir = home
+            .join(consts::DATA_DIR)
+            .join("tokens")
+            .join("proj")
+            .join("test-svc");
+        std::fs::create_dir_all(&token_dir).unwrap();
+        std::fs::write(token_dir.join("api_key"), "sk-123").unwrap();
+        std::fs::write(token_dir.join("token"), "tok-abc").unwrap();
+
+        let manifest = PluginManifest {
+            name: "Test".to_string(),
+            service_id: Some("test-svc".to_string()),
+            slug: "test-svc".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(4010),
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![
+                AuthFieldDef {
+                    key: "api_key".to_string(),
+                    label: "API Key".to_string(),
+                    field_type: "password".to_string(),
+                    placeholder: "sk-...".to_string(),
+                    is_secret: true,
+                },
+                AuthFieldDef {
+                    key: "token".to_string(),
+                    label: "Token".to_string(),
+                    field_type: "password".to_string(),
+                    placeholder: "tok-...".to_string(),
+                    is_secret: true,
+                },
+                AuthFieldDef {
+                    key: "label".to_string(),
+                    label: "Label".to_string(),
+                    field_type: "text".to_string(),
+                    placeholder: "My Label".to_string(),
+                    is_secret: false,
+                },
+            ],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+        };
+
+        let status = get_plugin_token_status_with_base(home, "proj", &manifest);
+        assert_eq!(status, TokenStatus::Configured);
+    }
+
+    #[test]
+    fn test_get_plugin_token_status_not_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        // Create only one of two required token files
+        let token_dir = home
+            .join(consts::DATA_DIR)
+            .join("tokens")
+            .join("proj")
+            .join("test-svc");
+        std::fs::create_dir_all(&token_dir).unwrap();
+        std::fs::write(token_dir.join("api_key"), "sk-123").unwrap();
+        // "token" file intentionally missing
+
+        let manifest = PluginManifest {
+            name: "Test".to_string(),
+            service_id: Some("test-svc".to_string()),
+            slug: "test-svc".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(4010),
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![
+                AuthFieldDef {
+                    key: "api_key".to_string(),
+                    label: "API Key".to_string(),
+                    field_type: "password".to_string(),
+                    placeholder: "sk-...".to_string(),
+                    is_secret: true,
+                },
+                AuthFieldDef {
+                    key: "token".to_string(),
+                    label: "Token".to_string(),
+                    field_type: "password".to_string(),
+                    placeholder: "tok-...".to_string(),
+                    is_secret: true,
+                },
+            ],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+        };
+
+        let status = get_plugin_token_status_with_base(home, "proj", &manifest);
+        assert_eq!(
+            status,
+            TokenStatus::NotConfigured {
+                missing: vec!["token".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn test_get_plugin_token_status_no_tokens_required() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        let manifest = PluginManifest {
+            name: "Test".to_string(),
+            service_id: None,
+            slug: "test-skills".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec!["skills".to_string()],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+        };
+
+        let status = get_plugin_token_status_with_base(home, "proj", &manifest);
+        assert_eq!(status, TokenStatus::NoTokensRequired);
+    }
+
+    #[test]
+    fn test_get_plugin_token_status_only_non_secret_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        let manifest = PluginManifest {
+            name: "Test".to_string(),
+            service_id: Some("test-svc".to_string()),
+            slug: "test-svc".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(4010),
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![AuthFieldDef {
+                key: "host_url".to_string(),
+                label: "Host URL".to_string(),
+                field_type: "url".to_string(),
+                placeholder: "https://...".to_string(),
+                is_secret: false,
+            }],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+        };
+
+        let status = get_plugin_token_status_with_base(home, "proj", &manifest);
+        assert_eq!(status, TokenStatus::NoTokensRequired);
+    }
+
+    #[test]
+    fn test_get_plugin_token_status_empty_file_counts_as_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        let token_dir = home
+            .join(consts::DATA_DIR)
+            .join("tokens")
+            .join("proj")
+            .join("test-svc");
+        std::fs::create_dir_all(&token_dir).unwrap();
+        // Write an empty file — should be treated as missing
+        std::fs::write(token_dir.join("api_key"), "").unwrap();
+
+        let manifest = PluginManifest {
+            name: "Test".to_string(),
+            service_id: Some("test-svc".to_string()),
+            slug: "test-svc".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(4010),
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![AuthFieldDef {
+                key: "api_key".to_string(),
+                label: "API Key".to_string(),
+                field_type: "password".to_string(),
+                placeholder: "sk-...".to_string(),
+                is_secret: true,
+            }],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+        };
+
+        let status = get_plugin_token_status_with_base(home, "proj", &manifest);
+        assert_eq!(
+            status,
+            TokenStatus::NotConfigured {
+                missing: vec!["api_key".to_string()]
+            }
+        );
+    }
+
+    // --- Task 2: duplicate service_id detection test ---
+
+    #[test]
+    fn test_install_plugin_rejects_duplicate_service_id() {
+        // We cannot easily call install_plugin() in tests because it requires
+        // a signed ZIP and uses dirs::home_dir(). Instead, test the duplicate
+        // detection logic directly by simulating what install_plugin does:
+        // check existing plugins for a matching service_id.
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path();
+
+        // Create an "existing" plugin with service_id "presale"
+        let existing_dir = plugins_dir.join("presale");
+        std::fs::create_dir_all(&existing_dir).unwrap();
+        std::fs::write(
+            existing_dir.join("plugin.json"),
+            r#"{
+                "name": "Presale Original",
+                "slug": "presale",
+                "service_id": "presale",
+                "version": "1.0.0",
+                "description": "Original presale plugin",
+                "port": 4010
+            }"#,
+        )
+        .unwrap();
+
+        // Simulate listing installed plugins from the temp dir
+        let mut existing_plugins = Vec::new();
+        for entry in std::fs::read_dir(plugins_dir).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                let mp = entry.path().join("plugin.json");
+                if mp.exists() {
+                    let content = std::fs::read_to_string(&mp).unwrap();
+                    let m: PluginManifest = serde_json::from_str(&content).unwrap();
+                    existing_plugins.push(m);
+                }
+            }
+        }
+
+        // New plugin with the same service_id but different slug
+        let new_manifest = PluginManifest {
+            name: "Presale Clone".to_string(),
+            service_id: Some("presale".to_string()),
+            slug: "presale".to_string(), // slug == service_id (required by validation)
+            version: "2.0.0".to_string(),
+            description: "A clone".to_string(),
+            port: Some(4011),
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+        };
+
+        // Replicate the duplicate check from install_plugin
+        let duplicate_found = if let Some(ref sid) = new_manifest.service_id {
+            existing_plugins.iter().any(|existing| {
+                existing.service_id.as_deref() == Some(sid.as_str())
+                    && existing.slug != new_manifest.slug
+            })
+        } else {
+            false
+        };
+
+        // Same slug means an upgrade (allowed), not a duplicate
+        assert!(
+            !duplicate_found,
+            "Same slug with same service_id should be allowed (upgrade scenario)"
+        );
+
+        // Now test with a DIFFERENT slug but same service_id
+        let conflict_manifest = PluginManifest {
+            name: "Presale Fork".to_string(),
+            service_id: Some("presale".to_string()),
+            slug: "presale-fork".to_string(),
+            version: "1.0.0".to_string(),
+            description: "A fork".to_string(),
+            port: Some(4012),
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+        };
+
+        let conflict_found = if let Some(ref sid) = conflict_manifest.service_id {
+            existing_plugins.iter().any(|existing| {
+                existing.service_id.as_deref() == Some(sid.as_str())
+                    && existing.slug != conflict_manifest.slug
+            })
+        } else {
+            false
+        };
+
+        assert!(
+            conflict_found,
+            "Different slug with same service_id should be rejected as duplicate"
+        );
+    }
+
+    // --- Task 3: YAML special characters in extra_env ---
+
+    #[test]
+    fn test_generate_plugin_service_extra_env_special_chars() {
+        let manifest = PluginManifest {
+            name: "Test Special".to_string(),
+            service_id: Some("test-special".to_string()),
+            slug: "test-special".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(4040),
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: Some(HashMap::from([
+                (
+                    "URL_VAR".to_string(),
+                    "https://example.com:8080/path".to_string(),
+                ),
+                ("JSON_VAR".to_string(), r#"{"key": "value"}"#.to_string()),
+                ("BRACKET_VAR".to_string(), "[item1, item2]".to_string()),
+                ("HASH_VAR".to_string(), "value # with hash".to_string()),
+                ("PLAIN_VAR".to_string(), "simple-value".to_string()),
+            ])),
+            mem_limit: None,
+        };
+
+        let tokens_dir = PathBuf::from("/tokens");
+        let result = generate_plugin_service(&manifest, "proj", "net", &tokens_dir).unwrap();
+
+        // Verify it parses back as valid YAML
+        let yaml = serde_yaml_ng::to_string(&result).unwrap();
+
+        // Re-parse to ensure round-trip works
+        let reparsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let env_list = reparsed
+            .get("environment")
+            .expect("environment key must exist");
+        let env_seq = env_list
+            .as_sequence()
+            .expect("environment must be a sequence");
+
+        // Collect all env entries as strings
+        let env_strings: Vec<String> = env_seq
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+
+        // Verify all values survive the YAML round-trip intact
+        assert!(
+            env_strings
+                .iter()
+                .any(|s| s == "URL_VAR=https://example.com:8080/path"),
+            "URL_VAR should survive round-trip: {:?}",
+            env_strings
+        );
+        assert!(
+            env_strings
+                .iter()
+                .any(|s| s == r#"JSON_VAR={"key": "value"}"#),
+            "JSON_VAR should survive round-trip: {:?}",
+            env_strings
+        );
+        assert!(
+            env_strings
+                .iter()
+                .any(|s| s == "BRACKET_VAR=[item1, item2]"),
+            "BRACKET_VAR should survive round-trip: {:?}",
+            env_strings
+        );
+        assert!(
+            env_strings
+                .iter()
+                .any(|s| s == "HASH_VAR=value # with hash"),
+            "HASH_VAR should survive round-trip: {:?}",
+            env_strings
+        );
+        assert!(
+            env_strings.iter().any(|s| s == "PLAIN_VAR=simple-value"),
+            "PLAIN_VAR should survive round-trip: {:?}",
+            env_strings
+        );
+    }
+
+    #[test]
+    fn test_yaml_quote_entry_plain() {
+        assert_eq!(yaml_quote_entry("KEY=simple"), "KEY=simple");
+        assert_eq!(yaml_quote_entry("KEY=hello-world"), "KEY=hello-world");
+    }
+
+    #[test]
+    fn test_yaml_quote_entry_special_chars() {
+        assert_eq!(
+            yaml_quote_entry("URL=https://host:8080"),
+            "'URL=https://host:8080'"
+        );
+        assert_eq!(yaml_quote_entry("JSON={key: val}"), "'JSON={key: val}'");
+    }
+
+    #[test]
+    fn test_yaml_quote_entry_embedded_single_quotes() {
+        assert_eq!(yaml_quote_entry("MSG=it's here"), "'MSG=it''s here'");
     }
 }

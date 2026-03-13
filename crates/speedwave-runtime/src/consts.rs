@@ -556,4 +556,16 @@ mod tests {
         assert!(find_mcp_service("").is_none());
         assert!(find_mcp_service("os").is_none());
     }
+
+    #[test]
+    fn test_built_in_service_ids_no_overlap_with_built_in_services() {
+        // Verify that no service_id in BUILT_IN_SERVICE_IDS appears in BUILT_IN_SERVICES
+        // (they use different naming: "slack" vs "mcp-slack")
+        for sid in BUILT_IN_SERVICE_IDS {
+            assert!(
+                !BUILT_IN_SERVICES.contains(sid),
+                "BUILT_IN_SERVICE_IDS entry '{sid}' collides with BUILT_IN_SERVICES"
+            );
+        }
+    }
 }
