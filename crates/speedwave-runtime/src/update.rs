@@ -117,10 +117,11 @@ pub fn update_containers(
         config::resolve_project_config(&project_path, &user_config, project);
 
     // 2. Re-render compose.yml with current template
-    let compose_yml = compose::render_compose(project, &project_dir, &resolved, &integrations)?;
+    let compose_yml =
+        compose::render_compose(project, &project_dir, &resolved, &integrations, None)?;
 
     // 3. Mandatory security gate — BEFORE saving anything
-    let violations = SecurityCheck::run(&compose_yml, project);
+    let violations = SecurityCheck::run(&compose_yml, project, &[]);
     if !violations.is_empty() {
         let msgs: Vec<String> = violations
             .iter()
@@ -192,7 +193,7 @@ pub fn rollback_containers(runtime: &dyn ContainerRuntime, project: &str) -> any
     let snapshot = load_snapshot(project)?;
 
     // Security check on the snapshot compose.yml before applying
-    let violations = SecurityCheck::run(&snapshot.compose_yml, project);
+    let violations = SecurityCheck::run(&snapshot.compose_yml, project, &[]);
     if !violations.is_empty() {
         let msgs: Vec<String> = violations
             .iter()

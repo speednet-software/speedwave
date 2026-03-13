@@ -303,6 +303,10 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
     "mcp-gitlab",
 ];
 
+/// Built-in service IDs (logical names, not compose names).
+/// Used by plugin install to prevent slug collisions.
+pub const BUILT_IN_SERVICE_IDS: &[&str] = &["slack", "sharepoint", "redmine", "gitlab", "os"];
+
 #[cfg(test)]
 mod tests {
     use super::*;

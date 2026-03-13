@@ -1056,6 +1056,7 @@ pub fn create_project(name: &str, dir: &str) -> anyhow::Result<()> {
             dir: dir.to_string(),
             claude: None,
             integrations: None,
+            plugin_settings: None,
         });
     }
 
@@ -1079,7 +1080,7 @@ pub fn create_project(name: &str, dir: &str) -> anyhow::Result<()> {
     let project_path = std::path::Path::new(dir);
     let resolved = config::resolve_claude_config(project_path, &user_config, name);
     let integrations = config::resolve_integrations(project_path, &user_config, name);
-    let yaml = compose::render_compose(name, dir, &resolved, &integrations)?;
+    let yaml = compose::render_compose(name, dir, &resolved, &integrations, None)?;
     compose::save_compose(name, &yaml)?;
 
     let mut state = SetupState::load();
@@ -1144,9 +1145,9 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     let project_path = std::path::Path::new(project_dir);
     let resolved = config::resolve_claude_config(project_path, &user_config, project);
     let integrations = config::resolve_integrations(project_path, &user_config, project);
-    let yaml = compose::render_compose(project, project_dir, &resolved, &integrations)?;
+    let yaml = compose::render_compose(project, project_dir, &resolved, &integrations, None)?;
 
-    let violations = compose::SecurityCheck::run(&yaml, project);
+    let violations = compose::SecurityCheck::run(&yaml, project, &[]);
     if !violations.is_empty() {
         let msgs: Vec<String> = violations
             .iter()
@@ -1678,12 +1679,14 @@ mod tests {
                     dir: "/tmp/acme".to_string(),
                     claude: None,
                     integrations: None,
+                    plugin_settings: None,
                 },
                 config::ProjectUserEntry {
                     name: "beta-corp".to_string(),
                     dir: "/tmp/beta-corp".to_string(),
                     claude: None,
                     integrations: None,
+                    plugin_settings: None,
                 },
             ],
             active_project: Some("acme".to_string()),
@@ -3378,7 +3381,7 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = compose::SecurityCheck::run(yaml, "test");
+        let violations = compose::SecurityCheck::run(yaml, "test", &[]);
         assert!(
             violations.iter().any(|v| v.rule == "CAP_DROP_ALL"),
             "Expected CAP_DROP_ALL violation for compose YAML missing cap_drop"
@@ -3425,7 +3428,7 @@ services:
 "#;
 
         // SecurityCheck should find violations
-        let violations = compose::SecurityCheck::run(yaml, "test-ordering");
+        let violations = compose::SecurityCheck::run(yaml, "test-ordering", &[]);
         assert!(!violations.is_empty(), "Should detect violations");
 
         // Simulate the correct ordering: check first, bail before save
@@ -3460,7 +3463,7 @@ networks:
   speedwave_test_network:
     driver: bridge
 "#;
-        let violations = compose::SecurityCheck::run(yaml, "test");
+        let violations = compose::SecurityCheck::run(yaml, "test", &[]);
         assert!(
             violations.is_empty(),
             "Expected no violations for valid compose YAML, got: {:?}",

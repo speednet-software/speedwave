@@ -128,6 +128,7 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
             &project_dir,
             &resolved,
             &integrations,
+            None,
         ) {
             Ok(y) => y,
             Err(e) => {
@@ -136,7 +137,7 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
             }
         };
 
-        let violations = speedwave_runtime::compose::SecurityCheck::run(&yaml, &project);
+        let violations = speedwave_runtime::compose::SecurityCheck::run(&yaml, &project, &[]);
         if !violations.is_empty() {
             let msgs: Vec<String> = violations
                 .iter()
