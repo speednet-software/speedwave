@@ -11,6 +11,7 @@ import {
   clearWorkerCache,
   parseServiceError,
   getRequestTimeout,
+  initializeAllBridges,
 } from './http-bridge.js';
 import {
   getServiceMethods,
@@ -675,6 +676,57 @@ describe('http-bridge', () => {
       // Cleanup
       delete mutableRegistry['presale'];
       delete process.env.WORKER_PRESALE_URL;
+    });
+
+    it('should create bridge for plugin service from ENABLED_SERVICES via initializeAllBridges', async () => {
+      // Register a plugin service in the registry
+      const mutableRegistry = TOOL_REGISTRY as Record<
+        string,
+        Record<string, Record<string, unknown>>
+      >;
+      mutableRegistry['analytics'] = {
+        runReport: {
+          name: 'runReport',
+          service: 'analytics',
+          category: 'read',
+          description: 'Run analytics report',
+          inputSchema: { type: 'object', properties: {} },
+          keywords: ['report'],
+          example: '',
+          deferLoading: false,
+        },
+      };
+
+      // Set ENABLED_SERVICES to include the plugin service
+      const origEnabled = process.env.ENABLED_SERVICES;
+      process.env.ENABLED_SERVICES = 'gitlab,analytics';
+      process.env.WORKER_ANALYTICS_URL = 'http://mcp-analytics:4020';
+
+      // Reset enabled services cache so new env value is picked up
+      const { resetServiceCaches } = await import('./tool-registry.js');
+      resetServiceCaches();
+
+      // Mock fetch for health checks
+      const fetchMock = vi.fn().mockResolvedValue({ ok: false });
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const bridges = await initializeAllBridges();
+
+      // Plugin service should have a bridge (not null)
+      expect(bridges['analytics']).not.toBeNull();
+      expect(bridges['analytics']).toHaveProperty('runReport');
+      expect(typeof bridges['analytics']!.runReport).toBe('function');
+
+      // Cleanup
+      delete mutableRegistry['analytics'];
+      delete process.env.WORKER_ANALYTICS_URL;
+      if (origEnabled === undefined) {
+        delete process.env.ENABLED_SERVICES;
+      } else {
+        process.env.ENABLED_SERVICES = origEnabled;
+      }
+      resetServiceCaches();
+      vi.restoreAllMocks();
     });
   });
 
