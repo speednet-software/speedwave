@@ -33,10 +33,10 @@ Speedwave supports extending integrations via the addon system:
 - `compose.rs` merges addon compose fragments into the main compose document
 - Addon services get injected `WORKER_<ADDON>_URL` in the hub environment
 
-See [ADR-015](../adr/ADR-015-addon-system-open-core-model.md) for the full open-core model design.
+See [ADR-015](../adr/ADR-015-plugin-system.md) for the plugin system design.
 
 ## See Also
 
 - [ADR-010: mcp-os as Host Process Per Platform](../adr/ADR-010-mcp-os-as-host-process-per-platform.md)
 - [ADR-013: mcp-os as Host Process — Implementation Details](../adr/ADR-013-mcp-os-as-host-process-implementation.md)
-- [ADR-015: Addon System — Open-Core Model](../adr/ADR-015-addon-system-open-core-model.md)
+- [ADR-015: Plugin System](../adr/ADR-015-plugin-system.md)

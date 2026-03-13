@@ -84,7 +84,7 @@ When addons are installed (`SPEEDWAVE_ADDONS` env variable), `entrypoint.sh` sym
 
 Unlike core resources (which symlink entire directories), addon resources create per-file symlinks. This allows core and addon resources to coexist within the same user-level directory. Addon resources support `commands`, `agents`, and `skills` only — `hooks` are intentionally excluded because hooks execute shell commands, and allowing third-party addons to inject hooks would expand the attack surface without user consent.
 
-See [ADR-015](../adr/ADR-015-addon-system-open-core-model.md) for the addon system design.
+See [ADR-015](../adr/ADR-015-plugin-system.md) for the plugin system design.
 
 ## Persistence Across Container Restarts
 
@@ -106,7 +106,7 @@ Checklist for contributors:
 ## See Also
 
 - [ADR-022 — Bundled Resources and Project Coexistence](../adr/ADR-022-bundled-claude-resources-and-project-coexistence.md)
-- [ADR-015 — Addon System](../adr/ADR-015-addon-system-open-core-model.md)
+- [ADR-015 — Plugin System](../adr/ADR-015-plugin-system.md)
 - [Containers](containers.md) — OCI images, compose templates, per-project isolation
 - [Security Model](security.md) — container hardening, token isolation
 
