@@ -18,10 +18,23 @@ enum CliAction {
     PluginInstall(String), // zip path
     PluginList,
     PluginRemove(String), // slug
+    PluginEnable { service_id: String, project: String },
+    PluginDisable { service_id: String, project: String },
     Check,
     SelfUpdate,
     Update,
     Run, // default: compose_up + exec
+}
+
+/// Extracts `--project <value>` from plugin enable/disable args.
+fn parse_project_flag(args: &[String], subcommand: &str) -> Result<String, String> {
+    // args: [speedwave, plugin, enable|disable, <service_id>, --project, <project>]
+    let flag_pos = args.iter().position(|a| a == "--project").ok_or(format!(
+        "usage: speedwave plugin {subcommand} <service_id> --project <project>"
+    ))?;
+    args.get(flag_pos + 1).cloned().ok_or(format!(
+        "usage: speedwave plugin {subcommand} <service_id> --project <project>"
+    ))
 }
 
 fn parse_action(args: &[String]) -> Result<CliAction, String> {
@@ -40,7 +53,27 @@ fn parse_action(args: &[String]) -> Result<CliAction, String> {
                     .ok_or("usage: speedwave plugin remove <slug>".to_string())?;
                 Ok(CliAction::PluginRemove(slug.clone()))
             }
-            _ => Err("usage: speedwave plugin [install|list|remove]".to_string()),
+            Some("enable") => {
+                let service_id = args.get(3).ok_or(
+                    "usage: speedwave plugin enable <service_id> --project <project>".to_string(),
+                )?;
+                let project = parse_project_flag(args, "enable")?;
+                Ok(CliAction::PluginEnable {
+                    service_id: service_id.clone(),
+                    project,
+                })
+            }
+            Some("disable") => {
+                let service_id = args.get(3).ok_or(
+                    "usage: speedwave plugin disable <service_id> --project <project>".to_string(),
+                )?;
+                let project = parse_project_flag(args, "disable")?;
+                Ok(CliAction::PluginDisable {
+                    service_id: service_id.clone(),
+                    project,
+                })
+            }
+            _ => Err("usage: speedwave plugin [install|list|remove|enable|disable]".to_string()),
         },
         Some("check") => Ok(CliAction::Check),
         Some("self-update") => Ok(CliAction::SelfUpdate),
@@ -323,6 +356,64 @@ fn main() -> anyhow::Result<()> {
             println!("Plugin '{}' removed", slug);
             std::process::exit(0);
         }
+        CliAction::PluginEnable {
+            service_id,
+            project,
+        } => {
+            let manifests = plugin::list_installed_plugins()?;
+            let manifest = manifests
+                .iter()
+                .find(|m| m.service_id.as_deref() == Some(service_id))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No installed plugin with service_id '{}'. Run `speedwave plugin list` to see installed plugins.",
+                        service_id
+                    )
+                })?;
+            let mut user_config = config::load_user_config()?;
+            let entry = user_config
+                .projects
+                .iter_mut()
+                .find(|p| p.name == *project)
+                .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
+            let integrations = entry.integrations.get_or_insert_with(Default::default);
+            integrations.set_plugin_enabled(service_id, true);
+            config::save_user_config(&user_config)?;
+            println!(
+                "Plugin '{}' (service_id: {}) enabled for project '{}'",
+                manifest.name, service_id, project
+            );
+            std::process::exit(0);
+        }
+        CliAction::PluginDisable {
+            service_id,
+            project,
+        } => {
+            let manifests = plugin::list_installed_plugins()?;
+            let manifest = manifests
+                .iter()
+                .find(|m| m.service_id.as_deref() == Some(service_id))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No installed plugin with service_id '{}'. Run `speedwave plugin list` to see installed plugins.",
+                        service_id
+                    )
+                })?;
+            let mut user_config = config::load_user_config()?;
+            let entry = user_config
+                .projects
+                .iter_mut()
+                .find(|p| p.name == *project)
+                .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
+            let integrations = entry.integrations.get_or_insert_with(Default::default);
+            integrations.set_plugin_enabled(service_id, false);
+            config::save_user_config(&user_config)?;
+            println!(
+                "Plugin '{}' (service_id: {}) disabled for project '{}'",
+                manifest.name, service_id, project
+            );
+            std::process::exit(0);
+        }
         _ => {}
     }
 
@@ -368,9 +459,11 @@ fn main() -> anyhow::Result<()> {
         Some(&*runtime),
     )?;
 
+    let manifests = plugin::list_installed_plugins().unwrap_or_default();
+
     // Handle `speedwave check` subcommand
     if action == CliAction::Check {
-        let violations = SecurityCheck::run(&compose_yml, &project_name, &[]);
+        let violations = SecurityCheck::run(&compose_yml, &project_name, &manifests);
         if violations.is_empty() {
             println!("speedwave check OK -- all security invariants satisfied");
             std::process::exit(0);
@@ -385,7 +478,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Mandatory security gate before container start
-    let violations = SecurityCheck::run(&compose_yml, &project_name, &[]);
+    let violations = SecurityCheck::run(&compose_yml, &project_name, &manifests);
     if !violations.is_empty() {
         eprintln!("speedwave check FAILED -- containers NOT started\n");
         for v in &violations {
@@ -707,5 +800,109 @@ mod tests {
         let raw = "  \n";
         let resources_dir = raw.trim();
         assert!(resources_dir.is_empty());
+    }
+
+    #[test]
+    fn parse_action_plugin_enable() {
+        let args = vec![
+            "speedwave".to_string(),
+            "plugin".to_string(),
+            "enable".to_string(),
+            "my-svc".to_string(),
+            "--project".to_string(),
+            "demo".to_string(),
+        ];
+        assert_eq!(
+            parse_action(&args).unwrap(),
+            CliAction::PluginEnable {
+                service_id: "my-svc".to_string(),
+                project: "demo".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_action_plugin_disable() {
+        let args = vec![
+            "speedwave".to_string(),
+            "plugin".to_string(),
+            "disable".to_string(),
+            "my-svc".to_string(),
+            "--project".to_string(),
+            "demo".to_string(),
+        ];
+        assert_eq!(
+            parse_action(&args).unwrap(),
+            CliAction::PluginDisable {
+                service_id: "my-svc".to_string(),
+                project: "demo".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_action_plugin_enable_missing_service_id() {
+        let args = vec![
+            "speedwave".to_string(),
+            "plugin".to_string(),
+            "enable".to_string(),
+        ];
+        assert!(parse_action(&args).is_err());
+    }
+
+    #[test]
+    fn parse_action_plugin_disable_missing_service_id() {
+        let args = vec![
+            "speedwave".to_string(),
+            "plugin".to_string(),
+            "disable".to_string(),
+        ];
+        assert!(parse_action(&args).is_err());
+    }
+
+    #[test]
+    fn parse_action_plugin_enable_missing_project_flag() {
+        let args = vec![
+            "speedwave".to_string(),
+            "plugin".to_string(),
+            "enable".to_string(),
+            "my-svc".to_string(),
+        ];
+        assert!(parse_action(&args).is_err());
+    }
+
+    #[test]
+    fn parse_action_plugin_disable_missing_project_flag() {
+        let args = vec![
+            "speedwave".to_string(),
+            "plugin".to_string(),
+            "disable".to_string(),
+            "my-svc".to_string(),
+        ];
+        assert!(parse_action(&args).is_err());
+    }
+
+    #[test]
+    fn parse_action_plugin_enable_missing_project_value() {
+        let args = vec![
+            "speedwave".to_string(),
+            "plugin".to_string(),
+            "enable".to_string(),
+            "my-svc".to_string(),
+            "--project".to_string(),
+        ];
+        assert!(parse_action(&args).is_err());
+    }
+
+    #[test]
+    fn parse_action_plugin_disable_missing_project_value() {
+        let args = vec![
+            "speedwave".to_string(),
+            "plugin".to_string(),
+            "disable".to_string(),
+            "my-svc".to_string(),
+            "--project".to_string(),
+        ];
+        assert!(parse_action(&args).is_err());
     }
 }
