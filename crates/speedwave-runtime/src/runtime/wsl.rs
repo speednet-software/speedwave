@@ -92,7 +92,7 @@ impl WslRuntime {
             "wsl.exe",
             &["-d", distro, "--", "systemctl", "start", service_name],
         ) {
-            eprintln!("warning: systemctl start {service_name} failed: {e}");
+            log::warn!("systemctl start {service_name} failed: {e}");
         }
         std::thread::sleep(std::time::Duration::from_secs(3));
         self.runner.run("wsl.exe", &args).map_err(|_| {
