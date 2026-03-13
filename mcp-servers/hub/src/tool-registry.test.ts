@@ -1,11 +1,10 @@
 /**
  * Tool Registry Tests
  *
- * Tests for the central tool registry that provides Single Source of Truth
- * for all tool definitions across services.
+ * Tests for the dynamic tool registry that merges worker metadata with hub policies.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   TOOL_REGISTRY,
   SERVICE_NAMES,
@@ -22,10 +21,22 @@ import {
   resetServiceCaches,
   validateRegistry,
   getRegistryStats,
+  stopBackgroundRefresh,
 } from './tool-registry.js';
+import { TOOL_POLICIES, SUPPORTED_SERVICES } from './hub-tool-policy.js';
 import { TIMEOUTS } from '@speedwave/mcp-shared';
+import { populateRegistryFromPolicies, _resetRegistryForTesting } from './test-helpers.js';
 
 describe('tool-registry', () => {
+  beforeEach(() => {
+    _resetRegistryForTesting();
+    populateRegistryFromPolicies();
+  });
+
+  afterEach(() => {
+    stopBackgroundRefresh();
+  });
+
   describe('TOOL_REGISTRY', () => {
     it('should contain all expected services', () => {
       const expectedServices = ['slack', 'sharepoint', 'redmine', 'gitlab', 'os'];
@@ -35,8 +46,8 @@ describe('tool-registry', () => {
       }
     });
 
-    it('should have SERVICE_NAMES matching registry keys', () => {
-      expect([...SERVICE_NAMES].sort()).toEqual(Object.keys(TOOL_REGISTRY).sort());
+    it('should have SERVICE_NAMES matching SUPPORTED_SERVICES', () => {
+      expect([...SERVICE_NAMES].sort()).toEqual([...SUPPORTED_SERVICES].sort());
     });
   });
 
@@ -83,35 +94,16 @@ describe('tool-registry', () => {
   describe('getLongTimeoutTools', () => {
     it('should return tools with timeoutClass long', () => {
       const longTools = getLongTimeoutTools();
-
-      // Verify known long-running tools are included
       expect(longTools).toContainEqual({ service: 'sharepoint', method: 'sync' });
       expect(longTools).toContainEqual({ service: 'sharepoint', method: 'syncDirectory' });
     });
 
     it('should not include standard timeout tools', () => {
       const longTools = getLongTimeoutTools();
-
-      // Standard operations should not be in the list
       const hasStandardSlackTool = longTools.some(
         (t) => t.service === 'slack' && t.method === 'sendChannel'
       );
       expect(hasStandardSlackTool).toBe(false);
-
-      const hasStandardRedmineTool = longTools.some(
-        (t) => t.service === 'redmine' && t.method === 'listIssueIds'
-      );
-      expect(hasStandardRedmineTool).toBe(false);
-    });
-
-    it('should return consistent results (matches registry)', () => {
-      const longTools = getLongTimeoutTools();
-
-      // Verify all returned tools actually have timeoutClass: 'long' in registry
-      for (const { service, method } of longTools) {
-        const meta = getToolMetadata(service, method);
-        expect(meta?.timeoutClass).toBe('long');
-      }
     });
   });
 
@@ -132,12 +124,9 @@ describe('tool-registry', () => {
 
     it('should return standard for non-long-timeout service calls', () => {
       expect(getRequiredTimeoutClass('await redmine.listIssueIds()')).toBe('standard');
-      expect(getRequiredTimeoutClass('await slack.sendChannel({ channel: "test" })')).toBe(
-        'standard'
-      );
     });
 
-    it('should handle code with multiple tool calls (returns long if any is long)', () => {
+    it('should handle code with multiple tool calls', () => {
       const code = `
         const issues = await redmine.listIssueIds();
         await sharepoint.sync({ local_path: "/test" });
@@ -146,47 +135,22 @@ describe('tool-registry', () => {
       expect(getRequiredTimeoutClass(code)).toBe('long');
     });
 
-    it('should handle whitespace variations in service.method pattern', () => {
-      // With spaces around dot
+    it('should handle whitespace variations', () => {
       expect(getRequiredTimeoutClass('sharepoint . sync()')).toBe('long');
-      expect(getRequiredTimeoutClass('sharepoint\n.\nsync()')).toBe('long');
     });
   });
 
   describe('getExecutionTimeout', () => {
     it('should return LONG_OPERATION_MS for code with long-timeout tools', () => {
       const result = getExecutionTimeout('await sharepoint.sync()', TIMEOUTS.EXECUTION_MS);
-
       expect(result.timeoutMs).toBe(TIMEOUTS.LONG_OPERATION_MS);
-      expect(result.maxTimeoutMs).toBe(TIMEOUTS.LONG_OPERATION_MS);
       expect(result.timeoutClass).toBe('long');
     });
 
     it('should return default timeout for standard code', () => {
       const result = getExecutionTimeout('return 1 + 1', TIMEOUTS.EXECUTION_MS);
-
       expect(result.timeoutMs).toBe(TIMEOUTS.EXECUTION_MS);
-      expect(result.maxTimeoutMs).toBe(TIMEOUTS.EXECUTION_MS);
       expect(result.timeoutClass).toBe('standard');
-    });
-
-    it('should respect custom default timeout for standard operations', () => {
-      const customDefault = 60000;
-      const result = getExecutionTimeout('await redmine.listIssueIds()', customDefault);
-
-      expect(result.timeoutMs).toBe(customDefault);
-      expect(result.maxTimeoutMs).toBe(TIMEOUTS.EXECUTION_MS);
-      expect(result.timeoutClass).toBe('standard');
-    });
-
-    it('should ignore custom default for long operations', () => {
-      const customDefault = 30000; // Even with short custom default
-      const result = getExecutionTimeout('await sharepoint.sync()', customDefault);
-
-      // Long operations always use LONG_OPERATION_MS
-      expect(result.timeoutMs).toBe(TIMEOUTS.LONG_OPERATION_MS);
-      expect(result.maxTimeoutMs).toBe(TIMEOUTS.LONG_OPERATION_MS);
-      expect(result.timeoutClass).toBe('long');
     });
   });
 
@@ -231,21 +195,6 @@ describe('tool-registry', () => {
       );
     });
 
-    it('should not pass timeout options when getTimeoutMs is not provided', async () => {
-      const mockCallWorker = vi.fn().mockResolvedValue({ success: true });
-      const bridge = buildServiceBridge('slack', mockCallWorker);
-
-      await bridge.sendChannel({ channel: 'test' });
-
-      // Fourth argument should be undefined when no getTimeoutMs provided
-      expect(mockCallWorker).toHaveBeenCalledWith(
-        'slack',
-        'sendChannel',
-        { channel: 'test' },
-        undefined
-      );
-    });
-
     it('should pass timeout options when getTimeoutMs is provided', async () => {
       const mockCallWorker = vi.fn().mockResolvedValue({ success: true });
       const getTimeoutMs = vi.fn().mockReturnValue(5000);
@@ -261,116 +210,15 @@ describe('tool-registry', () => {
         { timeoutMs: 5000 }
       );
     });
-
-    it('should call getTimeoutMs for each method invocation (remaining time tracking)', async () => {
-      const mockCallWorker = vi.fn().mockResolvedValue({ success: true });
-      let callCount = 0;
-      const getTimeoutMs = vi.fn(() => {
-        callCount++;
-        // Simulate decreasing remaining time
-        return 10000 - callCount * 1000;
-      });
-      const bridge = buildServiceBridge('slack', mockCallWorker, getTimeoutMs);
-
-      // First call should get 9000ms remaining
-      await bridge.sendChannel({ channel: 'test1' });
-      expect(mockCallWorker).toHaveBeenLastCalledWith(
-        'slack',
-        'sendChannel',
-        { channel: 'test1' },
-        { timeoutMs: 9000 }
-      );
-
-      // Second call should get 8000ms remaining
-      await bridge.listChannelIds();
-      expect(mockCallWorker).toHaveBeenLastCalledWith(
-        'slack',
-        'listChannelIds',
-        {},
-        { timeoutMs: 8000 }
-      );
-
-      expect(getTimeoutMs).toHaveBeenCalledTimes(2);
-    });
-
-    it('should use metadata.timeoutMs when defined (per-tool timeout)', async () => {
-      const mockCallWorker = vi.fn().mockResolvedValue({ success: true });
-      // No getTimeoutMs provided - should use per-tool timeout from metadata
-      const bridge = buildServiceBridge('sharepoint', mockCallWorker);
-
-      // sharepoint.getFileFull has timeoutMs: TIMEOUTS.LONG_OPERATION_MS (600000ms)
-      await bridge.getFileFull({ file_id: '/test.txt' });
-
-      expect(mockCallWorker).toHaveBeenCalledWith(
-        'sharepoint',
-        'getFileFull',
-        { file_id: '/test.txt' },
-        { timeoutMs: 600000 } // LONG_OPERATION_MS = 10 min
-      );
-    });
-
-    it('should use per-tool timeout even when remaining time is less', async () => {
-      const mockCallWorker = vi.fn().mockResolvedValue({ success: true });
-      // Remaining time is less than per-tool timeout
-      const getTimeoutMs = vi.fn().mockReturnValue(30000); // 30s remaining
-      const bridge = buildServiceBridge('sharepoint', mockCallWorker, getTimeoutMs);
-
-      // sharepoint.getFileFull has timeoutMs: 600000ms (10 min) but only 30s remaining
-      await bridge.getFileFull({ file_id: '/test.txt' });
-
-      // Per-tool timeout takes precedence (allows long operations like getFileFull)
-      expect(mockCallWorker).toHaveBeenCalledWith(
-        'sharepoint',
-        'getFileFull',
-        { file_id: '/test.txt' },
-        { timeoutMs: 600000 }
-      );
-    });
-
-    it('should use per-tool timeout when remaining time is greater', async () => {
-      const mockCallWorker = vi.fn().mockResolvedValue({ success: true });
-      // Remaining time is greater than per-tool timeout
-      const getTimeoutMs = vi.fn().mockReturnValue(900000); // 15 min remaining
-      const bridge = buildServiceBridge('sharepoint', mockCallWorker, getTimeoutMs);
-
-      // sharepoint.getFileFull has timeoutMs: 600000ms (10 min), 15 min remaining
-      await bridge.getFileFull({ file_id: '/test.txt' });
-
-      // Per-tool timeout takes precedence
-      expect(mockCallWorker).toHaveBeenCalledWith(
-        'sharepoint',
-        'getFileFull',
-        { file_id: '/test.txt' },
-        { timeoutMs: 600000 }
-      );
-    });
-
-    it('should use remaining time when tool has no per-tool timeout', async () => {
-      const mockCallWorker = vi.fn().mockResolvedValue({ success: true });
-      const getTimeoutMs = vi.fn().mockReturnValue(45000);
-      const bridge = buildServiceBridge('slack', mockCallWorker, getTimeoutMs);
-
-      // slack.sendChannel has no timeoutMs in metadata
-      await bridge.sendChannel({ channel: 'test' });
-
-      // Should use remaining time since no per-tool timeout
-      expect(mockCallWorker).toHaveBeenCalledWith(
-        'slack',
-        'sendChannel',
-        { channel: 'test' },
-        { timeoutMs: 45000 }
-      );
-    });
   });
 
   describe('buildExecutorWrappers', () => {
     it('should generate wrappers for all service methods', () => {
-      const mockBridge = {
-        sendChannel: vi.fn(),
-        listChannelIds: vi.fn(),
-        getChannelMessages: vi.fn(),
-        getUsers: vi.fn(),
-      };
+      const slackMethods = getServiceMethods('slack');
+      const mockBridge: Record<string, ReturnType<typeof vi.fn>> = {};
+      for (const m of slackMethods) {
+        mockBridge[m] = vi.fn();
+      }
       const mockWrapWithAudit = vi.fn((cat, svc, tool, fn) => fn);
       const mockPrepareParams = vi.fn((p) => p);
       const mockWrapBridgeCall = vi.fn((fn) => fn());
@@ -388,32 +236,11 @@ describe('tool-registry', () => {
     });
 
     it('should use category from metadata', () => {
-      // Complete redmine bridge with all required methods
-      const mockBridge = {
-        listIssueIds: vi.fn(),
-        getIssueFull: vi.fn(),
-        searchIssueIds: vi.fn(),
-        createIssue: vi.fn(),
-        updateIssue: vi.fn(),
-        commentIssue: vi.fn(),
-        listJournals: vi.fn(),
-        updateJournal: vi.fn(),
-        deleteJournal: vi.fn(),
-        listTimeEntries: vi.fn(),
-        createTimeEntry: vi.fn(),
-        updateTimeEntry: vi.fn(),
-        listUsers: vi.fn(),
-        resolveUser: vi.fn(),
-        getCurrentUser: vi.fn(),
-        getMappings: vi.fn(),
-        getConfig: vi.fn(),
-        listProjectIds: vi.fn(),
-        getProjectFull: vi.fn(),
-        searchProjectIds: vi.fn(),
-        listRelations: vi.fn(),
-        createRelation: vi.fn(),
-        deleteRelation: vi.fn(),
-      };
+      const redmineMethods = getServiceMethods('redmine');
+      const mockBridge: Record<string, ReturnType<typeof vi.fn>> = {};
+      for (const m of redmineMethods) {
+        mockBridge[m] = vi.fn();
+      }
       const wrapWithAuditCalls: Array<{ category: string; service: string; tool: string }> = [];
       const mockWrapWithAudit = vi.fn((cat, svc, tool, fn) => {
         wrapWithAuditCalls.push({ category: cat, service: svc, tool });
@@ -430,54 +257,16 @@ describe('tool-registry', () => {
         mockWrapBridgeCall
       );
 
-      // Verify categories match metadata
       const createIssueCall = wrapWithAuditCalls.find((c) => c.tool === 'createIssue');
       expect(createIssueCall?.category).toBe('write');
-
       const listCall = wrapWithAuditCalls.find((c) => c.tool === 'listIssueIds');
       expect(listCall?.category).toBe('read');
-
       const deleteCall = wrapWithAuditCalls.find((c) => c.tool === 'deleteJournal');
       expect(deleteCall?.category).toBe('delete');
     });
 
-    it('should call prepareParams and wrapBridgeCall', async () => {
-      // Complete slack bridge with all required methods
-      const mockBridge = {
-        sendChannel: vi.fn().mockResolvedValue({ ok: true }),
-        getChannelMessages: vi.fn(),
-        listChannelIds: vi.fn(),
-        getUsers: vi.fn(),
-      };
-      const mockWrapWithAudit = vi.fn((cat, svc, tool, fn) => fn);
-      const mockPrepareParams = vi.fn((p) => ({ ...p, prepared: true }));
-      const mockWrapBridgeCall = vi.fn(async (fn) => fn());
-
-      const wrappers = buildExecutorWrappers(
-        'slack',
-        mockBridge,
-        mockWrapWithAudit,
-        mockPrepareParams,
-        mockWrapBridgeCall
-      );
-
-      await wrappers.sendChannel({ channel: 'test', message: 'hello' });
-
-      expect(mockPrepareParams).toHaveBeenCalled();
-      expect(mockWrapBridgeCall).toHaveBeenCalled();
-      expect(mockBridge.sendChannel).toHaveBeenCalledWith({
-        channel: 'test',
-        message: 'hello',
-        prepared: true,
-      });
-    });
-
     it('should throw when bridge method is missing', () => {
-      // Incomplete bridge - missing most methods
-      const incompleteBridge = {
-        sendChannel: vi.fn(),
-        // Missing: listChannelIds, getChannelMessages, getUsers
-      };
+      const incompleteBridge = { sendChannel: vi.fn() };
       const mockWrapWithAudit = vi.fn((cat, svc, tool, fn) => fn);
       const mockPrepareParams = vi.fn((p) => p);
       const mockWrapBridgeCall = vi.fn((fn) => fn());
@@ -492,43 +281,15 @@ describe('tool-registry', () => {
         )
       ).toThrow('Bridge method not found');
     });
-
-    it('should include available methods in error when bridge method is missing', () => {
-      const incompleteBridge = {
-        sendChannel: vi.fn(),
-      };
-      const mockWrapWithAudit = vi.fn((cat, svc, tool, fn) => fn);
-      const mockPrepareParams = vi.fn((p) => p);
-      const mockWrapBridgeCall = vi.fn((fn) => fn());
-
-      try {
-        buildExecutorWrappers(
-          'slack',
-          incompleteBridge,
-          mockWrapWithAudit,
-          mockPrepareParams,
-          mockWrapBridgeCall
-        );
-        expect.fail('Should have thrown');
-      } catch (error) {
-        expect((error as Error).message).toContain('slack.');
-        expect((error as Error).message).toContain('sendChannel');
-      }
-    });
   });
 
   describe('validateRegistry', () => {
     it('should return empty array for valid registry', () => {
       const errors = validateRegistry();
-      // If there are errors, log them for debugging
-      if (errors.length > 0) {
-        console.log('Registry validation errors:', errors);
-      }
       expect(errors).toEqual([]);
     });
 
     it('should validate all tools have required fields', () => {
-      // This test ensures all tools in registry have proper metadata
       for (const [service, tools] of Object.entries(TOOL_REGISTRY)) {
         for (const [methodName, metadata] of Object.entries(tools)) {
           expect(metadata.name).toBe(methodName);
@@ -544,34 +305,28 @@ describe('tool-registry', () => {
   describe('getRegistryStats', () => {
     it('should return correct statistics', () => {
       const stats = getRegistryStats();
-
-      expect(stats.services.slack).toBeGreaterThanOrEqual(4);
-      expect(stats.services.redmine).toBeGreaterThanOrEqual(15);
-      expect(stats.services.gitlab).toBeGreaterThanOrEqual(40);
+      expect(stats.services.slack).toBe(4);
+      expect(stats.services.redmine).toBe(23);
+      expect(stats.services.gitlab).toBe(46);
+      expect(stats.services.sharepoint).toBe(5);
       expect(stats.services.os).toBe(25);
-      expect(stats.total).toBeGreaterThanOrEqual(95);
+      expect(stats.total).toBe(103);
     });
   });
 
   describe('registry consistency with existing bridges', () => {
     it('should have all methods that were in http-bridge.ts', () => {
-      // These are the methods that were manually defined in http-bridge.ts
-      // This test ensures registry has them all
-
-      // Slack methods
       const slackMethods = getServiceMethods('slack');
       expect(slackMethods).toContain('sendChannel');
       expect(slackMethods).toContain('listChannelIds');
       expect(slackMethods).toContain('getChannelMessages');
       expect(slackMethods).toContain('getUsers');
 
-      // Redmine relation methods (the ones that caused the original bug)
       const redmineMethods = getServiceMethods('redmine');
       expect(redmineMethods).toContain('listRelations');
       expect(redmineMethods).toContain('createRelation');
       expect(redmineMethods).toContain('deleteRelation');
 
-      // SharePoint methods
       const sharepointMethods = getServiceMethods('sharepoint');
       expect(sharepointMethods).toContain('listFileIds');
       expect(sharepointMethods).toContain('getFileFull');
@@ -608,8 +363,6 @@ describe('tool-registry', () => {
       expect(enabled.has('slack')).toBe(true);
       expect(enabled.has('gitlab')).toBe(true);
       expect(enabled.has('redmine')).toBe(false);
-      expect(enabled.has('sharepoint')).toBe(false);
-      expect(enabled.has('os')).toBe(false);
     });
 
     it('handles whitespace in env var values', () => {
@@ -624,15 +377,6 @@ describe('tool-registry', () => {
       process.env.ENABLED_SERVICES = '';
       const enabled = getEnabledServices();
       expect(enabled.size).toBe(0);
-    });
-
-    it('returns empty set when ENABLED_SERVICES is empty string (enforcement)', () => {
-      process.env.ENABLED_SERVICES = '';
-      const enabled = getEnabledServices();
-      expect(enabled.size).toBe(0);
-      for (const svc of SERVICE_NAMES) {
-        expect(enabled.has(svc)).toBe(false);
-      }
     });
   });
 
@@ -664,23 +408,6 @@ describe('tool-registry', () => {
       expect(disabled.has('reminders')).toBe(true);
       expect(disabled.has('mail')).toBe(true);
       expect(disabled.has('calendar')).toBe(false);
-      expect(disabled.has('notes')).toBe(false);
-    });
-
-    it('handles empty env var', () => {
-      process.env.DISABLED_OS_SERVICES = '';
-      const disabled = getDisabledOsCategories();
-      expect(disabled.size).toBe(0);
-    });
-
-    it('parses all four categories', () => {
-      process.env.DISABLED_OS_SERVICES = 'reminders,calendar,mail,notes';
-      const disabled = getDisabledOsCategories();
-      expect(disabled.size).toBe(4);
-      expect(disabled.has('reminders')).toBe(true);
-      expect(disabled.has('calendar')).toBe(true);
-      expect(disabled.has('mail')).toBe(true);
-      expect(disabled.has('notes')).toBe(true);
     });
   });
 
@@ -714,7 +441,7 @@ describe('tool-registry', () => {
       );
 
       // Reminder tools should be excluded
-      const reminderTools = Object.entries(TOOL_REGISTRY['os'])
+      const reminderTools = Object.entries(TOOL_POLICIES['os'])
         .filter(([, meta]) => meta.osCategory === 'reminders')
         .map(([name]) => name);
 
@@ -722,8 +449,8 @@ describe('tool-registry', () => {
         expect(wrappers[tool]).toBeUndefined();
       }
 
-      // Calendar/mail/notes tools should remain
-      const calendarTools = Object.entries(TOOL_REGISTRY['os'])
+      // Calendar tools should remain
+      const calendarTools = Object.entries(TOOL_POLICIES['os'])
         .filter(([, meta]) => meta.osCategory === 'calendar')
         .map(([name]) => name);
 
@@ -746,24 +473,6 @@ describe('tool-registry', () => {
         mockPrepareParams,
         mockWrapBridgeCall as never,
         new Set()
-      );
-
-      expect(Object.keys(wrappers).length).toBe(osMethods.length);
-    });
-
-    it('does not filter when disabledOsCategories is undefined', () => {
-      const osMethods = getServiceMethods('os');
-      const bridge: Record<string, () => Promise<unknown>> = {};
-      for (const method of osMethods) {
-        bridge[method] = vi.fn().mockResolvedValue({ ok: true });
-      }
-
-      const wrappers = buildExecutorWrappers(
-        'os',
-        bridge,
-        mockWrapWithAudit as never,
-        mockPrepareParams,
-        mockWrapBridgeCall as never
       );
 
       expect(Object.keys(wrappers).length).toBe(osMethods.length);

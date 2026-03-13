@@ -9,6 +9,9 @@ import { withValidation } from './validation.js';
 const listBranchesTool: Tool = {
   name: 'listBranches',
   description: 'List branches in a project',
+  category: 'read',
+  keywords: ['gitlab', 'branches', 'list', 'git', 'refs'],
+  example: 'const branches = await gitlab.listBranches({ project_id: "speedwave/core" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -18,11 +21,46 @@ const listBranchesTool: Tool = {
     },
     required: ['project_id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      branches: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            merged: { type: 'boolean' },
+            protected: { type: 'boolean' },
+            default: { type: 'boolean' },
+            web_url: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'List all branches',
+      input: { project_id: 'my-group/my-project' },
+    },
+    {
+      description: 'Search branches',
+      input: { project_id: 'my-group/my-project', search: 'feature' },
+    },
+  ],
 };
 
 const getBranchTool: Tool = {
   name: 'getBranch',
   description: 'Get details of a specific branch',
+  category: 'read',
+  keywords: ['gitlab', 'branch', 'get', 'show', 'git'],
+  example:
+    'const branch = await gitlab.getBranch({ project_id: "speedwave/core", branch: "main" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -31,11 +69,39 @@ const getBranchTool: Tool = {
     },
     required: ['project_id', 'branch'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      branch: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          commit: { type: 'object' },
+          merged: { type: 'boolean' },
+          protected: { type: 'boolean' },
+          default: { type: 'boolean' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Get branch details',
+      input: { project_id: 'my-group/my-project', branch: 'develop' },
+    },
+  ],
 };
 
 const createBranchTool: Tool = {
   name: 'createBranch',
   description: 'Create a new branch',
+  category: 'write',
+  keywords: ['gitlab', 'branch', 'create', 'new', 'git'],
+  example:
+    'const branch = await gitlab.createBranch({ project_id: "speedwave/core", branch: "feature/new", ref: "main" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -45,11 +111,36 @@ const createBranchTool: Tool = {
     },
     required: ['project_id', 'branch', 'ref'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      branch: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          commit: { type: 'object' },
+          web_url: { type: 'string' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Create branch from main',
+      input: { project_id: 'my-group/my-project', branch: 'feature/auth', ref: 'main' },
+    },
+  ],
 };
 
 const deleteBranchTool: Tool = {
   name: 'deleteBranch',
   description: 'Delete a branch',
+  category: 'delete',
+  keywords: ['gitlab', 'branch', 'delete', 'remove', 'git'],
+  example: 'await gitlab.deleteBranch({ project_id: "speedwave/core", branch: "feature/old" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -58,11 +149,29 @@ const deleteBranchTool: Tool = {
     },
     required: ['project_id', 'branch'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Delete branch',
+      input: { project_id: 'my-group/my-project', branch: 'feature/obsolete' },
+    },
+  ],
 };
 
 const compareBranchesTool: Tool = {
   name: 'compareBranches',
   description: 'Compare two branches',
+  category: 'read',
+  keywords: ['gitlab', 'compare', 'diff', 'branches', 'git'],
+  example:
+    'const diff = await gitlab.compareBranches({ project_id: "speedwave/core", from: "main", to: "develop" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -72,6 +181,27 @@ const compareBranchesTool: Tool = {
     },
     required: ['project_id', 'from', 'to'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      comparison: {
+        type: 'object',
+        properties: {
+          commits: { type: 'array' },
+          diffs: { type: 'array' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Compare branches',
+      input: { project_id: 'my-group/my-project', from: 'main', to: 'feature/new' },
+    },
+  ],
 };
 
 /**

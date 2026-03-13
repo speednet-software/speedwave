@@ -42,6 +42,9 @@ import { createCodeExecutorHandlers } from './handlers.js';
 // Import bridge initialization
 import { initializeBridges } from './executor.js';
 
+// Import registry initialization
+import { initializeRegistry } from './tool-registry.js';
+
 // Import auth token loader
 import { loadAuthTokens } from './auth-tokens.js';
 
@@ -117,6 +120,8 @@ Before calling ANY tool for the first time, you MUST:
 3. Use EXACT parameter structure from schema
 
 DO NOT guess parameter formats - always check schema first!
+
+⚠️ ISOLATED SANDBOX: Each execute_code call runs in a fresh sandbox. Variables do NOT persist between calls. Put your entire workflow (fetch IDs → fetch details → process) in a SINGLE code block.
 
 IMPORTANT: Use plain JavaScript, NOT TypeScript. Do NOT use type annotations like ": number[]" or ": string".
 
@@ -218,6 +223,11 @@ async function main() {
 
   // Load per-service auth tokens (e.g., for mcp-os on host)
   loadAuthTokens();
+
+  // Initialize dynamic tool registry (fetches tools from workers)
+  console.log(`${ts()} 🔧 Initializing dynamic tool registry...`);
+  await initializeRegistry();
+  console.log(`${ts()} ✅ Tool registry initialized`);
 
   // Initialize HTTP bridges to workers
   console.log(`${ts()} 🔧 Initializing HTTP bridges to workers...`);

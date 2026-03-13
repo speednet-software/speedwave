@@ -13,6 +13,32 @@ const getCurrentUserTool: Tool = {
     type: 'object',
     properties: {},
   },
+  category: 'read',
+  keywords: ['sharepoint', 'user', 'current', 'me', 'auth'],
+  example: 'const user = await sharepoint.getCurrentUser()',
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      user: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          displayName: { type: 'string' },
+          email: { type: 'string' },
+          userPrincipalName: { type: 'string' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Get current user (no params)',
+      input: {},
+    },
+  ],
 };
 
 /**

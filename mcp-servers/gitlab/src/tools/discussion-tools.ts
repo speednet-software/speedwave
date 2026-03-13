@@ -9,6 +9,10 @@ import { withValidation } from './validation.js';
 const listMrDiscussionsTool: Tool = {
   name: 'listMrDiscussions',
   description: 'List discussion threads on a merge request',
+  category: 'read',
+  keywords: ['gitlab', 'merge', 'request', 'discussions', 'threads'],
+  example:
+    'const discussions = await gitlab.listMrDiscussions({ project_id: "speedwave/core", mr_iid: 42 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -18,11 +22,39 @@ const listMrDiscussionsTool: Tool = {
     },
     required: ['project_id', 'mr_iid'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      discussions: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            notes: { type: 'array' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'List MR discussions',
+      input: { project_id: 'my-group/my-project', mr_iid: 123 },
+    },
+  ],
 };
 
 const createMrDiscussionTool: Tool = {
   name: 'createMrDiscussion',
   description: 'Create a discussion thread on a merge request',
+  category: 'write',
+  keywords: ['gitlab', 'merge', 'request', 'discussion', 'thread'],
+  example:
+    'await gitlab.createMrDiscussion({ project_id: "speedwave/core", mr_iid: 42, body: "What about error handling?" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -32,6 +64,31 @@ const createMrDiscussionTool: Tool = {
     },
     required: ['project_id', 'mr_iid', 'body'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      discussion: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          notes: { type: 'array' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Start discussion',
+      input: {
+        project_id: 'my-group/my-project',
+        mr_iid: 123,
+        body: 'Can we refactor this?',
+      },
+    },
+  ],
 };
 
 /**

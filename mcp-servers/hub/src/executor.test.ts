@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { executeCode, _setBridgesForTesting, _formatErrorMessage } from './executor.js';
 import type { AllBridges } from './http-bridge.js';
-import { resetServiceCaches } from './tool-registry.js';
+import { resetServiceCaches, stopBackgroundRefresh } from './tool-registry.js';
+import { populateRegistryFromPolicies, _resetRegistryForTesting } from './test-helpers.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Tests for Code Executor
@@ -16,6 +17,15 @@ import { resetServiceCaches } from './tool-registry.js';
 //═══════════════════════════════════════════════════════════════════════════════
 
 describe('executor', () => {
+  beforeAll(() => {
+    _resetRegistryForTesting();
+    populateRegistryFromPolicies();
+  });
+
+  afterAll(() => {
+    stopBackgroundRefresh();
+  });
+
   describe('security restrictions', () => {
     it('should reject code with eval', async () => {
       const code = `
