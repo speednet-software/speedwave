@@ -1020,4 +1020,41 @@ mod tests {
         let plugin_key = service_id.as_deref().unwrap_or(slug);
         assert_eq!(plugin_key, "presale");
     }
+
+    #[test]
+    fn auto_enable_writes_plugin_enabled_to_active_project_config() {
+        let mut cfg = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "my-project".into(),
+                dir: "/tmp/test".into(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: Some("my-project".into()),
+            selected_ide: None,
+            log_level: None,
+        };
+        // Simulate the auto-enable block from install_plugin
+        let plugin_key = "my-skills";
+        if let Some(active) = cfg.active_project.clone() {
+            if let Some(entry) = cfg.projects.iter_mut().find(|p| p.name == active) {
+                let integrations = entry.integrations.get_or_insert_with(Default::default);
+                integrations.set_plugin_enabled(plugin_key, true);
+            }
+        }
+        let enabled = cfg
+            .projects
+            .iter()
+            .find(|p| p.name == "my-project")
+            .and_then(|e| e.integrations.as_ref())
+            .and_then(|i| i.plugins.as_ref())
+            .and_then(|p| p.get(plugin_key))
+            .and_then(|e| e.enabled)
+            .unwrap_or(false);
+        assert!(
+            enabled,
+            "auto-enable should write plugin_key=true to active project config"
+        );
+    }
 }
