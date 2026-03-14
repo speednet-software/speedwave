@@ -28,4 +28,9 @@ export class TauriService {
   getVersion(): Promise<string> {
     return getVersion();
   }
+
+  /** Detects whether the app is running inside a Tauri 2 webview. */
+  isRunningInTauri(): boolean {
+    return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  }
 }

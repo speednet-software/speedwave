@@ -111,7 +111,7 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
                 return;
             }
         };
-        let project_dir = match user_config.projects.iter().find(|p| p.name == project) {
+        let project_dir = match user_config.find_project(&project) {
             Some(p) => p.dir.clone(),
             None => {
                 log::debug!("reconcile_compose_port: project '{project}' not found in config");

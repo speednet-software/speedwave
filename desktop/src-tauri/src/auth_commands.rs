@@ -81,6 +81,22 @@ fn shell_escape_single_quoted(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
+/// Validates that a string contains no control characters (U+0000..U+001F, U+007F).
+///
+/// Control characters in paths embedded into AppleScript or shell commands
+/// can break quoting and enable injection attacks. This rejects newlines,
+/// carriage returns, null bytes, tabs, and all other ASCII control characters.
+fn validate_no_control_chars(s: &str) -> Result<(), String> {
+    if let Some(pos) = s.find(|c: char| c.is_ascii_control()) {
+        let byte = s.as_bytes()[pos];
+        return Err(format!(
+            "path contains control character 0x{byte:02X} at position {pos} — \
+             this is not allowed for security reasons"
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn open_auth_terminal(project: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
@@ -90,11 +106,13 @@ pub async fn open_auth_terminal(project: String) -> Result<(), String> {
         let user_config = speedwave_runtime::config::load_user_config()
             .map_err(|e| format!("Failed to load config: {e}"))?;
         let project_dir = user_config
-            .projects
-            .iter()
-            .find(|p| p.name == project)
+            .find_project(&project)
             .map(|p| p.dir.clone())
             .ok_or_else(|| format!("project '{}' not found in config", project))?;
+
+        // Reject paths with control characters (newlines, carriage returns, etc.)
+        // to prevent AppleScript / shell injection via crafted project directory names.
+        validate_no_control_chars(&project_dir)?;
 
         // Find the speedwave CLI binary
         let cli_path = validate_cli_path()?;
@@ -207,5 +225,99 @@ mod tests {
     #[test]
     fn shell_escape_empty_string() {
         assert_eq!(shell_escape_single_quoted(""), "");
+    }
+
+    // -- validate_no_control_chars tests --
+
+    #[test]
+    fn validate_no_control_chars_accepts_normal_path() {
+        assert!(validate_no_control_chars("/Users/dev/my project").is_ok());
+    }
+
+    #[test]
+    fn validate_no_control_chars_accepts_unicode() {
+        assert!(validate_no_control_chars("/Users/dev/projekt-zółw").is_ok());
+    }
+
+    #[test]
+    fn validate_no_control_chars_rejects_newline() {
+        let result = validate_no_control_chars("/tmp/evil\n; rm -rf /");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("0x0A"),
+            "error should mention 0x0A for newline: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_no_control_chars_rejects_carriage_return() {
+        let result = validate_no_control_chars("/tmp/evil\r");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("0x0D"),
+            "error should mention 0x0D for CR: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_no_control_chars_rejects_null_byte() {
+        let result = validate_no_control_chars("/tmp/evil\0");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("0x00"),
+            "error should mention 0x00 for null: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_no_control_chars_rejects_tab() {
+        let result = validate_no_control_chars("/tmp/evil\there");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("0x09"),
+            "error should mention 0x09 for tab: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_no_control_chars_rejects_escape() {
+        let result = validate_no_control_chars("/tmp/\x1B[31mred");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("0x1B"),
+            "error should mention 0x1B for ESC: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_no_control_chars_rejects_del() {
+        let result = validate_no_control_chars("/tmp/evil\x7F");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("0x7F"),
+            "error should mention 0x7F for DEL: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_no_control_chars_reports_position() {
+        let result = validate_no_control_chars("abcd\nefg");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("position 4"),
+            "error should report position 4: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_no_control_chars_accepts_empty_string() {
+        assert!(validate_no_control_chars("").is_ok());
     }
 }

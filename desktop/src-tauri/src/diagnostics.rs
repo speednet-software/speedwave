@@ -76,7 +76,8 @@ pub(crate) fn build_diagnostics_zip(
         if path.exists() {
             if let Ok(content) = std::fs::read_to_string(path) {
                 let sanitized = speedwave_runtime::log_sanitizer::sanitize(&content);
-                zip.start_file("mcp-os/mcp-os.log", options)?;
+                let entry_name = format!("mcp-os/{}", speedwave_runtime::consts::MCP_OS_LOG_FILE);
+                zip.start_file(&entry_name, options)?;
                 zip.write_all(sanitized.as_bytes())?;
             }
         }
@@ -445,6 +446,34 @@ mod tests {
             names,
             vec!["system-info.txt"],
             "Empty-input ZIP should only contain system-info.txt"
+        );
+    }
+
+    #[test]
+    fn diagnostics_zip_mcp_os_entry_uses_const() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("diag-mcp-os.zip");
+
+        let mcp_os_log = tmp.path().join("mcp-os.log");
+        std::fs::write(&mcp_os_log, "mcp-os log content").unwrap();
+
+        let input = DiagnosticsInput {
+            log_dir: None,
+            serial_log: None,
+            container_logs: None,
+            mcp_os_log: Some(mcp_os_log),
+            compose_path: None,
+        };
+
+        build_diagnostics_zip(&zip_path, &input).unwrap();
+
+        let expected_entry = format!("mcp-os/{}", speedwave_runtime::consts::MCP_OS_LOG_FILE);
+        let names = zip_entry_names(&zip_path);
+        assert!(
+            names.contains(&expected_entry),
+            "ZIP should contain mcp-os entry named '{}', got: {:?}",
+            expected_entry,
+            names
         );
     }
 }

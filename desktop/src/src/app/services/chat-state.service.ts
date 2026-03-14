@@ -1,35 +1,41 @@
 import { Injectable, inject } from '@angular/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
 import { TauriService } from './tauri.service';
+import type {
+  ChatMessage,
+  MessageBlock,
+  SessionStats,
+  StreamChunk,
+  ToolUseBlock,
+  AskUserQuestionBlock,
+  ProjectList,
+} from '../models/chat';
 
-/** A single chat message exchanged between the user and the assistant. */
-export interface ChatMessage {
-  role: string;
-  content: string;
-  timestamp: number;
-}
-
-/** A chunk emitted by the Claude streaming subprocess. */
-export interface StreamChunk {
-  chunk_type: string;
-  content: string;
-}
-
-/** Response shape for the list_projects Tauri command. */
-export interface ProjectList {
-  projects: { name: string; dir: string }[];
-  active_project: string | null;
-}
+// Re-export types consumed by components
+export type {
+  ChatMessage,
+  MessageBlock,
+  StreamChunk,
+  ProjectList,
+  SessionStats,
+  AskUserQuestionBlock,
+};
 
 /** Singleton service that holds chat session state across navigation. */
 @Injectable({ providedIn: 'root' })
 export class ChatStateService {
+  /** Completed messages (immutable — replaced on each change). */
   messages: ChatMessage[] = [];
+  /** Blocks accumulating during the current streaming assistant turn. */
+  currentBlocks: MessageBlock[] = [];
   isStreaming = false;
-  currentStream = '';
+  /** Session cost/usage stats from the most recent result. */
+  sessionStats: SessionStats | null = null;
 
   containerStatus: 'checking' | 'starting' | 'running' | 'error' = 'checking';
   containerError = '';
+  /** The currently active project name, set during checkContainers. */
+  activeProject: string | null = null;
 
   private unlisten: UnlistenFn | null = null;
   private listenerReady = false;
@@ -78,6 +84,7 @@ export class ChatStateService {
     try {
       const result = await this.tauri.invoke<ProjectList>('list_projects');
       const project = result.active_project;
+      this.activeProject = project;
       if (!project) {
         this.containerStatus = 'error';
         this.containerError = 'No active project selected. Please select a project first.';
@@ -108,9 +115,16 @@ export class ChatStateService {
   async sendMessage(text: string): Promise<void> {
     if (!text || this.isStreaming) return;
 
-    this.messages.push({ role: 'user', content: text, timestamp: Date.now() });
+    this.messages = [
+      ...this.messages,
+      {
+        role: 'user',
+        blocks: [{ type: 'text', content: text }],
+        timestamp: Date.now(),
+      },
+    ];
     this.isStreaming = true;
-    this.currentStream = '';
+    this.currentBlocks = [];
     this.notifyChange();
 
     try {
@@ -132,64 +146,153 @@ export class ChatStateService {
           }
         } catch (retryErr) {
           this.isStreaming = false;
-          this.messages.push({
-            role: 'assistant',
-            content: `Failed to restart session: ${retryErr}`,
-            timestamp: Date.now(),
-          });
+          this.messages = [
+            ...this.messages,
+            {
+              role: 'assistant',
+              blocks: [{ type: 'error', content: `Failed to restart session: ${retryErr}` }],
+              timestamp: Date.now(),
+            },
+          ];
           this.notifyChange();
           return;
         }
       }
       this.isStreaming = false;
-      this.messages.push({
-        role: 'assistant',
-        content: `Failed to send message: ${err}`,
-        timestamp: Date.now(),
-      });
+      this.messages = [
+        ...this.messages,
+        {
+          role: 'assistant',
+          blocks: [{ type: 'error', content: `Failed to send message: ${err}` }],
+          timestamp: Date.now(),
+        },
+      ];
+      this.notifyChange();
+    }
+  }
+
+  /**
+   * Sends an answer to an AskUserQuestion prompt back to Claude.
+   * @param toolUseId - The tool_use_id of the AskUserQuestion.
+   * @param selectedValues - The selected option value(s).
+   */
+  async answerQuestion(toolUseId: string, selectedValues: string[]): Promise<void> {
+    const answer = selectedValues.join(', ');
+
+    // Mark the question as answered in currentBlocks
+    this.currentBlocks = this.currentBlocks.map((b) =>
+      b.type === 'ask_user' && b.question.tool_id === toolUseId
+        ? { ...b, question: { ...b.question, answered: true, selected_values: selectedValues } }
+        : b
+    );
+    this.notifyChange();
+
+    try {
+      await this.tauri.invoke('answer_question', { toolUseId, answer });
+    } catch (err) {
+      this.isStreaming = false;
+      // Revert the optimistic answered state so the user can retry
+      this.currentBlocks = this.currentBlocks.map((b) =>
+        b.type === 'ask_user' && b.question.tool_id === toolUseId
+          ? { ...b, question: { ...b.question, answered: false, selected_values: [] } }
+          : b
+      );
+      this.currentBlocks = [
+        ...this.currentBlocks,
+        { type: 'error', content: `Failed to send answer: ${err}` },
+      ];
       this.notifyChange();
     }
   }
 
   /**
    * Processes a streaming chunk from the Claude subprocess.
+   * Uses immutable updates: currentBlocks is replaced on every mutation.
    * @param chunk - The stream chunk to handle.
    */
   handleStreamChunk(chunk: StreamChunk): void {
     switch (chunk.chunk_type) {
-      case 'text':
+      case 'Text':
         this.isStreaming = true;
-        this.currentStream += chunk.content;
+        this.currentBlocks = appendOrCreateTextBlock(this.currentBlocks, chunk.data.content);
         break;
-      case 'result':
-        if (this.currentStream) {
-          this.messages.push({
-            role: 'assistant',
-            content: this.currentStream,
-            timestamp: Date.now(),
-          });
-          this.currentStream = '';
-        } else if (chunk.content) {
-          this.messages.push({
-            role: 'assistant',
-            content: chunk.content,
-            timestamp: Date.now(),
-          });
+
+      case 'Thinking':
+        this.isStreaming = true;
+        this.currentBlocks = appendOrCreateThinkingBlock(this.currentBlocks, chunk.data.content);
+        break;
+
+      case 'ToolStart': {
+        const newTool: ToolUseBlock = {
+          tool_id: chunk.data.tool_id,
+          tool_name: chunk.data.tool_name,
+          input_json: '',
+          status: 'running',
+          collapsed: false,
+        };
+        this.currentBlocks = [...this.currentBlocks, { type: 'tool_use', tool: newTool }];
+        break;
+      }
+
+      case 'ToolInputDelta':
+        this.currentBlocks = updateToolInput(
+          this.currentBlocks,
+          chunk.data.tool_id,
+          chunk.data.partial_json
+        );
+        break;
+
+      case 'ToolResult':
+        this.currentBlocks = completeToolBlock(this.currentBlocks, chunk.data);
+        break;
+
+      case 'AskUserQuestion': {
+        const askBlock: AskUserQuestionBlock = {
+          tool_id: chunk.data.tool_id,
+          question: chunk.data.question,
+          options: chunk.data.options,
+          header: chunk.data.header,
+          multi_select: chunk.data.multi_select,
+          answered: false,
+          selected_values: [],
+        };
+        this.currentBlocks = [...this.currentBlocks, { type: 'ask_user', question: askBlock }];
+        break;
+      }
+
+      case 'Result':
+        if (this.currentBlocks.length > 0) {
+          this.messages = [
+            ...this.messages,
+            { role: 'assistant', blocks: this.currentBlocks, timestamp: Date.now() },
+          ];
+          this.currentBlocks = [];
         }
         this.isStreaming = false;
+        this.sessionStats = {
+          session_id: chunk.data.session_id,
+          cost_usd: chunk.data.cost_usd ?? 0,
+          total_cost: chunk.data.total_cost ?? 0,
+          usage: chunk.data.usage,
+        };
         break;
-      case 'error':
-        this.messages.push({
-          role: 'assistant',
-          content: `Error: ${chunk.content}`,
-          timestamp: Date.now(),
-        });
-        this.currentStream = '';
+
+      case 'Error':
+        this.currentBlocks = [
+          ...this.currentBlocks,
+          { type: 'error', content: chunk.data.content },
+        ];
+        // Finalize as error turn
+        this.messages = [
+          ...this.messages,
+          { role: 'assistant', blocks: this.currentBlocks, timestamp: Date.now() },
+        ];
+        this.currentBlocks = [];
         this.isStreaming = false;
         break;
-      case 'tool_use':
-        this.currentStream += `\n\n_Using tool: ${chunk.content}_\n\n`;
-        break;
+
+      default:
+        return; // unknown chunk type — no state change, no notification
     }
     this.notifyChange();
   }
@@ -197,8 +300,9 @@ export class ChatStateService {
   /** Clears all chat state to start a fresh conversation. */
   resetForNewConversation(): void {
     this.messages = [];
+    this.currentBlocks = [];
     this.isStreaming = false;
-    this.currentStream = '';
+    this.sessionStats = null;
     this.initialized = false;
     this.notifyChange();
   }
@@ -218,8 +322,61 @@ export class ChatStateService {
       this.unlisten = await this.tauri.listen<StreamChunk>('chat_stream', (event) => {
         this.handleStreamChunk(event.payload);
       });
-    } catch {
-      // Not running inside Tauri (dev mode) — ignore
+    } catch (err) {
+      if (this.tauri.isRunningInTauri()) {
+        console.error('Failed to set up stream listener:', err);
+        this.containerStatus = 'error';
+        this.containerError = `Stream listener failed: ${err}`;
+        this.notifyChange();
+      }
     }
   }
+}
+
+// ── Immutable helper functions ─────────────────────────────────────────
+
+function appendOrCreateTextBlock(blocks: MessageBlock[], content: string): MessageBlock[] {
+  const last = blocks[blocks.length - 1];
+  if (last && last.type === 'text') {
+    return [...blocks.slice(0, -1), { type: 'text', content: last.content + content }];
+  }
+  return [...blocks, { type: 'text', content }];
+}
+
+function appendOrCreateThinkingBlock(blocks: MessageBlock[], content: string): MessageBlock[] {
+  const last = blocks[blocks.length - 1];
+  if (last && last.type === 'thinking') {
+    return [
+      ...blocks.slice(0, -1),
+      { type: 'thinking', content: last.content + content, collapsed: true },
+    ];
+  }
+  return [...blocks, { type: 'thinking', content, collapsed: true }];
+}
+
+function updateToolInput(blocks: MessageBlock[], toolId: string, delta: string): MessageBlock[] {
+  return blocks.map((b) =>
+    b.type === 'tool_use' && b.tool.tool_id === toolId
+      ? { ...b, tool: { ...b.tool, input_json: b.tool.input_json + delta } }
+      : b
+  );
+}
+
+function completeToolBlock(
+  blocks: MessageBlock[],
+  data: { tool_id: string; content: string; is_error: boolean }
+): MessageBlock[] {
+  return blocks.map((b) =>
+    b.type === 'tool_use' && b.tool.tool_id === data.tool_id
+      ? {
+          ...b,
+          tool: {
+            ...b.tool,
+            result: data.content,
+            result_is_error: data.is_error,
+            status: (data.is_error ? 'error' : 'done') as 'done' | 'error',
+          },
+        }
+      : b
+  );
 }
