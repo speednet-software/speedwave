@@ -35,6 +35,7 @@ export default {
         'lint',
         'config',
         'native',
+        'security',
       ],
     ],
     'scope-empty': [1, 'never'],

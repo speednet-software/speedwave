@@ -39,7 +39,7 @@ Granular targets:
 - **Build:** `build-runtime`, `build-cli`, `build-desktop`, `build-native-macos`, `build-os-cli`, `build-mcp`, `build-angular`, `build-tauri`
 - **Check:** `check-clippy`, `check-desktop-clippy`, `check-fmt`, `check-mcp`, `check-mcp-lint`, `check-angular`, `check-angular-lint`
 - **Coverage:** `coverage-rust`, `coverage-mcp`, `coverage-angular`
-- **Audit:** `audit-rust`, `audit-mcp`
+- **Audit:** `audit-rust`, `audit-mcp`, `audit-desktop`
 - **Download:** `download-lima`, `download-nodejs`, `download-nerdctl-full`, `download-wsl-resources` (+ `clean-*` variants)
 - **Other:** `lint`, `install-deps`, `install-hooks`, `clean`
 
