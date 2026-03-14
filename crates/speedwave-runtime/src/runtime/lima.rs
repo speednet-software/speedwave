@@ -1080,6 +1080,27 @@ mod tests {
     }
 
     #[test]
+    fn test_build_image_passes_build_args() {
+        let (recorded, runner) = make_recording_runner();
+        let rt = LimaRuntime::with_runner(runner);
+        rt.build_image(
+            "my-image:latest",
+            "/ctx",
+            "/ctx/Containerfile",
+            &[("CLAUDE_VERSION", "2.1.76")],
+        )
+        .unwrap();
+
+        let commands = recorded.lock().unwrap();
+        assert_eq!(commands.len(), 1);
+        assert!(
+            commands[0].contains("--build-arg CLAUDE_VERSION=2.1.76"),
+            "build_image should pass --build-arg, got: {}",
+            commands[0]
+        );
+    }
+
+    #[test]
     fn test_system_prune_fails_when_vm_stopped() {
         let runner = MockRunner::new()
             .with_response("limactl --version", "limactl version 1.0.0")

@@ -739,6 +739,25 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("prune failed"));
     }
 
+    #[test]
+    fn test_build_image_passes_build_args() {
+        let runner = MockRunner::new().with_response(
+            "wsl.exe -d Speedwave -- nerdctl build -t my-image:latest -f /ctx/Containerfile --build-arg CLAUDE_VERSION=2.1.76 /ctx",
+            "",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        assert!(
+            rt.build_image(
+                "my-image:latest",
+                "/ctx",
+                "/ctx/Containerfile",
+                &[("CLAUDE_VERSION", "2.1.76")],
+            )
+            .is_ok(),
+            "build_image with build_args should succeed"
+        );
+    }
+
     // ── wsl_compose_file_path tests ────────────────────────────────────
 
     #[test]
