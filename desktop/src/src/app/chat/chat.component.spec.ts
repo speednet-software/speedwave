@@ -40,10 +40,8 @@ describe('ChatComponent', () => {
     chatState = TestBed.inject(ChatStateService);
 
     // Reset service state between tests
-    chatState.messages = [];
-    chatState.currentBlocks = [];
+    chatState._setState({ messages: [], currentBlocks: [], sessionStats: null });
     chatState.isStreaming = false;
-    chatState.sessionStats = null;
     chatState.containerStatus = 'checking';
     chatState.containerError = '';
   });
@@ -106,7 +104,7 @@ describe('ChatComponent', () => {
   describe('handleStreamChunk Error', () => {
     it('adds error block, finalizes message, and stops streaming', () => {
       chatState.isStreaming = true;
-      chatState.currentBlocks = [{ type: 'text', content: 'partial data' }];
+      chatState._setState({ currentBlocks: [{ type: 'text', content: 'partial data' }] });
 
       chatState.handleStreamChunk({
         chunk_type: 'Error',
@@ -240,6 +238,29 @@ describe('ChatComponent', () => {
 
       expect(preventSpy).not.toHaveBeenCalled();
       expect(sendSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── onQuestionAnswered ──────────────────────────────────────────────────
+
+  describe('onQuestionAnswered', () => {
+    it('calls answerQuestion with the correct tool ID and values', async () => {
+      chatState.handleStreamChunk({
+        chunk_type: 'AskUserQuestion',
+        data: {
+          tool_id: 'test-tool',
+          question: 'Pick one',
+          options: [{ label: 'A', value: 'a' }],
+          header: '',
+          multi_select: false,
+        },
+      });
+
+      const answerSpy = vi.spyOn(chatState, 'answerQuestion').mockResolvedValue();
+
+      await component.onQuestionAnswered({ toolId: 'test-tool', values: ['answer1'] });
+
+      expect(answerSpy).toHaveBeenCalledWith('test-tool', ['answer1']);
     });
   });
 
@@ -438,12 +459,12 @@ describe('ChatComponent', () => {
 
   describe('newConversation', () => {
     it('resets all state and re-initialises', async () => {
-      chatState.messages = [
-        { role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 },
-      ];
+      chatState._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+        currentBlocks: [{ type: 'text', content: 'stream' }],
+      });
       component.inputText = 'partial';
       chatState.isStreaming = true;
-      chatState.currentBlocks = [{ type: 'text', content: 'stream' }];
       component.viewingTranscript = { session_id: 's1', messages: [] };
       component.showHistory = true;
       component.showMemory = true;
@@ -644,14 +665,141 @@ describe('ChatComponent', () => {
     });
   });
 
+  // ── project_switched event ─────────────────────────────────────────────────
+
+  describe('project_switched event', () => {
+    it('reloads conversations when history panel is open', async () => {
+      chatState.activeProject = 'test';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'list_conversations') return [];
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'check_containers_running') return true;
+        if (cmd === 'start_chat') return undefined;
+        return undefined;
+      };
+
+      await component.ngOnInit();
+      component.showHistory = true;
+      component.conversations = [
+        { session_id: 's1', timestamp: '2026-03-06T10:00:00Z', preview: 'old', message_count: 1 },
+      ];
+
+      const newConversations = [
+        { session_id: 's2', timestamp: '2026-03-07T10:00:00Z', preview: 'new', message_count: 2 },
+      ];
+      chatState.activeProject = 'other-project';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'list_conversations') return newConversations;
+        return undefined;
+      };
+
+      mockTauri.dispatchEvent('project_switched', 'other-project');
+      await fixture.whenStable();
+
+      expect(component.conversations).toEqual(newConversations);
+    });
+
+    it('reloads memory when memory panel is open', async () => {
+      chatState.activeProject = 'test';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_project_memory') return 'old memory';
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'check_containers_running') return true;
+        if (cmd === 'start_chat') return undefined;
+        return undefined;
+      };
+
+      await component.ngOnInit();
+      component.showMemory = true;
+      component.projectMemory = 'old memory';
+
+      chatState.activeProject = 'other-project';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_project_memory') return 'new memory';
+        return undefined;
+      };
+
+      mockTauri.dispatchEvent('project_switched', 'other-project');
+      await fixture.whenStable();
+
+      expect(component.projectMemory).toBe('new memory');
+    });
+
+    it('closes transcript view on project switch', async () => {
+      chatState.activeProject = 'test';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'check_containers_running') return true;
+        if (cmd === 'start_chat') return undefined;
+        return undefined;
+      };
+
+      await component.ngOnInit();
+      component.viewingTranscript = { session_id: 's1', messages: [] };
+
+      mockTauri.dispatchEvent('project_switched', 'other-project');
+      await fixture.whenStable();
+
+      expect(component.viewingTranscript).toBeNull();
+    });
+
+    it('clears stale data immediately on project switch', async () => {
+      chatState.activeProject = 'test';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'check_containers_running') return true;
+        if (cmd === 'start_chat') return undefined;
+        return undefined;
+      };
+
+      await component.ngOnInit();
+      component.conversations = [
+        { session_id: 's1', timestamp: '2026-03-06T10:00:00Z', preview: 'old', message_count: 1 },
+      ];
+      component.projectMemory = 'old memory';
+      component.showHistory = false;
+      component.showMemory = false;
+
+      mockTauri.dispatchEvent('project_switched', 'other-project');
+      await fixture.whenStable();
+
+      expect(component.conversations).toEqual([]);
+      expect(component.projectMemory).toBe('');
+    });
+
+    it('cleans up project_switched listener on destroy', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'check_containers_running') return true;
+        if (cmd === 'start_chat') return undefined;
+        return undefined;
+      };
+
+      await component.ngOnInit();
+      expect(mockTauri.listenHandlers['project_switched']).toBeDefined();
+
+      component.ngOnDestroy();
+      expect(mockTauri.listenHandlers['project_switched']).toBeUndefined();
+    });
+  });
+
   // ── state persistence ─────────────────────────────────────────────────────
 
   describe('state persistence', () => {
     it('ChatStateService is a singleton — state survives component recreation', () => {
-      chatState.messages.push({
-        role: 'user',
-        blocks: [{ type: 'text', content: 'persisted' }],
-        timestamp: 1,
+      chatState._setState({
+        messages: [
+          {
+            role: 'user',
+            blocks: [{ type: 'text', content: 'persisted' }],
+            timestamp: 1,
+          },
+        ],
       });
       chatState.containerStatus = 'running';
 

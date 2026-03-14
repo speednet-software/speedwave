@@ -399,14 +399,26 @@ mod tests {
 
     #[test]
     fn test_build_before_compose_down_in_update_containers() {
-        // Verify that build_all_images is called BEFORE compose_down in update_containers().
-        // Searches only within the function body to avoid false matches from
-        // rollback_containers or other functions that may also call compose_down.
+        // **Why a structural (source-code) test?**
+        //
+        // The key safety invariant: `build_all_images` must run BEFORE
+        // `compose_down`. Building first means a failed build leaves running
+        // containers untouched (containerd uses content-addressable storage,
+        // so new images don't affect running containers).
+        //
+        // A behavioral test would require mocking `build::build_all_images`
+        // (a free function, not a trait method) plus `config::load_user_config`,
+        // `compose::render_compose`, `SecurityCheck::run`, and filesystem I/O.
+        // That level of test infrastructure isn't justified for a single
+        // ordering invariant. Instead we verify the call order directly in
+        // the source text, scoped to the `update_containers` function body.
         let source = include_str!("update.rs");
 
+        // Locate the function body to avoid false matches from
+        // rollback_containers or other functions that also call compose_down.
         let fn_start = source
             .find("fn update_containers(")
-            .expect("update_containers function must exist");
+            .expect("update_containers function must exist in update.rs");
         let fn_body = &source[fn_start..];
 
         let build_pos = fn_body
@@ -418,9 +430,10 @@ mod tests {
 
         assert!(
             build_pos < down_pos,
-            "build_all_images (offset {}) must appear before compose_down (offset {}) in update_containers",
-            build_pos,
-            down_pos
+            "Safety invariant violated: build_all_images (at byte offset {build_pos}) \
+             must appear before compose_down (at byte offset {down_pos}) in \
+             update_containers — building first ensures a failed build leaves \
+             running containers untouched",
         );
     }
 

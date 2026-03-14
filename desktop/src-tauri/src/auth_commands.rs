@@ -3,7 +3,7 @@
 // Tauri command wrappers for API-key management and native terminal launch.
 
 use super::{auth, setup_wizard};
-use crate::types::AuthStatusResponse;
+use crate::types::{check_project, AuthStatusResponse};
 
 // ---------------------------------------------------------------------------
 // Authentication commands (API key only — OAuth is done via CLI)
@@ -11,7 +11,8 @@ use crate::types::AuthStatusResponse;
 
 #[tauri::command]
 pub async fn save_api_key(project: String, api_key: String) -> Result<(), String> {
-    if api_key.len() > 4096 {
+    check_project(&project)?;
+    if api_key.len() > crate::types::MAX_CREDENTIAL_BYTES {
         return Err("API key too long".to_string());
     }
     tokio::task::spawn_blocking(move || {
@@ -27,6 +28,7 @@ pub async fn save_api_key(project: String, api_key: String) -> Result<(), String
 
 #[tauri::command]
 pub async fn delete_api_key(project: String) -> Result<(), String> {
+    check_project(&project)?;
     tokio::task::spawn_blocking(move || {
         log::info!("delete_api_key: project={project}");
         auth::delete_api_key(&project).map_err(|e| {
@@ -40,6 +42,7 @@ pub async fn delete_api_key(project: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, String> {
+    check_project(&project)?;
     tokio::task::spawn_blocking(move || {
         log::info!("get_auth_status: project={project}");
         let api_key_configured = auth::has_api_key(&project);

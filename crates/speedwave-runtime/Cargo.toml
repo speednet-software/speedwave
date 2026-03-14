@@ -16,6 +16,7 @@ serde_yaml_ng = { workspace = true }
 anyhow = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 dirs = "6"
+fs2 = "0.4"
 log = { workspace = true }
 regex = "1"
 

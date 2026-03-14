@@ -37,7 +37,7 @@ impl Default for UpdateSettings {
     fn default() -> Self {
         Self {
             auto_check: true,
-            check_interval_hours: 24,
+            check_interval_hours: consts::UPDATE_CHECK_INTERVAL_HOURS,
         }
     }
 }

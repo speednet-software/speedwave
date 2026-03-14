@@ -9,8 +9,18 @@ use crate::types::{
 };
 use speedwave_runtime::config;
 
-/// Fields stored in Redmine's config.json rather than as individual files.
-const REDMINE_CONFIG_JSON_FIELDS: [&str; 3] = ["host_url", "project_id", "project_name"];
+/// Returns the field keys that Redmine stores in config.json (derived from SSOT in consts).
+fn redmine_config_json_fields() -> Vec<&'static str> {
+    speedwave_runtime::consts::find_mcp_service("redmine")
+        .map(|svc| {
+            svc.auth_fields
+                .iter()
+                .filter(|f| f.stored_in_config_json)
+                .map(|f| f.key)
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 // ---------------------------------------------------------------------------
 // Redmine helpers — Redmine stores host_url, project_id, and project_name
@@ -44,7 +54,7 @@ fn read_redmine_current_values(
         if is_secret_field(&field.key) {
             continue;
         }
-        if REDMINE_CONFIG_JSON_FIELDS.contains(&field.key.as_str()) {
+        if redmine_config_json_fields().contains(&field.key.as_str()) {
             if let Some(val) = config_json.get(&field.key).and_then(|v| v.as_str()) {
                 current_values.insert(field.key.clone(), val.to_string());
             }
@@ -76,7 +86,7 @@ fn save_redmine_credentials(
 ) -> Result<(), String> {
     let has_config_fields = credentials
         .keys()
-        .any(|k| REDMINE_CONFIG_JSON_FIELDS.contains(&k.as_str()));
+        .any(|k| redmine_config_json_fields().contains(&k.as_str()));
 
     let config_path = svc_dir.join("config.json");
     let mut config_obj = if has_config_fields {
@@ -96,7 +106,7 @@ fn save_redmine_credentials(
         }
         validate_credential_field(key, value)?;
 
-        if REDMINE_CONFIG_JSON_FIELDS.contains(&key.as_str()) {
+        if redmine_config_json_fields().contains(&key.as_str()) {
             config_obj[key] = serde_json::Value::String(value.clone());
         } else {
             let file_path = svc_dir.join(key);
@@ -122,8 +132,12 @@ fn validate_credential_field(key: &str, value: &str) -> Result<(), String> {
     if value.contains('\0') {
         return Err(format!("value for '{}' contains null byte", key));
     }
-    if value.len() > 4096 {
-        return Err(format!("value for '{}' exceeds 4096 bytes", key));
+    if value.len() > crate::types::MAX_CREDENTIAL_BYTES {
+        return Err(format!(
+            "value for '{}' exceeds {} bytes",
+            key,
+            crate::types::MAX_CREDENTIAL_BYTES
+        ));
     }
     Ok(())
 }

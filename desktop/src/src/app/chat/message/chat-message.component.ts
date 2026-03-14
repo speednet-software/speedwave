@@ -85,7 +85,7 @@ import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
   `,
 })
 export class ChatMessageComponent {
-  @Input({ required: true }) blocks!: MessageBlock[];
+  @Input({ required: true }) blocks!: readonly MessageBlock[];
   @Input() role: 'user' | 'assistant' = 'assistant';
   @Input() streaming = false;
   @Output() questionAnswered = new EventEmitter<{ toolId: string; values: string[] }>();

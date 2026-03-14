@@ -196,19 +196,27 @@ fn list_projects() -> Result<ProjectList, String> {
     })
 }
 
+/// Switches the active project in-memory. Extracted for testability.
+fn apply_switch_project(
+    user_config: &mut config::SpeedwaveUserConfig,
+    name: &str,
+) -> anyhow::Result<()> {
+    if user_config.find_project(name).is_none() {
+        anyhow::bail!("Project '{}' not found", name);
+    }
+    user_config.active_project = Some(name.to_string());
+    Ok(())
+}
+
 #[tauri::command]
 fn switch_project(name: String, app: tauri::AppHandle) -> Result<(), String> {
-    let _lock = CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
-    let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
-
-    // Verify project exists
-    if user_config.find_project(&name).is_none() {
-        return Err(format!("Project '{}' not found", name));
-    }
-
-    user_config.active_project = Some(name.clone());
-
-    config::save_user_config(&user_config).map_err(|e| e.to_string())?;
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        apply_switch_project(&mut user_config, &name)?;
+        config::save_user_config(&user_config)?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
 
     use tauri::Emitter;
     let _ = app.emit("project_switched", &name);
@@ -895,6 +903,7 @@ fn main() {
             // Project management
             list_projects,
             switch_project,
+            containers_cmd::add_project,
             // Health
             get_health,
             // Container logs
@@ -952,4 +961,117 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("fatal: Tauri application failed to start");
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use config::{ProjectUserEntry, SpeedwaveUserConfig};
+
+    fn make_config_with_projects() -> SpeedwaveUserConfig {
+        SpeedwaveUserConfig {
+            projects: vec![
+                ProjectUserEntry {
+                    name: "alpha".to_string(),
+                    dir: "/tmp/alpha".to_string(),
+                    claude: None,
+                    integrations: None,
+                },
+                ProjectUserEntry {
+                    name: "beta".to_string(),
+                    dir: "/tmp/beta".to_string(),
+                    claude: None,
+                    integrations: None,
+                },
+            ],
+            active_project: Some("alpha".to_string()),
+            selected_ide: None,
+            log_level: None,
+        }
+    }
+
+    // -- apply_switch_project tests --
+
+    #[test]
+    fn switch_project_happy_path() {
+        let mut cfg = make_config_with_projects();
+        assert_eq!(cfg.active_project.as_deref(), Some("alpha"));
+
+        let result = apply_switch_project(&mut cfg, "beta");
+        assert!(result.is_ok());
+        assert_eq!(cfg.active_project.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn switch_project_to_same_project() {
+        let mut cfg = make_config_with_projects();
+        let result = apply_switch_project(&mut cfg, "alpha");
+        assert!(result.is_ok());
+        assert_eq!(cfg.active_project.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn switch_project_error_not_found() {
+        let mut cfg = make_config_with_projects();
+        let result = apply_switch_project(&mut cfg, "nonexistent");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not found"),
+            "expected 'not found' error, got: {err}"
+        );
+        assert!(
+            err.contains("nonexistent"),
+            "error should mention the project name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn switch_project_error_empty_name() {
+        let mut cfg = make_config_with_projects();
+        let result = apply_switch_project(&mut cfg, "");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn switch_project_does_not_modify_projects_list() {
+        let mut cfg = make_config_with_projects();
+        let projects_before: Vec<String> = cfg.projects.iter().map(|p| p.name.clone()).collect();
+
+        apply_switch_project(&mut cfg, "beta").unwrap();
+
+        let projects_after: Vec<String> = cfg.projects.iter().map(|p| p.name.clone()).collect();
+        assert_eq!(projects_before, projects_after);
+    }
+
+    #[test]
+    fn switch_project_from_none_active() {
+        let mut cfg = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "only".to_string(),
+                dir: "/tmp/only".to_string(),
+                claude: None,
+                integrations: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        };
+
+        let result = apply_switch_project(&mut cfg, "only");
+        assert!(result.is_ok());
+        assert_eq!(cfg.active_project.as_deref(), Some("only"));
+    }
+
+    #[test]
+    fn switch_project_empty_projects_list() {
+        let mut cfg = SpeedwaveUserConfig::default();
+        let result = apply_switch_project(&mut cfg, "anything");
+        assert!(result.is_err());
+    }
 }
