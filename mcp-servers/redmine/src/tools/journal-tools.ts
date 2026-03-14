@@ -8,6 +8,9 @@ import { RedmineClient } from '../client.js';
 const listJournalsTool: Tool = {
   name: 'listJournals',
   description: 'List all journals (comments/updates) for an issue',
+  category: 'read',
+  keywords: ['redmine', 'journals', 'history', 'comments', 'audit', 'changelog'],
+  example: `const journals = await redmine.listJournals({ issue_id: 12345 })`,
   inputSchema: {
     type: 'object',
     properties: {
@@ -15,11 +18,59 @@ const listJournalsTool: Tool = {
     },
     required: ['issue_id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      journals: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'number' },
+            user: {
+              type: 'object',
+              properties: { id: { type: 'number' }, name: { type: 'string' } },
+            },
+            notes: { type: 'string' },
+            created_on: { type: 'string' },
+            details: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  property: { type: 'string' },
+                  name: { type: 'string' },
+                  old_value: { type: 'string' },
+                  new_value: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: get all journals for issue',
+      input: { issue_id: 12345 },
+    },
+    {
+      description: 'Full: get journal history',
+      input: { issue_id: 67890 },
+    },
+  ],
 };
 
 const updateJournalTool: Tool = {
   name: 'updateJournal',
   description: 'Update an existing journal entry',
+  category: 'write',
+  keywords: ['redmine', 'journal', 'update', 'comment', 'edit', 'modify'],
+  example: `await redmine.updateJournal({ issue_id: 12345, journal_id: 67890, notes: "Updated comment with more details" })`,
   inputSchema: {
     type: 'object',
     properties: {
@@ -29,11 +80,43 @@ const updateJournalTool: Tool = {
     },
     required: ['issue_id', 'journal_id', 'notes'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      journal: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' },
+          notes: { type: 'string' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: update journal note',
+      input: { issue_id: 12345, journal_id: 67890, notes: 'Updated comment with more details' },
+    },
+    {
+      description: 'Full: update with detailed note',
+      input: {
+        issue_id: 12345,
+        journal_id: 67890,
+        notes: 'h3. Correction\n\nPrevious analysis was incorrect. Updated with new findings.',
+      },
+    },
+  ],
 };
 
 const deleteJournalTool: Tool = {
   name: 'deleteJournal',
   description: 'Delete a journal entry',
+  category: 'delete',
+  keywords: ['redmine', 'journal', 'delete', 'remove', 'comment'],
+  example: `await redmine.deleteJournal({ issue_id: 12345, journal_id: 67890 })`,
   inputSchema: {
     type: 'object',
     properties: {
@@ -42,6 +125,25 @@ const deleteJournalTool: Tool = {
     },
     required: ['issue_id', 'journal_id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      deleted_journal_id: { type: 'number' },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: delete a journal entry',
+      input: { issue_id: 12345, journal_id: 67890 },
+    },
+    {
+      description: 'Full: remove comment from history',
+      input: { issue_id: 67890, journal_id: 54321 },
+    },
+  ],
 };
 
 /**

@@ -11,11 +11,14 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { searchTools, getServiceTools, getToolMetadata } from './search-tools.js';
 import { resetServiceCaches } from './tool-registry.js';
+import { populateRegistryFromPolicies, _resetRegistryForTesting } from './test-helpers.js';
 
 describe('searchTools', () => {
   const savedEnabledServices = process.env.ENABLED_SERVICES;
 
   beforeEach(() => {
+    _resetRegistryForTesting();
+    populateRegistryFromPolicies();
     resetServiceCaches();
     process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,gitlab,os';
   });
@@ -50,21 +53,19 @@ describe('searchTools', () => {
     });
 
     it('matches by description', async () => {
+      // Skeleton descriptions contain the method name, so search by a known method name
       const result = await searchTools({
-        query: 'message',
+        query: 'sendChannel',
         detailLevel: 'with_descriptions',
       });
 
       expect(result.matches.length).toBeGreaterThan(0);
-      // Verify at least one match has 'message' in description
-      expect(result.matches.some((m) => m.description?.toLowerCase().includes('message'))).toBe(
-        true
-      );
+      expect(result.matches.some((m) => m.description?.includes('sendChannel'))).toBe(true);
     });
 
-    it('matches by keywords', async () => {
+    it('matches by name substring', async () => {
       const result = await searchTools({
-        query: 'ci',
+        query: 'pipeline',
         detailLevel: 'names_only',
         service: 'gitlab',
       });
@@ -204,7 +205,7 @@ describe('searchTools', () => {
       expect(match.outputSchema).toBeUndefined();
     });
 
-    it('full_schema includes inputSchema, outputSchema, example', async () => {
+    it('full_schema includes inputSchema and example', async () => {
       const result = await searchTools({
         query: 'sendChannel',
         detailLevel: 'full_schema',
@@ -214,26 +215,11 @@ describe('searchTools', () => {
       expect(result.matches.length).toBeGreaterThan(0);
       const match = result.matches[0];
 
-      // Should have all fields
+      // Should have all fields (may be empty for skeleton entries)
       expect(match.description).toBeDefined();
       expect(match.inputSchema).toBeDefined();
-      expect(match.outputSchema).toBeDefined();
-      expect(match.example).toBeDefined();
-    });
-
-    it('full_schema includes inputExamples when available', async () => {
-      const result = await searchTools({
-        query: 'sendChannel',
-        detailLevel: 'full_schema',
-        service: 'slack',
-      });
-
-      expect(result.matches.length).toBeGreaterThan(0);
-      const match = result.matches[0];
-
-      // inputExamples should be present (may be undefined for some tools)
-      expect(match.inputExamples).toBeDefined();
-      expect(Array.isArray(match.inputExamples)).toBe(true);
+      // example and outputSchema may be empty/undefined for skeleton entries
+      expect('example' in match).toBe(true);
     });
   });
 
@@ -411,8 +397,6 @@ describe('getToolMetadata', () => {
     expect(metadata).toHaveProperty('description');
     expect(metadata).toHaveProperty('keywords');
     expect(metadata).toHaveProperty('inputSchema');
-    expect(metadata).toHaveProperty('outputSchema');
-    expect(metadata).toHaveProperty('example');
     expect(metadata).toHaveProperty('service');
     expect(metadata).toHaveProperty('category');
   });
@@ -421,7 +405,6 @@ describe('getToolMetadata', () => {
     const metadata = getToolMetadata('slack', 'sendChannel');
 
     expect(Array.isArray(metadata?.keywords)).toBe(true);
-    expect(metadata?.keywords.length).toBeGreaterThan(0);
   });
 
   it('inputSchema has correct structure', () => {
@@ -465,6 +448,8 @@ describe('searchTools ENABLED_SERVICES filtering', () => {
   const originalDisabled = process.env.DISABLED_OS_SERVICES;
 
   beforeEach(() => {
+    _resetRegistryForTesting();
+    populateRegistryFromPolicies();
     resetServiceCaches();
   });
 

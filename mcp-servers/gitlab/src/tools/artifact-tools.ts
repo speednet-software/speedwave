@@ -9,6 +9,10 @@ import { withValidation } from './validation.js';
 const listArtifactsTool: Tool = {
   name: 'listArtifacts',
   description: 'List artifacts from a pipeline',
+  category: 'read',
+  keywords: ['gitlab', 'artifacts', 'pipeline', 'ci', 'build'],
+  example:
+    'const artifacts = await gitlab.listArtifacts({ project_id: "speedwave/core", pipeline_id: 12345 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -17,11 +21,41 @@ const listArtifactsTool: Tool = {
     },
     required: ['project_id', 'pipeline_id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      artifacts: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            file_type: { type: 'string' },
+            size: { type: 'number' },
+            filename: { type: 'string' },
+            file_format: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'List pipeline artifacts',
+      input: { project_id: 'my-group/my-project', pipeline_id: 98765 },
+    },
+  ],
 };
 
 const downloadArtifactTool: Tool = {
   name: 'downloadArtifact',
   description: 'Download job artifacts',
+  category: 'read',
+  keywords: ['gitlab', 'artifact', 'download', 'ci', 'build'],
+  example:
+    'const artifact = await gitlab.downloadArtifact({ project_id: "speedwave/core", job_id: 54321 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -30,11 +64,35 @@ const downloadArtifactTool: Tool = {
     },
     required: ['project_id', 'job_id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      artifact: {
+        type: 'object',
+        properties: {
+          content: { type: 'string' },
+          size: { type: 'number' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Download job artifact',
+      input: { project_id: 'my-group/my-project', job_id: 11111 },
+    },
+  ],
 };
 
 const deleteArtifactsTool: Tool = {
   name: 'deleteArtifacts',
   description: 'Delete job artifacts',
+  category: 'delete',
+  keywords: ['gitlab', 'artifacts', 'delete', 'remove', 'ci'],
+  example: 'await gitlab.deleteArtifacts({ project_id: "speedwave/core", job_id: 54321 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -43,6 +101,20 @@ const deleteArtifactsTool: Tool = {
     },
     required: ['project_id', 'job_id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Delete job artifacts',
+      input: { project_id: 'my-group/my-project', job_id: 11111 },
+    },
+  ],
 };
 
 /**

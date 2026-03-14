@@ -9,6 +9,9 @@ import { resolveParams } from './helpers.js';
 const listTimeEntriesTool: Tool = {
   name: 'listTimeEntries',
   description: 'List time entries with optional filters.',
+  category: 'read',
+  keywords: ['redmine', 'time', 'entries', 'list', 'hours', 'log'],
+  example: `const entries = await redmine.listTimeEntries({ issue_id: 12345 })`,
   inputSchema: {
     type: 'object',
     properties: {
@@ -20,11 +23,58 @@ const listTimeEntriesTool: Tool = {
       limit: { type: 'number', description: 'Maximum results (default 25)' },
     },
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      time_entries: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'number' },
+            hours: { type: 'number' },
+            activity: {
+              type: 'object',
+              properties: { id: { type: 'number' }, name: { type: 'string' } },
+            },
+            comments: { type: 'string' },
+            spent_on: { type: 'string', description: 'Date in YYYY-MM-DD format' },
+            user: {
+              type: 'object',
+              properties: { id: { type: 'number' }, name: { type: 'string' } },
+            },
+            issue: { type: 'object', properties: { id: { type: 'number' } } },
+          },
+        },
+      },
+      total_count: { type: 'number' },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: list all entries',
+      input: {},
+    },
+    {
+      description: 'Partial: entries for issue',
+      input: { issue_id: 12345 },
+    },
+    {
+      description: 'Full: date range with limit',
+      input: { from: '2024-01-01', to: '2024-01-31', user_id: 42, limit: 100 },
+    },
+  ],
 };
 
 const createTimeEntryTool: Tool = {
   name: 'createTimeEntry',
   description: 'Log time on an issue or project',
+  category: 'write',
+  keywords: ['redmine', 'time', 'entry', 'create', 'log', 'hours'],
+  example: `await redmine.createTimeEntry({ hours: 2.5, issue_id: 12345, activity: "development", comments: "Code review" })`,
   inputSchema: {
     type: 'object',
     properties: {
@@ -38,11 +88,59 @@ const createTimeEntryTool: Tool = {
     },
     required: ['hours'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      time_entry: {
+        type: 'object',
+        properties: {
+          id: { type: 'number', description: 'ID of created time entry' },
+          hours: { type: 'number' },
+          activity: {
+            type: 'object',
+            properties: { id: { type: 'number' }, name: { type: 'string' } },
+          },
+          spent_on: { type: 'string' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: log hours to issue',
+      input: { hours: 2.5, issue_id: 12345 },
+    },
+    {
+      description: 'Partial: with activity and comment',
+      input: {
+        hours: 4.0,
+        issue_id: 12345,
+        activity: 'development',
+        comments: 'Implemented feature X',
+      },
+    },
+    {
+      description: 'Full: log to specific date',
+      input: {
+        hours: 8.0,
+        issue_id: 12345,
+        activity: 'development',
+        comments: 'Full day refactoring',
+        spent_on: '2024-01-15',
+      },
+    },
+  ],
 };
 
 const updateTimeEntryTool: Tool = {
   name: 'updateTimeEntry',
   description: 'Update an existing time entry',
+  category: 'write',
+  keywords: ['redmine', 'time', 'update', 'modify', 'hours', 'edit'],
+  example: `await redmine.updateTimeEntry({ time_entry_id: 789, hours: 3.5 })`,
   inputSchema: {
     type: 'object',
     properties: {
@@ -54,6 +152,41 @@ const updateTimeEntryTool: Tool = {
     },
     required: ['time_entry_id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      time_entry: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' },
+          hours: { type: 'number' },
+          activity: { type: 'object', properties: { name: { type: 'string' } } },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: update hours only',
+      input: { time_entry_id: 789, hours: 3.5 },
+    },
+    {
+      description: 'Partial: update activity and comments',
+      input: { time_entry_id: 789, activity: 'testing', comments: 'Updated test description' },
+    },
+    {
+      description: 'Full: update all fields',
+      input: {
+        time_entry_id: 789,
+        hours: 4.0,
+        activity: 'development',
+        comments: 'Corrected hours and activity',
+      },
+    },
+  ],
 };
 
 /**

@@ -439,6 +439,16 @@ pub async fn restart_integration_containers(project: String) -> Result<(), Strin
             log::warn!("restart_integration_containers: save_snapshot failed, rollback will not work: {e}");
         }
 
+        // Rebuild images BEFORE stopping containers.
+        // If the build fails, containers keep running with the previous version.
+        // Docker/nerdctl layer caching makes no-op rebuilds fast (seconds).
+        if let Err(e) = speedwave_runtime::build::build_all_images(&*rt) {
+            log::error!("restart_integration_containers: image rebuild failed: {e}");
+            return Err(format!(
+                "Image rebuild failed: {e}. Containers are still running with the previous version."
+            ));
+        }
+
         rt.compose_down(&project).map_err(|e| {
             log::error!("restart_integration_containers: compose_down error: {e}");
             e.to_string()
@@ -472,9 +482,9 @@ pub async fn restart_integration_containers(project: String) -> Result<(), Strin
 
         speedwave_runtime::compose::save_compose(&project, &yaml).map_err(|e| e.to_string())?;
 
-        if let Err(e) = rt.compose_up(&project) {
+        if let Err(e) = rt.compose_up_recreate(&project) {
             log::error!(
-                "restart_integration_containers: compose_up failed: {e}, attempting rollback"
+                "restart_integration_containers: compose_up_recreate failed: {e}, attempting rollback"
             );
             if let Err(rb_err) = speedwave_runtime::update::rollback_containers(&*rt, &project) {
                 log::error!(
@@ -713,4 +723,43 @@ mod tests {
     }
 
     // OsIntegrationsConfig::set_service tests live in config.rs (SSOT)
+
+    // -- restart_integration_containers structural tests --
+
+    #[test]
+    fn restart_rebuilds_images_before_compose_down() {
+        let source = include_str!("integrations_cmd.rs");
+        let fn_start = source
+            .find("fn restart_integration_containers(")
+            .expect("restart_integration_containers function must exist");
+        let fn_body = &source[fn_start..];
+
+        let build_pos = fn_body
+            .find("build::build_all_images")
+            .expect("build_all_images call must exist in restart_integration_containers");
+        let down_pos = fn_body
+            .find("compose_down")
+            .expect("compose_down call must exist in restart_integration_containers");
+
+        assert!(
+            build_pos < down_pos,
+            "build_all_images (offset {}) must appear before compose_down (offset {}) in restart_integration_containers",
+            build_pos,
+            down_pos
+        );
+    }
+
+    #[test]
+    fn restart_uses_compose_up_recreate() {
+        let source = include_str!("integrations_cmd.rs");
+        let fn_start = source
+            .find("fn restart_integration_containers(")
+            .expect("restart_integration_containers function must exist");
+        let fn_body = &source[fn_start..];
+
+        assert!(
+            fn_body.contains("compose_up_recreate"),
+            "restart_integration_containers must use compose_up_recreate, not compose_up"
+        );
+    }
 }

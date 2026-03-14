@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import {
   createGitLabBridge,
   createSlackBridge,
@@ -12,8 +12,9 @@ import {
   parseServiceError,
   getRequestTimeout,
 } from './http-bridge.js';
-import { getServiceMethods } from './tool-registry.js';
+import { getServiceMethods, stopBackgroundRefresh } from './tool-registry.js';
 import { SERVICES } from './http-bridge.js';
+import { populateRegistryFromPolicies, _resetRegistryForTesting } from './test-helpers.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Tests for HTTP Bridge
@@ -25,6 +26,15 @@ import { SERVICES } from './http-bridge.js';
 //═══════════════════════════════════════════════════════════════════════════════
 
 describe('http-bridge', () => {
+  beforeAll(() => {
+    _resetRegistryForTesting();
+    populateRegistryFromPolicies();
+  });
+
+  afterAll(() => {
+    stopBackgroundRefresh();
+  });
+
   const savedEnv: Record<string, string | undefined> = {};
 
   beforeEach(() => {

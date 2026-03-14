@@ -9,6 +9,9 @@ import { withValidation } from './validation.js';
 const listLabelsTool: Tool = {
   name: 'listLabels',
   description: 'List project labels',
+  category: 'read',
+  keywords: ['gitlab', 'labels', 'list', 'tags'],
+  example: 'const labels = await gitlab.listLabels({ project_id: "speedwave/core" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -18,11 +21,41 @@ const listLabelsTool: Tool = {
     },
     required: ['project_id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      labels: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'number' },
+            name: { type: 'string' },
+            color: { type: 'string' },
+            description: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'List project labels',
+      input: { project_id: 'my-group/my-project' },
+    },
+  ],
 };
 
 const createLabelTool: Tool = {
   name: 'createLabel',
   description: 'Create a project label',
+  category: 'write',
+  keywords: ['gitlab', 'label', 'create', 'new', 'tag'],
+  example:
+    'const label = await gitlab.createLabel({ project_id: "speedwave/core", name: "urgent", color: "#FF0000" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -33,6 +66,41 @@ const createLabelTool: Tool = {
     },
     required: ['project_id', 'name', 'color'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      label: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' },
+          name: { type: 'string' },
+          color: { type: 'string' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Create label',
+      input: {
+        project_id: 'my-group/my-project',
+        name: 'bug',
+        color: '#FF0000',
+      },
+    },
+    {
+      description: 'Create label with description',
+      input: {
+        project_id: 'my-group/my-project',
+        name: 'feature',
+        color: '#00FF00',
+        description: 'New feature request',
+      },
+    },
+  ],
 };
 
 /**
