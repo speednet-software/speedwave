@@ -12,6 +12,7 @@ import {
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { TauriService } from '../services/tauri.service';
+import { ProjectStateService } from '../services/project-state.service';
 import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/health';
 
 /** Displays real-time system health status including VM, containers, IDE bridge, and mcp-os. */
@@ -578,8 +579,10 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
   private eventTimerId: ReturnType<typeof setTimeout> | null = null;
   private unlistenEvent: (() => void) | null = null;
   private unlistenReconciled: (() => void) | null = null;
+  private unsubProjectReady: (() => void) | null = null;
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
+  private projectState = inject(ProjectStateService);
 
   /** Starts periodic health polling and subscribes to IDE bridge events. */
   ngOnInit(): void {
@@ -623,6 +626,10 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
       .catch(() => {
         // Tauri event listener not available outside desktop context
       });
+
+    this.unsubProjectReady = this.projectState.onProjectReady(() => {
+      this.refresh();
+    });
   }
 
   /** Clears polling interval, event timers, and unsubscribes from IDE bridge events. */
@@ -643,10 +650,15 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
       this.unlistenReconciled();
       this.unlistenReconciled = null;
     }
+    if (this.unsubProjectReady) {
+      this.unsubProjectReady();
+      this.unsubProjectReady = null;
+    }
   }
 
   /** Fetches the latest health report and IDE bridge status from the Tauri backend. */
   async refresh(): Promise<void> {
+    if (this.projectState.status === 'switching') return;
     this.loading = true;
     this.error = null;
     try {

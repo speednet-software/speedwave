@@ -531,6 +531,17 @@ describe('SystemHealthComponent', () => {
       expect(mockUnlistenReconciled).toHaveBeenCalled();
       expect((component as never as Private)['unlistenReconciled']).toBeNull();
     });
+
+    it('cleans up project ready listener on destroy', async () => {
+      vi.spyOn(component, 'refresh').mockResolvedValue();
+      component.ngOnInit();
+      await new Promise((r) => queueMicrotask(r));
+      await new Promise((r) => queueMicrotask(r));
+
+      component.ngOnDestroy();
+
+      expect((component as never as Private)['unsubProjectReady']).toBeNull();
+    });
   });
 
   describe('containers_reconciled event', () => {

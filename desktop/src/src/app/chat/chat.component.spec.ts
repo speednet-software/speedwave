@@ -3,6 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ChatComponent } from './chat.component';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
+import { ProjectStateService } from '../services/project-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
 describe('ChatComponent', () => {
@@ -10,6 +11,7 @@ describe('ChatComponent', () => {
   let fixture: ComponentFixture<ChatComponent>;
   let mockTauri: MockTauriService;
   let chatState: ChatStateService;
+  let projectState: ProjectStateService;
 
   beforeEach(async () => {
     mockTauri = new MockTauriService();
@@ -38,6 +40,7 @@ describe('ChatComponent', () => {
     fixture = TestBed.createComponent(ChatComponent);
     component = fixture.componentInstance;
     chatState = TestBed.inject(ChatStateService);
+    projectState = TestBed.inject(ProjectStateService);
 
     // Reset service state between tests
     chatState._setState({ messages: [], currentBlocks: [], sessionStats: null });
@@ -665,9 +668,9 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── project_switched event ─────────────────────────────────────────────────
+  // ── project_switch_succeeded event ──────────────────────────────────────────
 
-  describe('project_switched event', () => {
+  describe('project_switch_succeeded event', () => {
     it('reloads conversations when history panel is open', async () => {
       chatState.activeProject = 'test';
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -679,6 +682,7 @@ describe('ChatComponent', () => {
         return undefined;
       };
 
+      await projectState.init();
       await component.ngOnInit();
       component.showHistory = true;
       component.conversations = [
@@ -694,7 +698,7 @@ describe('ChatComponent', () => {
         return undefined;
       };
 
-      mockTauri.dispatchEvent('project_switched', 'other-project');
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other-project' });
       await fixture.whenStable();
 
       expect(component.conversations).toEqual(newConversations);
@@ -711,6 +715,7 @@ describe('ChatComponent', () => {
         return undefined;
       };
 
+      await projectState.init();
       await component.ngOnInit();
       component.showMemory = true;
       component.projectMemory = 'old memory';
@@ -721,7 +726,7 @@ describe('ChatComponent', () => {
         return undefined;
       };
 
-      mockTauri.dispatchEvent('project_switched', 'other-project');
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other-project' });
       await fixture.whenStable();
 
       expect(component.projectMemory).toBe('new memory');
@@ -737,10 +742,11 @@ describe('ChatComponent', () => {
         return undefined;
       };
 
+      await projectState.init();
       await component.ngOnInit();
       component.viewingTranscript = { session_id: 's1', messages: [] };
 
-      mockTauri.dispatchEvent('project_switched', 'other-project');
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other-project' });
       await fixture.whenStable();
 
       expect(component.viewingTranscript).toBeNull();
@@ -756,6 +762,7 @@ describe('ChatComponent', () => {
         return undefined;
       };
 
+      await projectState.init();
       await component.ngOnInit();
       component.conversations = [
         { session_id: 's1', timestamp: '2026-03-06T10:00:00Z', preview: 'old', message_count: 1 },
@@ -764,14 +771,14 @@ describe('ChatComponent', () => {
       component.showHistory = false;
       component.showMemory = false;
 
-      mockTauri.dispatchEvent('project_switched', 'other-project');
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other-project' });
       await fixture.whenStable();
 
       expect(component.conversations).toEqual([]);
       expect(component.projectMemory).toBe('');
     });
 
-    it('cleans up project_switched listener on destroy', async () => {
+    it('cleans up project ready listener on destroy', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_projects')
           return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
@@ -780,11 +787,20 @@ describe('ChatComponent', () => {
         return undefined;
       };
 
+      await projectState.init();
       await component.ngOnInit();
-      expect(mockTauri.listenHandlers['project_switched']).toBeDefined();
+
+      // Verify the unsub function exists before destroy
+      expect(
+        (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
+      ).not.toBeNull();
 
       component.ngOnDestroy();
-      expect(mockTauri.listenHandlers['project_switched']).toBeUndefined();
+
+      // Verify unsub was called and nulled
+      expect(
+        (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
+      ).toBeNull();
     });
   });
 

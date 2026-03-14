@@ -4,6 +4,7 @@ import { provideRouter } from '@angular/router';
 import { Router } from '@angular/router';
 import { PluginsComponent } from './plugins.component';
 import { TauriService } from '../services/tauri.service';
+import { ProjectStateService } from '../services/project-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
@@ -86,6 +87,10 @@ describe('PluginsComponent', () => {
       providers: [{ provide: TauriService, useValue: mockTauri }, provideRouter([])],
     }).compileComponents();
 
+    // Set activeProject on the SSOT so loadActiveProject() picks it up
+    const projectState = TestBed.inject(ProjectStateService);
+    projectState.activeProject = 'test-project';
+
     fixture = TestBed.createComponent(PluginsComponent);
     component = fixture.componentInstance;
   });
@@ -115,10 +120,8 @@ describe('PluginsComponent', () => {
   });
 
   it('should not load plugins without active project', async () => {
-    mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'list_projects') return { projects: [], active_project: null };
-      return undefined;
-    };
+    const projectState = TestBed.inject(ProjectStateService);
+    projectState.activeProject = null;
     const invokeSpy = vi.spyOn(mockTauri, 'invoke');
     await component.ngOnInit();
     expect(invokeSpy).not.toHaveBeenCalledWith('get_plugins', expect.anything());
@@ -384,8 +387,10 @@ describe('PluginsComponent', () => {
     });
   });
 
-  describe('project_switched event', () => {
-    it('reloads active project and plugins on project_switched', async () => {
+  describe('project_switch_succeeded event', () => {
+    it('reloads active project and plugins on project_switch_succeeded', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
       await component.ngOnInit();
       expect(component.activeProject).toBe('test-project');
 
@@ -403,18 +408,28 @@ describe('PluginsComponent', () => {
         }
       };
 
-      mockTauri.dispatchEvent('project_switched', 'other-project');
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other-project' });
       await fixture.whenStable();
       expect(component.activeProject).toBe('other-project');
       expect(component.plugins).toHaveLength(0);
     });
 
-    it('cleans up project_switched listener on destroy', async () => {
+    it('cleans up project ready listener on destroy', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
       await component.ngOnInit();
-      expect(mockTauri.listenHandlers['project_switched']).toBeDefined();
+
+      // Verify the unsub function exists before destroy
+      expect(
+        (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
+      ).not.toBeNull();
 
       component.ngOnDestroy();
-      expect(mockTauri.listenHandlers['project_switched']).toBeUndefined();
+
+      // Verify unsub was called and nulled
+      expect(
+        (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
+      ).toBeNull();
     });
   });
 

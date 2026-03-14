@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { ChatStateService } from './chat-state.service';
+import { ProjectStateService } from './project-state.service';
 import { TauriService } from './tauri.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import type { StreamChunk } from '../models/chat';
@@ -541,28 +542,73 @@ describe('ChatStateService', () => {
     });
   });
 
-  describe('project_switched event', () => {
-    it('clears state and re-checks containers on project switch', async () => {
+  describe('project switching/settled events via ProjectStateService', () => {
+    it('project_switch_started clears state and shows overlay', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
       await service.init();
       service._setState({
         messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
       });
       service.isStreaming = true;
 
-      const spy = vi.spyOn(mockTauri, 'invoke');
-      spy.mockClear();
-
-      // Simulate project_switched event
-      mockTauri.dispatchEvent('project_switched', 'other-project');
-
-      // Wait for async checkContainers to complete
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other-project' });
       await new Promise((r) => setTimeout(r, 10));
 
       expect(service.messages).toEqual([]);
       expect(service.isStreaming).toBe(false);
       expect(service.sessionStats).toBeNull();
-      expect(spy).toHaveBeenCalledWith('list_projects');
-      expect(spy).toHaveBeenCalledWith('start_chat', { project: 'test' });
+      expect(service.containerStatus).toBe('switching');
+    });
+
+    it('project_switch_succeeded sets running and syncs activeProject', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      await service.init();
+
+      // First trigger switching, then succeeded
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other-project' });
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other-project' });
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(service.containerStatus).toBe('running');
+      expect(service.activeProject).toBe('other-project');
+    });
+
+    it('project_switch_failed with rollback project sets running with error', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      await service.init();
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'fail-project' });
+      mockTauri.dispatchEvent('project_switch_failed', {
+        project: 'test',
+        error: 'chat failed',
+      });
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Rolled back to 'test' — container is considered running for the old project
+      expect(service.containerStatus).toBe('running');
+      expect(service.containerError).toContain('chat failed');
+      expect(service.activeProject).toBe('test');
+    });
+
+    it('project_switch_failed without rollback project sets error', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      await service.init();
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'fail-project' });
+      mockTauri.dispatchEvent('project_switch_failed', {
+        project: null,
+        error: 'chat failed',
+      });
+      await new Promise((r) => setTimeout(r, 10));
+
+      // No rollback project — error state
+      expect(service.containerStatus).toBe('error');
+      expect(service.containerError).toContain('chat failed');
+      expect(service.activeProject).toBeNull();
     });
   });
 

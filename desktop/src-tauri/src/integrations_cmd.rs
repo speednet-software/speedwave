@@ -28,9 +28,9 @@ fn redmine_config_json_fields() -> Vec<&'static str> {
 // These helpers isolate that difference so the generic handlers stay clean.
 // ---------------------------------------------------------------------------
 
-/// Reads and parses Redmine's config.json. Returns an empty JSON object
+/// Reads and parses a service's config.json. Returns an empty JSON object
 /// on missing or unreadable files.
-fn read_redmine_config(svc_token_dir: &std::path::Path) -> serde_json::Value {
+fn read_service_config(svc_token_dir: &std::path::Path) -> serde_json::Value {
     let config_path = svc_token_dir.join("config.json");
     std::fs::read_to_string(&config_path)
         .ok()
@@ -47,7 +47,7 @@ fn read_redmine_current_values(
     std::collections::HashMap<String, String>,
     Option<std::collections::HashMap<String, serde_json::Value>>,
 ) {
-    let config_json = read_redmine_config(svc_token_dir);
+    let config_json = read_service_config(svc_token_dir);
 
     let mut current_values = std::collections::HashMap::new();
     for field in auth_fields {
@@ -234,25 +234,45 @@ pub(crate) fn is_service_configured(project: &str, service: &str) -> bool {
         Some(h) => h,
         None => return false,
     };
+    is_service_configured_with_home(&home, project, service)
+}
+
+/// Testable core of [`is_service_configured`] — takes an explicit `home` path
+/// instead of reading `dirs::home_dir()`.
+fn is_service_configured_with_home(home: &std::path::Path, project: &str, service: &str) -> bool {
+    let svc_desc = match speedwave_runtime::consts::find_mcp_service(service) {
+        Some(d) => d,
+        None => return false,
+    };
+    if svc_desc.auth_fields.is_empty() {
+        return false;
+    }
     let svc_token_dir = home
         .join(speedwave_runtime::consts::DATA_DIR)
         .join("tokens")
         .join(project)
         .join(service);
-    let auth_fields = get_auth_fields(service);
-    let secret_fields: Vec<_> = auth_fields
-        .iter()
-        .filter(|f| is_secret_field(&f.key))
-        .collect();
-    if secret_fields.is_empty() {
-        return false;
-    }
-    secret_fields.iter().all(|f| {
-        let path = svc_token_dir.join(&f.key);
-        path.exists()
-            && std::fs::metadata(&path)
+
+    let has_config_fields = svc_desc.auth_fields.iter().any(|f| f.stored_in_config_json);
+    let config_json = if has_config_fields {
+        read_service_config(&svc_token_dir)
+    } else {
+        serde_json::json!({})
+    };
+
+    svc_desc.auth_fields.iter().all(|f| {
+        if f.stored_in_config_json {
+            config_json
+                .get(f.key)
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
+        } else {
+            let path = svc_token_dir.join(f.key);
+            std::fs::metadata(&path)
                 .map(|m| m.len() > 0)
                 .unwrap_or(false)
+        }
     })
 }
 
@@ -487,35 +507,8 @@ pub async fn restart_integration_containers(project: String) -> Result<(), Strin
             e.to_string()
         })?;
 
-        let user_config = config::load_user_config().map_err(|e| e.to_string())?;
-        let project_dir = user_config
-            .find_project(&project)
-            .map(|p| p.dir.clone())
-            .ok_or_else(|| format!("project '{}' not found", project))?;
-
-        let project_path = std::path::Path::new(&project_dir);
-        let (resolved, integrations) =
-            config::resolve_project_config(project_path, &user_config, &project);
-        let yaml = speedwave_runtime::compose::render_compose(
-            &project,
-            &project_dir,
-            &resolved,
-            &integrations,
-            Some(&*rt),
-        )
-        .map_err(|e| e.to_string())?;
-
-        let manifests = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_default();
-        let violations = speedwave_runtime::compose::SecurityCheck::run(&yaml, &project, &manifests);
-        if !violations.is_empty() {
-            let msgs: Vec<String> = violations
-                .iter()
-                .map(|v| format!("[{}] {} -- {}", v.container, v.rule, v.message))
-                .collect();
-            return Err(format!("Security check failed:\n{}", msgs.join("\n")));
-        }
-
-        speedwave_runtime::compose::save_compose(&project, &yaml).map_err(|e| e.to_string())?;
+        // Resolve config, render compose, security check, save
+        crate::containers_cmd::render_and_save_compose(&project, &*rt)?;
 
         if let Err(e) = rt.compose_up_recreate(&project) {
             log::error!(
@@ -663,17 +656,17 @@ mod tests {
         assert!(validate_credential_field("key", &max_value).is_ok());
     }
 
-    // -- Redmine helper tests --
+    // -- read_service_config tests --
 
     #[test]
-    fn read_redmine_config_returns_empty_for_missing_file() {
+    fn read_service_config_returns_empty_for_missing_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let result = read_redmine_config(tmp.path());
+        let result = read_service_config(tmp.path());
         assert_eq!(result, serde_json::json!({}));
     }
 
     #[test]
-    fn read_redmine_config_parses_valid_json() {
+    fn read_service_config_parses_valid_json() {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
         std::fs::write(
@@ -681,7 +674,7 @@ mod tests {
             r#"{"host_url":"https://redmine.example.com","project_id":"my-proj"}"#,
         )
         .unwrap();
-        let result = read_redmine_config(tmp.path());
+        let result = read_service_config(tmp.path());
         assert_eq!(
             result.get("host_url").unwrap().as_str().unwrap(),
             "https://redmine.example.com"
@@ -689,11 +682,11 @@ mod tests {
     }
 
     #[test]
-    fn read_redmine_config_returns_empty_for_invalid_json() {
+    fn read_service_config_returns_empty_for_invalid_json() {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
         std::fs::write(&config_path, "not json").unwrap();
-        let result = read_redmine_config(tmp.path());
+        let result = read_service_config(tmp.path());
         assert_eq!(result, serde_json::json!({}));
     }
 
@@ -806,5 +799,142 @@ mod tests {
             fn_body.contains("compose_up_recreate"),
             "restart_integration_containers must use compose_up_recreate, not compose_up"
         );
+    }
+
+    // -- is_service_configured tests --
+
+    /// Helper: creates the token directory for a service under a fake home.
+    fn make_svc_token_dir(
+        home: &std::path::Path,
+        project: &str,
+        service: &str,
+    ) -> std::path::PathBuf {
+        let dir = home
+            .join(speedwave_runtime::consts::DATA_DIR)
+            .join("tokens")
+            .join(project)
+            .join(service);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn is_service_configured_returns_false_when_only_secrets_exist() {
+        // SharePoint: access_token + refresh_token exist (file-based secrets),
+        // but client_id/tenant_id/site_id/base_path are missing → false
+        let tmp = tempfile::tempdir().unwrap();
+        let svc_dir = make_svc_token_dir(tmp.path(), "proj", "sharepoint");
+        std::fs::write(svc_dir.join("access_token"), "tok").unwrap();
+        std::fs::write(svc_dir.join("refresh_token"), "ref").unwrap();
+
+        assert!(
+            !is_service_configured_with_home(tmp.path(), "proj", "sharepoint"),
+            "should be false when non-secret fields (client_id etc.) are missing"
+        );
+    }
+
+    #[test]
+    fn is_service_configured_returns_true_when_all_fields_present() {
+        // SharePoint: all 6 auth_fields are file-based → all must exist as non-empty files
+        let tmp = tempfile::tempdir().unwrap();
+        let svc_dir = make_svc_token_dir(tmp.path(), "proj", "sharepoint");
+        std::fs::write(svc_dir.join("access_token"), "tok").unwrap();
+        std::fs::write(svc_dir.join("refresh_token"), "ref").unwrap();
+        std::fs::write(
+            svc_dir.join("client_id"),
+            "550e8400-e29b-41d4-a716-446655440000",
+        )
+        .unwrap();
+        std::fs::write(svc_dir.join("tenant_id"), "common").unwrap();
+        std::fs::write(svc_dir.join("site_id"), "my-site").unwrap();
+        std::fs::write(svc_dir.join("base_path"), "/Shared Documents").unwrap();
+
+        assert!(
+            is_service_configured_with_home(tmp.path(), "proj", "sharepoint"),
+            "should be true when all auth_fields are present"
+        );
+    }
+
+    #[test]
+    fn is_service_configured_checks_stored_in_config_json_for_redmine() {
+        // Redmine has host_url, project_id, project_name in config.json + api_key as file
+        let tmp = tempfile::tempdir().unwrap();
+        let svc_dir = make_svc_token_dir(tmp.path(), "proj", "redmine");
+
+        // Only api_key file — config.json fields missing → false
+        std::fs::write(svc_dir.join("api_key"), "secret").unwrap();
+        assert!(
+            !is_service_configured_with_home(tmp.path(), "proj", "redmine"),
+            "should be false when config.json fields are missing"
+        );
+
+        // Add config.json with required fields → true
+        let config = serde_json::json!({
+            "host_url": "https://redmine.example.com",
+            "project_id": "my-proj",
+            "project_name": "My Project"
+        });
+        std::fs::write(
+            svc_dir.join("config.json"),
+            serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            is_service_configured_with_home(tmp.path(), "proj", "redmine"),
+            "should be true when all auth_fields (file + config.json) are present"
+        );
+    }
+
+    #[test]
+    fn is_service_configured_returns_false_for_empty_files() {
+        // Slack: bot_token + user_token exist but are empty → false
+        let tmp = tempfile::tempdir().unwrap();
+        let svc_dir = make_svc_token_dir(tmp.path(), "proj", "slack");
+        std::fs::write(svc_dir.join("bot_token"), "").unwrap();
+        std::fs::write(svc_dir.join("user_token"), "").unwrap();
+
+        assert!(
+            !is_service_configured_with_home(tmp.path(), "proj", "slack"),
+            "should be false when token files are empty (0 bytes)"
+        );
+
+        // Write non-empty content → true
+        std::fs::write(svc_dir.join("bot_token"), "xoxb-123").unwrap();
+        std::fs::write(svc_dir.join("user_token"), "xoxp-456").unwrap();
+        assert!(
+            is_service_configured_with_home(tmp.path(), "proj", "slack"),
+            "should be true when token files are non-empty"
+        );
+    }
+
+    #[test]
+    fn is_service_configured_returns_false_for_empty_config_json_values() {
+        // Redmine: config.json exists but host_url is empty string → false
+        let tmp = tempfile::tempdir().unwrap();
+        let svc_dir = make_svc_token_dir(tmp.path(), "proj", "redmine");
+        std::fs::write(svc_dir.join("api_key"), "secret").unwrap();
+        let config = serde_json::json!({
+            "host_url": "",
+            "project_id": "proj",
+            "project_name": "Proj"
+        });
+        std::fs::write(
+            svc_dir.join("config.json"),
+            serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            !is_service_configured_with_home(tmp.path(), "proj", "redmine"),
+            "should be false when a config.json field is an empty string"
+        );
+    }
+
+    #[test]
+    fn read_service_config_returns_empty_for_missing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nonexistent = tmp.path().join("does-not-exist");
+        let result = read_service_config(&nonexistent);
+        assert_eq!(result, serde_json::json!({}));
     }
 }

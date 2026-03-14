@@ -8,9 +8,9 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { error as logError } from '@tauri-apps/plugin-log';
+import { TauriService } from '../services/tauri.service';
+import { ProjectStateService } from '../services/project-state.service';
 import type { ProjectEntry, ProjectList } from '../models/update';
 
 /** Manages project switching and selection in the toolbar. */
@@ -216,12 +216,14 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
   addError: string | null = null;
 
   private cdr = inject(ChangeDetectorRef);
-  private unlistenProjectSwitch: UnlistenFn | null = null;
+  private tauri = inject(TauriService);
+  private projectState = inject(ProjectStateService);
+  private unsubProjectSettled: (() => void) | null = null;
 
   /** Loads available projects from the backend on initialization. */
   async ngOnInit(): Promise<void> {
     try {
-      const result = await invoke<ProjectList>('list_projects');
+      const result = await this.tauri.invoke<ProjectList>('list_projects');
       this.projects = result.projects;
       this.activeProject = result.active_project;
       this.cdr.markForCheck();
@@ -229,28 +231,24 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
       // Not running inside Tauri or command not registered yet
     }
 
-    listen<string>('project_switched', async () => {
+    // Refresh list on settled (not just ready — failed add still registers project)
+    this.unsubProjectSettled = this.projectState.onProjectSettled(async () => {
       try {
-        const result = await invoke<ProjectList>('list_projects');
+        const result = await this.tauri.invoke<ProjectList>('list_projects');
         this.projects = result.projects;
         this.activeProject = result.active_project;
         this.cdr.markForCheck();
       } catch (err) {
-        console.error('project_switched: failed to refresh project list:', err);
+        console.error('project settled: failed to refresh project list:', err);
       }
-    })
-      .then((unlisten) => {
-        this.unlistenProjectSwitch = unlisten;
-      })
-      // Expected to fail in non-Tauri environments (e.g. unit tests, browser preview)
-      .catch(() => {});
+    });
   }
 
-  /** Unsubscribes from the project_switched event listener. */
+  /** Unsubscribes from the project settled listener. */
   ngOnDestroy(): void {
-    if (this.unlistenProjectSwitch) {
-      this.unlistenProjectSwitch();
-      this.unlistenProjectSwitch = null;
+    if (this.unsubProjectSettled) {
+      this.unsubProjectSettled();
+      this.unsubProjectSettled = null;
     }
   }
 
@@ -270,15 +268,14 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
     this.isOpen = false;
     this.resetAddForm();
     try {
-      await invoke('switch_project', { name });
-      this.activeProject = name;
+      await this.projectState.switchProject(name);
     } catch (err) {
       logError(`Failed to switch project: ${String(err)}`).catch(() => {});
     }
     this.cdr.markForCheck();
   }
 
-  /** Adds a new project and closes the form. The project_switched event listener handles list refresh. */
+  /** Adds a new project and closes the form. The settled listener handles list refresh. */
   async addProject(): Promise<void> {
     const name = this.newProjectName.trim();
     const dir = this.newProjectDir.trim();
@@ -294,8 +291,7 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
 
     try {
-      await invoke('add_project', { name, dir });
-      // project_switched event listener handles list refresh
+      await this.projectState.addProject(name, dir);
       this.resetAddForm();
       this.isOpen = false;
     } catch (err) {

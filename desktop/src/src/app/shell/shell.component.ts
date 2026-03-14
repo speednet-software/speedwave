@@ -1,7 +1,15 @@
-import { ChangeDetectionStrategy, Component } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  Component,
+  inject,
+  OnDestroy,
+  OnInit,
+} from '@angular/core';
 import { RouterOutlet, RouterLink, RouterLinkActive } from '@angular/router';
 import { ProjectSwitcherComponent } from '../project-switcher/project-switcher.component';
 import { UpdateNotificationComponent } from '../update-notification/update-notification.component';
+import { ProjectStateService } from '../services/project-state.service';
 
 /** Main application shell with header navigation and project switcher. */
 @Component({
@@ -17,6 +25,18 @@ import { UpdateNotificationComponent } from '../update-notification/update-notif
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="app-layout">
+      @if (switching) {
+        <div class="project-switch-overlay" data-testid="project-switch-overlay">
+          <div class="project-switch-spinner"></div>
+          <p class="project-switch-text">Switching project...</p>
+        </div>
+      }
+      @if (switchError) {
+        <div class="project-switch-error-banner" data-testid="project-switch-error">
+          <span>{{ switchError }}</span>
+          <button (click)="dismissError()">Dismiss</button>
+        </div>
+      }
       <app-update-notification />
       <header class="app-header">
         <span class="app-title" data-testid="shell-title">Speedwave</span>
@@ -85,7 +105,86 @@ import { UpdateNotificationComponent } from '../update-notification/update-notif
         overflow-y: auto;
         overflow-x: hidden;
       }
+      .project-switch-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: rgba(26, 26, 46, 0.92);
+      }
+      .project-switch-spinner {
+        width: 32px;
+        height: 32px;
+        border: 3px solid #333;
+        border-top-color: #e94560;
+        border-radius: 50%;
+        animation: shell-spin 0.8s linear infinite;
+      }
+      @keyframes shell-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .project-switch-text {
+        margin-top: 16px;
+        font-family: monospace;
+        font-size: 14px;
+        color: #e0e0e0;
+      }
+      .project-switch-error-banner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 16px;
+        background: #3d0000;
+        border-bottom: 1px solid #e94560;
+        color: #e94560;
+        font-size: 13px;
+        font-family: monospace;
+      }
+      .project-switch-error-banner button {
+        background: none;
+        border: 1px solid #e94560;
+        color: #e94560;
+        padding: 2px 10px;
+        border-radius: 4px;
+        font-size: 12px;
+        cursor: pointer;
+      }
     `,
   ],
 })
-export class ShellComponent {}
+export class ShellComponent implements OnInit, OnDestroy {
+  switching = false;
+  switchError = '';
+  private unsubscribe: (() => void) | null = null;
+  private projectState = inject(ProjectStateService);
+  private cdr = inject(ChangeDetectorRef);
+
+  /** Bootstraps ProjectStateService and subscribes to state changes. */
+  ngOnInit(): void {
+    this.projectState.init();
+    this.unsubscribe = this.projectState.onChange(() => {
+      this.switching = this.projectState.status === 'switching';
+      this.switchError = this.projectState.status === 'error' ? this.projectState.error : '';
+      this.cdr.markForCheck();
+    });
+  }
+
+  /** Dismisses the error banner. */
+  dismissError(): void {
+    this.switchError = '';
+    this.cdr.markForCheck();
+  }
+
+  /** Cleans up the project state subscription. */
+  ngOnDestroy(): void {
+    if (this.unsubscribe) {
+      this.unsubscribe();
+      this.unsubscribe = null;
+    }
+  }
+}

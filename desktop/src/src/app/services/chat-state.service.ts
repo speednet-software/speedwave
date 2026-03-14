@@ -1,6 +1,7 @@
 import { Injectable, inject } from '@angular/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
 import { TauriService } from './tauri.service';
+import { ProjectStateService } from './project-state.service';
 import type {
   ChatMessage,
   MessageBlock,
@@ -44,16 +45,18 @@ export class ChatStateService {
     return this._sessionStats;
   }
 
-  containerStatus: 'checking' | 'starting' | 'running' | 'error' = 'checking';
+  containerStatus: 'checking' | 'starting' | 'switching' | 'running' | 'error' = 'checking';
   containerError = '';
   /** The currently active project name, set during checkContainers. */
   activeProject: string | null = null;
 
   private unlisten: UnlistenFn | null = null;
-  private unlistenProjectSwitch: UnlistenFn | null = null;
   private listenerReady = false;
   private initialized = false;
   private tauri = inject(TauriService);
+  private projectState = inject(ProjectStateService);
+  private unsubProjectChange: (() => void) | null = null;
+  private unsubProjectSettled: (() => void) | null = null;
 
   /**
    * Test-only setter for private backing fields.
@@ -93,12 +96,12 @@ export class ChatStateService {
     }
   }
 
-  /** Ensures the stream listener, project switch listener, and container check run exactly once. */
+  /** Ensures the stream listener and container check run exactly once. */
   async init(): Promise<void> {
     if (!this.listenerReady) {
       this.listenerReady = true;
       await this.setupStreamListener();
-      await this.setupProjectSwitchListener();
+      this.setupProjectStateListeners();
     }
     if (!this.initialized) {
       this.initialized = true;
@@ -348,24 +351,31 @@ export class ChatStateService {
     this.notifyChange();
   }
 
-  /** Listens for project_switched events and restarts the chat session. */
-  private async setupProjectSwitchListener(): Promise<void> {
-    try {
-      this.unlistenProjectSwitch = await this.tauri.listen<string>('project_switched', async () => {
+  /**
+   * Subscribes to ProjectStateService for project switching lifecycle.
+   * On switching: clears chat state immediately (cross-project leak prevention).
+   * On settled: syncs local state with backend reality (chat already started by backend).
+   */
+  private setupProjectStateListeners(): void {
+    this.unsubProjectChange = this.projectState.onChange(() => {
+      if (this.projectState.status === 'switching') {
         this._messages = [];
         this._currentBlocks = [];
         this.isStreaming = false;
         this._sessionStats = null;
-        this.initialized = false;
+        this.containerStatus = 'switching';
+        this.containerError = '';
         this.notifyChange();
-        this.initialized = true;
-        await this.checkContainers();
-      });
-    } catch (err) {
-      if (this.tauri.isRunningInTauri()) {
-        console.error('Failed to set up project switch listener:', err);
       }
-    }
+    });
+
+    this.unsubProjectSettled = this.projectState.onProjectSettled(() => {
+      const project = this.projectState.activeProject;
+      this.activeProject = project;
+      this.containerStatus = project ? 'running' : 'error';
+      this.containerError = this.projectState.error;
+      this.notifyChange();
+    });
   }
 
   /** Sets up the Tauri event listener for streaming chat responses. */

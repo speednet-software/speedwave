@@ -20,6 +20,7 @@ mod ide_bridge;
 mod integrations_cmd;
 mod logging_cmd;
 mod mcp_os_process;
+mod oauth_cmd;
 mod plugin_cmd;
 mod reconcile;
 mod setup_wizard;
@@ -213,19 +214,85 @@ fn apply_switch_project(
 }
 
 #[tauri::command]
-fn switch_project(name: String, app: tauri::AppHandle) -> Result<(), String> {
-    config::with_config_lock(|| {
+async fn switch_project(
+    name: String,
+    app: tauri::AppHandle,
+    chat_state: tauri::State<'_, SharedChatSession>,
+) -> Result<(), String> {
+    let previous = config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
+        let prev = user_config.active_project.clone();
         apply_switch_project(&mut user_config, &name)?;
         config::save_user_config(&user_config)?;
-        Ok(())
+        Ok(prev)
     })
     .map_err(|e| e.to_string())?;
 
     use tauri::Emitter;
-    let _ = app.emit("project_switched", &name);
+    let _ = app.emit(
+        "project_switch_started",
+        serde_json::json!({ "project": name }),
+    );
 
+    // Phase 1: recreate containers
+    if let Err(e) = containers_cmd::recreate_project_containers(name.clone()).await {
+        rollback_and_emit_failed(&app, previous, &e.to_string());
+        return Err(e);
+    }
+
+    // Phase 2: rebind chat session
+    if let Err(e) = rebind_chat(&name, &app, &chat_state) {
+        rollback_and_emit_failed(&app, previous, &e.to_string());
+        return Err(e);
+    }
+
+    let _ = app.emit(
+        "project_switch_succeeded",
+        serde_json::json!({ "project": name }),
+    );
     Ok(())
+}
+
+fn rebind_chat(
+    project: &str,
+    app: &tauri::AppHandle,
+    chat_state: &tauri::State<'_, SharedChatSession>,
+) -> Result<(), String> {
+    check_project(project)?;
+    let mut session = chat_state
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    session.stop().map_err(|e| e.to_string())?;
+    *session = ChatSession::new(project);
+    session.start(app.clone(), None).map_err(|e| e.to_string())
+}
+
+pub(crate) fn rollback_and_emit_failed(
+    app: &tauri::AppHandle,
+    previous: Option<String>,
+    error: &str,
+) {
+    let rollback_err = config::with_config_lock(|| {
+        let mut cfg = config::load_user_config()?;
+        cfg.active_project = previous.clone();
+        config::save_user_config(&cfg)?;
+        Ok(())
+    })
+    .err();
+
+    let full_error = match rollback_err {
+        Some(rb) => format!("{error}. Rollback also failed: {rb}"),
+        None => error.to_string(),
+    };
+
+    use tauri::Emitter;
+    let _ = app.emit(
+        "project_switch_failed",
+        serde_json::json!({
+            "project": previous,
+            "error": full_error,
+        }),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -937,6 +1004,10 @@ fn main() {
             integrations_cmd::save_redmine_mappings,
             integrations_cmd::delete_integration_credentials,
             integrations_cmd::restart_integration_containers,
+            containers_cmd::recreate_project_containers,
+            // OAuth
+            oauth_cmd::start_sharepoint_oauth,
+            oauth_cmd::cancel_sharepoint_oauth,
             // Plugins
             plugin_cmd::get_plugins,
             plugin_cmd::install_plugin,

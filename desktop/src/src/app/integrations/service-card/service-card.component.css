@@ -212,3 +212,85 @@
   font-size: 12px;
   font-family: monospace;
 }
+
+.oauth-section {
+  margin: 16px 0;
+  padding: 16px;
+  background: #1a1a2e;
+  border: 1px solid #0f3460;
+  border-radius: 4px;
+}
+.user-code {
+  font-size: 28px;
+  font-family: monospace;
+  font-weight: 700;
+  letter-spacing: 4px;
+  color: #e94560;
+  margin: 12px 0;
+  text-align: center;
+}
+.btn-oauth {
+  padding: 8px 20px;
+  background: transparent;
+  color: #e94560;
+  border: 1px solid #e94560;
+  border-radius: 4px;
+  font-size: 14px;
+  font-family: monospace;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-oauth:hover {
+  background: #e94560;
+  color: #1a1a2e;
+}
+.polling-status {
+  color: #aaa;
+  font-size: 13px;
+  margin: 8px 0;
+}
+.oauth-success {
+  color: #95d5b2;
+  font-size: 14px;
+}
+.oauth-error {
+  color: #e09090;
+  font-size: 14px;
+}
+.btn-cancel-oauth {
+  padding: 6px 16px;
+  background: transparent;
+  color: #e09090;
+  border: 1px solid #e09090;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: monospace;
+  cursor: pointer;
+  margin-top: 8px;
+}
+.verification-url-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+  flex-wrap: wrap;
+}
+.btn-link {
+  padding: 6px 16px;
+  background: transparent;
+  color: #e94560;
+  border: 1px solid #e94560;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: monospace;
+  cursor: pointer;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.verification-url {
+  font-size: 12px;
+  font-family: monospace;
+  color: #aaa;
+  user-select: all;
+  word-break: break-all;
+}

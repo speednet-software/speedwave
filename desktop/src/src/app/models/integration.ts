@@ -4,6 +4,7 @@ export interface AuthField {
   label: string;
   field_type: string;
   placeholder: string;
+  oauth_flow: boolean;
 }
 
 /** Status and configuration details for a container-based MCP integration. */
@@ -30,4 +31,19 @@ export interface OsIntegrationStatusEntry {
 export interface IntegrationsResponse {
   services: IntegrationStatusEntry[];
   os: OsIntegrationStatusEntry[];
+}
+
+/** Information returned when starting the Device Code Flow. */
+export interface DeviceCodeInfo {
+  user_code: string;
+  verification_uri: string;
+  expires_in: number;
+  request_id: string;
+}
+
+/** Progress event emitted by the OAuth polling task. */
+export interface OAuthProgressEvent {
+  status: 'polling' | 'success' | 'error' | 'cancelled' | 'expired';
+  message: string;
+  request_id: string;
 }
