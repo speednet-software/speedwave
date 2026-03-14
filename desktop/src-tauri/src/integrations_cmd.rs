@@ -116,8 +116,11 @@ fn save_redmine_credentials(
 
 /// Validates a credential field name and value.
 fn validate_credential_field(key: &str, value: &str) -> Result<(), String> {
-    if key.contains('/') || key.contains('\\') || key.contains("..") {
+    if key.contains('/') || key.contains('\\') || key.contains("..") || key.contains('\0') {
         return Err(format!("invalid field name: {}", key));
+    }
+    if value.contains('\0') {
+        return Err(format!("value for '{}' contains null byte", key));
     }
     if value.len() > 4096 {
         return Err(format!("value for '{}' exceeds 4096 bytes", key));
@@ -604,6 +607,16 @@ mod tests {
     #[test]
     fn validate_credential_field_rejects_dotdot() {
         assert!(validate_credential_field("foo..bar", "value").is_err());
+    }
+
+    #[test]
+    fn validate_credential_field_rejects_null_byte_in_key() {
+        assert!(validate_credential_field("api\x00key", "value").is_err());
+    }
+
+    #[test]
+    fn validate_credential_field_rejects_null_byte_in_value() {
+        assert!(validate_credential_field("key", "val\x00ue").is_err());
     }
 
     #[test]

@@ -405,15 +405,16 @@ fn build_ask_user_response(request: &ControlRequest, selected_label: &str) -> se
     // Inject answers into the appropriate format
     if let Some(questions) = updated_input["questions"].as_array() {
         // Wrapped format: {"questions":[{...}]}
-        if let Some(first_q) = questions.first() {
-            let question_text = first_q["question"].as_str().unwrap_or("");
-            let mut answers = serde_json::Map::new();
-            answers.insert(
-                question_text.to_string(),
-                serde_json::Value::String(selected_label.to_string()),
-            );
-            updated_input["answers"] = serde_json::Value::Object(answers);
-        }
+        let question_text = questions
+            .first()
+            .and_then(|q| q["question"].as_str())
+            .unwrap_or("");
+        let mut answers = serde_json::Map::new();
+        answers.insert(
+            question_text.to_string(),
+            serde_json::Value::String(selected_label.to_string()),
+        );
+        updated_input["answers"] = serde_json::Value::Object(answers);
     } else {
         // Flat format: {"question":"...", ...}
         let question_text = updated_input["question"].as_str().unwrap_or("").to_string();
@@ -502,7 +503,7 @@ impl ChatSession {
         project_name: &str,
         user_config: &config::SpeedwaveUserConfig,
         resume_session_id: Option<&str>,
-    ) -> anyhow::Result<(std::path::PathBuf, Vec<String>, String)> {
+    ) -> anyhow::Result<(Vec<String>, String)> {
         if let Some(id) = resume_session_id {
             history::validate_session_id(id)?;
         }
@@ -514,7 +515,7 @@ impl ChatSession {
         let args = build_claude_args(resume_session_id, &resolved.flags);
         let container = claude_container_name(project_name);
 
-        Ok((project_dir, args, container))
+        Ok((args, container))
     }
 
     /// Start Claude Code in stream-json mode inside the container.
@@ -530,7 +531,7 @@ impl ChatSession {
         let rt = runtime::detect_runtime();
         let user_config = config::load_user_config()?;
 
-        let (_project_dir, args, container) =
+        let (args, container) =
             Self::prepare_start(&self.project_name, &user_config, resume_session_id)?;
 
         let mut cmd = rt.container_exec_piped(
@@ -753,8 +754,13 @@ impl ChatSession {
                 pending.tool_name
             );
             // Restore the pending request so the user can retry
-            if let Ok(mut map) = self.pending_requests.lock() {
-                map.insert(tool_use_id.to_string(), pending);
+            match self.pending_requests.lock() {
+                Ok(mut map) => {
+                    map.insert(tool_use_id.to_string(), pending);
+                }
+                Err(poison_err) => {
+                    log::error!("failed to restore pending request: mutex poisoned: {poison_err}");
+                }
             }
             return Err(anyhow::anyhow!("failed to write answer to stdin: {e}"));
         }
@@ -1525,6 +1531,23 @@ mod tests {
     }
 
     #[test]
+    fn build_ask_user_response_empty_questions_array_sets_answers() {
+        let pending = ControlRequest {
+            request_id: "req_empty".to_string(),
+            tool_name: "AskUserQuestion".to_string(),
+            input: serde_json::json!({
+                "questions": []
+            }),
+            tool_use_id: "toolu_empty_q".to_string(),
+        };
+        let resp = build_ask_user_response(&pending, "fallback");
+        assert_eq!(resp["type"], "control_response");
+        let updated = &resp["response"]["response"]["updatedInput"];
+        // With empty questions, the answer key is "" (empty question text)
+        assert_eq!(updated["answers"][""], "fallback");
+    }
+
+    #[test]
     fn emit_ask_user_from_control_request_flat() {
         let req = ControlRequest {
             request_id: "req_20".to_string(),
@@ -1657,11 +1680,7 @@ mod tests {
         };
         let result = ChatSession::prepare_start("myproject", &user_config, None);
         assert!(result.is_ok());
-        let (project_dir, args, container) = result.unwrap();
-        assert_eq!(
-            project_dir,
-            std::path::PathBuf::from("/home/user/myproject")
-        );
+        let (args, container) = result.unwrap();
         assert!(args.contains(&"-p".to_string()));
         assert!(container.contains("myproject"));
     }
@@ -1682,7 +1701,7 @@ mod tests {
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
         let result = ChatSession::prepare_start("proj", &user_config, Some(session_id));
         assert!(result.is_ok());
-        let (_dir, args, _container) = result.unwrap();
+        let (args, _container) = result.unwrap();
         assert!(args.contains(&"--resume".to_string()));
         assert!(args.contains(&session_id.to_string()));
     }

@@ -8,7 +8,7 @@ describe('ToolBlockComponent', () => {
   let component: ToolBlockComponent;
   let fixture: ComponentFixture<ToolBlockComponent>;
 
-  /** Counter to ensure unique tool_ids across tests so static Set state does not leak. */
+  /** Counter to ensure unique tool_ids across tests. */
   let toolIdCounter = 0;
 
   const makeTool = (overrides: Partial<ToolUseBlock> = {}): ToolUseBlock => ({

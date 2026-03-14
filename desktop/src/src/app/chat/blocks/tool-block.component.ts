@@ -265,8 +265,8 @@ export class ToolBlockComponent {
   private normalizer = inject(ToolNormalizerService);
   private cdr = inject(ChangeDetectorRef);
 
-  /** Local collapsed state keyed by tool_id (avoids mutating @Input). */
-  private static collapsedTools = new Set<string>();
+  /** Collapsed state keyed by tool_id (avoids mutating @Input). */
+  private collapsedTools = new Set<string>();
 
   /** Cached normalized result and the input_json it was computed from. */
   private cachedInputJson = '';
@@ -283,15 +283,15 @@ export class ToolBlockComponent {
 
   /** Returns whether this tool block is collapsed. */
   isCollapsed(): boolean {
-    return ToolBlockComponent.collapsedTools.has(this.tool.tool_id);
+    return this.collapsedTools.has(this.tool.tool_id);
   }
 
   /** Toggles collapsed state for this tool block. */
   toggleCollapsed(): void {
-    if (ToolBlockComponent.collapsedTools.has(this.tool.tool_id)) {
-      ToolBlockComponent.collapsedTools.delete(this.tool.tool_id);
+    if (this.collapsedTools.has(this.tool.tool_id)) {
+      this.collapsedTools.delete(this.tool.tool_id);
     } else {
-      ToolBlockComponent.collapsedTools.add(this.tool.tool_id);
+      this.collapsedTools.add(this.tool.tool_id);
     }
     this.cdr.markForCheck();
   }

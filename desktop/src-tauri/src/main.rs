@@ -91,6 +91,9 @@ fn answer_question(
     answer: String,
     state: tauri::State<SharedChatSession>,
 ) -> Result<(), String> {
+    if answer.len() > 1_000_000 {
+        return Err("Answer too long".to_string());
+    }
     let mut session = state.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     session
         .answer_question(&tool_use_id, &answer)
