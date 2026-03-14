@@ -48,6 +48,9 @@ windows-sys = { version = "0.61", features = [
 # Usage: cargo tauri build --features e2e
 e2e = ["dep:tauri-plugin-webdriver"]
 
+[dev-dependencies]
+serial_test = "3"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

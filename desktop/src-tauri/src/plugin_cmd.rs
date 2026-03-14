@@ -180,15 +180,18 @@ pub fn install_plugin(zip_path: String) -> Result<String, String> {
     let needs_credentials = manifest.auth_fields.iter().any(|f| f.is_secret);
     if !needs_credentials {
         let plugin_key = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
-        let _lock = crate::CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
-        let mut cfg = config::load_user_config().map_err(|e| e.to_string())?;
-        if let Some(active) = cfg.active_project.clone() {
-            if let Some(entry) = cfg.projects.iter_mut().find(|p| p.name == active) {
-                let integrations = entry.integrations.get_or_insert_with(Default::default);
-                integrations.set_plugin_enabled(plugin_key, true);
-                config::save_user_config(&cfg).map_err(|e| e.to_string())?;
+        config::with_config_lock(|| {
+            let mut cfg = config::load_user_config()?;
+            if let Some(active) = cfg.active_project.clone() {
+                if let Some(entry) = cfg.projects.iter_mut().find(|p| p.name == active) {
+                    let integrations = entry.integrations.get_or_insert_with(Default::default);
+                    integrations.set_plugin_enabled(plugin_key, true);
+                    config::save_user_config(&cfg)?;
+                }
             }
-        }
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
     }
 
     Ok(format!(
@@ -215,31 +218,40 @@ pub fn remove_plugin(slug: String) -> Result<(), String> {
     // Delete plugin files from ~/.speedwave/plugins/<slug>/
     plugin::remove_plugin(&slug).map_err(|e| e.to_string())?;
 
+    // Collect project names for token cleanup (before config lock)
+    let project_names: Vec<String> = {
+        let cfg = config::load_user_config().map_err(|e| e.to_string())?;
+        cfg.projects.iter().map(|p| p.name.clone()).collect()
+    };
+
     // Clean config: plugin_settings + integrations.plugins
-    let _lock = crate::CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
-    let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
-    let mut changed = false;
-    for project in &mut user_config.projects {
-        if let Some(ps) = project.plugin_settings.as_mut() {
-            if ps.remove(&slug).is_some() {
-                changed = true;
-            }
-        }
-        if let Some(integrations) = project.integrations.as_mut() {
-            if let Some(plugins) = integrations.plugins.as_mut() {
-                if plugins.remove(&service_id).is_some() {
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        let mut changed = false;
+        for project in &mut user_config.projects {
+            if let Some(ps) = project.plugin_settings.as_mut() {
+                if ps.remove(&slug).is_some() {
                     changed = true;
                 }
             }
+            if let Some(integrations) = project.integrations.as_mut() {
+                if let Some(plugins) = integrations.plugins.as_mut() {
+                    if plugins.remove(&service_id).is_some() {
+                        changed = true;
+                    }
+                }
+            }
         }
-    }
-    if changed {
-        config::save_user_config(&user_config).map_err(|e| e.to_string())?;
-    }
+        if changed {
+            config::save_user_config(&user_config)?;
+        }
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
 
     // Delete tokens from ~/.speedwave/tokens/<project>/<service_id>/
-    for project in &user_config.projects {
-        let svc_dir = token_dir_for(&project.name, &service_id)?;
+    for project_name in &project_names {
+        let svc_dir = token_dir_for(project_name, &service_id)?;
         if svc_dir.exists() {
             if auth_fields.is_empty() {
                 std::fs::remove_dir_all(&svc_dir).map_err(|e| e.to_string())?;
@@ -286,22 +298,21 @@ pub fn set_plugin_enabled(
         ));
     }
 
-    let _lock = crate::CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
 
-    let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
+        let entry = user_config
+            .projects
+            .iter_mut()
+            .find(|p| p.name == project)
+            .ok_or_else(|| anyhow::anyhow!("project '{}' not found", project))?;
 
-    let entry = user_config
-        .projects
-        .iter_mut()
-        .find(|p| p.name == project)
-        .ok_or_else(|| format!("project '{}' not found", project))?;
+        let integrations = entry.integrations.get_or_insert_with(Default::default);
+        integrations.set_plugin_enabled(&service_id, enabled);
 
-    let integrations = entry.integrations.get_or_insert_with(Default::default);
-    integrations.set_plugin_enabled(&service_id, enabled);
-
-    config::save_user_config(&user_config).map_err(|e| e.to_string())?;
-
-    Ok(())
+        config::save_user_config(&user_config)
+    })
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -352,20 +363,21 @@ pub fn plugin_save_settings(
     check_project(&project)?;
     log::info!("plugin_save_settings: project={project} slug={slug}");
 
-    let _lock = crate::CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
 
-    let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
+        let entry = user_config
+            .projects
+            .iter_mut()
+            .find(|p| p.name == project)
+            .ok_or_else(|| anyhow::anyhow!("project '{}' not found", project))?;
 
-    let entry = user_config
-        .projects
-        .iter_mut()
-        .find(|p| p.name == project)
-        .ok_or_else(|| format!("project '{}' not found", project))?;
+        let ps = entry.plugin_settings.get_or_insert_with(HashMap::new);
+        ps.insert(slug.clone(), settings.clone());
 
-    let ps = entry.plugin_settings.get_or_insert_with(HashMap::new);
-    ps.insert(slug, settings);
-
-    config::save_user_config(&user_config).map_err(|e| e.to_string())
+        config::save_user_config(&user_config)
+    })
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -400,11 +412,8 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
 
     let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
 
-    // Acquire lock BEFORE any mutations
-    let _lock = crate::CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
-
+    // Delete token files (no config lock needed for filesystem ops)
     let svc_dir = token_dir_for(&project, sid)?;
-
     for field in &manifest.auth_fields {
         let path = svc_dir.join(&field.key);
         if path.exists() {
@@ -413,14 +422,16 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
     }
 
     // Auto-disable the plugin since credentials are removed
-    let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
-    if let Some(entry) = user_config.projects.iter_mut().find(|p| p.name == project) {
-        let integrations = entry.integrations.get_or_insert_with(Default::default);
-        integrations.set_plugin_enabled(sid, false);
-        config::save_user_config(&user_config).map_err(|e| e.to_string())?;
-    }
-
-    Ok(())
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        if let Some(entry) = user_config.projects.iter_mut().find(|p| p.name == project) {
+            let integrations = entry.integrations.get_or_insert_with(Default::default);
+            integrations.set_plugin_enabled(sid, false);
+            config::save_user_config(&user_config)?;
+        }
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

@@ -493,6 +493,7 @@ pub fn cancel_sharepoint_oauth() {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     // -- Tenant ID validation --
 
@@ -655,6 +656,7 @@ mod tests {
     // -- Flow state --
 
     #[test]
+    #[serial]
     fn cancel_clears_active_flow() {
         // Set up a flow
         let cancel = CancellationToken::new();
@@ -676,6 +678,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn new_flow_cancels_previous_token() {
         let old_cancel = CancellationToken::new();
         let new_cancel = CancellationToken::new();
@@ -712,6 +715,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn cancel_bumps_generation() {
         let gen_before = {
             let state = FLOW_STATE.lock().unwrap();
@@ -732,6 +736,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn clear_flow_if_current_only_clears_matching_id() {
         let cancel = CancellationToken::new();
         {
@@ -755,6 +760,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn clear_flow_if_current_clears_matching_id() {
         let cancel = CancellationToken::new();
         {
@@ -854,6 +860,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn save_tokens_error_path_clears_flow() {
         // Verifies the contract: when save_tokens fails, the polling task calls
         // clear_flow_if_current (lines 359-367 in the polling loop). We test the

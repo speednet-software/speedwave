@@ -50,11 +50,6 @@ type SharedUpdateVersion = Arc<Mutex<Option<String>>>;
 
 const MAIN_WINDOW_LABEL: &str = "main";
 
-/// Global mutex protecting all read-modify-write cycles on config.json.
-/// Without this, concurrent Tauri commands (e.g. toggling mail then notes in quick
-/// succession) can lose writes due to TOCTOU races.
-static CONFIG_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
-
 /// Stop flag for the mcp-os watchdog thread. Set during app exit cleanup
 /// to prevent the watchdog from respawning mcp-os during shutdown.
 static WATCHDOG_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
