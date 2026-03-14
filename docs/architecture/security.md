@@ -12,7 +12,7 @@ The following security principles are inherited from Speedwave v1 and are **non-
 - **Hub has zero tokens** — compromise of the hub exposes nothing
 - **Kernel-level isolation** — Lima VM (macOS) / WSL2 (Windows) provides an additional isolation layer on top of container isolation
 - **Resource limits** — CPU + memory caps per container
-- **Verified downloads** — SHA256-verified binary downloads in Containerfile
+- **Verified downloads** — pinned version with SHA256-verified binary downloads (verified by official installer via GCS manifest)
 - **Minimal health endpoints** — return only `{ "status": "ok" }`, no service metadata leaked
 
 ## Container Hardening

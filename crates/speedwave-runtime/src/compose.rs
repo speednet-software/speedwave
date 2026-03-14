@@ -2035,9 +2035,8 @@ services:
     }
 
     #[test]
-    fn test_render_compose_claude_version_is_latest() {
-        // Regression guard: CLAUDE_VERSION must be "latest" in generated compose.
-        // A pinned version (e.g. "1.0.3") causes 404 on install and the container exits(1).
+    fn test_render_compose_claude_version_is_pinned() {
+        // Regression guard: CLAUDE_VERSION must be the pinned semver from defaults.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
@@ -2051,13 +2050,18 @@ services:
             None,
         )
         .unwrap();
+        let expected = format!("CLAUDE_VERSION={}", crate::defaults::CLAUDE_VERSION);
         assert!(
-            yaml.contains("CLAUDE_VERSION=latest"),
-            "render_compose must inject CLAUDE_VERSION=latest, got:\n{yaml}"
+            yaml.contains(&expected),
+            "render_compose must inject {expected}, got:\n{yaml}"
         );
         assert!(
-            !yaml.contains("CLAUDE_VERSION=1."),
-            "render_compose must not contain a pinned semver CLAUDE_VERSION"
+            !yaml.contains("CLAUDE_VERSION=latest"),
+            "render_compose must not contain CLAUDE_VERSION=latest"
+        );
+        assert!(
+            !yaml.contains("CLAUDE_VERSION=stable"),
+            "render_compose must not contain CLAUDE_VERSION=stable"
         );
     }
 

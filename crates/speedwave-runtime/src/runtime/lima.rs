@@ -289,24 +289,36 @@ impl ContainerRuntime for LimaRuntime {
             .unwrap_or(false)
     }
 
-    fn build_image(&self, tag: &str, context_dir: &str, containerfile: &str) -> anyhow::Result<()> {
+    fn build_image(
+        &self,
+        tag: &str,
+        context_dir: &str,
+        containerfile: &str,
+        build_args: &[(&str, &str)],
+    ) -> anyhow::Result<()> {
         self.require_running()?;
-        self.runner.run(
-            "limactl",
-            &[
-                "shell",
-                consts::LIMA_VM_NAME,
-                "--",
-                "sudo",
-                "nerdctl",
-                "build",
-                "-t",
-                tag,
-                "-f",
-                containerfile,
-                context_dir,
-            ],
-        )?;
+        let ba_strings: Vec<String> = build_args
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        let mut args: Vec<&str> = vec![
+            "shell",
+            consts::LIMA_VM_NAME,
+            "--",
+            "sudo",
+            "nerdctl",
+            "build",
+            "-t",
+            tag,
+            "-f",
+            containerfile,
+        ];
+        for s in &ba_strings {
+            args.push("--build-arg");
+            args.push(s);
+        }
+        args.push(context_dir);
+        self.runner.run("limactl", &args)?;
         Ok(())
     }
 
@@ -1063,6 +1075,29 @@ mod tests {
         assert!(
             commands[0].contains("nerdctl system prune --force"),
             "system_prune should run nerdctl system prune --force, got: {}",
+            commands[0]
+        );
+    }
+
+    #[test]
+    fn test_build_image_passes_build_args() {
+        let (recorded, runner) = make_recording_runner();
+        let rt = LimaRuntime::with_runner(runner);
+        let version = crate::defaults::CLAUDE_VERSION;
+        rt.build_image(
+            "my-image:latest",
+            "/ctx",
+            "/ctx/Containerfile",
+            &[("CLAUDE_VERSION", version)],
+        )
+        .unwrap();
+
+        let commands = recorded.lock().unwrap();
+        assert_eq!(commands.len(), 1);
+        let expected = format!("--build-arg CLAUDE_VERSION={}", version);
+        assert!(
+            commands[0].contains(&expected),
+            "build_image should pass {expected}, got: {}",
             commands[0]
         );
     }

@@ -9,41 +9,52 @@ pub struct ImageDef {
     pub context_dir: &'static str,
     /// Containerfile path relative to the build root.
     pub containerfile: &'static str,
+    /// Build arguments passed as `--build-arg KEY=VAL` to the container engine.
+    pub build_args: &'static [(&'static str, &'static str)],
 }
 
 /// SSOT for all container images — used by both Desktop (setup wizard) and the update flow.
 ///
 /// All paths are relative to the build root returned by `resolve_build_root()`.
+/// Build args for the Claude container — passes the pinned version to Containerfile.claude.
+const CLAUDE_BUILD_ARGS: &[(&str, &str)] = &[("CLAUDE_VERSION", crate::defaults::CLAUDE_VERSION)];
+
 pub const IMAGES: &[ImageDef] = &[
     ImageDef {
         tag: "speedwave-claude:latest",
         context_dir: "containers",
         containerfile: "containers/Containerfile.claude",
+        build_args: CLAUDE_BUILD_ARGS,
     },
     ImageDef {
         tag: "speedwave-mcp-hub:latest",
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/hub/Containerfile",
+        build_args: &[],
     },
     ImageDef {
         tag: "speedwave-mcp-slack:latest",
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/slack/Dockerfile",
+        build_args: &[],
     },
     ImageDef {
         tag: "speedwave-mcp-sharepoint:latest",
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/sharepoint/Dockerfile",
+        build_args: &[],
     },
     ImageDef {
         tag: "speedwave-mcp-redmine:latest",
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/redmine/Dockerfile",
+        build_args: &[],
     },
     ImageDef {
         tag: "speedwave-mcp-gitlab:latest",
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/gitlab/Dockerfile",
+        build_args: &[],
     },
 ];
 
@@ -299,7 +310,7 @@ fn try_build_all(runtime: &dyn ContainerRuntime, vm_root: &std::path::Path) -> a
         // on Windows, replacing the base entirely instead of appending.
         let abs_context = format!("{}/{}", root_str, img.context_dir);
         let abs_containerfile = format!("{}/{}", root_str, img.containerfile);
-        runtime.build_image(img.tag, &abs_context, &abs_containerfile)?;
+        runtime.build_image(img.tag, &abs_context, &abs_containerfile, img.build_args)?;
         built += 1;
         log::info!(
             "build_all_images: [{}/{}] {} built OK",
@@ -817,6 +828,7 @@ mod tests {
             tag: String,
             context_dir: String,
             containerfile: String,
+            build_args: Vec<(String, String)>,
         }
 
         struct MockRuntime {
@@ -852,11 +864,16 @@ mod tests {
                 tag: &str,
                 context_dir: &str,
                 containerfile: &str,
+                build_args: &[(&str, &str)],
             ) -> anyhow::Result<()> {
                 self.build_calls.lock().unwrap().push(Call {
                     tag: tag.to_string(),
                     context_dir: context_dir.to_string(),
                     containerfile: containerfile.to_string(),
+                    build_args: build_args
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect(),
                 });
                 Ok(())
             }
@@ -915,6 +932,38 @@ mod tests {
                 "containerfile should use translated root, got: {}",
                 call.containerfile
             );
+            let expected_args: Vec<(String, String)> = img
+                .build_args
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            assert_eq!(
+                call.build_args, expected_args,
+                "build_args for '{}' should match ImageDef",
+                call.tag
+            );
+        }
+    }
+
+    #[test]
+    fn test_claude_image_has_build_args() {
+        let claude_img = IMAGES
+            .iter()
+            .find(|img| img.tag.contains("claude"))
+            .unwrap();
+        assert_eq!(claude_img.build_args.len(), 1);
+        assert_eq!(claude_img.build_args[0].0, "CLAUDE_VERSION");
+        assert_eq!(claude_img.build_args[0].1, crate::defaults::CLAUDE_VERSION);
+    }
+
+    #[test]
+    fn test_non_claude_images_have_no_build_args() {
+        for img in IMAGES.iter().filter(|img| !img.tag.contains("claude")) {
+            assert!(
+                img.build_args.is_empty(),
+                "non-claude image '{}' should have empty build_args",
+                img.tag
+            );
         }
     }
 
@@ -960,6 +1009,7 @@ mod tests {
             tag: &str,
             _context_dir: &str,
             _containerfile: &str,
+            _build_args: &[(&str, &str)],
         ) -> anyhow::Result<()> {
             let n = self
                 .build_call_counter
