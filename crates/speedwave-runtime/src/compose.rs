@@ -321,11 +321,10 @@ fn apply_plugins(
         let slug = &manifest.slug;
         let service_id = manifest.service_id.as_deref();
 
-        // Only include enabled plugins (MCP plugins check service_id, non-MCP always included)
-        if let Some(sid) = service_id {
-            if !integrations.is_plugin_enabled(sid) {
-                continue;
-            }
+        // Check if plugin is enabled (by service_id for MCP plugins, by slug otherwise)
+        let plugin_key = service_id.unwrap_or(slug);
+        if !integrations.is_plugin_enabled(plugin_key) {
+            continue;
         }
 
         plugin_slugs.push(slug.clone());

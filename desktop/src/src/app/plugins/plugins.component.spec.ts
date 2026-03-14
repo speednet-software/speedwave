@@ -42,7 +42,7 @@ const MOCK_PLUGINS = {
       version: '0.1.0',
       description: 'Extra commands',
       enabled: false,
-      configured: false,
+      configured: true,
       auth_fields: [],
       current_values: {},
       token_mount: 'ro',

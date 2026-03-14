@@ -21,7 +21,7 @@ export interface SavePluginCredentialsEvent {
         <button class="card-header-btn" type="button" (click)="toggleExpand.emit(plugin.slug)">
           <span class="service-name">{{ plugin.name }}</span>
           <span class="version-badge">v{{ plugin.version }}</span>
-          @if (plugin.service_id) {
+          @if (plugin.auth_fields.length > 0) {
             <span
               class="badge"
               [class.configured]="plugin.configured"
@@ -40,22 +40,20 @@ export interface SavePluginCredentialsEvent {
           >
             Open
           </button>
-          @if (plugin.service_id) {
-            <label
-              class="toggle"
-              [class.disabled]="!plugin.configured"
-              [title]="plugin.configured ? '' : 'Configure credentials to enable'"
-            >
-              <input
-                type="checkbox"
-                [checked]="plugin.enabled"
-                [disabled]="!plugin.configured"
-                (change)="onToggle($event)"
-                [attr.data-testid]="'plugin-toggle-' + plugin.slug"
-              />
-              <span class="slider"></span>
-            </label>
-          }
+          <label
+            class="toggle"
+            [class.disabled]="!plugin.configured"
+            [title]="plugin.configured ? '' : 'Configure credentials to enable'"
+          >
+            <input
+              type="checkbox"
+              [checked]="plugin.enabled"
+              [disabled]="!plugin.configured"
+              (change)="onToggle($event)"
+              [attr.data-testid]="'plugin-toggle-' + plugin.slug"
+            />
+            <span class="slider"></span>
+          </label>
         </div>
       </div>
       <p class="card-description">{{ plugin.description }}</p>

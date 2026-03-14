@@ -43,7 +43,7 @@ function makeResourcePlugin(): PluginStatusEntry {
     version: '0.1.0',
     description: 'Extra Claude commands',
     enabled: false,
-    configured: false,
+    configured: true,
     auth_fields: [],
     current_values: {},
     token_mount: 'ro',
@@ -94,11 +94,16 @@ describe('PluginCardComponent', () => {
     expect(badge.classList.contains('not-configured')).toBe(true);
   });
 
-  it('should not show badge or toggle for resource-only plugin', () => {
+  it('should not show badge for plugin without auth_fields', () => {
     component.plugin = makeResourcePlugin();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.badge')).toBeNull();
-    expect(fixture.nativeElement.querySelector('.toggle')).toBeNull();
+  });
+
+  it('should show toggle for all plugins regardless of service_id', () => {
+    component.plugin = makeResourcePlugin();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.toggle')).not.toBeNull();
   });
 
   it('should disable toggle when not configured', () => {
