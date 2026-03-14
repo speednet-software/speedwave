@@ -679,7 +679,12 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> anyhow::Result<()> {
         let entry = archive.by_index(i)?;
         let name = entry.name().to_owned();
         if entry.enclosed_name().is_none() {
-            anyhow::bail!("Rejected ZIP entry with path traversal: '{}'", name);
+            let reason = if name.starts_with('/') || name.starts_with('\\') {
+                "absolute path"
+            } else {
+                "path traversal"
+            };
+            anyhow::bail!("Rejected ZIP entry with {}: '{}'", reason, name);
         }
         if entry.is_symlink() {
             anyhow::bail!("Rejected symlink entry '{}' in plugin archive", name);
@@ -2120,6 +2125,10 @@ mod tests {
 
         let result = extract_zip(&zip_path, &extract_dir);
         assert!(result.is_err(), "extract_zip should reject path traversal");
+        assert!(
+            result.unwrap_err().to_string().contains("path traversal"),
+            "Error should mention 'path traversal'"
+        );
 
         // File must not escape the extraction directory
         assert!(
@@ -2149,6 +2158,10 @@ mod tests {
 
         let result = extract_zip(&zip_path, &extract_dir);
         assert!(result.is_err(), "extract_zip should reject absolute paths");
+        assert!(
+            result.unwrap_err().to_string().contains("absolute path"),
+            "Error should mention 'absolute path'"
+        );
     }
 
     #[cfg(unix)]
