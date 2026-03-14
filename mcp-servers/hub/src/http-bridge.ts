@@ -220,6 +220,7 @@ export const STARTUP_RETRY_DELAYS_MS = [1_000, 2_000, 4_000];
  * @param service - Service name to check
  */
 async function checkWorkerHealthAtStartup(service: string): Promise<boolean> {
+  // 4 total attempts: attempt 0 (first try) + 3 retries
   for (let attempt = 0; attempt <= STARTUP_HEALTH_RETRIES; attempt++) {
     try {
       const ok = await checkWorkerHealth(service);

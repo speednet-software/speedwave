@@ -464,6 +464,10 @@ fn apply_worker_auth_tokens_with_dir(
         } else {
             // Remove stale directory/symlink at token path if present
             if token_path.exists() {
+                log::warn!(
+                    "Stale path at token location, removing: {}",
+                    token_path.display()
+                );
                 std::fs::remove_dir_all(&token_path)?;
             }
             uuid::Uuid::new_v4().to_string()

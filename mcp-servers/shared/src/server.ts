@@ -348,6 +348,8 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
 // Internal Helpers
 //═══════════════════════════════════════════════════════════════════════════════
 
+// Double-HMAC: avoids length-leak since timingSafeEqual requires equal-length buffers.
+// Keyed by `expected` so the comparison is constant-time regardless of input lengths.
 function safeTokenCompare(provided: string, expected: string): boolean {
   const hmac = (data: string) => createHmac('sha256', expected).update(data).digest();
   return timingSafeEqual(hmac(provided), hmac(expected));

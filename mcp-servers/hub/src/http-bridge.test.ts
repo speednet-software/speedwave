@@ -23,6 +23,7 @@ import {
 } from './tool-registry.js';
 import { SERVICES } from './http-bridge.js';
 import { populateRegistryFromPolicies, _resetRegistryForTesting } from './test-helpers.js';
+import * as authTokens from './auth-tokens.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Tests for HTTP Bridge
@@ -907,6 +908,70 @@ describe('http-bridge', () => {
       fetchMock.mockRejectedValue('string error');
 
       await expect(callWorker('gitlab', 'test', {})).rejects.toBe('string error');
+    });
+  });
+
+  describe('callWorker - Bearer auth header injection', () => {
+    let fetchMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      fetchMock = vi.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('sends Authorization: Bearer header when auth token exists', async () => {
+      vi.spyOn(authTokens, 'getAuthToken').mockReturnValue('test-secret-token');
+
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: '123',
+          result: { content: [{ type: 'text', text: '{"ok":true}' }] },
+        }),
+      });
+
+      await callWorker('gitlab', 'list_branches', { project_id: '1' });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining('gitlab'),
+        expect.objectContaining({
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer test-secret-token',
+          },
+        })
+      );
+    });
+
+    it('does not send Authorization header when no auth token', async () => {
+      vi.spyOn(authTokens, 'getAuthToken').mockReturnValue(undefined);
+
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: '123',
+          result: { content: [{ type: 'text', text: '{"ok":true}' }] },
+        }),
+      });
+
+      await callWorker('gitlab', 'list_branches', { project_id: '1' });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining('gitlab'),
+        expect.objectContaining({
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+      // Verify no Authorization key in headers
+      const calledHeaders = fetchMock.mock.calls[0][1].headers;
+      expect(calledHeaders).not.toHaveProperty('Authorization');
     });
   });
 
