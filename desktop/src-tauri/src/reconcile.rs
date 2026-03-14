@@ -104,56 +104,8 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
         }
 
         // Regenerate compose with the current port
-        let user_config = match config::load_user_config() {
-            Ok(c) => c,
-            Err(e) => {
-                log::error!("reconcile_compose_port: failed to load config: {e}");
-                return;
-            }
-        };
-        let project_dir = match user_config.find_project(&project) {
-            Some(p) => p.dir.clone(),
-            None => {
-                log::debug!("reconcile_compose_port: project '{project}' not found in config");
-                return;
-            }
-        };
-
-        let project_path = std::path::Path::new(&project_dir);
-        let (resolved, integrations) =
-            config::resolve_project_config(project_path, &user_config, &project);
-
-        let yaml = match speedwave_runtime::compose::render_compose(
-            &project,
-            &project_dir,
-            &resolved,
-            &integrations,
-            Some(&*rt),
-        ) {
-            Ok(y) => y,
-            Err(e) => {
-                log::error!("reconcile_compose_port: render_compose failed: {e}");
-                return;
-            }
-        };
-
-        let manifests = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_default();
-        let violations =
-            speedwave_runtime::compose::SecurityCheck::run(&yaml, &project, &manifests);
-        if !violations.is_empty() {
-            let msgs: Vec<String> = violations
-                .iter()
-                .map(|v| format!("[{}] {} -- {}", v.container, v.rule, v.message))
-                .collect();
-            log::error!(
-                "reconcile_compose_port: security check failed:\n{}",
-                msgs.join("\n")
-            );
-            return;
-        }
-
-        if let Err(e) = speedwave_runtime::compose::save_compose(&project, &yaml) {
-            log::error!("reconcile_compose_port: save_compose failed: {e}");
+        if let Err(e) = crate::containers_cmd::render_and_save_compose(&project, &*rt) {
+            log::error!("reconcile_compose_port: {e}");
             return;
         }
 

@@ -9,6 +9,7 @@ import {
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
+import { ProjectStateService } from '../services/project-state.service';
 import { AuthSectionComponent } from './auth-section/auth-section.component';
 import { SystemHealthComponent } from './system-health.component';
 import { AdvancedSectionComponent } from './advanced-section/advanced-section.component';
@@ -152,7 +153,8 @@ export class SettingsComponent implements OnInit, OnDestroy {
   private router = inject(Router);
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
-  private unlistenProjectSwitch: (() => void) | null = null;
+  private projectState = inject(ProjectStateService);
+  private unsubProjectReady: (() => void) | null = null;
 
   /** Loads project information on component initialization. */
   ngOnInit(): void {
@@ -160,23 +162,16 @@ export class SettingsComponent implements OnInit, OnDestroy {
     this.loadLlmProvider();
     this.loadLogLevel();
 
-    this.tauri
-      .listen<string>('project_switched', () => {
-        this.loadProjectInfo();
-      })
-      .then((unlisten) => {
-        this.unlistenProjectSwitch = unlisten;
-      })
-      .catch(() => {
-        // Tauri event listener not available outside desktop context
-      });
+    this.unsubProjectReady = this.projectState.onProjectReady(() => {
+      this.loadProjectInfo();
+    });
   }
 
-  /** Unsubscribes from the project_switched event listener. */
+  /** Unsubscribes from the project ready listener. */
   ngOnDestroy(): void {
-    if (this.unlistenProjectSwitch) {
-      this.unlistenProjectSwitch();
-      this.unlistenProjectSwitch = null;
+    if (this.unsubProjectReady) {
+      this.unsubProjectReady();
+      this.unsubProjectReady = null;
     }
   }
 

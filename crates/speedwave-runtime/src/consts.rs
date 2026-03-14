@@ -121,7 +121,16 @@ pub struct McpAuthFieldDescriptor {
     /// as an individual credential file. Used by Redmine's `host_url`,
     /// `project_id`, and `project_name` fields.
     pub stored_in_config_json: bool,
+    /// Whether this field is obtained via an OAuth flow rather than manual entry.
+    /// Fields with `oauth_flow: true` are hidden from the credential form and
+    /// populated automatically by the Device Code Flow.
+    pub oauth_flow: bool,
 }
+
+/// OAuth scopes requested during the SharePoint Device Code Flow.
+pub const SHAREPOINT_OAUTH_SCOPES: &str = "https://graph.microsoft.com/Sites.Read.All \
+     https://graph.microsoft.com/Files.ReadWrite.All \
+     https://graph.microsoft.com/User.Read offline_access";
 
 /// Descriptor for a toggleable MCP service.
 pub struct McpServiceDescriptor {
@@ -159,6 +168,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 placeholder: "xoxb-...",
                 is_secret: true,
                 stored_in_config_json: false,
+                oauth_flow: false,
             },
             McpAuthFieldDescriptor {
                 key: "user_token",
@@ -167,6 +177,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 placeholder: "xoxp-...",
                 is_secret: true,
                 stored_in_config_json: false,
+                oauth_flow: false,
             },
         ],
         credential_files: &["bot_token", "user_token"],
@@ -185,6 +196,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 placeholder: "eyJ0...",
                 is_secret: true,
                 stored_in_config_json: false,
+                oauth_flow: true,
             },
             McpAuthFieldDescriptor {
                 key: "refresh_token",
@@ -193,6 +205,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 placeholder: "0.AR...",
                 is_secret: true,
                 stored_in_config_json: false,
+                oauth_flow: true,
             },
             McpAuthFieldDescriptor {
                 key: "client_id",
@@ -201,6 +214,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 placeholder: "00000000-0000-...",
                 is_secret: false,
                 stored_in_config_json: false,
+                oauth_flow: false,
             },
             McpAuthFieldDescriptor {
                 key: "tenant_id",
@@ -209,6 +223,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 placeholder: "00000000-0000-...",
                 is_secret: false,
                 stored_in_config_json: false,
+                oauth_flow: false,
             },
             McpAuthFieldDescriptor {
                 key: "site_id",
@@ -217,14 +232,16 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 placeholder: "site-id",
                 is_secret: false,
                 stored_in_config_json: false,
+                oauth_flow: false,
             },
             McpAuthFieldDescriptor {
                 key: "base_path",
                 label: "Base Path",
                 field_type: "text",
-                placeholder: "/sites/MySite",
+                placeholder: "Projects/my-project",
                 is_secret: false,
                 stored_in_config_json: false,
+                oauth_flow: false,
             },
         ],
         credential_files: &[
@@ -250,6 +267,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 placeholder: "abcdef1234567890...",
                 is_secret: true,
                 stored_in_config_json: false,
+                oauth_flow: false,
             },
             McpAuthFieldDescriptor {
                 key: "host_url",
@@ -258,6 +276,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 placeholder: "https://redmine.company.com",
                 is_secret: false,
                 stored_in_config_json: true,
+                oauth_flow: false,
             },
             McpAuthFieldDescriptor {
                 key: "project_id",
@@ -266,6 +285,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 placeholder: "my-project",
                 is_secret: false,
                 stored_in_config_json: true,
+                oauth_flow: false,
             },
             McpAuthFieldDescriptor {
                 key: "project_name",
@@ -274,6 +294,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 placeholder: "My Project",
                 is_secret: false,
                 stored_in_config_json: true,
+                oauth_flow: false,
             },
         ],
         credential_files: &[
@@ -298,6 +319,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 placeholder: "glpat-...",
                 is_secret: true,
                 stored_in_config_json: false,
+                oauth_flow: false,
             },
             McpAuthFieldDescriptor {
                 key: "host_url",
@@ -306,6 +328,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 placeholder: "https://gitlab.com",
                 is_secret: false,
                 stored_in_config_json: false,
+                oauth_flow: false,
             },
         ],
         credential_files: &["token", "host_url"],
@@ -642,6 +665,43 @@ mod tests {
             86400,
             "UPDATE_CHECK_INTERVAL_HOURS * 3600 must equal 86400 seconds (24 hours)"
         );
+    }
+
+    #[test]
+    fn test_oauth_flow_only_on_sharepoint_tokens() {
+        let sharepoint = find_mcp_service("sharepoint").unwrap();
+        let oauth_fields: Vec<&str> = sharepoint
+            .auth_fields
+            .iter()
+            .filter(|f| f.oauth_flow)
+            .map(|f| f.key)
+            .collect();
+        assert_eq!(
+            oauth_fields,
+            vec!["access_token", "refresh_token"],
+            "only SharePoint's access_token and refresh_token should have oauth_flow=true"
+        );
+
+        // No other service should have oauth_flow fields
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            if svc.config_key == "sharepoint" {
+                continue;
+            }
+            for field in svc.auth_fields {
+                assert!(
+                    !field.oauth_flow,
+                    "field '{}' in service '{}' should not have oauth_flow=true",
+                    field.key, svc.config_key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_sharepoint_oauth_scopes_contains_required_scopes() {
+        assert!(SHAREPOINT_OAUTH_SCOPES.contains("Sites.Read.All"));
+        assert!(SHAREPOINT_OAUTH_SCOPES.contains("Files.ReadWrite.All"));
+        assert!(SHAREPOINT_OAUTH_SCOPES.contains("offline_access"));
     }
 
     #[test]

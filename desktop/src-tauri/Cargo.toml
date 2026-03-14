@@ -31,6 +31,8 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 http = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
@@ -45,6 +47,9 @@ windows-sys = { version = "0.61", features = [
 # Enable WebDriver server (port 4445) in release builds for E2E testing.
 # Usage: cargo tauri build --features e2e
 e2e = ["dep:tauri-plugin-webdriver"]
+
+[dev-dependencies]
+serial_test = "3"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

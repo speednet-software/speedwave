@@ -3,6 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterModule } from '@angular/router';
 import { SettingsComponent } from './settings.component';
 import { TauriService } from '../services/tauri.service';
+import { ProjectStateService } from '../services/project-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
 function setupMockTauri(mockTauri: MockTauriService): void {
@@ -95,7 +96,9 @@ describe('SettingsComponent', () => {
     expect(advancedEl).not.toBeNull();
   });
 
-  it('reloads project info on project_switched event', async () => {
+  it('reloads project info on project_switch_succeeded event', async () => {
+    const projectState = TestBed.inject(ProjectStateService);
+    await projectState.init();
     component.ngOnInit();
     await fixture.whenStable();
     expect(component.activeProject).toBe('test-project');
@@ -117,17 +120,27 @@ describe('SettingsComponent', () => {
       }
     };
 
-    mockTauri.dispatchEvent('project_switched', 'other-project');
+    mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other-project' });
     await fixture.whenStable();
     expect(component.activeProject).toBe('other-project');
   });
 
-  it('cleans up event listener on destroy', async () => {
+  it('cleans up project ready listener on destroy', async () => {
+    const projectState = TestBed.inject(ProjectStateService);
+    await projectState.init();
     component.ngOnInit();
     await fixture.whenStable();
-    expect(mockTauri.listenHandlers['project_switched']).toBeDefined();
+
+    // Verify the unsub function exists before destroy
+    expect(
+      (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
+    ).not.toBeNull();
 
     component.ngOnDestroy();
-    expect(mockTauri.listenHandlers['project_switched']).toBeUndefined();
+
+    // Verify unsub was called and nulled
+    expect(
+      (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
+    ).toBeNull();
   });
 });
