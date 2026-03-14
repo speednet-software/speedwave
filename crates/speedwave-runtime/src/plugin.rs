@@ -204,9 +204,12 @@ pub fn derive_compose_name(service_id: &str) -> String {
 
 /// Validates a slug matches the required pattern.
 fn validate_slug(slug: &str) -> anyhow::Result<()> {
-    static SLUG_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static SLUG_RE: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
+        std::sync::OnceLock::new();
     let re = SLUG_RE
-        .get_or_init(|| regex::Regex::new(SLUG_PATTERN).expect("invalid SLUG_PATTERN regex"));
+        .get_or_init(|| regex::Regex::new(SLUG_PATTERN))
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("invalid SLUG_PATTERN regex: {e}"))?;
     if !re.is_match(slug) {
         anyhow::bail!(
             "Invalid plugin slug '{}': must match {} (lowercase, starts with letter, max 64 chars)",
@@ -258,10 +261,12 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
 
     // Validate mem_limit format (e.g. "256m", "1g", "512000")
     if let Some(ref limit) = manifest.mem_limit {
-        static MEM_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        let re = MEM_RE.get_or_init(|| {
-            regex::Regex::new(r"^[0-9]+[bkmgBKMG]?$").expect("invalid mem_limit regex")
-        });
+        static MEM_RE: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
+            std::sync::OnceLock::new();
+        let re = MEM_RE
+            .get_or_init(|| regex::Regex::new(r"^[0-9]+[bkmgBKMG]?$"))
+            .as_ref()
+            .map_err(|e| anyhow::anyhow!("invalid mem_limit regex: {e}"))?;
         if !re.is_match(limit) {
             anyhow::bail!(
                 "Invalid mem_limit '{}': must be a number optionally followed by b/k/m/g",
@@ -272,11 +277,12 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
 
     // Validate image_tag format (alphanumeric, dots, hyphens, underscores)
     if let Some(ref tag) = manifest.image_tag {
-        static TAG_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        let re = TAG_RE.get_or_init(|| {
-            regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
-                .expect("invalid image_tag regex")
-        });
+        static TAG_RE: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
+            std::sync::OnceLock::new();
+        let re = TAG_RE
+            .get_or_init(|| regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$"))
+            .as_ref()
+            .map_err(|e| anyhow::anyhow!("invalid image_tag regex: {e}"))?;
         if !re.is_match(tag) {
             anyhow::bail!(
                 "Invalid image_tag '{}': must be alphanumeric with dots, hyphens, underscores (max 128 chars)",
