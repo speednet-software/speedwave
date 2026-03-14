@@ -1984,6 +1984,32 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_manifest_rejects_extra_env_carriage_return() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-cr".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: Some(HashMap::from([(
+                "EVIL\rimage: hack:tag".to_string(),
+                "value".to_string(),
+            )])),
+            mem_limit: None,
+            requires_integrations: vec![],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_manifest(&manifest, tmp.path()).is_err());
+    }
+
+    #[test]
     fn test_install_rejects_duplicate_port() {
         // Port uniqueness is checked in install_plugin against existing plugins.
         // We test the logic by simulating the check.

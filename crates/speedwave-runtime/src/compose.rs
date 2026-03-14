@@ -3762,4 +3762,51 @@ services:
             "resource-only plugin should NOT have a compose service"
         );
     }
+
+    #[test]
+    fn test_resource_only_plugin_enabled_by_slug_appears_in_speedwave_plugins() {
+        // A plugin without service_id should be toggled by slug.
+        // When enabled by slug, it should appear in SPEEDWAVE_PLUGINS.
+        let integrations = ResolvedIntegrationsConfig {
+            plugins: std::collections::HashMap::from([("my-skills".to_string(), true)]),
+            ..Default::default()
+        };
+        // The key lookup: service_id.unwrap_or(slug) = "my-skills"
+        let slug = "my-skills";
+        let service_id: Option<&str> = None;
+        let plugin_key = service_id.unwrap_or(slug);
+        assert!(
+            integrations.is_plugin_enabled(plugin_key),
+            "Resource-only plugin should be enabled when slug is in plugins map"
+        );
+    }
+
+    #[test]
+    fn test_resource_only_plugin_disabled_by_slug_excluded() {
+        // A plugin without service_id should be excluded when disabled.
+        let integrations = ResolvedIntegrationsConfig {
+            plugins: std::collections::HashMap::from([("my-skills".to_string(), false)]),
+            ..Default::default()
+        };
+        let slug = "my-skills";
+        let service_id: Option<&str> = None;
+        let plugin_key = service_id.unwrap_or(slug);
+        assert!(
+            !integrations.is_plugin_enabled(plugin_key),
+            "Resource-only plugin should be excluded when disabled"
+        );
+    }
+
+    #[test]
+    fn test_resource_only_plugin_absent_from_config_is_disabled() {
+        // A freshly installed plugin not in config should be disabled.
+        let integrations = ResolvedIntegrationsConfig::default();
+        let slug = "new-plugin";
+        let service_id: Option<&str> = None;
+        let plugin_key = service_id.unwrap_or(slug);
+        assert!(
+            !integrations.is_plugin_enabled(plugin_key),
+            "Plugin not in config should be disabled by default"
+        );
+    }
 }

@@ -251,10 +251,11 @@ export class PluginsComponent implements OnInit, OnDestroy {
       await this.loadPlugins();
 
       const updated = this.plugins.find((p) => p.slug === payload.plugin.slug);
-      if (updated && updated.configured && !updated.enabled && updated.service_id) {
+      if (updated && updated.configured && !updated.enabled) {
+        const sid = updated.service_id ?? updated.slug;
         await this.tauri.invoke<void>('set_plugin_enabled', {
           project: this.activeProject,
-          serviceId: updated.service_id,
+          serviceId: sid,
           enabled: true,
         });
         updated.enabled = true;

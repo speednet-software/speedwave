@@ -172,6 +172,23 @@ pub fn install_plugin(zip_path: String) -> Result<String, String> {
     let rt = speedwave_runtime::runtime::detect_runtime();
     let manifest = plugin::install_plugin(path, Some(&*rt)).map_err(|e| e.to_string())?;
 
+    // Auto-enable plugins that need no credentials (resource-only or no auth_fields).
+    // MCP plugins with auth_fields are auto-enabled after credential save in the UI.
+    let needs_credentials = manifest.auth_fields.iter().any(|f| f.is_secret);
+    if !needs_credentials {
+        let user_config = config::load_user_config().map_err(|e| e.to_string())?;
+        if let Some(active) = &user_config.active_project {
+            let plugin_key = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
+            let _lock = crate::CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
+            let mut cfg = config::load_user_config().map_err(|e| e.to_string())?;
+            if let Some(entry) = cfg.projects.iter_mut().find(|p| p.name == *active) {
+                let integrations = entry.integrations.get_or_insert_with(Default::default);
+                integrations.set_plugin_enabled(plugin_key, true);
+                config::save_user_config(&cfg).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
     Ok(format!(
         "Plugin '{}' v{} installed successfully",
         manifest.name, manifest.version

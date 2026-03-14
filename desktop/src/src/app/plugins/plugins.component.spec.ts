@@ -164,6 +164,19 @@ describe('PluginsComponent', () => {
       });
     });
 
+    it('uses slug as serviceId for plugin without service_id', async () => {
+      await component.ngOnInit();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      const event = { target: { checked: true } } as unknown as Event;
+      // plugins[1] is my-commands with service_id: null
+      await component.handleTogglePlugin({ plugin: component.plugins[1], event });
+      expect(invokeSpy).toHaveBeenCalledWith('set_plugin_enabled', {
+        project: 'test-project',
+        serviceId: 'my-commands',
+        enabled: true,
+      });
+    });
+
     it('reverts checkbox on error', async () => {
       await component.ngOnInit();
       mockTauri.invokeHandler = async (cmd: string) => {
