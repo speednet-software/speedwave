@@ -42,6 +42,7 @@ RUN mkdir -p /workspace && \
 # Copy reusable installer (DRY — also used by entrypoint.sh at runtime)
 COPY --chmod=755 install-claude.sh /usr/local/bin/install-claude.sh
 
+# Required — no default intentional (fail-closed; must be passed via --build-arg)
 ARG CLAUDE_VERSION
 USER 1000
 # The official installer downloads the binary from GCS and verifies its SHA256
