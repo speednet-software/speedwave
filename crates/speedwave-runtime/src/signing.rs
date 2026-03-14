@@ -3,31 +3,11 @@ use std::path::Path;
 /// Speednet Ed25519 public key for verifying plugin signatures.
 /// This key is embedded at compile time — only Speednet can sign plugins.
 ///
-/// **Development placeholder** — replace with the real Speednet production key
-/// before any release build. The `compile_error!` below prevents accidental
-/// release with this placeholder.
-const SPEEDNET_SIGNING_PUBLIC_KEY: &[u8; 32] = b"\xd7\x5a\x98\x0e\x82\x3c\x1f\x64\
-\xb0\x4e\x72\x9d\xa1\x58\x6b\xf3\xc2\x47\xe0\x15\x89\xab\xcd\xef\x01\x23\x45\x67\
-\x89\xab\xcd\xef";
-
-// Guard: the placeholder key must not ship in release builds.
-#[cfg(not(debug_assertions))]
-const _: () = {
-    const KEY: &[u8; 32] = SPEEDNET_SIGNING_PUBLIC_KEY;
-    // The last 12 bytes of the placeholder are a sequential pattern.
-    // A real key would not have this pattern.
-    assert!(
-        !(KEY[20] == 0x89
-            && KEY[21] == 0xab
-            && KEY[22] == 0xcd
-            && KEY[23] == 0xef
-            && KEY[24] == 0x01
-            && KEY[25] == 0x23
-            && KEY[26] == 0x45
-            && KEY[27] == 0x67),
-        "SPEEDNET_SIGNING_PUBLIC_KEY is still the development placeholder — replace with the real production key before release"
-    );
-};
+/// Generated via: `openssl genpkey -algorithm Ed25519`
+/// Private key stored securely — never committed to source.
+const SPEEDNET_SIGNING_PUBLIC_KEY: &[u8; 32] = b"\x13\x27\xf5\x88\xa1\xeb\xb6\x22\
+\xf2\x78\x08\xee\x7d\x86\x4a\xb2\xdf\xcd\xe4\xe6\x5b\x02\xdf\xee\x73\xf7\xe3\x77\
+\x92\x49\xe7\xc6";
 
 /// Verifies the Ed25519 signature of a plugin directory.
 ///
