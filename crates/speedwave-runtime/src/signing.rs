@@ -2,9 +2,32 @@ use std::path::Path;
 
 /// Speednet Ed25519 public key for verifying plugin signatures.
 /// This key is embedded at compile time — only Speednet can sign plugins.
+///
+/// **Development placeholder** — replace with the real Speednet production key
+/// before any release build. The `compile_error!` below prevents accidental
+/// release with this placeholder.
 const SPEEDNET_SIGNING_PUBLIC_KEY: &[u8; 32] = b"\xd7\x5a\x98\x0e\x82\x3c\x1f\x64\
 \xb0\x4e\x72\x9d\xa1\x58\x6b\xf3\xc2\x47\xe0\x15\x89\xab\xcd\xef\x01\x23\x45\x67\
 \x89\xab\xcd\xef";
+
+// Guard: the placeholder key must not ship in release builds.
+#[cfg(not(debug_assertions))]
+const _: () = {
+    const KEY: &[u8; 32] = SPEEDNET_SIGNING_PUBLIC_KEY;
+    // The last 12 bytes of the placeholder are a sequential pattern.
+    // A real key would not have this pattern.
+    assert!(
+        !(KEY[20] == 0x89
+            && KEY[21] == 0xab
+            && KEY[22] == 0xcd
+            && KEY[23] == 0xef
+            && KEY[24] == 0x01
+            && KEY[25] == 0x23
+            && KEY[26] == 0x45
+            && KEY[27] == 0x67),
+        "SPEEDNET_SIGNING_PUBLIC_KEY is still the development placeholder — replace with the real production key before release"
+    );
+};
 
 /// Verifies the Ed25519 signature of a plugin directory.
 ///
@@ -86,10 +109,6 @@ fn compute_plugin_digest(plugin_dir: &Path) -> anyhow::Result<Vec<u8>> {
             .strip_prefix(plugin_dir)
             .unwrap_or(file)
             .to_string_lossy();
-        // Skip the signature file itself
-        if rel == "SIGNATURE" {
-            continue;
-        }
         // Hash: relative path + file contents
         hasher.update(rel.as_bytes());
         let content = std::fs::read(file)?;
@@ -105,7 +124,7 @@ fn collect_files_recursive(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> any
         let path = entry.path();
         if path.is_dir() {
             collect_files_recursive(&path, out)?;
-        } else {
+        } else if path.file_name().map(|n| n != "SIGNATURE").unwrap_or(true) {
             out.push(path);
         }
     }
@@ -151,6 +170,10 @@ pub fn sign_plugin(plugin_dir: &Path, private_key_bytes: &[u8]) -> anyhow::Resul
 mod tests {
     use super::*;
     use base64::Engine;
+    use std::sync::Mutex;
+
+    /// Serializes tests that modify environment variables to prevent data races.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_generate_keypair_returns_valid_sizes() {
@@ -253,11 +276,14 @@ mod tests {
 
     #[test]
     fn test_allow_unsigned_env_skips_verification() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path();
         std::fs::write(plugin_dir.join("plugin.json"), r#"{"name":"test"}"#).unwrap();
         // No SIGNATURE file — would normally fail
 
+        // Serialized via ENV_MUTEX — no concurrent env access.
         std::env::set_var("SPEEDWAVE_ALLOW_UNSIGNED", "1");
         let result = verify_plugin_signature(plugin_dir);
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
@@ -291,6 +317,88 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "world").unwrap();
         let d2 = compute_plugin_digest(dir).unwrap();
         assert_ne!(d1, d2, "Digest must change when file content changes");
+    }
+
+    /// Verifies that `SPEEDWAVE_ALLOW_UNSIGNED` bypass is gated behind
+    /// `#[cfg(debug_assertions)]` — i.e. it is compiled away in release builds.
+    ///
+    /// This is a source-level guard: we parse our own source file and assert
+    /// the env-var check only appears inside a `#[cfg(debug_assertions)]` block.
+    /// If someone removes the cfg gate, this test fails.
+    #[test]
+    fn test_allow_unsigned_is_debug_only() {
+        let source = include_str!("signing.rs");
+
+        // Find all occurrences of SPEEDWAVE_ALLOW_UNSIGNED in the source
+        let lines: Vec<(usize, &str)> = source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| {
+                line.contains("SPEEDWAVE_ALLOW_UNSIGNED")
+                    && !line.trim_start().starts_with("//")
+                    && !line.trim_start().starts_with("///")
+                    && !line.contains("include_str!")
+                    && !line.contains("test_allow_unsigned")
+            })
+            .collect();
+
+        // There must be at least the env::var check and the set_var/remove_var in tests
+        assert!(
+            !lines.is_empty(),
+            "Expected SPEEDWAVE_ALLOW_UNSIGNED references in source"
+        );
+
+        // The env::var("SPEEDWAVE_ALLOW_UNSIGNED") check in verify_plugin_signature
+        // must appear AFTER a #[cfg(debug_assertions)] gate. Walk backwards from
+        // each non-test occurrence to verify it's inside a cfg(debug_assertions) block.
+        for (line_num, line_text) in &lines {
+            // Skip lines inside #[cfg(test)] mod tests block
+            let in_test_mod = source
+                .lines()
+                .take(*line_num)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .contains("#[cfg(test)]");
+            if in_test_mod {
+                continue;
+            }
+
+            // Walk backwards from this line to find the nearest cfg gate
+            let preceding: String = source
+                .lines()
+                .take(*line_num)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                preceding.contains("#[cfg(debug_assertions)]"),
+                "SPEEDWAVE_ALLOW_UNSIGNED at line {} ('{}') is NOT inside a \
+                 #[cfg(debug_assertions)] block — this would allow bypass in release builds!",
+                line_num + 1,
+                line_text.trim()
+            );
+        }
+    }
+
+    /// Verifies that in debug builds, SPEEDWAVE_ALLOW_UNSIGNED is NOT set
+    /// by default — the bypass is opt-in, not opt-out.
+    #[test]
+    fn test_allow_unsigned_not_set_by_default() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        // Remove the env var in case a previous test leaked it.
+        // Serialized via ENV_MUTEX — no concurrent env access.
+        std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path();
+        std::fs::write(plugin_dir.join("plugin.json"), r#"{"name":"test"}"#).unwrap();
+        // No SIGNATURE file
+
+        let result = verify_plugin_signature(plugin_dir);
+        assert!(
+            result.is_err(),
+            "Without SPEEDWAVE_ALLOW_UNSIGNED, unsigned plugins must be rejected"
+        );
     }
 
     #[test]

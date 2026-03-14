@@ -10,7 +10,7 @@ use std::path::PathBuf;
 /// On Windows, nerdctl runs inside WSL2 so host paths must be translated
 /// from `C:\Users\...` to `/mnt/c/Users/...`. On macOS and Linux the
 /// container engine runs on the host so paths are returned unchanged.
-fn to_engine_path(path: &std::path::Path) -> anyhow::Result<String> {
+pub(crate) fn to_engine_path(path: &std::path::Path) -> anyhow::Result<String> {
     #[cfg(target_os = "windows")]
     {
         let wsl = crate::runtime::wsl::windows_to_wsl_path(path)?;
@@ -83,7 +83,7 @@ pub fn render_compose(
     // Handle LLM provider switching
     yaml = apply_llm_config(&yaml, project_name, &resolved_config.llm)?;
 
-    // Build any pending plugin images (centralized — one hook, not 6 callsites)
+    // Build any pending plugin images before compose generation
     if let Some(rt) = runtime {
         if let Err(e) = plugin::build_pending_plugin_images(rt) {
             log::warn!("Failed to build pending plugin images: {e}");
@@ -330,7 +330,7 @@ fn apply_plugins(
 
         plugin_slugs.push(slug.clone());
 
-        // MCP service generation (follows apply_llm_config pattern — compose.rs:221-264)
+        // MCP service generation (follows apply_llm_config pattern)
         if let Some(sid) = service_id {
             let service_value =
                 plugin::generate_plugin_service(manifest, project_name, network_name, tokens_dir)?;
@@ -514,7 +514,7 @@ fn apply_mcp_os_config_with_path(
     token_path: &std::path::Path,
     port_path: &std::path::Path,
 ) -> anyhow::Result<String> {
-    if !token_path.exists() {
+    if !token_path.is_file() {
         return Ok(yaml.to_string());
     }
 
@@ -2400,6 +2400,20 @@ services:
     }
 
     #[test]
+    fn test_mcp_os_config_skipped_when_token_is_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let token_path = tmp.path().join("mcp-os-auth-token");
+        std::fs::create_dir(&token_path).unwrap();
+        let port_path = tmp.path().join("mcp-os-port");
+
+        let result = apply_mcp_os_config_with_path(VALID_COMPOSE, &token_path, &port_path).unwrap();
+        assert_eq!(
+            result, VALID_COMPOSE,
+            "yaml should be unchanged when token path is a directory"
+        );
+    }
+
+    #[test]
     fn test_mcp_os_config_not_in_claude_env() {
         // MCP_OS_* env vars must NOT be in the claude container.
         // mcp-os is accessed through the hub, not directly by Claude.
@@ -3466,6 +3480,7 @@ services:
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec![],
         }];
         let violations = SecurityCheck::run(&yaml, "test", &manifests);
         assert!(
@@ -3515,6 +3530,7 @@ services:
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec![],
         }];
         let violations = SecurityCheck::run(&yaml, "test", &manifests);
         assert!(
@@ -3546,6 +3562,7 @@ services:
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec![],
         };
 
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/test");
@@ -3648,6 +3665,7 @@ services:
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec![],
         };
 
         let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/myproject");
@@ -3692,5 +3710,57 @@ services:
     fn str_to_engine_path_handles_absolute_path() {
         let result = str_to_engine_path("/usr/local/share/speedwave").unwrap();
         assert_eq!(result, "/usr/local/share/speedwave");
+    }
+
+    #[test]
+    fn resource_only_plugin_has_no_service_in_compose() {
+        // A resource-only plugin (no service_id, no port) should not generate
+        // a compose service, but should still appear in SPEEDWAVE_PLUGINS.
+        let manifest = PluginManifest {
+            name: "Skills Pack".to_string(),
+            service_id: None,
+            slug: "skills-pack".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Resource-only plugin".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![],
+        };
+
+        // generate_plugin_service requires a port for MCP plugins,
+        // but resource-only plugins should never call it (service_id is None)
+        assert!(
+            manifest.service_id.is_none(),
+            "resource-only plugin has no service_id"
+        );
+        assert!(manifest.port.is_none(), "resource-only plugin has no port");
+
+        // Verify the slug would appear in SPEEDWAVE_PLUGINS
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
+        add_claude_env_var(&mut doc, "SPEEDWAVE_PLUGINS", "skills-pack");
+        let claude = doc.get("services").unwrap().get("claude").unwrap();
+        let env_seq = claude.get("environment").unwrap().as_sequence().unwrap();
+        let has_slug = env_seq.iter().any(|v| {
+            v.as_str()
+                .is_some_and(|s| s == "SPEEDWAVE_PLUGINS=skills-pack")
+        });
+        assert!(
+            has_slug,
+            "resource-only plugin slug should appear in SPEEDWAVE_PLUGINS"
+        );
+
+        // Verify no mcp-* service was added
+        let services = doc.get("services").unwrap().as_mapping().unwrap();
+        assert!(
+            !services.contains_key(&serde_yaml_ng::Value::String("mcp-skills-pack".into())),
+            "resource-only plugin should NOT have a compose service"
+        );
     }
 }

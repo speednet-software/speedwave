@@ -100,22 +100,23 @@ presale-1.2.0/
 
 ### Field Reference
 
-| Field              | Type     | Required | Description                                                                           |
-| ------------------ | -------- | -------- | ------------------------------------------------------------------------------------- |
-| `name`             | string   | Yes      | Human-readable display name                                                           |
-| `slug`             | string   | Yes      | Unique identifier, `^[a-z][a-z0-9-]{0,63}$`                                           |
-| `service_id`       | string?  | MCP only | Must equal `slug` when present                                                        |
-| `version`          | string   | Yes      | Semantic version                                                                      |
-| `description`      | string   | Yes      | Short description                                                                     |
-| `port`             | u16?     | MCP only | Container listening port                                                              |
-| `image_tag`        | string?  | No       | Custom image tag (default: `version`)                                                 |
-| `resources`        | string[] | No       | Subset of `["skills", "commands", "agents", "hooks"]`                                 |
-| `token_mount`      | object   | No       | `{"mode": "read_only"}` (default) or `{"mode": "read_write", "justification": "..."}` |
-| `auth_fields`      | object[] | No       | Credential field definitions for the Desktop UI                                       |
-| `settings_schema`  | JSON?    | No       | JSON Schema for per-project plugin settings                                           |
-| `speedwave_compat` | string?  | No       | Required Speedwave version range                                                      |
-| `extra_env`        | map?     | No       | Additional environment variables for the container                                    |
-| `mem_limit`        | string?  | No       | Container memory limit (default: `256m`)                                              |
+| Field                   | Type     | Required | Description                                                                           |
+| ----------------------- | -------- | -------- | ------------------------------------------------------------------------------------- |
+| `name`                  | string   | Yes      | Human-readable display name                                                           |
+| `slug`                  | string   | Yes      | Unique identifier, `^[a-z][a-z0-9-]{0,63}$`                                           |
+| `service_id`            | string?  | MCP only | Must equal `slug` when present                                                        |
+| `version`               | string   | Yes      | Semantic version                                                                      |
+| `description`           | string   | Yes      | Short description                                                                     |
+| `port`                  | u16?     | MCP only | Container listening port                                                              |
+| `image_tag`             | string?  | No       | Custom image tag (default: `version`)                                                 |
+| `resources`             | string[] | No       | Subset of `["skills", "commands", "agents", "hooks"]`                                 |
+| `token_mount`           | object   | No       | `{"mode": "read_only"}` (default) or `{"mode": "read_write", "justification": "..."}` |
+| `auth_fields`           | object[] | No       | Credential field definitions for the Desktop UI                                       |
+| `settings_schema`       | JSON?    | No       | JSON Schema for per-project plugin settings                                           |
+| `speedwave_compat`      | string?  | No       | Required Speedwave version range                                                      |
+| `extra_env`             | map?     | No       | Additional environment variables for the container                                    |
+| `mem_limit`             | string?  | No       | Container memory limit (default: `256m`)                                              |
+| `requires_integrations` | string[] | No       | Core integrations the plugin depends on (e.g. `["sharepoint"]`)                       |
 
 ### auth_fields entry
 
@@ -287,7 +288,7 @@ Plugin images are built lazily:
 
 1. `install_plugin()` creates `.image_pending` marker in the plugin directory
 2. If `ContainerRuntime` is available at install time, builds immediately
-3. Otherwise, `render_compose()` calls `build_pending_plugin_images(runtime)` — centralized in one location across all 6 callsites
+3. Otherwise, `render_compose()` calls `build_pending_plugin_images(runtime)` before compose generation
 4. Build uses `prepare_build_context()` + `build_image()`, handling Lima/WSL path translation[^6]
 
 ---
@@ -340,6 +341,19 @@ Guard test verifies no overlap between the two.
 
 ---
 
+## Plugin Sandbox
+
+Plugins operate within a strict sandbox — they cannot modify application settings or credentials of core integrations. This is analogous to browser extensions, which cannot alter browser settings.
+
+**Principles:**
+
+- A plugin manages only its own tokens at `~/.speedwave/tokens/<project>/<slug>/`
+- `requires_integrations` declares dependencies on core integrations — the user must configure them in the Integrations tab
+- The Desktop UI shows required integration status on the plugin dashboard with a link to the Integrations tab
+- `provision_credentials` was removed — it violated the sandbox principle by allowing plugins to write into core integration token directories
+
+---
+
 ## Hub Discovery
 
 The MCP Hub discovers plugin tools dynamically via `service-list.ts` — a module with zero imports from other hub modules (reads only `process.env.ENABLED_SERVICES`).
@@ -387,6 +401,7 @@ Desktop UI auto-generates a credential form from `auth_fields` in the manifest. 
 ```bash
 if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
     for plugin in ${SPEEDWAVE_PLUGINS//,/ }; do
+        # Validate slug: lowercase alphanumeric + hyphens, 1-64 chars, starts with letter
         if ! echo "${plugin}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
             echo "WARNING: Skipping invalid plugin slug: ${plugin}" >&2
             continue
@@ -396,9 +411,8 @@ if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
             for resource_type in commands agents skills hooks; do
                 if [ -d "${plugin_path}/${resource_type}" ]; then
                     mkdir -p "${HOME}/.claude/${resource_type}"
-                    for file in "${plugin_path}/${resource_type}"/*; do
-                        [ -f "${file}" ] && ln -sf "${file}" \
-                            "${HOME}/.claude/${resource_type}/$(basename "${file}")"
+                    for entry in "${plugin_path}/${resource_type}"/*; do
+                        [ -e "${entry}" ] && ln -sfn "${entry}" "${HOME}/.claude/${resource_type}/$(basename "${entry}")"
                     done
                 fi
             done
@@ -423,15 +437,16 @@ speedwave plugin disable <slug> --project <name>      # Disable per-project
 
 ## Desktop Interface
 
-| Feature        | Description                                                  |
-| -------------- | ------------------------------------------------------------ |
-| Install        | File picker for ZIP upload                                   |
-| List           | Cards showing name, version, configured/not-configured badge |
-| Enable/disable | Toggle switch per plugin (requires configuration first)      |
-| Credentials    | Auto-generated form from `auth_fields`                       |
-| Settings       | Per-project plugin settings (save/load)                      |
-| Uninstall      | Removes plugin directory                                     |
-| Restart        | Banner prompts for container restart after changes           |
+| Feature            | Description                                                                  |
+| ------------------ | ---------------------------------------------------------------------------- |
+| Install            | File picker for ZIP upload                                                   |
+| List               | Cards showing name, version, configured/not-configured badge                 |
+| Enable/disable     | Toggle switch per plugin (requires configuration first)                      |
+| Credentials        | Auto-generated form from `auth_fields`                                       |
+| Settings           | Per-project plugin settings (save/load)                                      |
+| Uninstall          | Removes plugin directory                                                     |
+| Restart            | Banner prompts for container restart after changes                           |
+| Integration status | Shows required integration status on dashboard with link to Integrations tab |
 
 Tauri commands: `get_plugins`, `install_plugin`, `remove_plugin`, `set_plugin_enabled`, `save_plugin_credentials`, `delete_plugin_credentials`, `plugin_save_settings`, `plugin_load_settings`.
 

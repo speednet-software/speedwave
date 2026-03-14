@@ -13,15 +13,6 @@ use std::collections::HashMap;
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Serialize, Clone)]
-pub(crate) struct PluginAuthFieldDto {
-    pub(crate) key: String,
-    pub(crate) label: String,
-    pub(crate) field_type: String,
-    pub(crate) placeholder: String,
-    pub(crate) is_secret: bool,
-}
-
-#[derive(serde::Serialize, Clone)]
 pub(crate) struct PluginStatusEntry {
     pub(crate) slug: String,
     pub(crate) name: String,
@@ -30,14 +21,45 @@ pub(crate) struct PluginStatusEntry {
     pub(crate) description: String,
     pub(crate) enabled: bool,
     pub(crate) configured: bool,
-    pub(crate) auth_fields: Vec<PluginAuthFieldDto>,
+    pub(crate) auth_fields: Vec<plugin::AuthFieldDef>,
     pub(crate) current_values: HashMap<String, String>,
     pub(crate) token_mount: String,
+    pub(crate) settings_schema: Option<serde_json::Value>,
+    pub(crate) requires_integrations: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
 pub(crate) struct PluginsResponse {
     pub(crate) plugins: Vec<PluginStatusEntry>,
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Returns the token directory path for a service: `~/.speedwave/tokens/<project>/<service_id>/`
+fn token_dir_for(project: &str, service_id: &str) -> Result<std::path::PathBuf, String> {
+    let home = dirs::home_dir().ok_or("cannot determine home directory")?;
+    Ok(home
+        .join(speedwave_runtime::consts::DATA_DIR)
+        .join("tokens")
+        .join(project)
+        .join(service_id))
+}
+
+/// Validates a credential field name and value for safety.
+pub(crate) fn validate_credential_field(key: &str, value: &str) -> Result<(), String> {
+    if key.contains('/') || key.contains('\\') || key.contains("..") {
+        return Err(format!("invalid field name: {}", key));
+    }
+    if value.len() > crate::CREDENTIAL_VALUE_MAX_BYTES {
+        return Err(format!(
+            "value for '{}' exceeds {} bytes",
+            key,
+            crate::CREDENTIAL_VALUE_MAX_BYTES
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -58,31 +80,20 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
 
     let manifests = plugin::list_installed_plugins().map_err(|e| e.to_string())?;
 
-    let home = dirs::home_dir().ok_or("cannot determine home directory")?;
-    let tokens_dir = home
-        .join(speedwave_runtime::consts::DATA_DIR)
-        .join("tokens")
-        .join(&project);
-
     let mut entries = Vec::new();
     for manifest in &manifests {
         let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
         let enabled = integrations.is_plugin_enabled(sid);
 
-        let auth_fields: Vec<PluginAuthFieldDto> = manifest
-            .auth_fields
-            .iter()
-            .map(|f| PluginAuthFieldDto {
-                key: f.key.clone(),
-                label: f.label.clone(),
-                field_type: f.field_type.clone(),
-                placeholder: f.placeholder.clone(),
-                is_secret: f.is_secret,
-            })
-            .collect();
+        let auth_fields: Vec<plugin::AuthFieldDef> = manifest.auth_fields.clone();
 
-        let svc_token_dir = tokens_dir.join(sid);
-        let configured = is_plugin_configured(&svc_token_dir, &manifest.auth_fields);
+        let svc_token_dir = token_dir_for(&project, sid)?;
+        let configured = is_plugin_configured(
+            &svc_token_dir,
+            &manifest.auth_fields,
+            &manifest.requires_integrations,
+            &project,
+        );
 
         let mut current_values = HashMap::new();
         for field in &manifest.auth_fields {
@@ -116,6 +127,8 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
             auth_fields,
             current_values,
             token_mount,
+            settings_schema: manifest.settings_schema.clone(),
+            requires_integrations: manifest.requires_integrations.clone(),
         });
     }
 
@@ -125,18 +138,32 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
 fn is_plugin_configured(
     svc_token_dir: &std::path::Path,
     auth_fields: &[plugin::AuthFieldDef],
+    requires_integrations: &[String],
+    project: &str,
 ) -> bool {
-    auth_fields.iter().any(|f| {
-        if f.is_secret {
+    let secret_fields: Vec<_> = auth_fields.iter().filter(|f| f.is_secret).collect();
+    // Check secret fields if any exist
+    if !secret_fields.is_empty() {
+        let all_present = secret_fields.iter().all(|f| {
             let path = svc_token_dir.join(&f.key);
             path.exists()
                 && std::fs::metadata(&path)
                     .map(|m| m.len() > 0)
                     .unwrap_or(false)
-        } else {
-            false
+        });
+        if !all_present {
+            return false;
         }
-    })
+    }
+
+    // Check that all required integrations are configured
+    for integration in requires_integrations {
+        if !crate::integrations_cmd::is_service_configured(project, integration) {
+            return false;
+        }
+    }
+
+    true
 }
 
 #[tauri::command]
@@ -159,7 +186,69 @@ pub fn install_plugin(zip_path: String) -> Result<String, String> {
 #[tauri::command]
 pub fn remove_plugin(slug: String) -> Result<(), String> {
     log::info!("remove_plugin: slug={slug}");
-    plugin::remove_plugin(&slug).map_err(|e| e.to_string())
+
+    // Read manifest BEFORE deleting plugin files — need service_id, auth_fields
+    let manifests = plugin::list_installed_plugins().map_err(|e| e.to_string())?;
+    let manifest = manifests.iter().find(|m| m.slug == slug);
+    let service_id = manifest
+        .and_then(|m| m.service_id.as_deref())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| slug.clone());
+    let auth_fields: Vec<String> = manifest
+        .map(|m| m.auth_fields.iter().map(|f| f.key.clone()).collect())
+        .unwrap_or_default();
+
+    // Delete plugin files from ~/.speedwave/plugins/<slug>/
+    plugin::remove_plugin(&slug).map_err(|e| e.to_string())?;
+
+    // Clean config: plugin_settings + integrations.plugins
+    let _lock = crate::CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
+    let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
+    let mut changed = false;
+    for project in &mut user_config.projects {
+        if let Some(ps) = project.plugin_settings.as_mut() {
+            if ps.remove(&slug).is_some() {
+                changed = true;
+            }
+        }
+        if let Some(integrations) = project.integrations.as_mut() {
+            if let Some(plugins) = integrations.plugins.as_mut() {
+                if plugins.remove(&service_id).is_some() {
+                    changed = true;
+                }
+            }
+        }
+    }
+    if changed {
+        config::save_user_config(&user_config).map_err(|e| e.to_string())?;
+    }
+
+    // Delete tokens from ~/.speedwave/tokens/<project>/<service_id>/
+    for project in &user_config.projects {
+        let svc_dir = token_dir_for(&project.name, &service_id)?;
+        if svc_dir.exists() {
+            if auth_fields.is_empty() {
+                std::fs::remove_dir_all(&svc_dir).map_err(|e| e.to_string())?;
+            } else {
+                for field_key in &auth_fields {
+                    let path = svc_dir.join(field_key);
+                    if path.exists() {
+                        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+                    }
+                }
+                if svc_dir
+                    .read_dir()
+                    .map_err(|e| e.to_string())?
+                    .next()
+                    .is_none()
+                {
+                    std::fs::remove_dir(&svc_dir).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -170,6 +259,18 @@ pub fn set_plugin_enabled(
 ) -> Result<(), String> {
     check_project(&project)?;
     log::info!("set_plugin_enabled: project={project} service_id={service_id} enabled={enabled}");
+
+    // Validate that service_id corresponds to an installed plugin
+    let manifests = plugin::list_installed_plugins().map_err(|e| e.to_string())?;
+    let found = manifests
+        .iter()
+        .any(|m| m.service_id.as_deref() == Some(&service_id) || m.slug == service_id);
+    if !found {
+        return Err(format!(
+            "no installed plugin with service_id '{}'",
+            service_id
+        ));
+    }
 
     let _lock = crate::CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
 
@@ -184,7 +285,9 @@ pub fn set_plugin_enabled(
     let integrations = entry.integrations.get_or_insert_with(Default::default);
     integrations.set_plugin_enabled(&service_id, enabled);
 
-    config::save_user_config(&user_config).map_err(|e| e.to_string())
+    config::save_user_config(&user_config).map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -209,24 +312,14 @@ pub fn save_plugin_credentials(
         .map(|f| f.key.as_str())
         .collect();
 
-    let home = dirs::home_dir().ok_or("cannot determine home directory")?;
-    let svc_dir = home
-        .join(speedwave_runtime::consts::DATA_DIR)
-        .join("tokens")
-        .join(&project)
-        .join(sid);
+    let svc_dir = token_dir_for(&project, sid)?;
     std::fs::create_dir_all(&svc_dir).map_err(|e| e.to_string())?;
 
     for (key, value) in &credentials {
         if !allowed_keys.contains(&key.as_str()) {
             return Err(format!("field '{}' not allowed for plugin '{}'", key, slug));
         }
-        if key.contains('/') || key.contains('\\') || key.contains("..") {
-            return Err(format!("invalid field name: {}", key));
-        }
-        if value.len() > 4096 {
-            return Err(format!("value for '{}' exceeds 4096 bytes", key));
-        }
+        validate_credential_field(key, value)?;
 
         let file_path = svc_dir.join(key);
         std::fs::write(&file_path, value).map_err(|e| e.to_string())?;
@@ -293,12 +386,10 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
 
     let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
 
-    let home = dirs::home_dir().ok_or("cannot determine home directory")?;
-    let svc_dir = home
-        .join(speedwave_runtime::consts::DATA_DIR)
-        .join("tokens")
-        .join(&project)
-        .join(sid);
+    // Acquire lock BEFORE any mutations
+    let _lock = crate::CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
+
+    let svc_dir = token_dir_for(&project, sid)?;
 
     for field in &manifest.auth_fields {
         let path = svc_dir.join(&field.key);
@@ -308,7 +399,6 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
     }
 
     // Auto-disable the plugin since credentials are removed
-    let _lock = crate::CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
     let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
     if let Some(entry) = user_config.projects.iter_mut().find(|p| p.name == project) {
         let integrations = entry.integrations.get_or_insert_with(Default::default);
@@ -338,7 +428,7 @@ mod tests {
             description: "A test plugin".into(),
             enabled: true,
             configured: false,
-            auth_fields: vec![PluginAuthFieldDto {
+            auth_fields: vec![plugin::AuthFieldDef {
                 key: "api_key".into(),
                 label: "API Key".into(),
                 field_type: "password".into(),
@@ -347,6 +437,8 @@ mod tests {
             }],
             current_values: HashMap::new(),
             token_mount: "ro".into(),
+            settings_schema: None,
+            requires_integrations: vec![],
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("test-plugin"));
@@ -354,7 +446,42 @@ mod tests {
     }
 
     #[test]
-    fn is_plugin_configured_false_when_no_secret_fields() {
+    fn plugin_status_entry_serializes_with_settings_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "currency": {
+                    "type": "string",
+                    "enum": ["PLN", "EUR", "USD"],
+                    "default": "PLN",
+                    "description": "Default currency"
+                }
+            }
+        });
+        let entry = PluginStatusEntry {
+            slug: "presale".into(),
+            name: "Presale CRM".into(),
+            service_id: Some("presale".into()),
+            version: "1.2.0".into(),
+            description: "CRM integration".into(),
+            enabled: true,
+            configured: true,
+            auth_fields: vec![],
+            current_values: HashMap::new(),
+            token_mount: "ro".into(),
+            settings_schema: Some(schema),
+            requires_integrations: vec!["sharepoint".into()],
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("settings_schema"));
+        assert!(json.contains("currency"));
+        assert!(json.contains("PLN"));
+        assert!(json.contains("requires_integrations"));
+        assert!(json.contains("sharepoint"));
+    }
+
+    #[test]
+    fn is_plugin_configured_true_when_no_secret_fields() {
         let fields = vec![plugin::AuthFieldDef {
             key: "host_url".into(),
             label: "Host".into(),
@@ -362,9 +489,21 @@ mod tests {
             placeholder: "".into(),
             is_secret: false,
         }];
-        assert!(!is_plugin_configured(
+        assert!(is_plugin_configured(
             std::path::Path::new("/nonexistent"),
-            &fields
+            &fields,
+            &[],
+            "any-project",
+        ));
+    }
+
+    #[test]
+    fn is_plugin_configured_true_when_no_auth_fields() {
+        assert!(is_plugin_configured(
+            std::path::Path::new("/nonexistent"),
+            &[],
+            &[],
+            "any-project",
         ));
     }
 
@@ -379,7 +518,9 @@ mod tests {
         }];
         assert!(!is_plugin_configured(
             std::path::Path::new("/nonexistent/path"),
-            &fields
+            &fields,
+            &[],
+            "any-project",
         ));
     }
 
@@ -396,7 +537,12 @@ mod tests {
             placeholder: "".into(),
             is_secret: true,
         }];
-        assert!(is_plugin_configured(dir.path(), &fields));
+        assert!(is_plugin_configured(
+            dir.path(),
+            &fields,
+            &[],
+            "any-project"
+        ));
     }
 
     #[test]
@@ -412,7 +558,12 @@ mod tests {
             placeholder: "".into(),
             is_secret: true,
         }];
-        assert!(!is_plugin_configured(dir.path(), &fields));
+        assert!(!is_plugin_configured(
+            dir.path(),
+            &fields,
+            &[],
+            "any-project"
+        ));
     }
 
     #[test]
@@ -531,21 +682,273 @@ mod tests {
     }
 
     #[test]
+    fn remove_plugin_cleans_settings_from_config() {
+        let mut cfg = config::SpeedwaveUserConfig {
+            projects: vec![
+                config::ProjectUserEntry {
+                    name: "proj-a".into(),
+                    dir: "/tmp/a".into(),
+                    claude: None,
+                    integrations: None,
+                    plugin_settings: Some(HashMap::from([
+                        ("my-plugin".into(), serde_json::json!({"key": "val"})),
+                        ("other-plugin".into(), serde_json::json!({"x": 1})),
+                    ])),
+                },
+                config::ProjectUserEntry {
+                    name: "proj-b".into(),
+                    dir: "/tmp/b".into(),
+                    claude: None,
+                    integrations: None,
+                    plugin_settings: Some(HashMap::from([(
+                        "my-plugin".into(),
+                        serde_json::json!({"k": "v"}),
+                    )])),
+                },
+            ],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        };
+
+        // Simulate the cleanup logic from remove_plugin
+        let slug = "my-plugin";
+        for project in &mut cfg.projects {
+            if let Some(ps) = project.plugin_settings.as_mut() {
+                ps.remove(slug);
+            }
+        }
+
+        // proj-a: my-plugin removed, other-plugin stays
+        let ps_a = cfg.projects[0].plugin_settings.as_ref().unwrap();
+        assert!(!ps_a.contains_key("my-plugin"));
+        assert!(ps_a.contains_key("other-plugin"));
+
+        // proj-b: my-plugin removed, map empty
+        let ps_b = cfg.projects[1].plugin_settings.as_ref().unwrap();
+        assert!(!ps_b.contains_key("my-plugin"));
+    }
+
+    #[test]
+    fn remove_plugin_cleans_integration_entries_from_config() {
+        let mut cfg = config::SpeedwaveUserConfig {
+            projects: vec![
+                config::ProjectUserEntry {
+                    name: "proj-a".into(),
+                    dir: "/tmp/a".into(),
+                    claude: None,
+                    integrations: Some(config::IntegrationsConfig {
+                        plugins: Some(HashMap::from([(
+                            "presale".into(),
+                            config::IntegrationConfig {
+                                enabled: Some(true),
+                            },
+                        )])),
+                        ..Default::default()
+                    }),
+                    plugin_settings: None,
+                },
+                config::ProjectUserEntry {
+                    name: "proj-b".into(),
+                    dir: "/tmp/b".into(),
+                    claude: None,
+                    integrations: Some(config::IntegrationsConfig {
+                        plugins: Some(HashMap::from([
+                            (
+                                "presale".into(),
+                                config::IntegrationConfig {
+                                    enabled: Some(true),
+                                },
+                            ),
+                            (
+                                "other".into(),
+                                config::IntegrationConfig {
+                                    enabled: Some(false),
+                                },
+                            ),
+                        ])),
+                        ..Default::default()
+                    }),
+                    plugin_settings: None,
+                },
+            ],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        };
+
+        let service_id = "presale";
+        for project in &mut cfg.projects {
+            if let Some(integrations) = project.integrations.as_mut() {
+                if let Some(plugins) = integrations.plugins.as_mut() {
+                    plugins.remove(service_id);
+                }
+            }
+        }
+
+        let plugins_a = cfg.projects[0]
+            .integrations
+            .as_ref()
+            .unwrap()
+            .plugins
+            .as_ref()
+            .unwrap();
+        assert!(!plugins_a.contains_key("presale"));
+
+        let plugins_b = cfg.projects[1]
+            .integrations
+            .as_ref()
+            .unwrap()
+            .plugins
+            .as_ref()
+            .unwrap();
+        assert!(!plugins_b.contains_key("presale"));
+        assert!(plugins_b.contains_key("other"));
+    }
+
+    #[test]
+    fn remove_plugin_cleans_tokens_from_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create token dirs for two projects
+        let dir_a = tmp.path().join("tokens/proj-a/presale");
+        let dir_b = tmp.path().join("tokens/proj-b/presale");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        std::fs::write(dir_a.join("access_token"), "secret-a").unwrap();
+        std::fs::write(dir_b.join("access_token"), "secret-b").unwrap();
+
+        let auth_fields = vec!["access_token".to_string()];
+        let service_id = "presale";
+        let project_names = vec!["proj-a", "proj-b"];
+
+        for project_name in &project_names {
+            let svc_dir = tmp
+                .path()
+                .join("tokens")
+                .join(project_name)
+                .join(service_id);
+            if svc_dir.exists() {
+                for field_key in &auth_fields {
+                    let path = svc_dir.join(field_key);
+                    if path.exists() {
+                        std::fs::remove_file(&path).unwrap();
+                    }
+                }
+                if svc_dir.read_dir().unwrap().next().is_none() {
+                    std::fs::remove_dir(&svc_dir).unwrap();
+                }
+            }
+        }
+
+        assert!(!dir_a.exists());
+        assert!(!dir_b.exists());
+    }
+
+    #[test]
+    fn remove_plugin_fallback_removes_whole_dir_when_no_auth_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let dir = tmp.path().join("tokens/proj-a/presale");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("unknown_file"), "data").unwrap();
+        std::fs::write(dir.join("another_file"), "data2").unwrap();
+
+        let auth_fields: Vec<String> = vec![];
+        let svc_dir = tmp.path().join("tokens/proj-a/presale");
+
+        if svc_dir.exists() {
+            if auth_fields.is_empty() {
+                std::fs::remove_dir_all(&svc_dir).unwrap();
+            }
+        }
+
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn remove_plugin_removes_empty_token_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let dir = tmp.path().join("tokens/proj-a/presale");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("api_key"), "secret").unwrap();
+        std::fs::write(dir.join("host_url"), "https://example.com").unwrap();
+
+        let auth_fields = vec!["api_key".to_string(), "host_url".to_string()];
+
+        for field_key in &auth_fields {
+            let path = dir.join(field_key);
+            if path.exists() {
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+        if dir.read_dir().unwrap().next().is_none() {
+            std::fs::remove_dir(&dir).unwrap();
+        }
+
+        assert!(!dir.exists());
+    }
+
+    #[test]
     fn credential_field_validation_rejects_path_traversal() {
-        let key = "../../etc/passwd";
-        assert!(
-            key.contains('/') || key.contains('\\') || key.contains(".."),
-            "path traversal must be detected"
-        );
+        assert!(validate_credential_field("../../etc/passwd", "val").is_err());
+        assert!(validate_credential_field("foo\\bar", "val").is_err());
+        assert!(validate_credential_field("foo..bar", "val").is_err());
+        assert!(validate_credential_field("valid_key", "val").is_ok());
     }
 
     #[test]
     fn credential_value_length_limit() {
-        let max_len = 4096;
-        let short_value = "a".repeat(max_len);
-        assert!(short_value.len() <= max_len, "exactly at limit should pass");
+        let max_len = crate::CREDENTIAL_VALUE_MAX_BYTES;
+        let at_limit = "a".repeat(max_len);
+        assert!(validate_credential_field("key", &at_limit).is_ok());
 
-        let long_value = "a".repeat(max_len + 1);
-        assert!(long_value.len() > max_len, "over limit should fail");
+        let over_limit = "a".repeat(max_len + 1);
+        assert!(validate_credential_field("key", &over_limit).is_err());
+    }
+
+    #[test]
+    fn set_plugin_enabled_rejects_unknown_service_id() {
+        let service_id = "nonexistent-plugin";
+        let manifests: Vec<plugin::PluginManifest> = vec![];
+        let found = manifests
+            .iter()
+            .any(|m| m.service_id.as_deref() == Some(service_id) || m.slug == service_id);
+        assert!(!found, "unknown service_id should not match any manifest");
+    }
+
+    #[test]
+    fn token_dir_for_constructs_correct_path() {
+        let result = token_dir_for("my-project", "my-service");
+        assert!(result.is_ok());
+        let path = result.unwrap();
+        assert!(path.ends_with("tokens/my-project/my-service"));
+    }
+
+    #[test]
+    fn is_plugin_configured_false_when_required_integration_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        // No auth fields required (always "configured" for own creds)
+        let configured = is_plugin_configured(
+            dir.path(),
+            &[],
+            &["sharepoint".to_string()],
+            "nonexistent-project",
+        );
+        assert!(
+            !configured,
+            "should be false when required integration is not configured"
+        );
+    }
+
+    #[test]
+    fn is_plugin_configured_true_when_no_required_integrations() {
+        let dir = tempfile::tempdir().unwrap();
+        let configured = is_plugin_configured(dir.path(), &[], &[], "any-project");
+        assert!(
+            configured,
+            "should be true when no integrations required and no auth fields"
+        );
     }
 }

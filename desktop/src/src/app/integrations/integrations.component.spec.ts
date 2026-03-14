@@ -99,7 +99,7 @@ describe('IntegrationsComponent', () => {
     expect(component.osIntegrations).toHaveLength(1);
   });
 
-  it('should filter out hidden services (slack, sharepoint)', async () => {
+  it('should filter out hidden services (slack) but show sharepoint', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
         case 'list_projects':
@@ -145,7 +145,7 @@ describe('IntegrationsComponent', () => {
     await component.ngOnInit();
     const serviceNames = component.services.map((s) => s.service);
     expect(serviceNames).not.toContain('slack');
-    expect(serviceNames).not.toContain('sharepoint');
+    expect(serviceNames).toContain('sharepoint');
     expect(serviceNames).toContain('gitlab');
     expect(serviceNames).toContain('redmine');
   });

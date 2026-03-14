@@ -658,7 +658,7 @@ ifeq ($(OS),Windows_NT)
 else
 	cp target/debug/speedwave desktop/src-tauri/cli/speedwave
 endif
-	cd desktop/src-tauri && cargo tauri dev
+	cd desktop/src-tauri && SPEEDWAVE_ALLOW_UNSIGNED=1 cargo tauri dev
 
 # ── Quick status ─────────────────────────────────────────────────────────────
 

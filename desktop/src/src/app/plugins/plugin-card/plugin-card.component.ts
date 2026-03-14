@@ -32,6 +32,14 @@ export interface SavePluginCredentialsEvent {
           }
         </button>
         <div class="card-actions">
+          <button
+            type="button"
+            class="btn-open"
+            [attr.data-testid]="'plugin-open-' + plugin.slug"
+            (click)="openPlugin.emit(plugin.slug); $event.stopPropagation()"
+          >
+            Open
+          </button>
           @if (plugin.service_id) {
             <label
               class="toggle"
@@ -95,14 +103,34 @@ export interface SavePluginCredentialsEvent {
           }
 
           <div class="form-actions">
-            <button
-              type="button"
-              class="btn-remove"
-              [attr.data-testid]="'plugin-remove-' + plugin.slug"
-              (click)="removePlugin.emit(plugin)"
-            >
-              Uninstall Plugin
-            </button>
+            @if (confirmingRemove) {
+              <span class="confirm-prompt">Are you sure?</span>
+              <button
+                type="button"
+                class="btn-remove"
+                [attr.data-testid]="'plugin-remove-confirm-' + plugin.slug"
+                (click)="onConfirmRemove()"
+              >
+                Yes, uninstall
+              </button>
+              <button
+                type="button"
+                class="btn-cancel"
+                [attr.data-testid]="'plugin-remove-cancel-' + plugin.slug"
+                (click)="confirmingRemove = false"
+              >
+                Cancel
+              </button>
+            } @else {
+              <button
+                type="button"
+                class="btn-remove"
+                [attr.data-testid]="'plugin-remove-' + plugin.slug"
+                (click)="confirmingRemove = true"
+              >
+                Uninstall Plugin
+              </button>
+            }
           </div>
         </div>
       }
@@ -115,12 +143,14 @@ export class PluginCardComponent {
   @Input() expanded = false;
 
   @Output() toggleExpand = new EventEmitter<string>();
+  @Output() openPlugin = new EventEmitter<string>();
   @Output() togglePlugin = new EventEmitter<{ plugin: PluginStatusEntry; event: Event }>();
   @Output() saveCredentials = new EventEmitter<SavePluginCredentialsEvent>();
   @Output() deleteCredentials = new EventEmitter<PluginStatusEntry>();
   @Output() removePlugin = new EventEmitter<PluginStatusEntry>();
 
   editedValues: Record<string, string> = {};
+  confirmingRemove = false;
 
   /**
    * Returns the current value for a credential field, preferring edited values.
@@ -145,6 +175,14 @@ export class PluginCardComponent {
    */
   onToggle(event: Event): void {
     this.togglePlugin.emit({ plugin: this.plugin, event });
+  }
+
+  /**
+   * Emits removePlugin and resets the confirmation state.
+   */
+  onConfirmRemove(): void {
+    this.confirmingRemove = false;
+    this.removePlugin.emit(this.plugin);
   }
 
   /**

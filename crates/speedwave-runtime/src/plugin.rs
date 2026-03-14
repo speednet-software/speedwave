@@ -72,6 +72,9 @@ pub struct PluginManifest {
     pub extra_env: Option<HashMap<String, String>>,
     #[serde(default)]
     pub mem_limit: Option<String>,
+    /// Core integrations this plugin depends on (e.g. `["sharepoint"]`).
+    #[serde(default)]
+    pub requires_integrations: Vec<String>,
 }
 
 /// Returns `~/.speedwave/plugins/`
@@ -194,7 +197,9 @@ pub fn derive_compose_name(service_id: &str) -> String {
 
 /// Validates a slug matches the required pattern.
 fn validate_slug(slug: &str) -> anyhow::Result<()> {
-    let re = regex::Regex::new(SLUG_PATTERN)?;
+    static SLUG_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = SLUG_RE
+        .get_or_init(|| regex::Regex::new(SLUG_PATTERN).expect("invalid SLUG_PATTERN regex"));
     if !re.is_match(slug) {
         anyhow::bail!(
             "Invalid plugin slug '{}': must match {} (lowercase, starts with letter, max 64 chars)",
@@ -236,6 +241,57 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
         );
     }
 
+    // MCP plugins must specify a port
+    if manifest.service_id.is_some() && manifest.port.is_none() {
+        anyhow::bail!(
+            "MCP plugins (service_id='{}') must specify a port",
+            manifest.service_id.as_deref().unwrap_or("")
+        );
+    }
+
+    // Validate mem_limit format (e.g. "256m", "1g", "512000")
+    if let Some(ref limit) = manifest.mem_limit {
+        static MEM_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let re = MEM_RE.get_or_init(|| {
+            regex::Regex::new(r"^[0-9]+[bkmgBKMG]?$").expect("invalid mem_limit regex")
+        });
+        if !re.is_match(limit) {
+            anyhow::bail!(
+                "Invalid mem_limit '{}': must be a number optionally followed by b/k/m/g",
+                limit
+            );
+        }
+    }
+
+    // Validate image_tag format (alphanumeric, dots, hyphens, underscores)
+    if let Some(ref tag) = manifest.image_tag {
+        static TAG_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let re = TAG_RE.get_or_init(|| {
+            regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
+                .expect("invalid image_tag regex")
+        });
+        if !re.is_match(tag) {
+            anyhow::bail!(
+                "Invalid image_tag '{}': must be alphanumeric with dots, hyphens, underscores (max 128 chars)",
+                tag
+            );
+        }
+    }
+
+    // Validate auth_fields keys are safe filesystem names
+    for field in &manifest.auth_fields {
+        if field.key.contains('/')
+            || field.key.contains('\\')
+            || field.key.contains("..")
+            || field.key.is_empty()
+        {
+            anyhow::bail!(
+                "Invalid auth_field key '{}': must not contain path separators or '..'",
+                field.key
+            );
+        }
+    }
+
     // If ReadWrite, justification must be non-empty
     if let TokenMount::ReadWrite { ref justification } = manifest.token_mount {
         if justification.trim().is_empty() {
@@ -273,9 +329,6 @@ pub fn install_plugin(
 
     // Read and validate manifest
     let manifest_path = plugin_src.join("plugin.json");
-    if !manifest_path.exists() {
-        anyhow::bail!("plugin.json not found in extracted plugin");
-    }
     let content = std::fs::read_to_string(&manifest_path)?;
     let manifest: PluginManifest = serde_json::from_str(&content)?;
 
@@ -337,12 +390,17 @@ pub fn remove_plugin(slug: &str) -> anyhow::Result<()> {
 /// Lists all installed plugins by scanning `~/.speedwave/plugins/*/plugin.json`
 pub fn list_installed_plugins() -> anyhow::Result<Vec<PluginManifest>> {
     let plugins_dir = plugins_base_dir()?;
+    list_installed_from_dir(&plugins_dir)
+}
+
+/// Lists plugins from a given directory by scanning `<dir>/*/plugin.json`.
+pub fn list_installed_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<PluginManifest>> {
     if !plugins_dir.exists() {
         return Ok(vec![]);
     }
 
     let mut plugins = Vec::new();
-    for entry in std::fs::read_dir(&plugins_dir)? {
+    for entry in std::fs::read_dir(plugins_dir)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             let manifest_path = entry.path().join("plugin.json");
@@ -370,6 +428,7 @@ pub fn build_pending_plugin_images(runtime: &dyn ContainerRuntime) -> anyhow::Re
         return Ok(());
     }
 
+    let mut errors: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(&plugins_dir)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -383,12 +442,31 @@ pub fn build_pending_plugin_images(runtime: &dyn ContainerRuntime) -> anyhow::Re
         if !manifest_path.exists() {
             continue;
         }
-        let content = std::fs::read_to_string(&manifest_path)?;
-        let manifest: PluginManifest = serde_json::from_str(&content)?;
+        let content = match std::fs::read_to_string(&manifest_path) {
+            Ok(c) => c,
+            Err(e) => {
+                errors.push(format!("{}: read manifest: {e}", entry.path().display()));
+                continue;
+            }
+        };
+        let manifest: PluginManifest = match serde_json::from_str(&content) {
+            Ok(m) => m,
+            Err(e) => {
+                errors.push(format!("{}: parse manifest: {e}", entry.path().display()));
+                continue;
+            }
+        };
 
-        build_single_plugin_image(runtime, &manifest, &entry.path())?;
+        if let Err(e) = build_single_plugin_image(runtime, &manifest, &entry.path()) {
+            errors.push(format!("plugin '{}': {e}", manifest.slug));
+        }
     }
-    Ok(())
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("Some plugin images failed to build:\n{}", errors.join("\n"))
+    }
 }
 
 /// Builds a single plugin image using prepare_build_context + build_image.
@@ -467,7 +545,7 @@ pub fn generate_plugin_service(
         TokenMount::ReadWrite { .. } => "rw",
     };
 
-    let tokens_path = to_engine_path(&tokens_dir.join(sid))?;
+    let tokens_path = crate::compose::to_engine_path(&tokens_dir.join(sid))?;
     let mem_limit = manifest.mem_limit.as_deref().unwrap_or("256m");
     let user = container_user();
 
@@ -536,19 +614,6 @@ fn yaml_quote_entry(entry: &str) -> String {
         format!("'{}'", escaped)
     } else {
         entry.to_string()
-    }
-}
-
-/// Converts a host path to the path seen by the container engine.
-fn to_engine_path(path: &Path) -> anyhow::Result<String> {
-    #[cfg(target_os = "windows")]
-    {
-        let wsl = crate::runtime::wsl::windows_to_wsl_path(path)?;
-        Ok(wsl.to_string_lossy().to_string())
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        Ok(path.to_string_lossy().to_string())
     }
 }
 
@@ -622,18 +687,23 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> anyhow::Result<()> {
 
 /// Emit a warning if legacy addon directory exists and is non-empty.
 fn warn_legacy_addons() {
-    if let Some(home) = dirs::home_dir() {
-        let addons_dir = home.join(consts::DATA_DIR).join("addons");
-        if addons_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&addons_dir) {
-                if entries.count() > 0 {
-                    log::warn!(
-                        "Legacy addons found at {}. Please migrate to the plugin system.",
-                        addons_dir.display()
-                    );
-                }
-            }
-        }
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return,
+    };
+    let addons_dir = home.join(consts::DATA_DIR).join("addons");
+    if !addons_dir.exists() {
+        return;
+    }
+    let entries = match std::fs::read_dir(&addons_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    if entries.count() > 0 {
+        log::warn!(
+            "Legacy addons found at {}. Please migrate to the plugin system.",
+            addons_dir.display()
+        );
     }
 }
 
@@ -665,6 +735,7 @@ mod tests {
             speedwave_compat: Some(">=0.1.0".to_string()),
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec!["sharepoint".to_string()],
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let parsed: PluginManifest = serde_json::from_str(&json).unwrap();
@@ -675,6 +746,7 @@ mod tests {
         assert_eq!(parsed.port, Some(4010));
         assert_eq!(parsed.resources.len(), 2);
         assert!(matches!(parsed.token_mount, TokenMount::ReadOnly));
+        assert_eq!(parsed.requires_integrations, vec!["sharepoint"]);
     }
 
     #[test]
@@ -692,6 +764,23 @@ mod tests {
         assert_eq!(manifest.slug, "custom-skills");
         assert!(manifest.port.is_none());
         assert!(matches!(manifest.token_mount, TokenMount::ReadOnly));
+        assert!(
+            manifest.requires_integrations.is_empty(),
+            "requires_integrations should default to empty"
+        );
+    }
+
+    #[test]
+    fn test_manifest_with_requires_integrations() {
+        let json = r#"{
+            "name": "Presale Plugin",
+            "slug": "presale",
+            "version": "1.0.0",
+            "description": "Presale CRM",
+            "requires_integrations": ["sharepoint"]
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.requires_integrations, vec!["sharepoint"]);
     }
 
     #[test]
@@ -754,6 +843,7 @@ mod tests {
                 speedwave_compat: None,
                 extra_env: None,
                 mem_limit: None,
+                requires_integrations: vec![],
             };
             let tmp = tempfile::tempdir().unwrap();
             let result = validate_manifest(&manifest, tmp.path());
@@ -782,6 +872,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec![],
         };
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("Containerfile"), "FROM node:22").unwrap();
@@ -806,6 +897,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec![],
         };
         let tmp = tempfile::tempdir().unwrap();
         // No Containerfile created
@@ -835,6 +927,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec![],
         };
         let tmp = tempfile::tempdir().unwrap();
         let result = validate_manifest(&manifest, tmp.path());
@@ -874,6 +967,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec![],
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/myproject");
@@ -933,6 +1027,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: Some("512m".to_string()),
+            requires_integrations: vec![],
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/proj");
@@ -965,6 +1060,7 @@ mod tests {
                 "value".to_string(),
             )])),
             mem_limit: None,
+            requires_integrations: vec![],
         };
 
         let tokens_dir = PathBuf::from("/tokens");
@@ -977,11 +1073,9 @@ mod tests {
     #[test]
     fn test_list_installed_plugins_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        // plugins_base_dir depends on home dir, so test the logic directly
         let plugins_dir = tmp.path().join("plugins");
         assert!(!plugins_dir.exists());
-        // Verify the pattern: no dir = empty vec
-        let result: Vec<PluginManifest> = Vec::new();
+        let result = list_installed_from_dir(&plugins_dir).unwrap();
         assert!(result.is_empty());
     }
 
@@ -1001,21 +1095,36 @@ mod tests {
         }"#;
         std::fs::write(plugin_dir.join("plugin.json"), manifest).unwrap();
 
-        // Simulate listing
-        let mut plugins = Vec::new();
-        for entry in std::fs::read_dir(tmp.path()).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_type().unwrap().is_dir() {
-                let mp = entry.path().join("plugin.json");
-                if mp.exists() {
-                    let content = std::fs::read_to_string(&mp).unwrap();
-                    let m: PluginManifest = serde_json::from_str(&content).unwrap();
-                    plugins.push(m);
-                }
-            }
-        }
+        let plugins = list_installed_from_dir(tmp.path()).unwrap();
         assert_eq!(plugins.len(), 1);
         assert_eq!(plugins[0].slug, "presale");
+    }
+
+    #[test]
+    fn test_list_installed_from_dir_skips_invalid_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Valid plugin
+        let valid_dir = tmp.path().join("good-plugin");
+        std::fs::create_dir_all(&valid_dir).unwrap();
+        std::fs::write(
+            valid_dir.join("plugin.json"),
+            r#"{"name":"Good","slug":"good-plugin","version":"1.0.0","description":"ok","port":4010}"#,
+        )
+        .unwrap();
+
+        // Invalid manifest (missing required fields)
+        let bad_dir = tmp.path().join("bad-plugin");
+        std::fs::create_dir_all(&bad_dir).unwrap();
+        std::fs::write(bad_dir.join("plugin.json"), r#"{"not_a_manifest": true}"#).unwrap();
+
+        let plugins = list_installed_from_dir(tmp.path()).unwrap();
+        assert_eq!(
+            plugins.len(),
+            1,
+            "should skip bad manifest and return only the valid one"
+        );
+        assert_eq!(plugins[0].slug, "good-plugin");
     }
 
     #[test]
@@ -1066,6 +1175,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec![],
         };
         assert_eq!(plugin_image_tag(&manifest), "speedwave-mcp-test:2.0.0");
     }
@@ -1087,6 +1197,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec![],
         };
         assert_eq!(plugin_image_tag(&manifest), "speedwave-mcp-test:custom-tag");
     }
@@ -1248,6 +1359,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec![],
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -1299,6 +1411,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec![],
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -1330,6 +1443,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec![],
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -1362,6 +1476,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec![],
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -1403,6 +1518,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec![],
         };
 
         let status = get_plugin_token_status_with_base(home, "proj", &manifest);
@@ -1472,6 +1588,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec![],
         };
 
         // Replicate the duplicate check from install_plugin
@@ -1506,6 +1623,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            requires_integrations: vec![],
         };
 
         let conflict_found = if let Some(ref sid) = conflict_manifest.service_id {
@@ -1551,6 +1669,7 @@ mod tests {
                 ("PLAIN_VAR".to_string(), "simple-value".to_string()),
             ])),
             mem_limit: None,
+            requires_integrations: vec![],
         };
 
         let tokens_dir = PathBuf::from("/tokens");
@@ -1628,5 +1747,135 @@ mod tests {
     #[test]
     fn test_yaml_quote_entry_embedded_single_quotes() {
         assert_eq!(yaml_quote_entry("MSG=it's here"), "'MSG=it''s here'");
+    }
+
+    #[test]
+    fn test_mcp_plugin_requires_port() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            service_id: Some("test-mcp".to_string()),
+            slug: "test-mcp".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None, // missing port
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Containerfile"), "FROM node:22").unwrap();
+        let result = validate_manifest(&manifest, tmp.path());
+        assert!(
+            result.is_err(),
+            "MCP plugin without port should be rejected"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("port"),
+            "Error should mention port"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_invalid_mem_limit() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-mem".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: Some("256m; rm -rf /".to_string()),
+            requires_integrations: vec![],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_manifest(&manifest, tmp.path()).is_err());
+    }
+
+    #[test]
+    fn test_validate_manifest_accepts_valid_mem_limit() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-mem".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: Some("256m".to_string()),
+            requires_integrations: vec![],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_manifest(&manifest, tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_invalid_image_tag() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-tag".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: Some("latest\nimage: evil:tag".to_string()),
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_manifest(&manifest, tmp.path()).is_err());
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_path_traversal_auth_key() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-auth".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![AuthFieldDef {
+                key: "../../etc/passwd".to_string(),
+                label: "Evil".to_string(),
+                field_type: "text".to_string(),
+                placeholder: "".to_string(),
+                is_secret: false,
+            }],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_manifest(&manifest, tmp.path()).is_err());
     }
 }

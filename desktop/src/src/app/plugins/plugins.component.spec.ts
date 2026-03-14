@@ -1,8 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { provideRouter } from '@angular/router';
+import { Router } from '@angular/router';
 import { PluginsComponent } from './plugins.component';
 import { TauriService } from '../services/tauri.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  open: vi.fn(),
+}));
+import { open } from '@tauri-apps/plugin-dialog';
 
 const MOCK_PLUGINS = {
   plugins: [
@@ -25,6 +32,8 @@ const MOCK_PLUGINS = {
       ],
       current_values: {},
       token_mount: 'ro',
+      settings_schema: null,
+      requires_integrations: [],
     },
     {
       slug: 'my-commands',
@@ -37,6 +46,8 @@ const MOCK_PLUGINS = {
       auth_fields: [],
       current_values: {},
       token_mount: 'ro',
+      settings_schema: null,
+      requires_integrations: [],
     },
   ],
 };
@@ -72,7 +83,7 @@ describe('PluginsComponent', () => {
 
     await TestBed.configureTestingModule({
       imports: [PluginsComponent],
-      providers: [{ provide: TauriService, useValue: mockTauri }],
+      providers: [{ provide: TauriService, useValue: mockTauri }, provideRouter([])],
     }).compileComponents();
 
     fixture = TestBed.createComponent(PluginsComponent);
@@ -241,6 +252,51 @@ describe('PluginsComponent', () => {
     });
   });
 
+  describe('installPlugin()', () => {
+    it('calls open dialog and installs on selection', async () => {
+      await component.ngOnInit();
+      vi.mocked(open).mockResolvedValue('/tmp/presale-1.0.0.zip');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_plugin') return 'Plugin installed';
+        if (cmd === 'list_projects')
+          return {
+            projects: [{ name: 'test-project', dir: '/tmp/test' }],
+            active_project: 'test-project',
+          };
+        if (cmd === 'get_plugins') return cloneMockPlugins();
+        return undefined;
+      };
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      await component.installPlugin();
+      expect(invokeSpy).toHaveBeenCalledWith('install_plugin', {
+        zipPath: '/tmp/presale-1.0.0.zip',
+      });
+      expect(component.success).toBe('Plugin installed');
+      expect(component.needsRestart).toBe(true);
+    });
+
+    it('does nothing when dialog is cancelled', async () => {
+      await component.ngOnInit();
+      vi.mocked(open).mockResolvedValue(null);
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      await component.installPlugin();
+      expect(invokeSpy).not.toHaveBeenCalledWith('install_plugin', expect.anything());
+      expect(component.installing).toBe(false);
+    });
+
+    it('sets error on install failure', async () => {
+      await component.ngOnInit();
+      vi.mocked(open).mockResolvedValue('/tmp/bad.zip');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_plugin') throw new Error('signature invalid');
+        return undefined;
+      };
+      await component.installPlugin();
+      expect(component.error).toBe('signature invalid');
+      expect(component.installing).toBe(false);
+    });
+  });
+
   describe('restartContainers()', () => {
     it('invokes restart_integration_containers and clears needsRestart', async () => {
       await component.ngOnInit();
@@ -312,6 +368,15 @@ describe('PluginsComponent', () => {
 
       component.ngOnDestroy();
       expect(mockTauri.listenHandlers['project_switched']).toBeUndefined();
+    });
+  });
+
+  describe('navigateToPlugin()', () => {
+    it('navigates to plugin detail route', () => {
+      const router = TestBed.inject(Router);
+      const spy = vi.spyOn(router, 'navigate');
+      component.navigateToPlugin('presale');
+      expect(spy).toHaveBeenCalledWith(['/plugins', 'presale']);
     });
   });
 

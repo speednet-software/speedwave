@@ -85,11 +85,11 @@ The `${CONTAINER_USER}` variable is resolved in three locations:
 
 1. **`render_compose()`** — main compose template rendering, where all `${CONTAINER_USER}` placeholders in `compose.template.yml` are replaced.
 2. **`apply_llm_config()`** — dynamically created `llm-proxy` service, which injects `user: "{container_user}"` directly into the inline YAML.
-3. **`merge_compose_fragment()`** — addon compose fragments, where `${CONTAINER_USER}` is resolved before merging addon services into the main compose document.
+3. **`apply_plugins()`** — plugin compose generation, where `${CONTAINER_USER}` is resolved when generating plugin service containers.
 
 ### SecurityCheck: `check_container_user`
 
-A `CONTAINER_USER` security check in `SecurityCheck::run()` validates that every service in the generated compose YAML has a `user:` field matching the platform-expected value (`container_user()`). This prevents addons from overriding the container user to gain elevated access. Services with a missing or mismatched `user:` field trigger a `SecurityViolation` that blocks `compose_up`.
+A `CONTAINER_USER` security check in `SecurityCheck::run()` validates that every service in the generated compose YAML has a `user:` field matching the platform-expected value (`container_user()`). This prevents plugins from overriding the container user to gain elevated access. Services with a missing or mismatched `user:` field trigger a `SecurityViolation` that blocks `compose_up`.
 
 ### Runtime rootless verification
 
@@ -101,15 +101,15 @@ A `CONTAINER_USER` security check in `SecurityCheck::run()` validates that every
 
 - Linux rootless nerdctl works — containers can access bind-mounted host directories
 - macOS and Windows security posture unchanged (UID 1000:1000 preserved)
-- Addon authors can use `${CONTAINER_USER}` in compose fragments
-- `check_container_user` SecurityCheck prevents addons from hardcoding a different user
+- Plugin authors can use `${CONTAINER_USER}` in their service definitions
+- `check_container_user` SecurityCheck prevents plugins from hardcoding a different user
 
 ### Negative
 
 - One defense-in-depth layer (non-root user) removed on Linux
 - If a future kernel bug bypasses `no-new-privileges` AND the capability bounding set, UID 0 could theoretically regain capabilities (UID 1000 could not)
 - **Rootful containerd risk:** If `NerdctlRuntime::ensure_ready()` is bypassed or its rootless check fails to detect rootful mode, UID 0:0 in containers would be real root on the host. Mitigated by the explicit rootless verification in `ensure_ready()`, which checks `nerdctl info` output before any containers are started.
-- **All services run as 0:0 on Linux**, including addon services. There is no per-service user override — the `check_container_user` SecurityCheck enforces a uniform user across all services.
+- **All services run as 0:0 on Linux**, including plugin services. There is no per-service user override — the `check_container_user` SecurityCheck enforces a uniform user across all services.
 - **Increased blast radius for container escapes on Linux vs macOS/Windows.** On macOS and Windows, a container escape lands in a VM (Lima or WSL2), adding a hypervisor boundary. On Linux, containers run natively — a container escape lands directly on the host, constrained only by the user namespace UID mapping.
 
 ### Neutral

@@ -42,17 +42,17 @@ The CLI binary is bundled inside the Desktop app and copied to the user's PATH o
 
 ## CLI Scope
 
-The CLI binary (`speedwave`) is a lightweight client — all container orchestration logic lives in `speedwave-runtime`. The CLI itself handles argument parsing, project resolution, self-update via GitHub Releases, addon installation, and the security pre-flight check. Core logic is ~340 lines of Rust (plus ~200 lines of tests).
+The CLI binary (`speedwave`) is a lightweight client — all container orchestration logic lives in `speedwave-runtime`. The CLI itself handles argument parsing, project resolution, self-update via GitHub Releases, plugin installation, and the security pre-flight check. Core logic is ~340 lines of Rust (plus ~200 lines of tests).
 
 Subcommands:
 
-| Command                         | Description                           |
-| ------------------------------- | ------------------------------------- |
-| `speedwave`                     | Start containers + interactive Claude |
-| `speedwave check`               | Validate security invariants          |
-| `speedwave update`              | Rebuild images + recreate containers  |
-| `speedwave self-update`         | Download latest CLI from GitHub       |
-| `speedwave addon install <zip>` | Install an addon package              |
+| Command                               | Description                           |
+| ------------------------------------- | ------------------------------------- |
+| `speedwave`                           | Start containers + interactive Claude |
+| `speedwave check`                     | Validate security invariants          |
+| `speedwave update`                    | Rebuild images + recreate containers  |
+| `speedwave self-update`               | Download latest CLI from GitHub       |
+| `speedwave plugin install <path.zip>` | Install a plugin package              |
 
 ## ContainerRuntime Trait
 

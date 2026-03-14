@@ -30,6 +30,8 @@ function makeMcpPlugin(): PluginStatusEntry {
     ],
     current_values: { host_url: 'https://crm.test' },
     token_mount: 'ro',
+    settings_schema: null,
+    requires_integrations: [],
   };
 }
 
@@ -45,6 +47,8 @@ function makeResourcePlugin(): PluginStatusEntry {
     auth_fields: [],
     current_values: {},
     token_mount: 'ro',
+    settings_schema: null,
+    requires_integrations: [],
   };
 }
 
@@ -122,6 +126,15 @@ describe('PluginCardComponent', () => {
     expect(fixture.nativeElement.querySelector('.card-body')).not.toBeNull();
   });
 
+  it('should emit openPlugin when Open button is clicked', () => {
+    fixture.detectChanges();
+    const spy = vi.spyOn(component.openPlugin, 'emit');
+    const openBtn = fixture.nativeElement.querySelector('[data-testid="plugin-open-presale"]');
+    expect(openBtn).not.toBeNull();
+    openBtn.click();
+    expect(spy).toHaveBeenCalledWith('presale');
+  });
+
   it('should emit toggleExpand when header button is clicked', () => {
     fixture.detectChanges();
     const spy = vi.spyOn(component.toggleExpand, 'emit');
@@ -190,13 +203,46 @@ describe('PluginCardComponent', () => {
     });
   });
 
-  it('should emit removePlugin when uninstall button is clicked', () => {
-    component.expanded = true;
-    fixture.detectChanges();
-    const spy = vi.spyOn(component.removePlugin, 'emit');
-    const removeBtn = fixture.nativeElement.querySelector('.btn-remove');
-    removeBtn.click();
-    expect(spy).toHaveBeenCalledWith(component.plugin);
+  describe('uninstall confirmation', () => {
+    it('shows confirmation prompt on first click', () => {
+      component.expanded = true;
+      fixture.detectChanges();
+      const spy = vi.spyOn(component.removePlugin, 'emit');
+      const removeBtn = fixture.nativeElement.querySelector('.btn-remove');
+      removeBtn.click();
+      fixture.detectChanges();
+      expect(spy).not.toHaveBeenCalled();
+      expect(fixture.nativeElement.querySelector('.confirm-prompt').textContent).toContain(
+        'Are you sure?'
+      );
+    });
+
+    it('emits removePlugin on confirm', () => {
+      component.expanded = true;
+      component.confirmingRemove = true;
+      fixture.detectChanges();
+      const spy = vi.spyOn(component.removePlugin, 'emit');
+      const confirmBtn = fixture.nativeElement.querySelector(
+        '[data-testid="plugin-remove-confirm-presale"]'
+      );
+      confirmBtn.click();
+      expect(spy).toHaveBeenCalledWith(component.plugin);
+      expect(component.confirmingRemove).toBe(false);
+    });
+
+    it('cancels removal on cancel click', () => {
+      component.expanded = true;
+      component.confirmingRemove = true;
+      fixture.detectChanges();
+      const spy = vi.spyOn(component.removePlugin, 'emit');
+      const cancelBtn = fixture.nativeElement.querySelector(
+        '[data-testid="plugin-remove-cancel-presale"]'
+      );
+      cancelBtn.click();
+      fixture.detectChanges();
+      expect(spy).not.toHaveBeenCalled();
+      expect(component.confirmingRemove).toBe(false);
+    });
   });
 
   it('should emit deleteCredentials when remove credentials button is clicked', () => {

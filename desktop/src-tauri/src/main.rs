@@ -49,6 +49,9 @@ type SharedUpdateVersion = Arc<Mutex<Option<String>>>;
 
 const MAIN_WINDOW_LABEL: &str = "main";
 
+/// Maximum size for a single credential value in bytes.
+pub(crate) const CREDENTIAL_VALUE_MAX_BYTES: usize = 4096;
+
 /// Global mutex protecting all read-modify-write cycles on config.json.
 /// Without this, concurrent Tauri commands (e.g. toggling mail then notes in quick
 /// succession) can lose writes due to TOCTOU races.
@@ -469,7 +472,6 @@ fn main() {
                 .level_for("hyper", log::LevelFilter::Warn)
                 .level_for("tungstenite", log::LevelFilter::Warn)
                 .level_for("tokio_tungstenite", log::LevelFilter::Warn)
-                .level_for("reqwest", log::LevelFilter::Warn)
                 .max_file_size(50_000_000)
                 .rotation_strategy(RotationStrategy::KeepAll)
                 .format(move |callback, message, record| {
@@ -483,6 +485,7 @@ fn main() {
                 })
                 .build()
         })
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Second instance tried to launch — focus the existing window instead.

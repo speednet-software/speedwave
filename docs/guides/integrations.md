@@ -26,14 +26,16 @@ The Hub has **zero tokens** — it acts as a router. Each worker container mount
 
 ## Adding New Integrations
 
-Speedwave supports extending integrations via the addon system:
+Speedwave supports extending integrations via the plugin system:
 
-- `speedwave addon install <path.zip>` extracts the addon to `~/.speedwave/addons/<name>/`
-- Each addon contains an `addon.json` manifest and optional `compose.addon.yml`
-- `compose.rs` merges addon compose fragments into the main compose document
-- Addon services get injected `WORKER_<ADDON>_URL` in the hub environment
+- `speedwave plugin install <path.zip>` verifies the Ed25519 signature and extracts the plugin to `~/.speedwave/plugins/<slug>/`
+- Each plugin contains a `plugin.json` manifest, an optional MCP service (`src/`, `Containerfile`), and optional claude-resources (`skills/`, `commands/`)
+- `compose.rs` generates plugin service containers via `apply_plugins()`
+- Plugin services get injected `WORKER_<PLUGIN>_URL` in the hub environment
 
 See [ADR-015](../adr/ADR-015-plugin-system.md) for the plugin system design.
+
+Plugins that declare `requires_integrations` (e.g. `["sharepoint"]`) display the required integration status on the plugin dashboard. The Desktop UI indicates whether required integrations are configured, linking to the Integrations tab when they are not.
 
 ## See Also
 

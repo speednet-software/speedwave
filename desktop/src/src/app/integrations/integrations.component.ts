@@ -101,7 +101,7 @@ import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
   styleUrl: './integrations.component.css',
 })
 export class IntegrationsComponent implements OnInit, OnDestroy {
-  private static readonly HIDDEN_SERVICES = new Set(['slack', 'sharepoint']);
+  private static readonly HIDDEN_SERVICES = new Set(['slack']);
 
   /** List of container-based MCP service integrations. */
   services: IntegrationStatusEntry[] = [];
@@ -168,7 +168,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       const response = await this.tauri.invoke<IntegrationsResponse>('get_integrations', {
         project: this.activeProject,
       });
-      // Slack and SharePoint are not yet publicly available (#91)
+      // Slack is not yet publicly available (#91)
       this.services = response.services.filter(
         (s) => !IntegrationsComponent.HIDDEN_SERVICES.has(s.service)
       );

@@ -75,7 +75,7 @@ const TOOLS: Tool[] = [
     description: `Search available MCP tools by keyword. Returns tool names, descriptions, and optionally full schemas.
 Use this to discover tools before executing code. Start with 'names_only' for efficiency.
 
-Available services: slack, sharepoint, redmine, gitlab, os
+Built-in services: slack, sharepoint, redmine, gitlab, os. Plugin services (if enabled) are also searchable.
 
 Examples:
 - search_tools({ query: "slack", detail_level: "names_only" })
@@ -97,8 +97,8 @@ Examples:
         },
         service: {
           type: 'string',
-          enum: ['slack', 'sharepoint', 'redmine', 'gitlab', 'os'],
-          description: 'Limit search to specific service (optional)',
+          description:
+            'Limit search to specific service. Built-in: slack, sharepoint, redmine, gitlab, os. Plugin services also accepted.',
         },
         include_deferred: {
           type: 'boolean',

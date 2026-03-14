@@ -443,6 +443,54 @@ EOF
     rm -rf "$plugins_dir" "$patched"
 }
 
+@test "SPEEDWAVE_PLUGINS symlinks skill directories (not just flat files)" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    # Create a plugin with a skill directory containing SKILL.md
+    mkdir -p "${plugins_dir}/my-plugin/skills/my-skill"
+    echo "# My Skill" > "${plugins_dir}/my-plugin/skills/my-skill/SKILL.md"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # Verify the skill directory is symlinked (not just files)
+    [ -L "${TEST_HOME}/.claude/skills/my-skill" ]
+    [ -d "${TEST_HOME}/.claude/skills/my-skill" ]
+    [ -f "${TEST_HOME}/.claude/skills/my-skill/SKILL.md" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "SPEEDWAVE_PLUGINS symlinks command subdirectories" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    # Create a plugin with a command subdirectory
+    mkdir -p "${plugins_dir}/my-plugin/commands/iteration"
+    echo "# Create" > "${plugins_dir}/my-plugin/commands/iteration/create.md"
+    echo "# List" > "${plugins_dir}/my-plugin/commands/iteration/list.md"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # Verify the command subdirectory is symlinked
+    [ -L "${TEST_HOME}/.claude/commands/iteration" ]
+    [ -d "${TEST_HOME}/.claude/commands/iteration" ]
+    [ -f "${TEST_HOME}/.claude/commands/iteration/create.md" ]
+    [ -f "${TEST_HOME}/.claude/commands/iteration/list.md" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
 @test "SPEEDWAVE_PLUGINS handles multiple comma-separated plugins" {
     local plugins_dir
     plugins_dir="$(mktemp -d)"

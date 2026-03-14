@@ -7,6 +7,7 @@ import {
   inject,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { PluginStatusEntry, PluginsResponse } from '../models/plugin';
 import { ProjectList } from '../models/update';
@@ -14,6 +15,7 @@ import {
   PluginCardComponent,
   SavePluginCredentialsEvent,
 } from './plugin-card/plugin-card.component';
+import { open } from '@tauri-apps/plugin-dialog';
 
 /** Manages installed plugins: list, install, remove, enable/disable, credentials. */
 @Component({
@@ -56,22 +58,14 @@ import {
       }
 
       <div class="install-section">
-        <input
-          #fileInput
-          type="file"
-          accept=".zip"
-          class="hidden-input"
-          (change)="onFileSelected($event)"
-          data-testid="plugins-file-input"
-        />
         <button
           class="install-btn"
           data-testid="plugins-install"
-          (click)="fileInput.click()"
+          (click)="installPlugin()"
           [disabled]="installing"
         >
           @if (installing) {
-            Installing...
+            <span class="install-spinner"></span> Installing...
           } @else {
             + Install Plugin
           }
@@ -87,6 +81,7 @@ import {
             [plugin]="plugin"
             [expanded]="expandedPlugin === plugin.slug"
             (toggleExpand)="toggleExpand($event)"
+            (openPlugin)="navigateToPlugin($event)"
             (togglePlugin)="handleTogglePlugin($event)"
             (saveCredentials)="handleSaveCredentials($event)"
             (deleteCredentials)="handleDeleteCredentials($event)"
@@ -109,6 +104,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
   activeProject: string | null = null;
 
   private cdr = inject(ChangeDetectorRef);
+  private router = inject(Router);
   private tauri = inject(TauriService);
   private unlistenProjectSwitch: (() => void) | null = null;
 
@@ -174,13 +170,22 @@ export class PluginsComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Handles the file input change event for plugin ZIP install.
-   * @param event - the file input change event
+   * Navigates to the plugin detail page.
+   * @param slug - the plugin slug to navigate to
    */
-  async onFileSelected(event: Event): Promise<void> {
-    const input = event.target as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
+  navigateToPlugin(slug: string): void {
+    this.router.navigate(['/plugins', slug]);
+  }
+
+  /**
+   * Opens a native file dialog to select a plugin ZIP, then installs it.
+   */
+  async installPlugin(): Promise<void> {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: 'Plugin ZIP', extensions: ['zip'] }],
+    });
+    if (!selected) return;
 
     this.installing = true;
     this.error = '';
@@ -188,9 +193,8 @@ export class PluginsComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
 
     try {
-      // Tauri webview file inputs provide the real path
       const msg = await this.tauri.invoke<string>('install_plugin', {
-        zipPath: (file as File & { path?: string }).path ?? file.name,
+        zipPath: selected,
       });
       this.success = msg;
       this.needsRestart = true;
@@ -200,7 +204,6 @@ export class PluginsComponent implements OnInit, OnDestroy {
     }
 
     this.installing = false;
-    input.value = '';
     this.cdr.markForCheck();
   }
 
@@ -216,7 +219,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
     const enabled = (event.target as HTMLInputElement).checked;
     const sid = plugin.service_id ?? plugin.slug;
     try {
-      await this.tauri.invoke('set_plugin_enabled', {
+      await this.tauri.invoke<void>('set_plugin_enabled', {
         project: this.activeProject,
         serviceId: sid,
         enabled,
@@ -249,10 +252,9 @@ export class PluginsComponent implements OnInit, OnDestroy {
 
       const updated = this.plugins.find((p) => p.slug === payload.plugin.slug);
       if (updated && updated.configured && !updated.enabled && updated.service_id) {
-        const sid = updated.service_id ?? updated.slug;
-        await this.tauri.invoke('set_plugin_enabled', {
+        await this.tauri.invoke<void>('set_plugin_enabled', {
           project: this.activeProject,
-          serviceId: sid,
+          serviceId: updated.service_id,
           enabled: true,
         });
         updated.enabled = true;

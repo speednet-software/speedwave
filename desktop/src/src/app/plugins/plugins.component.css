@@ -75,6 +75,7 @@ h2 {
   opacity: 0.6;
   cursor: not-allowed;
 }
+.install-spinner,
 .restart-spinner {
   display: inline-block;
   width: 12px;

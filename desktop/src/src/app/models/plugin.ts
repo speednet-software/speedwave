@@ -19,6 +19,22 @@ export interface PluginStatusEntry {
   auth_fields: PluginAuthField[];
   current_values: Record<string, string>;
   token_mount: string;
+  settings_schema: JsonSchema | null;
+  requires_integrations: string[];
+}
+
+/** A single property within a JSON Schema. */
+export interface JsonSchemaProperty {
+  type: string;
+  enum?: string[];
+  default?: unknown;
+  description?: string;
+}
+
+/** A JSON Schema object definition used for plugin settings. */
+export interface JsonSchema {
+  type: 'object';
+  properties: Record<string, JsonSchemaProperty>;
 }
 
 /** Response from the `get_plugins` Tauri command. */

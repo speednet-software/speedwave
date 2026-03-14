@@ -5,7 +5,7 @@
   "identifier": "pl.speedwave.desktop",
   "build": {
     "frontendDist": "../src/dist/browser",
-    "devUrl": "http://localhost:4230",
+    "devUrl": "http://localhost:4270",
     "beforeDevCommand": {
       "script": "npx ng serve",
       "cwd": "../src"

@@ -44,6 +44,21 @@
   align-items: center;
   gap: 12px;
 }
+.btn-open {
+  padding: 4px 12px;
+  background: transparent;
+  color: #e94560;
+  border: 1px solid #e94560;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: monospace;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-open:hover {
+  background: #e94560;
+  color: #1a1a2e;
+}
 
 .badge {
   font-size: 11px;
@@ -175,6 +190,12 @@
   font-size: 13px;
   font-family: monospace;
   cursor: pointer;
+}
+
+.confirm-prompt {
+  color: #e09090;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .token-mount-info {
