@@ -264,22 +264,34 @@ impl ContainerRuntime for WslRuntime {
             .unwrap_or(false)
     }
 
-    fn build_image(&self, tag: &str, context_dir: &str, containerfile: &str) -> anyhow::Result<()> {
-        self.runner.run(
-            "wsl.exe",
-            &[
-                "-d",
-                consts::WSL_DISTRO_NAME,
-                "--",
-                "nerdctl",
-                "build",
-                "-t",
-                tag,
-                "-f",
-                containerfile,
-                context_dir,
-            ],
-        )?;
+    fn build_image(
+        &self,
+        tag: &str,
+        context_dir: &str,
+        containerfile: &str,
+        build_args: &[(&str, &str)],
+    ) -> anyhow::Result<()> {
+        let ba_strings: Vec<String> = build_args
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        let mut args: Vec<&str> = vec![
+            "-d",
+            consts::WSL_DISTRO_NAME,
+            "--",
+            "nerdctl",
+            "build",
+            "-t",
+            tag,
+            "-f",
+            containerfile,
+        ];
+        for s in &ba_strings {
+            args.push("--build-arg");
+            args.push(s);
+        }
+        args.push(context_dir);
+        self.runner.run("wsl.exe", &args)?;
         Ok(())
     }
 
@@ -725,6 +737,27 @@ mod tests {
         let result = rt.system_prune();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("prune failed"));
+    }
+
+    #[test]
+    fn test_build_image_passes_build_args() {
+        let version = crate::defaults::CLAUDE_VERSION;
+        let expected_key = format!(
+            "wsl.exe -d Speedwave -- nerdctl build -t my-image:latest -f /ctx/Containerfile --build-arg CLAUDE_VERSION={} /ctx",
+            version
+        );
+        let runner = MockRunner::new().with_response(&expected_key, "");
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        assert!(
+            rt.build_image(
+                "my-image:latest",
+                "/ctx",
+                "/ctx/Containerfile",
+                &[("CLAUDE_VERSION", version)],
+            )
+            .is_ok(),
+            "build_image with build_args should succeed"
+        );
     }
 
     // ── wsl_compose_file_path tests ────────────────────────────────────

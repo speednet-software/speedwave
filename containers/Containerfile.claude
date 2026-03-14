@@ -38,20 +38,15 @@ RUN mkdir -p /workspace && \
 # volume mount — reading 210MB through VirtioFS causes a ~10s freeze (Apple
 # Virtualization hypervisor spike). Fix: install as speedwave, then copy the
 # resolved binary to /usr/local/bin which lives on the VM's ext4 disk.
-ARG CLAUDE_VERSION=latest
+
+# Copy reusable installer (DRY — also used by entrypoint.sh at runtime)
+COPY --chmod=755 install-claude.sh /usr/local/bin/install-claude.sh
+
+ARG CLAUDE_VERSION
 USER 1000
-# SECURITY NOTE: install.sh is fetched over HTTPS without SHA256 verification
-# at build time. This is an accepted trade-off because:
-# 1. Image builds are developer-initiated, one-time operations (not runtime)
-# 2. The installed binary is baked into the image layer — the script is not
-#    persisted or re-executed at container start
-# 3. Pinning the installer hash is impractical: each Claude Code release changes
-#    the installer, so a pinned hash must be updated in lockstep — a pragmatic
-#    build-automation trade-off given the low-risk build-time context
-# 4. The runtime fallback in containers/entrypoint.sh DOES verify SHA256 via
-#    CLAUDE_INSTALLER_SHA256 when set by the caller; if absent, the entrypoint
-#    proceeds without hash verification
-RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}"
+# The official installer downloads the binary from GCS and verifies its SHA256
+# against a version-pinned manifest.json. See install-claude.sh for details.
+RUN /usr/local/bin/install-claude.sh "${CLAUDE_VERSION}"
 USER root
 RUN CLAUDE_BIN=$(readlink -f /home/speedwave/.local/bin/claude) && \
     cp "$CLAUDE_BIN" /usr/local/bin/claude && \

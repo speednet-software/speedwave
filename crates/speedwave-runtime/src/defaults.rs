@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-pub const CLAUDE_VERSION: &str = "latest";
+pub const CLAUDE_VERSION: &str = "2.1.76";
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
@@ -42,11 +42,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claude_version_is_latest_channel() {
-        // Must be "latest" — pinning a specific version number causes 404 on install.
-        // The native installer (claude.ai/install.sh) accepts "latest", "stable", or
-        // a concrete semver. We use "latest" so the container always gets a valid build.
-        assert_eq!(CLAUDE_VERSION, "latest");
+    fn claude_version_is_pinned_semver() {
+        // CLAUDE_VERSION must be a concrete semver — never "latest" or "stable".
+        // The official installer (claude.ai/install.sh) downloads the exact version
+        // and verifies its SHA256 against a version-pinned manifest.json from GCS.
+        // Pinning ensures reproducible builds and limits attack surface to a known release.
+        assert_ne!(CLAUDE_VERSION, "latest", "must not be 'latest'");
+        assert_ne!(CLAUDE_VERSION, "stable", "must not be 'stable'");
+        let re = regex::Regex::new(r"^[0-9]+\.[0-9]+\.[0-9]+$").unwrap();
+        assert!(
+            re.is_match(CLAUDE_VERSION),
+            "CLAUDE_VERSION must be a semver (e.g. '2.1.76'), got: '{}'",
+            CLAUDE_VERSION
+        );
     }
 
     #[test]
