@@ -154,6 +154,13 @@ fn emit_progress(app: &tauri::AppHandle, status: &str, message: &str, request_id
 
 /// Save access_token and refresh_token to the given service directory.
 fn save_tokens_to_dir(svc_dir: &std::path::Path, tokens: &MsTokenResponse) -> Result<(), String> {
+    let max = crate::types::MAX_CREDENTIAL_BYTES;
+    if tokens.access_token.len() > max {
+        return Err(format!("access_token exceeds {max} bytes"));
+    }
+    if tokens.refresh_token.len() > max {
+        return Err(format!("refresh_token exceeds {max} bytes"));
+    }
     std::fs::create_dir_all(svc_dir).map_err(|e| e.to_string())?;
 
     let at_path = svc_dir.join("access_token");
@@ -799,6 +806,34 @@ mod tests {
                 "refresh_token should have 0o600 permissions"
             );
         }
+    }
+
+    #[test]
+    fn save_tokens_to_dir_rejects_oversized_access_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tokens = MsTokenResponse {
+            access_token: "x".repeat(crate::types::MAX_CREDENTIAL_BYTES + 1),
+            refresh_token: "rt".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 3600,
+        };
+        let result = save_tokens_to_dir(&tmp.path().join("sp"), &tokens);
+        assert!(result.is_err(), "should reject oversized access_token");
+        assert!(result.unwrap_err().contains("access_token"));
+    }
+
+    #[test]
+    fn save_tokens_to_dir_rejects_oversized_refresh_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tokens = MsTokenResponse {
+            access_token: "at".to_string(),
+            refresh_token: "x".repeat(crate::types::MAX_CREDENTIAL_BYTES + 1),
+            token_type: "Bearer".to_string(),
+            expires_in: 3600,
+        };
+        let result = save_tokens_to_dir(&tmp.path().join("sp"), &tokens);
+        assert!(result.is_err(), "should reject oversized refresh_token");
+        assert!(result.unwrap_err().contains("refresh_token"));
     }
 
     #[test]

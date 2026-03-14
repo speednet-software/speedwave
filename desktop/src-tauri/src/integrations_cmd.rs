@@ -376,13 +376,7 @@ pub fn save_integration_credentials(
                 key, service
             ));
         }
-        crate::plugin_cmd::validate_credential_field(key, value)?;
-
-        if service == "redmine"
-            && (key == "host_url" || key == "project_id" || key == "project_name")
-        {
-            continue;
-        }
+        validate_credential_field(key, value)?;
 
         let file_path = svc_dir.join(key);
         std::fs::write(&file_path, value).map_err(|e| e.to_string())?;

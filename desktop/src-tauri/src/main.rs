@@ -50,9 +50,6 @@ type SharedUpdateVersion = Arc<Mutex<Option<String>>>;
 
 const MAIN_WINDOW_LABEL: &str = "main";
 
-/// Maximum size for a single credential value in bytes.
-pub(crate) const CREDENTIAL_VALUE_MAX_BYTES: usize = 4096;
-
 /// Global mutex protecting all read-modify-write cycles on config.json.
 /// Without this, concurrent Tauri commands (e.g. toggling mail then notes in quick
 /// succession) can lose writes due to TOCTOU races.

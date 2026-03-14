@@ -44,14 +44,17 @@ fn token_dir_for(project: &str, service_id: &str) -> Result<std::path::PathBuf, 
 
 /// Validates a credential field name and value for safety.
 pub(crate) fn validate_credential_field(key: &str, value: &str) -> Result<(), String> {
-    if key.contains('/') || key.contains('\\') || key.contains("..") {
+    if key.contains('/') || key.contains('\\') || key.contains("..") || key.contains('\0') {
         return Err(format!("invalid field name: {}", key));
     }
-    if value.len() > crate::CREDENTIAL_VALUE_MAX_BYTES {
+    if value.contains('\0') {
+        return Err(format!("value for '{}' contains null byte", key));
+    }
+    if value.len() > crate::types::MAX_CREDENTIAL_BYTES {
         return Err(format!(
             "value for '{}' exceeds {} bytes",
             key,
-            crate::CREDENTIAL_VALUE_MAX_BYTES
+            crate::types::MAX_CREDENTIAL_BYTES
         ));
     }
     Ok(())
@@ -910,8 +913,14 @@ mod tests {
     }
 
     #[test]
+    fn credential_field_validation_rejects_null_bytes() {
+        assert!(validate_credential_field("key\0evil", "val").is_err());
+        assert!(validate_credential_field("key", "val\0ue").is_err());
+    }
+
+    #[test]
     fn credential_value_length_limit() {
-        let max_len = crate::CREDENTIAL_VALUE_MAX_BYTES;
+        let max_len = crate::types::MAX_CREDENTIAL_BYTES;
         let at_limit = "a".repeat(max_len);
         assert!(validate_credential_field("key", &at_limit).is_ok());
 
