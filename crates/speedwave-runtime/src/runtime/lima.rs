@@ -1083,19 +1083,21 @@ mod tests {
     fn test_build_image_passes_build_args() {
         let (recorded, runner) = make_recording_runner();
         let rt = LimaRuntime::with_runner(runner);
+        let version = crate::defaults::CLAUDE_VERSION;
         rt.build_image(
             "my-image:latest",
             "/ctx",
             "/ctx/Containerfile",
-            &[("CLAUDE_VERSION", "2.1.76")],
+            &[("CLAUDE_VERSION", version)],
         )
         .unwrap();
 
         let commands = recorded.lock().unwrap();
         assert_eq!(commands.len(), 1);
+        let expected = format!("--build-arg CLAUDE_VERSION={}", version);
         assert!(
-            commands[0].contains("--build-arg CLAUDE_VERSION=2.1.76"),
-            "build_image should pass --build-arg, got: {}",
+            commands[0].contains(&expected),
+            "build_image should pass {expected}, got: {}",
             commands[0]
         );
     }

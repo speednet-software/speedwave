@@ -621,17 +621,19 @@ mod tests {
 
     #[test]
     fn test_build_image_passes_build_args() {
-        let runner = MockRunner::new().with_response(
-            "nerdctl build -t my-image:latest -f /ctx/Containerfile --build-arg CLAUDE_VERSION=2.1.76 /ctx",
-            "",
+        let version = crate::defaults::CLAUDE_VERSION;
+        let expected_key = format!(
+            "nerdctl build -t my-image:latest -f /ctx/Containerfile --build-arg CLAUDE_VERSION={} /ctx",
+            version
         );
+        let runner = MockRunner::new().with_response(&expected_key, "");
         let rt = NerdctlRuntime::with_runner(Box::new(runner));
         assert!(
             rt.build_image(
                 "my-image:latest",
                 "/ctx",
                 "/ctx/Containerfile",
-                &[("CLAUDE_VERSION", "2.1.76")],
+                &[("CLAUDE_VERSION", version)],
             )
             .is_ok(),
             "build_image with build_args should succeed"
