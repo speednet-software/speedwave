@@ -92,6 +92,11 @@ pub const UIDMAP_MISSING_MSG: &str = "newuidmap not found. Install the uidmap pa
      - Fedora/RHEL:   sudo dnf install -y shadow-utils\n\
      - openSUSE:      sudo zypper install -y shadow";
 
+/// Default interval (in hours) between automatic update checks.
+/// Used by both the CLI (converted to seconds) and the Desktop updater
+/// (as the default for `UpdateSettings::check_interval_hours`).
+pub const UPDATE_CHECK_INTERVAL_HOURS: u32 = 24;
+
 /// Delay in seconds after `compose_up_recreate` before checking container health.
 /// Allows crash-looping containers to exit before `compose_ps` reports state.
 pub const CONTAINER_STABILIZATION_DELAY_SECS: u64 = 3;
@@ -112,6 +117,10 @@ pub struct McpAuthFieldDescriptor {
     pub placeholder: &'static str,
     /// Whether this field contains a secret (token, key, etc.).
     pub is_secret: bool,
+    /// Whether this field is stored inside a `config.json` file rather than
+    /// as an individual credential file. Used by Redmine's `host_url`,
+    /// `project_id`, and `project_name` fields.
+    pub stored_in_config_json: bool,
 }
 
 /// Descriptor for a toggleable MCP service.
@@ -149,6 +158,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "password",
                 placeholder: "xoxb-...",
                 is_secret: true,
+                stored_in_config_json: false,
             },
             McpAuthFieldDescriptor {
                 key: "user_token",
@@ -156,6 +166,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "password",
                 placeholder: "xoxp-...",
                 is_secret: true,
+                stored_in_config_json: false,
             },
         ],
         credential_files: &["bot_token", "user_token"],
@@ -173,6 +184,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "password",
                 placeholder: "eyJ0...",
                 is_secret: true,
+                stored_in_config_json: false,
             },
             McpAuthFieldDescriptor {
                 key: "refresh_token",
@@ -180,6 +192,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "password",
                 placeholder: "0.AR...",
                 is_secret: true,
+                stored_in_config_json: false,
             },
             McpAuthFieldDescriptor {
                 key: "client_id",
@@ -187,6 +200,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "text",
                 placeholder: "00000000-0000-...",
                 is_secret: false,
+                stored_in_config_json: false,
             },
             McpAuthFieldDescriptor {
                 key: "tenant_id",
@@ -194,6 +208,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "text",
                 placeholder: "00000000-0000-...",
                 is_secret: false,
+                stored_in_config_json: false,
             },
             McpAuthFieldDescriptor {
                 key: "site_id",
@@ -201,6 +216,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "text",
                 placeholder: "site-id",
                 is_secret: false,
+                stored_in_config_json: false,
             },
             McpAuthFieldDescriptor {
                 key: "base_path",
@@ -208,6 +224,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "text",
                 placeholder: "/sites/MySite",
                 is_secret: false,
+                stored_in_config_json: false,
             },
         ],
         credential_files: &[
@@ -232,6 +249,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "password",
                 placeholder: "abcdef1234567890...",
                 is_secret: true,
+                stored_in_config_json: false,
             },
             McpAuthFieldDescriptor {
                 key: "host_url",
@@ -239,6 +257,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "url",
                 placeholder: "https://redmine.company.com",
                 is_secret: false,
+                stored_in_config_json: true,
             },
             McpAuthFieldDescriptor {
                 key: "project_id",
@@ -246,6 +265,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "text",
                 placeholder: "my-project",
                 is_secret: false,
+                stored_in_config_json: true,
             },
             McpAuthFieldDescriptor {
                 key: "project_name",
@@ -253,6 +273,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "text",
                 placeholder: "My Project",
                 is_secret: false,
+                stored_in_config_json: true,
             },
         ],
         credential_files: &[
@@ -276,6 +297,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "password",
                 placeholder: "glpat-...",
                 is_secret: true,
+                stored_in_config_json: false,
             },
             McpAuthFieldDescriptor {
                 key: "host_url",
@@ -283,6 +305,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "url",
                 placeholder: "https://gitlab.com",
                 is_secret: false,
+                stored_in_config_json: false,
             },
         ],
         credential_files: &["token", "host_url"],
@@ -575,6 +598,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_stored_in_config_json_only_on_redmine() {
+        let redmine = find_mcp_service("redmine").unwrap();
+        let config_json_fields: Vec<&str> = redmine
+            .auth_fields
+            .iter()
+            .filter(|f| f.stored_in_config_json)
+            .map(|f| f.key)
+            .collect();
+        assert_eq!(
+            config_json_fields,
+            vec!["host_url", "project_id", "project_name"],
+            "only Redmine's host_url, project_id, project_name should be stored_in_config_json"
+        );
+
+        // No other service should have stored_in_config_json fields
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            if svc.config_key == "redmine" {
+                continue;
+            }
+            for field in svc.auth_fields {
+                assert!(
+                    !field.stored_in_config_json,
+                    "field '{}' in service '{}' should not have stored_in_config_json=true",
+                    field.key, svc.config_key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_update_check_interval_hours() {
+        assert_eq!(UPDATE_CHECK_INTERVAL_HOURS, 24);
+        assert_eq!(
+            UPDATE_CHECK_INTERVAL_HOURS as u64 * 3600,
+            86400,
+            "UPDATE_CHECK_INTERVAL_HOURS * 3600 must equal 86400 seconds (24 hours)"
+        );
     }
 
     #[test]

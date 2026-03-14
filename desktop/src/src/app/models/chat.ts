@@ -59,16 +59,36 @@ export interface AskUserQuestionBlock {
   selected_values: string[];
 }
 
-/** State for a tool invocation block within a message. */
-export interface ToolUseBlock {
-  tool_id: string;
-  tool_name: string;
-  input_json: string;
-  result?: string;
-  result_is_error?: boolean;
-  collapsed: boolean;
-  status: 'running' | 'done' | 'error';
-}
+/** State for a tool invocation block within a message (discriminated union on status). */
+export type ToolUseBlock =
+  | {
+      type: 'tool_use';
+      tool_id: string;
+      tool_name: string;
+      input_json: string;
+      status: 'running';
+      collapsed: boolean;
+    }
+  | {
+      type: 'tool_use';
+      tool_id: string;
+      tool_name: string;
+      input_json: string;
+      status: 'done';
+      result: string;
+      result_is_error: false;
+      collapsed: boolean;
+    }
+  | {
+      type: 'tool_use';
+      tool_id: string;
+      tool_name: string;
+      input_json: string;
+      status: 'error';
+      result: string;
+      result_is_error: true;
+      collapsed: boolean;
+    };
 
 /** Normalized tool input for display */
 export type NormalizedToolInput =
@@ -99,11 +119,8 @@ export interface SessionStats {
   usage?: UsageInfo;
 }
 
-/** Response shape for list_projects Tauri command */
-export interface ProjectList {
-  projects: Array<{ name: string; dir: string }>;
-  active_project: string | null;
-}
+// ProjectList and ProjectEntry are defined in models/update.ts (SSOT)
+export type { ProjectList, ProjectEntry } from './update';
 
 /** A summary of a past conversation returned by list_conversations. */
 export interface ConversationSummary {

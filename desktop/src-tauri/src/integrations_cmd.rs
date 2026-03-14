@@ -9,8 +9,18 @@ use crate::types::{
 };
 use speedwave_runtime::config;
 
-/// Fields stored in Redmine's config.json rather than as individual files.
-const REDMINE_CONFIG_JSON_FIELDS: [&str; 3] = ["host_url", "project_id", "project_name"];
+/// Returns the field keys that Redmine stores in config.json (derived from SSOT in consts).
+fn redmine_config_json_fields() -> Vec<&'static str> {
+    speedwave_runtime::consts::find_mcp_service("redmine")
+        .map(|svc| {
+            svc.auth_fields
+                .iter()
+                .filter(|f| f.stored_in_config_json)
+                .map(|f| f.key)
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 // ---------------------------------------------------------------------------
 // Redmine helpers — Redmine stores host_url, project_id, and project_name
@@ -44,7 +54,7 @@ fn read_redmine_current_values(
         if is_secret_field(&field.key) {
             continue;
         }
-        if REDMINE_CONFIG_JSON_FIELDS.contains(&field.key.as_str()) {
+        if redmine_config_json_fields().contains(&field.key.as_str()) {
             if let Some(val) = config_json.get(&field.key).and_then(|v| v.as_str()) {
                 current_values.insert(field.key.clone(), val.to_string());
             }
@@ -76,7 +86,7 @@ fn save_redmine_credentials(
 ) -> Result<(), String> {
     let has_config_fields = credentials
         .keys()
-        .any(|k| REDMINE_CONFIG_JSON_FIELDS.contains(&k.as_str()));
+        .any(|k| redmine_config_json_fields().contains(&k.as_str()));
 
     let config_path = svc_dir.join("config.json");
     let mut config_obj = if has_config_fields {
@@ -96,7 +106,7 @@ fn save_redmine_credentials(
         }
         validate_credential_field(key, value)?;
 
-        if REDMINE_CONFIG_JSON_FIELDS.contains(&key.as_str()) {
+        if redmine_config_json_fields().contains(&key.as_str()) {
             config_obj[key] = serde_json::Value::String(value.clone());
         } else {
             let file_path = svc_dir.join(key);
@@ -122,8 +132,12 @@ fn validate_credential_field(key: &str, value: &str) -> Result<(), String> {
     if value.contains('\0') {
         return Err(format!("value for '{}' contains null byte", key));
     }
-    if value.len() > 4096 {
-        return Err(format!("value for '{}' exceeds 4096 bytes", key));
+    if value.len() > crate::types::MAX_CREDENTIAL_BYTES {
+        return Err(format!(
+            "value for '{}' exceeds {} bytes",
+            key,
+            crate::types::MAX_CREDENTIAL_BYTES
+        ));
     }
     Ok(())
 }
@@ -248,28 +262,29 @@ pub fn set_integration_enabled(
     check_project(&project)?;
     log::info!("set_integration_enabled: project={project} service={service} enabled={enabled}");
 
-    let _lock = crate::CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
-
     if enabled && !is_service_configured(&project, &service) {
         return Err(format!("{service} has no credentials configured"));
     }
 
-    let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
 
-    let entry = user_config
-        .find_project_mut(&project)
-        .ok_or_else(|| format!("project '{}' not found in config", project))?;
+        let entry = user_config
+            .find_project_mut(&project)
+            .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
 
-    let integrations = entry.integrations.get_or_insert_with(Default::default);
-    let cfg = config::IntegrationConfig {
-        enabled: Some(enabled),
-    };
+        let integrations = entry.integrations.get_or_insert_with(Default::default);
+        let cfg = config::IntegrationConfig {
+            enabled: Some(enabled),
+        };
 
-    if !integrations.set_service(&service, cfg) {
-        return Err(format!("unknown service: {}", service));
-    }
+        if !integrations.set_service(&service, cfg) {
+            return Err(anyhow::anyhow!("unknown service: {}", service));
+        }
 
-    config::save_user_config(&user_config).map_err(|e| e.to_string())
+        config::save_user_config(&user_config)
+    })
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -283,24 +298,27 @@ pub fn set_os_integration_enabled(
     }
     check_project(&project)?;
     log::info!("set_os_integration_enabled: project={project} service={service} enabled={enabled}");
-    let _lock = crate::CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
-    let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
 
-    let entry = user_config
-        .find_project_mut(&project)
-        .ok_or_else(|| format!("project '{}' not found in config", project))?;
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
 
-    let integrations = entry.integrations.get_or_insert_with(Default::default);
-    let os = integrations.os.get_or_insert_with(Default::default);
-    let cfg = config::IntegrationConfig {
-        enabled: Some(enabled),
-    };
+        let entry = user_config
+            .find_project_mut(&project)
+            .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
 
-    if !os.set_service(&service, cfg) {
-        return Err(format!("unknown OS service: {}", service));
-    }
+        let integrations = entry.integrations.get_or_insert_with(Default::default);
+        let os = integrations.os.get_or_insert_with(Default::default);
+        let cfg = config::IntegrationConfig {
+            enabled: Some(enabled),
+        };
 
-    config::save_user_config(&user_config).map_err(|e| e.to_string())
+        if !os.set_service(&service, cfg) {
+            return Err(anyhow::anyhow!("unknown OS service: {}", service));
+        }
+
+        config::save_user_config(&user_config)
+    })
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -416,16 +434,19 @@ pub fn delete_integration_credentials(project: String, service: String) -> Resul
     }
 
     // Auto-disable the integration since credentials are now removed
-    let _lock = crate::CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
-    let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
-    if let Some(entry) = user_config.find_project_mut(&project) {
-        let integrations = entry.integrations.get_or_insert_with(Default::default);
-        let cfg = config::IntegrationConfig {
-            enabled: Some(false),
-        };
-        integrations.set_service(&service, cfg);
-        config::save_user_config(&user_config).map_err(|e| e.to_string())?;
-    }
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        if let Some(entry) = user_config.find_project_mut(&project) {
+            let integrations = entry.integrations.get_or_insert_with(Default::default);
+            let cfg = config::IntegrationConfig {
+                enabled: Some(false),
+            };
+            integrations.set_service(&service, cfg);
+            config::save_user_config(&user_config)?;
+        }
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
 
     Ok(())
 }

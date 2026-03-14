@@ -63,7 +63,7 @@ Tauri v2 underwent an independent security audit by Radically Open Security (fun
 
 ### Positive
 
-- **Smaller installer.** No bundled Chromium — final `.dmg` / `.exe` / AppImage are ~150 MB smaller than an equivalent Electron build.
+- **Smaller installer.** No bundled Chromium — final `.dmg` / `.exe` / `.deb` are ~150 MB smaller than an equivalent Electron build.
 - **Lower memory usage.** System WebView shares resources with the OS instead of running a dedicated Chromium process.
 - **Direct Rust integration.** `speedwave-runtime` is imported as a Cargo dependency — no N-API bindings, no sidecar, no IPC serialization boundary.
 - **Deny-by-default security.** Frontend capabilities are explicitly declared — no accidental exposure of Node.js APIs.
@@ -73,7 +73,7 @@ Tauri v2 underwent an independent security audit by Radically Open Security (fun
 
 - **WebView inconsistency across platforms.** WebKit (macOS), WebKitGTK (Linux), and WebView2 (Windows) have different CSS/JS engine behavior. Web APIs available in Chromium may not exist in WebKit. Testing must cover all three platforms.[^3]
 - **Smaller ecosystem.** Electron has a larger ecosystem of plugins, example apps, and community resources.[^11] Tauri's ecosystem is growing but smaller.
-- **WebKitGTK as Linux dependency.** On Linux, `libwebkit2gtk-4.1` is a system dependency (not bundled). Most desktop Linux distributions ship it, but minimal server installs may not have it.[^3] This is documented in the AppImage prerequisites.
+- **WebKitGTK as Linux dependency.** On Linux, `libwebkit2gtk-4.1` is a system dependency (not bundled). Most desktop Linux distributions ship it, but minimal server installs may not have it.[^3] This is documented in the .deb package requirements.
 - **Rust learning curve.** Contributors to the Desktop backend must know Rust. However, Speedwave's entire backend (`speedwave-runtime`, `speedwave-cli`) is already Rust, so this is not an incremental cost.
 
 ## Rejected Alternatives

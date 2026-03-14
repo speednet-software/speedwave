@@ -8,6 +8,7 @@ pub mod config;
 pub mod consts;
 pub mod defaults;
 pub mod log_sanitizer;
+pub mod project;
 pub mod runtime;
 pub mod update;
 pub mod validation;

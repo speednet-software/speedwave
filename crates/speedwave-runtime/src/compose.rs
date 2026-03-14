@@ -97,29 +97,6 @@ pub fn render_compose(
 }
 
 /// Creates project directories under ~/.speedwave/
-pub fn init_project_dirs(project: &str) -> anyhow::Result<()> {
-    crate::validation::validate_project_name(project)?;
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-    let data_dir = home.join(consts::DATA_DIR);
-
-    let dirs_to_create = [
-        data_dir.join("tokens").join(project).join("slack"),
-        data_dir.join("tokens").join(project).join("sharepoint"),
-        data_dir.join("tokens").join(project).join("redmine"),
-        data_dir.join("tokens").join(project).join("gitlab"),
-        data_dir.join("compose").join(project),
-        data_dir.join("context").join(project),
-        data_dir.join("claude-home").join(project),
-    ];
-
-    for dir in &dirs_to_create {
-        std::fs::create_dir_all(dir)?;
-    }
-
-    Ok(())
-}
-
 /// Creates the secrets directory for a project with restrictive permissions (chmod 700).
 /// Path: ~/.speedwave/secrets/<project>/
 pub fn init_secrets_dir(project: &str) -> anyhow::Result<PathBuf> {
@@ -1474,29 +1451,6 @@ services:
     fn test_security_check_invalid_yaml() {
         let violations = SecurityCheck::run("not: valid: yaml: [[[", "test");
         assert!(violations.iter().any(|v| v.rule == "YAML_PARSE_ERROR"));
-    }
-
-    #[test]
-    fn test_init_project_dirs() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Override home dir for testing by using the init logic directly
-        let data_dir = tmp.path().join(consts::DATA_DIR);
-        let project = "test-project";
-        let dirs_to_create: Vec<std::path::PathBuf> = vec![
-            data_dir.join("tokens").join(project).join("slack"),
-            data_dir.join("tokens").join(project).join("sharepoint"),
-            data_dir.join("tokens").join(project).join("redmine"),
-            data_dir.join("tokens").join(project).join("gitlab"),
-            data_dir.join("compose").join(project),
-            data_dir.join("context").join(project),
-            data_dir.join("claude-home").join(project),
-        ];
-        for dir in &dirs_to_create {
-            std::fs::create_dir_all(dir).unwrap();
-        }
-        for dir in &dirs_to_create {
-            assert!(dir.exists(), "Directory should exist: {:?}", dir);
-        }
     }
 
     #[test]
@@ -2861,13 +2815,6 @@ services:
         assert!(render_compose("", "/tmp/proj", &resolved, &integrations).is_err());
         assert!(render_compose("../evil", "/tmp/proj", &resolved, &integrations).is_err());
         assert!(render_compose(&"a".repeat(64), "/tmp/proj", &resolved, &integrations).is_err());
-    }
-
-    #[test]
-    fn test_init_project_dirs_rejects_invalid_name() {
-        assert!(init_project_dirs("").is_err());
-        assert!(init_project_dirs("../evil").is_err());
-        assert!(init_project_dirs(&"a".repeat(64)).is_err());
     }
 
     #[test]

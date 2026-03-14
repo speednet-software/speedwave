@@ -34,10 +34,8 @@ describe('ChatStateService', () => {
     service = TestBed.inject(ChatStateService);
 
     // Reset state between tests
-    service.messages = [];
-    service.currentBlocks = [];
+    service._setState({ messages: [], currentBlocks: [], sessionStats: null });
     service.isStreaming = false;
-    service.sessionStats = null;
     service.containerStatus = 'checking';
     service.containerError = '';
   });
@@ -543,14 +541,39 @@ describe('ChatStateService', () => {
     });
   });
 
+  describe('project_switched event', () => {
+    it('clears state and re-checks containers on project switch', async () => {
+      await service.init();
+      service._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+      });
+      service.isStreaming = true;
+
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockClear();
+
+      // Simulate project_switched event
+      mockTauri.dispatchEvent('project_switched', 'other-project');
+
+      // Wait for async checkContainers to complete
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(service.messages).toEqual([]);
+      expect(service.isStreaming).toBe(false);
+      expect(service.sessionStats).toBeNull();
+      expect(spy).toHaveBeenCalledWith('list_projects');
+      expect(spy).toHaveBeenCalledWith('start_chat', { project: 'test' });
+    });
+  });
+
   describe('resetForNewConversation', () => {
     it('clears messages, blocks, and streaming state', () => {
-      service.messages = [
-        { role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 },
-      ];
-      service.currentBlocks = [{ type: 'text', content: 'partial' }];
+      service._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+        currentBlocks: [{ type: 'text', content: 'partial' }],
+        sessionStats: { session_id: 'x', cost_usd: 0, total_cost: 0 },
+      });
       service.isStreaming = true;
-      service.sessionStats = { session_id: 'x', cost_usd: 0, total_cost: 0 };
 
       service.resetForNewConversation();
 
