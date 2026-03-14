@@ -20,6 +20,7 @@ import {
   getToolPolicy,
   getServicePolicies,
 } from './hub-tool-policy.js';
+import { getAllServiceNames } from './service-list.js';
 import { discoverAndMergeService, buildSkeletonFromPolicy } from './tool-discovery.js';
 import { ts, TIMEOUTS } from '@speedwave/mcp-shared';
 
@@ -68,9 +69,11 @@ export const TOOL_REGISTRY: Readonly<Record<string, Readonly<Record<string, Tool
   _registry;
 
 /**
- * List of all service names in the registry
+ * List of all service names in the registry.
+ * Initially set to built-in services; updated during initializeRegistry()
+ * to include plugin services from ENABLED_SERVICES env var.
  */
-export const SERVICE_NAMES: readonly string[] = [...SUPPORTED_SERVICES];
+export let SERVICE_NAMES: readonly string[] = [...SUPPORTED_SERVICES];
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Initialization
@@ -89,13 +92,16 @@ export async function initializeRegistry(): Promise<void> {
   if (_initialized) return;
   _initialized = true; // Set immediately to prevent concurrent double-initialization
 
+  // Update SERVICE_NAMES to include plugin services from env
+  SERVICE_NAMES = getAllServiceNames();
+
   console.log(`${ts()} [tool-registry] Initializing dynamic registry...`);
 
   const enabledServices = getEnabledServices();
 
-  for (const service of SUPPORTED_SERVICES) {
+  for (const service of SERVICE_NAMES) {
     if (!enabledServices.has(service)) {
-      // Still populate skeleton so bridge generation works
+      // Still populate skeleton so bridge generation works (built-in only)
       _populateSkeletons(service);
       continue;
     }
@@ -169,7 +175,7 @@ function _startBackgroundRefresh(): void {
     _refreshInProgress = true;
     try {
       const enabled = getEnabledServices();
-      for (const service of SUPPORTED_SERVICES) {
+      for (const service of SERVICE_NAMES) {
         if (enabled.has(service)) {
           await refreshServiceTools(service);
         }
@@ -204,6 +210,7 @@ export function _resetRegistryForTesting(): void {
   }
   _initialized = false;
   _refreshInProgress = false;
+  SERVICE_NAMES = [...SUPPORTED_SERVICES];
   stopBackgroundRefresh();
 }
 

@@ -20,6 +20,7 @@ mod ide_bridge;
 mod integrations_cmd;
 mod logging_cmd;
 mod mcp_os_process;
+mod plugin_cmd;
 mod reconcile;
 mod setup_wizard;
 mod tray;
@@ -47,6 +48,14 @@ use reconcile::{SharedAutoCheckHandle, SharedIdeBridge};
 type SharedUpdateVersion = Arc<Mutex<Option<String>>>;
 
 const MAIN_WINDOW_LABEL: &str = "main";
+
+/// Maximum size for a single credential value in bytes.
+pub(crate) const CREDENTIAL_VALUE_MAX_BYTES: usize = 4096;
+
+/// Global mutex protecting all read-modify-write cycles on config.json.
+/// Without this, concurrent Tauri commands (e.g. toggling mail then notes in quick
+/// succession) can lose writes due to TOCTOU races.
+static CONFIG_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 
 /// Stop flag for the mcp-os watchdog thread. Set during app exit cleanup
 /// to prevent the watchdog from respawning mcp-os during shutdown.
@@ -467,7 +476,6 @@ fn main() {
                 .level_for("hyper", log::LevelFilter::Warn)
                 .level_for("tungstenite", log::LevelFilter::Warn)
                 .level_for("tokio_tungstenite", log::LevelFilter::Warn)
-                .level_for("reqwest", log::LevelFilter::Warn)
                 .max_file_size(50_000_000)
                 .rotation_strategy(RotationStrategy::KeepAll)
                 .format(move |callback, message, record| {
@@ -481,6 +489,7 @@ fn main() {
                 })
                 .build()
         })
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Second instance tried to launch — focus the existing window instead.
@@ -928,6 +937,15 @@ fn main() {
             integrations_cmd::save_redmine_mappings,
             integrations_cmd::delete_integration_credentials,
             integrations_cmd::restart_integration_containers,
+            // Plugins
+            plugin_cmd::get_plugins,
+            plugin_cmd::install_plugin,
+            plugin_cmd::remove_plugin,
+            plugin_cmd::set_plugin_enabled,
+            plugin_cmd::save_plugin_credentials,
+            plugin_cmd::delete_plugin_credentials,
+            plugin_cmd::plugin_save_settings,
+            plugin_cmd::plugin_load_settings,
         ])
         .on_window_event(move |window, event| {
             match event {
@@ -972,12 +990,14 @@ mod tests {
                     dir: "/tmp/alpha".to_string(),
                     claude: None,
                     integrations: None,
+                    plugin_settings: None,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
                     dir: "/tmp/beta".to_string(),
                     claude: None,
                     integrations: None,
+                    plugin_settings: None,
                 },
             ],
             active_project: Some("alpha".to_string()),
@@ -1048,6 +1068,7 @@ mod tests {
                 dir: "/tmp/only".to_string(),
                 claude: None,
                 integrations: None,
+                plugin_settings: None,
             }],
             active_project: None,
             selected_ide: None,

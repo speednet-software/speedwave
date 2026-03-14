@@ -54,6 +54,8 @@ pub struct IntegrationsConfig {
     pub redmine: Option<IntegrationConfig>,
     pub gitlab: Option<IntegrationConfig>,
     pub os: Option<OsIntegrationsConfig>,
+    #[serde(default)]
+    pub plugins: Option<HashMap<String, IntegrationConfig>>,
 }
 
 impl IntegrationsConfig {
@@ -69,6 +71,19 @@ impl IntegrationsConfig {
         }
         true
     }
+
+    /// Set plugin enabled state. Does NOT validate against installed manifests
+    /// (caller must do that). Separate from set_service() to prevent typos
+    /// from silently creating plugin entries.
+    pub fn set_plugin_enabled(&mut self, service_id: &str, enabled: bool) {
+        let plugins = self.plugins.get_or_insert_with(HashMap::new);
+        plugins.insert(
+            service_id.to_string(),
+            IntegrationConfig {
+                enabled: Some(enabled),
+            },
+        );
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -81,6 +96,7 @@ pub struct ResolvedIntegrationsConfig {
     pub os_calendar: bool,
     pub os_mail: bool,
     pub os_notes: bool,
+    pub plugins: HashMap<String, bool>,
 }
 
 impl ResolvedIntegrationsConfig {
@@ -96,6 +112,18 @@ impl ResolvedIntegrationsConfig {
             "gitlab" => Some(self.gitlab),
             _ => None,
         }
+    }
+
+    pub fn is_plugin_enabled(&self, service_id: &str) -> bool {
+        self.plugins.get(service_id).copied().unwrap_or(false)
+    }
+
+    pub fn enabled_plugin_service_ids(&self) -> Vec<&str> {
+        self.plugins
+            .iter()
+            .filter(|(_, &enabled)| enabled)
+            .map(|(id, _)| id.as_str())
+            .collect()
     }
 
     pub fn is_os_service_enabled(&self, key: &str) -> Option<bool> {
@@ -121,6 +149,8 @@ pub struct ProjectUserEntry {
     pub dir: String,
     pub claude: Option<ClaudeOverrides>,
     pub integrations: Option<IntegrationsConfig>,
+    #[serde(default)]
+    pub plugin_settings: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -254,6 +284,13 @@ fn apply_integrations_layer(result: &mut ResolvedIntegrationsConfig, layer: &Int
         apply_toggle(&mut result.os_calendar, &os.calendar);
         apply_toggle(&mut result.os_mail, &os.mail);
         apply_toggle(&mut result.os_notes, &os.notes);
+    }
+    if let Some(ref plugins) = layer.plugins {
+        for (service_id, cfg) in plugins {
+            if let Some(enabled) = cfg.enabled {
+                result.plugins.insert(service_id.clone(), enabled);
+            }
+        }
     }
 }
 
@@ -456,6 +493,7 @@ mod tests {
                     llm: None,
                 }),
                 integrations: None,
+                plugin_settings: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -504,6 +542,7 @@ mod tests {
                     }),
                 }),
                 integrations: None,
+                plugin_settings: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -545,6 +584,7 @@ mod tests {
                 dir: "/home/user/projects/acme".to_string(),
                 claude: None,
                 integrations: None,
+                plugin_settings: None,
             }],
             active_project: Some("acme".to_string()),
             selected_ide: None,
@@ -568,6 +608,7 @@ mod tests {
                 dir: "/tmp/test".to_string(),
                 claude: None,
                 integrations: None,
+                plugin_settings: None,
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
@@ -610,6 +651,7 @@ mod tests {
                 dir: "/tmp/test".to_string(),
                 claude: None,
                 integrations: None,
+                plugin_settings: None,
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
@@ -642,6 +684,7 @@ mod tests {
                 dir: "/tmp/v1".to_string(),
                 claude: None,
                 integrations: None,
+                plugin_settings: None,
             }],
             active_project: Some("v1".to_string()),
             selected_ide: None,
@@ -656,6 +699,7 @@ mod tests {
                 dir: "/tmp/v2".to_string(),
                 claude: None,
                 integrations: None,
+                plugin_settings: None,
             }],
             active_project: Some("v2".to_string()),
             selected_ide: None,
@@ -729,6 +773,7 @@ mod tests {
                 mail: None,
                 notes: None,
             }),
+            plugins: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: IntegrationsConfig = serde_json::from_str(&json).unwrap();
@@ -774,7 +819,9 @@ mod tests {
                     redmine: None,
                     gitlab: None,
                     os: None,
+                    plugins: None,
                 }),
+                plugin_settings: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -809,7 +856,9 @@ mod tests {
                         }),
                         notes: None,
                     }),
+                    plugins: None,
                 }),
+                plugin_settings: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -839,7 +888,9 @@ mod tests {
                     redmine: None,
                     gitlab: None,
                     os: None,
+                    plugins: None,
                 }),
+                plugin_settings: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -1039,6 +1090,85 @@ mod tests {
         assert!(result.active_project.is_none());
     }
 
+    #[test]
+    fn test_set_plugin_enabled() {
+        let mut cfg = IntegrationsConfig::default();
+        assert!(cfg.plugins.is_none());
+
+        cfg.set_plugin_enabled("presale", true);
+        let plugins = cfg.plugins.as_ref().unwrap();
+        assert_eq!(plugins.get("presale").unwrap().enabled, Some(true));
+
+        cfg.set_plugin_enabled("presale", false);
+        let plugins = cfg.plugins.as_ref().unwrap();
+        assert_eq!(plugins.get("presale").unwrap().enabled, Some(false));
+    }
+
+    #[test]
+    fn test_is_plugin_enabled() {
+        let resolved = ResolvedIntegrationsConfig {
+            plugins: HashMap::from([
+                ("presale".to_string(), true),
+                ("analytics".to_string(), false),
+            ]),
+            ..Default::default()
+        };
+        assert!(resolved.is_plugin_enabled("presale"));
+        assert!(!resolved.is_plugin_enabled("analytics"));
+        assert!(!resolved.is_plugin_enabled("unknown"));
+    }
+
+    #[test]
+    fn test_enabled_plugin_service_ids() {
+        let resolved = ResolvedIntegrationsConfig {
+            plugins: HashMap::from([
+                ("presale".to_string(), true),
+                ("analytics".to_string(), false),
+                ("reporting".to_string(), true),
+            ]),
+            ..Default::default()
+        };
+        let mut enabled = resolved.enabled_plugin_service_ids();
+        enabled.sort();
+        assert_eq!(enabled, vec!["presale", "reporting"]);
+    }
+
+    #[test]
+    fn test_resolve_integrations_with_plugins() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No repo config (no .speedwave.json)
+
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "test-project".to_string(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: Some(IntegrationsConfig {
+                    slack: None,
+                    sharepoint: None,
+                    redmine: None,
+                    gitlab: None,
+                    os: None,
+                    plugins: Some(HashMap::from([(
+                        "presale".to_string(),
+                        IntegrationConfig {
+                            enabled: Some(true),
+                        },
+                    )])),
+                }),
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        };
+
+        let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
+        assert!(resolved.is_plugin_enabled("presale"));
+        assert!(!resolved.is_plugin_enabled("unknown"));
+        assert_eq!(resolved.enabled_plugin_service_ids(), vec!["presale"]);
+    }
+
     // -- SpeedwaveUserConfig::find_project / require_project tests --
 
     fn make_config_with_projects() -> SpeedwaveUserConfig {
@@ -1049,12 +1179,14 @@ mod tests {
                     dir: "/tmp/alpha".to_string(),
                     claude: None,
                     integrations: None,
+                    plugin_settings: None,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
                     dir: "/tmp/beta".to_string(),
                     claude: None,
                     integrations: None,
+                    plugin_settings: None,
                 },
             ],
             active_project: None,
@@ -1121,12 +1253,14 @@ mod tests {
                     dir: "/tmp/alpha".to_string(),
                     claude: None,
                     integrations: None,
+                    plugin_settings: None,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
                     dir: "/tmp/beta".to_string(),
                     claude: None,
                     integrations: None,
+                    plugin_settings: None,
                 },
             ],
             active_project: Some("beta".to_string()),
@@ -1152,6 +1286,7 @@ mod tests {
                 dir: "/tmp/alpha".to_string(),
                 claude: None,
                 integrations: None,
+                plugin_settings: None,
             }],
             active_project: Some("deleted-project".to_string()),
             selected_ide: None,

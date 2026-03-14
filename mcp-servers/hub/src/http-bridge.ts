@@ -18,6 +18,7 @@
 import { randomUUID } from 'crypto';
 import { buildServiceBridge, getEnabledServices } from './tool-registry.js';
 import { getAuthToken } from './auth-tokens.js';
+import { getAllServiceNames } from './service-list.js';
 import { TIMEOUTS, ts, validateWorkerUrl } from '@speedwave/mcp-shared';
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -52,9 +53,10 @@ function getWorkerUrl(service: string): string | undefined {
 
 /**
  * Get all services that have a WORKER_*_URL env var configured.
+ * Includes both built-in and plugin services.
  */
 function getConfiguredServices(): string[] {
-  return SERVICES.filter((service) => Boolean(getWorkerUrl(service)));
+  return getAllServiceNames().filter((service) => Boolean(getWorkerUrl(service)));
 }
 
 /**
@@ -457,20 +459,10 @@ export function createOsBridge() {
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * All service bridges combined
+ * All service bridges combined.
+ * Dynamic Record type to support both built-in and plugin services.
  */
-export interface AllBridges {
-  /** Slack service bridge */
-  slack: ReturnType<typeof createSlackBridge> | null;
-  /** SharePoint service bridge */
-  sharepoint: ReturnType<typeof createSharePointBridge> | null;
-  /** Redmine service bridge */
-  redmine: ReturnType<typeof createRedmineBridge> | null;
-  /** GitLab service bridge */
-  gitlab: ReturnType<typeof createGitLabBridge> | null;
-  /** OS service bridge (Reminders, Calendar, Mail, Notes) */
-  os: ReturnType<typeof createOsBridge> | null;
-}
+export type AllBridges = Record<string, ReturnType<typeof buildServiceBridge> | null>;
 
 /**
  * Initialize all service bridges
@@ -486,17 +478,17 @@ export async function initializeAllBridges(): Promise<AllBridges> {
   console.log(`${ts()} 🔗 Initializing HTTP bridges to workers (lazy mode)...`);
 
   const enabledServices = getEnabledServices();
+  const allServices = getAllServiceNames();
 
-  const bridges: AllBridges = {
-    slack: enabledServices.has('slack') ? createSlackBridge() : null,
-    sharepoint: enabledServices.has('sharepoint') ? createSharePointBridge() : null,
-    redmine: enabledServices.has('redmine') ? createRedmineBridge() : null,
-    gitlab: enabledServices.has('gitlab') ? createGitLabBridge() : null,
-    os: enabledServices.has('os') ? createOsBridge() : null,
-  };
+  const bridges: AllBridges = {};
+  for (const service of allServices) {
+    bridges[service] = enabledServices.has(service)
+      ? buildServiceBridge(service, callWorker)
+      : null;
+  }
 
   // Check initial status for logging only
-  const activeServices = SERVICES.filter((s) => enabledServices.has(s));
+  const activeServices = allServices.filter((s) => enabledServices.has(s));
   const statusChecks = await Promise.all(activeServices.map((s) => isWorkerAvailable(s)));
   const workerStatus = Object.fromEntries(activeServices.map((s, i) => [s, statusChecks[i]]));
 
@@ -505,7 +497,7 @@ export async function initializeAllBridges(): Promise<AllBridges> {
   console.log(
     `${ts()} \n📊 Workers available at startup: ${enabledCount}/${activeServices.length}`
   );
-  for (const service of SERVICES) {
+  for (const service of allServices) {
     if (!enabledServices.has(service)) {
       console.log(
         `${ts()}    ${service.charAt(0).toUpperCase() + service.slice(1).padEnd(10)}: disabled`

@@ -1,0 +1,82 @@
+.no-settings {
+  color: #888;
+  font-size: 13px;
+}
+
+.form-group {
+  margin: 16px 0;
+}
+.form-group label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: #aaa;
+}
+.field-hint {
+  display: block;
+  font-size: 11px;
+  color: #666;
+  margin-bottom: 6px;
+}
+.form-input {
+  width: 100%;
+  padding: 10px 12px;
+  background: #1a1a2e;
+  border: 1px solid #0f3460;
+  border-radius: 4px;
+  color: #e0e0e0;
+  font-size: 14px;
+  font-family: monospace;
+  box-sizing: border-box;
+}
+.form-input:focus {
+  border-color: #e94560;
+  outline: none;
+}
+.select-input {
+  width: 100%;
+  padding: 10px 12px;
+  background: #1a1a2e;
+  border: 1px solid #0f3460;
+  border-radius: 4px;
+  color: #e0e0e0;
+  font-size: 14px;
+  font-family: monospace;
+  box-sizing: border-box;
+}
+.select-input:focus {
+  border-color: #e94560;
+  outline: none;
+}
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #e0e0e0;
+  cursor: pointer;
+}
+.checkbox-label input[type='checkbox'] {
+  accent-color: #e94560;
+}
+
+.form-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+}
+.btn-save {
+  padding: 6px 20px;
+  background: transparent;
+  color: #e94560;
+  border: 1px solid #e94560;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: monospace;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-save:hover:not(:disabled) {
+  background: #e94560;
+  color: #1a1a2e;
+}

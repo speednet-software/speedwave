@@ -71,20 +71,20 @@ This means teams can override any Speedwave resource by committing a same-named 
 
 See [ADR-022](../adr/ADR-022-bundled-claude-resources-and-project-coexistence.md) for the full design rationale and rejected alternatives.
 
-## Addon Resources
+## Plugin Resources
 
-When addons are installed (`SPEEDWAVE_ADDONS` env variable), `entrypoint.sh` symlinks individual files from each addon into the user-level directories. Addon directories are mounted into the container at `/speedwave/addons/<addon-name>/`:
+When plugins are installed (`SPEEDWAVE_PLUGINS` env variable), `entrypoint.sh` symlinks individual files and directories from each plugin into the user-level directories. Plugin directories are mounted into the container at `/speedwave/plugins/<plugin-slug>/`:
 
 ```
-/speedwave/addons/<addon-name>/        ← container path (host: ~/.speedwave/addons/<addon-name>/claude-resources/)
+/speedwave/plugins/<plugin-slug>/        ← container path (host: ~/.speedwave/plugins/<plugin-slug>/claude-resources/)
 ├── commands/    ← per-file symlinks into ~/.claude/commands/
 ├── agents/      ← per-file symlinks into ~/.claude/agents/
 └── skills/      ← per-file symlinks into ~/.claude/skills/
 ```
 
-Unlike core resources (which symlink entire directories), addon resources create per-file symlinks. This allows core and addon resources to coexist within the same user-level directory. Addon resources support `commands`, `agents`, and `skills` only — `hooks` are intentionally excluded because hooks execute shell commands, and allowing third-party addons to inject hooks would expand the attack surface without user consent.
+Unlike core resources (which symlink entire directories), plugin resources create per-entry symlinks using `[ -e ]` and `ln -sfn`, supporting both files and directories. This allows core and plugin resources to coexist within the same user-level directory. Plugin resources support `commands`, `agents`, and `skills` only — `hooks` are intentionally excluded because hooks execute shell commands, and allowing third-party plugins to inject hooks would expand the attack surface without user consent.
 
-See [ADR-015](../adr/ADR-015-addon-system-open-core-model.md) for the addon system design.
+See [ADR-015](../adr/ADR-015-plugin-system.md) for the plugin system design.
 
 ## Persistence Across Container Restarts
 
@@ -106,7 +106,7 @@ Checklist for contributors:
 ## See Also
 
 - [ADR-022 — Bundled Resources and Project Coexistence](../adr/ADR-022-bundled-claude-resources-and-project-coexistence.md)
-- [ADR-015 — Addon System](../adr/ADR-015-addon-system-open-core-model.md)
+- [ADR-015 — Plugin System](../adr/ADR-015-plugin-system.md)
 - [Containers](containers.md) — OCI images, compose templates, per-project isolation
 - [Security Model](security.md) — container hardening, token isolation
 

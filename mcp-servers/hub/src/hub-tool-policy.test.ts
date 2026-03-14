@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
+import type { Tool } from '@speedwave/mcp-shared';
 import {
   TOOL_POLICIES,
   SUPPORTED_SERVICES,
   getToolPolicy,
   getServicePolicies,
+  getPluginToolPolicy,
 } from './hub-tool-policy.js';
 
 describe('hub-tool-policy', () => {
@@ -115,6 +117,68 @@ describe('hub-tool-policy', () => {
 
     it('returns empty object for non-existing service', () => {
       expect(getServicePolicies('nonExistent')).toEqual({});
+    });
+  });
+
+  describe('getPluginToolPolicy', () => {
+    it('defaults to read category when no worker tool provided', () => {
+      const policy = getPluginToolPolicy();
+      expect(policy.category).toBe('read');
+      expect(policy.deferLoading).toBe(false);
+    });
+
+    it('defaults to read when worker tool has no category', () => {
+      const tool: Tool = {
+        name: 'search_customers',
+        description: 'Search CRM customers',
+        inputSchema: { type: 'object', properties: {} },
+      };
+      const policy = getPluginToolPolicy(tool);
+      expect(policy.category).toBe('read');
+    });
+
+    it('uses worker tool category when provided as read', () => {
+      const tool: Tool = {
+        name: 'list_orders',
+        description: 'List orders',
+        inputSchema: { type: 'object', properties: {} },
+        category: 'read',
+      };
+      const policy = getPluginToolPolicy(tool);
+      expect(policy.category).toBe('read');
+    });
+
+    it('uses worker tool category when provided as write', () => {
+      const tool: Tool = {
+        name: 'create_order',
+        description: 'Create an order',
+        inputSchema: { type: 'object', properties: {} },
+        category: 'write',
+      };
+      const policy = getPluginToolPolicy(tool);
+      expect(policy.category).toBe('write');
+    });
+
+    it('uses worker tool category when provided as delete', () => {
+      const tool: Tool = {
+        name: 'delete_order',
+        description: 'Delete an order',
+        inputSchema: { type: 'object', properties: {} },
+        category: 'delete',
+      };
+      const policy = getPluginToolPolicy(tool);
+      expect(policy.category).toBe('delete');
+    });
+
+    it('always sets deferLoading to false for plugin tools', () => {
+      const tool: Tool = {
+        name: 'test_tool',
+        description: 'Test tool',
+        inputSchema: { type: 'object', properties: {} },
+        category: 'write',
+      };
+      const policy = getPluginToolPolicy(tool);
+      expect(policy.deferLoading).toBe(false);
     });
   });
 });

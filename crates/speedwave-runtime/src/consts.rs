@@ -365,6 +365,10 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
     "mcp-gitlab",
 ];
 
+/// Built-in service IDs (logical names, not compose names).
+/// Used by plugin install to prevent slug collisions.
+pub const BUILT_IN_SERVICE_IDS: &[&str] = &["slack", "sharepoint", "redmine", "gitlab", "os"];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -653,6 +657,18 @@ mod tests {
         assert!(find_mcp_service("unknown").is_none());
         assert!(find_mcp_service("").is_none());
         assert!(find_mcp_service("os").is_none());
+    }
+
+    #[test]
+    fn test_built_in_service_ids_no_overlap_with_built_in_services() {
+        // Verify that no service_id in BUILT_IN_SERVICE_IDS appears in BUILT_IN_SERVICES
+        // (they use different naming: "slack" vs "mcp-slack")
+        for sid in BUILT_IN_SERVICE_IDS {
+            assert!(
+                !BUILT_IN_SERVICES.contains(sid),
+                "BUILT_IN_SERVICE_IDS entry '{sid}' collides with BUILT_IN_SERVICES"
+            );
+        }
     }
 
     #[test]

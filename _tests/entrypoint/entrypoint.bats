@@ -401,3 +401,236 @@ EOF
     [ "$status" -eq 0 ]
     [ ! -e "${TEST_HOME}/.claude/settings.json" ]
 }
+
+# ---------------------------------------------------------------------------
+# SPEEDWAVE_PLUGINS: symlink plugin resources
+# ---------------------------------------------------------------------------
+
+@test "SPEEDWAVE_PLUGINS creates symlinks for all resource types" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    # Create a plugin with all four resource types
+    mkdir -p "${plugins_dir}/my-plugin/commands"
+    mkdir -p "${plugins_dir}/my-plugin/agents"
+    mkdir -p "${plugins_dir}/my-plugin/skills"
+    mkdir -p "${plugins_dir}/my-plugin/hooks"
+    echo "cmd content" > "${plugins_dir}/my-plugin/commands/do-thing.md"
+    echo "agent content" > "${plugins_dir}/my-plugin/agents/helper.md"
+    echo "skill content" > "${plugins_dir}/my-plugin/skills/analyze.md"
+    echo "hook content" > "${plugins_dir}/my-plugin/hooks/pre-run.sh"
+
+    # Patch entrypoint to use our temp plugins dir instead of /speedwave/plugins
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # Verify symlinks for each resource type
+    [ -L "${TEST_HOME}/.claude/commands/do-thing.md" ]
+    [ -L "${TEST_HOME}/.claude/agents/helper.md" ]
+    [ -L "${TEST_HOME}/.claude/skills/analyze.md" ]
+    [ -L "${TEST_HOME}/.claude/hooks/pre-run.sh" ]
+
+    # Verify symlink targets
+    [ "$(readlink "${TEST_HOME}/.claude/commands/do-thing.md")" = "${plugins_dir}/my-plugin/commands/do-thing.md" ]
+    [ "$(readlink "${TEST_HOME}/.claude/agents/helper.md")" = "${plugins_dir}/my-plugin/agents/helper.md" ]
+    [ "$(readlink "${TEST_HOME}/.claude/skills/analyze.md")" = "${plugins_dir}/my-plugin/skills/analyze.md" ]
+    [ "$(readlink "${TEST_HOME}/.claude/hooks/pre-run.sh")" = "${plugins_dir}/my-plugin/hooks/pre-run.sh" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "SPEEDWAVE_PLUGINS symlinks skill directories (not just flat files)" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    # Create a plugin with a skill directory containing SKILL.md
+    mkdir -p "${plugins_dir}/my-plugin/skills/my-skill"
+    echo "# My Skill" > "${plugins_dir}/my-plugin/skills/my-skill/SKILL.md"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # Verify the skill directory is symlinked (not just files)
+    [ -L "${TEST_HOME}/.claude/skills/my-skill" ]
+    [ -d "${TEST_HOME}/.claude/skills/my-skill" ]
+    [ -f "${TEST_HOME}/.claude/skills/my-skill/SKILL.md" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "SPEEDWAVE_PLUGINS symlinks command subdirectories" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    # Create a plugin with a command subdirectory
+    mkdir -p "${plugins_dir}/my-plugin/commands/iteration"
+    echo "# Create" > "${plugins_dir}/my-plugin/commands/iteration/create.md"
+    echo "# List" > "${plugins_dir}/my-plugin/commands/iteration/list.md"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # Verify the command subdirectory is symlinked
+    [ -L "${TEST_HOME}/.claude/commands/iteration" ]
+    [ -d "${TEST_HOME}/.claude/commands/iteration" ]
+    [ -f "${TEST_HOME}/.claude/commands/iteration/create.md" ]
+    [ -f "${TEST_HOME}/.claude/commands/iteration/list.md" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "SPEEDWAVE_PLUGINS handles multiple comma-separated plugins" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    mkdir -p "${plugins_dir}/alpha/commands"
+    mkdir -p "${plugins_dir}/beta/skills"
+    echo "alpha cmd" > "${plugins_dir}/alpha/commands/alpha-cmd.md"
+    echo "beta skill" > "${plugins_dir}/beta/skills/beta-skill.md"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="alpha,beta" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    [ -L "${TEST_HOME}/.claude/commands/alpha-cmd.md" ]
+    [ -L "${TEST_HOME}/.claude/skills/beta-skill.md" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "empty SPEEDWAVE_PLUGINS is handled gracefully" {
+    SPEEDWAVE_PLUGINS="" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+}
+
+@test "unset SPEEDWAVE_PLUGINS is handled gracefully" {
+    unset SPEEDWAVE_PLUGINS
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+}
+
+@test "SPEEDWAVE_PLUGINS rejects invalid slug with path traversal" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="../etc/passwd" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # Verify warning was printed
+    [[ "$output" == *"WARNING: Skipping invalid plugin slug: ../etc/passwd"* ]]
+
+    # No symlinks should be created
+    [ ! -e "${TEST_HOME}/.claude/commands/../etc/passwd" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "SPEEDWAVE_PLUGINS rejects slug with uppercase" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="MyPlugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # Verify warning was printed
+    [[ "$output" == *"WARNING: Skipping invalid plugin slug: MyPlugin"* ]]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "SPEEDWAVE_PLUGINS rejects slug starting with digit" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="1badslug" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    [[ "$output" == *"WARNING: Skipping invalid plugin slug: 1badslug"* ]]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "SPEEDWAVE_PLUGINS rejects slug with special characters" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="my_plugin;rm -rf /" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    [[ "$output" == *"WARNING: Skipping invalid plugin slug:"* ]]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "SPEEDWAVE_PLUGINS accepts valid slugs and rejects invalid in same list" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    # Create a valid plugin
+    mkdir -p "${plugins_dir}/good-plugin/commands"
+    echo "cmd" > "${plugins_dir}/good-plugin/commands/cmd.md"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="good-plugin,../BAD,also-good" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # Valid plugin should be symlinked
+    [ -L "${TEST_HOME}/.claude/commands/cmd.md" ]
+
+    # Invalid slug should have produced a warning
+    [[ "$output" == *"WARNING: Skipping invalid plugin slug: ../BAD"* ]]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "SPEEDWAVE_PLUGINS skips non-existent plugin directory" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    # Do NOT create the plugin directory — it should be silently skipped
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="nonexistent-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # No symlinks should be created for the missing plugin
+    [ ! -e "${TEST_HOME}/.claude/commands/nonexistent-plugin" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}

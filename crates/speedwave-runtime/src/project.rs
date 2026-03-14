@@ -1,4 +1,4 @@
-use crate::{compose, config, validation};
+use crate::{compose, config, runtime, validation};
 use std::path::Path;
 
 /// Best-effort cleanup of project directories created by `init_project_dirs_in`.
@@ -120,6 +120,7 @@ fn add_project_with_data_dir(name: &str, dir: &str, data_dir: &Path) -> anyhow::
         dir: canonical_str.clone(),
         claude: None,
         integrations: None,
+        plugin_settings: None,
     };
 
     user_config.projects.push(entry);
@@ -127,7 +128,10 @@ fn add_project_with_data_dir(name: &str, dir: &str, data_dir: &Path) -> anyhow::
 
     // Resolve config and render compose (still no I/O)
     let (resolved, integrations) = config::resolve_project_config(&canonical, &user_config, name);
-    let yaml = compose::render_compose(name, &canonical_str, &resolved, &integrations)?;
+    let rt = runtime::detect_runtime();
+    let rt_ref: Option<&dyn crate::runtime::ContainerRuntime> =
+        if rt.is_available() { Some(&*rt) } else { None };
+    let yaml = compose::render_compose(name, &canonical_str, &resolved, &integrations, rt_ref)?;
 
     // ── Phase 2: commit (all writes) ─────────────────────────────────────
 
@@ -225,6 +229,7 @@ mod tests {
                 dir: canonical_dir.to_string_lossy().to_string(),
                 claude: None,
                 integrations: None,
+                plugin_settings: None,
             }],
             active_project: Some("existing".to_string()),
             selected_ide: None,
@@ -265,6 +270,7 @@ mod tests {
                 dir: canonical_dir.to_string_lossy().to_string(),
                 claude: None,
                 integrations: None,
+                plugin_settings: None,
             }],
             active_project: None,
             selected_ide: None,

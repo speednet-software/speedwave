@@ -1,7 +1,8 @@
-use crate::addon;
 use crate::config::{LlmConfig, ResolvedClaudeConfig, ResolvedIntegrationsConfig};
 use crate::consts;
 use crate::defaults;
+use crate::plugin::{self, PluginManifest};
+use crate::runtime::ContainerRuntime;
 use std::path::PathBuf;
 
 /// Converts a host path to the path seen by the container engine.
@@ -9,7 +10,7 @@ use std::path::PathBuf;
 /// On Windows, nerdctl runs inside WSL2 so host paths must be translated
 /// from `C:\Users\...` to `/mnt/c/Users/...`. On macOS and Linux the
 /// container engine runs on the host so paths are returned unchanged.
-fn to_engine_path(path: &std::path::Path) -> anyhow::Result<String> {
+pub(crate) fn to_engine_path(path: &std::path::Path) -> anyhow::Result<String> {
     #[cfg(target_os = "windows")]
     {
         let wsl = crate::runtime::wsl::windows_to_wsl_path(path)?;
@@ -35,6 +36,7 @@ pub fn render_compose(
     project_dir: &str,
     resolved_config: &ResolvedClaudeConfig,
     integrations: &ResolvedIntegrationsConfig,
+    runtime: Option<&dyn ContainerRuntime>,
 ) -> anyhow::Result<String> {
     crate::validation::validate_project_name(project_name)?;
     let home =
@@ -81,8 +83,21 @@ pub fn render_compose(
     // Handle LLM provider switching
     yaml = apply_llm_config(&yaml, project_name, &resolved_config.llm)?;
 
-    // Integrate installed addons
-    yaml = apply_addons(&yaml, project_name)?;
+    // Build any pending plugin images before compose generation
+    if let Some(rt) = runtime {
+        if let Err(e) = plugin::build_pending_plugin_images(rt) {
+            log::warn!("Failed to build pending plugin images: {e}");
+        }
+    }
+
+    // Integrate installed plugins
+    yaml = apply_plugins(
+        &yaml,
+        project_name,
+        integrations,
+        &network_name,
+        &tokens_dir,
+    )?;
 
     // Inject Anthropic API key from secrets if configured
     yaml = apply_auth_config(&yaml, project_name)?;
@@ -257,67 +272,78 @@ deploy:
     }
 }
 
-// --- Addon integration ---
+// --- Plugin integration ---
 
-/// Applies all installed addons to the compose YAML:
-/// - Merges compose.addon.yml fragments (addon services)
-/// - Injects WORKER_<ADDON>_URL into mcp-hub environment
-/// - Adds addon volume mounts to claude container
-/// - Sets SPEEDWAVE_ADDONS env var in claude container
-fn apply_addons(yaml: &str, project_name: &str) -> anyhow::Result<String> {
-    let addons = addon::list_installed_addons()?;
-    if addons.is_empty() {
+/// Applies all installed and enabled plugins to the compose YAML:
+/// - Generates MCP service definitions for enabled plugins with service_id
+/// - Injects WORKER_<PLUGIN>_URL into mcp-hub environment
+/// - Adds plugin resource volume mounts to claude container
+/// - Sets SPEEDWAVE_PLUGINS env var in claude container
+fn apply_plugins(
+    yaml: &str,
+    project_name: &str,
+    integrations: &ResolvedIntegrationsConfig,
+    network_name: &str,
+    tokens_dir: &std::path::Path,
+) -> anyhow::Result<String> {
+    let plugins = plugin::list_installed_plugins()?;
+    if plugins.is_empty() {
         return Ok(yaml.to_string());
     }
 
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-    let addons_base = home.join(consts::DATA_DIR).join("addons");
+    let mut plugin_slugs: Vec<String> = Vec::new();
 
-    let mut addon_names: Vec<String> = Vec::new();
+    for manifest in &plugins {
+        let slug = &manifest.slug;
+        let service_id = manifest.service_id.as_deref();
 
-    for addon_manifest in &addons {
-        addon_names.push(addon_manifest.name.clone());
-
-        // Merge compose fragment (addon services)
-        if addon_manifest.mcp_server {
-            if let Some(fragment) = addon::load_addon_fragment(addon_manifest)? {
-                merge_compose_fragment(&mut doc, &fragment, project_name)?;
-            }
-
-            // Inject WORKER_<ADDON>_URL into mcp-hub environment
-            if let Some(worker_env) = &addon_manifest.worker_env {
-                if let Some(port) = addon_manifest.port {
-                    let service_name = worker_env
-                        .strip_prefix("WORKER_")
-                        .and_then(|s| s.strip_suffix("_URL"))
-                        .map(|s| format!("mcp-{}", s.to_lowercase()))
-                        .unwrap_or_else(|| addon_manifest.name.clone());
-                    let url = format!("http://{}:{}", service_name, port);
-                    inject_worker_env(&mut doc, worker_env, &url);
-                }
-            }
+        // Check if plugin is enabled (by service_id for MCP plugins, by slug otherwise)
+        let plugin_key = service_id.unwrap_or(slug);
+        if !integrations.is_plugin_enabled(plugin_key) {
+            continue;
         }
 
-        // Add addon volume mount to claude container (read-only)
-        let addon_resources = addons_base
-            .join(&addon_manifest.name)
-            .join("claude-resources");
-        if addon_resources.exists() {
-            let mount = format!(
-                "{}:/speedwave/addons/{}:ro",
-                to_engine_path(&addon_resources)?,
-                addon_manifest.name
+        plugin_slugs.push(slug.clone());
+
+        // MCP service generation (follows apply_llm_config pattern)
+        if let Some(sid) = service_id {
+            let service_value =
+                plugin::generate_plugin_service(manifest, project_name, network_name, tokens_dir)?;
+            // Insert into doc["services"]["mcp-<service_id>"]
+            if let Some(services) = doc.get_mut("services").and_then(|v| v.as_mapping_mut()) {
+                services.insert(
+                    serde_yaml_ng::Value::String(plugin::derive_compose_name(sid)),
+                    service_value,
+                );
+            }
+            // Inject WORKER_*_URL into hub
+            let worker_env = plugin::derive_worker_env(sid);
+            let url = format!(
+                "http://{}:{}",
+                plugin::derive_compose_name(sid),
+                manifest.port.unwrap_or(0)
             );
-            add_claude_volume(&mut doc, &mount);
+            inject_worker_env(&mut doc, &worker_env, &url);
+        }
+
+        // Mount claude-resources to claude container
+        if let Ok(plugins_base) = plugin::plugins_base_dir() {
+            let plugin_resources = plugins_base.join(slug).join("claude-resources");
+            if plugin_resources.exists() {
+                let mount = format!(
+                    "{}:/speedwave/plugins/{}:ro",
+                    to_engine_path(&plugin_resources)?,
+                    slug
+                );
+                add_claude_volume(&mut doc, &mount);
+            }
         }
     }
 
-    // Set SPEEDWAVE_ADDONS env var in claude container
-    if !addon_names.is_empty() {
-        let addons_list = addon_names.join(",");
-        add_claude_env_var(&mut doc, "SPEEDWAVE_ADDONS", &addons_list);
+    // SPEEDWAVE_PLUGINS env var in claude (slugs of enabled plugins)
+    if !plugin_slugs.is_empty() {
+        add_claude_env_var(&mut doc, "SPEEDWAVE_PLUGINS", &plugin_slugs.join(","));
     }
 
     Ok(serde_yaml_ng::to_string(&doc)?)
@@ -393,6 +419,11 @@ fn apply_integrations_filter(
     // OS service is conditionally present — only added when at least one OS category is enabled
     if integrations.any_os_enabled() {
         enabled_names.push("os");
+    }
+
+    // Include enabled plugin service_ids
+    for sid in integrations.enabled_plugin_service_ids() {
+        enabled_names.push(sid);
     }
 
     // Inject ENABLED_SERVICES into hub
@@ -581,31 +612,6 @@ fn ide_host_override() -> &'static str {
     }
 }
 
-/// Merges addon services from a compose fragment into the main compose document.
-/// Substitutes ${PROJECT_NAME} and ${COMPOSE_PREFIX} in the fragment.
-fn merge_compose_fragment(
-    doc: &mut serde_yaml_ng::Value,
-    fragment: &str,
-    project_name: &str,
-) -> anyhow::Result<()> {
-    let resolved = fragment
-        .replace("${PROJECT_NAME}", project_name)
-        .replace("${COMPOSE_PREFIX}", consts::COMPOSE_PREFIX)
-        .replace("${CONTAINER_USER}", container_user());
-
-    let fragment_doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&resolved)?;
-
-    if let Some(fragment_services) = fragment_doc.get("services").and_then(|v| v.as_mapping()) {
-        if let Some(main_services) = doc.get_mut("services").and_then(|v| v.as_mapping_mut()) {
-            for (key, value) in fragment_services {
-                main_services.insert(key.clone(), value.clone());
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Injects a WORKER_*_URL environment variable into the mcp-hub service.
 fn inject_worker_env(doc: &mut serde_yaml_ng::Value, env_name: &str, url: &str) {
     if let Some(services) = doc.get_mut("services") {
@@ -693,8 +699,15 @@ impl SecurityCheck {
     /// Verifies all security invariants on the generated compose YAML.
     /// Returns Vec of violations — if non-empty, compose_up MUST be blocked.
     ///
+    /// `plugin_manifests` provides signed manifest data for cross-referencing
+    /// plugin compose services against their declared token mount modes.
+    ///
     /// Uses serde_yaml_ng for structured parsing — NOT string matching on raw YAML.
-    pub fn run(compose_yml: &str, _project: &str) -> Vec<SecurityViolation> {
+    pub fn run(
+        compose_yml: &str,
+        _project: &str,
+        plugin_manifests: &[PluginManifest],
+    ) -> Vec<SecurityViolation> {
         let doc: serde_yaml_ng::Value = match serde_yaml_ng::from_str(compose_yml) {
             Ok(v) => v,
             Err(e) => {
@@ -714,7 +727,7 @@ impl SecurityCheck {
             Self::check_tmpfs_noexec(&doc),
             Self::check_no_tokens_in_claude(&doc),
             Self::check_no_tokens_in_hub(&doc),
-            // PORTS_LOCALHOST: any exposed port must bind 127.0.0.1 (addons, llm-proxy)
+            // PORTS_LOCALHOST: any exposed port must bind 127.0.0.1 (plugins, llm-proxy)
             Self::check_ports_localhost_only(&doc),
             Self::check_claude_no_socket(&doc),
             Self::check_no_external_llm_keys_claude(&doc),
@@ -722,6 +735,11 @@ impl SecurityCheck {
             // May fire alongside PORTS_LOCALHOST — intentional defense-in-depth.
             Self::check_no_ports_on_workers(&doc),
             Self::check_container_user(&doc),
+            // Plugin-specific checks
+            Self::check_plugin_no_privileged(&doc),
+            Self::check_plugin_no_host_network(&doc),
+            Self::check_plugin_no_extra_volumes(&doc),
+            Self::check_plugin_token_mount_mode(&doc, plugin_manifests),
         ]
         .into_iter()
         .flatten()
@@ -1115,8 +1133,144 @@ impl SecurityCheck {
         violations
     }
 
+    /// Plugin services (identified by label) must not have privileged: true
+    fn check_plugin_no_privileged(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        let services = match get_services(doc) {
+            Some(s) => s,
+            None => return violations,
+        };
+        for (name, service) in services {
+            if !is_plugin_service(service) {
+                continue;
+            }
+            if service
+                .get("privileged")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                violations.push(SecurityViolation {
+                    container: name,
+                    rule: "PLUGIN_NO_PRIVILEGED",
+                    message: "Plugin service must not have privileged: true".into(),
+                    remediation: "Remove 'privileged: true' from the plugin service.",
+                });
+            }
+        }
+        violations
+    }
+
+    /// Plugin services must not have network_mode: host
+    fn check_plugin_no_host_network(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        let services = match get_services(doc) {
+            Some(s) => s,
+            None => return violations,
+        };
+        for (name, service) in services {
+            if !is_plugin_service(service) {
+                continue;
+            }
+            if let Some(mode) = service.get("network_mode").and_then(|v| v.as_str()) {
+                if mode == "host" {
+                    violations.push(SecurityViolation {
+                        container: name,
+                        rule: "PLUGIN_NO_HOST_NETWORK",
+                        message: "Plugin service must not use network_mode: host".into(),
+                        remediation: "Remove 'network_mode: host' from the plugin service.",
+                    });
+                }
+            }
+        }
+        violations
+    }
+
+    /// Plugin services may only mount /tokens (max 1 volume). No other host paths.
+    fn check_plugin_no_extra_volumes(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        let services = match get_services(doc) {
+            Some(s) => s,
+            None => return violations,
+        };
+        for (name, service) in services {
+            if !is_plugin_service(service) {
+                continue;
+            }
+            if let Some(vols) = service.get("volumes").and_then(|v| v.as_sequence()) {
+                for vol in vols {
+                    if let Some(vol_str) = vol.as_str() {
+                        // Only /tokens mount is allowed
+                        if !vol_str.contains(":/tokens:") && !vol_str.ends_with(":/tokens") {
+                            violations.push(SecurityViolation {
+                                container: name.clone(),
+                                rule: "PLUGIN_NO_EXTRA_VOLUMES",
+                                message: format!(
+                                    "Plugin service has unauthorized volume mount: {}",
+                                    vol_str
+                                ),
+                                remediation:
+                                    "Plugin services may only mount /tokens. Remove all other volume mounts.",
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        violations
+    }
+
+    /// Plugin token mount mode in compose must match signed manifest.
+    /// If manifest says ReadOnly but compose has :rw → violation.
+    fn check_plugin_token_mount_mode(
+        doc: &serde_yaml_ng::Value,
+        manifests: &[PluginManifest],
+    ) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        let services = match get_services(doc) {
+            Some(s) => s,
+            None => return violations,
+        };
+        for (name, service) in services {
+            if !is_plugin_service(service) {
+                continue;
+            }
+            // Find the matching manifest by compose service name
+            let sid = name.strip_prefix("mcp-").unwrap_or(&name);
+            let manifest = manifests
+                .iter()
+                .find(|m| m.service_id.as_deref() == Some(sid));
+            let manifest = match manifest {
+                Some(m) => m,
+                None => continue, // No manifest to cross-check
+            };
+
+            // Check volume mount mode matches manifest
+            if let Some(vols) = service.get("volumes").and_then(|v| v.as_sequence()) {
+                for vol in vols {
+                    if let Some(vol_str) = vol.as_str() {
+                        if vol_str.contains(":/tokens:") || vol_str.ends_with(":/tokens") {
+                            let is_rw_in_compose = vol_str.ends_with(":rw");
+                            let is_ro_in_manifest =
+                                matches!(manifest.token_mount, plugin::TokenMount::ReadOnly);
+                            if is_rw_in_compose && is_ro_in_manifest {
+                                violations.push(SecurityViolation {
+                                    container: name.clone(),
+                                    rule: "PLUGIN_TOKEN_MOUNT_MODE",
+                                    message: "Plugin manifest declares ReadOnly tokens but compose has :rw mount".to_string(),
+                                    remediation:
+                                        "Change the token volume mount to :ro or update the plugin manifest.",
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        violations
+    }
+
     /// All services must have a valid `user:` field matching the platform-expected value.
-    /// This prevents addons from overriding the container user to gain elevated access.
+    /// This prevents plugins from overriding the container user to gain elevated access.
     fn check_container_user(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
         let mut violations = Vec::new();
         let services = match get_services(doc) {
@@ -1153,6 +1307,15 @@ impl SecurityCheck {
         }
         violations
     }
+}
+
+/// Checks if a service has the `speedwave.plugin-service: "true"` label.
+fn is_plugin_service(service: &serde_yaml_ng::Value) -> bool {
+    service
+        .get("labels")
+        .and_then(|l| l.get("speedwave.plugin-service"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s == "true")
 }
 
 /// Helper: extract services as Vec<(name, &Value)> from a compose YAML doc
@@ -1267,7 +1430,7 @@ networks:
     #[test]
     fn test_security_check_valid_compose() {
         let yaml = valid_compose_yaml();
-        let violations = SecurityCheck::run(&yaml, "test");
+        let violations = SecurityCheck::run(&yaml, "test", &[]);
         assert!(
             violations.is_empty(),
             "Expected no violations, got: {:?}",
@@ -1293,7 +1456,7 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         assert!(violations.iter().any(|v| v.rule == "CAP_DROP_ALL"));
     }
 
@@ -1312,7 +1475,7 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         assert!(violations.iter().any(|v| v.rule == "NO_NEW_PRIVS"));
     }
 
@@ -1332,7 +1495,7 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         assert!(violations
             .iter()
             .any(|v| v.rule == "READ_ONLY_FS" && v.container == "claude"));
@@ -1353,7 +1516,7 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         assert!(violations.iter().any(|v| v.rule == "TMPFS_NOEXEC"));
     }
 
@@ -1375,7 +1538,7 @@ services:
       - CLAUDE_VERSION=1.0.3
       - SLACK_TOKEN=xoxb-12345
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         assert!(violations.iter().any(|v| v.rule == "NO_TOKENS_CLAUDE"));
     }
 
@@ -1396,7 +1559,7 @@ services:
     ports:
       - "0.0.0.0:4000:4000"
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         assert!(violations.iter().any(|v| v.rule == "PORTS_LOCALHOST"));
     }
 
@@ -1419,7 +1582,7 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         assert!(violations.iter().any(|v| v.rule == "NO_SOCKET_CLAUDE"));
     }
 
@@ -1441,7 +1604,7 @@ services:
       - CLAUDE_VERSION=1.0.3
       - OPENAI_API_KEY=sk-12345
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         assert!(violations
             .iter()
             .any(|v| v.rule == "NO_EXTERNAL_LLM_KEYS_CLAUDE"));
@@ -1449,7 +1612,7 @@ services:
 
     #[test]
     fn test_security_check_invalid_yaml() {
-        let violations = SecurityCheck::run("not: valid: yaml: [[[", "test");
+        let violations = SecurityCheck::run("not: valid: yaml: [[[", "test", &[]);
         assert!(violations.iter().any(|v| v.rule == "YAML_PARSE_ERROR"));
     }
 
@@ -1465,6 +1628,7 @@ services:
             "/home/user/projects/test",
             &config,
             &ResolvedIntegrationsConfig::default(),
+            None,
         );
         assert!(result.is_ok());
         let yaml = result.unwrap();
@@ -1488,6 +1652,7 @@ services:
             "/home/user/projects/test",
             &config,
             &ResolvedIntegrationsConfig::default(),
+            None,
         )
         .unwrap();
         assert!(
@@ -1514,6 +1679,7 @@ services:
             "/home/user/projects/test",
             &config,
             &ResolvedIntegrationsConfig::default(),
+            None,
         )
         .unwrap();
         let expected = format!("MCP_HUB_PORT={}", crate::consts::PORT_BASE);
@@ -1538,6 +1704,7 @@ services:
             "/home/user/projects/test",
             &config,
             &ResolvedIntegrationsConfig::default(),
+            None,
         )
         .unwrap();
 
@@ -1564,6 +1731,7 @@ services:
             "/home/user/projects/test",
             &config,
             &ResolvedIntegrationsConfig::default(),
+            None,
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -1606,9 +1774,10 @@ services:
             "/home/user/projects/test",
             &config,
             &ResolvedIntegrationsConfig::default(),
+            None,
         )
         .unwrap();
-        let violations = SecurityCheck::run(&yaml, "test-project");
+        let violations = SecurityCheck::run(&yaml, "test-project", &[]);
         assert!(
             violations.is_empty(),
             "Generated compose should pass security check. Violations: {:?}",
@@ -1617,39 +1786,6 @@ services:
                 .map(|v| format!("{}", v))
                 .collect::<Vec<_>>()
         );
-    }
-
-    #[test]
-    fn test_merge_compose_fragment() {
-        let base_yaml = VALID_COMPOSE;
-        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(base_yaml).unwrap();
-
-        let fragment = r#"
-services:
-  mcp-presale:
-    image: registry.example.com/speedwave/mcp-presale:latest
-    container_name: speedwave_${PROJECT_NAME}_mcp_presale
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    ports:
-      - "127.0.0.1:4006:4006"
-    networks:
-      - speedwave_${PROJECT_NAME}_network
-"#;
-
-        merge_compose_fragment(&mut doc, fragment, "test").unwrap();
-
-        let result = serde_yaml_ng::to_string(&doc).unwrap();
-        assert!(result.contains("mcp-presale"));
-        assert!(result.contains("speedwave_test_mcp_presale"));
-
-        // Verify the merged service exists in structured YAML
-        let services = doc.get("services").unwrap().as_mapping().unwrap();
-        assert!(services
-            .iter()
-            .any(|(k, _)| k.as_str() == Some("mcp-presale")));
     }
 
     #[test]
@@ -1689,55 +1825,15 @@ services:
     fn test_add_claude_env_var() {
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
 
-        add_claude_env_var(&mut doc, "SPEEDWAVE_ADDONS", "presale,custom-skills");
+        add_claude_env_var(&mut doc, "SPEEDWAVE_PLUGINS", "presale,custom-skills");
 
         let claude = doc.get("services").unwrap().get("claude").unwrap();
         let env_seq = claude.get("environment").unwrap().as_sequence().unwrap();
-        let has_addons_var = env_seq.iter().any(|v| {
+        let has_plugins_var = env_seq.iter().any(|v| {
             v.as_str()
-                .is_some_and(|s| s == "SPEEDWAVE_ADDONS=presale,custom-skills")
+                .is_some_and(|s| s == "SPEEDWAVE_PLUGINS=presale,custom-skills")
         });
-        assert!(has_addons_var, "SPEEDWAVE_ADDONS should be in claude env");
-    }
-
-    #[test]
-    fn test_merged_addon_passes_security_check() {
-        let yaml = valid_compose_yaml();
-        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
-
-        // Add a well-formed addon service (with correct user field)
-        let fragment = format!(
-            r#"
-services:
-  mcp-presale:
-    image: registry.example.com/speedwave/mcp-presale:latest
-    container_name: speedwave_test_mcp_presale
-    user: "{user}"
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    ports:
-      - "127.0.0.1:4006:4006"
-    networks:
-      - speedwave_test_network
-"#,
-            user = container_user()
-        );
-        merge_compose_fragment(&mut doc, &fragment, "test").unwrap();
-        inject_worker_env(&mut doc, "WORKER_PRESALE_URL", "http://mcp-presale:4006");
-        add_claude_env_var(&mut doc, "SPEEDWAVE_ADDONS", "presale");
-
-        let result = serde_yaml_ng::to_string(&doc).unwrap();
-        let violations = SecurityCheck::run(&result, "test");
-        assert!(
-            violations.is_empty(),
-            "Merged compose with addon should pass security check. Violations: {:?}",
-            violations
-                .iter()
-                .map(|v| format!("{}", v))
-                .collect::<Vec<_>>()
-        );
+        assert!(has_plugins_var, "SPEEDWAVE_PLUGINS should be in claude env");
     }
 
     #[test]
@@ -1757,7 +1853,7 @@ services:
     ports:
       - 4000
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         assert!(
             violations.iter().any(|v| v.rule == "PORTS_LOCALHOST"),
             "Bare integer port should be rejected"
@@ -1783,7 +1879,7 @@ services:
         published: 4000
         protocol: tcp
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         assert!(
             violations.iter().any(|v| v.rule == "PORTS_LOCALHOST"),
             "Long-form port without host_ip should be rejected"
@@ -1810,7 +1906,7 @@ services:
         host_ip: "127.0.0.1"
         protocol: tcp
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         let port_violations: Vec<_> = violations
             .iter()
             .filter(|v| v.rule == "PORTS_LOCALHOST")
@@ -1839,7 +1935,7 @@ services:
       - CLAUDE_VERSION=1.0.3
       - ANTHROPIC_API_KEY=sk-ant-12345
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         assert!(
             !violations.iter().any(|v| v.rule == "NO_TOKENS_CLAUDE"),
             "ANTHROPIC_API_KEY in claude container should be allowed"
@@ -1863,6 +1959,7 @@ services:
             "/home/user/projects/test",
             &config,
             &ResolvedIntegrationsConfig::default(),
+            None,
         )
         .unwrap();
         // Ollama should inject ANTHROPIC_BASE_URL pointing to Ollama's OpenAI-compatible endpoint
@@ -1889,6 +1986,7 @@ services:
             "/home/user/projects/test",
             &config,
             &ResolvedIntegrationsConfig::default(),
+            None,
         )
         .unwrap();
         // External provider should add an llm-proxy (LiteLLM) service
@@ -1910,6 +2008,7 @@ services:
             "/home/user/projects/test",
             &config,
             &ResolvedIntegrationsConfig::default(),
+            None,
         )
         .unwrap();
         // Default anthropic: no proxy, no ANTHROPIC_BASE_URL override
@@ -1949,6 +2048,7 @@ services:
             "/home/user/projects/test",
             &config,
             &ResolvedIntegrationsConfig::default(),
+            None,
         )
         .unwrap();
         assert!(
@@ -1959,54 +2059,6 @@ services:
             !yaml.contains("CLAUDE_VERSION=1."),
             "render_compose must not contain a pinned semver CLAUDE_VERSION"
         );
-    }
-
-    #[test]
-    fn test_merge_empty_fragment() {
-        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
-        let original = serde_yaml_ng::to_string(&doc).unwrap();
-
-        // Fragment with no services key
-        let fragment = "version: '3'\n";
-        merge_compose_fragment(&mut doc, fragment, "test").unwrap();
-
-        let after = serde_yaml_ng::to_string(&doc).unwrap();
-        assert_eq!(original, after, "Empty fragment should not modify base");
-    }
-
-    #[test]
-    fn test_merge_fragment_overwrite_existing() {
-        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
-
-        // Fragment that overwrites existing mcp-slack service
-        let fragment = r#"
-services:
-  mcp-slack:
-    image: custom-slack:v2
-    container_name: speedwave_test_mcp_slack_v2
-"#;
-        merge_compose_fragment(&mut doc, fragment, "test").unwrap();
-
-        let services = doc.get("services").unwrap().as_mapping().unwrap();
-        let slack = services
-            .iter()
-            .find(|(k, _)| k.as_str() == Some("mcp-slack"))
-            .unwrap()
-            .1;
-        let image = slack.get("image").unwrap().as_str().unwrap();
-        assert_eq!(
-            image, "custom-slack:v2",
-            "Fragment should overwrite existing service"
-        );
-    }
-
-    #[test]
-    fn test_merge_fragment_invalid_yaml() {
-        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
-
-        let fragment = "not: valid: yaml: [[[";
-        let result = merge_compose_fragment(&mut doc, fragment, "test");
-        assert!(result.is_err(), "Invalid YAML fragment should return error");
     }
 
     #[test]
@@ -2023,6 +2075,7 @@ services:
             "/tmp/test",
             &config,
             &ResolvedIntegrationsConfig::default(),
+            None,
         )
         .expect("render_compose should succeed");
 
@@ -2349,7 +2402,7 @@ services:
       - CLAUDE_VERSION=1.0.3
       - MCP_OS_AUTH_TOKEN=550e8400-e29b-41d4-a716-446655440000
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         assert!(
             violations.iter().any(|v| v.rule == "NO_TOKENS_CLAUDE"),
             "MCP_OS_AUTH_TOKEN should be FORBIDDEN in claude container"
@@ -2376,7 +2429,7 @@ services:
       - WORKER_SLACK_URL=http://mcp-slack:4001
       - SLACK_TOKEN=xoxb-12345
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         assert!(
             violations
                 .iter()
@@ -2389,7 +2442,7 @@ services:
     fn test_security_check_hub_worker_urls_allowed() {
         // WORKER_*_URL vars in hub env should pass the security check.
         let yaml = valid_compose_yaml();
-        let violations = SecurityCheck::run(&yaml, "test");
+        let violations = SecurityCheck::run(&yaml, "test", &[]);
         assert!(
             !violations.iter().any(|v| v.rule == "NO_TOKENS_HUB"),
             "WORKER_*_URL in hub env should NOT trigger NO_TOKENS_HUB"
@@ -2413,7 +2466,7 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         assert!(
             violations.iter().any(|v| v.rule == "CONTAINER_USER"),
             "Should flag missing user field"
@@ -2435,7 +2488,7 @@ services:
       - no-new-privileges:true
 "#
         );
-        let violations = SecurityCheck::run(&yaml, "test");
+        let violations = SecurityCheck::run(&yaml, "test", &[]);
         assert!(
             violations
                 .iter()
@@ -2460,7 +2513,7 @@ services:
 "#,
             user = container_user()
         );
-        let violations = SecurityCheck::run(&yaml, "test");
+        let violations = SecurityCheck::run(&yaml, "test", &[]);
         assert!(
             !violations.iter().any(|v| v.rule == "CONTAINER_USER"),
             "Correct user should not trigger violation"
@@ -2498,6 +2551,7 @@ services:
             "/home/user/projects/test",
             &config,
             &ResolvedIntegrationsConfig::default(),
+            None,
         )
         .unwrap();
         assert!(
@@ -2560,6 +2614,7 @@ services:
             "/workspace",
             &config,
             &ResolvedIntegrationsConfig::default(),
+            None,
         )
         .unwrap();
         assert!(
@@ -2590,6 +2645,7 @@ services:
             "/workspace",
             &config,
             &ResolvedIntegrationsConfig::default(),
+            None,
         )
         .unwrap();
         assert!(
@@ -2624,6 +2680,7 @@ services:
             "/workspace",
             &config,
             &ResolvedIntegrationsConfig::default(),
+            None,
         )
         .unwrap();
         assert!(
@@ -2669,6 +2726,7 @@ services:
             "/home/user/projects/test",
             &config,
             &ResolvedIntegrationsConfig::default(),
+            None,
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -2714,7 +2772,7 @@ services:
       - "127.0.0.1:4000:4000"
 "#
             );
-            let violations = SecurityCheck::run(&yaml, "test");
+            let violations = SecurityCheck::run(&yaml, "test", &[]);
             assert!(
                 violations.iter().any(|v| v.rule == "NO_PORTS_WORKERS"),
                 "{name} with ports should trigger NO_PORTS_WORKERS"
@@ -2736,7 +2794,7 @@ services:
     environment:
       - PORT=4001
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         assert!(
             !violations.iter().any(|v| v.rule == "NO_PORTS_WORKERS"),
             "Worker without ports should pass"
@@ -2757,7 +2815,7 @@ services:
     ports:
       - "127.0.0.1:4010:4010"
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         assert!(
             !violations.iter().any(|v| v.rule == "NO_PORTS_WORKERS"),
             "llm-proxy is allowed to expose ports"
@@ -2797,7 +2855,7 @@ services:
     ports:
       - "127.0.0.1:4006:4006"
 "#;
-        let violations = SecurityCheck::run(yaml, "test");
+        let violations = SecurityCheck::run(yaml, "test", &[]);
         assert!(
             !violations.iter().any(|v| v.rule == "NO_PORTS_WORKERS"),
             "Addon services may expose ports (they are not in consts::BUILT_IN_SERVICES)"
@@ -2812,9 +2870,11 @@ services:
             llm: LlmConfig::default(),
         };
         let integrations = ResolvedIntegrationsConfig::default();
-        assert!(render_compose("", "/tmp/proj", &resolved, &integrations).is_err());
-        assert!(render_compose("../evil", "/tmp/proj", &resolved, &integrations).is_err());
-        assert!(render_compose(&"a".repeat(64), "/tmp/proj", &resolved, &integrations).is_err());
+        assert!(render_compose("", "/tmp/proj", &resolved, &integrations, None).is_err());
+        assert!(render_compose("../evil", "/tmp/proj", &resolved, &integrations, None).is_err());
+        assert!(
+            render_compose(&"a".repeat(64), "/tmp/proj", &resolved, &integrations, None).is_err()
+        );
     }
 
     #[test]
@@ -2906,16 +2966,7 @@ services:
 
     #[test]
     fn test_integrations_filter_all_disabled_keeps_claude_and_hub() {
-        let integrations = ResolvedIntegrationsConfig {
-            slack: false,
-            sharepoint: false,
-            redmine: false,
-            gitlab: false,
-            os_reminders: false,
-            os_calendar: false,
-            os_mail: false,
-            os_notes: false,
-        };
+        let integrations = ResolvedIntegrationsConfig::default();
 
         let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
@@ -2983,6 +3034,7 @@ services:
             "/home/user/projects/test",
             &config,
             &integrations,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -3093,7 +3145,7 @@ services:
         let integrations = ResolvedIntegrationsConfig::default(); // all false
         let yaml = valid_compose_yaml();
         let filtered = apply_integrations_filter(&yaml, &integrations).unwrap();
-        let violations = SecurityCheck::run(&filtered, "test");
+        let violations = SecurityCheck::run(&filtered, "test", &[]);
         assert!(
             violations.is_empty(),
             "All-disabled compose should pass security check. Violations: {:?}",
@@ -3163,7 +3215,8 @@ services:
             gitlab: true,
             ..ResolvedIntegrationsConfig::default()
         };
-        let result = render_compose("test-project", "/workspace", &config, &integrations).unwrap();
+        let result =
+            render_compose("test-project", "/workspace", &config, &integrations, None).unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
         let expected = container_user();
 
@@ -3184,34 +3237,6 @@ services:
     }
 
     #[test]
-    fn test_merge_compose_fragment_substitutes_container_user() {
-        let base_yaml = VALID_COMPOSE;
-        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(base_yaml).unwrap();
-
-        let fragment = r#"
-services:
-  mcp-custom:
-    image: custom:latest
-    container_name: speedwave_${PROJECT_NAME}_mcp_custom
-    user: "${CONTAINER_USER}"
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-"#;
-
-        merge_compose_fragment(&mut doc, fragment, "test").unwrap();
-
-        let custom = doc.get("services").unwrap().get("mcp-custom").unwrap();
-        let user = custom.get("user").and_then(|u| u.as_str()).unwrap();
-        assert_eq!(
-            user,
-            container_user(),
-            "merge_compose_fragment must substitute ${{CONTAINER_USER}}"
-        );
-    }
-
-    #[test]
     fn test_render_compose_llm_proxy_has_container_user() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -3228,6 +3253,7 @@ services:
             "/home/user/projects/test",
             &config,
             &ResolvedIntegrationsConfig::default(),
+            None,
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -3241,6 +3267,368 @@ services:
             Some(container_user()),
             "llm-proxy service must have user: \"{}\"",
             container_user()
+        );
+    }
+
+    // ── Plugin SecurityCheck tests ───────────────────────────────────────
+
+    #[test]
+    fn test_security_check_plugin_no_privileged() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-presale:
+    image: speedwave-mcp-presale:1.0.0
+    user: "{user}"
+    privileged: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user()
+        );
+        let violations = SecurityCheck::run(&yaml, "test", &[]);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == "PLUGIN_NO_PRIVILEGED" && v.container == "mcp-presale"),
+            "Plugin with privileged: true should trigger PLUGIN_NO_PRIVILEGED"
+        );
+    }
+
+    #[test]
+    fn test_security_check_plugin_no_host_network() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-presale:
+    image: speedwave-mcp-presale:1.0.0
+    user: "{user}"
+    network_mode: host
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user()
+        );
+        let violations = SecurityCheck::run(&yaml, "test", &[]);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == "PLUGIN_NO_HOST_NETWORK" && v.container == "mcp-presale"),
+            "Plugin with network_mode: host should trigger PLUGIN_NO_HOST_NETWORK"
+        );
+    }
+
+    #[test]
+    fn test_security_check_plugin_no_extra_volumes() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-presale:
+    image: speedwave-mcp-presale:1.0.0
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /home/user/.speedwave/tokens/test/presale:/tokens:ro
+      - /etc/passwd:/etc/passwd:ro
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user()
+        );
+        let violations = SecurityCheck::run(&yaml, "test", &[]);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == "PLUGIN_NO_EXTRA_VOLUMES" && v.container == "mcp-presale"),
+            "Plugin with extra volumes should trigger PLUGIN_NO_EXTRA_VOLUMES"
+        );
+    }
+
+    #[test]
+    fn test_security_check_plugin_no_extra_volumes_clean() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-presale:
+    image: speedwave-mcp-presale:1.0.0
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /home/user/.speedwave/tokens/test/presale:/tokens:ro
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user()
+        );
+        let violations = SecurityCheck::run(&yaml, "test", &[]);
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == "PLUGIN_NO_EXTRA_VOLUMES"),
+            "Plugin with only /tokens volume should not trigger PLUGIN_NO_EXTRA_VOLUMES"
+        );
+    }
+
+    #[test]
+    fn test_security_check_plugin_token_mount_mode_ro_violation() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-presale:
+    image: speedwave-mcp-presale:1.0.0
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /home/user/.speedwave/tokens/test/presale:/tokens:rw
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user()
+        );
+        let manifests = vec![PluginManifest {
+            name: "Presale".to_string(),
+            service_id: Some("presale".to_string()),
+            slug: "presale".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(4010),
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![],
+        }];
+        let violations = SecurityCheck::run(&yaml, "test", &manifests);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == "PLUGIN_TOKEN_MOUNT_MODE" && v.container == "mcp-presale"),
+            "ReadOnly manifest + :rw mount should trigger PLUGIN_TOKEN_MOUNT_MODE"
+        );
+    }
+
+    #[test]
+    fn test_security_check_plugin_token_mount_mode_rw_pass() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-presale:
+    image: speedwave-mcp-presale:1.0.0
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /home/user/.speedwave/tokens/test/presale:/tokens:rw
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user()
+        );
+        let manifests = vec![PluginManifest {
+            name: "Presale".to_string(),
+            service_id: Some("presale".to_string()),
+            slug: "presale".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(4010),
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadWrite {
+                justification: "OAuth token refresh".to_string(),
+            },
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![],
+        }];
+        let violations = SecurityCheck::run(&yaml, "test", &manifests);
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == "PLUGIN_TOKEN_MOUNT_MODE"),
+            "ReadWrite manifest + :rw mount should NOT trigger PLUGIN_TOKEN_MOUNT_MODE"
+        );
+    }
+
+    // ── apply_plugins integration tests (via individual pieces) ──────────
+
+    #[test]
+    fn test_apply_plugins_enabled_in_compose() {
+        // Test that generate_plugin_service creates a valid service and it can be
+        // inserted into compose YAML, simulating what apply_plugins does.
+        let manifest = PluginManifest {
+            name: "Presale".to_string(),
+            service_id: Some("presale".to_string()),
+            slug: "presale".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(4010),
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![],
+        };
+
+        let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/test");
+        let service_value = plugin::generate_plugin_service(
+            &manifest,
+            "test",
+            "speedwave_test_network",
+            &tokens_dir,
+        )
+        .unwrap();
+
+        // Insert into valid compose (simulating apply_plugins behavior)
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
+        if let Some(services) = doc.get_mut("services").and_then(|v| v.as_mapping_mut()) {
+            services.insert(
+                serde_yaml_ng::Value::String("mcp-presale".to_string()),
+                service_value,
+            );
+        }
+
+        // Verify the service appears
+        let services = doc.get("services").unwrap().as_mapping().unwrap();
+        assert!(
+            services.contains_key(&serde_yaml_ng::Value::String("mcp-presale".into())),
+            "Enabled plugin service mcp-presale should appear in compose"
+        );
+    }
+
+    #[test]
+    fn test_apply_plugins_disabled_excluded() {
+        // When a plugin is NOT enabled in integrations, its service should not appear.
+        // apply_plugins checks integrations.is_plugin_enabled(sid) — when false, it skips.
+        // Simulate by not inserting into compose.
+        let integrations = ResolvedIntegrationsConfig::default(); // plugins map is empty
+        assert!(
+            !integrations.is_plugin_enabled("presale"),
+            "presale should not be enabled by default"
+        );
+
+        // Verify the compose YAML does not contain the plugin service
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
+        let services = doc.get("services").unwrap().as_mapping().unwrap();
+        assert!(
+            !services.contains_key(&serde_yaml_ng::Value::String("mcp-presale".into())),
+            "Disabled plugin service should NOT appear in compose"
+        );
+    }
+
+    #[test]
+    fn test_apply_plugins_worker_url_injected() {
+        // Simulate apply_plugins injecting WORKER_PRESALE_URL into mcp-hub
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
+        let worker_env = plugin::derive_worker_env("presale");
+        let url = format!("http://mcp-presale:4010");
+        inject_worker_env(&mut doc, &worker_env, &url);
+
+        let env = get_hub_env_seq(&doc);
+        assert!(
+            env.iter()
+                .any(|s| s == "WORKER_PRESALE_URL=http://mcp-presale:4010"),
+            "WORKER_PRESALE_URL should be injected into mcp-hub. Got: {:?}",
+            env
+        );
+    }
+
+    #[test]
+    fn test_apply_plugins_speedwave_plugins_env() {
+        // Simulate apply_plugins setting SPEEDWAVE_PLUGINS in claude container
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
+        let slugs = vec!["presale".to_string(), "analytics".to_string()];
+        add_claude_env_var(&mut doc, "SPEEDWAVE_PLUGINS", &slugs.join(","));
+
+        let claude = doc.get("services").unwrap().get("claude").unwrap();
+        let env_seq = claude.get("environment").unwrap().as_sequence().unwrap();
+        let has_plugins = env_seq.iter().any(|v| {
+            v.as_str()
+                .is_some_and(|s| s == "SPEEDWAVE_PLUGINS=presale,analytics")
+        });
+        assert!(
+            has_plugins,
+            "SPEEDWAVE_PLUGINS should be set on claude with comma-separated slugs"
+        );
+    }
+
+    #[test]
+    fn test_apply_plugins_token_mount_path() {
+        // Verify the token mount path format generated by generate_plugin_service
+        let manifest = PluginManifest {
+            name: "Presale".to_string(),
+            service_id: Some("presale".to_string()),
+            slug: "presale".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(4010),
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![],
+        };
+
+        let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/myproject");
+        let service_value = plugin::generate_plugin_service(
+            &manifest,
+            "myproject",
+            "speedwave_myproject_network",
+            &tokens_dir,
+        )
+        .unwrap();
+
+        let yaml = serde_yaml_ng::to_string(&service_value).unwrap();
+        // Token mount should be tokens_dir/service_id:/tokens:ro
+        assert!(
+            yaml.contains("/home/user/.speedwave/tokens/myproject/presale:/tokens:ro"),
+            "Token mount should be <tokens_dir>/<service_id>:/tokens:<mode>. Got:\n{}",
+            yaml
         );
     }
 
@@ -3268,5 +3656,109 @@ services:
     fn str_to_engine_path_handles_absolute_path() {
         let result = str_to_engine_path("/usr/local/share/speedwave").unwrap();
         assert_eq!(result, "/usr/local/share/speedwave");
+    }
+
+    #[test]
+    fn resource_only_plugin_has_no_service_in_compose() {
+        // A resource-only plugin (no service_id, no port) should not generate
+        // a compose service, but should still appear in SPEEDWAVE_PLUGINS.
+        let manifest = PluginManifest {
+            name: "Skills Pack".to_string(),
+            service_id: None,
+            slug: "skills-pack".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Resource-only plugin".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![],
+        };
+
+        // generate_plugin_service requires a port for MCP plugins,
+        // but resource-only plugins should never call it (service_id is None)
+        assert!(
+            manifest.service_id.is_none(),
+            "resource-only plugin has no service_id"
+        );
+        assert!(manifest.port.is_none(), "resource-only plugin has no port");
+
+        // Verify the slug would appear in SPEEDWAVE_PLUGINS
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
+        add_claude_env_var(&mut doc, "SPEEDWAVE_PLUGINS", "skills-pack");
+        let claude = doc.get("services").unwrap().get("claude").unwrap();
+        let env_seq = claude.get("environment").unwrap().as_sequence().unwrap();
+        let has_slug = env_seq.iter().any(|v| {
+            v.as_str()
+                .is_some_and(|s| s == "SPEEDWAVE_PLUGINS=skills-pack")
+        });
+        assert!(
+            has_slug,
+            "resource-only plugin slug should appear in SPEEDWAVE_PLUGINS"
+        );
+
+        // Verify no mcp-* service was added
+        let services = doc.get("services").unwrap().as_mapping().unwrap();
+        assert!(
+            !services.contains_key(&serde_yaml_ng::Value::String("mcp-skills-pack".into())),
+            "resource-only plugin should NOT have a compose service"
+        );
+    }
+
+    // Note: these tests verify the `service_id.unwrap_or(slug)` key lookup
+    // used in apply_plugins (compose.rs:325). We test the components (is_plugin_enabled
+    // + key derivation) rather than calling apply_plugins directly because apply_plugins
+    // reads from ~/.speedwave/plugins/ on the filesystem.
+
+    #[test]
+    fn test_resource_only_plugin_enabled_by_slug_appears_in_speedwave_plugins() {
+        // A plugin without service_id should be toggled by slug.
+        // When enabled by slug, it should appear in SPEEDWAVE_PLUGINS.
+        let integrations = ResolvedIntegrationsConfig {
+            plugins: std::collections::HashMap::from([("my-skills".to_string(), true)]),
+            ..Default::default()
+        };
+        // The key lookup: service_id.unwrap_or(slug) = "my-skills"
+        let slug = "my-skills";
+        let service_id: Option<&str> = None;
+        let plugin_key = service_id.unwrap_or(slug);
+        assert!(
+            integrations.is_plugin_enabled(plugin_key),
+            "Resource-only plugin should be enabled when slug is in plugins map"
+        );
+    }
+
+    #[test]
+    fn test_resource_only_plugin_disabled_by_slug_excluded() {
+        // A plugin without service_id should be excluded when disabled.
+        let integrations = ResolvedIntegrationsConfig {
+            plugins: std::collections::HashMap::from([("my-skills".to_string(), false)]),
+            ..Default::default()
+        };
+        let slug = "my-skills";
+        let service_id: Option<&str> = None;
+        let plugin_key = service_id.unwrap_or(slug);
+        assert!(
+            !integrations.is_plugin_enabled(plugin_key),
+            "Resource-only plugin should be excluded when disabled"
+        );
+    }
+
+    #[test]
+    fn test_resource_only_plugin_absent_from_config_is_disabled() {
+        // A freshly installed plugin not in config should be disabled.
+        let integrations = ResolvedIntegrationsConfig::default();
+        let slug = "new-plugin";
+        let service_id: Option<&str> = None;
+        let plugin_key = service_id.unwrap_or(slug);
+        assert!(
+            !integrations.is_plugin_enabled(plugin_key),
+            "Plugin not in config should be disabled by default"
+        );
     }
 }

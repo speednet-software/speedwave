@@ -55,12 +55,52 @@ git push
 - **`dev` -> `main`:** always squash merge in GitHub UI. PR title must be a conventional commit (e.g. `feat(runtime): add logging`). See [RELEASING.md](RELEASING.md#why-squash-merge-matters)
 - Link commits to GitHub issues when they exist
 
-## Addons
+## Plugins
 
-- `speedwave addon install <path.zip>` -> extracts to `~/.speedwave/addons/<name>/`
-- Each addon: `addon.json` manifest + optional `compose.addon.yml`
-- `compose.rs` merges addon compose fragments into the main compose document
-- Addon services get injected `WORKER_<ADDON>_URL` in the hub environment
+Plugins live in a **separate repository** (`speedwave-plugins`, sibling to this repo). Any change to the plugin contract in this repo **must stay compatible** with existing plugins, and vice versa. The contract surface is:
+
+### Contract between Speedwave and plugins
+
+| Contract element                   | SSOT location (this repo)                                                                              | Consumer (plugins repo)                                                 |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
+| **`plugin.json` manifest schema**  | `crates/speedwave-runtime/src/plugin.rs` → `PluginManifest` struct                                     | Every plugin's `plugin.json`                                            |
+| **Slug validation**                | `plugin.rs` → `validate_manifest()` regex `^[a-z][a-z0-9-]{0,63}$`                                     | Plugin slug values                                                      |
+| **Ed25519 signature**              | `crates/speedwave-runtime/src/signing.rs` → `verify_plugin_signature()`                                | `SIGNATURE` file in each plugin ZIP                                     |
+| **Built-in service ID blocklist**  | `crates/speedwave-runtime/src/consts.rs` → `BUILT_IN_SERVICE_IDS`                                      | Plugins must not use these slugs                                        |
+| **Compose injection**              | `crates/speedwave-runtime/src/compose.rs` → `apply_plugins()`, `generate_plugin_service()`             | Plugin `Containerfile`, `port`, `extra_env`, `mem_limit`, `token_mount` |
+| **Hub env var convention**         | `compose.rs` → `WORKER_<SLUG_UPPER>_URL` injection into hub                                            | Hub discovers plugin workers by this env var                            |
+| **Token mount path**               | `compose.rs` → mounts `~/.speedwave/tokens/<project>/<service_id>/` as `/tokens`                       | Plugin reads credentials from `/tokens/<key>`                           |
+| **Claude-resources directory**     | `entrypoint.sh` → symlinks `claude-resources/{skills,commands,agents,hooks}`                           | Plugin ships `claude-resources/` with skills/commands                   |
+| **`SPEEDWAVE_PLUGINS` env var**    | `compose.rs` → comma-separated enabled slugs in claude container                                       | `entrypoint.sh` iterates this list                                      |
+| **Settings schema (JSON Schema)**  | `plugin.rs` → `settings_schema` field, `plugin_cmd.rs` → `plugin_save_settings`/`plugin_load_settings` | Plugin defines `settings_schema` in manifest                            |
+| **Container security constraints** | `compose.rs` → `cap_drop: ALL`, `no-new-privileges`, `read_only`, resource limits                      | Plugins must work within these constraints                              |
+| **Tauri commands (Desktop UI)**    | `desktop/src-tauri/src/plugin_cmd.rs` → 8 commands                                                     | Frontend models in `desktop/src/src/app/models/plugin.ts`               |
+| **Frontend models**                | `desktop/src/src/app/models/plugin.ts` → `PluginStatusEntry`                                           | Must match Tauri command return types                                   |
+
+### Breaking-change rule
+
+Before changing any contract element above:
+
+1. Check impact on plugins in the `speedwave-plugins` sibling repository
+2. If breaking — coordinate: update plugins first, or add backward compat in this repo
+
+### Plugin types
+
+| Type                     | Has `service_id`? | Has `Containerfile`? | Provides                                             |
+| ------------------------ | ----------------- | -------------------- | ---------------------------------------------------- |
+| **MCP service plugin**   | Yes               | Yes (required)       | Containerized MCP worker + optional claude-resources |
+| **Resource-only plugin** | No                | No                   | Skills, commands, agents, hooks only                 |
+
+All plugins are toggled per-project via `integrations.plugins.<key>.enabled`, where `<key>` is `service_id` for MCP plugins or `slug` for plugins without `service_id`.
+
+### Plugin lifecycle
+
+- **Install:** `speedwave plugin install <path.zip>` → verify Ed25519 → validate manifest → extract to `~/.speedwave/plugins/<slug>/` → build image
+- **Configure:** user fills `auth_fields` credentials → stored at `~/.speedwave/tokens/<project>/<service_id>/<key>` (perm `0o600`)
+- **Enable/disable:** per-project toggle in config (`integrations.plugins.<slug>.enabled`)
+- **Compose:** `apply_plugins()` generates plugin service in compose, injects `WORKER_<PLUGIN>_URL` into hub, mounts claude-resources
+- **Hub discovery:** MCP Hub reads `ENABLED_SERVICES`, fetches tools from plugin workers via HTTP
+- **Uninstall:** `plugin::remove_plugin()` removes `~/.speedwave/plugins/<slug>/`; Desktop `remove_plugin` command additionally cleans tokens and config entries
 
 ## Key Principles
 
@@ -92,5 +132,5 @@ git push
 - `docs/contributing/development-setup.md` — dev environment and build targets
 - `docs/contributing/testing.md` — test strategy, patterns, and coverage thresholds
 - `docs/guides/cli.md` — CLI subcommands and usage
-- `docs/guides/integrations.md` — MCP integrations and addon system
+- `docs/guides/integrations.md` — MCP integrations and plugin system
 - `docs/getting-started/configuration.md` — config schema and environment variables

@@ -94,17 +94,17 @@ This means teams can:
 2. Override specific resources by committing same-named files to `.claude/` in their repo
 3. Add project-specific resources that complement the Speedwave bundle
 
-### Addon Resources
+### Plugin Resources
 
-Addon resources (lines 82–96 of `entrypoint.sh`) use a finer-grained approach — individual files are symlinked into the user-level directories rather than replacing entire directories:[^1]
+Plugin resources (lines 82–96 of `entrypoint.sh`) use a finer-grained approach — individual files and directories are symlinked into the user-level directories rather than replacing entire directories:[^1]
 
 ```bash
-for file in "${addon_path}/${resource_type}"/*; do
-    [ -f "${file}" ] && ln -sf "${file}" "${HOME}/.claude/${resource_type}/$(basename "${file}")"
+for entry in "${plugin_path}/${resource_type}"/*; do
+    [ -e "${entry}" ] && ln -sfn "${entry}" "${HOME}/.claude/${resource_type}/$(basename "${entry}")"
 done
 ```
 
-This allows core Speedwave resources and addon resources to coexist within the same user-level directory. Addon resources support `commands`, `agents`, and `skills` only — `hooks` are intentionally excluded because hooks execute shell commands, and allowing third-party addons to inject hooks would expand the attack surface without user consent.
+This allows core Speedwave resources and plugin resources to coexist within the same user-level directory. The `[ -e ]` guard and `ln -sfn` support both files and directories. Plugin resources support `commands`, `agents`, and `skills` only — `hooks` are intentionally excluded because hooks execute shell commands, and allowing third-party plugins to inject hooks would expand the attack surface without user consent.
 
 ### Container Isolation
 

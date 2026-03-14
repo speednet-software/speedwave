@@ -229,7 +229,7 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
     })
 }
 
-fn is_service_configured(project: &str, service: &str) -> bool {
+pub(crate) fn is_service_configured(project: &str, service: &str) -> bool {
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => return false,
@@ -240,16 +240,19 @@ fn is_service_configured(project: &str, service: &str) -> bool {
         .join(project)
         .join(service);
     let auth_fields = get_auth_fields(service);
-    auth_fields.iter().any(|f| {
-        if is_secret_field(&f.key) {
-            let path = svc_token_dir.join(&f.key);
-            path.exists()
-                && std::fs::metadata(&path)
-                    .map(|m| m.len() > 0)
-                    .unwrap_or(false)
-        } else {
-            false
-        }
+    let secret_fields: Vec<_> = auth_fields
+        .iter()
+        .filter(|f| is_secret_field(&f.key))
+        .collect();
+    if secret_fields.is_empty() {
+        return false;
+    }
+    secret_fields.iter().all(|f| {
+        let path = svc_token_dir.join(&f.key);
+        path.exists()
+            && std::fs::metadata(&path)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
     })
 }
 
@@ -353,7 +356,13 @@ pub fn save_integration_credentials(
                 key, service
             ));
         }
-        validate_credential_field(key, value)?;
+        crate::plugin_cmd::validate_credential_field(key, value)?;
+
+        if service == "redmine"
+            && (key == "host_url" || key == "project_id" || key == "project_name")
+        {
+            continue;
+        }
 
         let file_path = svc_dir.join(key);
         std::fs::write(&file_path, value).map_err(|e| e.to_string())?;
@@ -492,10 +501,12 @@ pub async fn restart_integration_containers(project: String) -> Result<(), Strin
             &project_dir,
             &resolved,
             &integrations,
+            Some(&*rt),
         )
         .map_err(|e| e.to_string())?;
 
-        let violations = speedwave_runtime::compose::SecurityCheck::run(&yaml, &project);
+        let manifests = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_default();
+        let violations = speedwave_runtime::compose::SecurityCheck::run(&yaml, &project, &manifests);
         if !violations.is_empty() {
             let msgs: Vec<String> = violations
                 .iter()

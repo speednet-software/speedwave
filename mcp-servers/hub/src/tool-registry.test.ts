@@ -22,6 +22,7 @@ import {
   validateRegistry,
   getRegistryStats,
   stopBackgroundRefresh,
+  initializeRegistry,
 } from './tool-registry.js';
 import { TOOL_POLICIES, SUPPORTED_SERVICES } from './hub-tool-policy.js';
 import { TIMEOUTS } from '@speedwave/mcp-shared';
@@ -46,7 +47,7 @@ describe('tool-registry', () => {
       }
     });
 
-    it('should have SERVICE_NAMES matching SUPPORTED_SERVICES', () => {
+    it('should have SERVICE_NAMES matching SUPPORTED_SERVICES after reset', () => {
       expect([...SERVICE_NAMES].sort()).toEqual([...SUPPORTED_SERVICES].sort());
     });
   });
@@ -311,6 +312,39 @@ describe('tool-registry', () => {
       expect(stats.services.sharepoint).toBe(5);
       expect(stats.services.os).toBe(25);
       expect(stats.total).toBe(103);
+    });
+  });
+
+  describe('dynamic SERVICE_NAMES', () => {
+    const savedEnabled = process.env.ENABLED_SERVICES;
+
+    afterEach(() => {
+      if (savedEnabled === undefined) {
+        delete process.env.ENABLED_SERVICES;
+      } else {
+        process.env.ENABLED_SERVICES = savedEnabled;
+      }
+      resetServiceCaches();
+      _resetRegistryForTesting();
+      populateRegistryFromPolicies();
+    });
+
+    it('should include plugin services after initializeRegistry', async () => {
+      _resetRegistryForTesting();
+      resetServiceCaches();
+      process.env.ENABLED_SERVICES = 'slack,presale';
+
+      await initializeRegistry();
+
+      expect([...SERVICE_NAMES]).toContain('presale');
+      expect([...SERVICE_NAMES]).toContain('slack');
+      expect([...SERVICE_NAMES]).toContain('sharepoint');
+    });
+
+    it('should reset SERVICE_NAMES to built-in on _resetRegistryForTesting', () => {
+      // After the above test, reset should restore to built-in
+      _resetRegistryForTesting();
+      expect([...SERVICE_NAMES]).toEqual([...SUPPORTED_SERVICES]);
     });
   });
 

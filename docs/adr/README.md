@@ -21,7 +21,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-012](ADR-012-github-as-ci-cd-and-distribution-platform.md)        | GitHub as CI/CD and Distribution Platform               | Accepted              |
 | [ADR-013](ADR-013-mcp-os-as-host-process-implementation.md)            | mcp-os as Host Process — Implementation Details         | Accepted              |
 | [ADR-014](ADR-014-ide-bridge-three-mechanisms-per-platform.md)         | IDE Bridge — Three Mechanisms Per Platform              | Accepted              |
-| [ADR-015](ADR-015-addon-system-open-core-model.md)                     | Addon System — Open-Core Model                          | Accepted              |
+| [ADR-015](ADR-015-plugin-system.md)                                    | Plugin System                                           | Accepted              |
 | [ADR-016](ADR-016-cross-platform-cli-path.md)                          | Cross-Platform CLI PATH                                 | Accepted              |
 | [ADR-017](ADR-017-claude-code-in-container-via-entrypoint.md)          | Claude Code in Container via entrypoint.sh              | Accepted              |
 | [ADR-018](ADR-018-llm-provider-switching-proxy-as-container.md)        | LLM Provider Switching — Proxy as Container             | Accepted              |

@@ -17,7 +17,8 @@ import type { Tool } from '@speedwave/mcp-shared';
 import { TIMEOUTS, ts } from '@speedwave/mcp-shared';
 import type { ToolMetadata } from './hub-types.js';
 import type { ToolPolicy } from './hub-tool-policy.js';
-import { getServicePolicies } from './hub-tool-policy.js';
+import { getServicePolicies, getPluginToolPolicy } from './hub-tool-policy.js';
+import { isPluginService } from './service-list.js';
 import { getAuthToken } from './auth-tokens.js';
 import { validateWorkerUrl } from '@speedwave/mcp-shared';
 
@@ -212,11 +213,31 @@ export function validateMergeResult(
 export async function discoverAndMergeService(
   service: string
 ): Promise<Record<string, ToolMetadata>> {
-  const policies = getServicePolicies(service);
   const result: Record<string, ToolMetadata> = {};
 
   // Fetch from worker
   const workerTools = await discoverServiceTools(service);
+
+  // Plugin services: accept ALL worker tools, no policy-gating
+  if (isPluginService(service)) {
+    for (const tool of workerTools) {
+      const methodName = toCamelCase(tool.name);
+      const policy = getPluginToolPolicy(tool);
+      const merged = mergeToolWithPolicy(tool, policy, service, methodName);
+      const errors = validateMergeResult(service, methodName, merged);
+      if (errors.length > 0) {
+        console.warn(
+          `${ts()} [tool-discovery] Validation errors for plugin ${service}.${methodName}: ${errors.join('; ')} — skipping`
+        );
+      } else {
+        result[methodName] = merged;
+      }
+    }
+    return result;
+  }
+
+  // Built-in services: merge with hub policy
+  const policies = getServicePolicies(service);
 
   // Index worker tools by camelCase name
   const toolsByMethod = new Map<string, Tool>();

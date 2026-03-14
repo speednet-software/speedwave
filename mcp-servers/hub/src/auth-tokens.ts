@@ -10,7 +10,7 @@
  */
 
 import { readFileSync, existsSync } from 'fs';
-import { SERVICES } from './http-bridge.js';
+import { getAllServiceNames } from './service-list.js';
 import { ts } from '@speedwave/mcp-shared';
 
 const AUTH_TOKENS: Map<string, string> = new Map();
@@ -20,7 +20,7 @@ const AUTH_TOKENS: Map<string, string> = new Map();
  * Called once at server startup.
  */
 export function loadAuthTokens(): void {
-  for (const service of SERVICES) {
+  for (const service of getAllServiceNames()) {
     const path = `/secrets/${service}-auth-token`;
     if (existsSync(path)) {
       const token = readFileSync(path, 'utf8').trim();
