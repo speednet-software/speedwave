@@ -92,9 +92,18 @@ pub const UIDMAP_MISSING_MSG: &str = "newuidmap not found. Install the uidmap pa
      - Fedora/RHEL:   sudo dnf install -y shadow-utils\n\
      - openSUSE:      sudo zypper install -y shadow";
 
+/// Default interval (in hours) between automatic update checks.
+/// Used by both the CLI (converted to seconds) and the Desktop updater
+/// (as the default for `UpdateSettings::check_interval_hours`).
+pub const UPDATE_CHECK_INTERVAL_HOURS: u32 = 24;
+
 /// Delay in seconds after `compose_up_recreate` before checking container health.
 /// Allows crash-looping containers to exit before `compose_ps` reports state.
 pub const CONTAINER_STABILIZATION_DELAY_SECS: u64 = 3;
+
+/// Delay in seconds after `systemctl start` inside WSL2 before retrying
+/// a service health check. Gives systemd time to bring up containerd/buildkitd.
+pub const WSL_SERVICE_START_DELAY_SECS: u64 = 3;
 
 /// Descriptor for a single auth/credential field of an MCP service.
 pub struct McpAuthFieldDescriptor {
@@ -108,6 +117,10 @@ pub struct McpAuthFieldDescriptor {
     pub placeholder: &'static str,
     /// Whether this field contains a secret (token, key, etc.).
     pub is_secret: bool,
+    /// Whether this field is stored inside a `config.json` file rather than
+    /// as an individual credential file. Used by Redmine's `host_url`,
+    /// `project_id`, and `project_name` fields.
+    pub stored_in_config_json: bool,
 }
 
 /// Descriptor for a toggleable MCP service.
@@ -145,6 +158,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "password",
                 placeholder: "xoxb-...",
                 is_secret: true,
+                stored_in_config_json: false,
             },
             McpAuthFieldDescriptor {
                 key: "user_token",
@@ -152,6 +166,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "password",
                 placeholder: "xoxp-...",
                 is_secret: true,
+                stored_in_config_json: false,
             },
         ],
         credential_files: &["bot_token", "user_token"],
@@ -169,6 +184,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "password",
                 placeholder: "eyJ0...",
                 is_secret: true,
+                stored_in_config_json: false,
             },
             McpAuthFieldDescriptor {
                 key: "refresh_token",
@@ -176,6 +192,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "password",
                 placeholder: "0.AR...",
                 is_secret: true,
+                stored_in_config_json: false,
             },
             McpAuthFieldDescriptor {
                 key: "client_id",
@@ -183,6 +200,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "text",
                 placeholder: "00000000-0000-...",
                 is_secret: false,
+                stored_in_config_json: false,
             },
             McpAuthFieldDescriptor {
                 key: "tenant_id",
@@ -190,6 +208,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "text",
                 placeholder: "00000000-0000-...",
                 is_secret: false,
+                stored_in_config_json: false,
             },
             McpAuthFieldDescriptor {
                 key: "site_id",
@@ -197,6 +216,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "text",
                 placeholder: "site-id",
                 is_secret: false,
+                stored_in_config_json: false,
             },
             McpAuthFieldDescriptor {
                 key: "base_path",
@@ -204,6 +224,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "text",
                 placeholder: "/sites/MySite",
                 is_secret: false,
+                stored_in_config_json: false,
             },
         ],
         credential_files: &[
@@ -228,6 +249,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "password",
                 placeholder: "abcdef1234567890...",
                 is_secret: true,
+                stored_in_config_json: false,
             },
             McpAuthFieldDescriptor {
                 key: "host_url",
@@ -235,6 +257,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "url",
                 placeholder: "https://redmine.company.com",
                 is_secret: false,
+                stored_in_config_json: true,
             },
             McpAuthFieldDescriptor {
                 key: "project_id",
@@ -242,6 +265,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "text",
                 placeholder: "my-project",
                 is_secret: false,
+                stored_in_config_json: true,
             },
             McpAuthFieldDescriptor {
                 key: "project_name",
@@ -249,6 +273,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "text",
                 placeholder: "My Project",
                 is_secret: false,
+                stored_in_config_json: true,
             },
         ],
         credential_files: &[
@@ -272,6 +297,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "password",
                 placeholder: "glpat-...",
                 is_secret: true,
+                stored_in_config_json: false,
             },
             McpAuthFieldDescriptor {
                 key: "host_url",
@@ -279,9 +305,45 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 field_type: "url",
                 placeholder: "https://gitlab.com",
                 is_secret: false,
+                stored_in_config_json: false,
             },
         ],
         credential_files: &["token", "host_url"],
+    },
+];
+
+/// Descriptor for a toggleable OS integration service (macOS only).
+pub struct OsServiceDescriptor {
+    /// Config key used in OsIntegrationsConfig (e.g. "reminders").
+    pub config_key: &'static str,
+    /// Human-readable display name (e.g. "Reminders").
+    pub display_name: &'static str,
+    /// Short description for the UI.
+    pub description: &'static str,
+}
+
+/// Toggleable OS integration services — Single Source of Truth for OS service metadata.
+/// Used by compose filtering (DISABLED_OS_SERVICES), integrations UI, and config toggles.
+pub const TOGGLEABLE_OS_SERVICES: &[OsServiceDescriptor] = &[
+    OsServiceDescriptor {
+        config_key: "reminders",
+        display_name: "Reminders",
+        description: "Native OS reminders and tasks",
+    },
+    OsServiceDescriptor {
+        config_key: "calendar",
+        display_name: "Calendar",
+        description: "Native OS calendar events",
+    },
+    OsServiceDescriptor {
+        config_key: "mail",
+        display_name: "Mail",
+        description: "Native OS email client",
+    },
+    OsServiceDescriptor {
+        config_key: "notes",
+        display_name: "Notes",
+        description: "Native OS notes",
     },
 ];
 
@@ -539,6 +601,46 @@ mod tests {
     }
 
     #[test]
+    fn test_stored_in_config_json_only_on_redmine() {
+        let redmine = find_mcp_service("redmine").unwrap();
+        let config_json_fields: Vec<&str> = redmine
+            .auth_fields
+            .iter()
+            .filter(|f| f.stored_in_config_json)
+            .map(|f| f.key)
+            .collect();
+        assert_eq!(
+            config_json_fields,
+            vec!["host_url", "project_id", "project_name"],
+            "only Redmine's host_url, project_id, project_name should be stored_in_config_json"
+        );
+
+        // No other service should have stored_in_config_json fields
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            if svc.config_key == "redmine" {
+                continue;
+            }
+            for field in svc.auth_fields {
+                assert!(
+                    !field.stored_in_config_json,
+                    "field '{}' in service '{}' should not have stored_in_config_json=true",
+                    field.key, svc.config_key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_update_check_interval_hours() {
+        assert_eq!(UPDATE_CHECK_INTERVAL_HOURS, 24);
+        assert_eq!(
+            UPDATE_CHECK_INTERVAL_HOURS as u64 * 3600,
+            86400,
+            "UPDATE_CHECK_INTERVAL_HOURS * 3600 must equal 86400 seconds (24 hours)"
+        );
+    }
+
+    #[test]
     fn test_find_mcp_service_found() {
         assert!(find_mcp_service("slack").is_some());
         assert!(find_mcp_service("sharepoint").is_some());
@@ -551,5 +653,76 @@ mod tests {
         assert!(find_mcp_service("unknown").is_none());
         assert!(find_mcp_service("").is_none());
         assert!(find_mcp_service("os").is_none());
+    }
+
+    #[test]
+    fn test_wsl_service_start_delay_is_positive() {
+        assert!(
+            WSL_SERVICE_START_DELAY_SECS > 0,
+            "WSL_SERVICE_START_DELAY_SECS must be positive"
+        );
+    }
+
+    #[test]
+    fn test_toggleable_os_services_count() {
+        assert_eq!(
+            TOGGLEABLE_OS_SERVICES.len(),
+            4,
+            "TOGGLEABLE_OS_SERVICES should contain exactly 4 services"
+        );
+    }
+
+    #[test]
+    fn test_toggleable_os_services_have_unique_keys() {
+        let mut keys: Vec<&str> = TOGGLEABLE_OS_SERVICES
+            .iter()
+            .map(|s| s.config_key)
+            .collect();
+        let count_before = keys.len();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(
+            keys.len(),
+            count_before,
+            "TOGGLEABLE_OS_SERVICES config keys must be unique"
+        );
+    }
+
+    #[test]
+    fn test_toggleable_os_services_have_display_names() {
+        for svc in TOGGLEABLE_OS_SERVICES {
+            assert!(
+                !svc.display_name.is_empty(),
+                "OS service '{}' must have a display name",
+                svc.config_key
+            );
+            assert!(
+                !svc.description.is_empty(),
+                "OS service '{}' must have a description",
+                svc.config_key
+            );
+        }
+    }
+
+    /// Guard against OS service list drift: TOGGLEABLE_OS_SERVICES count must match
+    /// the number of os_ boolean fields in ResolvedIntegrationsConfig.
+    #[test]
+    fn test_toggleable_os_count_matches_resolved_config_fields() {
+        let resolved = crate::config::ResolvedIntegrationsConfig::default();
+        let os_field_count = [
+            resolved.os_reminders,
+            resolved.os_calendar,
+            resolved.os_mail,
+            resolved.os_notes,
+        ]
+        .len();
+        assert_eq!(
+            TOGGLEABLE_OS_SERVICES.len(),
+            os_field_count,
+            "TOGGLEABLE_OS_SERVICES count ({}) must match ResolvedIntegrationsConfig OS fields ({}). \
+             Did you add a service to one but not the other?",
+            TOGGLEABLE_OS_SERVICES.len(),
+            os_field_count
+        );
     }
 }

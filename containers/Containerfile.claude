@@ -45,10 +45,12 @@ USER 1000
 # 1. Image builds are developer-initiated, one-time operations (not runtime)
 # 2. The installed binary is baked into the image layer — the script is not
 #    persisted or re-executed at container start
-# 3. Pinning the installer hash would require updating it for every Claude Code
-#    release, breaking automated builds
+# 3. Pinning the installer hash is impractical: each Claude Code release changes
+#    the installer, so a pinned hash must be updated in lockstep — a pragmatic
+#    build-automation trade-off given the low-risk build-time context
 # 4. The runtime fallback in containers/entrypoint.sh DOES verify SHA256 via
-#    CLAUDE_INSTALLER_SHA256 for the higher-risk runtime install path
+#    CLAUDE_INSTALLER_SHA256 when set by the caller; if absent, the entrypoint
+#    proceeds without hash verification
 RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}"
 USER root
 RUN CLAUDE_BIN=$(readlink -f /home/speedwave/.local/bin/claude) && \

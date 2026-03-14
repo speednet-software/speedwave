@@ -10,6 +10,7 @@
 mod auth;
 mod auth_commands;
 mod chat;
+mod container_logs_cmd;
 mod containers_cmd;
 mod diagnostics;
 mod fs_perms;
@@ -17,7 +18,6 @@ mod health;
 mod history;
 mod ide_bridge;
 mod integrations_cmd;
-mod log_commands;
 mod logging_cmd;
 mod mcp_os_process;
 mod reconcile;
@@ -47,11 +47,6 @@ use reconcile::{SharedAutoCheckHandle, SharedIdeBridge};
 type SharedUpdateVersion = Arc<Mutex<Option<String>>>;
 
 const MAIN_WINDOW_LABEL: &str = "main";
-
-/// Global mutex protecting all read-modify-write cycles on config.json.
-/// Without this, concurrent Tauri commands (e.g. toggling mail then notes in quick
-/// succession) can lose writes due to TOCTOU races.
-static CONFIG_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 
 /// Stop flag for the mcp-os watchdog thread. Set during app exit cleanup
 /// to prevent the watchdog from respawning mcp-os during shutdown.
@@ -83,6 +78,21 @@ fn send_message(message: String, state: tauri::State<SharedChatSession>) -> Resu
     }
     let mut session = state.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     session.send_message(&message).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn answer_question(
+    tool_use_id: String,
+    answer: String,
+    state: tauri::State<SharedChatSession>,
+) -> Result<(), String> {
+    if answer.len() > 1_000_000 {
+        return Err("Answer too long".to_string());
+    }
+    let mut session = state.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    session
+        .answer_question(&tool_use_id, &answer)
+        .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -181,19 +191,27 @@ fn list_projects() -> Result<ProjectList, String> {
     })
 }
 
+/// Switches the active project in-memory. Extracted for testability.
+fn apply_switch_project(
+    user_config: &mut config::SpeedwaveUserConfig,
+    name: &str,
+) -> anyhow::Result<()> {
+    if user_config.find_project(name).is_none() {
+        anyhow::bail!("Project '{}' not found", name);
+    }
+    user_config.active_project = Some(name.to_string());
+    Ok(())
+}
+
 #[tauri::command]
 fn switch_project(name: String, app: tauri::AppHandle) -> Result<(), String> {
-    let _lock = CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
-    let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
-
-    // Verify project exists
-    if !user_config.projects.iter().any(|p| p.name == name) {
-        return Err(format!("Project '{}' not found", name));
-    }
-
-    user_config.active_project = Some(name.clone());
-
-    config::save_user_config(&user_config).map_err(|e| e.to_string())?;
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        apply_switch_project(&mut user_config, &name)?;
+        config::save_user_config(&user_config)?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
 
     use tauri::Emitter;
     let _ = app.emit("project_switched", &name);
@@ -217,9 +235,7 @@ async fn get_health(project: String) -> Result<health::HealthReport, String> {
             }
         };
         let project_dir = user_config
-            .projects
-            .iter()
-            .find(|p| p.name == project)
+            .find_project(&project)
             .map(|p| std::path::PathBuf::from(&p.dir));
         let any_os_enabled = if cfg!(target_os = "macos") {
             project_dir
@@ -261,12 +277,29 @@ fn is_upstream_alive(port: u16) -> bool {
     health::is_ide_lock_alive(&lock_path)
 }
 
+/// Clears the dead IDE selection from both the live bridge and persisted config.
+///
+/// Called when the upstream IDE is detected as dead (PID gone or port not
+/// listening). Separated from the query command so that `get_bridge_status`
+/// does not have write side-effects.
+fn cleanup_dead_ide(bridge: &ide_bridge::IdeBridge) {
+    bridge.clear_upstream();
+    if let Ok(()) = config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        user_config.selected_ide = None;
+        config::save_user_config(&user_config)
+    }) {
+        // ok
+    } else {
+        log::warn!("cleanup_dead_ide: failed to persist IDE deselection");
+    }
+}
+
 /// Returns the current IDE Bridge status for the Angular frontend.
 ///
-/// **Side effect:** when the upstream IDE is detected as dead (PID gone or port
-/// not listening), this command clears the upstream selection and removes it from
-/// persisted config so it won't be restored on next startup. This fires only once
-/// per IDE death — subsequent polls see `upstream_info() → None`.
+/// When the upstream IDE is detected as dead (PID gone or port not listening),
+/// delegates to `cleanup_dead_ide()` to clear the stale selection. This fires
+/// only once per IDE death — subsequent polls see `upstream_info() -> None`.
 #[tauri::command]
 fn get_bridge_status(state: tauri::State<SharedIdeBridge>) -> Result<Option<BridgeStatus>, String> {
     let guard = state
@@ -279,25 +312,7 @@ fn get_bridge_status(state: tauri::State<SharedIdeBridge>) -> Result<Option<Brid
                     if is_upstream_alive(port) {
                         (Some(name), Some(port))
                     } else {
-                        bridge.clear_upstream();
-                        // Clear persisted selection so it doesn't restore on next startup
-                        if let Ok(_lock) = CONFIG_LOCK.lock() {
-                            match config::load_user_config() {
-                                Ok(mut user_config) => {
-                                    user_config.selected_ide = None;
-                                    if let Err(e) = config::save_user_config(&user_config) {
-                                        log::warn!(
-                                            "get_bridge_status: failed to persist IDE deselection: {e}"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    log::warn!(
-                                        "get_bridge_status: failed to load user config: {e}"
-                                    );
-                                }
-                            }
-                        }
+                        cleanup_dead_ide(bridge);
                         (None, None)
                     }
                 }
@@ -336,15 +351,15 @@ fn select_ide(
     }
 
     // Persist the selection to config.json
-    {
-        let _lock = CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
-        let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
         user_config.selected_ide = Some(speedwave_runtime::config::SelectedIde {
             ide_name: ide_name.clone(),
             port,
         });
-        config::save_user_config(&user_config).map_err(|e| e.to_string())?;
-    }
+        config::save_user_config(&user_config)
+    })
+    .map_err(|e| e.to_string())?;
 
     // Update the live Bridge so new connections are proxied immediately
     let guard = state
@@ -870,6 +885,7 @@ fn main() {
             // Chat
             start_chat,
             send_message,
+            answer_question,
             // Chat history
             list_conversations,
             get_conversation,
@@ -878,12 +894,13 @@ fn main() {
             // Project management
             list_projects,
             switch_project,
+            containers_cmd::add_project,
             // Health
             get_health,
             // Container logs
-            log_commands::get_container_logs,
-            log_commands::get_compose_logs,
-            log_commands::get_mcp_os_logs,
+            container_logs_cmd::get_container_logs,
+            container_logs_cmd::get_compose_logs,
+            container_logs_cmd::get_mcp_os_logs,
             // IDE Bridge
             list_available_ides,
             select_ide,
@@ -935,4 +952,117 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("fatal: Tauri application failed to start");
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use config::{ProjectUserEntry, SpeedwaveUserConfig};
+
+    fn make_config_with_projects() -> SpeedwaveUserConfig {
+        SpeedwaveUserConfig {
+            projects: vec![
+                ProjectUserEntry {
+                    name: "alpha".to_string(),
+                    dir: "/tmp/alpha".to_string(),
+                    claude: None,
+                    integrations: None,
+                },
+                ProjectUserEntry {
+                    name: "beta".to_string(),
+                    dir: "/tmp/beta".to_string(),
+                    claude: None,
+                    integrations: None,
+                },
+            ],
+            active_project: Some("alpha".to_string()),
+            selected_ide: None,
+            log_level: None,
+        }
+    }
+
+    // -- apply_switch_project tests --
+
+    #[test]
+    fn switch_project_happy_path() {
+        let mut cfg = make_config_with_projects();
+        assert_eq!(cfg.active_project.as_deref(), Some("alpha"));
+
+        let result = apply_switch_project(&mut cfg, "beta");
+        assert!(result.is_ok());
+        assert_eq!(cfg.active_project.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn switch_project_to_same_project() {
+        let mut cfg = make_config_with_projects();
+        let result = apply_switch_project(&mut cfg, "alpha");
+        assert!(result.is_ok());
+        assert_eq!(cfg.active_project.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn switch_project_error_not_found() {
+        let mut cfg = make_config_with_projects();
+        let result = apply_switch_project(&mut cfg, "nonexistent");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not found"),
+            "expected 'not found' error, got: {err}"
+        );
+        assert!(
+            err.contains("nonexistent"),
+            "error should mention the project name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn switch_project_error_empty_name() {
+        let mut cfg = make_config_with_projects();
+        let result = apply_switch_project(&mut cfg, "");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn switch_project_does_not_modify_projects_list() {
+        let mut cfg = make_config_with_projects();
+        let projects_before: Vec<String> = cfg.projects.iter().map(|p| p.name.clone()).collect();
+
+        apply_switch_project(&mut cfg, "beta").unwrap();
+
+        let projects_after: Vec<String> = cfg.projects.iter().map(|p| p.name.clone()).collect();
+        assert_eq!(projects_before, projects_after);
+    }
+
+    #[test]
+    fn switch_project_from_none_active() {
+        let mut cfg = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "only".to_string(),
+                dir: "/tmp/only".to_string(),
+                claude: None,
+                integrations: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        };
+
+        let result = apply_switch_project(&mut cfg, "only");
+        assert!(result.is_ok());
+        assert_eq!(cfg.active_project.as_deref(), Some("only"));
+    }
+
+    #[test]
+    fn switch_project_empty_projects_list() {
+        let mut cfg = SpeedwaveUserConfig::default();
+        let result = apply_switch_project(&mut cfg, "anything");
+        assert!(result.is_err());
+    }
 }

@@ -21,7 +21,9 @@ The IDE Bridge must be running for Claude (inside a container) to communicate wi
 
 ## Trade-offs
 
-- If the user closes the Desktop app window while the system tray is available (macOS/Windows, Linux with libappindicator), the window hides to tray and all host-side processes continue running (IDE Bridge, mcp-os). The app fully exits only when the user clicks "Quit" in the tray menu, or when the tray is unavailable (e.g. some Linux environments without libappindicator). In the latter case, closing the window exits the app and all host-side processes stop until the app is reopened. This is an acceptable trade-off given the simplicity gained.
+- If the user closes the Desktop app window while the system tray is available (macOS/Windows, Linux with libappindicator), the window hides to tray and all host-side processes continue running (IDE Bridge, mcp-os). The app fully exits only when the user clicks "Quit" in the tray menu, or when the tray is unavailable (e.g. some Linux environments without libappindicator). In the latter case, closing the window exits the app and all host-side processes stop until the app is reopened.
+  - When the user clicks "Quit" from the tray menu, containers are stopped (compose_down), mcp-os is killed, and IDE Bridge is shut down. This matches the Docker Desktop model — closing the app stops all managed containers.
+  - This is an acceptable trade-off given the simplicity gained.
 - If a future requirement demands "always-on" host services (e.g., headless server usage), this decision can be revisited by adding an optional system service.
 
 ---

@@ -97,29 +97,6 @@ pub fn render_compose(
 }
 
 /// Creates project directories under ~/.speedwave/
-pub fn init_project_dirs(project: &str) -> anyhow::Result<()> {
-    crate::validation::validate_project_name(project)?;
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-    let data_dir = home.join(consts::DATA_DIR);
-
-    let dirs_to_create = [
-        data_dir.join("tokens").join(project).join("slack"),
-        data_dir.join("tokens").join(project).join("sharepoint"),
-        data_dir.join("tokens").join(project).join("redmine"),
-        data_dir.join("tokens").join(project).join("gitlab"),
-        data_dir.join("compose").join(project),
-        data_dir.join("context").join(project),
-        data_dir.join("claude-home").join(project),
-    ];
-
-    for dir in &dirs_to_create {
-        std::fs::create_dir_all(dir)?;
-    }
-
-    Ok(())
-}
-
 /// Creates the secrets directory for a project with restrictive permissions (chmod 700).
 /// Path: ~/.speedwave/secrets/<project>/
 pub fn init_secrets_dir(project: &str) -> anyhow::Result<PathBuf> {
@@ -424,19 +401,15 @@ fn apply_integrations_filter(
     inject_worker_env(&mut doc, "ENABLED_SERVICES", &enabled_csv);
 
     // Inject DISABLED_OS_SERVICES if any OS sub-integrations are disabled
-    let mut disabled_os: Vec<&str> = Vec::new();
-    if !integrations.os_reminders {
-        disabled_os.push("reminders");
-    }
-    if !integrations.os_calendar {
-        disabled_os.push("calendar");
-    }
-    if !integrations.os_mail {
-        disabled_os.push("mail");
-    }
-    if !integrations.os_notes {
-        disabled_os.push("notes");
-    }
+    let disabled_os: Vec<&str> = consts::TOGGLEABLE_OS_SERVICES
+        .iter()
+        .filter(|svc| {
+            !integrations
+                .is_os_service_enabled(svc.config_key)
+                .unwrap_or(false)
+        })
+        .map(|svc| svc.config_key)
+        .collect();
     if !disabled_os.is_empty() {
         log::debug!("integrations filter: disabled_os={}", disabled_os.join(","));
         inject_worker_env(&mut doc, "DISABLED_OS_SERVICES", &disabled_os.join(","));
@@ -486,7 +459,7 @@ fn apply_mcp_os_config_with_path(
     token_path: &std::path::Path,
     port_path: &std::path::Path,
 ) -> anyhow::Result<String> {
-    if !token_path.exists() {
+    if !token_path.is_file() {
         return Ok(yaml.to_string());
     }
 
@@ -1481,29 +1454,6 @@ services:
     }
 
     #[test]
-    fn test_init_project_dirs() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Override home dir for testing by using the init logic directly
-        let data_dir = tmp.path().join(consts::DATA_DIR);
-        let project = "test-project";
-        let dirs_to_create: Vec<std::path::PathBuf> = vec![
-            data_dir.join("tokens").join(project).join("slack"),
-            data_dir.join("tokens").join(project).join("sharepoint"),
-            data_dir.join("tokens").join(project).join("redmine"),
-            data_dir.join("tokens").join(project).join("gitlab"),
-            data_dir.join("compose").join(project),
-            data_dir.join("context").join(project),
-            data_dir.join("claude-home").join(project),
-        ];
-        for dir in &dirs_to_create {
-            std::fs::create_dir_all(dir).unwrap();
-        }
-        for dir in &dirs_to_create {
-            assert!(dir.exists(), "Directory should exist: {:?}", dir);
-        }
-    }
-
-    #[test]
     fn test_render_compose_substitution() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -2350,6 +2300,20 @@ services:
     }
 
     #[test]
+    fn test_mcp_os_config_skipped_when_token_is_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let token_path = tmp.path().join("mcp-os-auth-token");
+        std::fs::create_dir(&token_path).unwrap();
+        let port_path = tmp.path().join("mcp-os-port");
+
+        let result = apply_mcp_os_config_with_path(VALID_COMPOSE, &token_path, &port_path).unwrap();
+        assert_eq!(
+            result, VALID_COMPOSE,
+            "yaml should be unchanged when token path is a directory"
+        );
+    }
+
+    #[test]
     fn test_mcp_os_config_not_in_claude_env() {
         // MCP_OS_* env vars must NOT be in the claude container.
         // mcp-os is accessed through the hub, not directly by Claude.
@@ -2851,13 +2815,6 @@ services:
         assert!(render_compose("", "/tmp/proj", &resolved, &integrations).is_err());
         assert!(render_compose("../evil", "/tmp/proj", &resolved, &integrations).is_err());
         assert!(render_compose(&"a".repeat(64), "/tmp/proj", &resolved, &integrations).is_err());
-    }
-
-    #[test]
-    fn test_init_project_dirs_rejects_invalid_name() {
-        assert!(init_project_dirs("").is_err());
-        assert!(init_project_dirs("../evil").is_err());
-        assert!(init_project_dirs(&"a".repeat(64)).is_err());
     }
 
     #[test]

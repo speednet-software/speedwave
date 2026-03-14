@@ -69,15 +69,46 @@ The `content` field accepts either a plain string or an array of content blocks 
 
 ```
 Claude subprocess (inside container via container_exec_piped)
-  stdout → BufReader → background thread → parse_stream_line() → app_handle.emit("chat_stream", chunk)
+  stdout → BufReader → background thread → StreamParser::parse_line() → app_handle.emit("chat_stream", chunk)
   stdin  ← build_user_message() → writeln!(stdin, "{}", json)
+  stdin  ← answer_question()    → writeln!(stdin, "{}", control_result_json)
                                                     ↓
-Angular frontend ← listen("chat_stream") → handleStreamChunk() state machine
+Angular frontend ← listen("chat_stream") → handleStreamChunk() block-based state machine
 ```
 
 **Design decision: direct Tauri event emission, not mpsc channel.** The background thread that reads Claude's stdout calls `app_handle.emit()` directly to push `StreamChunk` events to the Angular frontend. An earlier design used an intermediate `mpsc::channel` to collect output, but this required a separate polling mechanism to bridge chunks to the frontend — adding latency and complexity. Direct emission eliminates the middleman.
 
-**State machine — `result` as sole finalizer.** The frontend accumulates text from `stream_event`/`text_delta` chunks into `currentStream`. Only the `result` message finalizes the accumulated text as a complete assistant message. The `assistant` message type is intentionally ignored — it duplicates content already streamed via `stream_event`. Using both would cause each response to appear twice.
+**Block-based streaming model.** The backend `StreamParser` converts raw NDJSON `stream_event` messages into typed `StreamChunk` variants:
+
+| StreamChunk Variant | Source Event                                     | Frontend Action                                                |
+| ------------------- | ------------------------------------------------ | -------------------------------------------------------------- |
+| `Text`              | `content_block_delta` with `text_delta`          | Append to current text block (or create new one)               |
+| `Thinking`          | `content_block_start/delta` with `thinking` type | Append to current thinking block (collapsible)                 |
+| `ToolStart`         | `content_block_start` with `tool_use` type       | Push new `ToolUseBlock` with `status: running`                 |
+| `ToolInputDelta`    | `content_block_delta` with `input_json_delta`    | Append partial JSON to matching tool block                     |
+| `ToolResult`        | User message with `tool_result` content          | Complete tool block with result and `status: done/error`       |
+| `AskUserQuestion`   | `control_request` with `AskUser` tool            | Push interactive question block with options                   |
+| `Result`            | `result` message type                            | Finalize turn: capture `SessionStats`, move blocks to messages |
+| `Error`             | Parse failures, subprocess errors                | Push error block and finalize turn                             |
+
+The frontend accumulates `MessageBlock[]` in `currentBlocks` during an assistant turn. Each `MessageBlock` is one of: `text`, `thinking`, `tool_use`, `ask_user`, or `error`. Only the `Result` chunk finalizes the turn — it moves `currentBlocks` into the `messages` array as a complete `ChatMessage { role, blocks, timestamp }` and captures `SessionStats` (session_id, cost_usd, total_cost, usage). The `assistant` message type from Claude is intentionally ignored — it duplicates content already streamed via `stream_event`.
+
+**Interactive questions (AskUserQuestion flow).** When Claude needs user confirmation (e.g., permission to run a tool), it sends a `control_request` via `--permission-prompt-tool stdio`. The backend parses this into an `AskUserQuestion` chunk containing the question text, selectable options, and a `tool_id`. The frontend renders the question with option buttons. When the user selects an answer, the frontend calls the `answer_question` Tauri command with the `tool_use_id` and selected value(s). The backend writes a `control_result` JSON message to Claude's stdin, and Claude resumes execution.
+
+**Auto-retry on session death.** If `send_message` fails with "session exited", "no active session", or "Broken pipe", the frontend transparently restarts the Claude subprocess via `start_chat` and retries the message — the user sees no interruption.
+
+## Chat History API
+
+The Desktop exposes four Tauri commands for browsing and resuming past conversations. All operate on Claude Code's native JSONL session files stored at `~/.speedwave/data/claude-home/<project>/.claude/projects/-workspace/*.jsonl`.
+
+| Command               | Parameters              | Returns                  | Description                                                                                         |
+| --------------------- | ----------------------- | ------------------------ | --------------------------------------------------------------------------------------------------- |
+| `list_conversations`  | `project`               | `ConversationSummary[]`  | Lists JSONL session files, sorted newest first. Reads first ~50 lines per file for preview/count    |
+| `get_conversation`    | `project`, `session_id` | `ConversationTranscript` | Reads a full session by UUID. Returns messages with rich `MessageBlock[]` for block-based rendering |
+| `resume_conversation` | `project`, `session_id` | `()`                     | Stops current session, starts a new Claude subprocess with `--resume <session_id>`                  |
+| `get_project_memory`  | `project`               | `String`                 | Reads the project's MEMORY.md file. Returns empty string if the file does not exist                 |
+
+Session IDs are validated as lowercase UUID v4 hex strings before any file access (path traversal prevention). `resume_conversation` re-uses the existing `ChatSession::start()` with an optional `resume_session_id` parameter that appends `--resume <id>` to the Claude CLI arguments.
 
 ## Rejected Alternatives
 

@@ -23,11 +23,39 @@ pub struct ConversationSummary {
     pub message_count: usize,
 }
 
+/// Rich block types for detailed message rendering.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type")]
+pub enum MessageBlock {
+    /// Text content.
+    #[serde(rename = "text")]
+    Text { content: String },
+    /// Thinking / extended thinking content.
+    #[serde(rename = "thinking")]
+    Thinking { content: String },
+    /// Tool invocation with input JSON.
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        tool_name: String,
+        input_json: String,
+    },
+    /// Tool execution result.
+    #[serde(rename = "tool_result")]
+    ToolResult { content: String, is_error: bool },
+    /// Error content.
+    #[serde(rename = "error")]
+    Error { content: String },
+}
+
 /// A single message extracted from a JSONL session.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConversationMessage {
     pub role: String,
     pub content: String,
+    /// Rich blocks for detailed rendering (optional — backward-compatible).
+    /// When `Some`, frontend uses block-based rendering; when `None`, falls back to `content`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<Vec<MessageBlock>>,
     pub timestamp: Option<String>,
 }
 
@@ -130,14 +158,17 @@ fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage>
         return Some(ConversationMessage {
             role: "user".to_string(),
             content: text.to_string(),
+            blocks: Some(vec![MessageBlock::Text {
+                content: text.to_string(),
+            }]),
             timestamp,
         });
     }
 
     // content can be an array of blocks
-    if let Some(blocks) = content.as_array() {
+    if let Some(raw_blocks) = content.as_array() {
         // Skip messages where content is only tool_result blocks
-        let has_non_tool_result = blocks
+        let has_non_tool_result = raw_blocks
             .iter()
             .any(|b| b["type"].as_str().unwrap_or("") != "tool_result");
         if !has_non_tool_result {
@@ -145,11 +176,15 @@ fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage>
         }
 
         let mut text_parts = Vec::new();
-        for block in blocks {
+        let mut rich_blocks = Vec::new();
+        for block in raw_blocks {
             let block_type = block["type"].as_str().unwrap_or("");
             if block_type == "text" {
                 if let Some(t) = block["text"].as_str() {
                     text_parts.push(t.to_string());
+                    rich_blocks.push(MessageBlock::Text {
+                        content: t.to_string(),
+                    });
                 }
             }
         }
@@ -161,6 +196,7 @@ fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage>
         return Some(ConversationMessage {
             role: "user".to_string(),
             content: text_parts.join("\n"),
+            blocks: Some(rich_blocks),
             timestamp,
         });
     }
@@ -173,33 +209,58 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
     let content = &message["content"];
     let timestamp = parsed["timestamp"].as_str().map(String::from);
 
-    let blocks = content.as_array()?;
+    let raw_blocks = content.as_array()?;
 
     let mut parts = Vec::new();
-    for block in blocks {
+    let mut rich_blocks = Vec::new();
+    for block in raw_blocks {
         let block_type = block["type"].as_str().unwrap_or("");
         match block_type {
             "text" => {
                 if let Some(t) = block["text"].as_str() {
                     parts.push(t.to_string());
+                    rich_blocks.push(MessageBlock::Text {
+                        content: t.to_string(),
+                    });
+                }
+            }
+            "thinking" => {
+                if let Some(t) = block["thinking"].as_str() {
+                    rich_blocks.push(MessageBlock::Thinking {
+                        content: t.to_string(),
+                    });
                 }
             }
             "tool_use" => {
                 if let Some(name) = block["name"].as_str() {
                     parts.push(format!("[Tool: {name}]"));
+                    let input = block["input"].to_string();
+                    rich_blocks.push(MessageBlock::ToolUse {
+                        tool_name: name.to_string(),
+                        input_json: input,
+                    });
                 }
             }
             _ => {}
         }
     }
 
-    if parts.is_empty() {
+    if parts.is_empty() && rich_blocks.is_empty() {
         return None;
     }
 
+    // Flat content fallback (for sidebar preview and legacy rendering)
+    let flat_content = if parts.is_empty() {
+        // Thinking-only messages — provide a placeholder
+        "[thinking]".to_string()
+    } else {
+        parts.join("\n")
+    };
+
     Some(ConversationMessage {
         role: "assistant".to_string(),
-        content: parts.join("\n"),
+        content: flat_content,
+        blocks: Some(rich_blocks),
         timestamp,
     })
 }
@@ -714,6 +775,28 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let result = get_project_memory_impl(tmp.path(), "proj").unwrap();
         assert_eq!(result, "");
+    }
+
+    #[test]
+    fn get_project_memory_propagates_non_not_found_io_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+
+        // Create a directory at the MEMORY.md path — reading a directory as a
+        // file produces an I/O error that is NOT ErrorKind::NotFound.
+        let memory_dir = dir.join("memory").join("MEMORY.md");
+        fs::create_dir_all(&memory_dir).unwrap();
+
+        let result = get_project_memory_impl(tmp.path(), "proj");
+        assert!(
+            result.is_err(),
+            "non-NotFound I/O error should propagate as Err"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("cannot read project memory"),
+            "error message should mention 'cannot read project memory', got: {err_msg}"
+        );
     }
 
     // ── Edge cases ─────────────────────────────────────────────────

@@ -314,7 +314,7 @@ test-desktop-build: build-angular build-mcp
 	@echo "✅ Desktop build tests passed"
 
 # ── Desktop E2E tests ────────────────────────────────────────────────────────
-# Per-platform: builds debug binary and runs WebdriverIO E2E tests.
+# Per-platform: builds release binary (with `e2e` feature flag for WebDriver support) and runs WebdriverIO E2E tests.
 # App embeds tauri-plugin-webdriver on port 4445 — no external driver needed.
 
 # Build only: download deps, compile CLI + MCP + Tauri binary. No test run.

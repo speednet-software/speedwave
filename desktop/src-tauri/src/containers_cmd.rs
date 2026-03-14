@@ -8,7 +8,6 @@ use speedwave_runtime::config;
 
 use crate::setup_wizard;
 use crate::types::{check_project, LlmConfigResponse};
-use crate::CONFIG_LOCK;
 
 // ---------------------------------------------------------------------------
 // Setup wizard commands
@@ -66,14 +65,6 @@ pub async fn init_vm() -> Result<(), String> {
 #[tauri::command]
 pub async fn create_project(name: String, dir: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        check_project(&name)?;
-        let dir_path = std::path::Path::new(&dir);
-        if !dir_path.is_absolute() {
-            return Err("Project directory must be an absolute path".to_string());
-        }
-        if !dir_path.is_dir() {
-            return Err(format!("Project directory does not exist: {}", dir));
-        }
         log::info!("create_project: name={name}, dir={dir}");
         setup_wizard::create_project(&name, &dir).map_err(|e| {
             log::error!("create_project: error: {e}");
@@ -92,6 +83,24 @@ pub async fn link_cli() -> Result<(), String> {
             log::error!("link_cli: error: {e}");
             e.to_string()
         })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Adds a new project and activates it.  Emits `project_switched` so that
+/// Settings, Integrations and other listeners refresh automatically.
+#[tauri::command]
+pub async fn add_project(name: String, dir: String, app: tauri::AppHandle) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        log::info!("add_project: name={name}, dir={dir}");
+        speedwave_runtime::project::add_project(&name, &dir).map_err(|e| {
+            log::error!("add_project: error: {e}");
+            e.to_string()
+        })?;
+        use tauri::Emitter;
+        let _ = app.emit("project_switched", &name);
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -191,11 +200,8 @@ pub async fn factory_reset() -> Result<(), String> {
 #[tauri::command]
 pub fn get_llm_config() -> Result<LlmConfigResponse, String> {
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
-    let active = user_config.active_project.as_deref().unwrap_or("");
     let llm = user_config
-        .projects
-        .iter()
-        .find(|p| p.name == active)
+        .active_project_entry()
         .and_then(|p| p.claude.as_ref())
         .and_then(|c| c.llm.as_ref());
     Ok(LlmConfigResponse {
@@ -206,21 +212,21 @@ pub fn get_llm_config() -> Result<LlmConfigResponse, String> {
     })
 }
 
-#[tauri::command]
-pub fn update_llm_config(
+/// Applies LLM config to the active project in-memory. Extracted for testability.
+fn apply_llm_config(
+    user_config: &mut config::SpeedwaveUserConfig,
     provider: Option<String>,
     model: Option<String>,
     base_url: Option<String>,
     api_key_env: Option<String>,
-) -> Result<(), String> {
-    let _lock = CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
-    let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
-    let active = user_config.active_project.clone().unwrap_or_default();
+) -> anyhow::Result<()> {
+    let active = user_config
+        .active_project
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("No active project"))?;
     let project = user_config
-        .projects
-        .iter_mut()
-        .find(|p| p.name == active)
-        .ok_or_else(|| "No active project".to_string())?;
+        .find_project_mut(&active)
+        .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", active))?;
 
     let llm = config::LlmConfig {
         provider,
@@ -238,5 +244,223 @@ pub fn update_llm_config(
             });
         }
     }
-    config::save_user_config(&user_config).map_err(|e| e.to_string())
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_llm_config(
+    provider: Option<String>,
+    model: Option<String>,
+    base_url: Option<String>,
+    api_key_env: Option<String>,
+) -> Result<(), String> {
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        apply_llm_config(&mut user_config, provider, model, base_url, api_key_env)?;
+        config::save_user_config(&user_config)
+    })
+    .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use config::{ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig};
+
+    fn make_config_with_active_project() -> SpeedwaveUserConfig {
+        SpeedwaveUserConfig {
+            projects: vec![
+                ProjectUserEntry {
+                    name: "alpha".to_string(),
+                    dir: "/tmp/alpha".to_string(),
+                    claude: None,
+                    integrations: None,
+                },
+                ProjectUserEntry {
+                    name: "beta".to_string(),
+                    dir: "/tmp/beta".to_string(),
+                    claude: Some(ClaudeOverrides {
+                        env: None,
+                        settings: None,
+                        llm: Some(LlmConfig {
+                            provider: Some("anthropic".to_string()),
+                            model: Some("claude-sonnet-4-6".to_string()),
+                            base_url: None,
+                            api_key_env: None,
+                        }),
+                    }),
+                    integrations: None,
+                },
+            ],
+            active_project: Some("alpha".to_string()),
+            selected_ide: None,
+            log_level: None,
+        }
+    }
+
+    // -- apply_llm_config tests --
+
+    #[test]
+    fn apply_llm_config_happy_path_no_existing_claude() {
+        let mut cfg = make_config_with_active_project();
+        // alpha has no claude config yet
+        assert!(cfg.find_project("alpha").unwrap().claude.is_none());
+
+        let result = apply_llm_config(
+            &mut cfg,
+            Some("openai".to_string()),
+            Some("gpt-4o".to_string()),
+            Some("http://localhost:8080".to_string()),
+            Some("OPENAI_KEY".to_string()),
+        );
+        assert!(result.is_ok());
+
+        let project = cfg.find_project("alpha").unwrap();
+        let llm = project.claude.as_ref().unwrap().llm.as_ref().unwrap();
+        assert_eq!(llm.provider.as_deref(), Some("openai"));
+        assert_eq!(llm.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(llm.base_url.as_deref(), Some("http://localhost:8080"));
+        assert_eq!(llm.api_key_env.as_deref(), Some("OPENAI_KEY"));
+    }
+
+    #[test]
+    fn apply_llm_config_happy_path_existing_claude_overrides() {
+        let mut cfg = make_config_with_active_project();
+        cfg.active_project = Some("beta".to_string());
+        // beta already has claude.llm set
+
+        let result = apply_llm_config(
+            &mut cfg,
+            Some("ollama".to_string()),
+            Some("llama3.3".to_string()),
+            None,
+            None,
+        );
+        assert!(result.is_ok());
+
+        let project = cfg.find_project("beta").unwrap();
+        let llm = project.claude.as_ref().unwrap().llm.as_ref().unwrap();
+        assert_eq!(llm.provider.as_deref(), Some("ollama"));
+        assert_eq!(llm.model.as_deref(), Some("llama3.3"));
+        assert_eq!(llm.base_url, None);
+        assert_eq!(llm.api_key_env, None);
+    }
+
+    #[test]
+    fn apply_llm_config_all_none_clears_fields() {
+        let mut cfg = make_config_with_active_project();
+        cfg.active_project = Some("beta".to_string());
+
+        let result = apply_llm_config(&mut cfg, None, None, None, None);
+        assert!(result.is_ok());
+
+        let project = cfg.find_project("beta").unwrap();
+        let llm = project.claude.as_ref().unwrap().llm.as_ref().unwrap();
+        assert!(llm.provider.is_none());
+        assert!(llm.model.is_none());
+        assert!(llm.base_url.is_none());
+        assert!(llm.api_key_env.is_none());
+    }
+
+    #[test]
+    fn apply_llm_config_error_no_active_project() {
+        let mut cfg = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "alpha".to_string(),
+                dir: "/tmp/alpha".to_string(),
+                claude: None,
+                integrations: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        };
+
+        let result = apply_llm_config(&mut cfg, Some("openai".to_string()), None, None, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("No active project"),
+            "expected 'No active project' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_llm_config_error_active_project_not_in_list() {
+        let mut cfg = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "alpha".to_string(),
+                dir: "/tmp/alpha".to_string(),
+                claude: None,
+                integrations: None,
+            }],
+            active_project: Some("nonexistent".to_string()),
+            selected_ide: None,
+            log_level: None,
+        };
+
+        let result = apply_llm_config(&mut cfg, Some("openai".to_string()), None, None, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not found in config"),
+            "expected 'not found in config' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_llm_config_preserves_existing_env_and_settings() {
+        let mut cfg = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: Some(ClaudeOverrides {
+                    env: Some(std::collections::HashMap::from([(
+                        "KEY".to_string(),
+                        "val".to_string(),
+                    )])),
+                    settings: Some(serde_json::json!({"foo": "bar"})),
+                    llm: None,
+                }),
+                integrations: None,
+            }],
+            active_project: Some("proj".to_string()),
+            selected_ide: None,
+            log_level: None,
+        };
+
+        apply_llm_config(&mut cfg, Some("openai".to_string()), None, None, None).unwrap();
+
+        let project = cfg.find_project("proj").unwrap();
+        let claude = project.claude.as_ref().unwrap();
+        assert!(claude.env.is_some(), "env should be preserved");
+        assert_eq!(
+            claude.env.as_ref().unwrap().get("KEY"),
+            Some(&"val".to_string())
+        );
+        assert!(claude.settings.is_some(), "settings should be preserved");
+        assert_eq!(
+            claude.llm.as_ref().unwrap().provider.as_deref(),
+            Some("openai")
+        );
+    }
+
+    #[test]
+    fn apply_llm_config_does_not_affect_other_projects() {
+        let mut cfg = make_config_with_active_project();
+        // active_project is "alpha"
+
+        apply_llm_config(&mut cfg, Some("openai".to_string()), None, None, None).unwrap();
+
+        // beta should be unchanged
+        let beta = cfg.find_project("beta").unwrap();
+        let beta_llm = beta.claude.as_ref().unwrap().llm.as_ref().unwrap();
+        assert_eq!(beta_llm.provider.as_deref(), Some("anthropic"));
+        assert_eq!(beta_llm.model.as_deref(), Some("claude-sonnet-4-6"));
+    }
 }

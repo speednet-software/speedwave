@@ -34,8 +34,9 @@ Speedwave.app/
 Binary resolution order:
 
 1. `SPEEDWAVE_RESOURCES_DIR` environment variable (if set — used in development)
-2. `.app/Contents/Resources/lima/bin/` (production, resolved via `std::env::current_exe()`)
-3. System PATH fallback (development mode only)
+2. `~/.speedwave/resources-dir` marker file (written by the Desktop app, read by the CLI to discover bundled resources when `SPEEDWAVE_RESOURCES_DIR` is not set)
+3. `.app/Contents/Resources/lima/bin/` (production, resolved via `std::env::current_exe()`)
+4. System PATH fallback (development mode only)
 
 ### Linux: Bundle nerdctl-full in .deb
 

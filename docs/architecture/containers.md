@@ -35,6 +35,20 @@ speedwave_<project>_network
 - The `IMAGES` constant in `crates/speedwave-runtime/src/build.rs` must stay aligned with `scripts/bundle-build-context.sh`
 - All binary downloads in Containerfiles are **SHA256-verified** for supply chain security
 
+## Dynamic Port Reconciliation (mcp-os)
+
+The mcp-os process runs on the host (not in a container) and binds to a dynamic port at startup. When the Desktop app starts — or when the mcp-os watchdog respawns a crashed process — the new port may differ from the `WORKER_OS_URL` baked into the running compose configuration.
+
+`reconcile_compose_port` runs in a background thread to fix this:
+
+1. Reads the current mcp-os port from `~/.speedwave/mcp-os.port`
+2. Reads the active compose file and checks `WORKER_OS_URL` for a matching port
+3. If the port is stale, regenerates the compose YAML via `render_compose()`, runs the security check, and saves the new compose file
+4. Calls `compose_up_recreate` to recreate containers with the updated `WORKER_OS_URL`
+5. Emits a `containers_reconciled` Tauri event to notify the frontend
+
+This ensures the MCP Hub always routes OS integration requests to the live mcp-os instance, even after process restarts.
+
 ## See Also
 
 - [ADR-001: Eliminate Docker Desktop](../adr/ADR-001-eliminate-docker-desktop.md)

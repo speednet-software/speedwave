@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use speedwave_runtime::{build, compose, config, consts, runtime};
+use speedwave_runtime::{build, compose, config, consts, project, runtime};
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
@@ -8,7 +8,6 @@ use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct SetupState {
-    pub current_step: u8,
     pub runtime_ready: bool,
     pub vm_ready: bool,
     pub project_created: Option<String>,
@@ -19,6 +18,44 @@ pub struct SetupState {
 }
 
 impl SetupState {
+    /// Derives the current wizard step from the boolean flags.
+    ///
+    /// Returns the number of completed sequential steps (0 = nothing done).
+    /// The wizard steps execute in this order:
+    ///   1. runtime_ready  (Check Runtime)
+    ///   2. vm_ready       (Initialize VM)
+    ///   3. images_built   (Build Images)
+    ///   4. project_created (Create Project)
+    ///   5. containers_started (Start Containers)
+    ///   6. cli_linked     (Finalize / CLI symlink)
+    ///
+    /// Previously this was a stored field (`current_step: u8`) that could
+    /// diverge from the boolean flags. Now it is derived, so it is always
+    /// consistent. Old serialized JSON that includes `"current_step"` is
+    /// silently ignored on deserialization (serde default behavior).
+    #[cfg(test)]
+    pub fn current_step(&self) -> u8 {
+        if !self.runtime_ready {
+            return 0;
+        }
+        if !self.vm_ready {
+            return 1;
+        }
+        if !self.images_built {
+            return 2;
+        }
+        if self.project_created.is_none() {
+            return 3;
+        }
+        if !self.containers_started {
+            return 4;
+        }
+        if !self.cli_linked {
+            return 5;
+        }
+        6
+    }
+
     fn state_path() -> anyhow::Result<PathBuf> {
         let home =
             dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
@@ -1045,42 +1082,7 @@ install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containe
 // ---------------------------------------------------------------------------
 
 pub fn create_project(name: &str, dir: &str) -> anyhow::Result<()> {
-    compose::init_project_dirs(name)?;
-
-    let mut user_config = config::load_user_config()?;
-
-    // Add project to user config if not already present
-    if !user_config.projects.iter().any(|p| p.name == name) {
-        user_config.projects.push(config::ProjectUserEntry {
-            name: name.to_string(),
-            dir: dir.to_string(),
-            claude: None,
-            integrations: None,
-        });
-    }
-
-    // Set as active project
-    user_config.active_project = Some(name.to_string());
-
-    // Save user config
-    let config_path = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
-        .join(consts::DATA_DIR)
-        .join("config.json");
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let json = serde_json::to_string_pretty(&user_config)?;
-    let tmp_path = config_path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &json)?;
-    std::fs::rename(&tmp_path, &config_path)?;
-
-    // Render and save compose file
-    let project_path = std::path::Path::new(dir);
-    let resolved = config::resolve_claude_config(project_path, &user_config, name);
-    let integrations = config::resolve_integrations(project_path, &user_config, name);
-    let yaml = compose::render_compose(name, dir, &resolved, &integrations)?;
-    compose::save_compose(name, &yaml)?;
+    project::add_project(name, dir)?;
 
     let mut state = SetupState::load();
     state.project_created = Some(name.to_string());
@@ -1130,17 +1132,7 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     // auth keys, addons) may have changed since create_project() first rendered it.
     // Without this, WORKER_OS_URL is missing if mcp-os started after project creation.
     let user_config = config::load_user_config()?;
-    let project_dir = user_config
-        .projects
-        .iter()
-        .find(|p| p.name == project)
-        .map(|p| p.dir.as_str())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "project '{}' not found in config — cannot render compose.yml",
-                project
-            )
-        })?;
+    let project_dir = &user_config.require_project(project)?.dir;
     let project_path = std::path::Path::new(project_dir);
     let resolved = config::resolve_claude_config(project_path, &user_config, project);
     let integrations = config::resolve_integrations(project_path, &user_config, project);
@@ -1656,7 +1648,6 @@ mod tests {
 
         // Seed setup_state.json with non-default values
         let state = SetupState {
-            current_step: 5,
             runtime_ready: true,
             vm_ready: true,
             project_created: Some("acme".to_string()),
@@ -1705,7 +1696,7 @@ mod tests {
         // Verify setup_state.json is reset to defaults
         let raw = std::fs::read_to_string(&state_path).expect("read state");
         let reset_state: SetupState = serde_json::from_str(&raw).expect("parse state");
-        assert_eq!(reset_state.current_step, 0);
+        assert_eq!(reset_state.current_step(), 0);
         assert!(!reset_state.runtime_ready);
         assert!(!reset_state.vm_ready);
         assert!(reset_state.project_created.is_none());
@@ -1762,7 +1753,6 @@ mod tests {
         let path = tmp.path().join("setup_state.json");
 
         let state = SetupState {
-            current_step: 4,
             runtime_ready: true,
             vm_ready: true,
             project_created: Some("myproject".to_string()),
@@ -1775,7 +1765,7 @@ mod tests {
         state.save_to(&path).expect("save should succeed");
         let loaded = SetupState::load_from(&path).expect("load should succeed");
 
-        assert_eq!(loaded.current_step, 4);
+        assert_eq!(loaded.current_step(), 4);
         assert!(loaded.runtime_ready);
         assert!(loaded.vm_ready);
         assert_eq!(loaded.project_created, Some("myproject".to_string()));
@@ -1794,7 +1784,7 @@ mod tests {
     #[test]
     fn setup_state_default_is_all_false() {
         let state = SetupState::default();
-        assert_eq!(state.current_step, 0);
+        assert_eq!(state.current_step(), 0);
         assert!(!state.runtime_ready);
         assert!(!state.vm_ready);
         assert!(state.project_created.is_none());
@@ -1804,13 +1794,114 @@ mod tests {
         assert!(!state.cli_linked);
     }
 
+    #[test]
+    fn current_step_derived_from_boolean_flags() {
+        // Step 0: nothing done
+        let state = SetupState::default();
+        assert_eq!(state.current_step(), 0);
+
+        // Step 1: runtime_ready only
+        let state = SetupState {
+            runtime_ready: true,
+            ..Default::default()
+        };
+        assert_eq!(state.current_step(), 1);
+
+        // Step 2: runtime + vm
+        let state = SetupState {
+            runtime_ready: true,
+            vm_ready: true,
+            ..Default::default()
+        };
+        assert_eq!(state.current_step(), 2);
+
+        // Step 3: + images_built
+        let state = SetupState {
+            runtime_ready: true,
+            vm_ready: true,
+            images_built: true,
+            ..Default::default()
+        };
+        assert_eq!(state.current_step(), 3);
+
+        // Step 4: + project_created
+        let state = SetupState {
+            runtime_ready: true,
+            vm_ready: true,
+            images_built: true,
+            project_created: Some("test".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(state.current_step(), 4);
+
+        // Step 5: + containers_started
+        let state = SetupState {
+            runtime_ready: true,
+            vm_ready: true,
+            images_built: true,
+            project_created: Some("test".to_string()),
+            containers_started: true,
+            ..Default::default()
+        };
+        assert_eq!(state.current_step(), 5);
+
+        // Step 6: + cli_linked (fully complete)
+        let state = SetupState {
+            runtime_ready: true,
+            vm_ready: true,
+            images_built: true,
+            project_created: Some("test".to_string()),
+            containers_started: true,
+            cli_linked: true,
+            ..Default::default()
+        };
+        assert_eq!(state.current_step(), 6);
+    }
+
+    #[test]
+    fn current_step_returns_first_incomplete_even_with_later_flags_set() {
+        // vm_ready=false but images_built=true → step 1 (stops at first gap)
+        let state = SetupState {
+            runtime_ready: true,
+            vm_ready: false,
+            images_built: true,
+            project_created: Some("test".to_string()),
+            containers_started: true,
+            cli_linked: true,
+            ..Default::default()
+        };
+        assert_eq!(state.current_step(), 1);
+    }
+
+    #[test]
+    fn current_step_backward_compat_ignores_old_field_in_json() {
+        // Old serialized JSON that includes "current_step" should be ignored
+        let json = r#"{
+            "current_step": 99,
+            "runtime_ready": true,
+            "vm_ready": false,
+            "project_created": null,
+            "tokens_configured": [],
+            "images_built": false,
+            "containers_started": false,
+            "cli_linked": false
+        }"#;
+        let state: SetupState = serde_json::from_str(json).expect("parse old JSON");
+        assert_eq!(
+            state.current_step(),
+            1,
+            "derived step should be 1 (only runtime_ready)"
+        );
+        assert!(state.runtime_ready);
+        assert!(!state.vm_ready);
+    }
+
     // ── is_setup_complete logic ─────────────────────────────────────────────
 
     #[test]
     fn is_setup_complete_requires_all_fields() {
         // All true → complete
         let complete = SetupState {
-            current_step: 8,
             runtime_ready: true,
             vm_ready: true,
             project_created: Some("acme".to_string()),
@@ -1955,7 +2046,6 @@ mod tests {
     #[test]
     fn is_complete_false_without_vm_ready() {
         let state = SetupState {
-            current_step: 8,
             runtime_ready: true,
             vm_ready: false,
             project_created: Some("test".to_string()),
@@ -2123,7 +2213,6 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("setup_state.json");
         let state = SetupState {
-            current_step: 3,
             runtime_ready: true,
             ..Default::default()
         };
@@ -2136,7 +2225,7 @@ mod tests {
         );
 
         let loaded = SetupState::load_from(&path).expect("load should succeed");
-        assert_eq!(loaded.current_step, 3);
+        assert_eq!(loaded.current_step(), 1);
         assert!(loaded.runtime_ready);
     }
 
@@ -3207,11 +3296,11 @@ mod tests {
         // Pre-seed with cli_linked: false and other fields set
         let initial = SetupState {
             cli_linked: false,
-            current_step: 3,
             runtime_ready: true,
             vm_ready: true,
             ..Default::default()
         };
+        let initial_step = initial.current_step();
         initial.save_to(&state_path).expect("save initial state");
 
         // Load, flip cli_linked, save — mirrors what link_cli() does
@@ -3227,8 +3316,10 @@ mod tests {
             "cli_linked should be true after update"
         );
         assert_eq!(
-            final_state.current_step, 3,
-            "current_step should be unchanged"
+            final_state.current_step(),
+            initial_step,
+            "current_step() should reflect the same base flags (only cli_linked changed, \
+             which comes after the incomplete steps)"
         );
         assert!(
             final_state.runtime_ready,

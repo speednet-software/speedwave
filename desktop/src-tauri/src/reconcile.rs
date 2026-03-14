@@ -111,7 +111,7 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
                 return;
             }
         };
-        let project_dir = match user_config.projects.iter().find(|p| p.name == project) {
+        let project_dir = match user_config.find_project(&project) {
             Some(p) => p.dir.clone(),
             None => {
                 log::debug!("reconcile_compose_port: project '{project}' not found in config");
@@ -168,6 +168,26 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
     });
 }
 
+/// Maximum time to wait for all containers to stop during exit cleanup.
+const CONTAINER_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Stop containers for all projects. Best-effort — failures are logged
+/// but do not prevent remaining cleanup.
+fn stop_all_containers(
+    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    projects: &[config::ProjectUserEntry],
+) {
+    for project in projects {
+        log::info!("exit cleanup: stopping containers for '{}'", project.name);
+        if let Err(e) = rt.compose_down(&project.name) {
+            log::warn!(
+                "exit cleanup: compose_down failed for '{}': {e}",
+                project.name
+            );
+        }
+    }
+}
+
 /// Runs cleanup when the main window is destroyed: stops IDE Bridge,
 /// mcp-os process, and aborts the background auto-update check.
 pub(crate) fn run_exit_cleanup(
@@ -177,6 +197,29 @@ pub(crate) fn run_exit_cleanup(
 ) {
     // Stop watchdog before killing mcp-os to prevent respawn during shutdown
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    // Stop containers for all projects before killing mcp-os.
+    // Analogous to Docker Desktop stopping containers on quit.
+    // Runs in a thread with a timeout so the UI doesn't freeze on quit.
+    match config::load_user_config() {
+        Ok(user_config) => {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let rt = speedwave_runtime::runtime::detect_runtime();
+                stop_all_containers(rt.as_ref(), &user_config.projects);
+                let _ = tx.send(());
+            });
+            if rx.recv_timeout(CONTAINER_STOP_TIMEOUT).is_err() {
+                log::warn!(
+                    "exit cleanup: container stop timed out after {}s, proceeding",
+                    CONTAINER_STOP_TIMEOUT.as_secs()
+                );
+            }
+        }
+        Err(e) => {
+            log::warn!("exit cleanup: failed to load config, skipping compose_down: {e}");
+        }
+    }
 
     match ide_bridge.lock() {
         Ok(mut guard) => {
@@ -265,6 +308,128 @@ pub(crate) fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std:
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    mod stop_all_containers_tests {
+        use super::stop_all_containers;
+        use speedwave_runtime::config::ProjectUserEntry;
+        use speedwave_runtime::runtime::ContainerRuntime;
+        use std::sync::{Arc, Mutex};
+
+        struct MockRuntime {
+            down_calls: Arc<Mutex<Vec<String>>>,
+            fail_on: Vec<String>,
+        }
+
+        impl MockRuntime {
+            fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
+                let calls = Arc::new(Mutex::new(Vec::new()));
+                (
+                    Self {
+                        down_calls: calls.clone(),
+                        fail_on: Vec::new(),
+                    },
+                    calls,
+                )
+            }
+
+            fn failing(names: &[&str]) -> (Self, Arc<Mutex<Vec<String>>>) {
+                let calls = Arc::new(Mutex::new(Vec::new()));
+                (
+                    Self {
+                        down_calls: calls.clone(),
+                        fail_on: names.iter().map(|s| s.to_string()).collect(),
+                    },
+                    calls,
+                )
+            }
+        }
+
+        impl ContainerRuntime for MockRuntime {
+            fn compose_up(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn compose_down(&self, project: &str) -> anyhow::Result<()> {
+                self.down_calls.lock().unwrap().push(project.to_string());
+                if self.fail_on.contains(&project.to_string()) {
+                    anyhow::bail!("mock error for {project}");
+                }
+                Ok(())
+            }
+            fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+                Ok(vec![])
+            }
+            fn container_exec(&self, _: &str, _: &[&str]) -> std::process::Command {
+                std::process::Command::new("true")
+            }
+            fn container_exec_piped(
+                &self,
+                _: &str,
+                _: &[&str],
+            ) -> anyhow::Result<std::process::Command> {
+                Ok(std::process::Command::new("true"))
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn ensure_ready(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn build_image(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        fn project(name: &str) -> ProjectUserEntry {
+            ProjectUserEntry {
+                name: name.to_string(),
+                dir: "/tmp/fake".to_string(),
+                claude: None,
+                integrations: None,
+            }
+        }
+
+        #[test]
+        fn calls_compose_down_for_each_project() {
+            let (rt, calls) = MockRuntime::new();
+            let projects = vec![project("alpha"), project("beta"), project("gamma")];
+
+            stop_all_containers(&rt, &projects);
+
+            let recorded = calls.lock().unwrap();
+            assert_eq!(*recorded, vec!["alpha", "beta", "gamma"]);
+        }
+
+        #[test]
+        fn empty_projects_is_noop() {
+            let (rt, calls) = MockRuntime::new();
+            stop_all_containers(&rt, &[]);
+            assert!(calls.lock().unwrap().is_empty());
+        }
+
+        #[test]
+        fn failure_does_not_abort_remaining_projects() {
+            let (rt, calls) = MockRuntime::failing(&["beta"]);
+            let projects = vec![project("alpha"), project("beta"), project("gamma")];
+
+            stop_all_containers(&rt, &projects);
+
+            let recorded = calls.lock().unwrap();
+            assert_eq!(
+                *recorded,
+                vec!["alpha", "beta", "gamma"],
+                "all projects should be attempted even when one fails"
+            );
+        }
+    }
 
     #[cfg(target_os = "macos")]
     mod resolve_resources_dir_tests {
