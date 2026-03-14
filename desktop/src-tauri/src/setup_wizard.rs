@@ -33,6 +33,7 @@ impl SetupState {
     /// diverge from the boolean flags. Now it is derived, so it is always
     /// consistent. Old serialized JSON that includes `"current_step"` is
     /// silently ignored on deserialization (serde default behavior).
+    #[cfg(test)]
     pub fn current_step(&self) -> u8 {
         if !self.runtime_ready {
             return 0;

@@ -26,7 +26,7 @@ pub fn decode_wsl_output(bytes: &[u8]) -> String {
     // Plain ASCII text (all bytes < 0x80) would decode to CJK characters
     // under UTF-16LE, so we require at least some null bytes in odd positions
     // (the high byte of ASCII code points in UTF-16LE is always 0x00).
-    if bytes.len() >= 4 && bytes.len() % 2 == 0 {
+    if bytes.len() >= 4 && bytes.len().is_multiple_of(2) {
         let has_null_high_bytes = bytes.iter().skip(1).step_by(2).any(|&b| b == 0x00);
         if has_null_high_bytes {
             let u16s: Vec<u16> = bytes
