@@ -424,19 +424,15 @@ fn apply_integrations_filter(
     inject_worker_env(&mut doc, "ENABLED_SERVICES", &enabled_csv);
 
     // Inject DISABLED_OS_SERVICES if any OS sub-integrations are disabled
-    let mut disabled_os: Vec<&str> = Vec::new();
-    if !integrations.os_reminders {
-        disabled_os.push("reminders");
-    }
-    if !integrations.os_calendar {
-        disabled_os.push("calendar");
-    }
-    if !integrations.os_mail {
-        disabled_os.push("mail");
-    }
-    if !integrations.os_notes {
-        disabled_os.push("notes");
-    }
+    let disabled_os: Vec<&str> = consts::TOGGLEABLE_OS_SERVICES
+        .iter()
+        .filter(|svc| {
+            !integrations
+                .is_os_service_enabled(svc.config_key)
+                .unwrap_or(false)
+        })
+        .map(|svc| svc.config_key)
+        .collect();
     if !disabled_os.is_empty() {
         log::debug!("integrations filter: disabled_os={}", disabled_os.join(","));
         inject_worker_env(&mut doc, "DISABLED_OS_SERVICES", &disabled_os.join(","));

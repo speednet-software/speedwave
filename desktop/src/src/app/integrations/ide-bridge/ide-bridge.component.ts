@@ -172,7 +172,7 @@ export class IdeBridgeComponent implements OnInit, OnDestroy {
       );
       if (sel) this.selectedIde = { ide_name: sel.ide_name, port: sel.port };
     } catch (e: unknown) {
-      if (typeof window !== 'undefined' && '__TAURI__' in window) {
+      if (this.tauri.isRunningInTauri()) {
         console.warn('loadSelectedIde failed:', e);
       }
     }
@@ -183,7 +183,7 @@ export class IdeBridgeComponent implements OnInit, OnDestroy {
     try {
       this.availableIdes = await this.tauri.invoke<DetectedIde[]>('list_available_ides');
     } catch (e: unknown) {
-      if (typeof window !== 'undefined' && '__TAURI__' in window) {
+      if (this.tauri.isRunningInTauri()) {
         console.warn('pollIdes failed:', e);
       }
     }

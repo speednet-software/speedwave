@@ -9,6 +9,9 @@
         >
           + New Conversation
         </button>
+        @if (historyError) {
+          <div class="sidebar-error" data-testid="chat-history-error">{{ historyError }}</div>
+        }
         @if (historyLoading) {
           <div class="sidebar-loading">Loading...</div>
         } @else {
@@ -53,6 +56,9 @@
         </button>
       </div>
 
+      @if (viewError) {
+        <div class="view-error" data-testid="chat-view-error">{{ viewError }}</div>
+      }
       @if (viewingTranscript) {
         <div class="messages" data-testid="chat-messages" #messageList>
           @for (msg of viewingTranscript.messages; track $index) {
@@ -80,22 +86,27 @@
       } @else {
         <div class="messages" data-testid="chat-messages" #messageList>
           @for (msg of chat.messages; track msg.timestamp) {
-            <div class="message" [class]="msg.role">
-              <div class="content" [innerHTML]="renderMarkdown(msg.content)"></div>
-            </div>
+            <app-chat-message
+              [blocks]="msg.blocks"
+              [role]="msg.role"
+              (questionAnswered)="onQuestionAnswered($event)"
+            />
           }
-          @if (chat.isStreaming) {
-            <div class="message assistant streaming">
-              <div class="content" [innerHTML]="renderMarkdown(chat.currentStream)"></div>
-              <span class="cursor">&#x2588;</span>
-            </div>
+          @if (chat.isStreaming && chat.currentBlocks.length) {
+            <app-chat-message
+              [blocks]="chat.currentBlocks"
+              role="assistant"
+              [streaming]="true"
+              (questionAnswered)="onQuestionAnswered($event)"
+            />
           }
         </div>
+        <app-session-stats [stats]="chat.sessionStats" />
         <div class="input-area">
           <textarea
             data-testid="chat-input"
             [(ngModel)]="inputText"
-            (keydown.enter)="onEnter($event)"
+            (keydown.enter)="onEnter($any($event))"
             placeholder="Message Claude..."
             [disabled]="chat.isStreaming"
             rows="1"

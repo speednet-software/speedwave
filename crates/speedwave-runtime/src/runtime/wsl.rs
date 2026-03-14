@@ -92,9 +92,11 @@ impl WslRuntime {
             "wsl.exe",
             &["-d", distro, "--", "systemctl", "start", service_name],
         ) {
-            eprintln!("warning: systemctl start {service_name} failed: {e}");
+            log::warn!("systemctl start {service_name} failed: {e}");
         }
-        std::thread::sleep(std::time::Duration::from_secs(3));
+        std::thread::sleep(std::time::Duration::from_secs(
+            consts::WSL_SERVICE_START_DELAY_SECS,
+        ));
         self.runner.run("wsl.exe", &args).map_err(|_| {
             anyhow::anyhow!(
                 "{service_name} is not running inside WSL2 distribution '{distro}'. \

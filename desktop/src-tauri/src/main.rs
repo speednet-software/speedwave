@@ -10,6 +10,7 @@
 mod auth;
 mod auth_commands;
 mod chat;
+mod container_logs_cmd;
 mod containers_cmd;
 mod diagnostics;
 mod fs_perms;
@@ -17,7 +18,6 @@ mod health;
 mod history;
 mod ide_bridge;
 mod integrations_cmd;
-mod log_commands;
 mod logging_cmd;
 mod mcp_os_process;
 mod reconcile;
@@ -83,6 +83,18 @@ fn send_message(message: String, state: tauri::State<SharedChatSession>) -> Resu
     }
     let mut session = state.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     session.send_message(&message).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn answer_question(
+    tool_use_id: String,
+    answer: String,
+    state: tauri::State<SharedChatSession>,
+) -> Result<(), String> {
+    let mut session = state.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    session
+        .answer_question(&tool_use_id, &answer)
+        .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +199,7 @@ fn switch_project(name: String, app: tauri::AppHandle) -> Result<(), String> {
     let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
 
     // Verify project exists
-    if !user_config.projects.iter().any(|p| p.name == name) {
+    if user_config.find_project(&name).is_none() {
         return Err(format!("Project '{}' not found", name));
     }
 
@@ -217,9 +229,7 @@ async fn get_health(project: String) -> Result<health::HealthReport, String> {
             }
         };
         let project_dir = user_config
-            .projects
-            .iter()
-            .find(|p| p.name == project)
+            .find_project(&project)
             .map(|p| std::path::PathBuf::from(&p.dir));
         let any_os_enabled = if cfg!(target_os = "macos") {
             project_dir
@@ -261,12 +271,33 @@ fn is_upstream_alive(port: u16) -> bool {
     health::is_ide_lock_alive(&lock_path)
 }
 
+/// Clears the dead IDE selection from both the live bridge and persisted config.
+///
+/// Called when the upstream IDE is detected as dead (PID gone or port not
+/// listening). Separated from the query command so that `get_bridge_status`
+/// does not have write side-effects.
+fn cleanup_dead_ide(bridge: &ide_bridge::IdeBridge) {
+    bridge.clear_upstream();
+    if let Ok(_lock) = CONFIG_LOCK.lock() {
+        match config::load_user_config() {
+            Ok(mut user_config) => {
+                user_config.selected_ide = None;
+                if let Err(e) = config::save_user_config(&user_config) {
+                    log::warn!("cleanup_dead_ide: failed to persist IDE deselection: {e}");
+                }
+            }
+            Err(e) => {
+                log::warn!("cleanup_dead_ide: failed to load user config: {e}");
+            }
+        }
+    }
+}
+
 /// Returns the current IDE Bridge status for the Angular frontend.
 ///
-/// **Side effect:** when the upstream IDE is detected as dead (PID gone or port
-/// not listening), this command clears the upstream selection and removes it from
-/// persisted config so it won't be restored on next startup. This fires only once
-/// per IDE death — subsequent polls see `upstream_info() → None`.
+/// When the upstream IDE is detected as dead (PID gone or port not listening),
+/// delegates to `cleanup_dead_ide()` to clear the stale selection. This fires
+/// only once per IDE death — subsequent polls see `upstream_info() -> None`.
 #[tauri::command]
 fn get_bridge_status(state: tauri::State<SharedIdeBridge>) -> Result<Option<BridgeStatus>, String> {
     let guard = state
@@ -279,25 +310,7 @@ fn get_bridge_status(state: tauri::State<SharedIdeBridge>) -> Result<Option<Brid
                     if is_upstream_alive(port) {
                         (Some(name), Some(port))
                     } else {
-                        bridge.clear_upstream();
-                        // Clear persisted selection so it doesn't restore on next startup
-                        if let Ok(_lock) = CONFIG_LOCK.lock() {
-                            match config::load_user_config() {
-                                Ok(mut user_config) => {
-                                    user_config.selected_ide = None;
-                                    if let Err(e) = config::save_user_config(&user_config) {
-                                        log::warn!(
-                                            "get_bridge_status: failed to persist IDE deselection: {e}"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    log::warn!(
-                                        "get_bridge_status: failed to load user config: {e}"
-                                    );
-                                }
-                            }
-                        }
+                        cleanup_dead_ide(bridge);
                         (None, None)
                     }
                 }
@@ -870,6 +883,7 @@ fn main() {
             // Chat
             start_chat,
             send_message,
+            answer_question,
             // Chat history
             list_conversations,
             get_conversation,
@@ -881,9 +895,9 @@ fn main() {
             // Health
             get_health,
             // Container logs
-            log_commands::get_container_logs,
-            log_commands::get_compose_logs,
-            log_commands::get_mcp_os_logs,
+            container_logs_cmd::get_container_logs,
+            container_logs_cmd::get_compose_logs,
+            container_logs_cmd::get_mcp_os_logs,
             // IDE Bridge
             list_available_ides,
             select_ide,

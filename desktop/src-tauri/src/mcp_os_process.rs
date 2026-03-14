@@ -1205,7 +1205,7 @@ process.stdout.write(JSON.stringify({ leaked }));
     /// Helper: create a temp log path for drain tests.
     fn temp_log_path() -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
-        let log_path = tmp.path().join("mcp-os.log");
+        let log_path = tmp.path().join(consts::MCP_OS_LOG_FILE);
         (tmp, log_path)
     }
 

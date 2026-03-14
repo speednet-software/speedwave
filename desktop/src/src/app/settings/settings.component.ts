@@ -7,22 +7,13 @@ import {
   inject,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { AuthSectionComponent } from './auth-section/auth-section.component';
-import { LlmProviderComponent } from './llm-provider/llm-provider.component';
 import { SystemHealthComponent } from './system-health.component';
 import { AdvancedSectionComponent } from './advanced-section/advanced-section.component';
 import { UpdateSectionComponent } from './update-section/update-section.component';
-import { ProjectList, ContainerUpdateResult } from '../models/update';
-
-interface LlmConfigResponse {
-  provider: string | null;
-  model: string | null;
-  base_url: string | null;
-  api_key_env: string | null;
-}
+import { ProjectList } from '../models/update';
 
 /** Displays application settings and provides factory reset functionality. */
 @Component({
@@ -30,9 +21,7 @@ interface LlmConfigResponse {
   standalone: true,
   imports: [
     CommonModule,
-    FormsModule,
     AuthSectionComponent,
-    LlmProviderComponent,
     SystemHealthComponent,
     AdvancedSectionComponent,
     UpdateSectionComponent,
@@ -67,14 +56,6 @@ interface LlmConfigResponse {
         </div>
       </section>
 
-      <!-- LLM Provider (temporarily hidden) -->
-      @if (showAdvancedSections) {
-        <app-llm-provider
-          (providerChange)="llmProvider = $event"
-          (errorOccurred)="error = $event"
-        />
-      }
-
       <!-- Authentication -->
       <app-auth-section
         [activeProject]="activeProject"
@@ -83,11 +64,7 @@ interface LlmConfigResponse {
       />
 
       <!-- Updates -->
-      <app-update-section
-        [activeProject]="activeProject"
-        [showAdvancedSections]="showAdvancedSections"
-        (errorOccurred)="error = $event"
-      />
+      <app-update-section [activeProject]="activeProject" (errorOccurred)="error = $event" />
 
       <!-- System Health -->
       @if (activeProject) {
@@ -166,21 +143,11 @@ interface LlmConfigResponse {
   ],
 })
 export class SettingsComponent implements OnInit, OnDestroy {
-  /** When false, hides LLM Provider and Container Updates sections (temporary). */
-  showAdvancedSections = false;
   activeProject: string | null = null;
   projectDir = '';
   error = '';
   llmProvider = 'anthropic';
-  llmModel = '';
-  llmBaseUrl = '';
-  llmApiKeyEnv = '';
-  llmSaving = false;
-  llmSaved = false;
   logLevel = 'info';
-  containerUpdating = false;
-  containerUpdateDone = false;
-  containerUpdateResult: ContainerUpdateResult | null = null;
 
   private router = inject(Router);
   private cdr = inject(ChangeDetectorRef);
@@ -190,7 +157,7 @@ export class SettingsComponent implements OnInit, OnDestroy {
   /** Loads project information on component initialization. */
   ngOnInit(): void {
     this.loadProjectInfo();
-    this.loadLlmConfig();
+    this.loadLlmProvider();
     this.loadLogLevel();
 
     this.tauri
@@ -230,89 +197,13 @@ export class SettingsComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
-  private async loadLlmConfig(): Promise<void> {
+  private async loadLlmProvider(): Promise<void> {
     try {
-      const config = await this.tauri.invoke<LlmConfigResponse>('get_llm_config');
+      const config = await this.tauri.invoke<{ provider: string | null }>('get_llm_config');
       this.llmProvider = config.provider || 'anthropic';
-      this.llmModel = config.model || '';
-      this.llmBaseUrl = config.base_url || '';
-      this.llmApiKeyEnv = config.api_key_env || '';
     } catch {
       // Not running inside Tauri or no config yet
     }
-    this.cdr.markForCheck();
-  }
-
-  /** Returns a placeholder model name based on the selected LLM provider. */
-  modelPlaceholder(): string {
-    switch (this.llmProvider) {
-      case 'ollama':
-        return 'llama3.3';
-      case 'external':
-        return 'gpt-4o';
-      default:
-        return 'claude-sonnet-4-6';
-    }
-  }
-
-  /** Persists the LLM provider configuration to the backend. */
-  async saveLlmConfig(): Promise<void> {
-    this.llmSaving = true;
-    this.llmSaved = false;
-    this.error = '';
-    try {
-      await this.tauri.invoke('update_llm_config', {
-        provider: this.llmProvider,
-        model: this.llmModel || null,
-        baseUrl: this.llmBaseUrl || null,
-        apiKeyEnv: this.llmApiKeyEnv || null,
-      });
-      this.llmSaved = true;
-      setTimeout(() => {
-        this.llmSaved = false;
-        this.cdr.markForCheck();
-      }, 2000);
-    } catch (e: unknown) {
-      this.error = e instanceof Error ? e.message : String(e);
-    }
-    this.llmSaving = false;
-    this.cdr.markForCheck();
-  }
-
-  /** Rebuilds images and recreates containers for the active project. */
-  async updateContainers(): Promise<void> {
-    if (!this.activeProject) return;
-    this.containerUpdating = true;
-    this.containerUpdateResult = null;
-    this.error = '';
-    this.cdr.markForCheck();
-    try {
-      const result = await this.tauri.invoke<ContainerUpdateResult>('update_containers', {
-        project: this.activeProject,
-      });
-      this.containerUpdateResult = result;
-      this.containerUpdateDone = result.success;
-    } catch (e: unknown) {
-      this.error = e instanceof Error ? e.message : String(e);
-    }
-    this.containerUpdating = false;
-    this.cdr.markForCheck();
-  }
-
-  /** Rolls back containers to the pre-update snapshot. */
-  async rollbackContainers(): Promise<void> {
-    if (!this.activeProject) return;
-    this.containerUpdating = true;
-    this.error = '';
-    this.cdr.markForCheck();
-    try {
-      await this.tauri.invoke('rollback_containers', { project: this.activeProject });
-      this.containerUpdateResult = null;
-      this.containerUpdateDone = false;
-    } catch (e: unknown) {
-      this.error = e instanceof Error ? e.message : String(e);
-    }
-    this.containerUpdating = false;
     this.cdr.markForCheck();
   }
 
