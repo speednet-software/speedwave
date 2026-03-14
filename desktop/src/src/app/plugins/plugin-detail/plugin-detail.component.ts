@@ -2,15 +2,16 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  OnDestroy,
   OnInit,
   inject,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router } from '@angular/router';
 import { TauriService } from '../../services/tauri.service';
+import { ProjectStateService } from '../../services/project-state.service';
 import { PluginStatusEntry, PluginsResponse } from '../../models/plugin';
 import { IntegrationsResponse } from '../../models/integration';
-import { ProjectList } from '../../models/update';
 import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-settings-form.component';
 
 /** Detail page for a single plugin with Dashboard and Settings tabs. */
@@ -117,7 +118,7 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
   `,
   styleUrl: './plugin-detail.component.css',
 })
-export class PluginDetailComponent implements OnInit {
+export class PluginDetailComponent implements OnInit, OnDestroy {
   plugin: PluginStatusEntry | null = null;
   settings: Record<string, unknown> = {};
   activeTab: 'dashboard' | 'settings' = 'dashboard';
@@ -129,7 +130,9 @@ export class PluginDetailComponent implements OnInit {
   private router = inject(Router);
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
+  private projectState = inject(ProjectStateService);
   private activeProject: string | null = null;
+  private unsubProjectReady: (() => void) | null = null;
 
   /** Returns integration names that are not yet configured. */
   get missingIntegrations(): string[] {
@@ -149,6 +152,27 @@ export class PluginDetailComponent implements OnInit {
     await this.loadSettings(slug);
     await this.loadIntegrationStatuses();
     this.cdr.markForCheck();
+
+    this.unsubProjectReady = this.projectState.onProjectReady(async () => {
+      await this.loadActiveProject();
+      const currentSlug = this.route.snapshot.paramMap.get('slug');
+      if (!currentSlug || !this.activeProject) {
+        this.router.navigate(['/plugins']);
+        return;
+      }
+      await this.loadPlugin(currentSlug);
+      await this.loadSettings(currentSlug);
+      await this.loadIntegrationStatuses();
+      this.cdr.markForCheck();
+    });
+  }
+
+  /** Cleans up the project ready listener. */
+  ngOnDestroy(): void {
+    if (this.unsubProjectReady) {
+      this.unsubProjectReady();
+      this.unsubProjectReady = null;
+    }
   }
 
   /** Navigates back to the plugins list. */
@@ -183,13 +207,8 @@ export class PluginDetailComponent implements OnInit {
     this.cdr.markForCheck();
   }
 
-  private async loadActiveProject(): Promise<void> {
-    try {
-      const result = await this.tauri.invoke<ProjectList>('list_projects');
-      this.activeProject = result.active_project;
-    } catch (e: unknown) {
-      this.error = e instanceof Error ? e.message : String(e);
-    }
+  private loadActiveProject(): void {
+    this.activeProject = this.projectState.activeProject;
   }
 
   private async loadPlugin(slug: string): Promise<void> {

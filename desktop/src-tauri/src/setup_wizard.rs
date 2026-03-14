@@ -1147,11 +1147,10 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     let manifests = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_default();
     let violations = compose::SecurityCheck::run(&yaml, project, &manifests);
     if !violations.is_empty() {
-        let msgs: Vec<String> = violations
-            .iter()
-            .map(|v| format!("[{}] {} -- {}", v.container, v.rule, v.message))
-            .collect();
-        anyhow::bail!("Security check failed:\n{}", msgs.join("\n"));
+        anyhow::bail!(
+            "Security check failed:\n{}",
+            crate::containers_cmd::format_security_violations(&violations)
+        );
     }
 
     compose::save_compose(project, &yaml)?;

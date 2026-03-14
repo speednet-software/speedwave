@@ -9,8 +9,8 @@ import {
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
+import { ProjectStateService } from '../services/project-state.service';
 import { PluginStatusEntry, PluginsResponse } from '../models/plugin';
-import { ProjectList } from '../models/update';
 import {
   PluginCardComponent,
   SavePluginCredentialsEvent,
@@ -106,44 +106,30 @@ export class PluginsComponent implements OnInit, OnDestroy {
   private cdr = inject(ChangeDetectorRef);
   private router = inject(Router);
   private tauri = inject(TauriService);
-  private unlistenProjectSwitch: (() => void) | null = null;
+  private projectState = inject(ProjectStateService);
+  private unsubProjectReady: (() => void) | null = null;
 
   /** Loads the active project and plugins on init. */
   async ngOnInit(): Promise<void> {
     await this.loadActiveProject();
     await this.loadPlugins();
-    this.tauri
-      .listen<string>('project_switched', async () => {
-        await this.loadActiveProject();
-        await this.loadPlugins();
-      })
-      .then((unlisten) => {
-        this.unlistenProjectSwitch = unlisten;
-      })
-      .catch(() => {
-        // Tauri event listener not available outside desktop context
-      });
+    this.unsubProjectReady = this.projectState.onProjectReady(async () => {
+      await this.loadActiveProject();
+      await this.loadPlugins();
+    });
   }
 
-  /** Cleans up Tauri event listener. */
+  /** Cleans up project ready listener. */
   ngOnDestroy(): void {
-    if (this.unlistenProjectSwitch) {
-      this.unlistenProjectSwitch();
-      this.unlistenProjectSwitch = null;
+    if (this.unsubProjectReady) {
+      this.unsubProjectReady();
+      this.unsubProjectReady = null;
     }
   }
 
-  /** Resolves the active project from the backend config. */
-  async loadActiveProject(): Promise<void> {
-    try {
-      const result = await this.tauri.invoke<ProjectList>('list_projects');
-      this.activeProject = result.active_project;
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (typeof window !== 'undefined' && '__TAURI__' in window) {
-        this.error = `Failed to load project: ${msg}`;
-      }
-    }
+  /** Syncs the active project from ProjectStateService. */
+  loadActiveProject(): void {
+    this.activeProject = this.projectState.activeProject;
     this.cdr.markForCheck();
   }
 

@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { IntegrationStatusEntry } from '../../models/integration';
+import { DeviceCodeInfo, IntegrationStatusEntry } from '../../models/integration';
 
 /** Payload emitted when the user saves credentials for a service. */
 export interface SaveCredentialsEvent {
@@ -52,16 +52,61 @@ export interface SaveCredentialsEvent {
         <div class="card-body">
           <form (submit)="onSave($event)">
             @for (field of svc.auth_fields; track field.key) {
-              <div class="form-group">
-                <label [for]="svc.service + '-' + field.key">{{ field.label }}</label>
-                <input
-                  [id]="svc.service + '-' + field.key"
-                  [type]="field.field_type === 'password' ? 'password' : 'text'"
-                  [placeholder]="field.placeholder"
-                  [value]="getFieldValue(field.key)"
-                  (input)="onFieldInput(field.key, $event)"
-                  class="form-input"
-                />
+              @if (!field.oauth_flow) {
+                <div class="form-group">
+                  <label [for]="svc.service + '-' + field.key">{{ field.label }}</label>
+                  <input
+                    [id]="svc.service + '-' + field.key"
+                    [type]="field.field_type === 'password' ? 'password' : 'text'"
+                    [placeholder]="field.placeholder"
+                    [value]="getFieldValue(field.key)"
+                    (input)="onFieldInput(field.key, $event)"
+                    class="form-input"
+                    required
+                  />
+                </div>
+              }
+            }
+
+            @if (hasOAuthFields()) {
+              <div class="oauth-section">
+                @if (!deviceCodeInfo && oauthStatus !== 'polling' && oauthStatus !== 'starting') {
+                  <button type="button" class="btn-oauth" (click)="onStartOAuth()">
+                    Sign in with Microsoft
+                  </button>
+                }
+                @if (oauthStatus === 'starting') {
+                  <p class="polling-status">Connecting to Microsoft...</p>
+                  <button type="button" class="btn-cancel-oauth" (click)="cancelOAuth.emit()">
+                    Cancel
+                  </button>
+                }
+                @if (deviceCodeInfo) {
+                  <p>Enter this code:</p>
+                  <div class="user-code">{{ deviceCodeInfo.user_code }}</div>
+                  <div class="verification-url-row">
+                    <button
+                      type="button"
+                      class="btn-link"
+                      (click)="openVerificationUrl.emit(deviceCodeInfo.verification_uri)"
+                    >
+                      Open Microsoft Sign-in
+                    </button>
+                    <span class="verification-url">{{ deviceCodeInfo.verification_uri }}</span>
+                  </div>
+                  @if (oauthStatus === 'polling') {
+                    <p class="polling-status">Waiting for sign-in...</p>
+                  }
+                  <button type="button" class="btn-cancel-oauth" (click)="cancelOAuth.emit()">
+                    Cancel
+                  </button>
+                }
+                @if (oauthStatus === 'success') {
+                  <p class="oauth-success">Authentication successful</p>
+                }
+                @if (oauthStatus === 'error' || oauthStatus === 'expired') {
+                  <p class="oauth-error">{{ oauthStatusMessage }}</p>
+                }
               </div>
             }
 
@@ -125,15 +170,31 @@ export interface SaveCredentialsEvent {
 export class ServiceCardComponent {
   @Input({ required: true }) svc!: IntegrationStatusEntry;
   @Input() expanded = false;
+  @Input() oauthStatus: string | null = null;
+  @Input() deviceCodeInfo: DeviceCodeInfo | null = null;
+  @Input() oauthStatusMessage = '';
 
   @Output() toggleExpand = new EventEmitter<string>();
   @Output() toggleService = new EventEmitter<{ svc: IntegrationStatusEntry; event: Event }>();
   @Output() saveCredentials = new EventEmitter<SaveCredentialsEvent>();
   @Output() deleteCredentials = new EventEmitter<IntegrationStatusEntry>();
+  @Output() startOAuth = new EventEmitter<{
+    svc: IntegrationStatusEntry;
+    credentials: Record<string, string>;
+  }>();
+  @Output() cancelOAuth = new EventEmitter<void>();
+  @Output() openVerificationUrl = new EventEmitter<string>();
 
   editedValues: Record<string, string> = {};
   editedMappings: Record<string, number> | null = null;
   private nextMappingId = 0;
+
+  /**
+   * Returns whether any auth fields use the OAuth flow.
+   */
+  hasOAuthFields(): boolean {
+    return this.svc.auth_fields.some((f) => f.oauth_flow);
+  }
 
   /**
    * Returns the current value for a credential field, preferring edited values.
@@ -158,6 +219,21 @@ export class ServiceCardComponent {
    */
   onToggle(event: Event): void {
     this.toggleService.emit({ svc: this.svc, event });
+  }
+
+  /**
+   * Emits startOAuth with fresh form values (non-oauth fields only).
+   */
+  onStartOAuth(): void {
+    const credentials: Record<string, string> = {};
+    for (const field of this.svc.auth_fields) {
+      if (field.oauth_flow) continue;
+      const value = this.editedValues[field.key] ?? this.svc.current_values[field.key] ?? '';
+      if (value !== '') {
+        credentials[field.key] = value;
+      }
+    }
+    this.startOAuth.emit({ svc: this.svc, credentials });
   }
 
   /**

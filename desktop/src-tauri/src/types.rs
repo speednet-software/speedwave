@@ -41,6 +41,7 @@ pub(crate) struct AuthField {
     pub(crate) label: String,
     pub(crate) field_type: String,
     pub(crate) placeholder: String,
+    pub(crate) oauth_flow: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -94,6 +95,7 @@ pub(crate) fn get_auth_fields(service: &str) -> Vec<AuthField> {
                     label: f.label.to_string(),
                     field_type: f.field_type.to_string(),
                     placeholder: f.placeholder.to_string(),
+                    oauth_flow: f.oauth_flow,
                 })
                 .collect()
         })
@@ -233,6 +235,40 @@ mod tests {
                 "TOGGLEABLE service '{}' has no credential_files",
                 svc.config_key
             );
+        }
+    }
+
+    #[test]
+    fn get_auth_fields_includes_oauth_flow() {
+        let fields = get_auth_fields("sharepoint");
+        let access_token = fields.iter().find(|f| f.key == "access_token").unwrap();
+        assert!(
+            access_token.oauth_flow,
+            "access_token must have oauth_flow=true"
+        );
+        let refresh_token = fields.iter().find(|f| f.key == "refresh_token").unwrap();
+        assert!(
+            refresh_token.oauth_flow,
+            "refresh_token must have oauth_flow=true"
+        );
+        let client_id = fields.iter().find(|f| f.key == "client_id").unwrap();
+        assert!(
+            !client_id.oauth_flow,
+            "client_id must have oauth_flow=false"
+        );
+    }
+
+    #[test]
+    fn get_auth_fields_other_services_no_oauth_flow() {
+        for svc_key in &["slack", "gitlab", "redmine"] {
+            let fields = get_auth_fields(svc_key);
+            for field in &fields {
+                assert!(
+                    !field.oauth_flow,
+                    "field '{}' in service '{}' should not have oauth_flow=true",
+                    field.key, svc_key
+                );
+            }
         }
     }
 

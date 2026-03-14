@@ -9,12 +9,14 @@ import {
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { TauriService } from '../services/tauri.service';
+import { ProjectStateService } from '../services/project-state.service';
 import {
+  DeviceCodeInfo,
   IntegrationsResponse,
   IntegrationStatusEntry,
+  OAuthProgressEvent,
   OsIntegrationStatusEntry,
 } from '../models/integration';
-import { ProjectList } from '../models/update';
 import { ServiceCardComponent, SaveCredentialsEvent } from './service-card/service-card.component';
 import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
 
@@ -63,10 +65,16 @@ import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
           <app-service-card
             [svc]="svc"
             [expanded]="expandedService === svc.service"
+            [oauthStatus]="svc.service === 'sharepoint' ? oauthStatus : null"
+            [deviceCodeInfo]="svc.service === 'sharepoint' ? deviceCodeInfo : null"
+            [oauthStatusMessage]="svc.service === 'sharepoint' ? oauthStatusMessage : ''"
             (toggleExpand)="toggleExpand($event)"
             (toggleService)="handleToggleService($event)"
             (saveCredentials)="handleSaveCredentials($event)"
             (deleteCredentials)="deleteCredentials($event)"
+            (startOAuth)="handleStartOAuth($event)"
+            (cancelOAuth)="handleCancelOAuth()"
+            (openVerificationUrl)="handleOpenVerificationUrl($event)"
           />
         }
       </section>
@@ -118,46 +126,81 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   /** Name of the currently active project. */
   activeProject: string | null = null;
 
+  /** OAuth state */
+  oauthStatus: string | null = null;
+  deviceCodeInfo: DeviceCodeInfo | null = null;
+  oauthStatusMessage = '';
+  activeOAuthRequestId: string | null = null;
+  private oauthProjectAtStart: string | null = null;
+  private oauthStartNonce = 0;
+  private unlistenOAuth: (() => void) | null = null;
+
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
-  private unlistenProjectSwitch: (() => void) | null = null;
+  private projectState = inject(ProjectStateService);
+  private unsubProjectReady: (() => void) | null = null;
 
   /** Loads the active project and integrations on init. */
   async ngOnInit(): Promise<void> {
     await this.loadActiveProject();
     await this.loadIntegrations();
+    this.unsubProjectReady = this.projectState.onProjectReady(async () => {
+      if (this.activeOAuthRequestId || this.oauthStatus === 'starting') {
+        await this.handleCancelOAuth();
+      }
+      await this.loadActiveProject();
+      await this.loadIntegrations();
+    });
+
     this.tauri
-      .listen<string>('project_switched', async () => {
-        await this.loadActiveProject();
-        await this.loadIntegrations();
+      .listen<OAuthProgressEvent>('sharepoint_oauth_progress', async (event) => {
+        try {
+          const payload = (event as { payload: OAuthProgressEvent }).payload;
+          if (payload.request_id !== this.activeOAuthRequestId) return;
+
+          this.oauthStatus = payload.status;
+          this.oauthStatusMessage = payload.message;
+          if (payload.status === 'success') {
+            const flowProject = this.oauthProjectAtStart;
+            this.deviceCodeInfo = null;
+            this.activeOAuthRequestId = null;
+            this.oauthProjectAtStart = null;
+            if (flowProject !== this.activeProject) return;
+            this.needsRestart = true;
+            await this.loadIntegrations();
+            if (flowProject !== this.activeProject) return;
+            await this.autoEnableIfConfigured('sharepoint');
+          }
+          if (['error', 'expired', 'cancelled'].includes(payload.status)) {
+            this.deviceCodeInfo = null;
+            this.activeOAuthRequestId = null;
+          }
+        } catch (e: unknown) {
+          this.error = e instanceof Error ? e.message : String(e);
+        }
+        this.cdr.markForCheck();
       })
       .then((unlisten) => {
-        this.unlistenProjectSwitch = unlisten;
+        this.unlistenOAuth = unlisten;
       })
-      .catch(() => {
-        // Tauri event listener not available outside desktop context
-      });
+      .catch(() => {});
   }
 
-  /** Cleans up Tauri event listener. */
+  /** Cleans up event listeners. */
   ngOnDestroy(): void {
-    if (this.unlistenProjectSwitch) {
-      this.unlistenProjectSwitch();
-      this.unlistenProjectSwitch = null;
+    if (this.unsubProjectReady) {
+      this.unsubProjectReady();
+      this.unsubProjectReady = null;
+    }
+    if (this.unlistenOAuth) {
+      this.unlistenOAuth();
+      this.unlistenOAuth = null;
     }
   }
 
-  /** Resolves the active project from the backend config. */
-  async loadActiveProject(): Promise<void> {
-    try {
-      const result = await this.tauri.invoke<ProjectList>('list_projects');
-      this.activeProject = result.active_project;
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (this.tauri.isRunningInTauri()) {
-        this.error = `Failed to load project: ${msg}`;
-      }
-    }
+  /** Syncs the active project from ProjectStateService. */
+  loadActiveProject(): void {
+    this.activeProject = this.projectState.activeProject;
     this.cdr.markForCheck();
   }
 
@@ -223,20 +266,122 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
 
       this.needsRestart = true;
       await this.loadIntegrations();
-
-      const updated = this.services.find((s) => s.service === payload.svc.service);
-      if (updated && updated.configured && !updated.enabled) {
-        await this.tauri.invoke('set_integration_enabled', {
-          project: this.activeProject,
-          service: payload.svc.service,
-          enabled: true,
-        });
-        updated.enabled = true;
-      }
+      await this.autoEnableIfConfigured(payload.svc.service);
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
     }
     this.cdr.markForCheck();
+  }
+
+  /**
+   * Auto-enables a service if it became configured but is not yet enabled.
+   * Shared by handleSaveCredentials and OAuth success handler.
+   * @param service - the service identifier to check and auto-enable
+   */
+  private async autoEnableIfConfigured(service: string): Promise<void> {
+    const updated = this.services.find((s) => s.service === service);
+    if (updated && updated.configured && !updated.enabled) {
+      await this.tauri.invoke('set_integration_enabled', {
+        project: this.activeProject,
+        service,
+        enabled: true,
+      });
+      updated.enabled = true;
+      this.cdr.markForCheck();
+    }
+  }
+
+  /**
+   * Handles the startOAuth event from a service card.
+   * @param payload - the service and non-oauth credentials
+   * @param payload.svc - the integration to start OAuth for
+   * @param payload.credentials - non-oauth field values from the form
+   */
+  async handleStartOAuth(payload: {
+    svc: IntegrationStatusEntry;
+    credentials: Record<string, string>;
+  }): Promise<void> {
+    if (this.oauthStatus === 'starting' || this.oauthStatus === 'polling') return;
+
+    const myNonce = ++this.oauthStartNonce;
+    this.oauthProjectAtStart = this.activeProject;
+    this.oauthStatus = 'starting';
+    this.oauthStatusMessage = '';
+    this.error = '';
+    this.cdr.markForCheck();
+
+    // Save non-oauth fields first
+    const nonOAuthCreds = { ...payload.credentials };
+    if (Object.keys(nonOAuthCreds).length > 0) {
+      try {
+        await this.tauri.invoke('save_integration_credentials', {
+          project: this.activeProject,
+          service: payload.svc.service,
+          credentials: nonOAuthCreds,
+        });
+      } catch (e: unknown) {
+        if (myNonce !== this.oauthStartNonce) return;
+        this.oauthStatus = null;
+        this.error = e instanceof Error ? e.message : String(e);
+        this.cdr.markForCheck();
+        return;
+      }
+    }
+
+    const clientId = payload.credentials['client_id'] ?? '';
+    const tenantId = payload.credentials['tenant_id'] ?? '';
+    if (!clientId || !tenantId) {
+      if (myNonce !== this.oauthStartNonce) return;
+      this.oauthStatus = null;
+      this.error = 'Client ID and Tenant ID are required to start OAuth';
+      this.cdr.markForCheck();
+      return;
+    }
+
+    try {
+      const result = await this.tauri.invoke<DeviceCodeInfo>('start_sharepoint_oauth', {
+        project: this.activeProject,
+        clientId,
+        tenantId,
+      });
+      if (myNonce !== this.oauthStartNonce) return;
+      this.deviceCodeInfo = result;
+      this.activeOAuthRequestId = result.request_id;
+      this.oauthStatus = 'polling';
+    } catch (e: unknown) {
+      if (myNonce !== this.oauthStartNonce) return;
+      this.oauthStatus = null;
+      this.error = e instanceof Error ? e.message : String(e);
+    }
+    this.cdr.markForCheck();
+  }
+
+  /** Cancels any active or starting OAuth flow. */
+  async handleCancelOAuth(): Promise<void> {
+    ++this.oauthStartNonce;
+    try {
+      await this.tauri.invoke('cancel_sharepoint_oauth');
+    } catch {
+      // Best-effort cancel
+    }
+    this.activeOAuthRequestId = null;
+    this.oauthProjectAtStart = null;
+    this.deviceCodeInfo = null;
+    this.oauthStatus = null;
+    this.oauthStatusMessage = '';
+    this.cdr.markForCheck();
+  }
+
+  /**
+   * Opens the verification URL in the default browser.
+   * @param url - the Microsoft verification URL
+   */
+  async handleOpenVerificationUrl(url: string): Promise<void> {
+    try {
+      await this.tauri.invoke('open_url', { url });
+    } catch {
+      // Best-effort open
+    }
   }
 
   /**

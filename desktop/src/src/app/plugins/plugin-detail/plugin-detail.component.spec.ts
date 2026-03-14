@@ -4,6 +4,7 @@ import { Router } from '@angular/router';
 import { ActivatedRoute } from '@angular/router';
 import { PluginDetailComponent } from './plugin-detail.component';
 import { TauriService } from '../../services/tauri.service';
+import { ProjectStateService } from '../../services/project-state.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import { JsonSchema } from '../../models/plugin';
 
@@ -148,6 +149,10 @@ describe('PluginDetailComponent', () => {
         { provide: Router, useValue: mockRouter },
       ],
     });
+
+    // Set activeProject on the SSOT so loadActiveProject() picks it up
+    const projectState = TestBed.inject(ProjectStateService);
+    projectState.activeProject = 'test-project';
 
     const fixture = TestBed.createComponent(PluginDetailComponent);
     return { component: fixture.componentInstance, fixture };
@@ -374,5 +379,24 @@ describe('PluginDetailComponent', () => {
     expect(requirements).toBeNull();
     const placeholder = fixture.nativeElement.querySelector('.dashboard-placeholder');
     expect(placeholder).not.toBeNull();
+  });
+
+  it('should clean up project ready listener on destroy', async () => {
+    const { component } = setup();
+    const projectState = TestBed.inject(ProjectStateService);
+    await projectState.init();
+    await component.ngOnInit();
+
+    // Verify the unsub function exists before destroy
+    expect(
+      (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
+    ).not.toBeNull();
+
+    component.ngOnDestroy();
+
+    // Verify unsub was called and nulled
+    expect(
+      (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
+    ).toBeNull();
   });
 });

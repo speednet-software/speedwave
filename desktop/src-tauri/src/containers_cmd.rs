@@ -10,6 +10,61 @@ use crate::setup_wizard;
 use crate::types::{check_project, LlmConfigResponse};
 
 // ---------------------------------------------------------------------------
+// Compose helpers — resolve config, render, security check, save
+// ---------------------------------------------------------------------------
+
+/// Renders a new compose.yml for a project and saves it after security check.
+///
+/// Shared pipeline used by `recreate_project_containers`,
+/// `restart_integration_containers`, and `reconcile_compose_port`.
+pub(crate) fn render_and_save_compose(
+    project: &str,
+    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+) -> Result<String, String> {
+    let user_config = config::load_user_config().map_err(|e| e.to_string())?;
+    let project_dir = user_config
+        .find_project(project)
+        .map(|p| p.dir.clone())
+        .ok_or_else(|| format!("project '{}' not found", project))?;
+
+    let project_path = std::path::Path::new(&project_dir);
+    let (resolved, integrations) =
+        config::resolve_project_config(project_path, &user_config, project);
+
+    let yaml = speedwave_runtime::compose::render_compose(
+        project,
+        &project_dir,
+        &resolved,
+        &integrations,
+        Some(rt),
+    )
+    .map_err(|e| e.to_string())?;
+
+    let manifests = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_default();
+    let violations = speedwave_runtime::compose::SecurityCheck::run(&yaml, project, &manifests);
+    if !violations.is_empty() {
+        return Err(format!(
+            "Security check failed:\n{}",
+            format_security_violations(&violations)
+        ));
+    }
+
+    speedwave_runtime::compose::save_compose(project, &yaml).map_err(|e| e.to_string())?;
+    Ok(yaml)
+}
+
+/// Formats security violations into a human-readable multi-line string.
+pub(crate) fn format_security_violations(
+    violations: &[speedwave_runtime::compose::SecurityViolation],
+) -> String {
+    violations
+        .iter()
+        .map(|v| format!("[{}] {} -- {}", v.container, v.rule, v.message))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// ---------------------------------------------------------------------------
 // Setup wizard commands
 // ---------------------------------------------------------------------------
 
@@ -88,22 +143,64 @@ pub async fn link_cli() -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Adds a new project and activates it.  Emits `project_switched` so that
-/// Settings, Integrations and other listeners refresh automatically.
+/// Adds a new project and boots it (containers + chat).
+///
+/// Same lifecycle as `switch_project`: emits `project_switch_started` /
+/// `project_switch_succeeded` / `project_switch_failed`.  On failure the
+/// project stays registered but inactive (user can retry from the switcher).
 #[tauri::command]
-pub async fn add_project(name: String, dir: String, app: tauri::AppHandle) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        log::info!("add_project: name={name}, dir={dir}");
-        speedwave_runtime::project::add_project(&name, &dir).map_err(|e| {
-            log::error!("add_project: error: {e}");
-            e.to_string()
-        })?;
-        use tauri::Emitter;
-        let _ = app.emit("project_switched", &name);
-        Ok(())
+pub async fn add_project(
+    name: String,
+    dir: String,
+    app: tauri::AppHandle,
+    chat_state: tauri::State<'_, crate::chat::SharedChatSession>,
+) -> Result<(), String> {
+    // Capture previous active project BEFORE runtime sets new one
+    let previous = config::with_config_lock(|| {
+        let cfg = config::load_user_config()?;
+        Ok(cfg.active_project.clone())
+    })
+    .map_err(|e| e.to_string())?;
+
+    // Register project (sets active_project internally)
+    tokio::task::spawn_blocking({
+        let name = name.clone();
+        let dir = dir.clone();
+        move || {
+            log::info!("add_project: name={name}, dir={dir}");
+            speedwave_runtime::project::add_project(&name, &dir).map_err(|e| {
+                log::error!("add_project: error: {e}");
+                e.to_string()
+            })
+        }
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+
+    use tauri::Emitter;
+    let _ = app.emit(
+        "project_switch_started",
+        serde_json::json!({ "project": name }),
+    );
+
+    // Start containers for the new project
+    if let Err(e) = start_containers(name.clone()).await {
+        // Rollback active_project to previous (keep new project registered)
+        crate::rollback_and_emit_failed(&app, previous, &e.to_string());
+        return Err(e);
+    }
+
+    // Rebind chat session
+    if let Err(e) = crate::rebind_chat(&name, &app, &chat_state) {
+        // Containers running but chat failed — transient, still emit succeeded
+        log::warn!("add_project: rebind_chat failed: {e}");
+    }
+
+    let _ = app.emit(
+        "project_switch_succeeded",
+        serde_json::json!({ "project": name }),
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +272,37 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
         })?;
         log::info!("check_containers_running: {} containers", containers.len());
         Ok(!containers.is_empty())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Recreate containers for a project with freshly generated compose.
+///
+/// Used on project switch to ensure `ENABLED_SERVICES` matches the new
+/// project's integration settings.  Lighter than `restart_integration_containers`
+/// because it skips image rebuilds and snapshot/rollback (images don't change
+/// between projects, and there's no previous "good" compose to roll back to).
+#[tauri::command]
+pub async fn recreate_project_containers(project: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        check_project(&project)?;
+        log::info!("recreate_project_containers: project={project}");
+        let rt = speedwave_runtime::runtime::detect_runtime();
+
+        // Stop old containers (ignore errors — they may not be running)
+        let _ = rt.compose_down(&project);
+
+        // Resolve config, render compose, security check, save
+        render_and_save_compose(&project, &*rt)?;
+
+        rt.compose_up_recreate(&project).map_err(|e| {
+            log::error!("recreate_project_containers: compose_up_recreate failed: {e}");
+            e.to_string()
+        })?;
+
+        log::info!("recreate_project_containers: done for project={project}");
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
