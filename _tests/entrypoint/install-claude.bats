@@ -8,6 +8,7 @@ DEFAULTS_RS="$BATS_TEST_DIRNAME/../../crates/speedwave-runtime/src/defaults.rs"
 
 # Extract pinned version from defaults.rs (SSOT) — avoids hardcoding "2.1.76" in tests.
 PINNED_VERSION="$(grep 'pub const CLAUDE_VERSION' "$DEFAULTS_RS" | sed 's/.*"\(.*\)".*/\1/')"
+[[ -n "$PINNED_VERSION" ]] || { echo "ERROR: could not extract CLAUDE_VERSION from defaults.rs" >&2; exit 1; }
 
 setup() {
     TEST_HOME="$(mktemp -d)"
