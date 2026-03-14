@@ -4,6 +4,10 @@
 # Stubs out 'curl' and 'claude' to avoid network calls.
 
 ENTRYPOINT="$BATS_TEST_DIRNAME/../../containers/entrypoint.sh"
+DEFAULTS_RS="$BATS_TEST_DIRNAME/../../crates/speedwave-runtime/src/defaults.rs"
+
+# Extract pinned version from defaults.rs (SSOT) — avoids hardcoding "2.1.76" in tests.
+PINNED_VERSION="$(grep 'pub const CLAUDE_VERSION' "$DEFAULTS_RS" | sed 's/.*"\(.*\)".*/\1/')"
 
 setup() {
     TEST_HOME="$(mktemp -d)"
@@ -14,7 +18,7 @@ setup() {
     export SPEEDWAVE_RESOURCES="$RESOURCES_DIR"
 
     # CLAUDE_VERSION is required — set a default for tests that don't care about it
-    export CLAUDE_VERSION="2.1.76"
+    export CLAUDE_VERSION="$PINNED_VERSION"
 
     # Stubs dir goes first in PATH; also strip real claude locations
     STUBS_DIR="$(mktemp -d)"
@@ -25,9 +29,9 @@ setup() {
     export PATH="$CLEAN_PATH"
 
     # Default stub: claude already installed — skip install
-    cat > "$STUBS_DIR/claude" << 'EOF'
+    cat > "$STUBS_DIR/claude" << EOF
 #!/bin/bash
-echo "2.1.76 (Claude Code)"
+echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$STUBS_DIR/claude"
 
@@ -75,18 +79,18 @@ teardown() {
 echo "\$1" > ${version_file}
 # Make claude "appear" installed after this
 mkdir -p "${STUBS_DIR}"
-cat > "${STUBS_DIR}/claude" << 'INNER'
+cat > "${STUBS_DIR}/claude" << INNER
 #!/bin/bash
-echo "2.1.76 (Claude Code)"
+echo "${PINNED_VERSION} (Claude Code)"
 INNER
 chmod +x "${STUBS_DIR}/claude"
 EOF
     chmod +x "$STUBS_DIR/install-claude.sh"
 
-    CLAUDE_VERSION="2.1.76" run bash "$patched" true 2>/dev/null || true
+    CLAUDE_VERSION="$PINNED_VERSION" run bash "$patched" true 2>/dev/null || true
 
     [[ -s "$version_file" ]]
-    grep -q "2.1.76" "$version_file"
+    grep -q "$PINNED_VERSION" "$version_file"
     rm -f "$version_file" "$patched"
 }
 
@@ -188,9 +192,9 @@ EOF
 @test "claude in HOME/.local/bin is found without reinstalling" {
     # Place a claude stub in the fake ~/.local/bin
     mkdir -p "$HOME/.local/bin"
-    cat > "$HOME/.local/bin/claude" << 'EOF'
+    cat > "$HOME/.local/bin/claude" << EOF
 #!/bin/bash
-echo "2.1.76 (Claude Code)"
+echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$HOME/.local/bin/claude"
     # Remove stub from STUBS_DIR so only the ~/.local/bin one exists

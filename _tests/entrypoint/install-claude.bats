@@ -4,6 +4,10 @@
 # Stubs out 'curl' and 'bash' execution to avoid network calls.
 
 INSTALL_SCRIPT="$BATS_TEST_DIRNAME/../../containers/install-claude.sh"
+DEFAULTS_RS="$BATS_TEST_DIRNAME/../../crates/speedwave-runtime/src/defaults.rs"
+
+# Extract pinned version from defaults.rs (SSOT) — avoids hardcoding "2.1.76" in tests.
+PINNED_VERSION="$(grep 'pub const CLAUDE_VERSION' "$DEFAULTS_RS" | sed 's/.*"\(.*\)".*/\1/')"
 
 setup() {
     TEST_HOME="$(mktemp -d)"
@@ -53,9 +57,9 @@ teardown() {
 # ---------------------------------------------------------------------------
 
 @test "install-claude.sh passes version argument to installer" {
-    run bash "$INSTALL_SCRIPT" "2.1.76"
+    run bash "$INSTALL_SCRIPT" "$PINNED_VERSION"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"installed 2.1.76"* ]]
+    [[ "$output" == *"installed ${PINNED_VERSION}"* ]]
 }
 
 @test "install-claude.sh passes arbitrary semver to installer" {
@@ -75,7 +79,7 @@ exit 1
 EOF
     chmod +x "$STUBS_DIR/curl"
 
-    run bash "$INSTALL_SCRIPT" "2.1.76"
+    run bash "$INSTALL_SCRIPT" "$PINNED_VERSION"
     [ "$status" -ne 0 ]
 }
 
@@ -84,7 +88,7 @@ EOF
 # ---------------------------------------------------------------------------
 
 @test "install-claude.sh cleans up temp file on success" {
-    run bash "$INSTALL_SCRIPT" "2.1.76"
+    run bash "$INSTALL_SCRIPT" "$PINNED_VERSION"
     [ "$status" -eq 0 ]
 
     # The install dir should have no leftover install-claude.* files
