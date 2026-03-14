@@ -142,22 +142,13 @@ describe('ProjectSwitcherComponent', () => {
       expect(mockInvoke).not.toHaveBeenCalledWith('add_project', expect.anything());
     });
 
-    it('calls add_project, refreshes list, and closes form on success', async () => {
+    it('calls add_project, resets form, and closes dropdown (event listener handles refresh)', async () => {
       component.showAddForm = true;
       component.isOpen = true;
       component.newProjectName = 'new-proj';
       component.newProjectDir = '/tmp/new-proj';
 
-      mockInvoke
-        .mockResolvedValueOnce(undefined) // add_project
-        .mockResolvedValueOnce({
-          // list_projects
-          projects: [
-            { name: 'existing', dir: '/tmp/existing' },
-            { name: 'new-proj', dir: '/tmp/new-proj' },
-          ],
-          active_project: 'new-proj',
-        });
+      mockInvoke.mockResolvedValueOnce(undefined); // add_project
 
       await component.addProject();
 
@@ -165,9 +156,7 @@ describe('ProjectSwitcherComponent', () => {
         name: 'new-proj',
         dir: '/tmp/new-proj',
       });
-      expect(mockInvoke).toHaveBeenCalledWith('list_projects');
-      expect(component.projects).toHaveLength(2);
-      expect(component.activeProject).toBe('new-proj');
+      expect(mockInvoke).not.toHaveBeenCalledWith('list_projects');
       expect(component.showAddForm).toBe(false);
       expect(component.isOpen).toBe(false);
       expect(component.addBusy).toBe(false);

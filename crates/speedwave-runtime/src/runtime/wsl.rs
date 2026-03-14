@@ -21,11 +21,12 @@ pub fn decode_wsl_output(bytes: &[u8]) -> String {
             .collect();
         return String::from_utf16_lossy(&u16s);
     }
-    // Try UTF-16LE without BOM: valid if even length, decodes cleanly,
-    // and contains null high-bytes typical of ASCII encoded as UTF-16LE.
-    // Plain ASCII text (all bytes < 0x80) would decode to CJK characters
-    // under UTF-16LE, so we require at least some null bytes in odd positions
-    // (the high byte of ASCII code points in UTF-16LE is always 0x00).
+    // Heuristic for UTF-16LE without BOM: require even length and at least
+    // one null byte in an odd position (the high byte of ASCII code points
+    // in UTF-16LE is always 0x00). This distinguishes UTF-16LE-encoded ASCII
+    // from plain UTF-8, which would never have null bytes in odd positions.
+    // If the heuristic matches, attempt decode and accept only if the result
+    // contains no replacement characters and no unexpected control characters.
     if bytes.len() >= 4 && bytes.len().is_multiple_of(2) {
         let has_null_high_bytes = bytes.iter().skip(1).step_by(2).any(|&b| b == 0x00);
         if has_null_high_bytes {

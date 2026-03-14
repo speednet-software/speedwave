@@ -65,14 +65,6 @@ pub async fn init_vm() -> Result<(), String> {
 #[tauri::command]
 pub async fn create_project(name: String, dir: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        check_project(&name)?;
-        let dir_path = std::path::Path::new(&dir);
-        if !dir_path.is_absolute() {
-            return Err("Project directory must be an absolute path".to_string());
-        }
-        if !dir_path.is_dir() {
-            return Err(format!("Project directory does not exist: {}", dir));
-        }
         log::info!("create_project: name={name}, dir={dir}");
         setup_wizard::create_project(&name, &dir).map_err(|e| {
             log::error!("create_project: error: {e}");
@@ -228,10 +220,13 @@ fn apply_llm_config(
     base_url: Option<String>,
     api_key_env: Option<String>,
 ) -> anyhow::Result<()> {
-    let active = user_config.active_project.clone().unwrap_or_default();
+    let active = user_config
+        .active_project
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("No active project"))?;
     let project = user_config
         .find_project_mut(&active)
-        .ok_or_else(|| anyhow::anyhow!("No active project"))?;
+        .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", active))?;
 
     let llm = config::LlmConfig {
         provider,
@@ -413,8 +408,8 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("No active project"),
-            "expected 'No active project' error, got: {err}"
+            err.contains("not found in config"),
+            "expected 'not found in config' error, got: {err}"
         );
     }
 

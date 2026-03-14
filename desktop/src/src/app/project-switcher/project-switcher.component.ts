@@ -278,7 +278,7 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
-  /** Adds a new project, refreshes the list, and closes the form. */
+  /** Adds a new project and closes the form. The project_switched event listener handles list refresh. */
   async addProject(): Promise<void> {
     const name = this.newProjectName.trim();
     const dir = this.newProjectDir.trim();
@@ -295,10 +295,7 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
 
     try {
       await invoke('add_project', { name, dir });
-      // Refresh project list
-      const result = await invoke<ProjectList>('list_projects');
-      this.projects = result.projects;
-      this.activeProject = result.active_project;
+      // project_switched event listener handles list refresh
       this.resetAddForm();
       this.isOpen = false;
     } catch (err) {

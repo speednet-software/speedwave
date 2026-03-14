@@ -1,14 +1,18 @@
 use crate::{compose, config, validation};
 use std::path::Path;
 
-/// Best-effort cleanup of project directories created by `compose::init_project_dirs`.
+/// Best-effort cleanup of project directories created by `init_project_dirs_in`.
 /// Used for rollback when a later step of `add_project` fails.
 pub fn cleanup_project_dirs(project: &str) {
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => return,
     };
-    let data_dir = home.join(crate::consts::DATA_DIR);
+    cleanup_project_dirs_in(project, &home.join(crate::consts::DATA_DIR));
+}
+
+/// Best-effort cleanup of project directories under a given data directory.
+fn cleanup_project_dirs_in(project: &str, data_dir: &Path) {
     for sub in &["tokens", "compose", "context", "claude-home"] {
         let dir = data_dir.join(sub).join(project);
         if dir.exists() {
@@ -22,6 +26,34 @@ pub fn cleanup_project_dirs(project: &str) {
     }
 }
 
+/// Creates project directories under a given data directory.
+fn init_project_dirs_in(project: &str, data_dir: &Path) -> anyhow::Result<()> {
+    validation::validate_project_name(project)?;
+    let dirs_to_create = [
+        data_dir.join("tokens").join(project).join("slack"),
+        data_dir.join("tokens").join(project).join("sharepoint"),
+        data_dir.join("tokens").join(project).join("redmine"),
+        data_dir.join("tokens").join(project).join("gitlab"),
+        data_dir.join("compose").join(project),
+        data_dir.join("context").join(project),
+        data_dir.join("claude-home").join(project),
+    ];
+    for dir in &dirs_to_create {
+        std::fs::create_dir_all(dir)?;
+    }
+    Ok(())
+}
+
+/// Saves the rendered compose YAML under a given data directory.
+fn save_compose_in(project: &str, yaml: &str, data_dir: &Path) -> anyhow::Result<()> {
+    let path = data_dir.join("compose").join(project).join("compose.yml");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, yaml)?;
+    Ok(())
+}
+
 /// Registers a new project with transactional semantics: validate everything
 /// first, then commit all side-effects.  If a late write fails, previously
 /// created directories are cleaned up.
@@ -33,6 +65,16 @@ pub fn add_project(name: &str, dir: &str) -> anyhow::Result<()> {
 }
 
 fn add_project_inner(name: &str, dir: &str) -> anyhow::Result<()> {
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+    let data_dir = home.join(crate::consts::DATA_DIR);
+    add_project_with_data_dir(name, dir, &data_dir)
+}
+
+/// Core implementation of project registration, parameterized by `data_dir`
+/// so that tests can redirect all I/O to a temporary directory without
+/// modifying process-global state (e.g. `HOME`).
+fn add_project_with_data_dir(name: &str, dir: &str, data_dir: &Path) -> anyhow::Result<()> {
     // ── Phase 1: validate and build in-memory (zero side-effects) ────────
 
     validation::validate_project_name(name)?;
@@ -52,7 +94,8 @@ fn add_project_inner(name: &str, dir: &str) -> anyhow::Result<()> {
 
     let canonical_str = canonical.to_string_lossy().to_string();
 
-    let mut user_config = config::load_user_config()?;
+    let config_path = data_dir.join("config.json");
+    let mut user_config = config::load_user_config_from(&config_path)?;
 
     // Duplicate name check
     if user_config.find_project(name).is_some() {
@@ -88,15 +131,15 @@ fn add_project_inner(name: &str, dir: &str) -> anyhow::Result<()> {
 
     // ── Phase 2: commit (all writes) ─────────────────────────────────────
 
-    compose::init_project_dirs(name)?;
+    init_project_dirs_in(name, data_dir)?;
 
-    if let Err(e) = config::save_user_config(&user_config) {
-        cleanup_project_dirs(name);
+    if let Err(e) = config::save_user_config_to(&user_config, &config_path) {
+        cleanup_project_dirs_in(name, data_dir);
         return Err(e);
     }
 
-    if let Err(e) = compose::save_compose(name, &yaml) {
-        cleanup_project_dirs(name);
+    if let Err(e) = save_compose_in(name, &yaml, data_dir) {
+        cleanup_project_dirs_in(name, data_dir);
         return Err(e);
     }
 
@@ -113,25 +156,28 @@ mod tests {
     use super::*;
     use crate::config::{save_user_config_to, SpeedwaveUserConfig};
 
-    /// Helper: creates a testable add_project that works with a custom config
-    /// path instead of the real `~/.speedwave/config.json`.
-    ///
-    /// We cannot easily redirect `add_project` (it uses real paths via
-    /// `config::load_user_config`), so we test the validation and rollback
-    /// logic through targeted unit tests.
-
     #[test]
     fn rejects_invalid_project_name() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().to_string_lossy().to_string();
-        let result = add_project_inner("", &dir);
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let project_dir = tmp.path().join("proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let dir = std::fs::canonicalize(&project_dir)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let result = add_project_with_data_dir("", &dir, &data_dir);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty"));
     }
 
     #[test]
     fn rejects_relative_path() {
-        let result = add_project_inner("myproject", "relative/path");
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let result = add_project_with_data_dir("myproject", "relative/path", &data_dir);
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("absolute"),
@@ -141,21 +187,29 @@ mod tests {
 
     #[test]
     fn rejects_nonexistent_directory() {
-        let result = add_project_inner("myproject", "/nonexistent/path/that/does/not/exist");
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let result = add_project_with_data_dir(
+            "myproject",
+            "/nonexistent/path/that/does/not/exist",
+            &data_dir,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn cleanup_project_dirs_is_safe_on_missing_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
         // Should not panic or error even when dirs don't exist
-        cleanup_project_dirs("nonexistent-test-project-xyz");
+        cleanup_project_dirs_in("nonexistent-test-project-xyz", &data_dir);
     }
 
     #[test]
     fn duplicate_name_detected() {
         let tmp = tempfile::tempdir().unwrap();
-        let fake_home = tmp.path().join("home");
-        std::fs::create_dir_all(&fake_home).unwrap();
 
         // Register a project dir
         let project_dir = tmp.path().join("existing-dir");
@@ -163,7 +217,7 @@ mod tests {
         let canonical_dir = std::fs::canonicalize(&project_dir).unwrap();
 
         // Seed config with a project named "existing"
-        let data_dir = fake_home.join(".speedwave");
+        let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
         let config = SpeedwaveUserConfig {
             projects: vec![config::ProjectUserEntry {
@@ -183,9 +237,8 @@ mod tests {
         std::fs::create_dir_all(&other_dir).unwrap();
         let canonical_other = std::fs::canonicalize(&other_dir).unwrap();
 
-        // Point HOME to our fake home so add_project_inner reads our config
-        std::env::set_var("HOME", &fake_home);
-        let result = add_project_inner("existing", &canonical_other.to_string_lossy());
+        let result =
+            add_project_with_data_dir("existing", &canonical_other.to_string_lossy(), &data_dir);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -197,8 +250,6 @@ mod tests {
     #[test]
     fn duplicate_path_detected() {
         let tmp = tempfile::tempdir().unwrap();
-        let fake_home = tmp.path().join("home");
-        std::fs::create_dir_all(&fake_home).unwrap();
 
         // Register a project dir
         let project_dir = tmp.path().join("shared-dir");
@@ -206,7 +257,7 @@ mod tests {
         let canonical_dir = std::fs::canonicalize(&project_dir).unwrap();
 
         // Seed config with a project at that path
-        let data_dir = fake_home.join(".speedwave");
+        let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
         let config = SpeedwaveUserConfig {
             projects: vec![config::ProjectUserEntry {
@@ -221,15 +272,49 @@ mod tests {
         };
         save_user_config_to(&config, &data_dir.join("config.json")).unwrap();
 
-        // Point HOME to our fake home so add_project_inner reads our config
-        std::env::set_var("HOME", &fake_home);
-        let result = add_project_inner("second", &canonical_dir.to_string_lossy());
+        let result =
+            add_project_with_data_dir("second", &canonical_dir.to_string_lossy(), &data_dir);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("already registered"),
             "expected 'already registered' error, got: {err}"
         );
+    }
+
+    #[test]
+    fn rollback_cleans_up_dirs_on_config_save_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create a project directory
+        let project_dir = tmp.path().join("myproject-dir");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let canonical_dir = std::fs::canonicalize(&project_dir).unwrap();
+
+        // Create data_dir without a config.json (load returns default).
+        // Pre-create config.json.tmp as a directory so that
+        // save_user_config_to fails on std::fs::write (EISDIR) after
+        // init_project_dirs_in has already created the project dirs.
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(data_dir.join("config.json.tmp")).unwrap();
+
+        let result =
+            add_project_with_data_dir("rollback-test", &canonical_dir.to_string_lossy(), &data_dir);
+        assert!(
+            result.is_err(),
+            "should fail because config write is blocked"
+        );
+
+        // Verify rollback: project directories should have been cleaned up
+        for sub in &["tokens", "compose", "context", "claude-home"] {
+            let dir = data_dir.join(sub).join("rollback-test");
+            assert!(
+                !dir.exists(),
+                "rollback should have removed '{}' but it still exists",
+                dir.display()
+            );
+        }
     }
 
     #[test]

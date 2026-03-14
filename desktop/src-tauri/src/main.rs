@@ -48,11 +48,6 @@ type SharedUpdateVersion = Arc<Mutex<Option<String>>>;
 
 const MAIN_WINDOW_LABEL: &str = "main";
 
-/// Global mutex protecting all read-modify-write cycles on config.json.
-/// Without this, concurrent Tauri commands (e.g. toggling mail then notes in quick
-/// succession) can lose writes due to TOCTOU races.
-static CONFIG_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
-
 /// Stop flag for the mcp-os watchdog thread. Set during app exit cleanup
 /// to prevent the watchdog from respawning mcp-os during shutdown.
 static WATCHDOG_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -289,18 +284,14 @@ fn is_upstream_alive(port: u16) -> bool {
 /// does not have write side-effects.
 fn cleanup_dead_ide(bridge: &ide_bridge::IdeBridge) {
     bridge.clear_upstream();
-    if let Ok(_lock) = CONFIG_LOCK.lock() {
-        match config::load_user_config() {
-            Ok(mut user_config) => {
-                user_config.selected_ide = None;
-                if let Err(e) = config::save_user_config(&user_config) {
-                    log::warn!("cleanup_dead_ide: failed to persist IDE deselection: {e}");
-                }
-            }
-            Err(e) => {
-                log::warn!("cleanup_dead_ide: failed to load user config: {e}");
-            }
-        }
+    if let Ok(()) = config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        user_config.selected_ide = None;
+        config::save_user_config(&user_config)
+    }) {
+        // ok
+    } else {
+        log::warn!("cleanup_dead_ide: failed to persist IDE deselection");
     }
 }
 
@@ -360,15 +351,15 @@ fn select_ide(
     }
 
     // Persist the selection to config.json
-    {
-        let _lock = CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
-        let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
         user_config.selected_ide = Some(speedwave_runtime::config::SelectedIde {
             ide_name: ide_name.clone(),
             port,
         });
-        config::save_user_config(&user_config).map_err(|e| e.to_string())?;
-    }
+        config::save_user_config(&user_config)
+    })
+    .map_err(|e| e.to_string())?;
 
     // Update the live Bridge so new connections are proxied immediately
     let guard = state
