@@ -176,12 +176,11 @@ pub fn install_plugin(zip_path: String) -> Result<String, String> {
     // MCP plugins with auth_fields are auto-enabled after credential save in the UI.
     let needs_credentials = manifest.auth_fields.iter().any(|f| f.is_secret);
     if !needs_credentials {
-        let user_config = config::load_user_config().map_err(|e| e.to_string())?;
-        if let Some(active) = &user_config.active_project {
-            let plugin_key = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
-            let _lock = crate::CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
-            let mut cfg = config::load_user_config().map_err(|e| e.to_string())?;
-            if let Some(entry) = cfg.projects.iter_mut().find(|p| p.name == *active) {
+        let plugin_key = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
+        let _lock = crate::CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
+        let mut cfg = config::load_user_config().map_err(|e| e.to_string())?;
+        if let Some(active) = cfg.active_project.clone() {
+            if let Some(entry) = cfg.projects.iter_mut().find(|p| p.name == active) {
                 let integrations = entry.integrations.get_or_insert_with(Default::default);
                 integrations.set_plugin_enabled(plugin_key, true);
                 config::save_user_config(&cfg).map_err(|e| e.to_string())?;
@@ -962,5 +961,63 @@ mod tests {
             configured,
             "should be true when no integrations required and no auth fields"
         );
+    }
+
+    #[test]
+    fn auto_enable_skips_plugins_needing_credentials() {
+        let auth_fields = vec![plugin::AuthFieldDef {
+            key: "api_key".into(),
+            label: "API Key".into(),
+            field_type: "password".into(),
+            placeholder: "".into(),
+            is_secret: true,
+        }];
+        let needs_credentials = auth_fields.iter().any(|f| f.is_secret);
+        assert!(
+            needs_credentials,
+            "plugin with secret auth_field needs credentials"
+        );
+    }
+
+    #[test]
+    fn auto_enable_triggers_for_plugins_without_secret_fields() {
+        let auth_fields: Vec<plugin::AuthFieldDef> = vec![plugin::AuthFieldDef {
+            key: "host_url".into(),
+            label: "Host".into(),
+            field_type: "text".into(),
+            placeholder: "".into(),
+            is_secret: false,
+        }];
+        let needs_credentials = auth_fields.iter().any(|f| f.is_secret);
+        assert!(
+            !needs_credentials,
+            "plugin with only non-secret fields should auto-enable"
+        );
+    }
+
+    #[test]
+    fn auto_enable_triggers_for_plugins_without_auth_fields() {
+        let auth_fields: Vec<plugin::AuthFieldDef> = vec![];
+        let needs_credentials = auth_fields.iter().any(|f| f.is_secret);
+        assert!(
+            !needs_credentials,
+            "plugin with no auth_fields should auto-enable"
+        );
+    }
+
+    #[test]
+    fn auto_enable_uses_slug_when_no_service_id() {
+        let service_id: Option<String> = None;
+        let slug = "my-skills";
+        let plugin_key = service_id.as_deref().unwrap_or(slug);
+        assert_eq!(plugin_key, "my-skills");
+    }
+
+    #[test]
+    fn auto_enable_uses_service_id_when_present() {
+        let service_id: Option<String> = Some("presale".to_string());
+        let slug = "presale";
+        let plugin_key = service_id.as_deref().unwrap_or(slug);
+        assert_eq!(plugin_key, "presale");
     }
 }

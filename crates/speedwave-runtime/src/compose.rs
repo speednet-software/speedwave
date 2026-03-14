@@ -3763,6 +3763,11 @@ services:
         );
     }
 
+    // Note: these tests verify the `service_id.unwrap_or(slug)` key lookup
+    // used in apply_plugins (compose.rs:325). We test the components (is_plugin_enabled
+    // + key derivation) rather than calling apply_plugins directly because apply_plugins
+    // reads from ~/.speedwave/plugins/ on the filesystem.
+
     #[test]
     fn test_resource_only_plugin_enabled_by_slug_appears_in_speedwave_plugins() {
         // A plugin without service_id should be toggled by slug.

@@ -207,6 +207,40 @@ describe('PluginsComponent', () => {
       expect(component.needsRestart).toBe(true);
     });
 
+    it('auto-enables plugin after save when configured and not enabled', async () => {
+      await component.ngOnInit();
+      // Mock: after save, get_plugins returns plugin as configured but not enabled
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'list_projects')
+          return {
+            projects: [{ name: 'test-project', dir: '/tmp/test' }],
+            active_project: 'test-project',
+          };
+        if (cmd === 'get_plugins')
+          return {
+            plugins: [
+              {
+                ...cloneMockPlugins().plugins[0],
+                configured: true,
+                enabled: false,
+              },
+              cloneMockPlugins().plugins[1],
+            ],
+          };
+        return undefined;
+      };
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      await component.handleSaveCredentials({
+        plugin: component.plugins[0],
+        credentials: { api_key: 'secret-123' },
+      });
+      expect(invokeSpy).toHaveBeenCalledWith('set_plugin_enabled', {
+        project: 'test-project',
+        serviceId: 'presale',
+        enabled: true,
+      });
+    });
+
     it('sets error on failure', async () => {
       await component.ngOnInit();
       mockTauri.invokeHandler = async (cmd: string) => {
