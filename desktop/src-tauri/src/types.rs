@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) const MAX_CREDENTIAL_BYTES: usize = 4096;
+
 // ---------------------------------------------------------------------------
 // DTOs
 // ---------------------------------------------------------------------------
@@ -199,7 +201,7 @@ mod tests {
 
     #[test]
     fn credential_value_length_limit() {
-        let max_len = 4096;
+        let max_len = MAX_CREDENTIAL_BYTES;
         let short_value = "a".repeat(max_len);
         assert!(short_value.len() <= max_len, "exactly at limit should pass");
 

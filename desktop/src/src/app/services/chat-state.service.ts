@@ -24,13 +24,25 @@ export type {
 /** Singleton service that holds chat session state across navigation. */
 @Injectable({ providedIn: 'root' })
 export class ChatStateService {
+  private _messages: ChatMessage[] = [];
   /** Completed messages (immutable — replaced on each change). */
-  messages: ChatMessage[] = [];
+  get messages(): readonly ChatMessage[] {
+    return this._messages;
+  }
+
+  private _currentBlocks: MessageBlock[] = [];
   /** Blocks accumulating during the current streaming assistant turn. */
-  currentBlocks: MessageBlock[] = [];
+  get currentBlocks(): readonly MessageBlock[] {
+    return this._currentBlocks;
+  }
+
   isStreaming = false;
+
+  private _sessionStats: SessionStats | null = null;
   /** Session cost/usage stats from the most recent result. */
-  sessionStats: SessionStats | null = null;
+  get sessionStats(): SessionStats | null {
+    return this._sessionStats;
+  }
 
   containerStatus: 'checking' | 'starting' | 'running' | 'error' = 'checking';
   containerError = '';
@@ -38,9 +50,27 @@ export class ChatStateService {
   activeProject: string | null = null;
 
   private unlisten: UnlistenFn | null = null;
+  private unlistenProjectSwitch: UnlistenFn | null = null;
   private listenerReady = false;
   private initialized = false;
   private tauri = inject(TauriService);
+
+  /**
+   * Test-only setter for private backing fields.
+   * @internal
+   * @param state - partial state to merge into the service
+   */
+  _setState(
+    state: Partial<{
+      messages: ChatMessage[];
+      currentBlocks: MessageBlock[];
+      sessionStats: SessionStats | null;
+    }>
+  ): void {
+    if (state.messages !== undefined) this._messages = state.messages;
+    if (state.currentBlocks !== undefined) this._currentBlocks = state.currentBlocks;
+    if (state.sessionStats !== undefined) this._sessionStats = state.sessionStats;
+  }
 
   /** Subscribers notified on every state change (components call markForCheck). */
   private changeListeners: Array<() => void> = [];
@@ -63,11 +93,12 @@ export class ChatStateService {
     }
   }
 
-  /** Ensures the stream listener and container check run exactly once. */
+  /** Ensures the stream listener, project switch listener, and container check run exactly once. */
   async init(): Promise<void> {
     if (!this.listenerReady) {
       this.listenerReady = true;
       await this.setupStreamListener();
+      await this.setupProjectSwitchListener();
     }
     if (!this.initialized) {
       this.initialized = true;
@@ -115,8 +146,8 @@ export class ChatStateService {
   async sendMessage(text: string): Promise<void> {
     if (!text || this.isStreaming) return;
 
-    this.messages = [
-      ...this.messages,
+    this._messages = [
+      ...this._messages,
       {
         role: 'user',
         blocks: [{ type: 'text', content: text }],
@@ -124,7 +155,7 @@ export class ChatStateService {
       },
     ];
     this.isStreaming = true;
-    this.currentBlocks = [];
+    this._currentBlocks = [];
     this.notifyChange();
 
     try {
@@ -146,8 +177,8 @@ export class ChatStateService {
           }
         } catch (retryErr) {
           this.isStreaming = false;
-          this.messages = [
-            ...this.messages,
+          this._messages = [
+            ...this._messages,
             {
               role: 'assistant',
               blocks: [{ type: 'error', content: `Failed to restart session: ${retryErr}` }],
@@ -159,8 +190,8 @@ export class ChatStateService {
         }
       }
       this.isStreaming = false;
-      this.messages = [
-        ...this.messages,
+      this._messages = [
+        ...this._messages,
         {
           role: 'assistant',
           blocks: [{ type: 'error', content: `Failed to send message: ${err}` }],
@@ -180,7 +211,7 @@ export class ChatStateService {
     const answer = selectedValues.join(', ');
 
     // Mark the question as answered in currentBlocks
-    this.currentBlocks = this.currentBlocks.map((b) =>
+    this._currentBlocks = this._currentBlocks.map((b) =>
       b.type === 'ask_user' && b.question.tool_id === toolUseId
         ? { ...b, question: { ...b.question, answered: true, selected_values: selectedValues } }
         : b
@@ -192,13 +223,13 @@ export class ChatStateService {
     } catch (err) {
       this.isStreaming = false;
       // Revert the optimistic answered state so the user can retry
-      this.currentBlocks = this.currentBlocks.map((b) =>
+      this._currentBlocks = this._currentBlocks.map((b) =>
         b.type === 'ask_user' && b.question.tool_id === toolUseId
           ? { ...b, question: { ...b.question, answered: false, selected_values: [] } }
           : b
       );
-      this.currentBlocks = [
-        ...this.currentBlocks,
+      this._currentBlocks = [
+        ...this._currentBlocks,
         { type: 'error', content: `Failed to send answer: ${err}` },
       ];
       this.notifyChange();
@@ -214,36 +245,37 @@ export class ChatStateService {
     switch (chunk.chunk_type) {
       case 'Text':
         this.isStreaming = true;
-        this.currentBlocks = appendOrCreateTextBlock(this.currentBlocks, chunk.data.content);
+        this._currentBlocks = appendOrCreateTextBlock(this._currentBlocks, chunk.data.content);
         break;
 
       case 'Thinking':
         this.isStreaming = true;
-        this.currentBlocks = appendOrCreateThinkingBlock(this.currentBlocks, chunk.data.content);
+        this._currentBlocks = appendOrCreateThinkingBlock(this._currentBlocks, chunk.data.content);
         break;
 
       case 'ToolStart': {
         const newTool: ToolUseBlock = {
+          type: 'tool_use',
           tool_id: chunk.data.tool_id,
           tool_name: chunk.data.tool_name,
           input_json: '',
           status: 'running',
           collapsed: false,
         };
-        this.currentBlocks = [...this.currentBlocks, { type: 'tool_use', tool: newTool }];
+        this._currentBlocks = [...this._currentBlocks, { type: 'tool_use', tool: newTool }];
         break;
       }
 
       case 'ToolInputDelta':
-        this.currentBlocks = updateToolInput(
-          this.currentBlocks,
+        this._currentBlocks = updateToolInput(
+          this._currentBlocks,
           chunk.data.tool_id,
           chunk.data.partial_json
         );
         break;
 
       case 'ToolResult':
-        this.currentBlocks = completeToolBlock(this.currentBlocks, chunk.data);
+        this._currentBlocks = completeToolBlock(this._currentBlocks, chunk.data);
         break;
 
       case 'AskUserQuestion': {
@@ -256,20 +288,20 @@ export class ChatStateService {
           answered: false,
           selected_values: [],
         };
-        this.currentBlocks = [...this.currentBlocks, { type: 'ask_user', question: askBlock }];
+        this._currentBlocks = [...this._currentBlocks, { type: 'ask_user', question: askBlock }];
         break;
       }
 
       case 'Result':
-        if (this.currentBlocks.length > 0) {
-          this.messages = [
-            ...this.messages,
-            { role: 'assistant', blocks: this.currentBlocks, timestamp: Date.now() },
+        if (this._currentBlocks.length > 0) {
+          this._messages = [
+            ...this._messages,
+            { role: 'assistant', blocks: [...this._currentBlocks], timestamp: Date.now() },
           ];
-          this.currentBlocks = [];
+          this._currentBlocks = [];
         }
         this.isStreaming = false;
-        this.sessionStats = {
+        this._sessionStats = {
           session_id: chunk.data.session_id,
           cost_usd: chunk.data.cost_usd ?? 0,
           total_cost: chunk.data.total_cost ?? 0,
@@ -278,16 +310,16 @@ export class ChatStateService {
         break;
 
       case 'Error':
-        this.currentBlocks = [
-          ...this.currentBlocks,
+        this._currentBlocks = [
+          ...this._currentBlocks,
           { type: 'error', content: chunk.data.content },
         ];
         // Finalize as error turn
-        this.messages = [
-          ...this.messages,
-          { role: 'assistant', blocks: this.currentBlocks, timestamp: Date.now() },
+        this._messages = [
+          ...this._messages,
+          { role: 'assistant', blocks: [...this._currentBlocks], timestamp: Date.now() },
         ];
-        this.currentBlocks = [];
+        this._currentBlocks = [];
         this.isStreaming = false;
         break;
 
@@ -299,10 +331,10 @@ export class ChatStateService {
 
   /** Clears all chat state to start a fresh conversation. */
   resetForNewConversation(): void {
-    this.messages = [];
-    this.currentBlocks = [];
+    this._messages = [];
+    this._currentBlocks = [];
     this.isStreaming = false;
-    this.sessionStats = null;
+    this._sessionStats = null;
     this.initialized = false;
     this.notifyChange();
   }
@@ -312,8 +344,28 @@ export class ChatStateService {
    * @param msgs - The messages to load.
    */
   loadMessages(msgs: ChatMessage[]): void {
-    this.messages = msgs;
+    this._messages = msgs;
     this.notifyChange();
+  }
+
+  /** Listens for project_switched events and restarts the chat session. */
+  private async setupProjectSwitchListener(): Promise<void> {
+    try {
+      this.unlistenProjectSwitch = await this.tauri.listen<string>('project_switched', async () => {
+        this._messages = [];
+        this._currentBlocks = [];
+        this.isStreaming = false;
+        this._sessionStats = null;
+        this.initialized = false;
+        this.notifyChange();
+        this.initialized = true;
+        await this.checkContainers();
+      });
+    } catch (err) {
+      if (this.tauri.isRunningInTauri()) {
+        console.error('Failed to set up project switch listener:', err);
+      }
+    }
   }
 
   /** Sets up the Tauri event listener for streaming chat responses. */
@@ -348,35 +400,35 @@ function appendOrCreateThinkingBlock(blocks: MessageBlock[], content: string): M
   if (last && last.type === 'thinking') {
     return [
       ...blocks.slice(0, -1),
-      { type: 'thinking', content: last.content + content, collapsed: true },
+      { type: 'thinking', content: last.content + content, collapsed: last.collapsed },
     ];
   }
   return [...blocks, { type: 'thinking', content, collapsed: true }];
 }
 
 function updateToolInput(blocks: MessageBlock[], toolId: string, delta: string): MessageBlock[] {
-  return blocks.map((b) =>
-    b.type === 'tool_use' && b.tool.tool_id === toolId
-      ? { ...b, tool: { ...b.tool, input_json: b.tool.input_json + delta } }
-      : b
-  );
+  return blocks.map((b) => {
+    if (b.type !== 'tool_use' || b.tool.tool_id !== toolId) return b;
+    return { ...b, tool: { ...b.tool, input_json: b.tool.input_json + delta } };
+  });
 }
 
 function completeToolBlock(
   blocks: MessageBlock[],
   data: { tool_id: string; content: string; is_error: boolean }
 ): MessageBlock[] {
-  return blocks.map((b) =>
-    b.type === 'tool_use' && b.tool.tool_id === data.tool_id
-      ? {
-          ...b,
-          tool: {
-            ...b.tool,
-            result: data.content,
-            result_is_error: data.is_error,
-            status: (data.is_error ? 'error' : 'done') as 'done' | 'error',
-          },
-        }
-      : b
-  );
+  return blocks.map((b) => {
+    if (b.type !== 'tool_use' || b.tool.tool_id !== data.tool_id) return b;
+    const base = {
+      type: 'tool_use' as const,
+      tool_id: b.tool.tool_id,
+      tool_name: b.tool.tool_name,
+      input_json: b.tool.input_json,
+      collapsed: b.tool.collapsed,
+    };
+    const tool: ToolUseBlock = data.is_error
+      ? { ...base, status: 'error', result: data.content, result_is_error: true }
+      : { ...base, status: 'done', result: data.content, result_is_error: false };
+    return { ...b, tool };
+  });
 }

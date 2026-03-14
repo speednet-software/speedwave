@@ -109,7 +109,7 @@ import { ToolNormalizerService } from '../../services/tool-normalizer.service';
               <pre class="code-block">{{ asGeneric(normalized).raw_json }}</pre>
             }
           }
-          @if (tool.result) {
+          @if (tool.status !== 'running') {
             <div class="tool-result" [class.tool-result-error]="tool.result_is_error">
               <div class="result-label">{{ tool.result_is_error ? 'Error' : 'Result' }}</div>
               <pre class="result-content">{{ tool.result }}</pre>

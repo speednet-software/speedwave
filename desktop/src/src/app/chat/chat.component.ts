@@ -45,6 +45,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private unsubChange: (() => void) | null = null;
+  private unlistenProjectSwitch: (() => void) | null = null;
 
   /** Subscribes to state changes from the service. */
   constructor() {
@@ -59,6 +60,28 @@ export class ChatComponent implements OnInit, OnDestroy {
     await this.chat.init();
     this.cdr.markForCheck();
     this.scrollToBottom();
+
+    this.tauri
+      .listen<string>('project_switched', async () => {
+        this.viewingTranscript = null;
+        const wasHistoryOpen = this.showHistory;
+        const wasMemoryOpen = this.showMemory;
+        this.conversations = [];
+        this.projectMemory = '';
+        this.cdr.markForCheck();
+        if (wasHistoryOpen) {
+          await this.loadConversations();
+        }
+        if (wasMemoryOpen) {
+          await this.loadProjectMemory();
+        }
+      })
+      .then((unlisten) => {
+        this.unlistenProjectSwitch = unlisten;
+      })
+      .catch((err) => {
+        console.warn('project_switched listener setup skipped:', err);
+      });
   }
 
   /** Retries the container health check. */
@@ -268,10 +291,14 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Unsubscribes from change notifications on component destruction. */
+  /** Unsubscribes from change notifications and event listeners on component destruction. */
   ngOnDestroy(): void {
     if (this.unsubChange) {
       this.unsubChange();
+    }
+    if (this.unlistenProjectSwitch) {
+      this.unlistenProjectSwitch();
+      this.unlistenProjectSwitch = null;
     }
   }
 }

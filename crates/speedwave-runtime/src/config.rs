@@ -1,4 +1,5 @@
 use crate::defaults;
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -183,12 +184,12 @@ impl SpeedwaveUserConfig {
         self.projects.iter_mut().find(|p| p.name == name)
     }
 
-    /// Looks up a project by name (mutable), returning an error if not found.
-    pub fn require_project_mut(&mut self, name: &str) -> anyhow::Result<&mut ProjectUserEntry> {
-        self.projects
-            .iter_mut()
-            .find(|p| p.name == name)
-            .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", name))
+    /// Returns the project entry for the currently active project, if any.
+    /// Convenience method that avoids the `active_project.as_deref() + find_project()` pattern.
+    pub fn active_project_entry(&self) -> Option<&ProjectUserEntry> {
+        self.active_project
+            .as_deref()
+            .and_then(|n| self.find_project(n))
     }
 }
 
@@ -346,6 +347,33 @@ pub(crate) fn save_user_config_to(config: &SpeedwaveUserConfig, path: &Path) -> 
     std::fs::write(&tmp_path, &content)?;
     std::fs::rename(&tmp_path, path)?;
     Ok(())
+}
+
+/// Acquires an exclusive file lock on `~/.speedwave/config.lock` and runs the
+/// closure `f` while the lock is held.  This prevents race conditions between
+/// concurrent processes (CLI vs Desktop) that read-modify-write `config.json`.
+pub fn with_config_lock<F, T>(f: F) -> anyhow::Result<T>
+where
+    F: FnOnce() -> anyhow::Result<T>,
+{
+    use fs2::FileExt;
+
+    let lock_path = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
+        .join(crate::consts::DATA_DIR)
+        .join("config.lock");
+
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let lock_file = std::fs::File::create(&lock_path)?;
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("Failed to acquire config lock at '{}'", lock_path.display()))?;
+    let result = f();
+    lock_file.unlock()?;
+    result
 }
 
 fn merge_env(base: &mut HashMap<String, String>, overlay: Option<HashMap<String, String>>) {
@@ -1214,19 +1242,60 @@ mod tests {
         assert_eq!(config.projects[0].dir, "/updated/path");
     }
 
+    // -- active_project_entry tests --
+
     #[test]
-    fn test_require_project_mut_modifies_entry() {
-        let mut config = make_config_with_projects();
-        let project = config.require_project_mut("beta").unwrap();
-        project.dir = "/new/beta".to_string();
-        assert_eq!(config.projects[1].dir, "/new/beta");
+    fn test_active_project_entry_returns_matching_project() {
+        let config = SpeedwaveUserConfig {
+            projects: vec![
+                ProjectUserEntry {
+                    name: "alpha".to_string(),
+                    dir: "/tmp/alpha".to_string(),
+                    claude: None,
+                    integrations: None,
+                    plugin_settings: None,
+                },
+                ProjectUserEntry {
+                    name: "beta".to_string(),
+                    dir: "/tmp/beta".to_string(),
+                    claude: None,
+                    integrations: None,
+                    plugin_settings: None,
+                },
+            ],
+            active_project: Some("beta".to_string()),
+            selected_ide: None,
+            log_level: None,
+        };
+        let entry = config.active_project_entry();
+        assert!(entry.is_some());
+        assert_eq!(entry.unwrap().name, "beta");
     }
 
     #[test]
-    fn test_require_project_mut_not_found_returns_error() {
-        let mut config = make_config_with_projects();
-        let result = config.require_project_mut("missing");
-        assert!(result.is_err());
+    fn test_active_project_entry_returns_none_when_no_active() {
+        let config = make_config_with_projects();
+        assert!(config.active_project_entry().is_none());
+    }
+
+    #[test]
+    fn test_active_project_entry_returns_none_when_dangling() {
+        let config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "alpha".to_string(),
+                dir: "/tmp/alpha".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: Some("deleted-project".to_string()),
+            selected_ide: None,
+            log_level: None,
+        };
+        assert!(
+            config.active_project_entry().is_none(),
+            "should return None when active_project references a non-existent project"
+        );
     }
 
     // -- OsIntegrationsConfig::set_service tests --

@@ -52,8 +52,8 @@ pub trait ContainerRuntime: Send + Sync {
     ///
     /// This bug affects all containerd overlayfs setups, including native
     /// Linux (NerdctlRuntime), Lima VM (LimaRuntime), and WSL2 (WslRuntime).
-    /// All three override this method. The default no-op exists only as a
-    /// fallback for future runtimes that may not use containerd.
+    /// All three current runtime implementations (`LimaRuntime`, `NerdctlRuntime`,
+    /// `WslRuntime`) override this method with `nerdctl system prune --force`.
     fn system_prune(&self) -> anyhow::Result<()> {
         Ok(())
     }

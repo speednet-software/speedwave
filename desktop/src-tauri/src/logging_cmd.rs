@@ -2,8 +2,6 @@
 
 use speedwave_runtime::config;
 
-use super::CONFIG_LOCK;
-
 pub(crate) fn parse_log_level(s: &str) -> Option<log::LevelFilter> {
     match s.to_lowercase().as_str() {
         "error" => Some(log::LevelFilter::Error),
@@ -32,12 +30,11 @@ pub(crate) fn get_log_level() -> String {
 }
 
 fn persist_log_level(level: &str) -> anyhow::Result<()> {
-    let _lock = CONFIG_LOCK
-        .lock()
-        .map_err(|e| anyhow::anyhow!("config lock poisoned: {e}"))?;
-    let mut config = config::load_user_config()?;
-    config.log_level = Some(level.to_lowercase());
-    config::save_user_config(&config)
+    config::with_config_lock(|| {
+        let mut config = config::load_user_config()?;
+        config.log_level = Some(level.to_lowercase());
+        config::save_user_config(&config)
+    })
 }
 
 /// Removes old rotated log files, keeping at most `max_files` recent ones.

@@ -11,14 +11,39 @@ describe('ToolBlockComponent', () => {
   /** Counter to ensure unique tool_ids across tests. */
   let toolIdCounter = 0;
 
-  const makeTool = (overrides: Partial<ToolUseBlock> = {}): ToolUseBlock => ({
-    tool_id: `t${++toolIdCounter}`,
-    tool_name: 'Read',
-    input_json: '{"file_path":"/src/main.rs"}',
-    status: 'done',
-    collapsed: false,
-    ...overrides,
-  });
+  /**
+   * Creates a ToolUseBlock for testing — defaults to 'done' status.
+   * @param overrides fields to override in the default block
+   */
+  function makeTool(overrides: Record<string, unknown> = {}): ToolUseBlock {
+    const id = `t${++toolIdCounter}`;
+    const base = {
+      type: 'tool_use' as const,
+      tool_id: id,
+      tool_name: 'Read',
+      input_json: '{"file_path":"/src/main.rs"}',
+      collapsed: false,
+    };
+    if (overrides['status'] === 'running') {
+      return { ...base, status: 'running', ...overrides } as ToolUseBlock;
+    }
+    if (overrides['status'] === 'error' || overrides['result_is_error'] === true) {
+      return {
+        ...base,
+        status: 'error',
+        result: (overrides['result'] as string) ?? '',
+        result_is_error: true,
+        ...overrides,
+      } as ToolUseBlock;
+    }
+    return {
+      ...base,
+      status: 'done',
+      result: (overrides['result'] as string) ?? '',
+      result_is_error: false,
+      ...overrides,
+    } as ToolUseBlock;
+  }
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
