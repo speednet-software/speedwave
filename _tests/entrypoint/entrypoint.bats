@@ -13,6 +13,9 @@ setup() {
     RESOURCES_DIR="$(mktemp -d)"
     export SPEEDWAVE_RESOURCES="$RESOURCES_DIR"
 
+    # CLAUDE_VERSION is required — set a default for tests that don't care about it
+    export CLAUDE_VERSION="2.1.76"
+
     # Stubs dir goes first in PATH; also strip real claude locations
     STUBS_DIR="$(mktemp -d)"
     export STUBS_DIR
@@ -21,10 +24,10 @@ setup() {
         | tr '\n' ':' | sed 's/:$//')"
     export PATH="$CLEAN_PATH"
 
-    # Default stub: claude already installed — skip curl
+    # Default stub: claude already installed — skip install
     cat > "$STUBS_DIR/claude" << 'EOF'
 #!/bin/bash
-echo "2.1.45 (Claude Code)"
+echo "2.1.76 (Claude Code)"
 EOF
     chmod +x "$STUBS_DIR/claude"
 
@@ -42,56 +45,49 @@ teardown() {
 }
 
 # ---------------------------------------------------------------------------
-# CLAUDE_VERSION — default and passthrough
+# CLAUDE_VERSION — required (no default)
 # ---------------------------------------------------------------------------
 
-@test "CLAUDE_VERSION defaults to 'latest' when env var is unset" {
-    rm -f "$STUBS_DIR/claude"  # force install path
-
-    local version_file
-    version_file="$(mktemp)"
-
-    # curl stub: entrypoint calls `curl -fsSL <url> -o <file>`, so parse -o to find output path
-    # and write a tiny script that records $1 (the version) into version_file
-    cat > "$STUBS_DIR/curl" << EOF
-#!/bin/bash
-OUT=""
-while [[ \$# -gt 0 ]]; do
-  case "\$1" in -o) OUT="\$2"; shift 2;; *) shift;; esac
-done
-[ -n "\$OUT" ] && echo "echo \\\$1 > ${version_file}" > "\$OUT"
-EOF
-    chmod +x "$STUBS_DIR/curl"
-
-    CLAUDE_VERSION="" run bash "$ENTRYPOINT" true 2>/dev/null || true
-
-    [[ -s "$version_file" ]]
-    grep -q "latest" "$version_file"
-    rm -f "$version_file"
+@test "fails when CLAUDE_VERSION is not set" {
+    unset CLAUDE_VERSION
+    run bash "$ENTRYPOINT" true
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CLAUDE_VERSION"* ]]
 }
 
-@test "CLAUDE_VERSION env var is forwarded to install.sh" {
-    rm -f "$STUBS_DIR/claude"
+# ---------------------------------------------------------------------------
+# CLAUDE_VERSION env var forwarded to install-claude.sh
+# ---------------------------------------------------------------------------
 
+@test "CLAUDE_VERSION env var is forwarded to install-claude.sh" {
+    rm -f "$STUBS_DIR/claude"  # force install path
+
+    # Create a fake install-claude.sh that records the version
     local version_file
     version_file="$(mktemp)"
 
-    # curl stub: parse -o flag, write installer script to the output file
-    cat > "$STUBS_DIR/curl" << EOF
-#!/bin/bash
-OUT=""
-while [[ \$# -gt 0 ]]; do
-  case "\$1" in -o) OUT="\$2"; shift 2;; *) shift;; esac
-done
-[ -n "\$OUT" ] && echo "echo \\\$1 > ${version_file}" > "\$OUT"
-EOF
-    chmod +x "$STUBS_DIR/curl"
+    local patched
+    patched="$(mktemp)"
+    sed "s|/usr/local/bin/install-claude.sh|${STUBS_DIR}/install-claude.sh|g" "$ENTRYPOINT" > "$patched"
 
-    CLAUDE_VERSION="stable" run bash "$ENTRYPOINT" true 2>/dev/null || true
+    cat > "$STUBS_DIR/install-claude.sh" << EOF
+#!/bin/bash
+echo "\$1" > ${version_file}
+# Make claude "appear" installed after this
+mkdir -p "${STUBS_DIR}"
+cat > "${STUBS_DIR}/claude" << 'INNER'
+#!/bin/bash
+echo "2.1.76 (Claude Code)"
+INNER
+chmod +x "${STUBS_DIR}/claude"
+EOF
+    chmod +x "$STUBS_DIR/install-claude.sh"
+
+    CLAUDE_VERSION="2.1.76" run bash "$patched" true 2>/dev/null || true
 
     [[ -s "$version_file" ]]
-    grep -q "stable" "$version_file"
-    rm -f "$version_file"
+    grep -q "2.1.76" "$version_file"
+    rm -f "$version_file" "$patched"
 }
 
 # ---------------------------------------------------------------------------
@@ -194,7 +190,7 @@ EOF
     mkdir -p "$HOME/.local/bin"
     cat > "$HOME/.local/bin/claude" << 'EOF'
 #!/bin/bash
-echo "2.1.45 (Claude Code)"
+echo "2.1.76 (Claude Code)"
 EOF
     chmod +x "$HOME/.local/bin/claude"
     # Remove stub from STUBS_DIR so only the ~/.local/bin one exists
@@ -210,14 +206,6 @@ EOF
 # ---------------------------------------------------------------------------
 
 @test "symlinks claude from /usr/local/bin to ~/.local/bin" {
-    # Create a fake /usr/local/bin/claude via stubs dir already in PATH.
-    # The entrypoint checks /usr/local/bin/claude specifically, so we need
-    # to place a file there. Instead we use the stubs dir as a stand-in:
-    # override the check by making the stub look like /usr/local/bin/claude.
-    # Since we can't write to /usr/local/bin in tests, we verify the symlink
-    # logic by placing claude in STUBS_DIR (which is in PATH) and checking
-    # that entrypoint creates ~/.local/bin/claude when /usr/local/bin/claude exists.
-
     # Create a temporary "fake /usr/local/bin" to satisfy the -x check
     local fake_usr_local="$TEST_HOME/fake-usr-local-bin"
     mkdir -p "$fake_usr_local"

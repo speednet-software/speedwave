@@ -111,11 +111,24 @@ impl ContainerRuntime for NerdctlRuntime {
             .unwrap_or(false)
     }
 
-    fn build_image(&self, tag: &str, context_dir: &str, containerfile: &str) -> anyhow::Result<()> {
-        self.runner.run(
-            "nerdctl",
-            &["build", "-t", tag, "-f", containerfile, context_dir],
-        )?;
+    fn build_image(
+        &self,
+        tag: &str,
+        context_dir: &str,
+        containerfile: &str,
+        build_args: &[(&str, &str)],
+    ) -> anyhow::Result<()> {
+        let ba_strings: Vec<String> = build_args
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        let mut args: Vec<&str> = vec!["build", "-t", tag, "-f", containerfile];
+        for s in &ba_strings {
+            args.push("--build-arg");
+            args.push(s);
+        }
+        args.push(context_dir);
+        self.runner.run("nerdctl", &args)?;
         Ok(())
     }
 

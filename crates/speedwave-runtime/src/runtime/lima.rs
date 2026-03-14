@@ -289,24 +289,36 @@ impl ContainerRuntime for LimaRuntime {
             .unwrap_or(false)
     }
 
-    fn build_image(&self, tag: &str, context_dir: &str, containerfile: &str) -> anyhow::Result<()> {
+    fn build_image(
+        &self,
+        tag: &str,
+        context_dir: &str,
+        containerfile: &str,
+        build_args: &[(&str, &str)],
+    ) -> anyhow::Result<()> {
         self.require_running()?;
-        self.runner.run(
-            "limactl",
-            &[
-                "shell",
-                consts::LIMA_VM_NAME,
-                "--",
-                "sudo",
-                "nerdctl",
-                "build",
-                "-t",
-                tag,
-                "-f",
-                containerfile,
-                context_dir,
-            ],
-        )?;
+        let ba_strings: Vec<String> = build_args
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        let mut args: Vec<&str> = vec![
+            "shell",
+            consts::LIMA_VM_NAME,
+            "--",
+            "sudo",
+            "nerdctl",
+            "build",
+            "-t",
+            tag,
+            "-f",
+            containerfile,
+        ];
+        for s in &ba_strings {
+            args.push("--build-arg");
+            args.push(s);
+        }
+        args.push(context_dir);
+        self.runner.run("limactl", &args)?;
         Ok(())
     }
 

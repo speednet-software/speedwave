@@ -377,7 +377,13 @@ mod tests {
             fn ensure_ready(&self) -> anyhow::Result<()> {
                 Ok(())
             }
-            fn build_image(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+            fn build_image(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &[(&str, &str)],
+            ) -> anyhow::Result<()> {
                 Ok(())
             }
             fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {

@@ -10,15 +10,19 @@ Claude Code running on the host would have unrestricted access to the filesystem
 
 ## Installation Mechanism
 
-`entrypoint.sh` uses the official native installer with a version pin:[^36]
+Claude Code is installed via `install-claude.sh` — a reusable script (SSOT) used by both `Containerfile.claude` (build time) and `entrypoint.sh` (runtime fallback):[^36]
 
 ```bash
-curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}"
+/usr/local/bin/install-claude.sh "${CLAUDE_VERSION}"
 ```
 
-- `CLAUDE_VERSION` is injected from `defaults.rs` by `render_compose()` — always a concrete version, never "latest"
+- `CLAUDE_VERSION` is a pinned semver (e.g. `2.1.76`) in `defaults.rs` — never "latest" or "stable"
+- At build time, the version is passed as `--build-arg CLAUDE_VERSION=X.Y.Z` via the `ContainerRuntime::build_image()` trait
+- At runtime, `render_compose()` injects it as an environment variable from `defaults::CLAUDE_VERSION`
 - `DISABLE_AUTOUPDATER=1` prevents auto-update after pinned installation
-- Version verification: `claude --version` output is compared to expected version; mismatch causes `exit 1` (fail fast)
+- The official installer (`bootstrap.sh`) verifies the downloaded binary's SHA256 against a version-pinned manifest.json from GCS
+
+**Accepted residual risk (CWE-494 of bootstrap.sh):** The bootstrap script is fetched via TLS (`--proto '=https' --tlsv1.2`) without hash verification — identical to rustup, nvm, and homebrew. Hash-pinning the bootstrap script is operationally fragile (it changes independently of Claude Code versions). Mitigating factors: (1) official Anthropic installer, (2) TLS protection, (3) installer verifies binary SHA256, (4) container isolation (cap_drop ALL, no tokens, read-only FS).
 
 ## Persistent Volume
 

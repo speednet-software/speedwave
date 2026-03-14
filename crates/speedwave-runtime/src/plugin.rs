@@ -541,6 +541,7 @@ fn build_single_plugin_image(
         &tag,
         &vm_root.to_string_lossy(),
         &containerfile.to_string_lossy(),
+        &[],
     )?;
 
     // Remove the pending marker on success
