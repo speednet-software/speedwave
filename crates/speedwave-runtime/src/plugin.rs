@@ -541,6 +541,7 @@ fn build_single_plugin_image(
         &tag,
         &vm_root.to_string_lossy(),
         &containerfile.to_string_lossy(),
+        &[],
     )?;
 
     // Remove the pending marker on success
@@ -673,6 +674,24 @@ fn yaml_quote_entry(entry: &str) -> String {
 fn extract_zip(zip_path: &Path, dest: &Path) -> anyhow::Result<()> {
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
+
+    // Pre-validate: reject dangerous entries before writing anything to disk.
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i)?;
+        let name = entry.name().to_owned();
+        if entry.enclosed_name().is_none() {
+            let reason = if name.starts_with('/') || name.starts_with('\\') {
+                "absolute path"
+            } else {
+                "path traversal"
+            };
+            anyhow::bail!("Rejected ZIP entry with {}: '{}'", reason, name);
+        }
+        if entry.is_symlink() {
+            anyhow::bail!("Rejected symlink entry '{}' in plugin archive", name);
+        }
+    }
+
     archive.extract(dest)?;
     Ok(())
 }
@@ -2053,6 +2072,158 @@ mod tests {
             result.ends_with(expected_suffix),
             "token_dir should return ~/.speedwave/tokens/<project>/<service_id>, got: {}",
             result.display()
+        );
+    }
+
+    // --- Zip Slip security tests (issue #36) ---
+
+    #[test]
+    fn test_extract_zip_safe_archive() {
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("safe.zip");
+        let extract_dir = tmp.path().join("extracted");
+        std::fs::create_dir_all(&extract_dir).unwrap();
+
+        let buf = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(buf);
+        let options = SimpleFileOptions::default();
+        writer.start_file("plugin.json", options).unwrap();
+        writer.write_all(b"{}").unwrap();
+        writer.start_file("Containerfile", options).unwrap();
+        writer.write_all(b"FROM scratch").unwrap();
+        let buf = writer.finish().unwrap();
+        std::fs::write(&zip_path, buf.into_inner()).unwrap();
+
+        extract_zip(&zip_path, &extract_dir).unwrap();
+
+        assert!(extract_dir.join("plugin.json").exists());
+        assert!(extract_dir.join("Containerfile").exists());
+        assert!(validate_extracted_paths(&extract_dir).is_ok());
+    }
+
+    #[test]
+    fn test_extract_zip_rejects_path_traversal() {
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("traversal.zip");
+        let extract_dir = tmp.path().join("extracted");
+        std::fs::create_dir_all(&extract_dir).unwrap();
+
+        let buf = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(buf);
+        let options = SimpleFileOptions::default();
+        writer.start_file("../../etc/passwd", options).unwrap();
+        writer.write_all(b"malicious").unwrap();
+        let buf = writer.finish().unwrap();
+        std::fs::write(&zip_path, buf.into_inner()).unwrap();
+
+        let result = extract_zip(&zip_path, &extract_dir);
+        assert!(result.is_err(), "extract_zip should reject path traversal");
+        assert!(
+            result.unwrap_err().to_string().contains("path traversal"),
+            "Error should mention 'path traversal'"
+        );
+
+        // File must not escape the extraction directory
+        assert!(
+            !tmp.path().join("etc").exists(),
+            "Traversal file should not exist outside extract dir"
+        );
+    }
+
+    #[test]
+    fn test_extract_zip_rejects_absolute_path() {
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("absolute.zip");
+        let extract_dir = tmp.path().join("extracted");
+        std::fs::create_dir_all(&extract_dir).unwrap();
+
+        let buf = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(buf);
+        let options = SimpleFileOptions::default();
+        writer.start_file("/etc/passwd", options).unwrap();
+        writer.write_all(b"malicious").unwrap();
+        let buf = writer.finish().unwrap();
+        std::fs::write(&zip_path, buf.into_inner()).unwrap();
+
+        let result = extract_zip(&zip_path, &extract_dir);
+        assert!(result.is_err(), "extract_zip should reject absolute paths");
+        assert!(
+            result.unwrap_err().to_string().contains("absolute path"),
+            "Error should mention 'absolute path'"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_extract_zip_rejects_symlink() {
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("symlink.zip");
+        let extract_dir = tmp.path().join("extracted");
+        std::fs::create_dir_all(&extract_dir).unwrap();
+
+        let outside = tmp.path().join("secret.txt");
+        std::fs::write(&outside, "sensitive data").unwrap();
+
+        let buf = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(buf);
+        let options = SimpleFileOptions::default();
+        writer.start_file("plugin.json", options).unwrap();
+        writer.write_all(b"{}").unwrap();
+        writer
+            .add_symlink("escape-link", outside.to_string_lossy(), options)
+            .unwrap();
+        let buf = writer.finish().unwrap();
+        std::fs::write(&zip_path, buf.into_inner()).unwrap();
+
+        // Pre-validation rejects symlinks before anything is written
+        let result = extract_zip(&zip_path, &extract_dir);
+        assert!(result.is_err(), "extract_zip should reject symlink entries");
+        assert!(
+            result.unwrap_err().to_string().contains("symlink"),
+            "Error should mention symlink"
+        );
+
+        // Symlink was never created on disk
+        assert!(
+            extract_dir.join("escape-link").symlink_metadata().is_err(),
+            "Symlink should not exist — rejected before extraction"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_extracted_paths_catches_dir_symlink_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("plugins");
+        std::fs::create_dir_all(&base).unwrap();
+
+        let outside_dir = tmp.path().join("outside-secrets");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        std::fs::write(outside_dir.join("credentials.json"), "secret").unwrap();
+
+        std::os::unix::fs::symlink(&outside_dir, base.join("escape-dir")).unwrap();
+
+        let result = validate_extracted_paths(&base);
+        assert!(result.is_err(), "Should detect directory symlink escape");
+        assert!(
+            format!("{:?}", result.unwrap_err()).contains("Zip Slip"),
+            "Error should mention Zip Slip"
         );
     }
 }

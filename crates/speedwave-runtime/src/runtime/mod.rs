@@ -22,7 +22,13 @@ pub trait ContainerRuntime: Send + Sync {
     fn container_exec_piped(&self, container: &str, cmd: &[&str]) -> anyhow::Result<Command>;
     fn is_available(&self) -> bool;
     fn ensure_ready(&self) -> anyhow::Result<()>;
-    fn build_image(&self, tag: &str, context_dir: &str, containerfile: &str) -> anyhow::Result<()>;
+    fn build_image(
+        &self,
+        tag: &str,
+        context_dir: &str,
+        containerfile: &str,
+        build_args: &[(&str, &str)],
+    ) -> anyhow::Result<()>;
     /// Translates a host build-root path into one accessible by the container engine.
     ///
     /// Default: identity (Linux nerdctl — paths are already native).

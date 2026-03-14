@@ -32,7 +32,7 @@ LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
         check-clippy check-desktop-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
         coverage coverage-rust coverage-mcp coverage-html \
-        audit audit-rust audit-mcp \
+        audit audit-rust audit-mcp audit-desktop \
         fmt lint status \
         download-lima clean-lima \
         download-nodejs clean-nodejs \
@@ -473,17 +473,22 @@ check-angular-lint:
 
 # ── Security audit ────────────────────────────────────────────────────────────
 
-audit: audit-rust audit-mcp
+audit: audit-rust audit-mcp audit-desktop
 	@echo "\n✅ No known vulnerabilities"
 
 audit-rust:
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "❌ cargo-audit not found. Install: cargo install cargo-audit"; exit 1; }
 	cargo audit
+	cargo audit --file desktop/src-tauri/Cargo.lock
 	@echo "✅ Rust dependencies: no vulnerabilities"
 
 audit-mcp:
 	cd mcp-servers && npm audit --omit=dev
 	@echo "✅ MCP dependencies: no vulnerabilities"
+
+audit-desktop:
+	cd desktop/src && npm audit --omit=dev
+	@echo "✅ Desktop dependencies: no vulnerabilities"
 
 # ── Full quality gate (run before push) ──────────────────────────────────────
 

@@ -44,10 +44,9 @@ This has significant architectural implications for Speedwave. See Section 1 for
 
 ```
 User installs Speedwave
-  └── Speedwave's first-run wizard checks if Claude Code is installed
-      If missing, installs it using the official native installer:
-        macOS/Linux: curl -fsSL https://claude.ai/install.sh | bash
-        Windows:     irm https://claude.ai/install.ps1 | iex
+  └── Speedwave builds the Claude container image with a pinned version:
+        install-claude.sh <version> (SSOT script, uses official installer)
+      The official installer (bootstrap.sh) verifies binary SHA256 via GCS manifest
       User authenticates directly with Anthropic (their own account/API key)
       Speedwave orchestrates their local Claude Code instance as a subprocess
 ```

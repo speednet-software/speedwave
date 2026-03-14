@@ -67,7 +67,7 @@ pub trait ContainerRuntime: Send + Sync {
     fn container_exec_piped(&self, container: &str, cmd: &[&str]) -> Command;
     fn is_available(&self) -> bool;
     fn ensure_ready(&self) -> anyhow::Result<()>;
-    fn build_image(&self, tag: &str, context_dir: &str, containerfile: &str) -> anyhow::Result<()>;
+    fn build_image(&self, tag: &str, context_dir: &str, containerfile: &str, build_args: &[(&str, &str)]) -> anyhow::Result<()>;
     fn container_logs(&self, container: &str, tail: u32) -> anyhow::Result<String>;
     fn compose_logs(&self, project: &str, tail: u32) -> anyhow::Result<String>;
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()>;

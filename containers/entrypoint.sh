@@ -11,32 +11,14 @@ export TERM="${TERM:-xterm-256color}"
 # Fallback: if missing (e.g. custom image), install at runtime.
 export PATH="/usr/local/bin:${HOME}/.local/bin:${PATH}"
 
-CLAUDE_VERSION="${CLAUDE_VERSION:-latest}"
+CLAUDE_VERSION="${CLAUDE_VERSION:?CLAUDE_VERSION env var is required}"
 
 # Resources mount point — overridable for testing
 SPEEDWAVE_RESOURCES="${SPEEDWAVE_RESOURCES:-/speedwave/resources}"
 
 if ! command -v claude &> /dev/null; then
-    echo "Installing Claude Code (${CLAUDE_VERSION})..."
-    INSTALLER=$(mktemp)
-    curl -fsSL https://claude.ai/install.sh -o "$INSTALLER"
-    # SHA256 verification — update hash when CLAUDE_VERSION changes
-    EXPECTED_SHA256="${CLAUDE_INSTALLER_SHA256:-}"
-    if [ -n "$EXPECTED_SHA256" ]; then
-        ACTUAL_SHA256=$(sha256sum "$INSTALLER" | cut -d' ' -f1)
-        if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
-            echo "FATAL: install.sh SHA256 mismatch!" >&2
-            echo "  expected: $EXPECTED_SHA256" >&2
-            echo "  actual:   $ACTUAL_SHA256" >&2
-            rm -f "$INSTALLER"
-            exit 1
-        fi
-        echo "SHA256 verified: $ACTUAL_SHA256"
-    else
-        echo "WARNING: CLAUDE_INSTALLER_SHA256 not set — skipping verification"
-    fi
-    bash "$INSTALLER" "${CLAUDE_VERSION}"
-    rm -f "$INSTALLER"
+    echo "Claude Code not found — installing via install-claude.sh (${CLAUDE_VERSION})..."
+    /usr/local/bin/install-claude.sh "${CLAUDE_VERSION}"
 fi
 
 # Ensure ~/.local/bin is in PATH for interactive shells (nerdctl exec runs bash).
