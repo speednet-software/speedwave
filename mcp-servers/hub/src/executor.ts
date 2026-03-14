@@ -5,6 +5,7 @@
  * Executes model-generated JavaScript code in a restricted context.
  * Security is provided by:
  * - Forbidden pattern validation (no eval, require, process, fs, etc.)
+ * - Prototype chain traversal prevention (ADR-029)
  * - Restricted context (only whitelisted globals injected)
  * - Execution timeout
  * - PII tokenization (sensitive data replaced before reaching model)
@@ -13,6 +14,7 @@
  * Security Model:
  * ✅ AsyncFunction with restricted globals (no process, require, fs)
  * ✅ Forbidden pattern validation before execution
+ * ✅ Prototype chain hardening — .constructor, __proto__, getPrototypeOf, Proxy, Reflect blocked (ADR-029)
  * ✅ Timeout enforcement
  * ✅ Docker isolation (container has no tokens, read-only fs)
  * ✅ Error sanitization
@@ -90,23 +92,44 @@ export interface ExecuteCodeParams {
   timeoutMs: number;
 }
 
+// Captured once at module load — this is executor-internal code, NOT user-submitted.
+// FORBIDDEN_PATTERNS validation applies only to user-supplied code strings, not this bootstrap.
+const AsyncFunction: new (...args: string[]) => (...a: unknown[]) => Promise<unknown> =
+  Object.getPrototypeOf(async function () {}).constructor;
+
 /**
  * Forbidden patterns in user code (security)
  * These are checked before execution
  */
 const FORBIDDEN_PATTERNS = [
+  // Code injection
   /\beval\s*\(/,
   /\bFunction\s*\(/,
+  // Module loading
   /\brequire\s*\(/,
-  /\bimport\s*\(/, // Dynamic import
+  /\bimport\s*\(/,
+  // Process / runtime access
   /\bprocess\b/,
   /\bglobalThis\b/,
+  /\bglobal\b/,
   /\b__dirname\b/,
   /\b__filename\b/,
   /\bchild_process\b/,
+  // Network / filesystem access
   /\bfs\s*\./,
   /\bnet\s*\./,
   /\bhttp[s]?\s*\./,
+  // Prototype chain traversal prevention (ADR-029)
+  /\.constructor\b/,
+  /\.__proto__\b/,
+  /\bgetPrototypeOf\b/,
+  /\bsetPrototypeOf\b/,
+  /\bProxy\s*\(/,
+  /\bReflect\b/,
+  // Bracket-notation bypasses (ADR-029)
+  /\[\s*['"`]constructor['"`]\s*\]/,
+  /\[\s*['"`]__proto__['"`]\s*\]/,
+  /\[\s*['"`]prototype['"`]\s*\]/,
 ];
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -510,7 +533,6 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
     `;
 
     // Create async function with sandbox context
-    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
     const contextKeys = Object.keys(sandboxContext);
     const contextValues = Object.values(sandboxContext);
 

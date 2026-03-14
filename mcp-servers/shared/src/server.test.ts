@@ -1444,6 +1444,68 @@ describe('server', () => {
       expect(res.status).toHaveBeenCalledWith(429);
       expect(res.json).toHaveBeenCalledWith({ error: 'Too Many Requests' });
       expect(res.setHeader).toHaveBeenCalledWith('Retry-After', '60');
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('RATE_LIMIT'));
+    });
+
+    it('logs RATE_LIMIT with method, path, and IP', () => {
+      const server = createMCPServer({
+        name: 'rate-log-test',
+        version: '1.0.0',
+        port: 3000,
+        rateLimit: { maxRequests: 1, windowMs: 60_000 },
+      });
+
+      const layers = (server.app as any)._router.stack;
+      const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
+
+      const makeReq = () => {
+        const req = createMockRequest({}, {});
+        (req as any).path = '/mcp';
+        (req as any).method = 'POST';
+        (req as any).ip = '10.0.0.99';
+        return req;
+      };
+
+      // Exhaust limit
+      rlLayer.handle(makeReq(), createMockResponse(), vi.fn());
+
+      // Trigger rate limit
+      const res = createMockResponse();
+      rlLayer.handle(makeReq(), res, vi.fn());
+
+      expect(console.warn).toHaveBeenCalledWith(
+        expect.stringMatching(/RATE_LIMIT POST \/mcp from 10\.0\.0\.99/)
+      );
+    });
+
+    it('sanitizes control characters in rate limit log path', () => {
+      const server = createMCPServer({
+        name: 'rate-sanitize-test',
+        version: '1.0.0',
+        port: 3000,
+        rateLimit: { maxRequests: 1, windowMs: 60_000 },
+      });
+
+      const layers = (server.app as any)._router.stack;
+      const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
+
+      const makeReq = () => {
+        const req = createMockRequest({}, {});
+        (req as any).path = '/bad\x00path\x1b[31m';
+        (req as any).method = 'GET';
+        (req as any).ip = '10.0.0.1';
+        return req;
+      };
+
+      // Exhaust limit
+      rlLayer.handle(makeReq(), createMockResponse(), vi.fn());
+
+      // Trigger rate limit
+      rlLayer.handle(makeReq(), createMockResponse(), vi.fn());
+
+      expect(console.warn).toHaveBeenCalledWith(
+        expect.stringMatching(/RATE_LIMIT GET \/bad\?path\?\[31m from 10\.0\.0\.1/)
+      );
     });
 
     it('skips /health from rate limiting', () => {

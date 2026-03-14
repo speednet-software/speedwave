@@ -54,6 +54,17 @@ When implementing any feature, ask these questions:
 - **Container ↔ Container**: per-project network isolation (`speedwave_<project>_network`)
 - **Worker ↔ Worker**: token isolation — each worker has access only to its own service credentials
 
+## Executor Sandbox (MCP Hub)
+
+The MCP Hub executes model-generated JavaScript in a restricted `AsyncFunction` sandbox. Security is provided by multiple layers:
+
+- **Forbidden pattern denylist** — regex-based validation blocks dangerous APIs (`eval`, `require`, `process`, `globalThis`, etc.) and prototype chain traversal vectors (`.constructor`, `.__proto__`, `getPrototypeOf`, `Reflect`, `Proxy`, bracket-notation equivalents) before code execution
+- **Restricted context** — only whitelisted globals (service bridges, `JSON`, `Date`, `Math`, `Array`, `Object`, etc.) are injected into the sandbox scope
+- **Execution timeout** — prevents denial-of-service via infinite loops
+- **PII tokenization** — sensitive data is replaced with tokens before reaching the model
+
+This is **defense-in-depth**: even if the sandbox is bypassed, the attacker lands in a container with zero tokens, `cap_drop: ALL`, `no-new-privileges`, and a read-only filesystem. See [ADR-029](../adr/ADR-029-sandbox-prototype-chain-hardening.md) for the prototype chain hardening decision.
+
 ## SSRF Protection (SEC-015)
 
 The MCP Hub HTTP bridge validates all outbound worker URLs at the single resolution

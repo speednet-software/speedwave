@@ -35,6 +35,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-026](ADR-026-linux-rootless-container-user.md)                    | Linux Rootless nerdctl — Per-Platform Container User    | Accepted              |
 | [ADR-027](ADR-027-native-directory-structure.md)                       | Native Directory Structure                              | Accepted              |
 | [ADR-028](ADR-028-tauri-over-electron.md)                              | Tauri v2 over Electron for Desktop Shell                | Accepted              |
+| [ADR-029](ADR-029-sandbox-prototype-chain-hardening.md)                | Sandbox Prototype Chain Hardening                       | Accepted              |
 
 ## Creating a New ADR
 
