@@ -3,8 +3,8 @@ use std::path::Path;
 /// Speednet Ed25519 public key for verifying plugin signatures.
 /// This key is embedded at compile time — only Speednet can sign plugins.
 ///
-/// Generated via: `openssl genpkey -algorithm Ed25519`
-/// Private key stored securely — never committed to source.
+/// Public key extracted from the Ed25519 private key stored in the
+/// Speednet signing infrastructure. Private key never committed to source.
 const SPEEDNET_SIGNING_PUBLIC_KEY: &[u8; 32] = b"\x13\x27\xf5\x88\xa1\xeb\xb6\x22\
 \xf2\x78\x08\xee\x7d\x86\x4a\xb2\xdf\xcd\xe4\xe6\x5b\x02\xdf\xee\x73\xf7\xe3\x77\
 \x92\x49\xe7\xc6";
@@ -154,6 +154,12 @@ mod tests {
 
     /// Serializes tests that modify environment variables to prevent data races.
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_production_public_key_is_valid_ed25519_key() {
+        ed25519_dalek::VerifyingKey::from_bytes(super::SPEEDNET_SIGNING_PUBLIC_KEY)
+            .expect("SPEEDNET_SIGNING_PUBLIC_KEY must be a valid Ed25519 public key");
+    }
 
     #[test]
     fn test_generate_keypair_returns_valid_sizes() {
