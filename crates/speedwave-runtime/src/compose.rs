@@ -482,7 +482,7 @@ fn apply_mcp_os_config_with_path(
     token_path: &std::path::Path,
     port_path: &std::path::Path,
 ) -> anyhow::Result<String> {
-    if !token_path.exists() {
+    if !token_path.is_file() {
         return Ok(yaml.to_string());
     }
 
@@ -2342,6 +2342,20 @@ services:
         assert!(
             has_token_mount,
             "Token file should be mounted into mcp-hub as /secrets/os-auth-token:ro"
+        );
+    }
+
+    #[test]
+    fn test_mcp_os_config_skipped_when_token_is_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let token_path = tmp.path().join("mcp-os-auth-token");
+        std::fs::create_dir(&token_path).unwrap();
+        let port_path = tmp.path().join("mcp-os-port");
+
+        let result = apply_mcp_os_config_with_path(VALID_COMPOSE, &token_path, &port_path).unwrap();
+        assert_eq!(
+            result, VALID_COMPOSE,
+            "yaml should be unchanged when token path is a directory"
         );
     }
 
