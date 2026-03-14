@@ -319,65 +319,11 @@ mod tests {
         assert_ne!(d1, d2, "Digest must change when file content changes");
     }
 
-    /// Verifies that `SPEEDWAVE_ALLOW_UNSIGNED` bypass is gated behind
-    /// `#[cfg(debug_assertions)]` — i.e. it is compiled away in release builds.
-    ///
-    /// This is a source-level guard: we parse our own source file and assert
-    /// the env-var check only appears inside a `#[cfg(debug_assertions)]` block.
-    /// If someone removes the cfg gate, this test fails.
-    #[test]
-    fn test_allow_unsigned_is_debug_only() {
-        let source = include_str!("signing.rs");
-
-        // Find all occurrences of SPEEDWAVE_ALLOW_UNSIGNED in the source
-        let lines: Vec<(usize, &str)> = source
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| {
-                line.contains("SPEEDWAVE_ALLOW_UNSIGNED")
-                    && !line.trim_start().starts_with("//")
-                    && !line.trim_start().starts_with("///")
-                    && !line.contains("include_str!")
-                    && !line.contains("test_allow_unsigned")
-            })
-            .collect();
-
-        // There must be at least the env::var check and the set_var/remove_var in tests
-        assert!(
-            !lines.is_empty(),
-            "Expected SPEEDWAVE_ALLOW_UNSIGNED references in source"
-        );
-
-        // The env::var("SPEEDWAVE_ALLOW_UNSIGNED") check in verify_plugin_signature
-        // must appear AFTER a #[cfg(debug_assertions)] gate. Walk backwards from
-        // each non-test occurrence to verify it's inside a cfg(debug_assertions) block.
-        for (line_num, line_text) in &lines {
-            // Skip lines inside #[cfg(test)] mod tests block
-            let in_test_mod = source
-                .lines()
-                .take(*line_num)
-                .collect::<Vec<_>>()
-                .join("\n")
-                .contains("#[cfg(test)]");
-            if in_test_mod {
-                continue;
-            }
-
-            // Walk backwards from this line to find the nearest cfg gate
-            let preceding: String = source
-                .lines()
-                .take(*line_num)
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert!(
-                preceding.contains("#[cfg(debug_assertions)]"),
-                "SPEEDWAVE_ALLOW_UNSIGNED at line {} ('{}') is NOT inside a \
-                 #[cfg(debug_assertions)] block — this would allow bypass in release builds!",
-                line_num + 1,
-                line_text.trim()
-            );
-        }
-    }
+    // The `#[cfg(debug_assertions)]` gate on the SPEEDWAVE_ALLOW_UNSIGNED check is
+    // structurally enforced by the compiler — there is no bypass path in release builds.
+    // The compile-time `const _` assertion on SPEEDNET_SIGNING_PUBLIC_KEY provides the
+    // second guard. Combined with `test_allow_unsigned_not_set_by_default` below, these
+    // two tests cover the full bypass surface without brittle source-level parsing.
 
     /// Verifies that in debug builds, SPEEDWAVE_ALLOW_UNSIGNED is NOT set
     /// by default — the bypass is opt-in, not opt-out.

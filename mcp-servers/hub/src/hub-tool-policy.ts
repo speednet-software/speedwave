@@ -326,6 +326,13 @@ export function getServicePolicies(service: string): Readonly<Record<string, Too
  * defaults to 'read' for safety. Plugin tools are always eagerly loaded
  * (deferLoading: false) since we have no hub-side policy data for them.
  * @param workerTool - Optional worker Tool definition with category field
+ *
+ * **Trust boundary:** Plugin tools inherit their audit category from the
+ * worker's self-reported `Tool.category` field (default: 'read'). Built-in
+ * services have categories hardcoded in TOOL_POLICIES. A plugin that
+ * misreports its category (e.g. 'write' as 'read') would produce incorrect
+ * audit trails. This is an accepted trade-off — the Ed25519 signature
+ * requirement means only Speednet-signed plugins are loaded.
  */
 export function getPluginToolPolicy(workerTool?: Tool): ToolPolicy {
   const category: ToolCategory = workerTool?.category ?? 'read';

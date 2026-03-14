@@ -37,14 +37,9 @@ pub(crate) struct PluginsResponse {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Returns the token directory path for a service: `~/.speedwave/tokens/<project>/<service_id>/`
+/// Returns the token directory path for a service, delegating to the runtime SSOT.
 fn token_dir_for(project: &str, service_id: &str) -> Result<std::path::PathBuf, String> {
-    let home = dirs::home_dir().ok_or("cannot determine home directory")?;
-    Ok(home
-        .join(speedwave_runtime::consts::DATA_DIR)
-        .join("tokens")
-        .join(project)
-        .join(service_id))
+    plugin::token_dir(project, service_id).map_err(|e| e.to_string())
 }
 
 /// Validates a credential field name and value for safety.

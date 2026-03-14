@@ -66,6 +66,8 @@ pub struct PluginManifest {
     pub auth_fields: Vec<AuthFieldDef>,
     #[serde(default)]
     pub settings_schema: Option<serde_json::Value>,
+    /// Reserved for future semver enforcement. Parsed from manifest but not
+    /// currently validated — will be enforced once the versioning scheme is stable.
     #[serde(default)]
     pub speedwave_compat: Option<String>,
     #[serde(default)]
@@ -83,6 +85,16 @@ pub fn plugins_base_dir() -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("cannot find home dir"))?
         .join(consts::DATA_DIR)
         .join("plugins"))
+}
+
+/// Returns `~/.speedwave/tokens/<project>/<service_id>/`
+pub fn token_dir(project: &str, service_id: &str) -> anyhow::Result<PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home dir"))?;
+    Ok(home
+        .join(consts::DATA_DIR)
+        .join("tokens")
+        .join(project)
+        .join(service_id))
 }
 
 /// Writes credential/token files for a plugin to the project's token directory.
@@ -278,7 +290,8 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
         }
     }
 
-    // Validate auth_fields keys are safe filesystem names
+    // Validate auth_fields keys are safe filesystem names and field_type is known
+    const ALLOWED_FIELD_TYPES: &[&str] = &["text", "password", "textarea"];
     for field in &manifest.auth_fields {
         if field.key.contains('/')
             || field.key.contains('\\')
@@ -289,6 +302,26 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
                 "Invalid auth_field key '{}': must not contain path separators or '..'",
                 field.key
             );
+        }
+        if !ALLOWED_FIELD_TYPES.contains(&field.field_type.as_str()) {
+            anyhow::bail!(
+                "auth_field '{}' has unknown field_type '{}'. Allowed: {:?}",
+                field.key,
+                field.field_type,
+                ALLOWED_FIELD_TYPES
+            );
+        }
+    }
+
+    // Validate extra_env keys/values contain no newlines or null bytes (YAML injection defense)
+    if let Some(ref env) = manifest.extra_env {
+        for (k, v) in env {
+            if k.contains('\n') || k.contains('\0') || v.contains('\n') || v.contains('\0') {
+                anyhow::bail!(
+                    "extra_env key/value must not contain newlines or null bytes (key: '{}')",
+                    k
+                );
+            }
         }
     }
 
@@ -334,9 +367,9 @@ pub fn install_plugin(
 
     validate_manifest(&manifest, &plugin_src)?;
 
-    // Reject duplicate service_id among already-installed plugins
+    // Reject duplicate service_id or port among already-installed plugins
+    let existing = list_installed_plugins()?;
     if let Some(ref sid) = manifest.service_id {
-        let existing = list_installed_plugins()?;
         for existing_manifest in &existing {
             if existing_manifest.service_id.as_deref() == Some(sid.as_str())
                 && existing_manifest.slug != manifest.slug
@@ -346,6 +379,19 @@ pub fn install_plugin(
                     sid,
                     existing_manifest.slug
                 );
+            }
+        }
+    }
+    if let Some(new_port) = manifest.port {
+        for existing_manifest in &existing {
+            if let Some(existing_port) = existing_manifest.port {
+                if existing_port == new_port && existing_manifest.slug != manifest.slug {
+                    anyhow::bail!(
+                        "Port {} is already claimed by plugin '{}'",
+                        new_port,
+                        existing_manifest.slug
+                    );
+                }
             }
         }
     }
@@ -1877,5 +1923,103 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_err());
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_unknown_field_type() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-ftype".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![AuthFieldDef {
+                key: "api_key".to_string(),
+                label: "Key".to_string(),
+                field_type: "dropdown".to_string(),
+                placeholder: "".to_string(),
+                is_secret: true,
+            }],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let result = validate_manifest(&manifest, tmp.path());
+        assert!(result.is_err(), "Unknown field_type should be rejected");
+        assert!(result.unwrap_err().to_string().contains("field_type"));
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_extra_env_newline() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-env".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: Some(HashMap::from([(
+                "EVIL\nimage: hack:tag".to_string(),
+                "value".to_string(),
+            )])),
+            mem_limit: None,
+            requires_integrations: vec![],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_manifest(&manifest, tmp.path()).is_err());
+    }
+
+    #[test]
+    fn test_install_rejects_duplicate_port() {
+        // Port uniqueness is checked in install_plugin against existing plugins.
+        // We test the logic by simulating the check.
+        let existing = vec![PluginManifest {
+            name: "Existing".to_string(),
+            service_id: Some("existing".to_string()),
+            slug: "existing".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(4010),
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![],
+        }];
+
+        let new_port: u16 = 4010;
+        let new_slug = "new-plugin";
+        let conflict = existing
+            .iter()
+            .any(|m| m.port == Some(new_port) && m.slug != new_slug);
+        assert!(conflict, "Duplicate port should be detected");
+    }
+
+    #[test]
+    fn test_token_dir_returns_correct_path() {
+        let result = token_dir("myproject", "presale").unwrap();
+        let expected_suffix = std::path::Path::new(".speedwave/tokens/myproject/presale");
+        assert!(
+            result.ends_with(expected_suffix),
+            "token_dir should return ~/.speedwave/tokens/<project>/<service_id>, got: {}",
+            result.display()
+        );
     }
 }

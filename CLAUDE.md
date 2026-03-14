@@ -91,6 +91,8 @@ Before changing any contract element above:
 | **MCP service plugin**   | Yes               | Yes (required)       | Containerized MCP worker + optional claude-resources |
 | **Resource-only plugin** | No                | No                   | Skills, commands, agents, hooks only                 |
 
+**Note:** Resource-only plugins are always included in every project's `SPEEDWAVE_PLUGINS` — they cannot be disabled per-project (no `service_id` means no config toggle). MCP plugins are toggled via `integrations.plugins.<service_id>.enabled`.
+
 ### Plugin lifecycle
 
 - **Install:** `speedwave plugin install <path.zip>` → verify Ed25519 → validate manifest → extract to `~/.speedwave/plugins/<slug>/` → build image
