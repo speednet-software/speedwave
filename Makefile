@@ -483,11 +483,11 @@ audit-rust:
 	@echo "✅ Rust dependencies: no vulnerabilities"
 
 audit-mcp:
-	cd mcp-servers && npm audit --audit-level=high --omit=dev
+	cd mcp-servers && npm audit --omit=dev
 	@echo "✅ MCP dependencies: no vulnerabilities"
 
 audit-desktop:
-	cd desktop/src && npm audit --audit-level=high --omit=dev
+	cd desktop/src && npm audit --omit=dev
 	@echo "✅ Desktop dependencies: no vulnerabilities"
 
 # ── Full quality gate (run before push) ──────────────────────────────────────
