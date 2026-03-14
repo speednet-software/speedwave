@@ -684,7 +684,8 @@ describe('ChatStateService', () => {
       });
     });
 
-    it('answerQuestion adds error block on backend failure', async () => {
+    it('answerQuestion adds error block, resets isStreaming, and reverts answered state on failure', async () => {
+      service.isStreaming = true;
       service.handleStreamChunk({
         chunk_type: 'AskUserQuestion',
         data: {
@@ -702,6 +703,19 @@ describe('ChatStateService', () => {
       };
 
       await service.answerQuestion('toolu_ask1', ['a']);
+
+      // isStreaming must be reset so the user is not stuck
+      expect(service.isStreaming).toBe(false);
+
+      // The question block should be reverted to unanswered so the user can retry
+      const askBlock = service.currentBlocks.find(
+        (b) => b.type === 'ask_user' && b.question.tool_id === 'toolu_ask1'
+      );
+      expect(askBlock).toBeDefined();
+      if (askBlock && askBlock.type === 'ask_user') {
+        expect(askBlock.question.answered).toBe(false);
+        expect(askBlock.question.selected_values).toEqual([]);
+      }
 
       const lastBlock = service.currentBlocks[service.currentBlocks.length - 1];
       expect(lastBlock.type).toBe('error');

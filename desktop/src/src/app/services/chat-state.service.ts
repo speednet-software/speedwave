@@ -190,6 +190,13 @@ export class ChatStateService {
     try {
       await this.tauri.invoke('answer_question', { toolUseId, answer });
     } catch (err) {
+      this.isStreaming = false;
+      // Revert the optimistic answered state so the user can retry
+      this.currentBlocks = this.currentBlocks.map((b) =>
+        b.type === 'ask_user' && b.question.tool_id === toolUseId
+          ? { ...b, question: { ...b.question, answered: false, selected_values: [] } }
+          : b
+      );
       this.currentBlocks = [
         ...this.currentBlocks,
         { type: 'error', content: `Failed to send answer: ${err}` },

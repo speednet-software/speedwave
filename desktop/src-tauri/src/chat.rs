@@ -149,7 +149,10 @@ impl StreamParser {
 
         // Handle wrapped format: {"questions": [{...}]}
         let q = if let Some(questions) = parsed["questions"].as_array() {
-            questions.first().cloned().unwrap_or(parsed.clone())
+            questions.first().cloned().unwrap_or_else(|| {
+                log::warn!("AskUserQuestion: 'questions' array is empty, using empty fallback");
+                serde_json::Value::Object(Default::default())
+            })
         } else {
             parsed.clone()
         };
@@ -1612,6 +1615,28 @@ mod tests {
                 assert_eq!(options.len(), 2);
                 assert_eq!(options[0].value, "red");
                 assert_eq!(options[1].value, "blue");
+            }
+            other => panic!("expected AskUserQuestion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emit_ask_user_from_control_request_empty_questions_array() {
+        let req = ControlRequest {
+            request_id: "req_empty".to_string(),
+            tool_name: "AskUserQuestion".to_string(),
+            input: serde_json::json!({
+                "questions": []
+            }),
+            tool_use_id: "toolu_empty_q".to_string(),
+        };
+        let chunk = StreamParser::emit_ask_user_from_control_request(&req).unwrap();
+        match chunk {
+            StreamChunk::AskUserQuestion {
+                question, options, ..
+            } => {
+                assert_eq!(question, "");
+                assert!(options.is_empty());
             }
             other => panic!("expected AskUserQuestion, got {other:?}"),
         }
