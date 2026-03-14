@@ -90,11 +90,15 @@ pub fn plugins_base_dir() -> anyhow::Result<PathBuf> {
 /// Returns `~/.speedwave/tokens/<project>/<service_id>/`
 pub fn token_dir(project: &str, service_id: &str) -> anyhow::Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home dir"))?;
-    Ok(home
-        .join(consts::DATA_DIR)
+    Ok(token_dir_with_base(&home, project, service_id))
+}
+
+/// Testable version: constructs `<base>/.speedwave/tokens/<project>/<service_id>/`
+fn token_dir_with_base(home: &Path, project: &str, service_id: &str) -> PathBuf {
+    home.join(consts::DATA_DIR)
         .join("tokens")
         .join(project)
-        .join(service_id))
+        .join(service_id)
 }
 
 /// Writes credential/token files for a plugin to the project's token directory.
@@ -115,11 +119,7 @@ fn configure_plugin_tokens_with_base(
     service_id: &str,
     tokens: &HashMap<String, String>,
 ) -> anyhow::Result<()> {
-    let token_dir = home
-        .join(consts::DATA_DIR)
-        .join("tokens")
-        .join(project)
-        .join(service_id);
+    let token_dir = token_dir_with_base(home, project, service_id);
     std::fs::create_dir_all(&token_dir)?;
 
     for (key, value) in tokens {
@@ -174,12 +174,7 @@ fn get_plugin_token_status_with_base(
     }
 
     let service_id = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
-
-    let token_dir = home
-        .join(consts::DATA_DIR)
-        .join("tokens")
-        .join(project)
-        .join(service_id);
+    let token_dir = token_dir_with_base(home, project, service_id);
 
     let mut missing = Vec::new();
     for field in &secret_fields {
@@ -316,9 +311,15 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
     // Validate extra_env keys/values contain no newlines or null bytes (YAML injection defense)
     if let Some(ref env) = manifest.extra_env {
         for (k, v) in env {
-            if k.contains('\n') || k.contains('\0') || v.contains('\n') || v.contains('\0') {
+            if k.contains('\n')
+                || k.contains('\r')
+                || k.contains('\0')
+                || v.contains('\n')
+                || v.contains('\r')
+                || v.contains('\0')
+            {
                 anyhow::bail!(
-                    "extra_env key/value must not contain newlines or null bytes (key: '{}')",
+                    "extra_env key/value must not contain newlines, carriage returns, or null bytes (key: '{}')",
                     k
                 );
             }

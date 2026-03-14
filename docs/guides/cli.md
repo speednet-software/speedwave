@@ -41,7 +41,7 @@ speedwave plugin disable <slug> --project <name>  # disable plugin for a project
 - **`speedwave self-update`** — downloads the latest CLI binary from GitHub Releases and replaces the current binary
 - **`speedwave plugin install <path.zip>`** — verifies the Ed25519 signature, extracts the plugin to `~/.speedwave/plugins/<slug>/`, and registers it
 - **`speedwave plugin list`** — lists all installed plugins, showing name, version, and enabled/configured status per project
-- **`speedwave plugin remove <slug>`** — removes the plugin directory from `~/.speedwave/plugins/<slug>/`
+- **`speedwave plugin remove <slug>`** — removes the plugin directory from `~/.speedwave/plugins/<slug>/`. Note: credential files at `~/.speedwave/tokens/<project>/<slug>/` and config entries are **not** cleaned by the CLI — use the Desktop UI for full cleanup, or remove token directories manually
 - **`speedwave plugin enable <slug> --project <name>`** — enables a plugin for a specific project in user config
 - **`speedwave plugin disable <slug> --project <name>`** — disables a plugin for a specific project in user config
 
