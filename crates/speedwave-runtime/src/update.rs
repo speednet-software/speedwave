@@ -105,12 +105,7 @@ pub fn update_containers(
 
     // 1. Load config and resolve
     let user_config = config::load_user_config()?;
-    let project_dir = user_config
-        .projects
-        .iter()
-        .find(|p| p.name == project)
-        .map(|p| p.dir.clone())
-        .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
+    let project_dir = user_config.require_project(project)?.dir.clone();
 
     let project_path = std::path::PathBuf::from(&project_dir);
     let (resolved, integrations) =

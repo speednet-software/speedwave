@@ -96,6 +96,10 @@ pub const UIDMAP_MISSING_MSG: &str = "newuidmap not found. Install the uidmap pa
 /// Allows crash-looping containers to exit before `compose_ps` reports state.
 pub const CONTAINER_STABILIZATION_DELAY_SECS: u64 = 3;
 
+/// Delay in seconds after `systemctl start` inside WSL2 before retrying
+/// a service health check. Gives systemd time to bring up containerd/buildkitd.
+pub const WSL_SERVICE_START_DELAY_SECS: u64 = 3;
+
 /// Descriptor for a single auth/credential field of an MCP service.
 pub struct McpAuthFieldDescriptor {
     /// Field key used as filename in the tokens directory (e.g. "bot_token").
@@ -282,6 +286,41 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             },
         ],
         credential_files: &["token", "host_url"],
+    },
+];
+
+/// Descriptor for a toggleable OS integration service (macOS only).
+pub struct OsServiceDescriptor {
+    /// Config key used in OsIntegrationsConfig (e.g. "reminders").
+    pub config_key: &'static str,
+    /// Human-readable display name (e.g. "Reminders").
+    pub display_name: &'static str,
+    /// Short description for the UI.
+    pub description: &'static str,
+}
+
+/// Toggleable OS integration services — Single Source of Truth for OS service metadata.
+/// Used by compose filtering (DISABLED_OS_SERVICES), integrations UI, and config toggles.
+pub const TOGGLEABLE_OS_SERVICES: &[OsServiceDescriptor] = &[
+    OsServiceDescriptor {
+        config_key: "reminders",
+        display_name: "Reminders",
+        description: "Native OS reminders and tasks",
+    },
+    OsServiceDescriptor {
+        config_key: "calendar",
+        display_name: "Calendar",
+        description: "Native OS calendar events",
+    },
+    OsServiceDescriptor {
+        config_key: "mail",
+        display_name: "Mail",
+        description: "Native OS email client",
+    },
+    OsServiceDescriptor {
+        config_key: "notes",
+        display_name: "Notes",
+        description: "Native OS notes",
     },
 ];
 
@@ -567,5 +606,76 @@ mod tests {
                 "BUILT_IN_SERVICE_IDS entry '{sid}' collides with BUILT_IN_SERVICES"
             );
         }
+    }
+
+    #[test]
+    fn test_wsl_service_start_delay_is_positive() {
+        assert!(
+            WSL_SERVICE_START_DELAY_SECS > 0,
+            "WSL_SERVICE_START_DELAY_SECS must be positive"
+        );
+    }
+
+    #[test]
+    fn test_toggleable_os_services_count() {
+        assert_eq!(
+            TOGGLEABLE_OS_SERVICES.len(),
+            4,
+            "TOGGLEABLE_OS_SERVICES should contain exactly 4 services"
+        );
+    }
+
+    #[test]
+    fn test_toggleable_os_services_have_unique_keys() {
+        let mut keys: Vec<&str> = TOGGLEABLE_OS_SERVICES
+            .iter()
+            .map(|s| s.config_key)
+            .collect();
+        let count_before = keys.len();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(
+            keys.len(),
+            count_before,
+            "TOGGLEABLE_OS_SERVICES config keys must be unique"
+        );
+    }
+
+    #[test]
+    fn test_toggleable_os_services_have_display_names() {
+        for svc in TOGGLEABLE_OS_SERVICES {
+            assert!(
+                !svc.display_name.is_empty(),
+                "OS service '{}' must have a display name",
+                svc.config_key
+            );
+            assert!(
+                !svc.description.is_empty(),
+                "OS service '{}' must have a description",
+                svc.config_key
+            );
+        }
+    }
+
+    /// Guard against OS service list drift: TOGGLEABLE_OS_SERVICES count must match
+    /// the number of os_ boolean fields in ResolvedIntegrationsConfig.
+    #[test]
+    fn test_toggleable_os_count_matches_resolved_config_fields() {
+        let resolved = crate::config::ResolvedIntegrationsConfig::default();
+        let os_field_count = [
+            resolved.os_reminders,
+            resolved.os_calendar,
+            resolved.os_mail,
+            resolved.os_notes,
+        ]
+        .len();
+        assert_eq!(
+            TOGGLEABLE_OS_SERVICES.len(),
+            os_field_count,
+            "TOGGLEABLE_OS_SERVICES count ({}) must match ResolvedIntegrationsConfig OS fields ({}). \
+             Did you add a service to one but not the other?",
+            TOGGLEABLE_OS_SERVICES.len(),
+            os_field_count
+        );
     }
 }

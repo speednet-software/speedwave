@@ -154,7 +154,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       this.activeProject = result.active_project;
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      if (typeof window !== 'undefined' && '__TAURI__' in window) {
+      if (this.tauri.isRunningInTauri()) {
         this.error = `Failed to load project: ${msg}`;
       }
     }

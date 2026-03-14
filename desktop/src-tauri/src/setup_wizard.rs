@@ -1134,17 +1134,7 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     // auth keys, addons) may have changed since create_project() first rendered it.
     // Without this, WORKER_OS_URL is missing if mcp-os started after project creation.
     let user_config = config::load_user_config()?;
-    let project_dir = user_config
-        .projects
-        .iter()
-        .find(|p| p.name == project)
-        .map(|p| p.dir.as_str())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "project '{}' not found in config — cannot render compose.yml",
-                project
-            )
-        })?;
+    let project_dir = &user_config.require_project(project)?.dir;
     let project_path = std::path::Path::new(project_dir);
     let resolved = config::resolve_claude_config(project_path, &user_config, project);
     let integrations = config::resolve_integrations(project_path, &user_config, project);

@@ -31,6 +31,21 @@ pub struct OsIntegrationsConfig {
     pub notes: Option<IntegrationConfig>,
 }
 
+impl OsIntegrationsConfig {
+    /// Sets the enabled state for an OS integration service by config key.
+    /// Returns `false` if the key is unknown.
+    pub fn set_service(&mut self, key: &str, cfg: IntegrationConfig) -> bool {
+        match key {
+            "reminders" => self.reminders = Some(cfg),
+            "calendar" => self.calendar = Some(cfg),
+            "mail" => self.mail = Some(cfg),
+            "notes" => self.notes = Some(cfg),
+            _ => return false,
+        }
+        true
+    }
+}
+
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct IntegrationsConfig {
     pub slack: Option<IntegrationConfig>,
@@ -109,6 +124,16 @@ impl ResolvedIntegrationsConfig {
             .map(|(id, _)| id.as_str())
             .collect()
     }
+
+    pub fn is_os_service_enabled(&self, key: &str) -> Option<bool> {
+        match key {
+            "reminders" => Some(self.os_reminders),
+            "calendar" => Some(self.os_calendar),
+            "mail" => Some(self.os_mail),
+            "notes" => Some(self.os_notes),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
@@ -139,6 +164,32 @@ pub struct SpeedwaveUserConfig {
     pub active_project: Option<String>,
     pub selected_ide: Option<SelectedIde>,
     pub log_level: Option<String>,
+}
+
+impl SpeedwaveUserConfig {
+    /// Looks up a project by name.
+    pub fn find_project(&self, name: &str) -> Option<&ProjectUserEntry> {
+        self.projects.iter().find(|p| p.name == name)
+    }
+
+    /// Looks up a project by name, returning an error if not found.
+    pub fn require_project(&self, name: &str) -> anyhow::Result<&ProjectUserEntry> {
+        self.find_project(name)
+            .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", name))
+    }
+
+    /// Looks up a project by name (mutable).
+    pub fn find_project_mut(&mut self, name: &str) -> Option<&mut ProjectUserEntry> {
+        self.projects.iter_mut().find(|p| p.name == name)
+    }
+
+    /// Looks up a project by name (mutable), returning an error if not found.
+    pub fn require_project_mut(&mut self, name: &str) -> anyhow::Result<&mut ProjectUserEntry> {
+        self.projects
+            .iter_mut()
+            .find(|p| p.name == name)
+            .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", name))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -175,7 +226,7 @@ pub fn resolve_project_config(
     }
 
     // Layer 2: user config (highest priority)
-    if let Some(user) = user_config.projects.iter().find(|p| p.name == project_name) {
+    if let Some(user) = user_config.find_project(project_name) {
         if let Some(c) = &user.claude {
             merge_env(&mut env, c.env.clone());
             if let Some(user_llm) = &c.llm {
@@ -1088,5 +1139,161 @@ mod tests {
         assert!(resolved.is_plugin_enabled("presale"));
         assert!(!resolved.is_plugin_enabled("unknown"));
         assert_eq!(resolved.enabled_plugin_service_ids(), vec!["presale"]);
+    }
+
+    // -- SpeedwaveUserConfig::find_project / require_project tests --
+
+    fn make_config_with_projects() -> SpeedwaveUserConfig {
+        SpeedwaveUserConfig {
+            projects: vec![
+                ProjectUserEntry {
+                    name: "alpha".to_string(),
+                    dir: "/tmp/alpha".to_string(),
+                    claude: None,
+                    integrations: None,
+                    plugin_settings: None,
+                },
+                ProjectUserEntry {
+                    name: "beta".to_string(),
+                    dir: "/tmp/beta".to_string(),
+                    claude: None,
+                    integrations: None,
+                    plugin_settings: None,
+                },
+            ],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        }
+    }
+
+    #[test]
+    fn test_find_project_found() {
+        let config = make_config_with_projects();
+        let project = config.find_project("alpha");
+        assert!(project.is_some());
+        assert_eq!(project.unwrap().dir, "/tmp/alpha");
+    }
+
+    #[test]
+    fn test_find_project_not_found() {
+        let config = make_config_with_projects();
+        assert!(config.find_project("missing").is_none());
+    }
+
+    #[test]
+    fn test_find_project_empty_name() {
+        let config = make_config_with_projects();
+        assert!(config.find_project("").is_none());
+    }
+
+    #[test]
+    fn test_require_project_found() {
+        let config = make_config_with_projects();
+        let project = config.require_project("beta").unwrap();
+        assert_eq!(project.dir, "/tmp/beta");
+    }
+
+    #[test]
+    fn test_require_project_not_found_returns_error() {
+        let config = make_config_with_projects();
+        let result = config.require_project("missing");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("missing"),
+            "error should contain project name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_find_project_mut_modifies_entry() {
+        let mut config = make_config_with_projects();
+        let project = config.find_project_mut("alpha").unwrap();
+        project.dir = "/updated/path".to_string();
+        assert_eq!(config.projects[0].dir, "/updated/path");
+    }
+
+    #[test]
+    fn test_require_project_mut_modifies_entry() {
+        let mut config = make_config_with_projects();
+        let project = config.require_project_mut("beta").unwrap();
+        project.dir = "/new/beta".to_string();
+        assert_eq!(config.projects[1].dir, "/new/beta");
+    }
+
+    #[test]
+    fn test_require_project_mut_not_found_returns_error() {
+        let mut config = make_config_with_projects();
+        let result = config.require_project_mut("missing");
+        assert!(result.is_err());
+    }
+
+    // -- OsIntegrationsConfig::set_service tests --
+
+    #[test]
+    fn test_os_set_service_known_keys() {
+        for key in &["reminders", "calendar", "mail", "notes"] {
+            let mut cfg = OsIntegrationsConfig::default();
+            let ic = IntegrationConfig {
+                enabled: Some(true),
+            };
+            assert!(
+                cfg.set_service(key, ic),
+                "set_service should accept '{}'",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_os_set_service_unknown_key_returns_false() {
+        let mut cfg = OsIntegrationsConfig::default();
+        let ic = IntegrationConfig {
+            enabled: Some(true),
+        };
+        assert!(!cfg.set_service("unknown", ic));
+    }
+
+    #[test]
+    fn test_os_set_service_overwrite() {
+        let mut cfg = OsIntegrationsConfig::default();
+        cfg.set_service(
+            "calendar",
+            IntegrationConfig {
+                enabled: Some(true),
+            },
+        );
+        cfg.set_service(
+            "calendar",
+            IntegrationConfig {
+                enabled: Some(false),
+            },
+        );
+        assert_eq!(cfg.calendar.unwrap().enabled, Some(false));
+    }
+
+    // -- ResolvedIntegrationsConfig::is_os_service_enabled tests --
+
+    #[test]
+    fn test_is_os_service_enabled_known_keys() {
+        let r = ResolvedIntegrationsConfig {
+            os_reminders: true,
+            os_calendar: false,
+            os_mail: true,
+            os_notes: false,
+            ..Default::default()
+        };
+        assert_eq!(r.is_os_service_enabled("reminders"), Some(true));
+        assert_eq!(r.is_os_service_enabled("calendar"), Some(false));
+        assert_eq!(r.is_os_service_enabled("mail"), Some(true));
+        assert_eq!(r.is_os_service_enabled("notes"), Some(false));
+    }
+
+    #[test]
+    fn test_is_os_service_enabled_unknown_key() {
+        let r = ResolvedIntegrationsConfig::default();
+        assert_eq!(r.is_os_service_enabled("unknown"), None);
+        assert_eq!(r.is_os_service_enabled("slack"), None);
     }
 }

@@ -437,7 +437,7 @@ fn main() -> anyhow::Result<()> {
     validate_project_name(&project_name).map_err(|e| anyhow::anyhow!(e))?;
 
     // Use project dir from config (authoritative), fall back to CWD
-    let project_dir = match user_config.projects.iter().find(|p| p.name == project_name) {
+    let project_dir = match user_config.find_project(&project_name) {
         Some(p) => std::path::PathBuf::from(&p.dir),
         None => std::env::current_dir().map_err(|e| {
             anyhow::anyhow!(

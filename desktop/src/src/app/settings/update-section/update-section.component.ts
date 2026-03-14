@@ -11,7 +11,7 @@ import {
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { TauriService } from '../../services/tauri.service';
-import { UpdateInfo, UpdateSettings, ContainerUpdateResult } from '../../models/update';
+import { UpdateInfo, UpdateSettings } from '../../models/update';
 
 /** Displays app update controls, container update/rollback, and auto-check settings. */
 @Component({
@@ -94,51 +94,6 @@ import { UpdateInfo, UpdateSettings, ContainerUpdateResult } from '../../models/
         }
       </div>
     </section>
-
-    <!-- Container Updates (temporarily hidden) -->
-    @if (showAdvancedSections) {
-      <section class="section">
-        <h2>Container Updates</h2>
-        <div class="info-card">
-          <p class="note" style="margin-top: 0">
-            Rebuild container images and recreate containers. User data on host volumes is
-            preserved.
-          </p>
-          <div class="form-actions">
-            <button
-              class="btn-save"
-              data-testid="settings-update-containers"
-              (click)="updateContainers()"
-              [disabled]="containerUpdating || !activeProject"
-            >
-              {{ containerUpdating ? 'Updating...' : 'Update containers' }}
-            </button>
-            <button
-              class="btn-cancel"
-              data-testid="settings-rollback"
-              (click)="rollbackContainers()"
-              [disabled]="containerUpdating || !containerUpdateDone || !activeProject"
-            >
-              Rollback
-            </button>
-          </div>
-          @if (containerUpdateResult) {
-            @if (containerUpdateResult.success) {
-              <p class="save-feedback" style="margin-top: 8px">
-                Updated {{ containerUpdateResult.containers_recreated }} containers ({{
-                  containerUpdateResult.images_rebuilt
-                }}
-                images rebuilt)
-              </p>
-            } @else {
-              <p class="error-banner" style="margin-top: 8px">
-                {{ containerUpdateResult.error }}
-              </p>
-            }
-          }
-        </div>
-      </section>
-    }
   `,
   styles: [
     `
@@ -313,7 +268,6 @@ import { UpdateInfo, UpdateSettings, ContainerUpdateResult } from '../../models/
 })
 export class UpdateSectionComponent implements OnInit {
   @Input() activeProject: string | null = null;
-  @Input() showAdvancedSections = false;
 
   @Output() errorOccurred = new EventEmitter<string>();
 
@@ -326,9 +280,6 @@ export class UpdateSectionComponent implements OnInit {
   updateInstalling = false;
   isLinux = false;
   updateInstallError = '';
-  containerUpdating = false;
-  containerUpdateDone = false;
-  containerUpdateResult: ContainerUpdateResult | null = null;
   error = '';
 
   private cdr = inject(ChangeDetectorRef);
@@ -453,44 +404,5 @@ export class UpdateSectionComponent implements OnInit {
     } catch {
       // Fallback: not running inside Tauri
     }
-  }
-
-  /** Rebuilds images and recreates containers for the active project. */
-  async updateContainers(): Promise<void> {
-    if (!this.activeProject) return;
-    this.containerUpdating = true;
-    this.containerUpdateResult = null;
-    this.error = '';
-    this.cdr.markForCheck();
-    try {
-      const result = await this.tauri.invoke<ContainerUpdateResult>('update_containers', {
-        project: this.activeProject,
-      });
-      this.containerUpdateResult = result;
-      this.containerUpdateDone = result.success;
-    } catch (e: unknown) {
-      this.error = e instanceof Error ? e.message : String(e);
-      this.errorOccurred.emit(this.error);
-    }
-    this.containerUpdating = false;
-    this.cdr.markForCheck();
-  }
-
-  /** Rolls back containers to the pre-update snapshot. */
-  async rollbackContainers(): Promise<void> {
-    if (!this.activeProject) return;
-    this.containerUpdating = true;
-    this.error = '';
-    this.cdr.markForCheck();
-    try {
-      await this.tauri.invoke('rollback_containers', { project: this.activeProject });
-      this.containerUpdateResult = null;
-      this.containerUpdateDone = false;
-    } catch (e: unknown) {
-      this.error = e instanceof Error ? e.message : String(e);
-      this.errorOccurred.emit(this.error);
-    }
-    this.containerUpdating = false;
-    this.cdr.markForCheck();
   }
 }

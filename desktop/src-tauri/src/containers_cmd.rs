@@ -193,9 +193,7 @@ pub fn get_llm_config() -> Result<LlmConfigResponse, String> {
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
     let active = user_config.active_project.as_deref().unwrap_or("");
     let llm = user_config
-        .projects
-        .iter()
-        .find(|p| p.name == active)
+        .find_project(active)
         .and_then(|p| p.claude.as_ref())
         .and_then(|c| c.llm.as_ref());
     Ok(LlmConfigResponse {
@@ -217,9 +215,7 @@ pub fn update_llm_config(
     let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
     let active = user_config.active_project.clone().unwrap_or_default();
     let project = user_config
-        .projects
-        .iter_mut()
-        .find(|p| p.name == active)
+        .find_project_mut(&active)
         .ok_or_else(|| "No active project".to_string())?;
 
     let llm = config::LlmConfig {
