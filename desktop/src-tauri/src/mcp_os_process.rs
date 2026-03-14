@@ -1432,7 +1432,7 @@ srv.listen(0, '127.0.0.1', () => {
     #[test]
     fn test_write_restricted_file_overwrites_directory() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("token-as-dir").to_path_buf();
+        let path = tmp.path().join("token-as-dir");
         std::fs::create_dir(&path).unwrap();
         assert!(path.is_dir());
 
