@@ -1,8 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { executeCode, _setBridgesForTesting, _formatErrorMessage } from './executor.js';
-import type { AllBridges } from './http-bridge.js';
 import { resetServiceCaches, stopBackgroundRefresh } from './tool-registry.js';
-import { populateRegistryFromPolicies, _resetRegistryForTesting } from './test-helpers.js';
+import {
+  populateRegistryFromPolicies,
+  _resetRegistryForTesting,
+  createMockBridges,
+} from './test-helpers.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Tests for Code Executor
@@ -145,96 +148,7 @@ describe('executor', () => {
     });
 
     it('should enforce timeout on async operations', async () => {
-      // Setup mock bridges for this test
-      const mockBridges: AllBridges = {
-        slack: {
-          listChannelIds: vi.fn(),
-          getChannelMessages: vi.fn(),
-          sendChannel: vi.fn(),
-          getUsers: vi.fn(),
-        },
-        sharepoint: {
-          listFileIds: vi.fn(),
-          getFileFull: vi.fn(),
-          sync: vi.fn(),
-          syncDirectory: vi.fn(),
-          getCurrentUser: vi.fn(),
-        },
-        redmine: {
-          listIssueIds: vi.fn(),
-          getIssueFull: vi.fn(),
-          createIssue: vi.fn(),
-          updateIssue: vi.fn(),
-          searchIssueIds: vi.fn(),
-          commentIssue: vi.fn(),
-          listTimeEntries: vi.fn(),
-          createTimeEntry: vi.fn(),
-          updateTimeEntry: vi.fn(),
-          listJournals: vi.fn(),
-          updateJournal: vi.fn(),
-          deleteJournal: vi.fn(),
-          listUsers: vi.fn(),
-          resolveUser: vi.fn(),
-          getMappings: vi.fn(),
-          getCurrentUser: vi.fn(),
-          getConfig: vi.fn(),
-          listProjectIds: vi.fn(),
-          getProjectFull: vi.fn(),
-          searchProjectIds: vi.fn(),
-          listRelations: vi.fn(),
-          createRelation: vi.fn(),
-          deleteRelation: vi.fn(),
-        },
-        gitlab: {
-          listProjectIds: vi.fn(),
-          getProjectFull: vi.fn(),
-          searchCode: vi.fn(),
-          listMrIds: vi.fn(),
-          getMrFull: vi.fn(),
-          createMergeRequest: vi.fn(),
-          updateMergeRequest: vi.fn(),
-          approveMergeRequest: vi.fn(),
-          mergeMergeRequest: vi.fn(),
-          getMrChanges: vi.fn(),
-          listMrCommits: vi.fn(),
-          listMrPipelines: vi.fn(),
-          listMrNotes: vi.fn(),
-          createMrNote: vi.fn(),
-          listMrDiscussions: vi.fn(),
-          createMrDiscussion: vi.fn(),
-          listBranches: vi.fn(),
-          getBranch: vi.fn(),
-          createBranch: vi.fn(),
-          deleteBranch: vi.fn(),
-          compareBranches: vi.fn(),
-          listCommits: vi.fn(),
-          searchCommits: vi.fn(),
-          getCommitDiff: vi.fn(),
-          listBranchCommits: vi.fn(),
-          listPipelineIds: vi.fn(),
-          getPipelineFull: vi.fn(),
-          retryPipeline: vi.fn(),
-          triggerPipeline: vi.fn(),
-          getJobLog: vi.fn(),
-          getTree: vi.fn(),
-          getFile: vi.fn(),
-          getBlame: vi.fn(),
-          listArtifacts: vi.fn(),
-          downloadArtifact: vi.fn(),
-          deleteArtifacts: vi.fn(),
-          listIssues: vi.fn(),
-          getIssue: vi.fn(),
-          createIssue: vi.fn(),
-          updateIssue: vi.fn(),
-          closeIssue: vi.fn(),
-          listLabels: vi.fn(),
-          createLabel: vi.fn(),
-          createTag: vi.fn(),
-          deleteTag: vi.fn(),
-          createRelease: vi.fn(),
-        },
-      };
-      _setBridgesForTesting(mockBridges);
+      _setBridgesForTesting(createMockBridges());
 
       // Note: Synchronous infinite loops cannot be interrupted by Promise.race timeout
       // This tests async timeout which is the realistic scenario
@@ -249,7 +163,6 @@ describe('executor', () => {
       expect(result.error?.code).toBe('EXECUTION_ERROR');
       expect(result.error?.message).toContain('timeout');
 
-      // Cleanup
       _setBridgesForTesting(null);
     }, 1000);
   });
@@ -326,15 +239,126 @@ describe('executor', () => {
     });
   });
 
+  describe('prototype chain traversal prevention', () => {
+    it('should reject .constructor access', async () => {
+      const code = `({}).constructor.constructor('return this')()`;
+      const result = await executeCode({ code, timeoutMs: 1000 });
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('VALIDATION_ERROR');
+      expect(result.error?.message).toContain('constructor');
+    });
+
+    it('should reject .__proto__ access', async () => {
+      const code = `({}).__proto__`;
+      const result = await executeCode({ code, timeoutMs: 1000 });
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('VALIDATION_ERROR');
+      expect(result.error?.message).toContain('__proto__');
+    });
+
+    it('should reject Object.getPrototypeOf', async () => {
+      const code = `Object.getPrototypeOf({})`;
+      const result = await executeCode({ code, timeoutMs: 1000 });
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('VALIDATION_ERROR');
+      expect(result.error?.message).toContain('getPrototypeOf');
+    });
+
+    it('should reject Object.setPrototypeOf', async () => {
+      const code = `Object.setPrototypeOf({}, null)`;
+      const result = await executeCode({ code, timeoutMs: 1000 });
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('VALIDATION_ERROR');
+      expect(result.error?.message).toContain('setPrototypeOf');
+    });
+
+    it('should reject Proxy constructor', async () => {
+      const code = `new Proxy({}, {})`;
+      const result = await executeCode({ code, timeoutMs: 1000 });
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('VALIDATION_ERROR');
+      expect(result.error?.message).toContain('Proxy');
+    });
+
+    it('should reject Reflect.getPrototypeOf', async () => {
+      const code = `Reflect.getPrototypeOf({})`;
+      const result = await executeCode({ code, timeoutMs: 1000 });
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('VALIDATION_ERROR');
+      expect(result.error?.message).toContain('getPrototypeOf');
+    });
+
+    it('should reject Reflect.construct bypass', async () => {
+      const code = `Reflect.construct(Array, [1, 2, 3])`;
+      const result = await executeCode({ code, timeoutMs: 1000 });
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('VALIDATION_ERROR');
+      expect(result.error?.message).toContain('Reflect');
+    });
+
+    it('should reject async function constructor chain', async () => {
+      const code = `(async()=>{}).constructor('return this')()`;
+      const result = await executeCode({ code, timeoutMs: 1000 });
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('VALIDATION_ERROR');
+      expect(result.error?.message).toContain('constructor');
+    });
+
+    it('should reject array method constructor chain', async () => {
+      const code = `[].find.constructor('return this')()`;
+      const result = await executeCode({ code, timeoutMs: 1000 });
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('VALIDATION_ERROR');
+      expect(result.error?.message).toContain('constructor');
+    });
+
+    it('should reject bracket-notation constructor access', async () => {
+      const code = `({})["constructor"]["constructor"]("return this")()`;
+      const result = await executeCode({ code, timeoutMs: 1000 });
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('VALIDATION_ERROR');
+      expect(result.error?.message).toContain('constructor');
+    });
+
+    it('should reject bracket-notation __proto__ access', async () => {
+      const code = `({})["__proto__"]`;
+      const result = await executeCode({ code, timeoutMs: 1000 });
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('VALIDATION_ERROR');
+      expect(result.error?.message).toContain('__proto__');
+    });
+
+    it('should reject bracket-notation prototype access', async () => {
+      const code = `Object["prototype"]`;
+      const result = await executeCode({ code, timeoutMs: 1000 });
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('VALIDATION_ERROR');
+      expect(result.error?.message).toContain('prototype');
+    });
+
+    it('should allow legitimate orchestration code after new patterns', async () => {
+      const code = `
+        const x = 1 + 2;
+        const arr = [1, 2, 3].map(n => n * 2);
+        return { sum: x, doubled: arr };
+      `;
+      const result = await executeCode({ code, timeoutMs: 1000 });
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({ sum: 3, doubled: [2, 4, 6] });
+    });
+  });
+
   describe('smart error enhancement', () => {
     const savedEnabledServices = process.env.ENABLED_SERVICES;
 
     beforeEach(() => {
       resetServiceCaches();
       process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,gitlab,os';
+      _setBridgesForTesting(createMockBridges());
     });
 
     afterEach(() => {
+      _setBridgesForTesting(null);
       if (savedEnabledServices === undefined) {
         delete process.env.ENABLED_SERVICES;
       } else {
@@ -344,98 +368,6 @@ describe('executor', () => {
     });
 
     it('should show available methods when calling non-existent function', async () => {
-      // Setup mock bridges
-      const mockBridges: AllBridges = {
-        slack: {
-          listChannelIds: vi.fn(),
-          getChannelMessages: vi.fn(),
-          sendChannel: vi.fn(),
-          getUsers: vi.fn(),
-        },
-        sharepoint: {
-          listFileIds: vi.fn(),
-          getFileFull: vi.fn(),
-          sync: vi.fn(),
-          syncDirectory: vi.fn(),
-          getCurrentUser: vi.fn(),
-        },
-        redmine: {
-          listIssueIds: vi.fn(),
-          getIssueFull: vi.fn(),
-          createIssue: vi.fn(),
-          updateIssue: vi.fn(),
-          searchIssueIds: vi.fn(),
-          commentIssue: vi.fn(),
-          listTimeEntries: vi.fn(),
-          createTimeEntry: vi.fn(),
-          updateTimeEntry: vi.fn(),
-          listJournals: vi.fn(),
-          updateJournal: vi.fn(),
-          deleteJournal: vi.fn(),
-          listUsers: vi.fn(),
-          resolveUser: vi.fn(),
-          getMappings: vi.fn(),
-          getCurrentUser: vi.fn(),
-          getConfig: vi.fn(),
-          listProjectIds: vi.fn(),
-          getProjectFull: vi.fn(),
-          searchProjectIds: vi.fn(),
-          listRelations: vi.fn(),
-          createRelation: vi.fn(),
-          deleteRelation: vi.fn(),
-        },
-        gitlab: {
-          listProjectIds: vi.fn(),
-          getProjectFull: vi.fn(),
-          searchCode: vi.fn(),
-          listMrIds: vi.fn(),
-          getMrFull: vi.fn(),
-          createMergeRequest: vi.fn(),
-          updateMergeRequest: vi.fn(),
-          approveMergeRequest: vi.fn(),
-          mergeMergeRequest: vi.fn(),
-          getMrChanges: vi.fn(),
-          listMrCommits: vi.fn(),
-          listMrPipelines: vi.fn(),
-          listMrNotes: vi.fn(),
-          createMrNote: vi.fn(),
-          listMrDiscussions: vi.fn(),
-          createMrDiscussion: vi.fn(),
-          listBranches: vi.fn(),
-          getBranch: vi.fn(),
-          createBranch: vi.fn(),
-          deleteBranch: vi.fn(),
-          compareBranches: vi.fn(),
-          listCommits: vi.fn(),
-          searchCommits: vi.fn(),
-          getCommitDiff: vi.fn(),
-          listBranchCommits: vi.fn(),
-          listPipelineIds: vi.fn(),
-          getPipelineFull: vi.fn(),
-          retryPipeline: vi.fn(),
-          triggerPipeline: vi.fn(),
-          getJobLog: vi.fn(),
-          getTree: vi.fn(),
-          getFile: vi.fn(),
-          getBlame: vi.fn(),
-          listArtifacts: vi.fn(),
-          downloadArtifact: vi.fn(),
-          deleteArtifacts: vi.fn(),
-          listIssues: vi.fn(),
-          getIssue: vi.fn(),
-          createIssue: vi.fn(),
-          updateIssue: vi.fn(),
-          closeIssue: vi.fn(),
-          listLabels: vi.fn(),
-          createLabel: vi.fn(),
-          createTag: vi.fn(),
-          deleteTag: vi.fn(),
-          createRelease: vi.fn(),
-        },
-      };
-      _setBridgesForTesting(mockBridges);
-
-      // Call a non-existent method on redmine
       const code = `await redmine.listProjects()`;
       const result = await executeCode({ code, timeoutMs: 5000 });
 
@@ -445,102 +377,9 @@ describe('executor', () => {
       expect(result.error?.message).toContain('Available redmine methods');
       expect(result.error?.message).toContain('listIssueIds');
       expect(result.error?.message).toContain('updateIssue');
-
-      // Cleanup
-      _setBridgesForTesting(null);
     });
 
     it('should show available methods for gitlab when calling non-existent function', async () => {
-      const mockBridges: AllBridges = {
-        slack: {
-          listChannelIds: vi.fn(),
-          getChannelMessages: vi.fn(),
-          sendChannel: vi.fn(),
-          getUsers: vi.fn(),
-        },
-        sharepoint: {
-          listFileIds: vi.fn(),
-          getFileFull: vi.fn(),
-          sync: vi.fn(),
-          syncDirectory: vi.fn(),
-          getCurrentUser: vi.fn(),
-        },
-        redmine: {
-          listIssueIds: vi.fn(),
-          getIssueFull: vi.fn(),
-          createIssue: vi.fn(),
-          updateIssue: vi.fn(),
-          searchIssueIds: vi.fn(),
-          commentIssue: vi.fn(),
-          listTimeEntries: vi.fn(),
-          createTimeEntry: vi.fn(),
-          updateTimeEntry: vi.fn(),
-          listJournals: vi.fn(),
-          updateJournal: vi.fn(),
-          deleteJournal: vi.fn(),
-          listUsers: vi.fn(),
-          resolveUser: vi.fn(),
-          getMappings: vi.fn(),
-          getCurrentUser: vi.fn(),
-          getConfig: vi.fn(),
-          listProjectIds: vi.fn(),
-          getProjectFull: vi.fn(),
-          searchProjectIds: vi.fn(),
-          listRelations: vi.fn(),
-          createRelation: vi.fn(),
-          deleteRelation: vi.fn(),
-        },
-        gitlab: {
-          listProjectIds: vi.fn(),
-          getProjectFull: vi.fn(),
-          searchCode: vi.fn(),
-          listMrIds: vi.fn(),
-          getMrFull: vi.fn(),
-          createMergeRequest: vi.fn(),
-          updateMergeRequest: vi.fn(),
-          approveMergeRequest: vi.fn(),
-          mergeMergeRequest: vi.fn(),
-          getMrChanges: vi.fn(),
-          listMrCommits: vi.fn(),
-          listMrPipelines: vi.fn(),
-          listMrNotes: vi.fn(),
-          createMrNote: vi.fn(),
-          listMrDiscussions: vi.fn(),
-          createMrDiscussion: vi.fn(),
-          listBranches: vi.fn(),
-          getBranch: vi.fn(),
-          createBranch: vi.fn(),
-          deleteBranch: vi.fn(),
-          compareBranches: vi.fn(),
-          listCommits: vi.fn(),
-          searchCommits: vi.fn(),
-          getCommitDiff: vi.fn(),
-          listBranchCommits: vi.fn(),
-          listPipelineIds: vi.fn(),
-          getPipelineFull: vi.fn(),
-          retryPipeline: vi.fn(),
-          triggerPipeline: vi.fn(),
-          getJobLog: vi.fn(),
-          getTree: vi.fn(),
-          getFile: vi.fn(),
-          getBlame: vi.fn(),
-          listArtifacts: vi.fn(),
-          downloadArtifact: vi.fn(),
-          deleteArtifacts: vi.fn(),
-          listIssues: vi.fn(),
-          getIssue: vi.fn(),
-          createIssue: vi.fn(),
-          updateIssue: vi.fn(),
-          closeIssue: vi.fn(),
-          listLabels: vi.fn(),
-          createLabel: vi.fn(),
-          createTag: vi.fn(),
-          deleteTag: vi.fn(),
-          createRelease: vi.fn(),
-        },
-      };
-      _setBridgesForTesting(mockBridges);
-
       const code = `await gitlab.getRepositories()`;
       const result = await executeCode({ code, timeoutMs: 5000 });
 
@@ -548,102 +387,9 @@ describe('executor', () => {
       expect(result.error?.message).toContain('getRepositories is not a function');
       expect(result.error?.message).toContain('Available gitlab methods');
       expect(result.error?.message).toContain('listProjectIds');
-
-      _setBridgesForTesting(null);
     });
 
     it('should show available methods when underscore method does not match any real method', async () => {
-      const mockBridges: AllBridges = {
-        slack: {
-          listChannelIds: vi.fn(),
-          getChannelMessages: vi.fn(),
-          sendChannel: vi.fn(),
-          getUsers: vi.fn(),
-        },
-        sharepoint: {
-          listFileIds: vi.fn(),
-          getFileFull: vi.fn(),
-          sync: vi.fn(),
-          syncDirectory: vi.fn(),
-          getCurrentUser: vi.fn(),
-        },
-        redmine: {
-          listIssueIds: vi.fn(),
-          getIssueFull: vi.fn(),
-          createIssue: vi.fn(),
-          updateIssue: vi.fn(),
-          searchIssueIds: vi.fn(),
-          commentIssue: vi.fn(),
-          listTimeEntries: vi.fn(),
-          createTimeEntry: vi.fn(),
-          updateTimeEntry: vi.fn(),
-          listJournals: vi.fn(),
-          updateJournal: vi.fn(),
-          deleteJournal: vi.fn(),
-          listUsers: vi.fn(),
-          resolveUser: vi.fn(),
-          getMappings: vi.fn(),
-          getCurrentUser: vi.fn(),
-          getConfig: vi.fn(),
-          listProjectIds: vi.fn(),
-          getProjectFull: vi.fn(),
-          searchProjectIds: vi.fn(),
-          listRelations: vi.fn(),
-          createRelation: vi.fn(),
-          deleteRelation: vi.fn(),
-        },
-        gitlab: {
-          listProjectIds: vi.fn(),
-          getProjectFull: vi.fn(),
-          searchCode: vi.fn(),
-          listMrIds: vi.fn(),
-          getMrFull: vi.fn(),
-          createMergeRequest: vi.fn(),
-          updateMergeRequest: vi.fn(),
-          approveMergeRequest: vi.fn(),
-          mergeMergeRequest: vi.fn(),
-          getMrChanges: vi.fn(),
-          listMrCommits: vi.fn(),
-          listMrPipelines: vi.fn(),
-          listMrNotes: vi.fn(),
-          createMrNote: vi.fn(),
-          listMrDiscussions: vi.fn(),
-          createMrDiscussion: vi.fn(),
-          listBranches: vi.fn(),
-          getBranch: vi.fn(),
-          createBranch: vi.fn(),
-          deleteBranch: vi.fn(),
-          compareBranches: vi.fn(),
-          listCommits: vi.fn(),
-          searchCommits: vi.fn(),
-          getCommitDiff: vi.fn(),
-          listBranchCommits: vi.fn(),
-          listPipelineIds: vi.fn(),
-          getPipelineFull: vi.fn(),
-          retryPipeline: vi.fn(),
-          triggerPipeline: vi.fn(),
-          getJobLog: vi.fn(),
-          getTree: vi.fn(),
-          getFile: vi.fn(),
-          getBlame: vi.fn(),
-          listArtifacts: vi.fn(),
-          downloadArtifact: vi.fn(),
-          deleteArtifacts: vi.fn(),
-          listIssues: vi.fn(),
-          getIssue: vi.fn(),
-          createIssue: vi.fn(),
-          updateIssue: vi.fn(),
-          closeIssue: vi.fn(),
-          listLabels: vi.fn(),
-          createLabel: vi.fn(),
-          createTag: vi.fn(),
-          deleteTag: vi.fn(),
-          createRelease: vi.fn(),
-        },
-      };
-      _setBridgesForTesting(mockBridges);
-
-      // Code using underscore notation for a method that doesn't exist
       const code = `slack_nonExistentMethod()`;
       const result = await executeCode({ code, timeoutMs: 5000 });
 
@@ -652,8 +398,6 @@ describe('executor', () => {
       expect(result.error?.message).toContain('slack_nonExistentMethod is not defined');
       expect(result.error?.message).toContain('Use dot notation');
       expect(result.error?.message).toContain('Available methods');
-
-      _setBridgesForTesting(null);
     });
   });
 
@@ -719,97 +463,8 @@ describe('executor', () => {
   // Local Docker logs are not sanitized as they don't leave the container
 
   describe('batch helper (through executeCode)', () => {
-    const mockBridges: AllBridges = {
-      slack: {
-        listChannelIds: vi.fn(),
-        getChannelMessages: vi.fn(),
-        sendChannel: vi.fn(),
-        getUsers: vi.fn(),
-      },
-      sharepoint: {
-        listFileIds: vi.fn(),
-        getFileFull: vi.fn(),
-        sync: vi.fn(),
-        syncDirectory: vi.fn(),
-        getCurrentUser: vi.fn(),
-      },
-      redmine: {
-        listIssueIds: vi.fn(),
-        getIssueFull: vi.fn(),
-        createIssue: vi.fn(),
-        updateIssue: vi.fn(),
-        searchIssueIds: vi.fn(),
-        commentIssue: vi.fn(),
-        listTimeEntries: vi.fn(),
-        createTimeEntry: vi.fn(),
-        updateTimeEntry: vi.fn(),
-        listJournals: vi.fn(),
-        updateJournal: vi.fn(),
-        deleteJournal: vi.fn(),
-        listUsers: vi.fn(),
-        resolveUser: vi.fn(),
-        getMappings: vi.fn(),
-        getCurrentUser: vi.fn(),
-        getConfig: vi.fn(),
-        listProjectIds: vi.fn(),
-        getProjectFull: vi.fn(),
-        searchProjectIds: vi.fn(),
-        listRelations: vi.fn(),
-        createRelation: vi.fn(),
-        deleteRelation: vi.fn(),
-      },
-      gitlab: {
-        listProjectIds: vi.fn(),
-        getProjectFull: vi.fn(),
-        searchCode: vi.fn(),
-        listMrIds: vi.fn(),
-        getMrFull: vi.fn(),
-        createMergeRequest: vi.fn(),
-        updateMergeRequest: vi.fn(),
-        approveMergeRequest: vi.fn(),
-        mergeMergeRequest: vi.fn(),
-        getMrChanges: vi.fn(),
-        listMrCommits: vi.fn(),
-        listMrPipelines: vi.fn(),
-        listMrNotes: vi.fn(),
-        createMrNote: vi.fn(),
-        listMrDiscussions: vi.fn(),
-        createMrDiscussion: vi.fn(),
-        listBranches: vi.fn(),
-        getBranch: vi.fn(),
-        createBranch: vi.fn(),
-        deleteBranch: vi.fn(),
-        compareBranches: vi.fn(),
-        listCommits: vi.fn(),
-        searchCommits: vi.fn(),
-        getCommitDiff: vi.fn(),
-        listBranchCommits: vi.fn(),
-        listPipelineIds: vi.fn(),
-        getPipelineFull: vi.fn(),
-        retryPipeline: vi.fn(),
-        triggerPipeline: vi.fn(),
-        getJobLog: vi.fn(),
-        getTree: vi.fn(),
-        getFile: vi.fn(),
-        getBlame: vi.fn(),
-        listArtifacts: vi.fn(),
-        downloadArtifact: vi.fn(),
-        deleteArtifacts: vi.fn(),
-        listIssues: vi.fn(),
-        getIssue: vi.fn(),
-        createIssue: vi.fn(),
-        updateIssue: vi.fn(),
-        closeIssue: vi.fn(),
-        listLabels: vi.fn(),
-        createLabel: vi.fn(),
-        createTag: vi.fn(),
-        deleteTag: vi.fn(),
-        createRelease: vi.fn(),
-      },
-    };
-
     beforeEach(() => {
-      _setBridgesForTesting(mockBridges);
+      _setBridgesForTesting(createMockBridges());
     });
 
     afterEach(() => {
@@ -906,19 +561,9 @@ describe('executor', () => {
       };
 
       // Set up mock bridges
-      const mockBridges: AllBridges = {
-        slack: {
-          listChannelIds: vi.fn(),
-          getChannelMessages: vi.fn(),
-          sendChannel: vi.fn(),
-          getUsers: vi.fn(),
-        },
-        presale: null,
-        sharepoint: null,
-        redmine: null,
-        gitlab: null,
-        os: null,
-      };
+      const mockBridges = createMockBridges();
+      mockBridges['presale'] = null;
+      mockBridges['os'] = null;
       _setBridgesForTesting(mockBridges);
 
       // Code that accesses the sandbox to check what's available
