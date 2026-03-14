@@ -178,6 +178,27 @@ pub(crate) fn run_exit_cleanup(
     // Stop watchdog before killing mcp-os to prevent respawn during shutdown
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
+    // Stop containers for all projects before killing mcp-os.
+    // Analogous to Docker Desktop stopping containers on quit.
+    // Best-effort — failures are logged but do not block remaining cleanup.
+    let rt = speedwave_runtime::runtime::detect_runtime();
+    match config::load_user_config() {
+        Ok(user_config) => {
+            for project in &user_config.projects {
+                log::info!("exit cleanup: stopping containers for '{}'", project.name);
+                if let Err(e) = rt.compose_down(&project.name) {
+                    log::warn!(
+                        "exit cleanup: compose_down failed for '{}': {e}",
+                        project.name
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!("exit cleanup: failed to load config, skipping compose_down: {e}");
+        }
+    }
+
     match ide_bridge.lock() {
         Ok(mut guard) => {
             if let Some(mut bridge) = guard.take() {

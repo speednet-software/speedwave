@@ -461,6 +461,13 @@ fn write_log_line(file: &mut Option<std::fs::File>, prefix: &str, line: &str) {
 
 /// Write content to file with chmod 600 (Unix) to prevent other users from reading it.
 fn write_restricted_file(path: &PathBuf, content: &str) -> anyhow::Result<()> {
+    if path.is_dir() {
+        log::warn!(
+            "write_restricted_file: removing unexpected directory at {}",
+            path.display()
+        );
+        std::fs::remove_dir_all(path)?;
+    }
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -1420,5 +1427,18 @@ srv.listen(0, '127.0.0.1', () => {
             proc.stop().unwrap();
         }
         // node not available — skip
+    }
+
+    #[test]
+    fn test_write_restricted_file_overwrites_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("token-as-dir").to_path_buf();
+        std::fs::create_dir(&path).unwrap();
+        assert!(path.is_dir());
+
+        write_restricted_file(&path, "my-token").unwrap();
+
+        assert!(path.is_file());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "my-token");
     }
 }
