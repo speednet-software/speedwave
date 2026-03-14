@@ -6,7 +6,7 @@
 
 ## Context
 
-The MCP Hub executor (`executor.ts`) runs model-generated JavaScript in a sandbox using `new AsyncFunction(...)` with a regex denylist (`FORBIDDEN_PATTERNS`). The denylist blocks direct access to `eval`, `require`, `process`, `globalThis`, and other dangerous APIs (see `FORBIDDEN_PATTERNS` in `mcp-servers/hub/src/executor.ts` for the canonical list).
+The MCP Hub executor (`executor.ts`) runs model-generated JavaScript in a sandbox using `new AsyncFunction(...)` with a regex denylist (`FORBIDDEN_PATTERNS`). The denylist blocks direct access to `eval`, `require`, `process`, `globalThis`, `global` (Node.js global object), and other dangerous APIs (see `FORBIDDEN_PATTERNS` in `mcp-servers/hub/src/executor.ts` for the canonical list).
 
 However, prototype chain traversal bypasses these patterns. For example:
 
@@ -95,7 +95,7 @@ If a mature, actively maintained V8 isolate library emerges with Node 24+ suppor
 
 [^2]: [OWASP Prototype Pollution](https://owasp.org/www-community/attacks/Prototype_Pollution) — documents `.constructor` as the standard chain escape mechanism
 
-[^3]: [isolated-vm GitHub](https://github.com/nicolo-ribaudo/isolated-vm) — repository shows maintenance-mode status and Node.js ABI compatibility issues
+[^3]: [isolated-vm GitHub](https://github.com/laverdet/isolated-vm) — repository shows maintenance-mode status and Node.js ABI compatibility issues
 
 [^4]: [quickjs-emscripten GitHub](https://github.com/nicolo-ribaudo/quickjs-emscripten) — async execution limitations documented in README
 

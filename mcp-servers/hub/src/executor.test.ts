@@ -210,6 +210,13 @@ describe('executor', () => {
       expect(result.error?.message).toContain('globalThis');
     });
 
+    it('should validate global access', async () => {
+      const code = `global.toString()`;
+      const result = await executeCode({ code, timeoutMs: 1000 });
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('global');
+    });
+
     it('should validate __dirname access', async () => {
       const code = `console.log(__dirname)`;
       const result = await executeCode({ code, timeoutMs: 1000 });
@@ -280,12 +287,12 @@ describe('executor', () => {
       expect(result.error?.message).toContain('Proxy');
     });
 
-    it('should reject Reflect.getPrototypeOf', async () => {
-      const code = `Reflect.getPrototypeOf({})`;
+    it('should reject Reflect API', async () => {
+      const code = `Reflect.ownKeys({})`;
       const result = await executeCode({ code, timeoutMs: 1000 });
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('VALIDATION_ERROR');
-      expect(result.error?.message).toContain('getPrototypeOf');
+      expect(result.error?.message).toContain('Reflect');
     });
 
     it('should reject Reflect.construct bypass', async () => {

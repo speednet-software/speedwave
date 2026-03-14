@@ -111,6 +111,7 @@ const FORBIDDEN_PATTERNS = [
   // Process / runtime access
   /\bprocess\b/,
   /\bglobalThis\b/,
+  /\bglobal\b/,
   /\b__dirname\b/,
   /\b__filename\b/,
   /\bchild_process\b/,
