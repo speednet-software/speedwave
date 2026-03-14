@@ -105,6 +105,9 @@ pub fn render_compose(
     // Inject mcp-os config into hub if auth token exists
     yaml = apply_mcp_os_config(&yaml)?;
 
+    // Inject per-worker Bearer auth tokens (SEC-035)
+    yaml = apply_worker_auth_tokens(&yaml, project_name, integrations)?;
+
     // Filter services based on integrations config
     yaml = apply_integrations_filter(&yaml, integrations)?;
 
@@ -372,6 +375,125 @@ pub fn apply_auth_config(yaml: &str, project: &str) -> anyhow::Result<String> {
 
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
     add_claude_env_var(&mut doc, "ANTHROPIC_API_KEY", &api_key);
+    Ok(serde_yaml_ng::to_string(&doc)?)
+}
+
+/// Adds an environment variable to a named service. Fails loudly if the service
+/// does not exist in the YAML — unlike `inject_worker_env()` which silently no-ops.
+/// Creates the `environment` key as a sequence if it does not exist.
+fn add_service_env_var(
+    doc: &mut serde_yaml_ng::Value,
+    service_name: &str,
+    key: &str,
+    value: &str,
+) -> anyhow::Result<()> {
+    let service = doc
+        .get_mut("services")
+        .and_then(|s| s.get_mut(service_name))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "service '{}' not found in compose YAML — cannot inject env var '{}'",
+                service_name,
+                key
+            )
+        })?;
+    let env = service
+        .get_mut("environment")
+        .and_then(|e| e.as_sequence_mut());
+    match env {
+        Some(seq) => {
+            seq.push(serde_yaml_ng::Value::String(format!("{}={}", key, value)));
+        }
+        None => {
+            service["environment"] =
+                serde_yaml_ng::Value::Sequence(vec![serde_yaml_ng::Value::String(format!(
+                    "{}={}",
+                    key, value
+                ))]);
+        }
+    }
+    Ok(())
+}
+
+/// Generates per-worker Bearer auth tokens and injects them into the compose YAML.
+///
+/// For each enabled MCP service:
+/// - Reads or generates a UUID v4 token at `~/.speedwave/secrets/<project>/<service>-auth-token`
+/// - Injects `MCP_<SERVICE>_AUTH_TOKEN=<token>` env var into the worker container
+/// - Mounts the token file as `/secrets/<service>-auth-token:ro` into the hub
+///
+/// Hub reads tokens from `/secrets/` files (auth-tokens.ts), not env vars.
+/// Workers read tokens from env vars. This asymmetry is enforced by `check_no_tokens_in_hub`.
+fn apply_worker_auth_tokens(
+    yaml: &str,
+    project_name: &str,
+    integrations: &ResolvedIntegrationsConfig,
+) -> anyhow::Result<String> {
+    let secrets_dir = init_secrets_dir(project_name)?;
+    apply_worker_auth_tokens_with_dir(yaml, &secrets_dir, integrations)
+}
+
+/// Testable version: accepts explicit secrets directory.
+fn apply_worker_auth_tokens_with_dir(
+    yaml: &str,
+    secrets_dir: &std::path::Path,
+    integrations: &ResolvedIntegrationsConfig,
+) -> anyhow::Result<String> {
+    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
+
+    for svc in consts::TOGGLEABLE_MCP_SERVICES {
+        if !integrations
+            .is_service_enabled(svc.config_key)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        let token_file_name = format!("{}-auth-token", svc.config_key);
+        let token_path = secrets_dir.join(&token_file_name);
+
+        // Read existing token or generate a new one.
+        // is_file() rejects directories, symlinks, and missing paths.
+        let token = if token_path.is_file() {
+            let content = std::fs::read_to_string(&token_path)?.trim().to_string();
+            if content.is_empty() {
+                uuid::Uuid::new_v4().to_string()
+            } else {
+                content
+            }
+        } else {
+            // Remove stale directory/symlink at token path if present
+            if token_path.exists() {
+                std::fs::remove_dir_all(&token_path)?;
+            }
+            uuid::Uuid::new_v4().to_string()
+        };
+
+        // Atomic write with 0o600 permissions (pattern from update.rs)
+        let tmp_path = token_path.with_extension("tmp");
+        std::fs::write(&tmp_path, &token)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::rename(&tmp_path, &token_path)?;
+
+        // Inject env var into worker container (fail-loud)
+        let env_key = format!("MCP_{}_AUTH_TOKEN", svc.config_key.to_uppercase());
+        add_service_env_var(&mut doc, svc.compose_name, &env_key, &token)?;
+
+        // Mount token file into hub as /secrets/<service>-auth-token:ro
+        add_hub_volume(
+            &mut doc,
+            &format!(
+                "{}:/secrets/{}:ro",
+                to_engine_path(&token_path)?,
+                token_file_name
+            ),
+        );
+    }
+
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
@@ -3763,6 +3885,448 @@ services:
         assert!(
             !integrations.is_plugin_enabled(plugin_key),
             "Plugin not in config should be disabled by default"
+        );
+    }
+
+    // ─── Worker auth token tests (SEC-035) ────────────────────────────────────
+
+    /// Compose YAML with all 4 toggleable workers for auth token tests.
+    const VALID_COMPOSE_ALL_WORKERS: &str = r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    container_name: speedwave_test_claude
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    volumes:
+      - /home/user/.speedwave/claude-home/test:/home/speedwave:rw
+      - /home/user/projects/test:/workspace
+      - /home/user/.speedwave/claude-resources:/speedwave/resources:ro
+    environment:
+      - CLAUDE_VERSION=1.0.3
+      - ANTHROPIC_MODEL=claude-sonnet-4-6
+      - DISABLE_AUTOUPDATER=1
+    networks:
+      - speedwave_test_network
+
+  mcp-hub:
+    image: speedwave-mcp-hub:latest
+    container_name: speedwave_test_mcp_hub
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    environment:
+      - PORT=4000
+      - WORKER_SLACK_URL=http://mcp-slack:4001
+      - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:4002
+      - WORKER_REDMINE_URL=http://mcp-redmine:4003
+      - WORKER_GITLAB_URL=http://mcp-gitlab:4004
+    networks:
+      - speedwave_test_network
+
+  mcp-slack:
+    image: speedwave-mcp-slack:latest
+    container_name: speedwave_test_mcp_slack
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /home/user/.speedwave/tokens/test/slack:/tokens:ro
+    environment:
+      - PORT=4001
+    networks:
+      - speedwave_test_network
+
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    container_name: speedwave_test_mcp_sharepoint
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /home/user/.speedwave/tokens/test/sharepoint:/tokens:rw
+    environment:
+      - PORT=4002
+    networks:
+      - speedwave_test_network
+
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
+    container_name: speedwave_test_mcp_redmine
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /home/user/.speedwave/tokens/test/redmine:/tokens:ro
+    environment:
+      - PORT=4003
+    networks:
+      - speedwave_test_network
+
+  mcp-gitlab:
+    image: speedwave-mcp-gitlab:latest
+    container_name: speedwave_test_mcp_gitlab
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /home/user/.speedwave/tokens/test/gitlab:/tokens:ro
+    environment:
+      - PORT=4004
+    networks:
+      - speedwave_test_network
+
+networks:
+  speedwave_test_network:
+    driver: bridge
+"#;
+
+    fn all_enabled_integrations() -> ResolvedIntegrationsConfig {
+        ResolvedIntegrationsConfig {
+            slack: true,
+            sharepoint: true,
+            redmine: true,
+            gitlab: true,
+            ..Default::default()
+        }
+    }
+
+    fn get_service_env_seq(doc: &serde_yaml_ng::Value, service: &str) -> Vec<String> {
+        doc.get("services")
+            .and_then(|s| s.get(service))
+            .and_then(|h| h.get("environment"))
+            .and_then(|e| e.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn get_hub_volumes(doc: &serde_yaml_ng::Value) -> Vec<String> {
+        doc.get("services")
+            .and_then(|s| s.get("mcp-hub"))
+            .and_then(|h| h.get("volumes"))
+            .and_then(|v| v.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn test_worker_auth_tokens_injected_into_enabled_workers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = all_enabled_integrations();
+
+        let result =
+            apply_worker_auth_tokens_with_dir(VALID_COMPOSE_ALL_WORKERS, tmp.path(), &integrations)
+                .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+
+        for svc in consts::TOGGLEABLE_MCP_SERVICES {
+            let env_key = format!("MCP_{}_AUTH_TOKEN", svc.config_key.to_uppercase());
+            let env = get_service_env_seq(&doc, svc.compose_name);
+            assert!(
+                env.iter().any(|e| e.starts_with(&format!("{}=", env_key))),
+                "worker '{}' should have {} env var",
+                svc.compose_name,
+                env_key
+            );
+        }
+    }
+
+    #[test]
+    fn test_worker_auth_tokens_not_injected_for_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = ResolvedIntegrationsConfig {
+            slack: false,
+            sharepoint: false,
+            redmine: false,
+            gitlab: false,
+            ..Default::default()
+        };
+
+        let result =
+            apply_worker_auth_tokens_with_dir(VALID_COMPOSE_ALL_WORKERS, tmp.path(), &integrations)
+                .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+
+        // No auth token env vars on any worker
+        for svc in consts::TOGGLEABLE_MCP_SERVICES {
+            let env_key = format!("MCP_{}_AUTH_TOKEN", svc.config_key.to_uppercase());
+            let env = get_service_env_seq(&doc, svc.compose_name);
+            assert!(
+                !env.iter().any(|e| e.starts_with(&format!("{}=", env_key))),
+                "disabled worker '{}' should NOT have {} env var",
+                svc.compose_name,
+                env_key
+            );
+        }
+
+        // No /secrets/ mounts in hub
+        let volumes = get_hub_volumes(&doc);
+        assert!(
+            !volumes
+                .iter()
+                .any(|v| v.contains("/secrets/") && v.contains("-auth-token")),
+            "hub should have no auth token mounts for disabled workers"
+        );
+    }
+
+    #[test]
+    fn test_worker_auth_tokens_mounted_into_hub() {
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = all_enabled_integrations();
+
+        let result =
+            apply_worker_auth_tokens_with_dir(VALID_COMPOSE_ALL_WORKERS, tmp.path(), &integrations)
+                .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let volumes = get_hub_volumes(&doc);
+
+        for svc in consts::TOGGLEABLE_MCP_SERVICES {
+            let expected_mount = format!("/secrets/{}-auth-token:ro", svc.config_key);
+            assert!(
+                volumes.iter().any(|v| v.ends_with(&expected_mount)),
+                "hub should have mount for {} (looking for suffix '{}')",
+                svc.config_key,
+                expected_mount
+            );
+        }
+    }
+
+    #[test]
+    fn test_worker_auth_tokens_not_in_hub_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = all_enabled_integrations();
+
+        let result =
+            apply_worker_auth_tokens_with_dir(VALID_COMPOSE_ALL_WORKERS, tmp.path(), &integrations)
+                .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+
+        // SecurityCheck: hub must not have TOKEN/KEY/SECRET env vars (except WORKER_*_URL, PORT)
+        let violations = SecurityCheck::check_no_tokens_in_hub(&doc);
+        assert!(
+            violations.is_empty(),
+            "check_no_tokens_in_hub should pass after worker auth injection, got: {:?}",
+            violations.iter().map(|v| &v.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_worker_auth_tokens_are_uuids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = all_enabled_integrations();
+
+        apply_worker_auth_tokens_with_dir(VALID_COMPOSE_ALL_WORKERS, tmp.path(), &integrations)
+            .unwrap();
+
+        for svc in consts::TOGGLEABLE_MCP_SERVICES {
+            let token_path = tmp.path().join(format!("{}-auth-token", svc.config_key));
+            let token = std::fs::read_to_string(&token_path).unwrap();
+            assert!(
+                uuid::Uuid::parse_str(token.trim()).is_ok(),
+                "token for '{}' should be a valid UUID, got: '{}'",
+                svc.config_key,
+                token
+            );
+        }
+    }
+
+    #[test]
+    fn test_worker_auth_tokens_persist_across_renders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = all_enabled_integrations();
+
+        // First render — generates tokens
+        apply_worker_auth_tokens_with_dir(VALID_COMPOSE_ALL_WORKERS, tmp.path(), &integrations)
+            .unwrap();
+
+        let first_tokens: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES
+            .iter()
+            .map(|svc| {
+                std::fs::read_to_string(tmp.path().join(format!("{}-auth-token", svc.config_key)))
+                    .unwrap()
+            })
+            .collect();
+
+        // Second render — should reuse same tokens
+        apply_worker_auth_tokens_with_dir(VALID_COMPOSE_ALL_WORKERS, tmp.path(), &integrations)
+            .unwrap();
+
+        let second_tokens: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES
+            .iter()
+            .map(|svc| {
+                std::fs::read_to_string(tmp.path().join(format!("{}-auth-token", svc.config_key)))
+                    .unwrap()
+            })
+            .collect();
+
+        assert_eq!(
+            first_tokens, second_tokens,
+            "tokens should persist across renders"
+        );
+    }
+
+    #[test]
+    fn test_worker_auth_tokens_use_engine_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = ResolvedIntegrationsConfig {
+            slack: true,
+            ..Default::default()
+        };
+
+        let result =
+            apply_worker_auth_tokens_with_dir(VALID_COMPOSE_ALL_WORKERS, tmp.path(), &integrations)
+                .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let volumes = get_hub_volumes(&doc);
+
+        let token_path = tmp.path().join("slack-auth-token");
+        let expected_host = to_engine_path(&token_path).unwrap();
+        assert!(
+            volumes
+                .iter()
+                .any(|v| v.starts_with(&expected_host)
+                    && v.ends_with("/secrets/slack-auth-token:ro")),
+            "hub mount should use to_engine_path(), volumes: {:?}",
+            volumes
+        );
+    }
+
+    #[test]
+    fn test_security_check_passes_with_worker_auth() {
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = all_enabled_integrations();
+
+        // Use VALID_COMPOSE_ALL_WORKERS with correct user for current platform
+        let yaml = VALID_COMPOSE_ALL_WORKERS.replace(
+            "user: \"1000:1000\"",
+            &format!("user: \"{}\"", container_user()),
+        );
+        let result = apply_worker_auth_tokens_with_dir(&yaml, tmp.path(), &integrations).unwrap();
+
+        let violations = SecurityCheck::run(&result, "test", &[]);
+        assert!(
+            violations.is_empty(),
+            "SecurityCheck should pass with worker auth, got: {:?}",
+            violations
+                .iter()
+                .map(|v| format!("{}", v))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_worker_auth_token_skipped_when_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = ResolvedIntegrationsConfig {
+            slack: true,
+            ..Default::default()
+        };
+
+        // Create a directory where the token file should be
+        std::fs::create_dir(tmp.path().join("slack-auth-token")).unwrap();
+
+        let result =
+            apply_worker_auth_tokens_with_dir(VALID_COMPOSE_ALL_WORKERS, tmp.path(), &integrations)
+                .unwrap();
+
+        // Should generate a new token (not panic)
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let env = get_service_env_seq(&doc, "mcp-slack");
+        assert!(
+            env.iter().any(|e| e.starts_with("MCP_SLACK_AUTH_TOKEN=")),
+            "should generate new token even when existing path is a directory"
+        );
+    }
+
+    #[test]
+    fn test_worker_auth_token_written_with_0o600() {
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = ResolvedIntegrationsConfig {
+            slack: true,
+            ..Default::default()
+        };
+
+        apply_worker_auth_tokens_with_dir(VALID_COMPOSE_ALL_WORKERS, tmp.path(), &integrations)
+            .unwrap();
+
+        let token_path = tmp.path().join("slack-auth-token");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&token_path).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "token file should have 0o600 permissions, got: {:o}",
+                mode & 0o777
+            );
+        }
+    }
+
+    #[test]
+    fn test_worker_auth_token_atomic_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = all_enabled_integrations();
+
+        apply_worker_auth_tokens_with_dir(VALID_COMPOSE_ALL_WORKERS, tmp.path(), &integrations)
+            .unwrap();
+
+        // No .tmp files should remain
+        let tmp_files: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "tmp"))
+            .collect();
+        assert!(
+            tmp_files.is_empty(),
+            "no .tmp files should remain after atomic write, found: {:?}",
+            tmp_files.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_add_service_env_var_fails_for_missing_service() {
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(VALID_COMPOSE_ALL_WORKERS).unwrap();
+
+        let result = add_service_env_var(&mut doc, "nonexistent-service", "FOO", "bar");
+        assert!(
+            result.is_err(),
+            "add_service_env_var should fail for missing service"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("nonexistent-service"),
+            "error should mention the missing service name, got: {}",
+            err
         );
     }
 }

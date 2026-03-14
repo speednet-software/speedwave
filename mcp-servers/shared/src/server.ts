@@ -230,17 +230,13 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
   //─────────────────────────────────────────────────────────────────────────────
 
   app.get('/health', async (_req: Request, res: Response) => {
-    // When auth is configured, health is a public path — return minimal data only
-    if (options.auth) {
-      res.json({ status: 'ok' });
-      return;
-    }
-
     if (options.healthCheck) {
       try {
         await options.healthCheck();
       } catch (error) {
-        console.error(`[${name}] Health check failed:`, error);
+        if (!options.auth) {
+          console.error(`[${name}] Health check failed:`, error);
+        }
         res.status(500).json({ status: 'error' });
         return;
       }
