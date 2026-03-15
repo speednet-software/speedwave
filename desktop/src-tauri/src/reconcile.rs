@@ -135,10 +135,10 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         ));
     }
     rt.ensure_ready().map_err(|e| {
-        let msg = format!("Runtime is not ready while applying the new bundle: {e}");
-        state.last_error = Some(msg.clone());
-        let _ = bundle::save_bundle_state(&state);
-        msg
+        set_bundle_error(
+            &mut state,
+            format!("Runtime is not ready while applying the new bundle: {e}"),
+        )
     })?;
 
     let build_root = build::resolve_build_root().map_err(|e| e.to_string())?;
