@@ -8,6 +8,9 @@ use std::sync::{Arc, Mutex};
 /// Shared handle for the IDE Bridge instance.
 pub(crate) type SharedIdeBridge = Arc<Mutex<Option<ide_bridge::IdeBridge>>>;
 
+/// Shared handle for the mcp-os process.
+pub(crate) type SharedMcpOs = Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>;
+
 /// Shared handle for the background auto-update check task.
 pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>;
 
@@ -154,7 +157,7 @@ fn stop_all_containers(
 /// mcp-os process, and aborts the background auto-update check.
 pub(crate) fn run_exit_cleanup(
     ide_bridge: &SharedIdeBridge,
-    mcp_os: &Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>,
+    mcp_os: &SharedMcpOs,
     auto_check: &SharedAutoCheckHandle,
 ) {
     // Stop watchdog before killing mcp-os to prevent respawn during shutdown

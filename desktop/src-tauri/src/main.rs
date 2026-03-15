@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex};
 use tauri::tray::TrayIconBuilder;
 use tauri::Manager;
 
-use reconcile::{SharedAutoCheckHandle, SharedIdeBridge};
+use reconcile::{SharedAutoCheckHandle, SharedIdeBridge, SharedMcpOs};
 
 /// Tracks the latest available update version for the system tray menu.
 type SharedUpdateVersion = Arc<Mutex<Option<String>>>;
@@ -481,6 +481,7 @@ fn select_ide(
     ide_name: String,
     port: u16,
     state: tauri::State<SharedIdeBridge>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     // Validate that the port belongs to a currently detected IDE
     if !health::list_available_ides()
@@ -503,6 +504,10 @@ fn select_ide(
         config::save_user_config(&user_config)
     })
     .map_err(|e| e.to_string())?;
+
+    // Start IDE Bridge on-demand if it wasn't started at startup (e.g. after
+    // factory reset when setup_started was false during the initial launch).
+    ensure_ide_bridge_running(&state, &app);
 
     // Update the live Bridge so new connections are proxied immediately
     let guard = state
@@ -529,6 +534,158 @@ use window::should_debounce;
 use window::{hide_main_window, should_prevent_close, should_run_cleanup, show_main_window};
 
 // ---------------------------------------------------------------------------
+// Extracted subsystem starters (reused by setup() and ensure_*_running())
+// ---------------------------------------------------------------------------
+
+/// Create, configure, and start IDE Bridge. Stores it in the shared state.
+/// Called from setup() on normal start and from ensure_ide_bridge_running().
+fn init_and_start_ide_bridge(ide_bridge: &SharedIdeBridge, app_handle: &tauri::AppHandle) {
+    if let Some(bridge) = init_and_start_ide_bridge_inner(app_handle) {
+        if let Ok(mut guard) = ide_bridge.lock() {
+            *guard = Some(bridge);
+        }
+    }
+}
+
+/// Inner implementation: creates, configures and starts IDE Bridge.
+/// Returns `Some(bridge)` on success so the caller can store it under a lock.
+fn init_and_start_ide_bridge_inner(app_handle: &tauri::AppHandle) -> Option<ide_bridge::IdeBridge> {
+    match ide_bridge::IdeBridge::new() {
+        Ok(mut bridge) => {
+            let handle = app_handle.clone();
+            bridge.set_event_callback(std::sync::Arc::new(move |kind, detail| {
+                use tauri::Emitter;
+                let _ = handle.emit(
+                    "ide_bridge_event",
+                    serde_json::json!({ "kind": kind, "detail": detail }),
+                );
+            }));
+            if let Err(e) = bridge.start() {
+                log::error!("IDE Bridge start error: {e}");
+                return None;
+            }
+            log::info!("IDE Bridge started");
+            if let Ok(cfg) = config::load_user_config() {
+                if let Some(sel) = cfg.selected_ide {
+                    let _ = bridge.set_upstream(sel.ide_name, sel.port);
+                }
+            }
+            Some(bridge)
+        }
+        Err(e) => {
+            log::error!("IDE Bridge init error: {e}");
+            None
+        }
+    }
+}
+
+/// Start mcp-os watchdog thread. Called from setup() and ensure_mcp_os_running().
+fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        use std::time::Duration;
+        const CHECK_INTERVAL: Duration = Duration::from_secs(30);
+        const MAX_UNHEALTHY: u32 = 5;
+        const COOLDOWN: Duration = Duration::from_secs(300);
+        let mut consecutive_unhealthy: u32 = 0;
+
+        loop {
+            std::thread::sleep(CHECK_INTERVAL);
+            if WATCHDOG_STOP.load(Ordering::Relaxed) {
+                break;
+            }
+
+            match mcp_os.lock() {
+                Ok(mut guard) => match *guard {
+                    None => break,
+                    Some(ref mut proc) => {
+                        if proc.is_alive() {
+                            consecutive_unhealthy = 0;
+                            continue;
+                        }
+
+                        consecutive_unhealthy += 1;
+
+                        if consecutive_unhealthy >= MAX_UNHEALTHY {
+                            log::error!(
+                                "mcp-os watchdog: unhealthy for {MAX_UNHEALTHY} consecutive checks, cooling down"
+                            );
+                            std::thread::sleep(COOLDOWN);
+                            consecutive_unhealthy = 0;
+                            continue;
+                        }
+
+                        log::warn!(
+                            "mcp-os watchdog: process unhealthy ({consecutive_unhealthy}/{MAX_UNHEALTHY}), respawning"
+                        );
+                        match proc.respawn() {
+                            Ok(port) => {
+                                log::info!("mcp-os watchdog: respawned (port {port})");
+                                reconcile::reconcile_compose_port(&app_handle);
+                            }
+                            Err(e) => {
+                                log::error!("mcp-os watchdog: respawn failed: {e}");
+                            }
+                        }
+                    }
+                },
+                Err(e) => {
+                    log::error!("mcp-os watchdog: mutex poisoned: {e}");
+                    break;
+                }
+            }
+        }
+        log::info!("mcp-os watchdog: stopped");
+    });
+}
+
+/// Start IDE Bridge if not already running. Holds the mutex for the entire
+/// init+start to prevent races (two callers both seeing None and double-starting).
+fn ensure_ide_bridge_running(ide_bridge: &SharedIdeBridge, app_handle: &tauri::AppHandle) {
+    let mut guard = match ide_bridge.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            log::error!("ensure_ide_bridge_running: mutex poisoned: {e}");
+            return;
+        }
+    };
+    if guard.is_some() {
+        return;
+    }
+    if let Some(bridge) = init_and_start_ide_bridge_inner(app_handle) {
+        *guard = Some(bridge);
+    }
+}
+
+/// Start mcp-os if not already running. Holds the mutex for the entire
+/// spawn to prevent races (two callers both seeing None and double-spawning).
+fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
+    let mut guard = match mcp_os.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            log::error!("ensure_mcp_os_running: mutex poisoned: {e}");
+            return;
+        }
+    };
+    if guard.is_some() {
+        return;
+    }
+    let script = speedwave_runtime::build::resolve_mcp_os_script();
+    if let Some(script_path) = script {
+        let script_str = script_path.to_string_lossy().to_string();
+        match mcp_os_process::McpOsProcess::spawn(&script_str) {
+            Ok(proc) => {
+                log::info!("ensure_mcp_os_running: started (port {})", proc.port());
+                *guard = Some(proc);
+                drop(guard); // release before spawning watchdog thread
+                WATCHDOG_STOP.store(false, Ordering::Relaxed);
+                start_mcp_os_watchdog(mcp_os.clone(), app_handle.clone());
+            }
+            Err(e) => log::error!("ensure_mcp_os_running: spawn failed: {e}"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Application entry point
 // ---------------------------------------------------------------------------
 
@@ -550,13 +707,25 @@ fn main() {
         }
     }));
 
+    // True when setup has been *started* (at least check_runtime passed).
+    // After factory reset or fresh install, runtime_ready is false so we
+    // skip IDE Bridge / mcp-os / link_cli / resources marker to keep
+    // ~/.speedwave/ non-existent until the wizard explicitly creates it.
+    let setup_started = setup_wizard::SetupState::load().runtime_ready;
+
     // Bundled binary resolution for app bundles.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             if let Some(res) = reconcile::resolve_resources_dir(parent) {
+                // Env var always set — Desktop uses it directly, never reads the marker file
                 std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, &res);
-                if let Err(e) = speedwave_runtime::build::write_resources_marker(&res) {
-                    log::warn!("could not write resources-dir marker: {e}");
+                // Marker written to disk only if setup was completed at least once.
+                // After factory reset or fresh install: don't recreate ~/.speedwave/.
+                // CLI needs the marker only after the wizard finishes and links the binary.
+                if setup_started {
+                    if let Err(e) = speedwave_runtime::build::write_resources_marker(&res) {
+                        log::warn!("could not write resources-dir marker: {e}");
+                    }
                 }
             }
         }
@@ -566,7 +735,7 @@ fn main() {
 
     // Shared state for IDE Bridge, mcp-os process, auto-check handle, and tray update version
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
-    let mcp_os: Arc<Mutex<Option<mcp_os_process::McpOsProcess>>> = Arc::new(Mutex::new(None));
+    let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
     let auto_check_handle: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
     let update_version: SharedUpdateVersion = Arc::new(Mutex::new(None));
 
@@ -636,6 +805,7 @@ fn main() {
         }))
         .manage(initial_session)
         .manage(ide_bridge.clone())
+        .manage(mcp_os.clone())
         .setup(move |app| {
             // Restore persisted log level (default: Info)
             let initial_level = config::load_user_config()
@@ -656,134 +826,38 @@ fn main() {
                 }
             });
 
-            // Start IDE Bridge
-            match ide_bridge::IdeBridge::new() {
-                Ok(mut bridge) => {
-                    // Wire event callback to emit Tauri events to the Angular frontend
-                    let app_handle = app.handle().clone();
-                    bridge.set_event_callback(std::sync::Arc::new(move |kind, detail| {
-                        use tauri::Emitter;
-                        if let Err(e) = app_handle.emit(
-                            "ide_bridge_event",
-                            serde_json::json!({ "kind": kind, "detail": detail }),
-                        ) {
-                            log::error!("failed to emit ide_bridge_event: {e}");
-                        }
-                    }));
+            if setup_started {
+                // Start IDE Bridge
+                init_and_start_ide_bridge(&ide_bridge, app.handle());
 
-                    if let Err(e) = bridge.start() {
-                        log::error!("IDE Bridge start error: {e}");
-                    } else {
-                        log::info!("IDE Bridge started");
-                        // Restore upstream IDE selection from persisted config
-                        if let Ok(cfg) = config::load_user_config() {
-                            if let Some(sel) = cfg.selected_ide {
-                                match bridge.set_upstream(sel.ide_name.clone(), sel.port) {
-                                    Ok(()) => log::info!(
-                                        "IDE Bridge: restored upstream {} :{}",
-                                        sel.ide_name,
-                                        sel.port
-                                    ),
-                                    Err(e) => {
-                                        log::warn!("IDE Bridge: failed to restore upstream: {e}")
-                                    }
-                                }
+                // Start mcp-os process
+                let script = speedwave_runtime::build::resolve_mcp_os_script();
+                if let Some(script_path) = script {
+                    let script_str = script_path.to_string_lossy().to_string();
+                    match mcp_os_process::McpOsProcess::spawn(&script_str) {
+                        Ok(proc) => {
+                            let new_port = proc.port();
+                            log::info!("mcp-os process started (port {new_port})");
+                            if let Ok(mut guard) = mcp_os.lock() {
+                                *guard = Some(proc);
                             }
+
+                            // If containers are already running, regenerate compose with the
+                            // new mcp-os port and recreate them. Without this, the hub would
+                            // keep connecting to the old (dead) port from the previous session.
+                            reconcile::reconcile_compose_port(app.handle());
                         }
+                        Err(e) => log::error!("mcp-os spawn error: {e}"),
                     }
-                    if let Ok(mut guard) = ide_bridge.lock() {
-                        *guard = Some(bridge);
-                    }
+                } else {
+                    log::warn!("mcp-os script not found — OS integrations will be unavailable");
                 }
-                Err(e) => log::error!("IDE Bridge init error: {e}"),
-            }
 
-            // Start mcp-os process
-            let script = speedwave_runtime::build::resolve_mcp_os_script();
-
-            if let Some(script_path) = script {
-                let script_str = script_path.to_string_lossy().to_string();
-                match mcp_os_process::McpOsProcess::spawn(&script_str) {
-                    Ok(proc) => {
-                        let new_port = proc.port();
-                        log::info!("mcp-os process started (port {new_port})");
-                        if let Ok(mut guard) = mcp_os.lock() {
-                            *guard = Some(proc);
-                        }
-
-                        // If containers are already running, regenerate compose with the
-                        // new mcp-os port and recreate them. Without this, the hub would
-                        // keep connecting to the old (dead) port from the previous session.
-                        reconcile::reconcile_compose_port(app.handle());
-                    }
-                    Err(e) => log::error!("mcp-os spawn error: {e}"),
-                }
+                // Start mcp-os watchdog thread
+                start_mcp_os_watchdog(mcp_os.clone(), app.handle().clone());
             } else {
-                log::warn!("mcp-os script not found — OS integrations will be unavailable");
+                log::info!("setup not started, deferring IDE Bridge / mcp-os / link_cli until setup completes");
             }
-
-            // Start mcp-os watchdog thread
-            let mcp_os_watchdog = mcp_os.clone();
-            let watchdog_handle = app.handle().clone();
-            std::thread::spawn(move || {
-                use std::time::Duration;
-                const CHECK_INTERVAL: Duration = Duration::from_secs(30);
-                const MAX_UNHEALTHY: u32 = 5;
-                const COOLDOWN: Duration = Duration::from_secs(300);
-                let mut consecutive_unhealthy: u32 = 0;
-
-                loop {
-                    std::thread::sleep(CHECK_INTERVAL);
-                    if WATCHDOG_STOP.load(Ordering::Relaxed) {
-                        break;
-                    }
-
-                    match mcp_os_watchdog.lock() {
-                        Ok(mut guard) => match *guard {
-                            None => break, // mcp-os was never started — watchdog not needed
-                            Some(ref mut proc) => {
-                                if proc.is_alive() {
-                                    consecutive_unhealthy = 0;
-                                    continue;
-                                }
-
-                                consecutive_unhealthy += 1;
-
-                                if consecutive_unhealthy >= MAX_UNHEALTHY {
-                                    log::error!(
-                                        "mcp-os watchdog: unhealthy for {MAX_UNHEALTHY} consecutive checks, cooling down"
-                                    );
-                                    std::thread::sleep(COOLDOWN);
-                                    consecutive_unhealthy = 0;
-                                    continue;
-                                }
-
-                                log::warn!(
-                                    "mcp-os watchdog: process unhealthy ({consecutive_unhealthy}/{MAX_UNHEALTHY}), respawning"
-                                );
-                                match proc.respawn() {
-                                    Ok(port) => {
-                                        log::info!(
-                                            "mcp-os watchdog: respawned (port {port})"
-                                        );
-                                        reconcile::reconcile_compose_port(&watchdog_handle);
-                                    }
-                                    Err(e) => {
-                                        log::error!(
-                                            "mcp-os watchdog: respawn failed: {e}"
-                                        );
-                                    }
-                                }
-                            }
-                        },
-                        Err(e) => {
-                            log::error!("mcp-os watchdog: mutex poisoned: {e}");
-                            break;
-                        }
-                    }
-                }
-                log::info!("mcp-os watchdog: stopped");
-            });
 
             // Start background auto-update check (store handle for cancellation)
             let handle = updater::spawn_auto_check(app.handle().clone());
@@ -793,10 +867,12 @@ fn main() {
             }
 
             // Re-link CLI binary on every startup to keep it in sync after updates.
-            // Runs unconditionally — users may need the CLI for OAuth authentication
-            // before completing the setup wizard.
-            if let Err(e) = setup_wizard::link_cli() {
-                log::warn!("CLI re-link on startup failed: {e}");
+            // Gated behind setup_started: CLI doesn't exist on fresh install,
+            // and we must not recreate ~/.speedwave/ after factory reset.
+            if setup_started {
+                if let Err(e) = setup_wizard::link_cli() {
+                    log::warn!("CLI re-link on startup failed: {e}");
+                }
             }
 
             // Linux safety net: show the window immediately on startup.

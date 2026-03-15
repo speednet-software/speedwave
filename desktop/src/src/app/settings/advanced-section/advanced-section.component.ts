@@ -69,8 +69,8 @@ import { TauriService } from '../../services/tauri.service';
         <div class="danger-info">
           <h3>Factory Reset</h3>
           <p>
-            Stops all containers, destroys the VM (macOS), and resets setup state. Tokens in
-            ~/.speedwave/tokens/ are preserved. After reset the Setup Wizard will run again.
+            Stops all containers, destroys the VM (macOS), and removes all Speedwave data including
+            tokens and plugins. The application will restart and the Setup Wizard will run again.
           </p>
         </div>
         <div class="danger-actions">
