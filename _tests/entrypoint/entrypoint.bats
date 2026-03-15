@@ -688,3 +688,30 @@ EOF
 
     rm -rf "$plugins_dir" "$patched"
 }
+
+@test "SPEEDWAVE_PLUGINS warns when plugin overwrites another plugin resource" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    # Two plugins both ship commands/do-thing.md
+    mkdir -p "${plugins_dir}/alpha/commands"
+    mkdir -p "${plugins_dir}/beta/commands"
+    echo "alpha version" > "${plugins_dir}/alpha/commands/do-thing.md"
+    echo "beta version" > "${plugins_dir}/beta/commands/do-thing.md"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="alpha,beta" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # Warning about collision should appear on stderr (captured in output by bats)
+    [[ "$output" == *"WARNING: plugin 'beta' overwrites commands/do-thing.md from another plugin"* ]]
+
+    # Second plugin wins (last-wins semantics)
+    [ -L "${TEST_HOME}/.claude/commands/do-thing.md" ]
+    [ "$(readlink "${TEST_HOME}/.claude/commands/do-thing.md")" = "${plugins_dir}/beta/commands/do-thing.md" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
