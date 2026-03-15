@@ -38,10 +38,28 @@ fi
 # Ensure ~/.claude exists before symlinking anything
 mkdir -p "${HOME}/.claude"
 
-# Symlink core resource directories (skills, commands, agents, hooks) from read-only mount
+# Determine if plugins env var is set — if so, we must use per-entry symlinks
+# (writable local dir) instead of whole-directory symlinks (which point into
+# a read-only mount and cannot be extended by plugin entries).
+HAS_PLUGINS=false
+if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
+    HAS_PLUGINS=true
+fi
+
+# Symlink core resource directories (skills, commands, agents, hooks) from read-only mount.
+# When plugins are present: create a real directory and symlink each entry individually,
+# so plugin entries can be added alongside core entries.
+# When no plugins: symlink the whole directory (simpler, no per-entry overhead).
 for resource_type in skills commands agents hooks; do
     if [ -d "${SPEEDWAVE_RESOURCES}/${resource_type}" ]; then
-        ln -sfn "${SPEEDWAVE_RESOURCES}/${resource_type}" "${HOME}/.claude/${resource_type}"
+        if [ "${HAS_PLUGINS}" = true ]; then
+            mkdir -p "${HOME}/.claude/${resource_type}"
+            for entry in "${SPEEDWAVE_RESOURCES}/${resource_type}"/*; do
+                [ -e "${entry}" ] && ln -sfn "${entry}" "${HOME}/.claude/${resource_type}/$(basename "${entry}")"
+            done
+        else
+            ln -sfn "${SPEEDWAVE_RESOURCES}/${resource_type}" "${HOME}/.claude/${resource_type}"
+        fi
     fi
 done
 
@@ -60,21 +78,26 @@ if [ -f "${SPEEDWAVE_RESOURCES}/output-styles/Speedwave.md" ]; then
     ln -sf "${SPEEDWAVE_RESOURCES}/output-styles/Speedwave.md" "${HOME}/.claude/output-styles/Speedwave.md"
 fi
 
-# Symlink plugin resources if any plugins are configured
-if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
+# Symlink plugin resources — directories were already created as real dirs above
+if [ "${HAS_PLUGINS}" = true ]; then
     for plugin in ${SPEEDWAVE_PLUGINS//,/ }; do
-        # Validate slug: lowercase alphanumeric + hyphens, 1-64 chars, starts with letter
         if ! echo "${plugin}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
             echo "WARNING: Skipping invalid plugin slug: ${plugin}" >&2
             continue
         fi
         plugin_path="/speedwave/plugins/${plugin}"
         if [ -d "${plugin_path}" ]; then
-            for resource_type in commands agents skills hooks; do
+            for resource_type in skills commands agents hooks; do
                 if [ -d "${plugin_path}/${resource_type}" ]; then
                     mkdir -p "${HOME}/.claude/${resource_type}"
                     for entry in "${plugin_path}/${resource_type}"/*; do
-                        [ -e "${entry}" ] && ln -sfn "${entry}" "${HOME}/.claude/${resource_type}/$(basename "${entry}")"
+                        if [ -e "${entry}" ]; then
+                            target="${HOME}/.claude/${resource_type}/$(basename "${entry}")"
+                            if [ -L "${target}" ] && [ "$(readlink "${target}")" != "${entry}" ]; then
+                                echo "WARNING: plugin '${plugin}' overwrites ${resource_type}/$(basename "${entry}") from another plugin" >&2
+                            fi
+                            ln -sfn "${entry}" "${target}"
+                        fi
                     done
                 fi
             done

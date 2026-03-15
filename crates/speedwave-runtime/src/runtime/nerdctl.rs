@@ -50,11 +50,21 @@ impl ContainerRuntime for NerdctlRuntime {
 
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
         let compose_file = super::compose_file_path(project)?;
-        self.runner.run(
+        super::compose_down_and_cleanup(
+            &*self.runner,
             "nerdctl",
-            &["compose", "-f", &compose_file, "-p", project, "down"],
-        )?;
-        Ok(())
+            project,
+            &[
+                "compose",
+                "-f",
+                &compose_file,
+                "-p",
+                project,
+                "down",
+                "--remove-orphans",
+            ],
+            &[],
+        )
     }
 
     fn compose_ps(&self, project: &str) -> anyhow::Result<Vec<Value>> {
@@ -551,6 +561,24 @@ mod tests {
             nerdctl_path.to_string_lossy().to_string(),
             "container_exec_piped should use the bundled nerdctl binary"
         );
+    }
+
+    #[test]
+    fn test_compose_down() {
+        let compose_file = crate::runtime::compose_file_path("runtime-cleanup-test").unwrap();
+        let expected_key = format!(
+            "nerdctl compose -f {} -p runtime-cleanup-test down --remove-orphans",
+            compose_file
+        );
+        let runner = MockRunner::new()
+            .with_response(&expected_key, "")
+            .with_response(
+                "nerdctl ps -a --filter label=com.docker.compose.project=runtime-cleanup-test -q",
+                "stale-id",
+            )
+            .with_response("nerdctl rm -f stale-id", "");
+        let rt = NerdctlRuntime::with_runner(Box::new(runner));
+        assert!(rt.compose_down("runtime-cleanup-test").is_ok());
     }
 
     #[test]

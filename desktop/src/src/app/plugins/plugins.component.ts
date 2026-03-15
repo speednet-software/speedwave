@@ -167,10 +167,17 @@ export class PluginsComponent implements OnInit, OnDestroy {
    * Opens a native file dialog to select a plugin ZIP, then installs it.
    */
   async installPlugin(): Promise<void> {
-    const selected = await open({
-      multiple: false,
-      filters: [{ name: 'Plugin ZIP', extensions: ['zip'] }],
-    });
+    let selected: string | null;
+    try {
+      selected = await open({
+        multiple: false,
+        filters: [{ name: 'Plugin ZIP', extensions: ['zip'] }],
+      });
+    } catch (e: unknown) {
+      this.error = e instanceof Error ? e.message : String(e);
+      this.cdr.markForCheck();
+      return;
+    }
     if (!selected) return;
 
     this.installing = true;

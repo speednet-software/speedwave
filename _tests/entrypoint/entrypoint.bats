@@ -610,6 +610,67 @@ EOF
     rm -rf "$plugins_dir" "$patched"
 }
 
+@test "plugin resources coexist with core resources (no read-only conflict)" {
+    # Setup core resources
+    mkdir -p "$RESOURCES_DIR/skills"
+    mkdir -p "$RESOURCES_DIR/commands"
+    echo "# Core Skill" > "$RESOURCES_DIR/skills/core-skill.md"
+    echo "# Core Command" > "$RESOURCES_DIR/commands/core-command.md"
+
+    # Setup plugin resources
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+    mkdir -p "${plugins_dir}/presale/skills"
+    mkdir -p "${plugins_dir}/presale/commands"
+    echo "# Plugin Skill" > "${plugins_dir}/presale/skills/presale-skill.md"
+    echo "# Plugin Command" > "${plugins_dir}/presale/commands/presale-cmd.md"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="presale" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # Resource dirs must be real directories (not symlinks to RO mount)
+    [ -d "${TEST_HOME}/.claude/skills" ]
+    [ ! -L "${TEST_HOME}/.claude/skills" ]
+    [ -d "${TEST_HOME}/.claude/commands" ]
+    [ ! -L "${TEST_HOME}/.claude/commands" ]
+
+    # Both core and plugin entries accessible
+    [ -L "${TEST_HOME}/.claude/skills/core-skill.md" ]
+    [ -L "${TEST_HOME}/.claude/skills/presale-skill.md" ]
+    [ -L "${TEST_HOME}/.claude/commands/core-command.md" ]
+    [ -L "${TEST_HOME}/.claude/commands/presale-cmd.md" ]
+
+    # Content is correct
+    grep -q "Core Skill" "${TEST_HOME}/.claude/skills/core-skill.md"
+    grep -q "Plugin Skill" "${TEST_HOME}/.claude/skills/presale-skill.md"
+    grep -q "Core Command" "${TEST_HOME}/.claude/commands/core-command.md"
+    grep -q "Plugin Command" "${TEST_HOME}/.claude/commands/presale-cmd.md"
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "without plugins core resources are still directory symlinks" {
+    mkdir -p "$RESOURCES_DIR/skills"
+    mkdir -p "$RESOURCES_DIR/commands"
+    echo "# Skill" > "$RESOURCES_DIR/skills/my-skill.md"
+    echo "# Command" > "$RESOURCES_DIR/commands/my-command.md"
+
+    # No SPEEDWAVE_PLUGINS set
+    unset SPEEDWAVE_PLUGINS
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+
+    # Resource dirs must be symlinks to the resources mount (not real dirs)
+    [ -L "${TEST_HOME}/.claude/skills" ]
+    [ "$(readlink "${TEST_HOME}/.claude/skills")" = "$RESOURCES_DIR/skills" ]
+    [ -L "${TEST_HOME}/.claude/commands" ]
+    [ "$(readlink "${TEST_HOME}/.claude/commands")" = "$RESOURCES_DIR/commands" ]
+}
+
 @test "SPEEDWAVE_PLUGINS skips non-existent plugin directory" {
     local plugins_dir
     plugins_dir="$(mktemp -d)"
@@ -624,6 +685,33 @@ EOF
 
     # No symlinks should be created for the missing plugin
     [ ! -e "${TEST_HOME}/.claude/commands/nonexistent-plugin" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "SPEEDWAVE_PLUGINS warns when plugin overwrites another plugin resource" {
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+
+    # Two plugins both ship commands/do-thing.md
+    mkdir -p "${plugins_dir}/alpha/commands"
+    mkdir -p "${plugins_dir}/beta/commands"
+    echo "alpha version" > "${plugins_dir}/alpha/commands/do-thing.md"
+    echo "beta version" > "${plugins_dir}/beta/commands/do-thing.md"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="alpha,beta" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # Warning about collision should appear on stderr (captured in output by bats)
+    [[ "$output" == *"WARNING: plugin 'beta' overwrites commands/do-thing.md from another plugin"* ]]
+
+    # Second plugin wins (last-wins semantics)
+    [ -L "${TEST_HOME}/.claude/commands/do-thing.md" ]
+    [ "$(readlink "${TEST_HOME}/.claude/commands/do-thing.md")" = "${plugins_dir}/beta/commands/do-thing.md" ]
 
     rm -rf "$plugins_dir" "$patched"
 }

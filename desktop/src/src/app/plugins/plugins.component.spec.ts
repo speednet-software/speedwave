@@ -345,6 +345,16 @@ describe('PluginsComponent', () => {
       expect(component.error).toBe('signature invalid');
       expect(component.installing).toBe(false);
     });
+
+    it('sets error when file dialog throws', async () => {
+      await component.ngOnInit();
+      vi.mocked(open).mockRejectedValue(new Error('dialog permission denied'));
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      await component.installPlugin();
+      expect(component.error).toBe('dialog permission denied');
+      expect(invokeSpy).not.toHaveBeenCalledWith('install_plugin', expect.anything());
+      expect(component.installing).toBe(false);
+    });
   });
 
   describe('restartContainers()', () => {
