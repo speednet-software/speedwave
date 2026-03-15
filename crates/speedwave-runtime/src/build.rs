@@ -9,46 +9,52 @@ pub struct ImageDef {
     pub context_dir: &'static str,
     /// Containerfile path relative to the build root.
     pub containerfile: &'static str,
+    /// Build arguments passed as `--build-arg KEY=VAL` to the container engine.
+    pub build_args: &'static [(&'static str, &'static str)],
 }
 
 /// SSOT for all container images — used by both Desktop (setup wizard) and the update flow.
 ///
 /// All paths are relative to the build root returned by `resolve_build_root()`.
+/// Build args for the Claude container — passes the pinned version to Containerfile.claude.
+const CLAUDE_BUILD_ARGS: &[(&str, &str)] = &[("CLAUDE_VERSION", crate::defaults::CLAUDE_VERSION)];
+
 pub const IMAGES: &[ImageDef] = &[
     ImageDef {
         tag: "speedwave-claude:latest",
         context_dir: "containers",
         containerfile: "containers/Containerfile.claude",
+        build_args: CLAUDE_BUILD_ARGS,
     },
     ImageDef {
         tag: "speedwave-mcp-hub:latest",
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/hub/Containerfile",
+        build_args: &[],
     },
     ImageDef {
         tag: "speedwave-mcp-slack:latest",
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/slack/Dockerfile",
+        build_args: &[],
     },
     ImageDef {
         tag: "speedwave-mcp-sharepoint:latest",
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/sharepoint/Dockerfile",
+        build_args: &[],
     },
     ImageDef {
         tag: "speedwave-mcp-redmine:latest",
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/redmine/Dockerfile",
+        build_args: &[],
     },
     ImageDef {
         tag: "speedwave-mcp-gitlab:latest",
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/gitlab/Dockerfile",
-    },
-    ImageDef {
-        tag: "speedwave-mcp-gemini:latest",
-        context_dir: "mcp-servers",
-        containerfile: "mcp-servers/gemini/Dockerfile",
+        build_args: &[],
     },
 ];
 
@@ -104,16 +110,31 @@ fn resolve_build_root_with_home(home: Option<PathBuf>) -> anyhow::Result<PathBuf
 
 /// Resolves the path to the mcp-os `index.js` entry point.
 ///
-/// Resolution order (same as `resolve_build_root`):
+/// Resolution order:
 /// 1. `SPEEDWAVE_RESOURCES_DIR` env var → `<dir>/mcp-os/os/dist/index.js`
-/// 2. `~/.speedwave/resources-dir` marker → `<dir>/mcp-os/os/dist/index.js`
-/// 3. `CARGO_MANIFEST_DIR` parent chain → `<repo>/mcp-servers/os/dist/index.js`
+/// 2. `CARGO_MANIFEST_DIR` source tree → `<repo>/mcp-servers/os/dist/index.js`
+/// 3. `~/.speedwave/resources-dir` marker → `<dir>/mcp-os/os/dist/index.js`
+///
+/// Step 2 before 3 ensures `make dev` uses local sources (with hoisted
+/// `node_modules`) instead of a stale bundle path written by the installed app.
 pub fn resolve_mcp_os_script() -> Option<std::path::PathBuf> {
     resolve_mcp_os_script_with_home(dirs::home_dir())
 }
 
 /// Internal implementation that accepts an explicit home directory for testability.
 fn resolve_mcp_os_script_with_home(home: Option<PathBuf>) -> Option<std::path::PathBuf> {
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|repo| repo.join("mcp-servers/os/dist/index.js"));
+    resolve_mcp_os_script_inner(home, dev)
+}
+
+/// Core resolution logic, separated for testability (dev_path can be overridden).
+fn resolve_mcp_os_script_inner(
+    home: Option<PathBuf>,
+    dev_path: Option<PathBuf>,
+) -> Option<std::path::PathBuf> {
     // 1. SPEEDWAVE_RESOURCES_DIR (production — Tauri bundle)
     if let Ok(res) = std::env::var(crate::consts::BUNDLE_RESOURCES_ENV) {
         let p = PathBuf::from(&res)
@@ -127,7 +148,15 @@ fn resolve_mcp_os_script_with_home(home: Option<PathBuf>) -> Option<std::path::P
         log::warn!("mcp-os not found at bundled path: {}", p.display());
     }
 
-    // 2. Marker file (CLI reads Desktop's resources path)
+    // 2. Dev source tree — prefer local sources over marker so `make dev`
+    //    picks up hoisted node_modules from the workspace
+    if let Some(ref p) = dev_path {
+        if p.exists() {
+            return dev_path;
+        }
+    }
+
+    // 3. Marker file (CLI reads Desktop's resources path)
     if let Some(ref home) = home {
         let marker = home
             .join(crate::consts::DATA_DIR)
@@ -145,22 +174,11 @@ fn resolve_mcp_os_script_with_home(home: Option<PathBuf>) -> Option<std::path::P
         }
     }
 
-    // 3. Dev fallback — path baked at compile time via env!(), validated at runtime
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|repo| repo.join("mcp-servers/os/dist/index.js"));
-    match dev {
-        Some(ref p) if p.exists() => dev,
-        Some(ref p) => {
-            log::warn!("mcp-os not found at dev path: {}", p.display());
-            None
-        }
-        None => {
-            log::warn!("mcp-os: could not determine dev path from CARGO_MANIFEST_DIR");
-            None
-        }
+    if let Some(ref p) = dev_path {
+        log::warn!("mcp-os not found at dev path: {}", p.display());
     }
+
+    None
 }
 
 /// Reads the `~/.speedwave/resources-dir` marker file and returns the build-context
@@ -234,27 +252,28 @@ fn write_resources_marker_to(
 /// a path accessible by the container engine (e.g. copy into `~` for Lima VM,
 /// convert `C:\` → `/mnt/c/` for WSL).
 ///
+/// If the build fails with a containerd overlayfs snapshotter error
+/// ("failed to rename: file exists"), automatically prunes dangling images and
+/// build cache, then retries once. This is a known containerd bug
+/// (containerd#11719, nerdctl#3420).
+///
 /// Returns the number of images successfully built.
-#[allow(clippy::print_stderr)]
 pub fn build_all_images(runtime: &dyn ContainerRuntime) -> anyhow::Result<u32> {
     let root = resolve_build_root()?;
     let vm_root = runtime.prepare_build_context(&root)?;
     let needs_cleanup = vm_root != root;
 
-    let result = (|| -> anyhow::Result<u32> {
-        let mut built = 0u32;
-        for img in IMAGES {
-            let abs_context = vm_root.join(img.context_dir);
-            let abs_containerfile = vm_root.join(img.containerfile);
-            runtime.build_image(
-                img.tag,
-                &abs_context.to_string_lossy(),
-                &abs_containerfile.to_string_lossy(),
-            )?;
-            built += 1;
+    let result = try_build_all(runtime, &vm_root).or_else(|e| {
+        if is_snapshotter_error(&e) {
+            log::warn!("build failed with containerd snapshotter error, pruning and retrying: {e}");
+            if let Err(prune_err) = runtime.system_prune() {
+                log::warn!("system prune failed: {prune_err}");
+            }
+            try_build_all(runtime, &vm_root)
+        } else {
+            Err(e)
         }
-        Ok(built)
-    })();
+    });
 
     // Clean up temporary build-cache on both success and failure
     if needs_cleanup && vm_root.exists() {
@@ -266,10 +285,72 @@ pub fn build_all_images(runtime: &dyn ContainerRuntime) -> anyhow::Result<u32> {
     result
 }
 
+/// Builds all images in sequence. Extracted so the retry logic in `build_all_images` can re-call it.
+fn try_build_all(runtime: &dyn ContainerRuntime, vm_root: &std::path::Path) -> anyhow::Result<u32> {
+    let total = IMAGES.len();
+    let mut built = 0u32;
+    log::info!(
+        "build_all_images: building {total} images from {}",
+        vm_root.display()
+    );
+    let root_str = vm_root.to_string_lossy();
+    let root_str = root_str.trim_end_matches('/');
+    for (i, img) in IMAGES.iter().enumerate() {
+        log::info!(
+            "build_all_images: [{}/{}] building {} (context={}, file={})",
+            i + 1,
+            total,
+            img.tag,
+            img.context_dir,
+            img.containerfile
+        );
+        // Use string concatenation with "/" instead of PathBuf::join because vm_root
+        // may be a WSL/Linux path (e.g. "/mnt/c/Speedwave/build-context") running on
+        // a Windows host. PathBuf::join treats `/`-prefixed paths as absolute roots
+        // on Windows, replacing the base entirely instead of appending.
+        let abs_context = format!("{}/{}", root_str, img.context_dir);
+        let abs_containerfile = format!("{}/{}", root_str, img.containerfile);
+        runtime.build_image(img.tag, &abs_context, &abs_containerfile, img.build_args)?;
+        built += 1;
+        log::info!(
+            "build_all_images: [{}/{}] {} built OK",
+            i + 1,
+            total,
+            img.tag
+        );
+    }
+    log::info!("build_all_images: all {total} images built successfully");
+    Ok(built)
+}
+
+/// Returns `true` if the error looks like a containerd overlayfs snapshotter bug.
+///
+/// Iterates the full error chain (`err.chain()`) so that wrapped/context errors
+/// are checked too — not just the top-level message.
+///
+/// Known error patterns from containerd (stable in Go source since 2023):
+/// - `"apply layer error"` — wrapper from containerd's differ
+/// - `"failed to prepare extraction snapshot"` — from snapshotter.Prepare()
+/// - `"failed to rename"` + `"file exists"` — OS-level rename failure on stale snapshot
+fn is_snapshotter_error(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        let msg = cause.to_string();
+        if msg.contains("apply layer error")
+            || msg.contains("failed to prepare extraction snapshot")
+            || (msg.contains("failed to rename") && msg.contains("file exists"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::process::Command;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_images_constant_has_entries() {
@@ -605,7 +686,7 @@ mod tests {
             crate::consts::BUNDLE_RESOURCES_ENV,
             tmp.path().to_string_lossy().as_ref(),
         );
-        let result = resolve_mcp_os_script_with_home(None);
+        let result = resolve_mcp_os_script_inner(None, None);
         assert_eq!(result, Some(script_path));
         std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
     }
@@ -629,26 +710,125 @@ mod tests {
 
         write_resources_marker_to(&fake_resources, &fake_home).unwrap();
 
-        let result = resolve_mcp_os_script_with_home(Some(fake_home));
+        // Pass None as dev_path to test marker fallback in isolation
+        let result = resolve_mcp_os_script_inner(Some(fake_home), None);
         assert_eq!(result, Some(script_path));
     }
 
     #[test]
+    fn test_resolve_mcp_os_script_dev_path_beats_marker() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let fake_resources = tmp.path().join("fake-resources");
+        let fake_dev = tmp.path().join("dev-repo");
+
+        // Set up marker script
+        let marker_script = fake_resources
+            .join("mcp-os")
+            .join("os")
+            .join("dist")
+            .join("index.js");
+        std::fs::create_dir_all(marker_script.parent().unwrap()).unwrap();
+        std::fs::write(&marker_script, "// marker").unwrap();
+        write_resources_marker_to(&fake_resources, &fake_home).unwrap();
+
+        // Set up dev script
+        let dev_script = fake_dev.join("mcp-servers/os/dist/index.js");
+        std::fs::create_dir_all(dev_script.parent().unwrap()).unwrap();
+        std::fs::write(&dev_script, "// dev").unwrap();
+
+        let result = resolve_mcp_os_script_inner(Some(fake_home), Some(dev_script.clone()));
+        assert_eq!(result, Some(dev_script), "dev path should win over marker");
+    }
+
+    #[test]
     fn test_images_count() {
-        assert_eq!(IMAGES.len(), 7);
+        assert_eq!(IMAGES.len(), 6);
+    }
+
+    #[test]
+    fn test_is_snapshotter_error_matches_apply_layer() {
+        let err =
+            anyhow::anyhow!("nerdctl failed: apply layer error for \"docker.io/library/img\"");
+        assert!(is_snapshotter_error(&err));
+    }
+
+    #[test]
+    fn test_is_snapshotter_error_matches_extraction_snapshot() {
+        let err = anyhow::anyhow!(
+            "failed to prepare extraction snapshot \"extract-123\": something went wrong"
+        );
+        assert!(is_snapshotter_error(&err));
+    }
+
+    #[test]
+    fn test_is_snapshotter_error_matches_failed_rename_file_exists() {
+        let err = anyhow::anyhow!(
+            "failed to rename: rename /var/lib/containerd/snapshots/new-123 /var/lib/containerd/snapshots/2: file exists"
+        );
+        assert!(is_snapshotter_error(&err));
+    }
+
+    #[test]
+    fn test_is_snapshotter_error_rejects_unrelated() {
+        let err = anyhow::anyhow!("network timeout connecting to registry");
+        assert!(!is_snapshotter_error(&err));
+    }
+
+    #[test]
+    fn test_is_snapshotter_error_rejects_partial_rename() {
+        // "failed to rename" alone (without "file exists") should NOT trigger retry
+        let err = anyhow::anyhow!("failed to rename: permission denied");
+        assert!(!is_snapshotter_error(&err));
+    }
+
+    #[test]
+    fn test_is_snapshotter_error_matches_wrapped_error() {
+        // The snapshotter error may be wrapped with .context() — chain iteration must find it
+        let inner = anyhow::anyhow!("apply layer error for \"docker.io/library/img:latest\"");
+        let wrapped = inner.context("nerdctl build failed for speedwave-claude:latest");
+        assert!(
+            is_snapshotter_error(&wrapped),
+            "should detect snapshotter error in wrapped/chained error"
+        );
+    }
+
+    #[test]
+    fn test_is_snapshotter_error_matches_deeply_wrapped_error() {
+        let inner = anyhow::anyhow!(
+            "failed to rename: rename /var/lib/containerd/snapshots/new /var/lib/containerd/snapshots/2: file exists"
+        );
+        let mid = inner.context("failed to prepare extraction snapshot");
+        let outer = mid.context("build_image failed");
+        assert!(
+            is_snapshotter_error(&outer),
+            "should detect snapshotter error deep in the chain"
+        );
+    }
+
+    #[test]
+    fn test_is_snapshotter_error_rejects_wrapped_unrelated() {
+        let inner = anyhow::anyhow!("connection refused");
+        let wrapped = inner.context("nerdctl build failed");
+        assert!(
+            !is_snapshotter_error(&wrapped),
+            "should not match unrelated wrapped error"
+        );
     }
 
     #[test]
     fn test_build_all_images_calls_prepare_build_context() {
         use serde_json::Value;
-        use std::process::Command;
-        use std::sync::{Arc, Mutex};
 
         #[derive(Clone)]
         struct Call {
             tag: String,
             context_dir: String,
             containerfile: String,
+            build_args: Vec<(String, String)>,
         }
 
         struct MockRuntime {
@@ -684,11 +864,16 @@ mod tests {
                 tag: &str,
                 context_dir: &str,
                 containerfile: &str,
+                build_args: &[(&str, &str)],
             ) -> anyhow::Result<()> {
                 self.build_calls.lock().unwrap().push(Call {
                     tag: tag.to_string(),
                     context_dir: context_dir.to_string(),
                     containerfile: containerfile.to_string(),
+                    build_args: build_args
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect(),
                 });
                 Ok(())
             }
@@ -747,6 +932,318 @@ mod tests {
                 "containerfile should use translated root, got: {}",
                 call.containerfile
             );
+            let expected_args: Vec<(String, String)> = img
+                .build_args
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            assert_eq!(
+                call.build_args, expected_args,
+                "build_args for '{}' should match ImageDef",
+                call.tag
+            );
         }
+    }
+
+    #[test]
+    fn test_claude_image_has_build_args() {
+        let claude_img = IMAGES
+            .iter()
+            .find(|img| img.tag.contains("claude"))
+            .unwrap();
+        assert_eq!(claude_img.build_args.len(), 1);
+        assert_eq!(claude_img.build_args[0].0, "CLAUDE_VERSION");
+        assert_eq!(claude_img.build_args[0].1, crate::defaults::CLAUDE_VERSION);
+    }
+
+    #[test]
+    fn test_non_claude_images_have_no_build_args() {
+        for img in IMAGES.iter().filter(|img| !img.tag.contains("claude")) {
+            assert!(
+                img.build_args.is_empty(),
+                "non-claude image '{}' should have empty build_args",
+                img.tag
+            );
+        }
+    }
+
+    /// A mock runtime for testing retry-with-prune logic.
+    ///
+    /// Tracks all `build_image` and `system_prune` calls.
+    /// Can be configured to fail on specific `build_image` call numbers.
+    struct RetryMockRuntime {
+        /// Path returned by `prepare_build_context`.
+        build_root: PathBuf,
+        /// Records all calls: "build:<tag>" for build_image, "system_prune" for system_prune.
+        calls: Arc<Mutex<Vec<String>>>,
+        /// Monotonically increasing counter for build_image invocations (1-based).
+        build_call_counter: Arc<std::sync::atomic::AtomicU32>,
+        /// Map from build_image call number → error message. If absent, the call succeeds.
+        fail_on: std::collections::HashMap<u32, String>,
+    }
+
+    impl ContainerRuntime for RetryMockRuntime {
+        fn compose_up(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn compose_down(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+            Ok(vec![])
+        }
+        fn container_exec(&self, _: &str, _: &[&str]) -> Command {
+            Command::new("true")
+        }
+        fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
+            Ok(Command::new("true"))
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn ensure_ready(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn build_image(
+            &self,
+            tag: &str,
+            _context_dir: &str,
+            _containerfile: &str,
+            _build_args: &[(&str, &str)],
+        ) -> anyhow::Result<()> {
+            let n = self
+                .build_call_counter
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.calls.lock().unwrap().push(format!("build:{}", tag));
+            if let Some(msg) = self.fail_on.get(&n) {
+                anyhow::bail!("{}", msg);
+            }
+            Ok(())
+        }
+        fn prepare_build_context(&self, _build_root: &std::path::Path) -> anyhow::Result<PathBuf> {
+            Ok(self.build_root.clone())
+        }
+        fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn system_prune(&self) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push("system_prune".to_string());
+            Ok(())
+        }
+    }
+
+    /// Creates a temp directory with the minimum structure needed for
+    /// `try_build_all` (Containerfiles for every IMAGES entry).
+    fn create_fake_build_root() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        for img in IMAGES {
+            let containerfile = root.join(img.containerfile);
+            std::fs::create_dir_all(containerfile.parent().unwrap()).unwrap();
+            std::fs::write(&containerfile, "FROM scratch").unwrap();
+            std::fs::create_dir_all(root.join(img.context_dir)).unwrap();
+        }
+        (tmp, root)
+    }
+
+    #[test]
+    fn test_retry_on_snapshotter_error() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let image_count = IMAGES.len() as u32;
+
+        // Fail on the 4th build_image call with a snapshotter error.
+        // First attempt: calls 1..=image_count, #4 fails.
+        // Retry:         calls (image_count+1)..=(2*image_count), all succeed.
+        let mut fail_on = std::collections::HashMap::new();
+        fail_on.insert(
+            4,
+            "apply layer error for \"docker.io/library/speedwave-mcp-sharepoint:latest\""
+                .to_string(),
+        );
+
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = RetryMockRuntime {
+            build_root,
+            calls: Arc::clone(&calls),
+            build_call_counter: Arc::clone(&counter),
+            fail_on,
+        };
+
+        let result = try_build_all(&rt, &rt.build_root.clone()).or_else(|e| {
+            if is_snapshotter_error(&e) {
+                if let Err(prune_err) = rt.system_prune() {
+                    log::warn!("system prune failed: {prune_err}");
+                }
+                try_build_all(&rt, &rt.build_root.clone())
+            } else {
+                Err(e)
+            }
+        });
+
+        assert!(result.is_ok(), "retry should succeed, got: {:?}", result);
+        assert_eq!(result.unwrap(), image_count);
+
+        let recorded = calls.lock().unwrap();
+
+        // system_prune called exactly once
+        let prune_count = recorded.iter().filter(|c| *c == "system_prune").count();
+        assert_eq!(prune_count, 1, "system_prune should be called once");
+
+        // Total build_image calls: 4 (first attempt, fails on 4th) + image_count (retry)
+        let build_count = recorded.iter().filter(|c| c.starts_with("build:")).count();
+        assert_eq!(
+            build_count,
+            4 + image_count as usize,
+            "expected 4 + {} build_image calls, got {}",
+            image_count,
+            build_count
+        );
+    }
+
+    #[test]
+    fn test_no_retry_on_generic_error() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        // Fail on 2nd call with a non-snapshotter error
+        let mut fail_on = std::collections::HashMap::new();
+        fail_on.insert(2, "network timeout".to_string());
+
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = RetryMockRuntime {
+            build_root,
+            calls: Arc::clone(&calls),
+            build_call_counter: Arc::clone(&counter),
+            fail_on,
+        };
+
+        let result = try_build_all(&rt, &rt.build_root.clone()).or_else(|e| {
+            if is_snapshotter_error(&e) {
+                if let Err(prune_err) = rt.system_prune() {
+                    log::warn!("system prune failed: {prune_err}");
+                }
+                try_build_all(&rt, &rt.build_root.clone())
+            } else {
+                Err(e)
+            }
+        });
+
+        assert!(result.is_err(), "generic error should not be retried");
+        assert!(
+            result.unwrap_err().to_string().contains("network timeout"),
+            "original error should propagate"
+        );
+
+        let recorded = calls.lock().unwrap();
+        let prune_count = recorded.iter().filter(|c| *c == "system_prune").count();
+        assert_eq!(
+            prune_count, 0,
+            "system_prune should NOT be called for generic errors"
+        );
+    }
+
+    #[test]
+    fn bundle_scripts_service_lists_are_in_sync() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+
+        let sh_content = std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.sh"))
+            .expect("bundle-build-context.sh should exist");
+
+        let ps1_content =
+            std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.ps1"))
+                .expect("bundle-build-context.ps1 should exist");
+
+        // Extract: MCP_SERVICES="shared hub slack sharepoint redmine gitlab"
+        let sh_services: Vec<&str> = sh_content
+            .lines()
+            .find(|l| l.starts_with("MCP_SERVICES="))
+            .expect("MCP_SERVICES= line should exist in .sh")
+            .trim_start_matches("MCP_SERVICES=")
+            .trim_matches('"')
+            .split_whitespace()
+            .collect();
+
+        // Extract: $services = @('shared','hub','slack','sharepoint','redmine','gitlab')
+        let ps1_line = ps1_content
+            .lines()
+            .find(|l| l.contains("$services = @("))
+            .expect("$services = @(...) line should exist in .ps1");
+        let ps1_services: Vec<&str> = ps1_line
+            .split("@(")
+            .nth(1)
+            .unwrap()
+            .trim_end_matches(')')
+            .split(',')
+            .map(|s| s.trim().trim_matches('\''))
+            .collect();
+
+        assert_eq!(
+            sh_services, ps1_services,
+            "bundle-build-context.sh MCP_SERVICES and bundle-build-context.ps1 $services \
+             must list the same services in the same order"
+        );
+    }
+
+    #[test]
+    fn test_retry_fails_returns_retry_error() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let image_count = IMAGES.len() as u32;
+
+        // First attempt: fail on call 3 with snapshotter error
+        // Retry: fail on call (3 + image_count) with snapshotter error again
+        let mut fail_on = std::collections::HashMap::new();
+        fail_on.insert(
+            3,
+            "apply layer error for \"docker.io/library/img:latest\"".to_string(),
+        );
+        fail_on.insert(
+            3 + image_count,
+            "failed to prepare extraction snapshot \"extract-456\": still broken".to_string(),
+        );
+
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = RetryMockRuntime {
+            build_root,
+            calls: Arc::clone(&calls),
+            build_call_counter: Arc::clone(&counter),
+            fail_on,
+        };
+
+        let result = try_build_all(&rt, &rt.build_root.clone()).or_else(|e| {
+            if is_snapshotter_error(&e) {
+                if let Err(prune_err) = rt.system_prune() {
+                    log::warn!("system prune failed: {prune_err}");
+                }
+                try_build_all(&rt, &rt.build_root.clone())
+            } else {
+                Err(e)
+            }
+        });
+
+        assert!(result.is_err(), "second failure should be returned");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("failed to prepare extraction snapshot"),
+            "should return the second (retry) error"
+        );
+
+        let recorded = calls.lock().unwrap();
+        let prune_count = recorded.iter().filter(|c| *c == "system_prune").count();
+        assert_eq!(prune_count, 1, "system_prune should be called once");
     }
 }

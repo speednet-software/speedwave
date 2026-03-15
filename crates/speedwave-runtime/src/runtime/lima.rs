@@ -140,8 +140,10 @@ impl ContainerRuntime for LimaRuntime {
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
         let compose_file = super::compose_file_path(project)?;
-        self.runner.run(
+        super::compose_down_and_cleanup(
+            &*self.runner,
             "limactl",
+            project,
             &[
                 "shell",
                 consts::LIMA_VM_NAME,
@@ -154,9 +156,10 @@ impl ContainerRuntime for LimaRuntime {
                 "-p",
                 project,
                 "down",
+                "--remove-orphans",
             ],
-        )?;
-        Ok(())
+            &["shell", consts::LIMA_VM_NAME, "--", "sudo", "nerdctl"],
+        )
     }
 
     fn compose_ps(&self, project: &str) -> anyhow::Result<Vec<Value>> {
@@ -289,24 +292,36 @@ impl ContainerRuntime for LimaRuntime {
             .unwrap_or(false)
     }
 
-    fn build_image(&self, tag: &str, context_dir: &str, containerfile: &str) -> anyhow::Result<()> {
+    fn build_image(
+        &self,
+        tag: &str,
+        context_dir: &str,
+        containerfile: &str,
+        build_args: &[(&str, &str)],
+    ) -> anyhow::Result<()> {
         self.require_running()?;
-        self.runner.run(
-            "limactl",
-            &[
-                "shell",
-                consts::LIMA_VM_NAME,
-                "--",
-                "sudo",
-                "nerdctl",
-                "build",
-                "-t",
-                tag,
-                "-f",
-                containerfile,
-                context_dir,
-            ],
-        )?;
+        let ba_strings: Vec<String> = build_args
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        let mut args: Vec<&str> = vec![
+            "shell",
+            consts::LIMA_VM_NAME,
+            "--",
+            "sudo",
+            "nerdctl",
+            "build",
+            "-t",
+            tag,
+            "-f",
+            containerfile,
+        ];
+        for s in &ba_strings {
+            args.push("--build-arg");
+            args.push(s);
+        }
+        args.push(context_dir);
+        self.runner.run("limactl", &args)?;
         Ok(())
     }
 
@@ -379,6 +394,24 @@ impl ContainerRuntime for LimaRuntime {
                 "-d",
                 "--force-recreate",
                 "--remove-orphans",
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn system_prune(&self) -> anyhow::Result<()> {
+        self.require_running()?;
+        self.runner.run(
+            "limactl",
+            &[
+                "shell",
+                consts::LIMA_VM_NAME,
+                "--",
+                "sudo",
+                "nerdctl",
+                "system",
+                "prune",
+                "--force",
             ],
         )?;
         Ok(())
@@ -616,6 +649,10 @@ mod tests {
                 {
                     return Ok("Running".to_string());
                 }
+                if key.contains(" ps -a --filter label=com.docker.compose.project=") {
+                    self.recorded.lock().unwrap().push(key);
+                    return Ok("stale-id".to_string());
+                }
                 self.recorded.lock().unwrap().push(key);
                 Ok(String::new())
             }
@@ -711,10 +748,11 @@ mod tests {
         rt.compose_down("testproject").unwrap();
 
         let commands = recorded.lock().unwrap();
+        // compose down + force_remove ps -a + rm -f stale-id
         assert_eq!(
             commands.len(),
-            1,
-            "compose_down should issue exactly 1 command, got: {:?}",
+            3,
+            "compose_down should issue 3 commands (down + ps cleanup + rm), got: {:?}",
             *commands
         );
 
@@ -732,6 +770,28 @@ mod tests {
             commands[0].contains("-p testproject"),
             "command should include project name, got: {}",
             commands[0]
+        );
+        assert!(
+            commands[0].contains("--remove-orphans"),
+            "command should include --remove-orphans, got: {}",
+            commands[0]
+        );
+
+        // Second command: ps -a to find ghost containers
+        assert!(
+            commands[1].contains("ps -a"),
+            "second command should be ps -a, got: {}",
+            commands[1]
+        );
+        assert!(
+            commands[1].contains("com.docker.compose.project=testproject"),
+            "second command should filter by project label, got: {}",
+            commands[1]
+        );
+        assert!(
+            commands[2].contains("rm -f stale-id"),
+            "third command should remove stale container id, got: {}",
+            commands[2]
         );
     }
 
@@ -1024,5 +1084,70 @@ mod tests {
         let path = home.join("projects").join("speedwave");
         let result = rt.prepare_build_context(&path).unwrap();
         assert_eq!(result, path);
+    }
+
+    #[test]
+    fn test_system_prune_shells_out_to_lima() {
+        let (recorded, runner) = make_recording_runner();
+        let rt = LimaRuntime::with_runner(runner);
+        assert!(
+            rt.system_prune().is_ok(),
+            "LimaRuntime::system_prune should succeed"
+        );
+
+        let commands = recorded.lock().unwrap();
+        assert_eq!(
+            commands.len(),
+            1,
+            "system_prune should issue exactly 1 command, got: {:?}",
+            *commands
+        );
+        assert!(
+            commands[0].contains("nerdctl system prune --force"),
+            "system_prune should run nerdctl system prune --force, got: {}",
+            commands[0]
+        );
+    }
+
+    #[test]
+    fn test_build_image_passes_build_args() {
+        let (recorded, runner) = make_recording_runner();
+        let rt = LimaRuntime::with_runner(runner);
+        let version = crate::defaults::CLAUDE_VERSION;
+        rt.build_image(
+            "my-image:latest",
+            "/ctx",
+            "/ctx/Containerfile",
+            &[("CLAUDE_VERSION", version)],
+        )
+        .unwrap();
+
+        let commands = recorded.lock().unwrap();
+        assert_eq!(commands.len(), 1);
+        let expected = format!("--build-arg CLAUDE_VERSION={}", version);
+        assert!(
+            commands[0].contains(&expected),
+            "build_image should pass {expected}, got: {}",
+            commands[0]
+        );
+    }
+
+    #[test]
+    fn test_system_prune_fails_when_vm_stopped() {
+        let runner = MockRunner::new()
+            .with_response("limactl --version", "limactl version 1.0.0")
+            .with_response(
+                &format!(
+                    "limactl list --format {{{{.Status}}}} {}",
+                    consts::LIMA_VM_NAME
+                ),
+                "Stopped",
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let err = rt.system_prune().unwrap_err();
+        assert!(
+            err.to_string().contains("not running"),
+            "should report VM not running, got: {err}"
+        );
     }
 }

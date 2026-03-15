@@ -25,6 +25,17 @@ export const routes: Routes = [
           import('./integrations/integrations.component').then((m) => m.IntegrationsComponent),
       },
       {
+        path: 'plugins',
+        loadComponent: () => import('./plugins/plugins.component').then((m) => m.PluginsComponent),
+      },
+      {
+        path: 'plugins/:slug',
+        loadComponent: () =>
+          import('./plugins/plugin-detail/plugin-detail.component').then(
+            (m) => m.PluginDetailComponent
+          ),
+      },
+      {
         path: 'settings',
         loadComponent: () =>
           import('./settings/settings.component').then((m) => m.SettingsComponent),

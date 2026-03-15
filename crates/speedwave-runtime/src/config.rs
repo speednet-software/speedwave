@@ -1,4 +1,5 @@
 use crate::defaults;
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -31,14 +32,30 @@ pub struct OsIntegrationsConfig {
     pub notes: Option<IntegrationConfig>,
 }
 
+impl OsIntegrationsConfig {
+    /// Sets the enabled state for an OS integration service by config key.
+    /// Returns `false` if the key is unknown.
+    pub fn set_service(&mut self, key: &str, cfg: IntegrationConfig) -> bool {
+        match key {
+            "reminders" => self.reminders = Some(cfg),
+            "calendar" => self.calendar = Some(cfg),
+            "mail" => self.mail = Some(cfg),
+            "notes" => self.notes = Some(cfg),
+            _ => return false,
+        }
+        true
+    }
+}
+
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct IntegrationsConfig {
     pub slack: Option<IntegrationConfig>,
     pub sharepoint: Option<IntegrationConfig>,
     pub redmine: Option<IntegrationConfig>,
     pub gitlab: Option<IntegrationConfig>,
-    pub gemini: Option<IntegrationConfig>,
     pub os: Option<OsIntegrationsConfig>,
+    #[serde(default)]
+    pub plugins: Option<HashMap<String, IntegrationConfig>>,
 }
 
 impl IntegrationsConfig {
@@ -50,10 +67,22 @@ impl IntegrationsConfig {
             "sharepoint" => self.sharepoint = Some(cfg),
             "redmine" => self.redmine = Some(cfg),
             "gitlab" => self.gitlab = Some(cfg),
-            "gemini" => self.gemini = Some(cfg),
             _ => return false,
         }
         true
+    }
+
+    /// Set plugin enabled state. Does NOT validate against installed manifests
+    /// (caller must do that). Separate from set_service() to prevent typos
+    /// from silently creating plugin entries.
+    pub fn set_plugin_enabled(&mut self, service_id: &str, enabled: bool) {
+        let plugins = self.plugins.get_or_insert_with(HashMap::new);
+        plugins.insert(
+            service_id.to_string(),
+            IntegrationConfig {
+                enabled: Some(enabled),
+            },
+        );
     }
 }
 
@@ -63,11 +92,11 @@ pub struct ResolvedIntegrationsConfig {
     pub sharepoint: bool,
     pub redmine: bool,
     pub gitlab: bool,
-    pub gemini: bool,
     pub os_reminders: bool,
     pub os_calendar: bool,
     pub os_mail: bool,
     pub os_notes: bool,
+    pub plugins: HashMap<String, bool>,
 }
 
 impl ResolvedIntegrationsConfig {
@@ -81,7 +110,28 @@ impl ResolvedIntegrationsConfig {
             "sharepoint" => Some(self.sharepoint),
             "redmine" => Some(self.redmine),
             "gitlab" => Some(self.gitlab),
-            "gemini" => Some(self.gemini),
+            _ => None,
+        }
+    }
+
+    pub fn is_plugin_enabled(&self, service_id: &str) -> bool {
+        self.plugins.get(service_id).copied().unwrap_or(false)
+    }
+
+    pub fn enabled_plugin_service_ids(&self) -> Vec<&str> {
+        self.plugins
+            .iter()
+            .filter(|(_, &enabled)| enabled)
+            .map(|(id, _)| id.as_str())
+            .collect()
+    }
+
+    pub fn is_os_service_enabled(&self, key: &str) -> Option<bool> {
+        match key {
+            "reminders" => Some(self.os_reminders),
+            "calendar" => Some(self.os_calendar),
+            "mail" => Some(self.os_mail),
+            "notes" => Some(self.os_notes),
             _ => None,
         }
     }
@@ -99,6 +149,8 @@ pub struct ProjectUserEntry {
     pub dir: String,
     pub claude: Option<ClaudeOverrides>,
     pub integrations: Option<IntegrationsConfig>,
+    #[serde(default)]
+    pub plugin_settings: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -113,6 +165,32 @@ pub struct SpeedwaveUserConfig {
     pub active_project: Option<String>,
     pub selected_ide: Option<SelectedIde>,
     pub log_level: Option<String>,
+}
+
+impl SpeedwaveUserConfig {
+    /// Looks up a project by name.
+    pub fn find_project(&self, name: &str) -> Option<&ProjectUserEntry> {
+        self.projects.iter().find(|p| p.name == name)
+    }
+
+    /// Looks up a project by name, returning an error if not found.
+    pub fn require_project(&self, name: &str) -> anyhow::Result<&ProjectUserEntry> {
+        self.find_project(name)
+            .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", name))
+    }
+
+    /// Looks up a project by name (mutable).
+    pub fn find_project_mut(&mut self, name: &str) -> Option<&mut ProjectUserEntry> {
+        self.projects.iter_mut().find(|p| p.name == name)
+    }
+
+    /// Returns the project entry for the currently active project, if any.
+    /// Convenience method that avoids the `active_project.as_deref() + find_project()` pattern.
+    pub fn active_project_entry(&self) -> Option<&ProjectUserEntry> {
+        self.active_project
+            .as_deref()
+            .and_then(|n| self.find_project(n))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -149,7 +227,7 @@ pub fn resolve_project_config(
     }
 
     // Layer 2: user config (highest priority)
-    if let Some(user) = user_config.projects.iter().find(|p| p.name == project_name) {
+    if let Some(user) = user_config.find_project(project_name) {
         if let Some(c) = &user.claude {
             merge_env(&mut env, c.env.clone());
             if let Some(user_llm) = &c.llm {
@@ -201,12 +279,18 @@ fn apply_integrations_layer(result: &mut ResolvedIntegrationsConfig, layer: &Int
     apply_toggle(&mut result.sharepoint, &layer.sharepoint);
     apply_toggle(&mut result.redmine, &layer.redmine);
     apply_toggle(&mut result.gitlab, &layer.gitlab);
-    apply_toggle(&mut result.gemini, &layer.gemini);
     if let Some(ref os) = layer.os {
         apply_toggle(&mut result.os_reminders, &os.reminders);
         apply_toggle(&mut result.os_calendar, &os.calendar);
         apply_toggle(&mut result.os_mail, &os.mail);
         apply_toggle(&mut result.os_notes, &os.notes);
+    }
+    if let Some(ref plugins) = layer.plugins {
+        for (service_id, cfg) in plugins {
+            if let Some(enabled) = cfg.enabled {
+                result.plugins.insert(service_id.clone(), enabled);
+            }
+        }
     }
 }
 
@@ -259,8 +343,37 @@ pub(crate) fn save_user_config_to(config: &SpeedwaveUserConfig, path: &Path) -> 
         std::fs::create_dir_all(parent)?;
     }
     let content = serde_json::to_string_pretty(config)?;
-    std::fs::write(path, content)?;
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, &content)?;
+    std::fs::rename(&tmp_path, path)?;
     Ok(())
+}
+
+/// Acquires an exclusive file lock on `~/.speedwave/config.lock` and runs the
+/// closure `f` while the lock is held.  This prevents race conditions between
+/// concurrent processes (CLI vs Desktop) that read-modify-write `config.json`.
+pub fn with_config_lock<F, T>(f: F) -> anyhow::Result<T>
+where
+    F: FnOnce() -> anyhow::Result<T>,
+{
+    use fs2::FileExt;
+
+    let lock_path = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
+        .join(crate::consts::DATA_DIR)
+        .join("config.lock");
+
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let lock_file = std::fs::File::create(&lock_path)?;
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("Failed to acquire config lock at '{}'", lock_path.display()))?;
+    let result = f();
+    lock_file.unlock()?;
+    result
 }
 
 fn merge_env(base: &mut HashMap<String, String>, overlay: Option<HashMap<String, String>>) {
@@ -380,6 +493,7 @@ mod tests {
                     llm: None,
                 }),
                 integrations: None,
+                plugin_settings: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -428,6 +542,7 @@ mod tests {
                     }),
                 }),
                 integrations: None,
+                plugin_settings: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -469,6 +584,7 @@ mod tests {
                 dir: "/home/user/projects/acme".to_string(),
                 claude: None,
                 integrations: None,
+                plugin_settings: None,
             }],
             active_project: Some("acme".to_string()),
             selected_ide: None,
@@ -492,6 +608,7 @@ mod tests {
                 dir: "/tmp/test".to_string(),
                 claude: None,
                 integrations: None,
+                plugin_settings: None,
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
@@ -524,6 +641,83 @@ mod tests {
     }
 
     #[test]
+    fn test_save_user_config_atomic_no_tmp_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+
+        let config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "test".to_string(),
+                dir: "/tmp/test".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: Some("test".to_string()),
+            selected_ide: None,
+            log_level: None,
+        };
+
+        save_user_config_to(&config, &config_path).unwrap();
+
+        assert!(config_path.exists(), "config file should exist");
+        assert!(
+            !config_path.with_extension("json.tmp").exists(),
+            "tmp file should not exist after atomic write"
+        );
+
+        let loaded = load_user_config_from(&config_path).unwrap();
+        assert_eq!(loaded.projects.len(), 1);
+        assert_eq!(loaded.projects[0].name, "test");
+        assert_eq!(loaded.active_project, Some("test".to_string()));
+    }
+
+    #[test]
+    fn test_save_user_config_atomic_preserves_existing_on_overwrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+
+        // Write initial config
+        let config_v1 = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "v1".to_string(),
+                dir: "/tmp/v1".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: Some("v1".to_string()),
+            selected_ide: None,
+            log_level: None,
+        };
+        save_user_config_to(&config_v1, &config_path).unwrap();
+
+        // Overwrite with v2
+        let config_v2 = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "v2".to_string(),
+                dir: "/tmp/v2".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: Some("v2".to_string()),
+            selected_ide: None,
+            log_level: None,
+        };
+        save_user_config_to(&config_v2, &config_path).unwrap();
+
+        let loaded = load_user_config_from(&config_path).unwrap();
+        assert_eq!(loaded.projects.len(), 1);
+        assert_eq!(loaded.projects[0].name, "v2");
+        assert_eq!(loaded.active_project, Some("v2".to_string()));
+        assert!(
+            !config_path.with_extension("json.tmp").exists(),
+            "tmp file should not exist after atomic write"
+        );
+    }
+
+    #[test]
     fn test_log_level_serde_roundtrip() {
         let config = SpeedwaveUserConfig {
             projects: vec![],
@@ -548,7 +742,6 @@ mod tests {
         assert!(!r.sharepoint, "sharepoint should be disabled");
         assert!(!r.redmine, "redmine should be disabled");
         assert!(!r.gitlab, "gitlab should be disabled");
-        assert!(!r.gemini, "gemini should be disabled");
         assert!(!r.os_reminders, "os_reminders should be disabled");
         assert!(!r.os_calendar, "os_calendar should be disabled");
         assert!(!r.os_mail, "os_mail should be disabled");
@@ -572,7 +765,6 @@ mod tests {
                 enabled: Some(true),
             }),
             gitlab: None,
-            gemini: None,
             os: Some(OsIntegrationsConfig {
                 reminders: Some(IntegrationConfig {
                     enabled: Some(false),
@@ -581,6 +773,7 @@ mod tests {
                 mail: None,
                 notes: None,
             }),
+            plugins: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: IntegrationsConfig = serde_json::from_str(&json).unwrap();
@@ -625,9 +818,10 @@ mod tests {
                     sharepoint: None,
                     redmine: None,
                     gitlab: None,
-                    gemini: None,
                     os: None,
+                    plugins: None,
                 }),
+                plugin_settings: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -652,7 +846,6 @@ mod tests {
                     sharepoint: None,
                     redmine: None,
                     gitlab: None,
-                    gemini: None,
                     os: Some(OsIntegrationsConfig {
                         reminders: Some(IntegrationConfig {
                             enabled: Some(false),
@@ -663,7 +856,9 @@ mod tests {
                         }),
                         notes: None,
                     }),
+                    plugins: None,
                 }),
+                plugin_settings: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -692,9 +887,10 @@ mod tests {
                     sharepoint: None,
                     redmine: None,
                     gitlab: None,
-                    gemini: None,
                     os: None,
+                    plugins: None,
                 }),
+                plugin_settings: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -707,7 +903,6 @@ mod tests {
         assert!(!resolved.sharepoint);
         assert!(!resolved.redmine);
         assert!(!resolved.gitlab);
-        assert!(!resolved.gemini);
         assert!(!resolved.os_reminders);
         assert!(!resolved.os_calendar);
         assert!(!resolved.os_mail);
@@ -760,14 +955,12 @@ mod tests {
         let r = ResolvedIntegrationsConfig {
             slack: true,
             gitlab: false,
-            gemini: true,
             ..Default::default()
         };
         assert_eq!(r.is_service_enabled("slack"), Some(true));
         assert_eq!(r.is_service_enabled("sharepoint"), Some(false));
         assert_eq!(r.is_service_enabled("redmine"), Some(false));
         assert_eq!(r.is_service_enabled("gitlab"), Some(false));
-        assert_eq!(r.is_service_enabled("gemini"), Some(true));
     }
 
     #[test]
@@ -854,14 +1047,7 @@ mod tests {
                 enabled: Some(true)
             }
         ));
-        assert!(cfg.set_service(
-            "gemini",
-            IntegrationConfig {
-                enabled: Some(true)
-            }
-        ));
         assert_eq!(cfg.slack.unwrap().enabled, Some(true));
-        assert_eq!(cfg.gemini.unwrap().enabled, Some(true));
     }
 
     #[test]
@@ -879,5 +1065,304 @@ mod tests {
                 enabled: Some(true)
             }
         ));
+    }
+
+    #[test]
+    fn test_load_corrupt_config_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        std::fs::write(&config_path, "{{not valid json!!!").unwrap();
+
+        let result = load_user_config_from(&config_path);
+        assert!(
+            result.is_err(),
+            "corrupt config should return an error, not silently default"
+        );
+    }
+
+    #[test]
+    fn test_load_missing_config_returns_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("nonexistent-config.json");
+
+        let result = load_user_config_from(&config_path).unwrap();
+        assert!(result.projects.is_empty());
+        assert!(result.active_project.is_none());
+    }
+
+    #[test]
+    fn test_set_plugin_enabled() {
+        let mut cfg = IntegrationsConfig::default();
+        assert!(cfg.plugins.is_none());
+
+        cfg.set_plugin_enabled("presale", true);
+        let plugins = cfg.plugins.as_ref().unwrap();
+        assert_eq!(plugins.get("presale").unwrap().enabled, Some(true));
+
+        cfg.set_plugin_enabled("presale", false);
+        let plugins = cfg.plugins.as_ref().unwrap();
+        assert_eq!(plugins.get("presale").unwrap().enabled, Some(false));
+    }
+
+    #[test]
+    fn test_is_plugin_enabled() {
+        let resolved = ResolvedIntegrationsConfig {
+            plugins: HashMap::from([
+                ("presale".to_string(), true),
+                ("analytics".to_string(), false),
+            ]),
+            ..Default::default()
+        };
+        assert!(resolved.is_plugin_enabled("presale"));
+        assert!(!resolved.is_plugin_enabled("analytics"));
+        assert!(!resolved.is_plugin_enabled("unknown"));
+    }
+
+    #[test]
+    fn test_enabled_plugin_service_ids() {
+        let resolved = ResolvedIntegrationsConfig {
+            plugins: HashMap::from([
+                ("presale".to_string(), true),
+                ("analytics".to_string(), false),
+                ("reporting".to_string(), true),
+            ]),
+            ..Default::default()
+        };
+        let mut enabled = resolved.enabled_plugin_service_ids();
+        enabled.sort();
+        assert_eq!(enabled, vec!["presale", "reporting"]);
+    }
+
+    #[test]
+    fn test_resolve_integrations_with_plugins() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No repo config (no .speedwave.json)
+
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "test-project".to_string(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: Some(IntegrationsConfig {
+                    slack: None,
+                    sharepoint: None,
+                    redmine: None,
+                    gitlab: None,
+                    os: None,
+                    plugins: Some(HashMap::from([(
+                        "presale".to_string(),
+                        IntegrationConfig {
+                            enabled: Some(true),
+                        },
+                    )])),
+                }),
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        };
+
+        let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
+        assert!(resolved.is_plugin_enabled("presale"));
+        assert!(!resolved.is_plugin_enabled("unknown"));
+        assert_eq!(resolved.enabled_plugin_service_ids(), vec!["presale"]);
+    }
+
+    // -- SpeedwaveUserConfig::find_project / require_project tests --
+
+    fn make_config_with_projects() -> SpeedwaveUserConfig {
+        SpeedwaveUserConfig {
+            projects: vec![
+                ProjectUserEntry {
+                    name: "alpha".to_string(),
+                    dir: "/tmp/alpha".to_string(),
+                    claude: None,
+                    integrations: None,
+                    plugin_settings: None,
+                },
+                ProjectUserEntry {
+                    name: "beta".to_string(),
+                    dir: "/tmp/beta".to_string(),
+                    claude: None,
+                    integrations: None,
+                    plugin_settings: None,
+                },
+            ],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        }
+    }
+
+    #[test]
+    fn test_find_project_found() {
+        let config = make_config_with_projects();
+        let project = config.find_project("alpha");
+        assert!(project.is_some());
+        assert_eq!(project.unwrap().dir, "/tmp/alpha");
+    }
+
+    #[test]
+    fn test_find_project_not_found() {
+        let config = make_config_with_projects();
+        assert!(config.find_project("missing").is_none());
+    }
+
+    #[test]
+    fn test_find_project_empty_name() {
+        let config = make_config_with_projects();
+        assert!(config.find_project("").is_none());
+    }
+
+    #[test]
+    fn test_require_project_found() {
+        let config = make_config_with_projects();
+        let project = config.require_project("beta").unwrap();
+        assert_eq!(project.dir, "/tmp/beta");
+    }
+
+    #[test]
+    fn test_require_project_not_found_returns_error() {
+        let config = make_config_with_projects();
+        let result = config.require_project("missing");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("missing"),
+            "error should contain project name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_find_project_mut_modifies_entry() {
+        let mut config = make_config_with_projects();
+        let project = config.find_project_mut("alpha").unwrap();
+        project.dir = "/updated/path".to_string();
+        assert_eq!(config.projects[0].dir, "/updated/path");
+    }
+
+    // -- active_project_entry tests --
+
+    #[test]
+    fn test_active_project_entry_returns_matching_project() {
+        let config = SpeedwaveUserConfig {
+            projects: vec![
+                ProjectUserEntry {
+                    name: "alpha".to_string(),
+                    dir: "/tmp/alpha".to_string(),
+                    claude: None,
+                    integrations: None,
+                    plugin_settings: None,
+                },
+                ProjectUserEntry {
+                    name: "beta".to_string(),
+                    dir: "/tmp/beta".to_string(),
+                    claude: None,
+                    integrations: None,
+                    plugin_settings: None,
+                },
+            ],
+            active_project: Some("beta".to_string()),
+            selected_ide: None,
+            log_level: None,
+        };
+        let entry = config.active_project_entry();
+        assert!(entry.is_some());
+        assert_eq!(entry.unwrap().name, "beta");
+    }
+
+    #[test]
+    fn test_active_project_entry_returns_none_when_no_active() {
+        let config = make_config_with_projects();
+        assert!(config.active_project_entry().is_none());
+    }
+
+    #[test]
+    fn test_active_project_entry_returns_none_when_dangling() {
+        let config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "alpha".to_string(),
+                dir: "/tmp/alpha".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: Some("deleted-project".to_string()),
+            selected_ide: None,
+            log_level: None,
+        };
+        assert!(
+            config.active_project_entry().is_none(),
+            "should return None when active_project references a non-existent project"
+        );
+    }
+
+    // -- OsIntegrationsConfig::set_service tests --
+
+    #[test]
+    fn test_os_set_service_known_keys() {
+        for key in &["reminders", "calendar", "mail", "notes"] {
+            let mut cfg = OsIntegrationsConfig::default();
+            let ic = IntegrationConfig {
+                enabled: Some(true),
+            };
+            assert!(
+                cfg.set_service(key, ic),
+                "set_service should accept '{}'",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_os_set_service_unknown_key_returns_false() {
+        let mut cfg = OsIntegrationsConfig::default();
+        let ic = IntegrationConfig {
+            enabled: Some(true),
+        };
+        assert!(!cfg.set_service("unknown", ic));
+    }
+
+    #[test]
+    fn test_os_set_service_overwrite() {
+        let mut cfg = OsIntegrationsConfig::default();
+        cfg.set_service(
+            "calendar",
+            IntegrationConfig {
+                enabled: Some(true),
+            },
+        );
+        cfg.set_service(
+            "calendar",
+            IntegrationConfig {
+                enabled: Some(false),
+            },
+        );
+        assert_eq!(cfg.calendar.unwrap().enabled, Some(false));
+    }
+
+    // -- ResolvedIntegrationsConfig::is_os_service_enabled tests --
+
+    #[test]
+    fn test_is_os_service_enabled_known_keys() {
+        let r = ResolvedIntegrationsConfig {
+            os_reminders: true,
+            os_calendar: false,
+            os_mail: true,
+            os_notes: false,
+            ..Default::default()
+        };
+        assert_eq!(r.is_os_service_enabled("reminders"), Some(true));
+        assert_eq!(r.is_os_service_enabled("calendar"), Some(false));
+        assert_eq!(r.is_os_service_enabled("mail"), Some(true));
+        assert_eq!(r.is_os_service_enabled("notes"), Some(false));
+    }
+
+    #[test]
+    fn test_is_os_service_enabled_unknown_key() {
+        let r = ResolvedIntegrationsConfig::default();
+        assert_eq!(r.is_os_service_enabled("unknown"), None);
+        assert_eq!(r.is_os_service_enabled("slack"), None);
     }
 }

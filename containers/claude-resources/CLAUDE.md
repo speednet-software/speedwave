@@ -8,7 +8,6 @@ You are running inside a Speedwave container with access to MCP tools for extern
 - **SharePoint**: Read/write documents, search sites
 - **Redmine**: Manage issues, time entries, projects
 - **GitLab**: Manage repos, merge requests, pipelines
-- **Gemini**: AI-powered analysis and generation
 - **Calendar/Mail/Reminders**: System integrations via mcp-os
 
 ## Guidelines

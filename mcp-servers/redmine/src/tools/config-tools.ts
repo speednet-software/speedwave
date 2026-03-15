@@ -2,21 +2,69 @@
  * Config Tools - 2 tools for Redmine configuration
  */
 
-import { Tool, ToolDefinition, jsonResult, errorResult } from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition, jsonResult, errorResult } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 
 const getMappingsTool: Tool = {
   name: 'getMappings',
   description: 'Get project-specific Redmine ID mappings (status, priority, tracker, activity)',
+  category: 'read',
+  keywords: ['redmine', 'mappings', 'config', 'status', 'priority', 'tracker', 'activity'],
+  example: `const mappings = await redmine.getMappings()`,
   inputSchema: {
     type: 'object',
     properties: {},
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      statuses: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { id: { type: 'number' }, name: { type: 'string' } },
+        },
+      },
+      priorities: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { id: { type: 'number' }, name: { type: 'string' } },
+        },
+      },
+      trackers: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { id: { type: 'number' }, name: { type: 'string' } },
+        },
+      },
+      activities: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { id: { type: 'number' }, name: { type: 'string' } },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Get all Redmine mappings (no params)',
+      input: {},
+    },
+  ],
 };
 
 const getConfigTool: Tool = {
   name: 'getConfig',
   description: 'Get project configuration (default project_id, project_name, Redmine URL)',
+  category: 'read',
+  keywords: ['redmine', 'config', 'configuration', 'project', 'url', 'settings'],
+  example: `const config = await redmine.getConfig()`,
   inputSchema: {
     type: 'object',
     properties: {},

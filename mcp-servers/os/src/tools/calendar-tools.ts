@@ -2,7 +2,7 @@
  * Calendar Tools — OS Calendar integration
  */
 
-import { Tool, ToolDefinition } from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
 import { runCommand } from '../platform-runner.js';
 
@@ -78,15 +78,45 @@ interface DeleteEventParams {
 const listCalendarsTool: Tool = {
   name: 'listCalendars',
   description: 'List all calendars available on this device',
+  category: 'read',
+  keywords: ['os', 'calendar', 'calendars', 'list', 'schedule'],
+  example: 'const { calendars } = await os.listCalendars()',
   inputSchema: {
     type: 'object',
     properties: {},
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      calendars: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            name: { type: 'string' },
+            type: { type: 'string', description: 'local, exchange, caldav, etc.' },
+            color: { type: 'string', description: 'Hex color' },
+          },
+        },
+      },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'List all calendars (no params)',
+      input: {},
+    },
+  ],
 };
 
 const listEventsTool: Tool = {
   name: 'listEvents',
   description: 'List calendar events within a date range',
+  category: 'read',
+  keywords: ['os', 'calendar', 'events', 'list', 'schedule', 'meetings', 'appointments'],
+  example:
+    'const { events } = await os.listEvents({ start: "2025-01-13T00:00:00Z", end: "2025-01-17T23:59:59Z" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -96,11 +126,49 @@ const listEventsTool: Tool = {
       limit: { type: 'number', description: 'Max events to return (default 50)' },
     },
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      events: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            summary: { type: 'string' },
+            start: { type: 'string', description: 'ISO8601' },
+            end: { type: 'string', description: 'ISO8601' },
+            location: { type: 'string' },
+            all_day: { type: 'boolean' },
+            calendar_id: { type: 'string' },
+          },
+        },
+      },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: this week events',
+      input: {},
+    },
+    {
+      description: 'Full: specific calendar and date range',
+      input: {
+        start: '2025-01-13T00:00:00Z',
+        end: '2025-01-17T23:59:59Z',
+        calendar_id: 'work-cal',
+        limit: 20,
+      },
+    },
+  ],
 };
 
 const getEventTool: Tool = {
   name: 'getEvent',
   description: 'Get a specific calendar event by ID',
+  category: 'read',
+  keywords: ['os', 'calendar', 'event', 'get', 'detail', 'show', 'meeting'],
+  example: 'const event = await os.getEvent({ id: "evt-123" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -108,11 +176,37 @@ const getEventTool: Tool = {
     },
     required: ['id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      id: { type: 'string' },
+      summary: { type: 'string' },
+      start: { type: 'string' },
+      end: { type: 'string' },
+      location: { type: 'string' },
+      notes: { type: 'string' },
+      all_day: { type: 'boolean' },
+      attendees: { type: 'array', items: { type: 'string' } },
+      calendar_id: { type: 'string' },
+      calendar_name: { type: 'string' },
+      url: { type: 'string' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Get event by ID',
+      input: { id: 'evt-123' },
+    },
+  ],
 };
 
 const createEventTool: Tool = {
   name: 'createEvent',
   description: 'Create a new calendar event',
+  category: 'write',
+  keywords: ['os', 'calendar', 'event', 'create', 'new', 'add', 'meeting', 'schedule'],
+  example:
+    'const { id } = await os.createEvent({ summary: "Team standup", start: "2025-01-15T09:00:00Z", end: "2025-01-15T09:30:00Z" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -126,11 +220,44 @@ const createEventTool: Tool = {
     },
     required: ['summary', 'start', 'end'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'ID of created event' },
+      status: { type: 'string', description: '"created"' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: create with required fields',
+      input: {
+        summary: 'Team standup',
+        start: '2025-01-15T09:00:00Z',
+        end: '2025-01-15T09:30:00Z',
+      },
+    },
+    {
+      description: 'Full: create with all fields',
+      input: {
+        summary: 'Sprint Planning',
+        start: '2025-01-15T10:00:00Z',
+        end: '2025-01-15T11:00:00Z',
+        calendar_id: 'work-cal',
+        location: 'Room 42',
+        notes: 'Q1 sprint planning',
+        all_day: false,
+      },
+    },
+  ],
 };
 
 const updateEventTool: Tool = {
   name: 'updateEvent',
   description: 'Update an existing calendar event',
+  category: 'write',
+  keywords: ['os', 'calendar', 'event', 'update', 'edit', 'modify', 'reschedule'],
+  example:
+    'await os.updateEvent({ id: "evt-123", summary: "Updated meeting title", start: "2025-01-15T10:00:00Z", end: "2025-01-15T11:00:00Z" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -143,11 +270,36 @@ const updateEventTool: Tool = {
     },
     required: ['id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      status: { type: 'string', description: '"updated"' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: update summary only',
+      input: { id: 'evt-123', summary: 'Renamed meeting' },
+    },
+    {
+      description: 'Full: reschedule and update details',
+      input: {
+        id: 'evt-123',
+        summary: 'Sprint Planning (moved)',
+        start: '2025-01-16T10:00:00Z',
+        end: '2025-01-16T11:00:00Z',
+        location: 'Room 7',
+      },
+    },
+  ],
 };
 
 const deleteEventTool: Tool = {
   name: 'deleteEvent',
   description: 'Delete a calendar event',
+  category: 'delete',
+  keywords: ['os', 'calendar', 'event', 'delete', 'remove', 'cancel'],
+  example: 'await os.deleteEvent({ id: "evt-123" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -155,6 +307,18 @@ const deleteEventTool: Tool = {
     },
     required: ['id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      status: { type: 'string', description: '"deleted"' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Delete an event',
+      input: { id: 'evt-123' },
+    },
+  ],
 };
 
 //=============================================================================

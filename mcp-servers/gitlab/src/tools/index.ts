@@ -16,7 +16,7 @@
  * - Release: 3 tools (create_tag, delete_tag, create_release)
  */
 
-import { ToolDefinition } from '../../../shared/dist/index.js';
+import { ToolDefinition } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { createProjectTools } from './project-tools.js';
 import { createMrTools } from './mr-tools.js';

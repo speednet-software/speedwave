@@ -5,6 +5,8 @@
   "permissions": [
     "core:default",
     "core:window:default",
+    "dialog:default",
+    "dialog:allow-open",
     "log:default"
   ]
 }

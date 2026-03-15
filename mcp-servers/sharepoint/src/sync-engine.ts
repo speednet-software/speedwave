@@ -5,7 +5,7 @@
 
 import fs from 'fs/promises';
 import path from 'path';
-import { ts } from '../../shared/dist/index.js';
+import { ts } from '@speedwave/mcp-shared';
 import { PathValidator } from './path-validator.js';
 import { SyncState, SyncStateEntry, SYNC_STATE_FILENAME } from './sync-state.js';
 

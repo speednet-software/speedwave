@@ -22,7 +22,13 @@ pub trait ContainerRuntime: Send + Sync {
     fn container_exec_piped(&self, container: &str, cmd: &[&str]) -> anyhow::Result<Command>;
     fn is_available(&self) -> bool;
     fn ensure_ready(&self) -> anyhow::Result<()>;
-    fn build_image(&self, tag: &str, context_dir: &str, containerfile: &str) -> anyhow::Result<()>;
+    fn build_image(
+        &self,
+        tag: &str,
+        context_dir: &str,
+        containerfile: &str,
+        build_args: &[(&str, &str)],
+    ) -> anyhow::Result<()>;
     /// Translates a host build-root path into one accessible by the container engine.
     ///
     /// Default: identity (Linux nerdctl — paths are already native).
@@ -41,6 +47,22 @@ pub trait ContainerRuntime: Send + Sync {
     fn compose_logs(&self, project: &str, tail: u32) -> anyhow::Result<String>;
     /// Recreates all containers using `--force-recreate --remove-orphans`.
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()>;
+
+    /// Removes dangling images and build cache (not tagged images).
+    ///
+    /// Used by `build_all_images` to recover from stale overlayfs snapshotter
+    /// state on containerd (containerd bug — "failed to rename:
+    /// file exists" during layer extraction). Only removes dangling
+    /// (untagged) images and build cache, so successfully-built tagged
+    /// images survive a partial-build retry.
+    ///
+    /// This bug affects all containerd overlayfs setups, including native
+    /// Linux (NerdctlRuntime), Lima VM (LimaRuntime), and WSL2 (WslRuntime).
+    /// All three current runtime implementations (`LimaRuntime`, `NerdctlRuntime`,
+    /// `WslRuntime`) override this method with `nerdctl system prune --force`.
+    fn system_prune(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 pub trait CommandRunner: Send + Sync {
@@ -56,6 +78,13 @@ pub trait CommandRunner: Send + Sync {
     /// `CommandRunner` implementations (including mocks) work unchanged.
     fn run_with_stderr(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
         self.run(cmd, args)
+    }
+
+    /// Like `run`, but returns raw stdout bytes without UTF-8 conversion.
+    /// Needed for commands like `wsl.exe --list` that output UTF-16LE.
+    fn run_raw_stdout(&self, cmd: &str, args: &[&str]) -> anyhow::Result<Vec<u8>> {
+        // Default: delegate to run() and return as UTF-8 bytes
+        self.run(cmd, args).map(|s| s.into_bytes())
     }
 }
 
@@ -100,6 +129,17 @@ impl CommandRunner for RealRunner {
         if output.status.success() {
             Ok(combine_outputs(&stdout, &stderr))
         } else {
+            anyhow::bail!("{} failed: {}", cmd, combine_outputs(&stderr, &stdout));
+        }
+    }
+
+    fn run_raw_stdout(&self, cmd: &str, args: &[&str]) -> anyhow::Result<Vec<u8>> {
+        let output = Self::prepare_command(cmd, args).output()?;
+        if output.status.success() {
+            Ok(output.stdout)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
             anyhow::bail!("{} failed: {}", cmd, combine_outputs(&stderr, &stdout));
         }
     }
@@ -160,6 +200,181 @@ pub fn compose_file_path(project: &str) -> anyhow::Result<String> {
     Ok(data_dir.to_string_lossy().to_string())
 }
 
+fn configured_project_container_names(project: &str) -> Vec<String> {
+    let compose_file = match compose_file_path(project) {
+        Ok(path) => path,
+        Err(e) => {
+            log::debug!(
+                "configured_project_container_names: compose path unavailable for {project}: {e}"
+            );
+            return Vec::new();
+        }
+    };
+
+    let compose_yml = match std::fs::read_to_string(&compose_file) {
+        Ok(yaml) => yaml,
+        Err(e) => {
+            log::debug!(
+                "configured_project_container_names: compose file unreadable for {project}: {e}"
+            );
+            return Vec::new();
+        }
+    };
+
+    container_names_from_compose_yaml(&compose_yml)
+}
+
+fn container_names_from_compose_yaml(compose_yml: &str) -> Vec<String> {
+    let doc: serde_yaml_ng::Value = match serde_yaml_ng::from_str(compose_yml) {
+        Ok(doc) => doc,
+        Err(e) => {
+            log::debug!("container_names_from_compose_yaml: invalid compose YAML: {e}");
+            return Vec::new();
+        }
+    };
+
+    doc.get("services")
+        .and_then(|services| services.as_mapping())
+        .map(|services| {
+            let mut container_names: Vec<String> = services
+                .values()
+                .filter_map(|service| {
+                    service
+                        .get("container_name")
+                        .and_then(|value| value.as_str())
+                        .map(ToString::to_string)
+                })
+                .collect();
+            container_names.sort();
+            container_names
+        })
+        .unwrap_or_default()
+}
+
+fn push_unique_target(targets: &mut Vec<String>, target: String) {
+    if !targets.contains(&target) {
+        targets.push(target);
+    }
+}
+
+fn cleanup_targets_from_ps_output(ps_output: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+
+    for id in ps_output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        push_unique_target(&mut targets, id.to_string());
+    }
+
+    targets
+}
+
+fn run_rm_force(
+    runner: &dyn CommandRunner,
+    cmd: &str,
+    nerdctl_prefix: &[&str],
+    targets: &[String],
+) -> anyhow::Result<()> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let mut rm_args: Vec<&str> = nerdctl_prefix.to_vec();
+    rm_args.extend_from_slice(&["rm", "-f"]);
+    for target in targets {
+        rm_args.push(target.as_str());
+    }
+    runner.run(cmd, &rm_args).map(|_| ())
+}
+
+fn is_missing_container_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string().to_ascii_lowercase();
+    message.contains("no such")
+        || message.contains("not found")
+        || message.contains("does not exist")
+        || message.contains("not exist")
+}
+
+/// Force-remove any containers still registered in the nerdctl name-store for
+/// the given compose project.  Called after `compose down --remove-orphans` to
+/// work around a nerdctl bug where ghost name-store entries survive and cause
+/// "name already used" on the next `compose up`.
+///
+/// `nerdctl_prefix` is the command slice needed to reach nerdctl
+/// (e.g. `&["shell", "speedwave", "--", "sudo", "nerdctl"]` for Lima).
+///
+/// Best-effort: failures are logged but never propagated.
+pub(crate) fn force_remove_project_containers(
+    runner: &dyn CommandRunner,
+    cmd: &str,
+    project: &str,
+    nerdctl_prefix: &[&str],
+) {
+    let filter = format!("label=com.docker.compose.project={project}");
+    let mut ps_args: Vec<&str> = nerdctl_prefix.to_vec();
+    ps_args.extend_from_slice(&["ps", "-a", "--filter", &filter, "-q"]);
+
+    let id_targets = match runner.run(cmd, &ps_args) {
+        Ok(output) => cleanup_targets_from_ps_output(&output),
+        Err(e) => {
+            log::debug!("force_remove_project_containers: ps failed for {project}: {e}");
+            Vec::new()
+        }
+    };
+    let name_targets = configured_project_container_names(project);
+
+    if id_targets.is_empty() && name_targets.is_empty() {
+        return;
+    }
+
+    if !id_targets.is_empty() {
+        log::info!(
+            "force_remove_project_containers: removing {} stale container id(s) for {project}",
+            id_targets.len()
+        );
+        if let Err(e) = run_rm_force(runner, cmd, nerdctl_prefix, &id_targets) {
+            log::warn!("force_remove_project_containers: rm -f by id failed for {project}: {e}");
+        }
+    }
+
+    for container_name in &name_targets {
+        let single_target = vec![container_name.clone()];
+        match run_rm_force(runner, cmd, nerdctl_prefix, &single_target) {
+            Ok(()) => {}
+            Err(e) if is_missing_container_error(&e) => {
+                log::debug!(
+                    "force_remove_project_containers: {project} target '{container_name}' already gone: {e}"
+                );
+            }
+            Err(e) => {
+                log::warn!(
+                    "force_remove_project_containers: rm -f by name failed for {project} target '{container_name}': {e}"
+                );
+            }
+        }
+    }
+}
+
+/// Runs `compose down` and then best-effort cleanup of any stale container
+/// entries for the project, even if `compose down` itself fails.
+pub(crate) fn compose_down_and_cleanup(
+    runner: &dyn CommandRunner,
+    cmd: &str,
+    project: &str,
+    compose_down_args: &[&str],
+    nerdctl_prefix: &[&str],
+) -> anyhow::Result<()> {
+    let down_result = runner.run(cmd, compose_down_args);
+    if let Err(ref e) = down_result {
+        log::warn!("compose_down_and_cleanup: compose down failed for {project}: {e}");
+    }
+
+    force_remove_project_containers(runner, cmd, project, nerdctl_prefix);
+    down_result.map(|_| ())
+}
+
 pub fn detect_runtime() -> Box<dyn ContainerRuntime> {
     #[cfg(target_os = "macos")]
     {
@@ -183,12 +398,14 @@ pub(crate) mod test_support {
 
     pub struct MockRunner {
         pub responses: std::collections::HashMap<String, anyhow::Result<String>>,
+        pub raw_responses: std::collections::HashMap<String, anyhow::Result<Vec<u8>>>,
     }
 
     impl MockRunner {
         pub fn new() -> Self {
             Self {
                 responses: std::collections::HashMap::new(),
+                raw_responses: std::collections::HashMap::new(),
             }
         }
 
@@ -201,6 +418,11 @@ pub(crate) mod test_support {
         pub fn with_error(mut self, key: &str, msg: &str) -> Self {
             self.responses
                 .insert(key.to_string(), Err(anyhow::anyhow!(msg.to_string())));
+            self
+        }
+
+        pub fn with_raw_response(mut self, key: &str, bytes: Vec<u8>) -> Self {
+            self.raw_responses.insert(key.to_string(), Ok(bytes));
             self
         }
 
@@ -218,6 +440,18 @@ pub(crate) mod test_support {
                 None => Err(anyhow::anyhow!("unexpected command: {}", key)),
             }
         }
+
+        fn run_raw_stdout(&self, cmd: &str, args: &[&str]) -> anyhow::Result<Vec<u8>> {
+            let key = Self::make_key(cmd, args);
+            // Check raw_responses first, fall back to run().into_bytes()
+            if let Some(result) = self.raw_responses.get(&key) {
+                return match result {
+                    Ok(val) => Ok(val.clone()),
+                    Err(e) => Err(anyhow::anyhow!("{}", e)),
+                };
+            }
+            self.run(cmd, args).map(|s| s.into_bytes())
+        }
     }
 }
 
@@ -225,6 +459,8 @@ pub(crate) mod test_support {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_compose_file_path_format() {
@@ -380,5 +616,242 @@ mod tests {
     #[test]
     fn combine_outputs_both_empty() {
         assert_eq!(combine_outputs("", ""), "");
+    }
+
+    #[test]
+    fn test_run_raw_stdout_default_delegates_to_run() {
+        struct StubRunner;
+        impl CommandRunner for StubRunner {
+            fn run(&self, _cmd: &str, _args: &[&str]) -> anyhow::Result<String> {
+                Ok("from_run".to_string())
+            }
+            // run_raw_stdout NOT overridden — uses default impl
+        }
+
+        let runner = StubRunner;
+        let result = runner
+            .run_raw_stdout("echo", &["hello"])
+            .expect("run_raw_stdout");
+        assert_eq!(
+            result, b"from_run",
+            "default run_raw_stdout should delegate to run() and return bytes"
+        );
+    }
+
+    #[test]
+    fn test_mock_runner_raw_response_takes_priority() {
+        let runner = test_support::MockRunner::new()
+            .with_response("cmd --flag", "text_response")
+            .with_raw_response("cmd --flag", vec![0xFF, 0xFE, 0x41, 0x00]);
+
+        // run() returns text response
+        assert_eq!(runner.run("cmd", &["--flag"]).unwrap(), "text_response");
+        // run_raw_stdout() returns raw bytes (raw_response takes priority)
+        assert_eq!(
+            runner.run_raw_stdout("cmd", &["--flag"]).unwrap(),
+            vec![0xFF, 0xFE, 0x41, 0x00]
+        );
+    }
+
+    #[test]
+    fn test_mock_runner_raw_fallback_to_run() {
+        let runner = test_support::MockRunner::new().with_response("cmd --flag", "hello");
+
+        // No raw_response set, so run_raw_stdout falls back to run().into_bytes()
+        assert_eq!(
+            runner.run_raw_stdout("cmd", &["--flag"]).unwrap(),
+            b"hello".to_vec()
+        );
+    }
+
+    #[test]
+    fn test_container_names_from_compose_yaml_extracts_declared_names() {
+        let compose_yml = r#"
+services:
+  claude:
+    image: speedwave-claude:latest
+    container_name: speedwave_tmp_claude
+  mcp-hub:
+    image: speedwave-mcp-hub:latest
+    container_name: speedwave_tmp_mcp_hub
+"#;
+
+        assert_eq!(
+            container_names_from_compose_yaml(compose_yml),
+            vec![
+                "speedwave_tmp_claude".to_string(),
+                "speedwave_tmp_mcp_hub".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_cleanup_targets_from_ps_output_extracts_ids() {
+        assert_eq!(
+            cleanup_targets_from_ps_output("stale-id\nother-id\n"),
+            vec!["stale-id".to_string(), "other-id".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_compose_down_and_cleanup_runs_cleanup_after_down_failure() {
+        struct RecordingRunner {
+            commands: Arc<Mutex<Vec<String>>>,
+            responses: HashMap<String, anyhow::Result<String>>,
+        }
+
+        impl CommandRunner for RecordingRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                self.commands.lock().unwrap().push(key.clone());
+                match self.responses.get(&key) {
+                    Some(Ok(val)) => Ok(val.clone()),
+                    Some(Err(e)) => Err(anyhow::anyhow!("{e}")),
+                    None => Err(anyhow::anyhow!("unexpected command: {key}")),
+                }
+            }
+        }
+
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let compose_file = "/tmp/compose.yml";
+        let project = "cleanup-down-error-test";
+        let down_key = format!(
+            "nerdctl compose -f {} -p {} down --remove-orphans",
+            compose_file, project
+        );
+        let ps_key = format!(
+            "nerdctl ps -a --filter label=com.docker.compose.project={} -q",
+            project
+        );
+        let rm_key = "nerdctl rm -f stale-id".to_string();
+
+        let runner = RecordingRunner {
+            commands: Arc::clone(&commands),
+            responses: HashMap::from([
+                (
+                    down_key.clone(),
+                    Err(anyhow::anyhow!("compose down failed")),
+                ),
+                (ps_key.clone(), Ok("stale-id\n".to_string())),
+                (rm_key.clone(), Ok(String::new())),
+            ]),
+        };
+
+        let err = compose_down_and_cleanup(
+            &runner,
+            "nerdctl",
+            project,
+            &[
+                "compose",
+                "-f",
+                compose_file,
+                "-p",
+                project,
+                "down",
+                "--remove-orphans",
+            ],
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("compose down failed"));
+        assert_eq!(
+            commands.lock().unwrap().as_slice(),
+            &[down_key, ps_key, rm_key]
+        );
+    }
+
+    #[test]
+    fn test_is_missing_container_error_detects_common_messages() {
+        assert!(is_missing_container_error(&anyhow::anyhow!(
+            "No such container: speedwave_tmp_claude"
+        )));
+        assert!(is_missing_container_error(&anyhow::anyhow!(
+            "container speedwave_tmp_claude not found"
+        )));
+        assert!(!is_missing_container_error(&anyhow::anyhow!(
+            "permission denied"
+        )));
+    }
+
+    #[test]
+    fn test_force_remove_project_containers_always_tries_configured_names() {
+        static HOME_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+        struct RecordingRunner {
+            commands: Arc<Mutex<Vec<String>>>,
+            responses: HashMap<String, anyhow::Result<String>>,
+        }
+
+        impl CommandRunner for RecordingRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                self.commands.lock().unwrap().push(key.clone());
+                match self.responses.get(&key) {
+                    Some(Ok(val)) => Ok(val.clone()),
+                    Some(Err(e)) => Err(anyhow::anyhow!("{e}")),
+                    None => Err(anyhow::anyhow!("unexpected command: {key}")),
+                }
+            }
+        }
+
+        let _guard = HOME_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp.path());
+
+        let compose_dir = temp
+            .path()
+            .join(crate::consts::DATA_DIR)
+            .join("compose")
+            .join("tmp");
+        std::fs::create_dir_all(&compose_dir).unwrap();
+        std::fs::write(
+            compose_dir.join("compose.yml"),
+            r#"
+services:
+  claude:
+    image: speedwave-claude:latest
+    container_name: speedwave_tmp_claude
+  mcp-hub:
+    image: speedwave-mcp-hub:latest
+    container_name: speedwave_tmp_mcp_hub
+"#,
+        )
+        .unwrap();
+
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let ps_key = "nerdctl ps -a --filter label=com.docker.compose.project=tmp -q".to_string();
+        let rm_ids_key = "nerdctl rm -f stale-id".to_string();
+        let rm_claude_key = "nerdctl rm -f speedwave_tmp_claude".to_string();
+        let rm_hub_key = "nerdctl rm -f speedwave_tmp_mcp_hub".to_string();
+
+        let runner = RecordingRunner {
+            commands: Arc::clone(&commands),
+            responses: HashMap::from([
+                (ps_key.clone(), Ok("stale-id\n".to_string())),
+                (rm_ids_key.clone(), Ok(String::new())),
+                (
+                    rm_claude_key.clone(),
+                    Err(anyhow::anyhow!("No such container: speedwave_tmp_claude")),
+                ),
+                (rm_hub_key.clone(), Ok(String::new())),
+            ]),
+        };
+
+        force_remove_project_containers(&runner, "nerdctl", "tmp", &[]);
+
+        match previous_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+
+        assert_eq!(
+            commands.lock().unwrap().as_slice(),
+            &[ps_key, rm_ids_key, rm_claude_key, rm_hub_key]
+        );
     }
 }

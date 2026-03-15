@@ -104,7 +104,6 @@ The updater uses strict semver comparison (`remote.version > current`) — downg
 | `mcp-servers/sharepoint/package.json` | `"version": "X.Y.Z"` | extra-files (JSON)          |
 | `mcp-servers/redmine/package.json`    | `"version": "X.Y.Z"` | extra-files (JSON)          |
 | `mcp-servers/gitlab/package.json`     | `"version": "X.Y.Z"` | extra-files (JSON)          |
-| `mcp-servers/gemini/package.json`     | `"version": "X.Y.Z"` | extra-files (JSON)          |
 | `mcp-servers/os/package.json`         | `"version": "X.Y.Z"` | extra-files (JSON)          |
 | `desktop/src-tauri/tauri.conf.json`   | `"version": "X.Y.Z"` | extra-files (JSON)          |
 | `crates/speedwave-runtime/Cargo.toml` | `version = "X.Y.Z"`  | extra-files (TOML)          |
@@ -209,7 +208,7 @@ Push to main (after merge)
               ├── job: publish-tauri (matrix build, 4 platforms)
               │   ├── build macOS arm64     (.dmg + .app.tar.gz + .sig)
               │   ├── build macOS x86_64    (.dmg + .app.tar.gz + .sig)
-              │   ├── build Linux x86_64    (.deb + .AppImage + .sig)
+              │   ├── build Linux x86_64    (.deb)
               │   ├── build Windows x86_64  (.msi + .nsis.zip + .sig)
               │   ├── sign bundles with TAURI_SIGNING_PRIVATE_KEY
               │   └── upload artifacts + latest.json via releaseId
@@ -223,7 +222,7 @@ Push to main (after merge)
 | ---------------- | -------- | --------------------- | --------------------- |
 | `macos-latest`   | macOS    | arm64 (Apple Silicon) | `.dmg`, `.app.tar.gz` |
 | `macos-latest`   | macOS    | x86_64 (Intel)        | `.dmg`, `.app.tar.gz` |
-| `ubuntu-22.04`   | Linux    | x86_64                | `.deb`, `.AppImage`   |
+| `ubuntu-22.04`   | Linux    | x86_64                | `.deb`                |
 | `windows-latest` | Windows  | x86_64                | `.msi`, `.nsis.zip`   |
 
 ## Tauri Auto-Update Protocol
@@ -247,7 +246,7 @@ Tauri's built-in updater[^53] checks a `latest.json` endpoint on startup and whe
       "signature": "<base64-encoded-minisign-signature>"
     },
     "linux-x86_64": {
-      "url": "https://github.com/speednet-software/speedwave/releases/download/v2.1.0/Speedwave_2.1.0_amd64.AppImage.tar.gz",
+      "url": "https://github.com/speednet-software/speedwave/releases/download/v2.1.0/speedwave_2.1.0_amd64.deb",
       "signature": "<base64-encoded-minisign-signature>"
     },
     "windows-x86_64": {
@@ -318,12 +317,12 @@ macOS notarization[^56] requires an Apple Developer account ($99/year). For the 
 
 ## Distribution Channels
 
-| Channel         | Platform | Format                              | Notes                            |
-| --------------- | -------- | ----------------------------------- | -------------------------------- |
-| GitHub Releases | All      | `.dmg`, `.msi`, `.deb`, `.AppImage` | Primary channel                  |
-| Homebrew Cask   | macOS    | `brew install --cask speedwave`     | Community tap initially          |
-| winget          | Windows  | `winget install speedwave`          | After first stable release       |
-| apt/rpm repo    | Linux    | `.deb`, `.rpm`                      | Future — GitHub Releases for now |
+| Channel         | Platform | Format                          | Notes                            |
+| --------------- | -------- | ------------------------------- | -------------------------------- |
+| GitHub Releases | All      | `.dmg`, `.msi`, `.deb`          | Primary channel                  |
+| Homebrew Cask   | macOS    | `brew install --cask speedwave` | Community tap initially          |
+| winget          | Windows  | `winget install speedwave`      | After first stable release       |
+| apt repo        | Linux    | `.deb`                          | Future — GitHub Releases for now |
 
 ---
 

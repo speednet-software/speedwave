@@ -44,10 +44,9 @@ This has significant architectural implications for Speedwave. See Section 1 for
 
 ```
 User installs Speedwave
-  └── Speedwave's first-run wizard checks if Claude Code is installed
-      If missing, installs it using the official native installer:
-        macOS/Linux: curl -fsSL https://claude.ai/install.sh | bash
-        Windows:     irm https://claude.ai/install.ps1 | iex
+  └── Speedwave builds the Claude container image with a pinned version:
+        install-claude.sh <version> (SSOT script, uses official installer)
+      The official installer (bootstrap.sh) verifies binary SHA256 via GCS manifest
       User authenticates directly with Anthropic (their own account/API key)
       Speedwave orchestrates their local Claude Code instance as a subprocess
 ```
@@ -89,7 +88,7 @@ All three are **Apache 2.0** — fully permissive.[^6][^7][^8]
 
 ### nerdctl-full (Linux)
 
-nerdctl is **Apache 2.0**.[^10] Same requirements as Lima + nerdctl + containerd above — attribution required, binary redistribution permitted, no source disclosure needed. nerdctl-full is bundled inside the AppImage (see ADR-003 and ADR-021).
+nerdctl is **Apache 2.0**.[^10] Same requirements as Lima + nerdctl + containerd above — attribution required, binary redistribution permitted, no source disclosure needed. nerdctl-full is bundled inside the .deb package (see ADR-003, ADR-021, and ADR-025).
 
 **crun note:** containerd defaults to runc (Apache 2.0) as its OCI runtime, so there is no GPL exposure from the bundled nerdctl-full. If the system has crun installed, containerd may use it as a subprocess — this is **not a licensing concern** for Speedwave: invoking a GPL binary as a subprocess does not trigger copyleft obligations.[^10a] This is analogous to any application calling `/usr/bin/bash` (GPL v3) — the caller is not a derivative work.
 

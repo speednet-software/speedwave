@@ -4,7 +4,7 @@
  * Central registry for all OS tools following the domain-tools pattern.
  */
 
-import { ToolDefinition } from '../../../shared/dist/index.js';
+import { ToolDefinition } from '@speedwave/mcp-shared';
 import type { OsDomain } from '../platform-runner.js';
 
 export {

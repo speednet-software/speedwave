@@ -2,7 +2,7 @@
  * User Tools - Tools for Slack user operations
  */
 
-import { Tool, ToolDefinition } from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
 import { SlackClients, getUsers, formatSlackError } from '../client.js';
 
@@ -20,6 +20,32 @@ const getUsersTool: Tool = {
     },
     required: ['email'],
   },
+  category: 'read',
+  keywords: ['slack', 'user', 'email', 'lookup', 'find'],
+  example: 'const user = await slack.getUsers({ email: "alice@example.com" })',
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      user: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'User ID' },
+          name: { type: 'string', description: 'Display name' },
+          email: { type: 'string' },
+          real_name: { type: 'string' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Lookup user by email',
+      input: { email: 'john@example.com' },
+    },
+  ],
 };
 
 /**

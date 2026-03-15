@@ -12,15 +12,31 @@ pub fn validate_project_name(name: &str) -> anyhow::Result<()> {
             name.len()
         );
     }
-    if !name.as_bytes()[0].is_ascii_alphanumeric() {
+    let first = name.as_bytes()[0];
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        if first.is_ascii_uppercase() {
+            anyhow::bail!(
+                "project name '{}' contains uppercase letter '{}' (container engines require lowercase). Try '{}'",
+                name,
+                first as char,
+                name.to_ascii_lowercase()
+            );
+        }
         anyhow::bail!("project name '{}' must start with a letter or digit", name);
     }
-    if let Some(c) = name
-        .chars()
-        .find(|c| !c.is_ascii_alphanumeric() && *c != '_' && *c != '.' && *c != '-')
-    {
+    if let Some(c) = name.chars().find(|c| {
+        !c.is_ascii_lowercase() && !c.is_ascii_digit() && *c != '_' && *c != '.' && *c != '-'
+    }) {
+        if c.is_ascii_uppercase() {
+            anyhow::bail!(
+                "project name '{}' contains uppercase letter '{}' (container engines require lowercase). Try '{}'",
+                name,
+                c,
+                name.to_ascii_lowercase()
+            );
+        }
         anyhow::bail!(
-            "project name '{}' contains invalid character '{}' (only a-z, A-Z, 0-9, _, ., - allowed)",
+            "project name '{}' contains invalid character '{}' (only a-z, 0-9, _, ., - allowed)",
             name,
             c
         );
@@ -44,8 +60,16 @@ mod tests {
     #[test]
     fn test_validate_project_name_valid() {
         assert!(validate_project_name("my-project").is_ok());
-        assert!(validate_project_name("Project_1.0").is_ok());
+        assert!(validate_project_name("project_1.0").is_ok());
         assert!(validate_project_name("a").is_ok());
+    }
+
+    #[test]
+    fn test_validate_project_name_uppercase_rejected() {
+        let err = validate_project_name("MyProject").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("uppercase"), "should mention uppercase: {msg}");
+        assert!(msg.contains("myproject"), "should suggest lowercase: {msg}");
     }
 
     #[test]

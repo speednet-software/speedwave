@@ -19,8 +19,12 @@ describe('timeouts', () => {
       expect(TIMEOUTS).toHaveProperty('ASYNC_JOB_MS');
     });
 
-    it('should have exactly 11 timeout keys', () => {
-      expect(Object.keys(TIMEOUTS)).toHaveLength(11);
+    it('should have exactly 12 timeout keys', () => {
+      expect(Object.keys(TIMEOUTS)).toHaveLength(12);
+    });
+
+    it('should export TOOL_DISCOVERY_MS', () => {
+      expect(TIMEOUTS).toHaveProperty('TOOL_DISCOVERY_MS');
     });
   });
 
@@ -59,6 +63,10 @@ describe('timeouts', () => {
 
     it('ASYNC_JOB_MS is 900000 (15 min default, BASE_MS * 7.5)', () => {
       expect(TIMEOUTS.ASYNC_JOB_MS).toBe(900000);
+    });
+
+    it('TOOL_DISCOVERY_MS is 10000 (10s)', () => {
+      expect(TIMEOUTS.TOOL_DISCOVERY_MS).toBe(10000);
     });
   });
 

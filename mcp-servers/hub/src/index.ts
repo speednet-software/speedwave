@@ -34,13 +34,16 @@ import {
   Tool,
   TIMEOUTS,
   ts,
-} from '../../shared/dist/index.js';
+} from '@speedwave/mcp-shared';
 
 // Import handlers
 import { createCodeExecutorHandlers } from './handlers.js';
 
 // Import bridge initialization
 import { initializeBridges } from './executor.js';
+
+// Import registry initialization
+import { initializeRegistry } from './tool-registry.js';
 
 // Import auth token loader
 import { loadAuthTokens } from './auth-tokens.js';
@@ -72,7 +75,7 @@ const TOOLS: Tool[] = [
     description: `Search available MCP tools by keyword. Returns tool names, descriptions, and optionally full schemas.
 Use this to discover tools before executing code. Start with 'names_only' for efficiency.
 
-Available services: slack, sharepoint, redmine, gitlab, gemini, os
+Built-in services: slack, sharepoint, redmine, gitlab, os. Plugin services (if enabled) are also searchable.
 
 Examples:
 - search_tools({ query: "slack", detail_level: "names_only" })
@@ -94,8 +97,8 @@ Examples:
         },
         service: {
           type: 'string',
-          enum: ['slack', 'sharepoint', 'redmine', 'gitlab', 'gemini', 'os'],
-          description: 'Limit search to specific service (optional)',
+          description:
+            'Limit search to specific service. Built-in: slack, sharepoint, redmine, gitlab, os. Plugin services also accepted.',
         },
         include_deferred: {
           type: 'boolean',
@@ -117,6 +120,8 @@ Before calling ANY tool for the first time, you MUST:
 3. Use EXACT parameter structure from schema
 
 DO NOT guess parameter formats - always check schema first!
+
+⚠️ ISOLATED SANDBOX: Each execute_code call runs in a fresh sandbox. Variables do NOT persist between calls. Put your entire workflow (fetch IDs → fetch details → process) in a SINGLE code block.
 
 IMPORTANT: Use plain JavaScript, NOT TypeScript. Do NOT use type annotations like ": number[]" or ": string".
 
@@ -177,7 +182,7 @@ return { total: results.length, failed: errors.length };
         },
         timeout_ms: {
           type: 'number',
-          description: `Execution timeout in milliseconds (default: ${TIMEOUTS.EXECUTION_MS}ms, max: ${TIMEOUTS.EXECUTION_MS}ms). For long operations (sharepoint.sync, gemini.generateContent) timeout auto-extends to ${TIMEOUTS.LONG_OPERATION_MS}ms.`,
+          description: `Execution timeout in milliseconds (default: ${TIMEOUTS.EXECUTION_MS}ms, max: ${TIMEOUTS.EXECUTION_MS}ms). For long operations (sharepoint.sync) timeout auto-extends to ${TIMEOUTS.LONG_OPERATION_MS}ms.`,
         },
       },
       required: ['code'],
@@ -218,6 +223,11 @@ async function main() {
 
   // Load per-service auth tokens (e.g., for mcp-os on host)
   loadAuthTokens();
+
+  // Initialize dynamic tool registry (fetches tools from workers)
+  console.log(`${ts()} 🔧 Initializing dynamic tool registry...`);
+  await initializeRegistry();
+  console.log(`${ts()} ✅ Tool registry initialized`);
 
   // Initialize HTTP bridges to workers
   console.log(`${ts()} 🔧 Initializing HTTP bridges to workers...`);

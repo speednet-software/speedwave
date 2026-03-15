@@ -1262,61 +1262,6 @@ export interface SharePointFile {
 }
 
 // =============================================================================
-// Gemini Types
-// =============================================================================
-
-/**
- * Represents a single search result from Gemini grounded search.
- * Contains web page information with title, URL, and snippet.
- * @interface GeminiSearchResult
- */
-export interface GeminiSearchResult {
-  /** Title of the web page */
-  title: string;
-  /** URL of the web page */
-  url: string;
-  /** Short text excerpt from the page */
-  snippet: string;
-  /** Publication date if available (ISO 8601 format) */
-  publishedDate?: string;
-}
-
-/**
- * Represents a complete response from Gemini grounded search.
- * Combines AI-generated answer with source citations and search queries used.
- * @interface GeminiGroundedResponse
- */
-export interface GeminiGroundedResponse {
-  /** AI-generated answer based on search results */
-  answer: string;
-  /** Array of web sources used to generate the answer */
-  sources: GeminiSearchResult[];
-  /** Search queries executed to find the sources */
-  searchQueries?: string[];
-}
-
-/**
- * Represents the result of a Gemini codebase scan operation.
- * Provides summary, relevant files, and suggestions for working with the codebase.
- * @interface GeminiScanResult
- */
-export interface GeminiScanResult {
-  /** High-level summary of the codebase */
-  summary: string;
-  /** Array of relevant files identified in the scan */
-  files: Array<{
-    /** File path relative to project root */
-    path: string;
-    /** AI-generated description of the file's purpose */
-    description: string;
-    /** Relevance score (0-1) indicating importance */
-    relevance: number;
-  }>;
-  /** Optional suggestions for working with the codebase */
-  suggestions?: string[];
-}
-
-// =============================================================================
 // Common Types
 // =============================================================================
 

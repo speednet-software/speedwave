@@ -24,10 +24,19 @@ Speedwave places bundled resources at the **user level** (`/home/speedwave/.clau
 **Symlink** — all resources (both directories and individual files) are symlinked from the read-only mount. Symlinks are re-created on every container start, so they always reflect the latest version shipped with Speedwave:
 
 ```bash
-# Directories: ln -sfn (no-deref for directory symlinks)
+# Resource directories: when plugins are present, create a real directory and
+# symlink each entry individually so plugin entries can coexist alongside core
+# entries. Without plugins, symlink the whole directory (simpler).
 for resource_type in skills commands agents hooks; do
     if [ -d "${SPEEDWAVE_RESOURCES}/${resource_type}" ]; then
-        ln -sfn "${SPEEDWAVE_RESOURCES}/${resource_type}" "${HOME}/.claude/${resource_type}"
+        if [ "${HAS_PLUGINS}" = true ]; then
+            mkdir -p "${HOME}/.claude/${resource_type}"
+            for entry in "${SPEEDWAVE_RESOURCES}/${resource_type}"/*; do
+                [ -e "${entry}" ] && ln -sfn "${entry}" "${HOME}/.claude/${resource_type}/$(basename "${entry}")"
+            done
+        else
+            ln -sfn "${SPEEDWAVE_RESOURCES}/${resource_type}" "${HOME}/.claude/${resource_type}"
+        fi
     fi
 done
 
@@ -94,17 +103,17 @@ This means teams can:
 2. Override specific resources by committing same-named files to `.claude/` in their repo
 3. Add project-specific resources that complement the Speedwave bundle
 
-### Addon Resources
+### Plugin Resources
 
-Addon resources (lines 82–96 of `entrypoint.sh`) use a finer-grained approach — individual files are symlinked into the user-level directories rather than replacing entire directories:[^1]
+Plugin resources (lines 82–96 of `entrypoint.sh`) use a finer-grained approach — individual files and directories are symlinked into the user-level directories rather than replacing entire directories:[^1]
 
 ```bash
-for file in "${addon_path}/${resource_type}"/*; do
-    [ -f "${file}" ] && ln -sf "${file}" "${HOME}/.claude/${resource_type}/$(basename "${file}")"
+for entry in "${plugin_path}/${resource_type}"/*; do
+    [ -e "${entry}" ] && ln -sfn "${entry}" "${HOME}/.claude/${resource_type}/$(basename "${entry}")"
 done
 ```
 
-This allows core Speedwave resources and addon resources to coexist within the same user-level directory. Addon resources support `commands`, `agents`, and `skills` only — `hooks` are intentionally excluded because hooks execute shell commands, and allowing third-party addons to inject hooks would expand the attack surface without user consent.
+This allows core Speedwave resources and plugin resources to coexist within the same user-level directory. The `[ -e ]` guard and `ln -sfn` support both files and directories. Plugin resources support all four resource types: `commands`, `agents`, `skills`, and `hooks`. Plugins run inside the container (sandboxed with `cap_drop: ALL`, `no-new-privileges`, `read_only`), so plugin hooks have the same trust boundary as plugin skills and commands.
 
 ### Container Isolation
 

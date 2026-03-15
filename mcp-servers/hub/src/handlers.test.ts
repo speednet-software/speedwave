@@ -8,7 +8,7 @@ import { createCodeExecutorHandlers } from './handlers.js';
 import * as searchToolsModule from './search-tools.js';
 import * as executorModule from './executor.js';
 import * as toolRegistryModule from './tool-registry.js';
-import { TIMEOUTS } from '../../shared/dist/index.js';
+import { TIMEOUTS } from '@speedwave/mcp-shared';
 
 // Helper factory for mock execute results
 function createMockExecuteResult(data: unknown, executionMs = 100) {
@@ -714,23 +714,6 @@ describe('createCodeExecutorHandlers', () => {
       // Should use LONG_OPERATION_MS (300000) as default for syncDirectory operations
       expect(executorModule.executeCode).toHaveBeenCalledWith({
         code: 'await sharepoint.syncDirectory({ local_path: "/path", mode: "push" })',
-        timeoutMs: TIMEOUTS.LONG_OPERATION_MS,
-      });
-    });
-
-    it('should use extended timeout for gemini.chat operations', async () => {
-      vi.mocked(executorModule.executeCode).mockResolvedValue(
-        createMockExecuteResult({ content: 'generated' }, 45000)
-      );
-
-      const handlers = createCodeExecutorHandlers(mockConfig);
-      await handlers.handleExecuteCode({
-        code: 'await gemini.chat({ prompt: "test" })',
-      });
-
-      // Should use LONG_OPERATION_MS (300000) as default for gemini.chat
-      expect(executorModule.executeCode).toHaveBeenCalledWith({
-        code: 'await gemini.chat({ prompt: "test" })',
         timeoutMs: TIMEOUTS.LONG_OPERATION_MS,
       });
     });

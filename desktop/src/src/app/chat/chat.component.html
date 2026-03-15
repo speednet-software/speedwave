@@ -2,7 +2,16 @@
   <div class="chat-layout">
     @if (showHistory) {
       <aside class="history-sidebar">
-        <button class="new-chat-btn" (click)="newConversation()">+ New Conversation</button>
+        <button
+          class="new-chat-btn"
+          data-testid="chat-new-conversation"
+          (click)="newConversation()"
+        >
+          + New Conversation
+        </button>
+        @if (historyError) {
+          <div class="sidebar-error" data-testid="chat-history-error">{{ historyError }}</div>
+        }
         @if (historyLoading) {
           <div class="sidebar-loading">Loading...</div>
         } @else {
@@ -29,16 +38,29 @@
 
     <div class="chat-main">
       <div class="chat-toolbar">
-        <button class="toolbar-btn" [class.active]="showHistory" (click)="toggleHistory()">
+        <button
+          class="toolbar-btn"
+          data-testid="chat-history-toggle"
+          [class.active]="showHistory"
+          (click)="toggleHistory()"
+        >
           History
         </button>
-        <button class="toolbar-btn" [class.active]="showMemory" (click)="toggleMemory()">
+        <button
+          class="toolbar-btn"
+          data-testid="chat-memory-toggle"
+          [class.active]="showMemory"
+          (click)="toggleMemory()"
+        >
           Memory
         </button>
       </div>
 
+      @if (viewError) {
+        <div class="view-error" data-testid="chat-view-error">{{ viewError }}</div>
+      }
       @if (viewingTranscript) {
-        <div class="messages" #messageList>
+        <div class="messages" data-testid="chat-messages" #messageList>
           @for (msg of viewingTranscript.messages; track $index) {
             <div class="message" [class]="msg.role">
               <div class="content" [innerHTML]="renderMarkdown(msg.content)"></div>
@@ -46,38 +68,55 @@
           }
         </div>
         <div class="transcript-actions">
-          <button class="action-btn secondary" (click)="closeTranscript()">Back</button>
+          <button
+            class="action-btn secondary"
+            data-testid="chat-transcript-back"
+            (click)="closeTranscript()"
+          >
+            Back
+          </button>
           <button
             class="action-btn primary"
+            data-testid="chat-transcript-resume"
             (click)="resumeConversation(viewingTranscript.session_id)"
           >
             Resume
           </button>
         </div>
       } @else {
-        <div class="messages" #messageList>
+        <div class="messages" data-testid="chat-messages" #messageList>
           @for (msg of chat.messages; track msg.timestamp) {
-            <div class="message" [class]="msg.role">
-              <div class="content" [innerHTML]="renderMarkdown(msg.content)"></div>
-            </div>
+            <app-chat-message
+              [blocks]="msg.blocks"
+              [role]="msg.role"
+              (questionAnswered)="onQuestionAnswered($event)"
+            />
           }
-          @if (chat.isStreaming) {
-            <div class="message assistant streaming">
-              <div class="content" [innerHTML]="renderMarkdown(chat.currentStream)"></div>
-              <span class="cursor">&#x2588;</span>
-            </div>
+          @if (chat.isStreaming && chat.currentBlocks.length) {
+            <app-chat-message
+              [blocks]="chat.currentBlocks"
+              role="assistant"
+              [streaming]="true"
+              (questionAnswered)="onQuestionAnswered($event)"
+            />
           }
         </div>
+        <app-session-stats [stats]="chat.sessionStats" />
         <div class="input-area">
           <textarea
+            data-testid="chat-input"
             [(ngModel)]="inputText"
-            (keydown.enter)="onEnter($event)"
+            (keydown.enter)="onEnter($any($event))"
             placeholder="Message Claude..."
             [disabled]="chat.isStreaming"
             rows="1"
           >
           </textarea>
-          <button (click)="sendMessage()" [disabled]="!inputText.trim() || chat.isStreaming">
+          <button
+            data-testid="chat-send"
+            (click)="sendMessage()"
+            [disabled]="!inputText.trim() || chat.isStreaming"
+          >
             Send
           </button>
         </div>
@@ -87,7 +126,9 @@
         <div class="memory-panel">
           <div class="memory-header">
             <span>Project Memory</span>
-            <button class="memory-close" (click)="toggleMemory()">X</button>
+            <button class="memory-close" data-testid="chat-memory-close" (click)="toggleMemory()">
+              X
+            </button>
           </div>
           <div class="memory-content" [innerHTML]="renderMarkdown(projectMemory)"></div>
         </div>
@@ -95,7 +136,7 @@
     </div>
   </div>
 } @else {
-  <div class="status-overlay">
+  <div class="status-overlay" data-testid="chat-status-overlay">
     @if (chat.containerStatus === 'checking') {
       <div class="status-spinner"></div>
       <p class="status-text">Checking containers...</p>
@@ -108,7 +149,7 @@
       <div class="status-icon-error">!</div>
       <p class="status-text">Failed to start containers</p>
       <p class="status-error">{{ chat.containerError }}</p>
-      <button class="retry-button" (click)="retry()">Retry</button>
+      <button class="retry-button" data-testid="chat-retry" (click)="retry()">Retry</button>
     }
   </div>
 }

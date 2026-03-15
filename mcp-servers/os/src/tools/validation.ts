@@ -4,7 +4,7 @@
  * Shared validation utilities following the Speedwave MCP pattern.
  */
 
-import { ToolsCallResult } from '../../../shared/dist/index.js';
+import { ToolsCallResult } from '@speedwave/mcp-shared';
 
 /** Standardized result returned by OS tool handlers. */
 export interface ToolResult {

@@ -10,8 +10,8 @@
  */
 
 import { readFileSync, existsSync } from 'fs';
-import { SERVICES } from './http-bridge.js';
-import { ts } from '../../shared/dist/index.js';
+import { getAllServiceNames } from './service-list.js';
+import { ts } from '@speedwave/mcp-shared';
 
 const AUTH_TOKENS: Map<string, string> = new Map();
 
@@ -20,13 +20,17 @@ const AUTH_TOKENS: Map<string, string> = new Map();
  * Called once at server startup.
  */
 export function loadAuthTokens(): void {
-  for (const service of SERVICES) {
+  for (const service of getAllServiceNames()) {
     const path = `/secrets/${service}-auth-token`;
     if (existsSync(path)) {
-      const token = readFileSync(path, 'utf8').trim();
-      if (token) {
-        AUTH_TOKENS.set(service, token);
-        console.log(`${ts()} [auth-tokens] Loaded auth token for ${service}`);
+      try {
+        const token = readFileSync(path, 'utf8').trim();
+        if (token) {
+          AUTH_TOKENS.set(service, token);
+          console.log(`${ts()} [auth-tokens] Loaded auth token for ${service}`);
+        }
+      } catch (err) {
+        console.warn(`${ts()} [auth-tokens] Could not read token for ${service}: ${err}`);
       }
     }
   }
@@ -53,4 +57,11 @@ export function getAuthToken(service: string): string | undefined {
  */
 export function hasAuthToken(service: string): boolean {
   return AUTH_TOKENS.has(service);
+}
+
+/**
+ * Clear all loaded auth tokens (for testing only).
+ */
+export function clearAuthTokens(): void {
+  AUTH_TOKENS.clear();
 }

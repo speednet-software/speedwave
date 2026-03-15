@@ -7,6 +7,14 @@ import { Response } from 'express';
 import type { SSEEvent, JSONRPCResponse, JSONRPCError } from './types.js';
 
 /**
+ * Strip newlines and carriage returns — SSE single-value fields must be one line.
+ * @param value - raw field value to sanitize
+ */
+export function sanitizeSSEField(value: string): string {
+  return value.replace(/[\r\n]/g, '');
+}
+
+/**
  * SSE Stream class for sending Server-Sent Events
  */
 export class SSEStream {
@@ -56,28 +64,31 @@ export class SSEStream {
   }
 
   /**
-   * Send a raw SSE event
+   * Send a raw SSE event.
+   * Defense-in-depth: all fields are sanitized even though current callers
+   * only pass internally-produced values (JSON.stringify for data, integer
+   * counter for id, literal "message" for event).
    * @param event - SSE event structure to send
    */
   private sendEvent(event: SSEEvent): void {
     let message = '';
 
     if (event.id !== undefined) {
-      message += `id: ${event.id}\n`;
+      message += `id: ${sanitizeSSEField(String(event.id))}\n`;
     }
 
     if (event.event) {
-      message += `event: ${event.event}\n`;
+      message += `event: ${sanitizeSSEField(String(event.event))}\n`;
     }
 
     if (event.retry !== undefined) {
-      message += `retry: ${event.retry}\n`;
+      message += `retry: ${sanitizeSSEField(String(event.retry))}\n`;
     }
 
     if (event.data) {
-      const lines = event.data.split('\n');
-      for (const line of lines) {
-        message += `data: ${line}\n`;
+      for (const line of String(event.data).split('\n')) {
+        // \r stripped inline (not via sanitizeSSEField) to preserve intentional \n-splitting
+        message += `data: ${line.replace(/\r/g, '')}\n`;
       }
     }
 

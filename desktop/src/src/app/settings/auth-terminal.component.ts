@@ -28,6 +28,7 @@ import { TauriService } from '../services/tauri.service';
       <div class="actions">
         <button
           class="btn-primary"
+          data-testid="auth-open-terminal"
           tabindex="0"
           (click)="openTerminal()"
           (keydown.enter)="openTerminal()"
@@ -36,7 +37,7 @@ import { TauriService } from '../services/tauri.service';
         </button>
       </div>
       @if (error) {
-        <div class="error-banner">{{ error }}</div>
+        <div class="error-banner" data-testid="auth-error">{{ error }}</div>
       }
       <p class="hint">This page updates automatically when authentication completes.</p>
       <div class="status-row">

@@ -2,7 +2,7 @@
  * Channel Tools - Tools for Slack channel operations
  */
 
-import { Tool, ToolDefinition } from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
 import {
   SlackClients,
@@ -46,6 +46,29 @@ const sendChannelTool: Tool = {
     },
     required: ['channel', 'message'],
   },
+  category: 'write',
+  keywords: ['slack', 'send', 'message', 'channel', 'post', 'write'],
+  example: 'await slack.sendChannel({ channel: "#general", message: "Hello!" })',
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      message_ts: { type: 'string', description: 'Timestamp/ID of sent message' },
+      channel: { type: 'string', description: 'Channel ID where message was sent' },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: send simple message',
+      input: { channel: '#general', message: 'Hello team!' },
+    },
+    {
+      description: 'Full: send to specific channel ID',
+      input: { channel: 'C0123ABC456', message: 'Deployment completed successfully! :rocket:' },
+    },
+  ],
 };
 
 const getChannelMessagesTool: Tool = {
@@ -61,6 +84,43 @@ const getChannelMessagesTool: Tool = {
     },
     required: ['channel'],
   },
+  category: 'read',
+  keywords: ['slack', 'read', 'message', 'history', 'channel', 'get'],
+  example: 'const messages = await slack.getChannelMessages({ channel: "#general", limit: 10 })',
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      messages: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            ts: { type: 'string', description: 'Message timestamp/ID' },
+            user: { type: 'string', description: 'User ID who sent the message' },
+            text: { type: 'string', description: 'Message text content' },
+            type: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: read with defaults',
+      input: { channel: '#general' },
+    },
+    {
+      description: 'Partial: limit messages',
+      input: { channel: '#engineering', limit: 50 },
+    },
+    {
+      description: 'Full: read by channel ID with limit',
+      input: { channel: 'C0123ABC456', limit: 100 },
+    },
+  ],
 };
 
 const listChannelIdsTool: Tool = {
@@ -75,6 +135,35 @@ const listChannelIdsTool: Tool = {
       },
     },
   },
+  category: 'read',
+  keywords: ['slack', 'channels', 'list', 'get', 'member'],
+  example: 'const channels = await slack.listChannelIds()',
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      channels: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Channel ID' },
+            name: { type: 'string', description: 'Channel name' },
+            is_private: { type: 'boolean' },
+            is_member: { type: 'boolean' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'List all channels (no params)',
+      input: {},
+    },
+  ],
 };
 
 //===============================================================================

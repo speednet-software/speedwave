@@ -18,7 +18,8 @@
 import { randomUUID } from 'crypto';
 import { buildServiceBridge, getEnabledServices } from './tool-registry.js';
 import { getAuthToken } from './auth-tokens.js';
-import { TIMEOUTS, ts } from '../../shared/dist/index.js';
+import { getAllServiceNames } from './service-list.js';
+import { TIMEOUTS, ts, validateWorkerUrl } from '@speedwave/mcp-shared';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Configuration
@@ -28,7 +29,7 @@ import { TIMEOUTS, ts } from '../../shared/dist/index.js';
  * List of all supported MCP worker services.
  * Adding a new service: add to this array and create corresponding bridge function.
  */
-export const SERVICES = ['slack', 'sharepoint', 'redmine', 'gitlab', 'gemini', 'os'] as const;
+export const SERVICES = ['slack', 'sharepoint', 'redmine', 'gitlab', 'os'] as const;
 
 /** Union type of all supported service names derived from SERVICES array. */
 export type ServiceName = (typeof SERVICES)[number];
@@ -39,14 +40,23 @@ export type ServiceName = (typeof SERVICES)[number];
  * @param service - service name (e.g. 'slack', 'gitlab')
  */
 function getWorkerUrl(service: string): string | undefined {
-  return process.env[`WORKER_${service.toUpperCase()}_URL`] || undefined;
+  const url = process.env[`WORKER_${service.toUpperCase()}_URL`] || undefined;
+  if (!url) return undefined;
+
+  if (!validateWorkerUrl(url)) {
+    console.error(`${ts()} [http-bridge] SSRF protection: rejected worker URL for ${service}`);
+    return undefined;
+  }
+
+  return url;
 }
 
 /**
  * Get all services that have a WORKER_*_URL env var configured.
+ * Includes both built-in and plugin services.
  */
 function getConfiguredServices(): string[] {
-  return SERVICES.filter((service) => Boolean(getWorkerUrl(service)));
+  return getAllServiceNames().filter((service) => Boolean(getWorkerUrl(service)));
 }
 
 /**
@@ -123,6 +133,46 @@ export function clearWorkerCache(): void {
 }
 
 /**
+ * Classify a health-check error for logging.
+ * @param error - The caught error value
+ */
+function classifyHealthError(error: unknown): string {
+  if (!(error instanceof Error)) return 'UNKNOWN';
+  if (error.name === 'AbortError') return 'TIMEOUT';
+  if ('code' in error) {
+    const code = (error as { code?: string }).code;
+    if (code === 'ENOTFOUND') return 'DNS_ERROR';
+    if (code === 'ECONNREFUSED') return 'CONNECTION_REFUSED';
+    if (code) return code;
+  }
+  if (error.message.includes('TLS') || error.message.includes('SSL')) return 'TLS_ERROR';
+  return 'UNKNOWN';
+}
+
+/**
+ * Single health-check fetch (no cache, no retry).
+ * Returns true when the worker responds with 2xx.
+ * @param service - Service name to check
+ */
+async function checkWorkerHealth(service: string): Promise<boolean> {
+  const url = getWorkerUrl(service);
+  if (!url) return false;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.HEALTH_CHECK_MS);
+
+  try {
+    const response = await fetch(`${url}/health`, {
+      signal: controller.signal,
+      redirect: 'error',
+    });
+    return response.ok;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
  * Check if worker is available (with caching)
  * @param service - Service name to check
  * @returns True if worker is available, false otherwise
@@ -136,19 +186,7 @@ export async function isWorkerAvailable(service: string): Promise<boolean> {
   }
 
   try {
-    const url = getWorkerUrl(service);
-    if (!url) return false;
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.HEALTH_CHECK_MS);
-
-    const response = await fetch(`${url}/health`, {
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    const available = response.ok;
+    const available = await checkWorkerHealth(service);
     workerStatusCache.set(service, {
       available,
       lastCheck: now,
@@ -157,25 +195,7 @@ export async function isWorkerAvailable(service: string): Promise<boolean> {
 
     return available;
   } catch (error) {
-    // Distinguish between different error types for better debugging
-    let errorType = 'UNKNOWN';
-    if (error instanceof Error) {
-      if (error.name === 'AbortError') {
-        errorType = 'TIMEOUT';
-      } else if ('code' in error) {
-        const code = (error as { code?: string }).code;
-        if (code === 'ENOTFOUND') {
-          errorType = 'DNS_ERROR';
-        } else if (code === 'ECONNREFUSED') {
-          errorType = 'CONNECTION_REFUSED';
-        } else if (code) {
-          errorType = code;
-        }
-      } else if (error.message.includes('TLS') || error.message.includes('SSL')) {
-        errorType = 'TLS_ERROR';
-      }
-    }
-
+    const errorType = classifyHealthError(error);
     console.warn(
       `${ts()} [http-bridge] Worker health check failed for ${service} [${errorType}]:`,
       error instanceof Error ? error.message : error
@@ -187,6 +207,41 @@ export async function isWorkerAvailable(service: string): Promise<boolean> {
     });
     return false;
   }
+}
+
+/** Max retries for startup health checks */
+export const STARTUP_HEALTH_RETRIES = 3;
+/** Delays between startup retries (exponential backoff: 1s, 2s, 4s) */
+export const STARTUP_RETRY_DELAYS_MS = [1_000, 2_000, 4_000];
+
+/**
+ * Check worker health at startup with retry + backoff.
+ * Logs at info level (not warn) because startup races are expected.
+ * @param service - Service name to check
+ */
+async function checkWorkerHealthAtStartup(service: string): Promise<boolean> {
+  // 4 total attempts: attempt 0 (first try) + 3 retries
+  for (let attempt = 0; attempt <= STARTUP_HEALTH_RETRIES; attempt++) {
+    try {
+      const ok = await checkWorkerHealth(service);
+      if (ok) return true;
+    } catch {
+      // expected during startup — worker may not be listening yet
+    }
+
+    if (attempt < STARTUP_HEALTH_RETRIES) {
+      const delay = STARTUP_RETRY_DELAYS_MS[attempt] ?? 4_000;
+      console.log(
+        `${ts()} [http-bridge] Worker ${service} not ready, retrying in ${delay / 1000}s (${attempt + 1}/${STARTUP_HEALTH_RETRIES})...`
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+
+  console.log(
+    `${ts()} [http-bridge] Worker ${service} not available after ${STARTUP_HEALTH_RETRIES} retries — will retry lazily on use`
+  );
+  return false;
 }
 
 /**
@@ -311,7 +366,7 @@ export function parseServiceError(error: unknown, serviceName: string): string {
 
 /**
  * Call a worker tool via HTTP bridge
- * @param service Service name (slack, sharepoint, redmine, gitlab, gemini)
+ * @param service Service name (slack, sharepoint, redmine, gitlab)
  * @param toolName Tool name to call
  * @param params Tool parameters
  * @param options Optional configuration (timeoutMs for custom timeout)
@@ -356,6 +411,7 @@ export async function callWorker<T = unknown>(
         },
       }),
       signal: controller.signal,
+      redirect: 'error',
     });
 
     clearTimeout(timeoutId);
@@ -437,11 +493,6 @@ export function createGitLabBridge() {
   return buildServiceBridge('gitlab', callWorker);
 }
 
-/** Create Gemini bridge for executor sandbox. */
-export function createGeminiBridge() {
-  return buildServiceBridge('gemini', callWorker);
-}
-
 /** Create OS bridge for executor sandbox (Reminders, Calendar, Mail, Notes). */
 export function createOsBridge() {
   return buildServiceBridge('os', callWorker);
@@ -452,22 +503,10 @@ export function createOsBridge() {
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * All service bridges combined
+ * All service bridges combined.
+ * Dynamic Record type to support both built-in and plugin services.
  */
-export interface AllBridges {
-  /** Slack service bridge */
-  slack: ReturnType<typeof createSlackBridge> | null;
-  /** SharePoint service bridge */
-  sharepoint: ReturnType<typeof createSharePointBridge> | null;
-  /** Redmine service bridge */
-  redmine: ReturnType<typeof createRedmineBridge> | null;
-  /** GitLab service bridge */
-  gitlab: ReturnType<typeof createGitLabBridge> | null;
-  /** Gemini service bridge */
-  gemini: ReturnType<typeof createGeminiBridge> | null;
-  /** OS service bridge (Reminders, Calendar, Mail, Notes) */
-  os: ReturnType<typeof createOsBridge> | null;
-}
+export type AllBridges = Record<string, ReturnType<typeof buildServiceBridge> | null>;
 
 /**
  * Initialize all service bridges
@@ -483,27 +522,36 @@ export async function initializeAllBridges(): Promise<AllBridges> {
   console.log(`${ts()} 🔗 Initializing HTTP bridges to workers (lazy mode)...`);
 
   const enabledServices = getEnabledServices();
+  const allServices = getAllServiceNames();
 
-  const bridges: AllBridges = {
-    slack: enabledServices.has('slack') ? createSlackBridge() : null,
-    sharepoint: enabledServices.has('sharepoint') ? createSharePointBridge() : null,
-    redmine: enabledServices.has('redmine') ? createRedmineBridge() : null,
-    gitlab: enabledServices.has('gitlab') ? createGitLabBridge() : null,
-    gemini: enabledServices.has('gemini') ? createGeminiBridge() : null,
-    os: enabledServices.has('os') ? createOsBridge() : null,
-  };
+  const bridges: AllBridges = {};
+  for (const service of allServices) {
+    bridges[service] = enabledServices.has(service)
+      ? buildServiceBridge(service, callWorker)
+      : null;
+  }
 
-  // Check initial status for logging only
-  const activeServices = SERVICES.filter((s) => enabledServices.has(s));
-  const statusChecks = await Promise.all(activeServices.map((s) => isWorkerAvailable(s)));
+  // Check initial status with retry+backoff (workers may still be starting)
+  const activeServices = allServices.filter((s) => enabledServices.has(s));
+  const statusChecks = await Promise.all(activeServices.map((s) => checkWorkerHealthAtStartup(s)));
   const workerStatus = Object.fromEntries(activeServices.map((s, i) => [s, statusChecks[i]]));
+
+  // Seed the cache so subsequent calls don't re-check immediately
+  const now = new Date();
+  for (let i = 0; i < activeServices.length; i++) {
+    workerStatusCache.set(activeServices[i], {
+      available: statusChecks[i],
+      lastCheck: now,
+      tools: [],
+    });
+  }
 
   const enabledCount = statusChecks.filter(Boolean).length;
 
   console.log(
     `${ts()} \n📊 Workers available at startup: ${enabledCount}/${activeServices.length}`
   );
-  for (const service of SERVICES) {
+  for (const service of allServices) {
     if (!enabledServices.has(service)) {
       console.log(
         `${ts()}    ${service.charAt(0).toUpperCase() + service.slice(1).padEnd(10)}: disabled`
@@ -517,29 +565,4 @@ export async function initializeAllBridges(): Promise<AllBridges> {
   }
 
   return bridges;
-}
-
-/**
- * Get bridge status (checks current worker availability)
- * @returns Object mapping service names to their availability status
- */
-export async function getBridgeStatusAsync(): Promise<Record<string, boolean>> {
-  const statusChecks = await Promise.all(SERVICES.map((s) => isWorkerAvailable(s)));
-  return Object.fromEntries(SERVICES.map((s, i) => [s, statusChecks[i]]));
-}
-
-/**
- * Get bridge status (synchronous, uses cached status)
- * @deprecated Use getBridgeStatusAsync for accurate status
- * @param _bridges - Bridges object (unused)
- * @returns Object mapping service names to their cached availability (null if unknown)
- */
-export function getBridgeStatus(_bridges: AllBridges): Record<string, boolean | null> {
-  const result: Record<string, boolean | null> = {};
-  for (const service of getConfiguredServices()) {
-    const cached = workerStatusCache.get(service);
-    // Return null when status unknown (no cache), false when unavailable, true when available
-    result[service] = cached?.available ?? null;
-  }
-  return result;
 }

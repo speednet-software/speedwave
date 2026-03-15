@@ -13,31 +13,17 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { marked } from 'marked';
 import { TauriService } from '../services/tauri.service';
-import { ChatStateService, type ProjectList } from '../services/chat-state.service';
-
-interface ConversationSummary {
-  session_id: string;
-  timestamp: string;
-  preview: string;
-  message_count: number;
-}
-
-interface ConversationTranscript {
-  session_id: string;
-  messages: ConversationMessage[];
-}
-
-interface ConversationMessage {
-  role: string;
-  content: string;
-  timestamp: string | null;
-}
+import { ChatStateService } from '../services/chat-state.service';
+import { ProjectStateService } from '../services/project-state.service';
+import type { ChatMessage, ConversationSummary, ConversationTranscript } from '../models/chat';
+import { ChatMessageComponent } from './message/chat-message.component';
+import { SessionStatsComponent } from './session-stats/session-stats.component';
 
 /** Chat component that handles message rendering, user input, and streaming responses from Claude. */
 @Component({
   selector: 'app-chat',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, ChatMessageComponent, SessionStatsComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './chat.component.html',
   styleUrl: './chat.component.css',
@@ -51,13 +37,17 @@ export class ChatComponent implements OnInit, OnDestroy {
   showHistory = false;
   viewingTranscript: ConversationTranscript | null = null;
   historyLoading = false;
+  historyError = '';
   projectMemory = '';
   showMemory = false;
+  viewError = '';
 
   readonly chat = inject(ChatStateService);
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
+  private projectState = inject(ProjectStateService);
   private unsubChange: (() => void) | null = null;
+  private unsubProjectReady: (() => void) | null = null;
 
   /** Subscribes to state changes from the service. */
   constructor() {
@@ -72,6 +62,21 @@ export class ChatComponent implements OnInit, OnDestroy {
     await this.chat.init();
     this.cdr.markForCheck();
     this.scrollToBottom();
+
+    this.unsubProjectReady = this.projectState.onProjectReady(async () => {
+      this.viewingTranscript = null;
+      const wasHistoryOpen = this.showHistory;
+      const wasMemoryOpen = this.showMemory;
+      this.conversations = [];
+      this.projectMemory = '';
+      this.cdr.markForCheck();
+      if (wasHistoryOpen) {
+        await this.loadConversations();
+      }
+      if (wasMemoryOpen) {
+        await this.loadProjectMemory();
+      }
+    });
   }
 
   /** Retries the container health check. */
@@ -92,9 +97,8 @@ export class ChatComponent implements OnInit, OnDestroy {
    * Handles Enter key press to send a message, allowing Shift+Enter for newlines.
    * @param event - The keyboard event from the input field.
    */
-  onEnter(event: Event): void {
-    const keyEvent = event as KeyboardEvent;
-    if (keyEvent.shiftKey) {
+  onEnter(event: KeyboardEvent): void {
+    if (event.shiftKey) {
       return;
     }
     event.preventDefault();
@@ -103,12 +107,21 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /**
    * Converts markdown content to sanitized HTML for display.
-   * Angular's built-in [innerHTML] sanitizer strips dangerous elements
-   * (script tags, event handlers, etc.) — do NOT use bypassSecurityTrustHtml.
+   * Used by transcript view (which still uses flat content strings).
    * @param content - The raw markdown string to render.
    */
   renderMarkdown(content: string): string {
     return marked.parse(content, { async: false }) as string;
+  }
+
+  /**
+   * Handles a user answering an AskUserQuestion prompt.
+   * @param event - Contains the tool ID and selected answer values.
+   * @param event.toolId - The tool ID of the answered question.
+   * @param event.values - The selected or freeform answer values.
+   */
+  async onQuestionAnswered(event: { toolId: string; values: string[] }): Promise<void> {
+    await this.chat.answerQuestion(event.toolId, event.values);
   }
 
   /** Toggles the history sidebar and loads conversations when opening. */
@@ -123,9 +136,10 @@ export class ChatComponent implements OnInit, OnDestroy {
   /** Loads conversation list from the backend for the active project. */
   async loadConversations(): Promise<void> {
     this.historyLoading = true;
+    this.historyError = '';
     this.cdr.markForCheck();
     try {
-      const project = await this.getActiveProject();
+      const project = this.chat.activeProject;
       if (!project) {
         this.conversations = [];
         return;
@@ -133,7 +147,9 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.conversations = await this.tauri.invoke<ConversationSummary[]>('list_conversations', {
         project,
       });
-    } catch {
+    } catch (err) {
+      console.error('loadConversations failed:', err);
+      this.historyError = `Failed to load conversations: ${err}`;
       this.conversations = [];
     } finally {
       this.historyLoading = false;
@@ -146,8 +162,9 @@ export class ChatComponent implements OnInit, OnDestroy {
    * @param sessionId - The UUID of the conversation to view.
    */
   async viewConversation(sessionId: string): Promise<void> {
+    this.viewError = '';
     try {
-      const project = await this.getActiveProject();
+      const project = this.chat.activeProject;
       if (!project) return;
       this.viewingTranscript = await this.tauri.invoke<ConversationTranscript>('get_conversation', {
         project,
@@ -155,6 +172,7 @@ export class ChatComponent implements OnInit, OnDestroy {
       });
     } catch (err) {
       console.error('viewConversation failed:', err);
+      this.viewError = `Failed to load conversation: ${err}`;
       this.viewingTranscript = null;
     }
     this.cdr.markForCheck();
@@ -166,14 +184,14 @@ export class ChatComponent implements OnInit, OnDestroy {
    */
   async resumeConversation(sessionId: string): Promise<void> {
     if (!this.viewingTranscript) return;
-    const messages = this.viewingTranscript.messages.map((msg) => ({
-      role: msg.role,
-      content: msg.content,
+    const messages: ChatMessage[] = this.viewingTranscript.messages.map((msg) => ({
+      role: msg.role as 'user' | 'assistant',
+      blocks: msg.blocks ?? [{ type: 'text' as const, content: msg.content }],
       timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
     }));
 
     try {
-      const project = await this.getActiveProject();
+      const project = this.chat.activeProject;
       if (project) {
         await this.tauri.invoke('resume_conversation', { project, sessionId });
       }
@@ -183,7 +201,12 @@ export class ChatComponent implements OnInit, OnDestroy {
         ...messages,
         {
           role: 'assistant',
-          content: `Failed to resume session: ${err}. Showing transcript for context only.`,
+          blocks: [
+            {
+              type: 'error' as const,
+              content: `Failed to resume session: ${err}. Showing transcript for context only.`,
+            },
+          ],
           timestamp: Date.now(),
         },
       ]);
@@ -223,22 +246,17 @@ export class ChatComponent implements OnInit, OnDestroy {
   /** Loads the project memory (CLAUDE.md contents) from the backend. */
   async loadProjectMemory(): Promise<void> {
     try {
-      const project = await this.getActiveProject();
+      const project = this.chat.activeProject;
       if (!project) {
         this.projectMemory = '';
         return;
       }
       this.projectMemory = await this.tauri.invoke<string>('get_project_memory', { project });
-    } catch {
+    } catch (err) {
+      console.error('loadProjectMemory failed:', err);
       this.projectMemory = '';
     }
     this.cdr.markForCheck();
-  }
-
-  /** Returns the active project name, or null if none is configured. */
-  private async getActiveProject(): Promise<string | null> {
-    const result = await this.tauri.invoke<ProjectList>('list_projects');
-    return result.active_project;
   }
 
   private scrollToBottom(): void {
@@ -268,10 +286,14 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Unsubscribes from change notifications on component destruction. */
+  /** Unsubscribes from change notifications and event listeners on component destruction. */
   ngOnDestroy(): void {
     if (this.unsubChange) {
       this.unsubChange();
+    }
+    if (this.unsubProjectReady) {
+      this.unsubProjectReady();
+      this.unsubProjectReady = null;
     }
   }
 }

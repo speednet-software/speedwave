@@ -11,12 +11,12 @@ import { createSlackHandlers, UserInfoError, ChannelResolutionError } from './ha
 import type { WebClient } from '@slack/web-api';
 
 // Mock the shared module (loadToken)
-vi.mock('../../shared/dist/index.js', () => ({
+vi.mock('@speedwave/mcp-shared', () => ({
   loadToken: vi.fn(),
   ts: () => '[test]',
 }));
 
-import { loadToken } from '../../shared/dist/index.js';
+import { loadToken } from '@speedwave/mcp-shared';
 
 // Helper to create mock WebClient instances
 function createMockWebClient(): WebClient {

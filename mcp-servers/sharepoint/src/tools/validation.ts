@@ -2,7 +2,7 @@
  * Validation Helpers for Tool Parameters
  */
 
-import { ToolsCallResult } from '../../../shared/dist/index.js';
+import { ToolsCallResult } from '@speedwave/mcp-shared';
 
 /**
  * Result from a tool handler

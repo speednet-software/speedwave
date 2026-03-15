@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { SSEStream, createSSEStream, sendJSONResponse } from './sse.js';
+import { SSEStream, createSSEStream, sendJSONResponse, sanitizeSSEField } from './sse.js';
 import type { JSONRPCResponse, JSONRPCError } from './types.js';
 import { JSONRPCErrorCode } from './types.js';
 import type { Response } from 'express';
@@ -478,6 +478,52 @@ describe('sse', () => {
         expect(written).toContain('-32001');
       });
     });
+
+    describe('SSE field sanitization', () => {
+      it('strips newlines from id field to prevent SSE injection', () => {
+        // Access sendEvent indirectly via sendMessage — the id is always
+        // an integer counter, but defense-in-depth strips \n and \r.
+        stream.sendMessage({ jsonrpc: '2.0', id: 1, result: {} });
+
+        const written = mockRes.write.mock.calls[0][0] as string;
+        const idLine = written.split('\n').find((l: string) => l.startsWith('id:'));
+        expect(idLine).toBeDefined();
+        expect(idLine).not.toMatch(/[\r\n]/);
+      });
+
+      it('strips newlines from event field', () => {
+        stream.sendMessage({ jsonrpc: '2.0', id: 1, result: {} });
+
+        const written = mockRes.write.mock.calls[0][0] as string;
+        const eventLine = written.split('\n').find((l: string) => l.startsWith('event:'));
+        expect(eventLine).toBe('event: message');
+        expect(eventLine).not.toMatch(/[\r\n]/);
+      });
+
+      it('strips carriage returns from data lines', () => {
+        // JSON.stringify never produces bare \r, but defense-in-depth strips it
+        stream.sendMessage({ jsonrpc: '2.0', id: 1, result: { ok: true } });
+
+        const written = mockRes.write.mock.calls[0][0] as string;
+        const dataLines = written.split('\n').filter((l: string) => l.startsWith('data:'));
+        for (const line of dataLines) {
+          expect(line).not.toContain('\r');
+        }
+      });
+
+      it('each SSE field occupies exactly one line', () => {
+        stream.sendMessage({ jsonrpc: '2.0', id: 1, result: { nested: { a: 1 } } });
+
+        const written = mockRes.write.mock.calls[0][0] as string;
+        const lines = written.split('\n');
+        // id, event, data, empty, empty (trailing \n\n)
+        expect(lines[0]).toMatch(/^id: \d+$/);
+        expect(lines[1]).toBe('event: message');
+        expect(lines[2]).toMatch(/^data: .+$/);
+        expect(lines[3]).toBe('');
+        expect(lines[4]).toBe('');
+      });
+    });
   });
 
   describe('createSSEStream', () => {
@@ -619,6 +665,36 @@ describe('sse', () => {
 
       expect(mockRes.setHeader).toHaveBeenCalledTimes(2);
       expect(mockRes.json).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('sanitizeSSEField', () => {
+    it('strips newline', () => {
+      expect(sanitizeSSEField('foo\nbar')).toBe('foobar');
+    });
+
+    it('strips carriage return', () => {
+      expect(sanitizeSSEField('foo\rbar')).toBe('foobar');
+    });
+
+    it('strips CRLF', () => {
+      expect(sanitizeSSEField('foo\r\nbar')).toBe('foobar');
+    });
+
+    it('leaves clean values unchanged', () => {
+      expect(sanitizeSSEField('message')).toBe('message');
+    });
+
+    it('strips injection payload', () => {
+      expect(sanitizeSSEField('0\r\nevent: injected')).toBe('0event: injected');
+    });
+
+    it('strips multiple newlines', () => {
+      expect(sanitizeSSEField('a\nb\nc\r\nd')).toBe('abcd');
+    });
+
+    it('handles empty string', () => {
+      expect(sanitizeSSEField('')).toBe('');
     });
   });
 });
