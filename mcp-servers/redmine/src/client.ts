@@ -722,12 +722,12 @@ function sanitizeTextile(textile: string): string {
   do {
     previous = result;
     for (const tag of DANGEROUS_TAGS) {
-      // Full tag with content: <script ...>...</script ...> (multiline, optional whitespace in closing)
-      result = result.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}\\s*>`, 'gi'), '');
+      // Full tag with content: <script ...>...</script\t\n bar> (multiline, junk before >)
+      result = result.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}[^>]*>`, 'gi'), '');
       // Self-closing or orphaned opening tags: <script ...> or <script .../>
       result = result.replace(new RegExp(`<${tag}\\b[^>]*/?>`, 'gi'), '');
-      // Orphaned closing tags: </script> or </script >
-      result = result.replace(new RegExp(`<\\/${tag}\\s*>`, 'gi'), '');
+      // Orphaned closing tags: </script> or </script\t\n bar>
+      result = result.replace(new RegExp(`<\\/${tag}[^>]*>`, 'gi'), '');
     }
   } while (result !== previous);
 
@@ -754,6 +754,7 @@ function sanitizeTextile(textile: string): string {
   // Phase 4: globally strip dangerous URI schemes in plain text (Textile links)
   result = result.replace(/javascript\s*:/gi, '');
   result = result.replace(/vbscript\s*:/gi, '');
+  result = result.replace(/data\s*:/gi, '');
 
   return result;
 }
