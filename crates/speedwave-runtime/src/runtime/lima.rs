@@ -513,15 +513,18 @@ impl ContainerRuntime for LimaRuntime {
                 log::info!("containerd + buildkit ready after {attempt} attempt(s)");
                 return Ok(());
             }
+            if attempt == max {
+                anyhow::bail!(
+                    "containerd/buildkit not ready after restart ({max} attempts). \
+                     Try: limactl shell {vm} -- sudo systemctl restart containerd && \
+                     limactl shell {vm} -- sudo systemctl restart buildkit",
+                    vm = consts::LIMA_VM_NAME,
+                );
+            }
             log::info!("waiting for containerd/buildkit readiness (attempt {attempt}/{max})");
         }
 
-        anyhow::bail!(
-            "containerd/buildkit not ready after restart ({max} attempts). \
-             Try: limactl shell {vm} -- sudo systemctl restart containerd && \
-             limactl shell {vm} -- sudo systemctl restart buildkit",
-            vm = consts::LIMA_VM_NAME,
-        )
+        unreachable!("loop always returns or bails")
     }
 
     fn ensure_ready(&self) -> anyhow::Result<()> {
