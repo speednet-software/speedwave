@@ -69,8 +69,8 @@ import { TauriService } from '../../services/tauri.service';
         <div class="danger-info">
           <h3>Factory Reset</h3>
           <p>
-            Stops all containers, destroys the VM (macOS), and resets setup state. Tokens in
-            ~/.speedwave/tokens/ are preserved. After reset the Setup Wizard will run again.
+            Stops all containers, destroys the VM (macOS), and removes all Speedwave data including
+            tokens and plugins. The application will restart and the Setup Wizard will run again.
           </p>
         </div>
         <div class="danger-actions">
@@ -308,11 +308,17 @@ export class AdvancedSectionComponent {
     this.cdr.markForCheck();
   }
 
-  /** Performs a factory reset, destroying containers and VM. */
+  /**
+   * Performs a factory reset, destroying containers and VM.
+   * The backend calls app.restart() and never returns a response,
+   * so the lines after invoke() are unreachable in practice —
+   * they exist only as a safety net if restart behaviour changes.
+   */
   async resetEnvironment(): Promise<void> {
     this.resetting = true;
     try {
       await this.tauri.invoke('factory_reset');
+      // app.restart() fires before Tauri can return — this line is unreachable
       this.resetCompleted.emit();
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));

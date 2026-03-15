@@ -72,8 +72,8 @@ impl AuthState {
 #[derive(Deserialize, Debug)]
 pub struct JsonRpcRequest {
     /// Protocol version — required by JSON-RPC 2.0 spec but not read after deserialization.
-    #[allow(dead_code)]
-    pub jsonrpc: String,
+    #[serde(rename = "jsonrpc")]
+    _jsonrpc: String,
     pub method: String,
     pub params: Option<serde_json::Value>,
     pub id: Option<serde_json::Value>,
