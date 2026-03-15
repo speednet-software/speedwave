@@ -2,7 +2,7 @@
  * Notes Tools — OS Notes integration
  */
 
-import { Tool, ToolDefinition } from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
 import { runCommand } from '../platform-runner.js';
 
@@ -70,15 +70,44 @@ interface DeleteNoteParams {
 const listNoteFoldersTool: Tool = {
   name: 'listNoteFolders',
   description: 'List all note folders/notebooks available on this device',
+  category: 'read',
+  keywords: ['os', 'notes', 'folders', 'notebooks', 'list', 'categories'],
+  example: 'const { folders } = await os.listNoteFolders()',
   inputSchema: {
     type: 'object',
     properties: {},
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      folders: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            name: { type: 'string' },
+            account_name: { type: 'string' },
+            note_count: { type: 'number' },
+          },
+        },
+      },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'List all note folders (no params)',
+      input: {},
+    },
+  ],
 };
 
 const listNotesTool: Tool = {
   name: 'listNotes',
   description: 'List notes, optionally filtered by folder',
+  category: 'read',
+  keywords: ['os', 'notes', 'list', 'documents', 'memos'],
+  example: 'const { notes } = await os.listNotes({ limit: 20 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -86,11 +115,42 @@ const listNotesTool: Tool = {
       limit: { type: 'number', description: 'Max notes to return (default 50)' },
     },
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      notes: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            title: { type: 'string' },
+            folder_id: { type: 'string' },
+            created_at: { type: 'string', description: 'ISO8601' },
+            modified_at: { type: 'string', description: 'ISO8601' },
+          },
+        },
+      },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: list all notes',
+      input: {},
+    },
+    {
+      description: 'Full: list from specific folder',
+      input: { folder_id: 'folder-123', limit: 10 },
+    },
+  ],
 };
 
 const getNoteTool: Tool = {
   name: 'getNote',
   description: 'Get a specific note by ID with full body content',
+  category: 'read',
+  keywords: ['os', 'note', 'get', 'read', 'detail', 'content', 'body'],
+  example: 'const note = await os.getNote({ id: "note-789" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -98,11 +158,33 @@ const getNoteTool: Tool = {
     },
     required: ['id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      id: { type: 'string' },
+      title: { type: 'string' },
+      body: { type: 'string', description: 'Note body (HTML)' },
+      plaintext: { type: 'string', description: 'Note body (plain text)' },
+      folder_id: { type: 'string' },
+      folder_name: { type: 'string' },
+      created_at: { type: 'string' },
+      modified_at: { type: 'string' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Get note by ID',
+      input: { id: 'note-789' },
+    },
+  ],
 };
 
 const searchNotesTool: Tool = {
   name: 'searchNotes',
   description: 'Search notes by query string',
+  category: 'read',
+  keywords: ['os', 'notes', 'search', 'find', 'query'],
+  example: 'const { notes } = await os.searchNotes({ query: "meeting notes" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -112,11 +194,44 @@ const searchNotesTool: Tool = {
     },
     required: ['query'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      notes: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            title: { type: 'string' },
+            snippet: { type: 'string', description: 'Matching text snippet' },
+            folder_id: { type: 'string' },
+            modified_at: { type: 'string' },
+          },
+        },
+      },
+      total: { type: 'number' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: search all notes',
+      input: { query: 'meeting notes' },
+    },
+    {
+      description: 'Full: search in specific folder',
+      input: { query: 'architecture decision', folder_id: 'work-folder', limit: 5 },
+    },
+  ],
 };
 
 const createNoteTool: Tool = {
   name: 'createNote',
   description: 'Create a new note',
+  category: 'write',
+  keywords: ['os', 'note', 'create', 'new', 'add', 'write'],
+  example:
+    'const { id } = await os.createNote({ title: "Sprint Retro Notes", body: "## What went well\\n- Deployment was smooth" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -126,11 +241,35 @@ const createNoteTool: Tool = {
     },
     required: ['title'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'ID of created note' },
+      status: { type: 'string', description: '"created"' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: create with title only',
+      input: { title: 'Quick thought' },
+    },
+    {
+      description: 'Full: create with body in specific folder',
+      input: {
+        title: 'Sprint Retro Notes',
+        body: '## What went well\n- Deployment was smooth\n- Tests all passed',
+        folder_id: 'work-folder',
+      },
+    },
+  ],
 };
 
 const updateNoteTool: Tool = {
   name: 'updateNote',
   description: 'Update an existing note',
+  category: 'write',
+  keywords: ['os', 'note', 'update', 'edit', 'modify'],
+  example: 'await os.updateNote({ id: "note-789", body: "Updated content here" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -140,11 +279,30 @@ const updateNoteTool: Tool = {
     },
     required: ['id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      status: { type: 'string', description: '"updated"' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: update body only',
+      input: { id: 'note-789', body: 'Updated content' },
+    },
+    {
+      description: 'Full: update title and body',
+      input: { id: 'note-789', title: 'Renamed Note', body: 'New content here' },
+    },
+  ],
 };
 
 const deleteNoteTool: Tool = {
   name: 'deleteNote',
   description: 'Delete a note',
+  category: 'delete',
+  keywords: ['os', 'note', 'delete', 'remove'],
+  example: 'await os.deleteNote({ id: "note-789" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -152,6 +310,18 @@ const deleteNoteTool: Tool = {
     },
     required: ['id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      status: { type: 'string', description: '"deleted"' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Delete a note',
+      input: { id: 'note-789' },
+    },
+  ],
 };
 
 //=============================================================================

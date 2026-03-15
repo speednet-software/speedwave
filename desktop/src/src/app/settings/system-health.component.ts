@@ -12,6 +12,7 @@ import {
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { TauriService } from '../services/tauri.service';
+import { ProjectStateService } from '../services/project-state.service';
 import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/health';
 
 /** Displays real-time system health status including VM, containers, IDE bridge, and mcp-os. */
@@ -24,7 +25,12 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
     <div class="health-container">
       <div class="health-header">
         <h2>System Health</h2>
-        <button class="refresh-btn" (click)="refresh()" [disabled]="loading">
+        <button
+          class="refresh-btn"
+          data-testid="health-refresh"
+          (click)="refresh()"
+          [disabled]="loading"
+        >
           {{ loading ? 'Checking...' : 'Refresh' }}
         </button>
       </div>
@@ -192,10 +198,21 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
                   max="10000"
                 />
               </label>
-              <button class="log-btn" (click)="fetchLogs()" [disabled]="logLoading">
+              <button
+                class="log-btn"
+                data-testid="health-logs-refresh"
+                (click)="fetchLogs()"
+                [disabled]="logLoading"
+              >
                 {{ logLoading ? 'Loading...' : 'Refresh' }}
               </button>
-              <button class="log-btn close-btn" (click)="closeLogs()">Close</button>
+              <button
+                class="log-btn close-btn"
+                data-testid="health-logs-close"
+                (click)="closeLogs()"
+              >
+                Close
+              </button>
             </div>
           </div>
 
@@ -561,13 +578,20 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private eventTimerId: ReturnType<typeof setTimeout> | null = null;
   private unlistenEvent: (() => void) | null = null;
+  private unlistenReconciled: (() => void) | null = null;
+  private unsubProjectReady: (() => void) | null = null;
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
+  private projectState = inject(ProjectStateService);
 
   /** Starts periodic health polling and subscribes to IDE bridge events. */
   ngOnInit(): void {
     this.refresh();
-    this.intervalId = setInterval(() => this.refresh(), 5000);
+    // 15s balances responsiveness with resource usage: health checks shell out to
+    // nerdctl compose ps (VM round-trip on macOS/Windows) which is expensive at
+    // high frequency. 5s caused noticeable CPU overhead on low-power machines.
+    // IDE bridge events provide instant feedback for the most common status changes.
+    this.intervalId = setInterval(() => this.refresh(), 15000);
 
     this.tauri
       .listen<{ kind: string; detail: string }>('ide_bridge_event', (event) => {
@@ -591,6 +615,21 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
       .then((unlisten) => {
         this.unlistenEvent = unlisten;
       });
+
+    this.tauri
+      .listen('containers_reconciled', () => {
+        this.refresh();
+      })
+      .then((unlisten) => {
+        this.unlistenReconciled = unlisten;
+      })
+      .catch(() => {
+        // Tauri event listener not available outside desktop context
+      });
+
+    this.unsubProjectReady = this.projectState.onProjectReady(() => {
+      this.refresh();
+    });
   }
 
   /** Clears polling interval, event timers, and unsubscribes from IDE bridge events. */
@@ -607,10 +646,19 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
       this.unlistenEvent();
       this.unlistenEvent = null;
     }
+    if (this.unlistenReconciled) {
+      this.unlistenReconciled();
+      this.unlistenReconciled = null;
+    }
+    if (this.unsubProjectReady) {
+      this.unsubProjectReady();
+      this.unsubProjectReady = null;
+    }
   }
 
   /** Fetches the latest health report and IDE bridge status from the Tauri backend. */
   async refresh(): Promise<void> {
+    if (this.projectState.status === 'switching') return;
     this.loading = true;
     this.error = null;
     try {

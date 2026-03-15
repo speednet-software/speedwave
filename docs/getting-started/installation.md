@@ -8,7 +8,7 @@ Platform-specific installation instructions for Speedwave.
 
 ## Linux
 
-<!-- Content to be written: AppImage installation, nerdctl-full extraction, system requirements (uidmap, systemd --user, /etc/subuid + /etc/subgid) -->
+<!-- Content to be written: .deb installation, nerdctl-full extraction, system requirements (uidmap, systemd --user, /etc/subuid + /etc/subgid) -->
 
 ## Windows
 

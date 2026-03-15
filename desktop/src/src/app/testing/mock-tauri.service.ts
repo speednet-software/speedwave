@@ -41,4 +41,9 @@ export class MockTauriService {
   async getVersion(): Promise<string> {
     return '1.0.0';
   }
+
+  /** Mock isRunningInTauri — defaults to false for tests. */
+  isRunningInTauri(): boolean {
+    return false;
+  }
 }

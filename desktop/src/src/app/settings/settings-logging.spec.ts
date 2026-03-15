@@ -1,84 +1,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { SettingsComponent } from './settings.component';
+import { AdvancedSectionComponent } from './advanced-section/advanced-section.component';
 import { TauriService } from '../services/tauri.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
-import { RouterModule } from '@angular/router';
 
-describe('SettingsComponent — logging settings', () => {
-  let component: SettingsComponent;
-  let fixture: ComponentFixture<SettingsComponent>;
+describe('AdvancedSectionComponent — logging settings', () => {
+  let component: AdvancedSectionComponent;
+  let fixture: ComponentFixture<AdvancedSectionComponent>;
   let mockTauri: MockTauriService;
 
   beforeEach(async () => {
     mockTauri = new MockTauriService();
-
-    mockTauri.invokeHandler = async (cmd: string) => {
-      switch (cmd) {
-        case 'list_projects':
-          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
-        case 'get_llm_config':
-          return { provider: 'anthropic', model: null, base_url: null, api_key_env: null };
-        case 'get_update_settings':
-          return { auto_check: true, check_interval_hours: 24 };
-        case 'get_log_level':
-          return 'INFO';
-        case 'get_auth_status':
-          return { api_key_configured: false, oauth_authenticated: false };
-        case 'get_health':
-          return {
-            containers: [],
-            vm: { running: false, vm_type: 'lima' },
-            mcp_os: { running: false },
-            ide_bridge: { running: false, port: null, ws_url: null, detected_ides: [] },
-            overall_healthy: false,
-          };
-        case 'get_bridge_status':
-          return null;
-        default:
-          return undefined;
-      }
-    };
+    mockTauri.invokeHandler = async () => undefined;
 
     await TestBed.configureTestingModule({
-      imports: [SettingsComponent, RouterModule.forRoot([])],
+      imports: [AdvancedSectionComponent],
       providers: [{ provide: TauriService, useValue: mockTauri }],
     }).compileComponents();
 
-    fixture = TestBed.createComponent(SettingsComponent);
+    fixture = TestBed.createComponent(AdvancedSectionComponent);
     component = fixture.componentInstance;
-  });
-
-  describe('loadLogLevel()', () => {
-    it('loads the current log level on init', async () => {
-      await component.ngOnInit();
-      // Allow async calls to settle
-      await new Promise((r) => setTimeout(r, 50));
-      expect(component.logLevel).toBe('info');
-    });
-
-    it('normalizes log level to lowercase', async () => {
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'get_log_level') return 'DEBUG';
-        if (cmd === 'list_projects') return { projects: [], active_project: null };
-        if (cmd === 'get_llm_config')
-          return { provider: 'anthropic', model: null, base_url: null, api_key_env: null };
-        if (cmd === 'get_update_settings') return { auto_check: true, check_interval_hours: 24 };
-        if (cmd === 'get_health')
-          return {
-            containers: [],
-            vm: { running: false, vm_type: 'lima' },
-            mcp_os: { running: false },
-            ide_bridge: { running: false, port: null, ws_url: null, detected_ides: [] },
-            overall_healthy: false,
-          };
-        if (cmd === 'get_bridge_status') return null;
-        return undefined;
-      };
-      await component.ngOnInit();
-      await new Promise((r) => setTimeout(r, 50));
-      expect(component.logLevel).toBe('debug');
-    });
   });
 
   describe('setLogLevel()', () => {
@@ -93,13 +34,15 @@ describe('SettingsComponent — logging settings', () => {
       expect(component.logLevel).toBe('trace');
     });
 
-    it('sets error on failure', async () => {
+    it('emits errorOccurred on failure', async () => {
+      const errorSpy = vi.fn();
+      component.errorOccurred.subscribe(errorSpy);
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'set_log_level') throw new Error('invalid level');
         return undefined;
       };
       await component.setLogLevel('bad');
-      expect(component.error).toBe('invalid level');
+      expect(errorSpy).toHaveBeenCalledWith('invalid level');
     });
   });
 
@@ -138,14 +81,16 @@ describe('SettingsComponent — logging settings', () => {
       expect(invokeSpy).not.toHaveBeenCalledWith('export_diagnostics', expect.anything());
     });
 
-    it('sets error on failure', async () => {
+    it('emits errorOccurred on failure', async () => {
+      const errorSpy = vi.fn();
+      component.errorOccurred.subscribe(errorSpy);
       component.activeProject = 'test';
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'export_diagnostics') throw new Error('zip failed');
         return undefined;
       };
       await component.exportDiagnostics();
-      expect(component.error).toBe('zip failed');
+      expect(errorSpy).toHaveBeenCalledWith('zip failed');
       expect(component.diagnosticsExporting).toBe(false);
     });
   });

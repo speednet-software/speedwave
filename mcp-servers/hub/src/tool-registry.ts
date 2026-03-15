@@ -1,93 +1,252 @@
 /**
- * Tool Registry - Single Source of Truth
+ * Tool Registry - Dynamic Discovery with Policy
  * @module tool-registry
  *
- * Central registry aggregating all tool metadata from service index files.
- * Provides functions to generate bridge and executor wrappers dynamically,
- * eliminating duplication between http-bridge.ts and executor.ts.
+ * Central registry that merges worker-fetched tool metadata with hub policies.
+ * Workers are the SSOT for tool contracts (name, description, inputSchema, etc.).
+ * Hub policies control operational behavior (deferLoading, timeoutClass, etc.).
  *
- * Architecture:
- * - Tool metadata in tools/{service}/*.ts is the ONLY source of truth
- * - Bridge functions are generated from registry (callWorker mapping)
- * - Executor wrappers are generated from registry (audit + PII handling)
- * @example
- * // Generate bridge for a service
- * const redmineBridge = buildServiceBridge('redmine', callWorker);
- *
- * // Generate executor wrappers
- * const redmineTools = buildExecutorWrappers('redmine', bridge, wrapWithAudit, ...);
+ * Lifecycle:
+ * 1. At startup, initializeRegistry() populates the registry from workers
+ * 2. If a worker is unavailable, skeleton entries are used (from policy data)
+ * 3. Background refresh periodically updates tools from workers
+ * 4. All existing consumers (search-tools, executor, handlers) use the same API
  */
 
 import { ToolMetadata, ToolCategory, TimeoutClass } from './hub-types.js';
-import { toolMetadata as slackTools } from './tools/slack/index.js';
-import { toolMetadata as sharepointTools } from './tools/sharepoint/index.js';
-import { toolMetadata as redmineTools } from './tools/redmine/index.js';
-import { toolMetadata as gitlabTools } from './tools/gitlab/index.js';
-import { toolMetadata as geminiTools } from './tools/gemini/index.js';
-import { toolMetadata as osTools } from './tools/os/index.js';
-import { ts, TIMEOUTS } from '../../shared/dist/index.js';
+import {
+  TOOL_POLICIES,
+  SUPPORTED_SERVICES,
+  getToolPolicy,
+  getServicePolicies,
+} from './hub-tool-policy.js';
+import { getAllServiceNames } from './service-list.js';
+import { discoverAndMergeService, buildSkeletonFromPolicy } from './tool-discovery.js';
+import { ts, TIMEOUTS } from '@speedwave/mcp-shared';
 
 /**
  * Escape special regex characters in a string to prevent regex injection.
  * @param str - String to escape
- * @returns Escaped string safe for use in RegExp
  */
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 //═══════════════════════════════════════════════════════════════════════════════
-// Tool Registry
+// Mutable Tool Registry
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Central registry of all tool metadata by service.
- * This is the Single Source of Truth for tool definitions.
- * Frozen to prevent accidental runtime modifications.
+ * Mutable registry of all tool metadata by service.
+ * Populated by initializeRegistry() and refreshed periodically.
+ * Consumers should access via exported functions, not directly.
  */
-export const TOOL_REGISTRY = Object.freeze({
-  slack: Object.freeze(slackTools),
-  sharepoint: Object.freeze(sharepointTools),
-  redmine: Object.freeze(redmineTools),
-  gitlab: Object.freeze(gitlabTools),
-  gemini: Object.freeze(geminiTools),
-  os: Object.freeze(osTools),
-}) as Readonly<Record<string, Readonly<Record<string, ToolMetadata>>>>;
+const _registry: Record<string, Record<string, ToolMetadata>> = {};
 
 /**
- * List of all service names in the registry
+ * Whether the registry has been initialized
  */
-export const SERVICE_NAMES = Object.keys(TOOL_REGISTRY) as readonly string[];
+let _initialized = false;
+
+/**
+ * Background refresh interval handle
+ */
+let _refreshInterval: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Read-only view of the registry for consumers.
+ * Returns the current snapshot. Keys and values may change after refresh.
+ */
+export function getRegistry(): Readonly<Record<string, Readonly<Record<string, ToolMetadata>>>> {
+  return _registry;
+}
+
+/**
+ * Backward-compatible alias: consumers that used TOOL_REGISTRY directly.
+ * Typed as Readonly for production safety. Tests cast to mutable via _resetRegistryForTesting.
+ */
+export const TOOL_REGISTRY: Readonly<Record<string, Readonly<Record<string, ToolMetadata>>>> =
+  _registry;
+
+/**
+ * List of all service names in the registry.
+ * Initially set to built-in services; updated during initializeRegistry()
+ * to include plugin services from ENABLED_SERVICES env var.
+ */
+export let SERVICE_NAMES: readonly string[] = [...SUPPORTED_SERVICES];
+
+//═══════════════════════════════════════════════════════════════════════════════
+// Initialization
+//═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Initialize the registry from workers + policies.
+ * Called once at startup before initializeBridges().
+ *
+ * For each service:
+ * 1. Try to discover tools from worker (JSON-RPC tools/list)
+ * 2. Merge with hub policy
+ * 3. Fall back to skeleton entries if worker unavailable
+ */
+export async function initializeRegistry(): Promise<void> {
+  if (_initialized) return;
+  _initialized = true; // Set immediately to prevent concurrent double-initialization
+
+  // Update SERVICE_NAMES to include plugin services from env
+  SERVICE_NAMES = getAllServiceNames();
+
+  console.log(`${ts()} [tool-registry] Initializing dynamic registry...`);
+
+  const enabledServices = getEnabledServices();
+
+  for (const service of SERVICE_NAMES) {
+    if (!enabledServices.has(service)) {
+      // Still populate skeleton so bridge generation works (built-in only)
+      _populateSkeletons(service);
+      continue;
+    }
+
+    try {
+      const tools = await discoverAndMergeService(service);
+      _registry[service] = tools;
+      console.log(`${ts()} [tool-registry] ${service}: ${Object.keys(tools).length} tools loaded`);
+    } catch (error) {
+      console.warn(
+        `${ts()} [tool-registry] ${service}: discovery failed, using skeletons`,
+        error instanceof Error ? error.message : error
+      );
+      _populateSkeletons(service);
+    }
+  }
+
+  // Start background refresh (every 5 minutes)
+  _startBackgroundRefresh();
+
+  const stats = getRegistryStats();
+  console.log(
+    `${ts()} [tool-registry] Registry initialized: ${stats.total} tools across ${Object.keys(stats.services).length} services`
+  );
+}
+
+/**
+ * Populate registry with skeleton entries for a service (from policy only).
+ * @param service - Service name
+ */
+function _populateSkeletons(service: string): void {
+  const policies = getServicePolicies(service);
+  _registry[service] = {};
+  for (const [methodName, policy] of Object.entries(policies)) {
+    _registry[service][methodName] = buildSkeletonFromPolicy(service, methodName, policy);
+  }
+}
+
+/**
+ * Refresh tools for a specific service from its worker.
+ * Called by background refresh or on-demand.
+ * @param service - Service name to refresh
+ */
+export async function refreshServiceTools(service: string): Promise<void> {
+  try {
+    const tools = await discoverAndMergeService(service);
+    _registry[service] = tools;
+  } catch (error) {
+    console.warn(
+      `${ts()} [tool-registry] Refresh failed for ${service}:`,
+      error instanceof Error ? error.message : error
+    );
+    // Keep existing data on refresh failure
+  }
+}
+
+/**
+ * Whether a background refresh is currently in progress
+ */
+let _refreshInProgress = false;
+
+/**
+ * Start background refresh of all enabled services.
+ */
+function _startBackgroundRefresh(): void {
+  if (_refreshInterval) return;
+
+  const REFRESH_MS = 5 * 60 * 1000; // 5 minutes
+  _refreshInterval = setInterval(async () => {
+    if (_refreshInProgress) return; // Skip overlapping refresh
+    _refreshInProgress = true;
+    try {
+      const enabled = getEnabledServices();
+      for (const service of SERVICE_NAMES) {
+        if (enabled.has(service)) {
+          await refreshServiceTools(service);
+        }
+      }
+    } finally {
+      _refreshInProgress = false;
+    }
+  }, REFRESH_MS);
+
+  // Don't prevent process from exiting
+  if (_refreshInterval && typeof _refreshInterval === 'object' && 'unref' in _refreshInterval) {
+    _refreshInterval.unref();
+  }
+}
+
+/**
+ * Stop background refresh (for testing).
+ */
+export function stopBackgroundRefresh(): void {
+  if (_refreshInterval) {
+    clearInterval(_refreshInterval);
+    _refreshInterval = null;
+  }
+}
+
+/**
+ * Reset registry state (for testing only).
+ */
+export function _resetRegistryForTesting(): void {
+  for (const key of Object.keys(_registry)) {
+    delete _registry[key];
+  }
+  _initialized = false;
+  _refreshInProgress = false;
+  SERVICE_NAMES = [...SUPPORTED_SERVICES];
+  stopBackgroundRefresh();
+}
+
+//═══════════════════════════════════════════════════════════════════════════════
+// Registry Accessors (same API as before)
+//═══════════════════════════════════════════════════════════════════════════════
 
 /**
  * Get tool metadata for a specific service and method
- * @param service - Service name (e.g., 'redmine', 'gitlab')
- * @param method - Method name (e.g., 'createRelation', 'getMrFull')
- * @returns Tool metadata or undefined if not found
+ * @param service - Service name
+ * @param method - camelCase method name
  */
 export function getToolMetadata(service: string, method: string): ToolMetadata | undefined {
-  return TOOL_REGISTRY[service]?.[method];
+  return _registry[service]?.[method];
 }
 
 /**
  * Get all method names for a service
  * @param service - Service name
- * @returns Array of method names
  */
 export function getServiceMethods(service: string): string[] {
-  const tools = TOOL_REGISTRY[service];
+  const tools = _registry[service];
   return tools ? Object.keys(tools) : [];
 }
 
 /**
  * Get tool category for audit logging
  * @param service - Service name
- * @param method - Method name
- * @returns Tool category or 'read' as default (with warning if metadata missing)
+ * @param method - camelCase method name
  */
 export function getToolCategory(service: string, method: string): ToolCategory {
   const meta = getToolMetadata(service, method);
   if (!meta) {
+    // Fall back to policy if registry entry not found
+    const policy = getToolPolicy(service, method);
+    if (policy) return policy.category;
     console.warn(
       `${ts()} [tool-registry] No metadata for ${service}.${method}, defaulting to 'read'`
     );
@@ -96,19 +255,17 @@ export function getToolCategory(service: string, method: string): ToolCategory {
 }
 
 //═══════════════════════════════════════════════════════════════════════════════
-// Timeout Detection (SSOT - based on tool metadata)
+// Timeout Detection (SSOT - based on tool policy)
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Cached result for getLongTimeoutTools() - computed once since TOOL_REGISTRY is frozen/immutable
+ * Cached result for getLongTimeoutTools()
  */
 let cachedLongTimeoutTools: Array<{ service: string; method: string }> | null = null;
 
 /**
- * Get list of all tools with 'long' timeout class from registry.
- * These are tools that require extended execution time (sync, extract, AI generation).
- * Result is cached since TOOL_REGISTRY is immutable.
- * @returns Array of {service, method} for all long-running tools
+ * Get list of all tools with 'long' timeout class.
+ * Uses TOOL_POLICIES as the source since this is a hub-side concern.
  */
 export function getLongTimeoutTools(): Array<{ service: string; method: string }> {
   if (cachedLongTimeoutTools !== null) {
@@ -116,9 +273,9 @@ export function getLongTimeoutTools(): Array<{ service: string; method: string }
   }
 
   cachedLongTimeoutTools = [];
-  for (const [service, tools] of Object.entries(TOOL_REGISTRY)) {
-    for (const [method, metadata] of Object.entries(tools)) {
-      if (metadata.timeoutClass === 'long') {
+  for (const [service, tools] of Object.entries(TOOL_POLICIES)) {
+    for (const [method, policy] of Object.entries(tools)) {
+      if (policy.timeoutClass === 'long') {
         cachedLongTimeoutTools.push({ service, method });
       }
     }
@@ -129,21 +286,12 @@ export function getLongTimeoutTools(): Array<{ service: string; method: string }
 
 /**
  * Determine the required timeout class for code execution.
- * Checks if any 'long' timeout tools from registry are mentioned in the code.
- *
- * Note: This uses simple string matching (service.method pattern).
- * It may have false positives (commented code, strings) but is safe -
- * a longer timeout doesn't cause harm, only prevents premature termination.
- * @param code - JavaScript code to analyze
- * @returns 'long' if any long-running tools are detected, 'standard' otherwise
+ * @param code - JavaScript code to analyze for long-running operations
  */
 export function getRequiredTimeoutClass(code: string): TimeoutClass {
   const longTools = getLongTimeoutTools();
 
   for (const { service, method } of longTools) {
-    // Match service.method pattern with optional whitespace
-    // e.g., "sharepoint.sync", "sharepoint .sync", "sharepoint. sync"
-    // Use escapeRegex to prevent regex injection from service/method names
     const pattern = new RegExp(`${escapeRegex(service)}\\s*\\.\\s*${escapeRegex(method)}\\b`);
     if (pattern.test(code)) {
       return 'long';
@@ -155,10 +303,8 @@ export function getRequiredTimeoutClass(code: string): TimeoutClass {
 
 /**
  * Get the appropriate execution timeout based on code content.
- * Uses tool registry as Single Source of Truth for timeout classification.
  * @param code - JavaScript code to analyze
- * @param defaultMs - Default timeout for standard operations
- * @returns Timeout in milliseconds (EXECUTION_MS or LONG_OPERATION_MS)
+ * @param defaultMs - Default timeout in milliseconds
  */
 export function getExecutionTimeout(
   code: string,
@@ -194,8 +340,6 @@ let _enabledServicesCache: Set<string> | null = null;
 /**
  * Get the set of enabled services from ENABLED_SERVICES env var.
  * If env var is not set, no services are enabled (fail-closed).
- * Result is cached since env vars don't change at runtime.
- * @returns Set of enabled service names
  */
 export function getEnabledServices(): Set<string> {
   if (_enabledServicesCache) return _enabledServicesCache;
@@ -220,9 +364,6 @@ let _disabledOsCategoriesCache: Set<string> | null = null;
 
 /**
  * Get the set of disabled OS sub-integration categories from DISABLED_OS_SERVICES env var.
- * If env var is not set, no OS categories are disabled.
- * Result is cached since env vars don't change at runtime.
- * @returns Set of disabled OS category names (e.g., 'reminders', 'mail')
  */
 export function getDisabledOsCategories(): Set<string> {
   if (_disabledOsCategoriesCache) return _disabledOsCategoriesCache;
@@ -257,7 +398,6 @@ export function resetServiceCaches(): void {
  * Options for callWorker function
  */
 export interface CallWorkerOptions {
-  /** Timeout in milliseconds for this specific call */
   timeoutMs?: number;
 }
 
@@ -273,25 +413,17 @@ export type CallWorkerFn = (
 
 /**
  * Build bridge functions for a service from registry.
- * Generates a mapping of camelCase method names to callWorker invocations.
- * @param service - Service name (e.g., 'redmine')
- * @param callWorker - Function to call the worker service
- * @param getTimeoutMs - Optional function that returns remaining timeout for each call
- * @returns Object with method functions
- * @throws {Error} If service is not found in registry
- * @example
- * const bridge = buildServiceBridge('redmine', callWorker);
- * // bridge.createRelation(params) calls callWorker('redmine', 'create_relation', params)
- *
- * // With timeout tracking:
- * const bridge = buildServiceBridge('redmine', callWorker, () => getRemainingTime());
+ * Uses current registry data (refreshed dynamically).
+ * @param service - Service name
+ * @param callWorker - Function to call worker via JSON-RPC
+ * @param getTimeoutMs - Optional getter for remaining execution timeout
  */
 export function buildServiceBridge(
   service: string,
   callWorker: CallWorkerFn,
   getTimeoutMs?: () => number
 ): Record<string, (params?: Record<string, unknown>) => Promise<unknown>> {
-  const tools = TOOL_REGISTRY[service];
+  const tools = _registry[service];
   if (!tools) {
     throw new Error(`Unknown service in registry: ${service}`);
   }
@@ -301,8 +433,6 @@ export function buildServiceBridge(
   for (const methodName of Object.keys(tools)) {
     const metadata = tools[methodName];
     bridge[methodName] = (params?: Record<string, unknown>) => {
-      // Per-tool timeout takes precedence if defined (allows long operations like sync)
-      // Otherwise use remaining execution time as fallback
       const perToolTimeout = metadata.timeoutMs;
       const remainingTimeout = getTimeoutMs?.();
       const timeoutMs = perToolTimeout ?? remainingTimeout;
@@ -319,7 +449,7 @@ export function buildServiceBridge(
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Type for wrapWithAudit function used by executor
+ * Function type for wrapping tool calls with audit logging.
  */
 export type WrapWithAuditFn = <TParams, TResult>(
   category: ToolCategory,
@@ -329,35 +459,23 @@ export type WrapWithAuditFn = <TParams, TResult>(
 ) => (params: TParams) => Promise<TResult>;
 
 /**
- * Type for prepareParams function (PII detokenization)
+ * Function type for preparing parameters before bridge call.
  */
 export type PrepareParamsFn = <T>(params: T) => T;
 
 /**
- * Type for wrapBridgeCall function (PII tokenization + error handling)
+ * Function type for wrapping bridge calls with error handling.
  */
 export type WrapBridgeCallFn = <T>(bridgeCall: () => Promise<T>, serviceName: string) => Promise<T>;
 
 /**
  * Build executor tool wrappers for a service from registry.
- * Generates wrapped functions with audit logging and PII handling.
- * Uses category from tool metadata instead of hardcoding.
- * @param service - Service name (e.g., 'redmine')
- * @param bridge - Bridge object with raw method functions
- * @param wrapWithAudit - Function to wrap with audit logging
- * @param prepareParams - Function to detokenize PII in params
- * @param wrapBridgeCall - Function to tokenize PII in results
- * @param disabledOsCategories - Set of OS categories to exclude (e.g. 'mail', 'notes')
- * @returns Object with wrapped method functions
- * @example
- * const wrappers = buildExecutorWrappers(
- *   'redmine',
- *   serviceBridges.redmine,
- *   wrapWithAudit,
- *   prepareParams,
- *   wrapBridgeCall
- * );
- * // wrappers.createRelation calls with audit='write' from metadata
+ * @param service - Service name
+ * @param bridge - Bridge functions for the service
+ * @param wrapWithAudit - Audit logging wrapper
+ * @param prepareParams - Parameter preparation function
+ * @param wrapBridgeCall - Bridge call wrapper with error handling
+ * @param disabledOsCategories - Optional set of disabled OS categories to skip
  */
 export function buildExecutorWrappers(
   service: string,
@@ -367,7 +485,7 @@ export function buildExecutorWrappers(
   wrapBridgeCall: WrapBridgeCallFn,
   disabledOsCategories?: Set<string>
 ): Record<string, (params?: Record<string, unknown>) => Promise<unknown>> {
-  const tools = TOOL_REGISTRY[service];
+  const tools = _registry[service];
   if (!tools) {
     throw new Error(`Unknown service in registry: ${service}`);
   }
@@ -385,7 +503,6 @@ export function buildExecutorWrappers(
 
     const bridgeMethod = bridge[methodName];
     if (!bridgeMethod) {
-      // Fail fast - misconfiguration should be caught at startup, not runtime
       throw new Error(
         `[tool-registry] Bridge method not found: ${service}.${methodName}. ` +
           `Available bridge methods: ${Object.keys(bridge).join(', ')}`
@@ -393,7 +510,7 @@ export function buildExecutorWrappers(
     }
 
     wrappers[methodName] = wrapWithAudit(
-      metadata.category, // FROM METADATA - not hardcoded!
+      metadata.category,
       service,
       methodName,
       async (params?: Record<string, unknown>) => {
@@ -412,37 +529,28 @@ export function buildExecutorWrappers(
 
 /**
  * Validate that all tools in registry have required fields.
- * Useful for build-time or test-time validation.
- * @returns Array of validation errors (empty if valid)
  */
 export function validateRegistry(): string[] {
   const errors: string[] = [];
   const validCategories = ['read', 'write', 'delete'];
 
-  for (const [service, tools] of Object.entries(TOOL_REGISTRY)) {
+  for (const [service, tools] of Object.entries(_registry)) {
     for (const [methodName, metadata] of Object.entries(tools)) {
-      // Check name matches key
       if (metadata.name !== methodName) {
         errors.push(
           `${service}.${methodName}: metadata.name ('${metadata.name}') does not match key`
         );
       }
-
-      // Check service matches
       if (metadata.service !== service) {
         errors.push(
           `${service}.${methodName}: metadata.service ('${metadata.service}') does not match service`
         );
       }
-
-      // Check category is valid
       if (!validCategories.includes(metadata.category)) {
         errors.push(
           `${service}.${methodName}: invalid category '${metadata.category}' (expected: ${validCategories.join('/')})`
         );
       }
-
-      // Check required fields
       if (!metadata.description) {
         errors.push(`${service}.${methodName}: missing description`);
       }
@@ -457,32 +565,16 @@ export function validateRegistry(): string[] {
 
 /**
  * Get registry statistics
- * @returns Object with tool counts per service and total
  */
 export function getRegistryStats(): { services: Record<string, number>; total: number } {
   const services: Record<string, number> = {};
   let total = 0;
 
-  for (const [service, tools] of Object.entries(TOOL_REGISTRY)) {
+  for (const [service, tools] of Object.entries(_registry)) {
     const count = Object.keys(tools).length;
     services[service] = count;
     total += count;
   }
 
   return { services, total };
-}
-
-//═══════════════════════════════════════════════════════════════════════════════
-// Auto-validation at startup (development only)
-//═══════════════════════════════════════════════════════════════════════════════
-
-// Validate registry on module load in non-production environments
-if (process.env.NODE_ENV !== 'production') {
-  const errors = validateRegistry();
-  if (errors.length > 0) {
-    console.error(`${ts()} [tool-registry] Registry validation errors:`, errors);
-    throw new Error(
-      `Registry validation failed with ${errors.length} error(s). Fix tool metadata before continuing.`
-    );
-  }
 }

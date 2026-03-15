@@ -209,6 +209,9 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
       const valid = timestamps.filter((t) => now - t < windowMs);
 
       if (valid.length >= maxRequests) {
+        // eslint-disable-next-line no-control-regex -- intentional: strip C0/DEL control chars to prevent log injection
+        const safePath = req.path.replace(/[\x00-\x1f\x7f]/g, '?');
+        console.warn(`${ts()} RATE_LIMIT ${req.method} ${safePath} from ${ip}`);
         res.setHeader('Retry-After', Math.ceil(windowMs / 1000).toString());
         res.status(429).json({ error: 'Too Many Requests' });
         return;
@@ -227,17 +230,13 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
   //─────────────────────────────────────────────────────────────────────────────
 
   app.get('/health', async (_req: Request, res: Response) => {
-    // When auth is configured, health is a public path — return minimal data only
-    if (options.auth) {
-      res.json({ status: 'ok' });
-      return;
-    }
-
     if (options.healthCheck) {
       try {
         await options.healthCheck();
       } catch (error) {
-        console.error(`[${name}] Health check failed:`, error);
+        if (!options.auth) {
+          console.error(`[${name}] Health check failed:`, error);
+        }
         res.status(500).json({ status: 'error' });
         return;
       }
@@ -349,6 +348,8 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
 // Internal Helpers
 //═══════════════════════════════════════════════════════════════════════════════
 
+// Double-HMAC: avoids length-leak since timingSafeEqual requires equal-length buffers.
+// Keyed by `expected` so the comparison is constant-time regardless of input lengths.
 function safeTokenCompare(provided: string, expected: string): boolean {
   const hmac = (data: string) => createHmac('sha256', expected).update(data).digest();
   return timingSafeEqual(hmac(provided), hmac(expected));

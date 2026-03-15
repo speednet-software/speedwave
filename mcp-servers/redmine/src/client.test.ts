@@ -485,6 +485,121 @@ describe('RedmineClient', () => {
       expect(call[1].issue.description).not.toContain('<script>');
       expect(call[1].issue.description).toContain('Safe text');
     });
+
+    it('should sanitize multiline script tags', async () => {
+      mockAxiosInstance.post.mockResolvedValue({
+        data: { issue: { id: 1 } },
+      });
+
+      await client.createIssue({
+        project_id: 'test-project',
+        subject: 'Test',
+        description: '<script type="text/javascript">\nalert("xss")\n</script >Safe text',
+      });
+
+      const call = mockAxiosInstance.post.mock.calls[0];
+      expect(call[1].issue.description).not.toContain('alert');
+      expect(call[1].issue.description).toContain('Safe text');
+    });
+
+    it('should sanitize event handler attributes', async () => {
+      mockAxiosInstance.post.mockResolvedValue({
+        data: { issue: { id: 1 } },
+      });
+
+      await client.createIssue({
+        project_id: 'test-project',
+        subject: 'Test',
+        description: '<img src="x" onerror="alert(1)">Safe text',
+      });
+
+      const call = mockAxiosInstance.post.mock.calls[0];
+      expect(call[1].issue.description).not.toContain('onerror');
+      expect(call[1].issue.description).toContain('Safe text');
+    });
+
+    it('should sanitize vbscript: and data: URI schemes', async () => {
+      mockAxiosInstance.post.mockResolvedValue({
+        data: { issue: { id: 1 } },
+      });
+
+      await client.createIssue({
+        project_id: 'test-project',
+        subject: 'Test',
+        description:
+          '<a href="vbscript:MsgBox">click</a> <img src="data:text/html;base64,PHNjcml">Safe',
+      });
+
+      const call = mockAxiosInstance.post.mock.calls[0];
+      expect(call[1].issue.description).not.toContain('vbscript:');
+      expect(call[1].issue.description).not.toContain('data:');
+      expect(call[1].issue.description).toContain('Safe');
+    });
+
+    it('should handle nested dangerous tag payloads', async () => {
+      mockAxiosInstance.post.mockResolvedValue({
+        data: { issue: { id: 1 } },
+      });
+
+      await client.createIssue({
+        project_id: 'test-project',
+        subject: 'Test',
+        description: '<scr<script>ipt>alert(1)</script>Safe text',
+      });
+
+      const call = mockAxiosInstance.post.mock.calls[0];
+      expect(call[1].issue.description).not.toContain('<script');
+      expect(call[1].issue.description).toContain('Safe text');
+    });
+
+    it('should sanitize closing tags with junk before >', async () => {
+      mockAxiosInstance.post.mockResolvedValue({
+        data: { issue: { id: 1 } },
+      });
+
+      await client.createIssue({
+        project_id: 'test-project',
+        subject: 'Test',
+        description: '<script>alert(1)</script\t\n bar>Safe text',
+      });
+
+      const call = mockAxiosInstance.post.mock.calls[0];
+      expect(call[1].issue.description).not.toContain('<script');
+      expect(call[1].issue.description).not.toContain('alert');
+      expect(call[1].issue.description).toContain('Safe text');
+    });
+
+    it('should sanitize data: URIs in plain text', async () => {
+      mockAxiosInstance.post.mockResolvedValue({
+        data: { issue: { id: 1 } },
+      });
+
+      await client.createIssue({
+        project_id: 'test-project',
+        subject: 'Test',
+        description: '"Click":data:text/html,<img onerror="alert(1)"> Safe text',
+      });
+
+      const call = mockAxiosInstance.post.mock.calls[0];
+      expect(call[1].issue.description).not.toContain('data:');
+      expect(call[1].issue.description).toContain('Safe text');
+    });
+
+    it('should sanitize form tags', async () => {
+      mockAxiosInstance.post.mockResolvedValue({
+        data: { issue: { id: 1 } },
+      });
+
+      await client.createIssue({
+        project_id: 'test-project',
+        subject: 'Test',
+        description: '<form action="evil"><input type="submit"></form>Safe text',
+      });
+
+      const call = mockAxiosInstance.post.mock.calls[0];
+      expect(call[1].issue.description).not.toContain('<form');
+      expect(call[1].issue.description).toContain('Safe text');
+    });
   });
 
   describe('updateIssue', () => {

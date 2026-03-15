@@ -43,7 +43,7 @@ teardown() {
 @test "bundle script creates all MCP service directories" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
-    for svc in shared hub slack sharepoint redmine gitlab gemini; do
+    for svc in shared hub slack sharepoint redmine gitlab; do
         [ -d "$DEST/build-context/mcp-servers/$svc" ]
         [ -f "$DEST/build-context/mcp-servers/$svc/package.json" ]
         [ -d "$DEST/build-context/mcp-servers/$svc/src" ]
@@ -61,6 +61,12 @@ teardown() {
     [ "$status" -eq 0 ]
     [ -d "$DEST/mcp-os/os/dist" ]
     [ -d "$DEST/mcp-os/shared/dist" ]
+}
+
+@test "bundle script installs express in mcp-os/shared/node_modules" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -d "$DEST/mcp-os/shared/node_modules/express" ]
 }
 
 @test "bundle script copies hub Containerfile" {
@@ -129,4 +135,5 @@ teardown() {
     [ -d "$DEST/mcp-os/os/dist" ]
     [ -d "$DEST/mcp-os/shared/dist" ]
     [ -f "$DEST/mcp-os/shared/package.json" ]
+    [ -d "$DEST/mcp-os/shared/node_modules/express" ]
 }

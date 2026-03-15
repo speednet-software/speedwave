@@ -4,7 +4,7 @@
  * @module handlers
  */
 
-import { ToolHandler, ToolsCallResult } from '../../shared/dist/index.js';
+import { ToolHandler, ToolsCallResult } from '@speedwave/mcp-shared';
 import { searchTools, SearchToolsParams } from './search-tools.js';
 import { executeCode, ExecuteCodeParams } from './executor.js';
 import { getExecutionTimeout } from './tool-registry.js';

@@ -2,7 +2,7 @@
  * Sync Tools - Tools for SharePoint directory sync operations
  */
 
-import { Tool, ToolDefinition } from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
 import { SharePointClient } from '../client.js';
 
@@ -72,6 +72,50 @@ const syncDirectoryTool: Tool = {
     // Note: required validation moved to handler after normalization
     // to support both snake_case and camelCase
   },
+  category: 'write',
+  keywords: ['sharepoint', 'sync', 'directory', 'folder', 'onedrive', 'two-way'],
+  example:
+    'await sharepoint.syncDirectory({ local_path: "/home/speedwave/.claude/context", mode: "pull" })',
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      plan: {
+        type: 'object',
+        properties: {
+          operations: { type: 'array' },
+          summary: { type: 'object' },
+        },
+      },
+      executed: { type: 'array' },
+      conflicts: { type: 'array' },
+      errors: { type: 'array' },
+      summary: { type: 'object' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Pull from SharePoint (download)',
+      input: { local_path: '/home/speedwave/.claude/context', mode: 'pull' },
+    },
+    {
+      description: 'Two-way sync (OneDrive-like)',
+      input: { local_path: '/home/speedwave/.claude/context', mode: 'two_way' },
+    },
+    {
+      description: 'Push to SharePoint (upload)',
+      input: { local_path: '/home/speedwave/.claude/context', mode: 'push' },
+    },
+    {
+      description: 'Dry run to preview changes',
+      input: {
+        local_path: '/home/speedwave/.claude/context',
+        mode: 'two_way',
+        dry_run: true,
+      },
+    },
+  ],
 };
 
 /**

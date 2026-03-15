@@ -16,7 +16,7 @@ import { UpdateInfo, ProjectList } from '../models/update';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (updateInfo && !dismissed) {
-      <div class="update-banner">
+      <div class="update-banner" data-testid="update-banner">
         <span class="update-text">
           @if (updateInstalled) {
             Speedwave v{{ updateInfo.version }} downloaded
@@ -38,23 +38,29 @@ import { UpdateInfo, ProjectList } from '../models/update';
         </span>
         <div class="update-actions">
           @if (error) {
-            <span class="update-error">{{ error }}</span>
+            <span class="update-error" data-testid="update-error">{{ error }}</span>
           }
           @if (!updateInstalled) {
-            @if (!confirmRestart) {
-              <button class="btn-restart" (click)="confirmRestart = true" [disabled]="installing">
-                Restart
+            @if (isLinux) {
+              <button class="btn-restart" (click)="openReleasesPage()">
+                Download v{{ updateInfo.version }}
               </button>
             } @else {
-              <button class="btn-restart" (click)="installAndRestart()" [disabled]="installing">
-                {{ installing ? 'Installing...' : 'Confirm Restart' }}
-              </button>
-              <button class="btn-later" (click)="confirmRestart = false" [disabled]="installing">
-                Cancel
-              </button>
+              @if (!confirmRestart) {
+                <button class="btn-restart" (click)="confirmRestart = true" [disabled]="installing">
+                  Restart
+                </button>
+              } @else {
+                <button class="btn-restart" (click)="installAndRestart()" [disabled]="installing">
+                  {{ installing ? 'Installing...' : 'Confirm Restart' }}
+                </button>
+                <button class="btn-later" (click)="confirmRestart = false" [disabled]="installing">
+                  Cancel
+                </button>
+              }
             }
-            @if (!confirmRestart) {
-              @if (containersRunning) {
+            @if (!confirmRestart || isLinux) {
+              @if (containersRunning && !isLinux) {
                 <span class="containers-warning">Running containers will be interrupted</span>
               }
               @if (!updateInfo.is_critical) {
@@ -154,6 +160,7 @@ export class UpdateNotificationComponent implements OnDestroy {
   confirmRestart = false;
   updateInstalled = false;
   containersRunning = false;
+  isLinux = false;
 
   private unlisten: UnlistenFn | null = null;
   private unlistenInstalled: UnlistenFn | null = null;
@@ -167,6 +174,9 @@ export class UpdateNotificationComponent implements OnDestroy {
 
   private async setupListeners(): Promise<void> {
     try {
+      const platform = await this.tauri.invoke<string>('get_platform');
+      this.isLinux = platform === 'linux';
+
       this.unlisten = await this.tauri.listen<UpdateInfo>('update_available', (event) => {
         this.updateInfo = event.payload;
         this.dismissed = false;
@@ -256,6 +266,17 @@ export class UpdateNotificationComponent implements OnDestroy {
     this.dismissed = true;
     this.confirmRestart = false;
     this.cdr.markForCheck();
+  }
+
+  /** Opens the GitHub Releases page for the latest version (Linux .deb). */
+  async openReleasesPage(): Promise<void> {
+    try {
+      await this.tauri.invoke('open_url', {
+        url: 'https://github.com/speednet-software/speedwave/releases',
+      });
+    } catch {
+      // Fallback: not running inside Tauri
+    }
   }
 
   /** Cleans up the Tauri event listeners on component destruction. */

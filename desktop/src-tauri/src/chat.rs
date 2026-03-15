@@ -1,5 +1,6 @@
 use crate::history;
 use speedwave_runtime::{config, consts, runtime};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
@@ -9,85 +10,380 @@ use tauri::{AppHandle, Emitter};
 
 /// Events emitted to the Angular frontend via Tauri's event system.
 /// The frontend listens for `"chat_stream"` events with this payload.
+/// Tagged enum: serde serializes as `{"chunk_type":"Text","data":{...}}`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct StreamChunk {
-    pub chunk_type: String,
-    pub content: String,
+#[serde(tag = "chunk_type", content = "data")]
+pub enum StreamChunk {
+    /// Text content delta from the assistant.
+    Text { content: String },
+    /// Thinking content delta (extended thinking / interleaved thinking).
+    Thinking { content: String },
+    /// Tool use started — includes tool_id and tool_name.
+    ToolStart { tool_id: String, tool_name: String },
+    /// Partial JSON input for a tool (streamed incrementally).
+    ToolInputDelta {
+        tool_id: String,
+        partial_json: String,
+    },
+    /// Tool result from a user message (tool execution output).
+    ToolResult {
+        tool_id: String,
+        content: String,
+        is_error: bool,
+    },
+    /// Final result — conversation turn complete.
+    Result {
+        session_id: String,
+        cost_usd: Option<f64>,
+        total_cost: Option<f64>,
+        usage: Option<UsageInfo>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result_text: Option<String>,
+    },
+    /// Interactive question from Claude (AskUserQuestion tool).
+    /// The frontend must display the question and send the answer back via `answer_question`.
+    AskUserQuestion {
+        tool_id: String,
+        question: String,
+        options: Vec<AskUserOption>,
+        header: String,
+        multi_select: bool,
+    },
+    /// Error from the Claude subprocess.
+    Error { content: String },
 }
 
-/// Parse a single line of Claude's stream-json output into an optional `StreamChunk`.
-///
-/// Returns `None` for empty lines, invalid JSON, or message types that should be
-/// ignored (e.g. `assistant`, `system`, `user`).
-pub fn parse_stream_line(line: &str) -> Option<StreamChunk> {
-    if line.trim().is_empty() {
-        return None;
+/// A single option in an AskUserQuestion prompt.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AskUserOption {
+    pub label: String,
+    pub value: String,
+}
+
+/// Token usage information from the result message.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UsageInfo {
+    /// Number of input tokens consumed.
+    pub input_tokens: u64,
+    /// Number of output tokens generated.
+    pub output_tokens: u64,
+    /// Number of tokens read from cache.
+    pub cache_read_tokens: Option<u64>,
+    /// Number of tokens written to cache.
+    pub cache_write_tokens: Option<u64>,
+}
+
+/// Tool name constant for the AskUserQuestion tool.
+const ASK_USER_TOOL_NAME: &str = "AskUserQuestion";
+
+/// Parsed control_request from Claude stdout.
+/// Also used as the pending request storage — keyed by `tool_use_id` in the HashMap.
+#[derive(Debug, Clone)]
+pub struct ControlRequest {
+    pub request_id: String,
+    pub tool_name: String,
+    pub input: serde_json::Value,
+    pub tool_use_id: String,
+}
+
+type PendingRequests = Arc<Mutex<HashMap<String, ControlRequest>>>;
+
+/// Stateful parser that tracks active content blocks across stream events.
+/// Maintains index→(tool_id, tool_name) map built from content_block_start events.
+pub struct StreamParser {
+    /// Maps content block index to (tool_use_id, tool_name).
+    active_blocks: HashMap<u64, (String, String)>,
+    /// Accumulated input_json per tool_id (built from ToolInputDelta chunks).
+    tool_input: HashMap<String, String>,
+}
+
+impl StreamParser {
+    /// Create a new parser with empty state.
+    pub fn new() -> Self {
+        Self {
+            active_blocks: HashMap::new(),
+            tool_input: HashMap::new(),
+        }
     }
 
-    let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
-    let msg_type = parsed["type"].as_str().unwrap_or("");
+    /// Parse a pre-parsed JSON value. Mutates internal state for block tracking.
+    /// Returns `None` for ignored message types.
+    pub fn parse_line(&mut self, parsed: &serde_json::Value) -> Option<StreamChunk> {
+        let msg_type = parsed["type"].as_str().unwrap_or("");
 
-    match msg_type {
-        // Real-time token streaming (from --include-partial-messages)
-        "stream_event" => {
-            let event = &parsed["event"];
-            let event_type = event["type"].as_str().unwrap_or("");
+        match msg_type {
+            "stream_event" => self.parse_stream_event(&parsed["event"]),
+            "user" => self.parse_user_message(parsed),
+            "result" => self.parse_result(parsed),
+            // assistant — ignored (ADR-006: we stream via stream_event, finalize on result)
+            // system — ignored
+            _ => None,
+        }
+    }
 
-            match event_type {
-                "content_block_delta" => {
-                    let delta = &event["delta"];
-                    let delta_type = delta["type"].as_str().unwrap_or("");
-                    if delta_type == "text_delta" {
-                        if let Some(text) = delta["text"].as_str() {
-                            return Some(StreamChunk {
-                                chunk_type: "text".to_string(),
-                                content: text.to_string(),
-                            });
+    /// Reset state (e.g. on new conversation turn).
+    pub fn reset(&mut self) {
+        self.active_blocks.clear();
+        self.tool_input.clear();
+    }
+
+    /// Check if a parsed JSON value is a control_request. Returns parsed data if so.
+    pub fn try_parse_control_request(parsed: &serde_json::Value) -> Option<ControlRequest> {
+        if parsed["type"].as_str() != Some("control_request") {
+            return None;
+        }
+        let request_id = parsed["request_id"].as_str()?.to_string();
+        let request = &parsed["request"];
+        let tool_name = request["tool_name"].as_str()?.to_string();
+        let input = request["input"].clone();
+        let tool_use_id = request["tool_use_id"].as_str()?.to_string();
+        Some(ControlRequest {
+            request_id,
+            tool_name,
+            input,
+            tool_use_id,
+        })
+    }
+
+    /// Build AskUserQuestion chunk from a control_request's input.
+    pub fn emit_ask_user_from_control_request(req: &ControlRequest) -> Option<StreamChunk> {
+        let parsed = &req.input;
+
+        // Handle wrapped format: {"questions": [{...}]}
+        let q = if let Some(questions) = parsed["questions"].as_array() {
+            questions.first().cloned().unwrap_or_else(|| {
+                log::warn!("AskUserQuestion: 'questions' array is empty, using empty fallback");
+                serde_json::Value::Object(Default::default())
+            })
+        } else {
+            parsed.clone()
+        };
+
+        let question = q["question"].as_str().unwrap_or("").to_string();
+        let header = q["header"].as_str().unwrap_or("").to_string();
+        let multi_select = q["multiSelect"].as_bool().unwrap_or(false);
+
+        let options = q["options"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|opt| {
+                        let label = opt["label"].as_str()?.to_string();
+                        let value = opt["value"].as_str().unwrap_or(&label).to_string();
+                        Some(AskUserOption { label, value })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Some(StreamChunk::AskUserQuestion {
+            tool_id: req.tool_use_id.clone(),
+            question,
+            options,
+            header,
+            multi_select,
+        })
+    }
+
+    fn parse_stream_event(&mut self, event: &serde_json::Value) -> Option<StreamChunk> {
+        let event_type = event["type"].as_str().unwrap_or("");
+
+        match event_type {
+            "content_block_start" => {
+                let index = event["index"].as_u64()?;
+                let block = &event["content_block"];
+                let block_type = block["type"].as_str().unwrap_or("");
+
+                match block_type {
+                    "tool_use" => {
+                        let id = match block["id"].as_str() {
+                            Some(s) if !s.is_empty() => s.to_string(),
+                            _ => {
+                                log::warn!(
+                                    "content_block_start: tool_use block missing 'id' field"
+                                );
+                                return None;
+                            }
+                        };
+                        let name = match block["name"].as_str() {
+                            Some(s) if !s.is_empty() => s.to_string(),
+                            _ => {
+                                log::warn!(
+                                    "content_block_start: tool_use block missing 'name' field"
+                                );
+                                return None;
+                            }
+                        };
+                        self.active_blocks.insert(index, (id.clone(), name.clone()));
+                        // Suppress ToolStart for AskUserQuestion — it will be emitted
+                        // via control_request path, not from stream events.
+                        if name == ASK_USER_TOOL_NAME {
+                            None
+                        } else {
+                            Some(StreamChunk::ToolStart {
+                                tool_id: id,
+                                tool_name: name,
+                            })
                         }
                     }
-                    None
+                    "thinking" => Some(StreamChunk::Thinking {
+                        content: String::new(),
+                    }),
+                    // "text" — text deltas will arrive via content_block_delta
+                    _ => None,
                 }
-                "content_block_start" => {
-                    let block = &event["content_block"];
-                    let block_type = block["type"].as_str().unwrap_or("");
-                    if block_type == "tool_use" {
-                        if let Some(name) = block["name"].as_str() {
-                            return Some(StreamChunk {
-                                chunk_type: "tool_use".to_string(),
-                                content: name.to_string(),
-                            });
+            }
+
+            "content_block_delta" => {
+                let delta = &event["delta"];
+                let delta_type = delta["type"].as_str().unwrap_or("");
+
+                match delta_type {
+                    "text_delta" => {
+                        let text = delta["text"].as_str()?;
+                        Some(StreamChunk::Text {
+                            content: text.to_string(),
+                        })
+                    }
+                    "thinking_delta" => {
+                        let thinking = delta["thinking"].as_str()?;
+                        Some(StreamChunk::Thinking {
+                            content: thinking.to_string(),
+                        })
+                    }
+                    "input_json_delta" => {
+                        let index = event["index"].as_u64()?;
+                        let partial = delta["partial_json"].as_str()?;
+                        let (tool_id, tool_name) = self.active_blocks.get(&index)?;
+                        // Accumulate input JSON for AskUserQuestion detection on block stop
+                        self.tool_input
+                            .entry(tool_id.clone())
+                            .or_default()
+                            .push_str(partial);
+                        // Suppress ToolInputDelta for AskUserQuestion — frontend doesn't need partial JSON
+                        if tool_name == ASK_USER_TOOL_NAME {
+                            None
+                        } else {
+                            Some(StreamChunk::ToolInputDelta {
+                                tool_id: tool_id.clone(),
+                                partial_json: partial.to_string(),
+                            })
                         }
                     }
-                    None
+                    // signature_delta — integrity, not rendered
+                    _ => None,
                 }
-                _ => None,
+            }
+
+            "content_block_stop" => {
+                if let Some(index) = event["index"].as_u64() {
+                    if let Some((tool_id, _tool_name)) = self.active_blocks.remove(&index) {
+                        // AskUserQuestion is handled via control_request protocol,
+                        // not via stream events — just clean up accumulated input.
+                        self.tool_input.remove(&tool_id);
+                    }
+                }
+                None
+            }
+
+            "message_stop" => {
+                self.reset();
+                None
+            }
+
+            _ => None,
+        }
+    }
+
+    fn parse_user_message(&self, parsed: &serde_json::Value) -> Option<StreamChunk> {
+        let message = &parsed["message"];
+        let content = &message["content"];
+        let blocks = content.as_array()?;
+
+        for block in blocks {
+            let block_type = block["type"].as_str().unwrap_or("");
+            if block_type == "tool_result" {
+                let tool_use_id = match block["tool_use_id"].as_str() {
+                    Some(s) if !s.is_empty() => s.to_string(),
+                    _ => {
+                        log::warn!("parse_user_message: tool_result block missing 'tool_use_id'");
+                        return None;
+                    }
+                };
+                let is_error = block["is_error"].as_bool().unwrap_or(false);
+
+                // content can be a string or an array of content blocks
+                let result_content = if let Some(s) = block["content"].as_str() {
+                    s.to_string()
+                } else if let Some(arr) = block["content"].as_array() {
+                    arr.iter()
+                        .filter_map(|b| {
+                            if b["type"].as_str() == Some("text") {
+                                b["text"].as_str().map(String::from)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                } else {
+                    String::new()
+                };
+
+                return Some(StreamChunk::ToolResult {
+                    tool_id: tool_use_id,
+                    content: result_content,
+                    is_error,
+                });
             }
         }
+        None
+    }
 
-        // Complete assistant message — ignored since we stream via stream_event
-        // and finalize on the "result" message.
-        "assistant" => None,
+    fn parse_result(&self, parsed: &serde_json::Value) -> Option<StreamChunk> {
+        let is_error = parsed["is_error"].as_bool().unwrap_or(false);
 
-        // Final result — conversation done
-        "result" => {
-            let is_error = parsed["is_error"].as_bool().unwrap_or(false);
-            let result_text = parsed["result"].as_str().unwrap_or("").to_string();
-
-            if is_error {
-                Some(StreamChunk {
-                    chunk_type: "error".to_string(),
-                    content: result_text,
-                })
-            } else {
-                Some(StreamChunk {
-                    chunk_type: "result".to_string(),
-                    content: result_text,
-                })
+        if is_error {
+            let result_text = parsed["result"].as_str().unwrap_or("");
+            if result_text.trim().is_empty() {
+                log::warn!("parse_result: is_error=true but result text is empty");
+                return None;
             }
+            return Some(StreamChunk::Error {
+                content: result_text.to_string(),
+            });
         }
 
-        // system, user — ignore
-        _ => None,
+        let session_id = parsed["session_id"].as_str().unwrap_or("").to_string();
+        if session_id.is_empty() {
+            log::warn!("parse_result: result message missing 'session_id'");
+        }
+        let cost_usd = parsed["cost_usd"].as_f64();
+        let total_cost = parsed["total_cost"].as_f64();
+
+        let usage = if parsed["usage"].is_object() {
+            Some(UsageInfo {
+                input_tokens: parsed["usage"]["input_tokens"].as_u64().unwrap_or(0),
+                output_tokens: parsed["usage"]["output_tokens"].as_u64().unwrap_or(0),
+                cache_read_tokens: parsed["usage"]["cache_read_tokens"].as_u64(),
+                cache_write_tokens: parsed["usage"]["cache_write_tokens"].as_u64(),
+            })
+        } else {
+            None
+        };
+
+        let result_text = parsed["result"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .map(String::from);
+
+        Some(StreamChunk::Result {
+            session_id,
+            cost_usd,
+            total_cost,
+            usage,
+            result_text,
+        })
     }
 }
 
@@ -98,6 +394,62 @@ pub fn build_user_message(message: &str) -> serde_json::Value {
         "message": {
             "role": "user",
             "content": [{"type": "text", "text": message}]
+        }
+    })
+}
+
+/// Auto-approve response for non-AskUserQuestion tools.
+pub fn build_auto_approve_response(request: &ControlRequest) -> serde_json::Value {
+    serde_json::json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request.request_id,
+            "response": {
+                "behavior": "allow",
+                "updatedInput": request.input
+            }
+        }
+    })
+}
+
+/// AskUserQuestion response with user's answer injected into input.
+fn build_ask_user_response(request: &ControlRequest, selected_label: &str) -> serde_json::Value {
+    let mut updated_input = request.input.clone();
+
+    // Inject answers into the appropriate format
+    if let Some(questions) = updated_input["questions"].as_array() {
+        // Wrapped format: {"questions":[{...}]}
+        let question_text = questions
+            .first()
+            .and_then(|q| q["question"].as_str())
+            .unwrap_or("");
+        let mut answers = serde_json::Map::new();
+        answers.insert(
+            question_text.to_string(),
+            serde_json::Value::String(selected_label.to_string()),
+        );
+        updated_input["answers"] = serde_json::Value::Object(answers);
+    } else {
+        // Flat format: {"question":"...", ...}
+        let question_text = updated_input["question"].as_str().unwrap_or("").to_string();
+        let mut answers = serde_json::Map::new();
+        answers.insert(
+            question_text,
+            serde_json::Value::String(selected_label.to_string()),
+        );
+        updated_input["answers"] = serde_json::Value::Object(answers);
+    }
+
+    serde_json::json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request.request_id,
+            "response": {
+                "behavior": "allow",
+                "updatedInput": updated_input
+            }
         }
     })
 }
@@ -116,6 +468,8 @@ pub fn build_claude_args(resume_session_id: Option<&str>, flags: &[&str]) -> Vec
         "stream-json".to_string(),
         "--verbose".to_string(),
         "--include-partial-messages".to_string(),
+        "--permission-prompt-tool".to_string(),
+        "stdio".to_string(),
     ];
 
     if let Some(id) = resume_session_id {
@@ -143,14 +497,40 @@ pub fn claude_container_name(project: &str) -> String {
 pub struct ChatSession {
     child: Option<Child>,
     project_name: String,
+    shared_stdin: Option<Arc<Mutex<std::process::ChildStdin>>>,
+    pending_requests: PendingRequests,
 }
 
 impl ChatSession {
+    /// Create a new session for the given project.
     pub fn new(project_name: &str) -> Self {
         Self {
             child: None,
             project_name: project_name.to_string(),
+            shared_stdin: None,
+            pending_requests: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Validate inputs and resolve config needed before spawning Claude.
+    /// Extracted from `start()` so validation logic is independently testable.
+    pub fn prepare_start(
+        project_name: &str,
+        user_config: &config::SpeedwaveUserConfig,
+        resume_session_id: Option<&str>,
+    ) -> anyhow::Result<(Vec<String>, String)> {
+        if let Some(id) = resume_session_id {
+            history::validate_session_id(id)?;
+        }
+
+        let project_dir = std::path::PathBuf::from(&user_config.require_project(project_name)?.dir);
+
+        let resolved = config::resolve_claude_config(&project_dir, user_config, project_name);
+
+        let args = build_claude_args(resume_session_id, &resolved.flags);
+        let container = claude_container_name(project_name);
+
+        Ok((args, container))
     }
 
     /// Start Claude Code in stream-json mode inside the container.
@@ -163,31 +543,12 @@ impl ChatSession {
         app_handle: AppHandle,
         resume_session_id: Option<&str>,
     ) -> anyhow::Result<()> {
-        if let Some(id) = resume_session_id {
-            history::validate_session_id(id)?;
-        }
-
         let rt = runtime::detect_runtime();
-        let user_config = config::load_user_config().unwrap_or_default();
+        let user_config = config::load_user_config()?;
 
-        let project_dir = user_config
-            .projects
-            .iter()
-            .find(|p| p.name == self.project_name)
-            .map(|p| std::path::PathBuf::from(&p.dir))
-            .unwrap_or_else(|| {
-                dirs::home_dir()
-                    .unwrap_or_default()
-                    .join("projects")
-                    .join(&self.project_name)
-            });
+        let (args, container) =
+            Self::prepare_start(&self.project_name, &user_config, resume_session_id)?;
 
-        let resolved =
-            config::resolve_claude_config(&project_dir, &user_config, &self.project_name);
-
-        let args = build_claude_args(resume_session_id, &resolved.flags);
-
-        let container = claude_container_name(&self.project_name);
         let mut cmd = rt.container_exec_piped(
             &container,
             &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
@@ -204,6 +565,13 @@ impl ChatSession {
             .take()
             .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout from child process"))?;
 
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Failed to capture stdin from child process"))?;
+        let shared_stdin = Arc::new(Mutex::new(stdin));
+        self.shared_stdin = Some(shared_stdin.clone());
+
         // Spawn stderr reader to log errors (avoids pipe buffer deadlock)
         if let Some(stderr) = child.stderr.take() {
             std::thread::spawn(move || {
@@ -211,23 +579,119 @@ impl ChatSession {
                 for line in reader.lines() {
                     match line {
                         Ok(l) => log::debug!("{l}"),
-                        Err(_) => break,
+                        Err(e) => {
+                            log::warn!("stderr reader: I/O error: {e}");
+                            break;
+                        }
                     }
                 }
             });
         }
 
+        let pending_requests = self.pending_requests.clone();
+        let stdin_for_reader = shared_stdin;
+
         // Background thread: parse Claude's stream-json and emit Tauri events
         std::thread::spawn(move || {
+            let mut parser = StreamParser::new();
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 let line = match line {
                     Ok(l) => l,
-                    Err(_) => break,
+                    Err(e) => {
+                        log::warn!("stdout reader: I/O error: {e}");
+                        break;
+                    }
                 };
 
-                if let Some(chunk) = parse_stream_line(&line) {
-                    let _ = app_handle.emit("chat_stream", chunk);
+                // Parse JSON once — pass the Value to both control_request and stream parsers
+                let parsed = match serde_json::from_str::<serde_json::Value>(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue, // skip invalid JSON lines
+                };
+
+                // 1. Check for control_request
+                if let Some(ctrl) = StreamParser::try_parse_control_request(&parsed) {
+                    if ctrl.tool_name == ASK_USER_TOOL_NAME {
+                        // Store pending request and emit to frontend
+                        match pending_requests.lock() {
+                            Ok(mut map) => {
+                                map.insert(ctrl.tool_use_id.clone(), ctrl.clone());
+                            }
+                            Err(e) => {
+                                log::error!(
+                                    "pending_requests mutex poisoned: {e}; dropping stream"
+                                );
+                                let _ = app_handle.emit(
+                                    "chat_stream",
+                                    StreamChunk::Error {
+                                        content: "Internal error: pending_requests lock poisoned"
+                                            .to_string(),
+                                    },
+                                );
+                                break;
+                            }
+                        }
+                        if let Some(chunk) = StreamParser::emit_ask_user_from_control_request(&ctrl)
+                        {
+                            if let Err(e) = app_handle.emit("chat_stream", chunk) {
+                                log::warn!("failed to emit AskUserQuestion event: {e}");
+                            }
+                        }
+                    } else {
+                        // Auto-approve non-AskUserQuestion tools
+                        let response = build_auto_approve_response(&ctrl);
+                        match stdin_for_reader.lock() {
+                            Ok(mut stdin) => {
+                                if let Err(e) = writeln!(stdin, "{}", response) {
+                                    log::error!(
+                                        "auto-approve stdin write failed: {e}; dropping stream"
+                                    );
+                                    let _ = app_handle.emit(
+                                        "chat_stream",
+                                        StreamChunk::Error {
+                                            content: format!(
+                                                "Failed to write auto-approve to stdin: {e}"
+                                            ),
+                                        },
+                                    );
+                                    break;
+                                }
+                                if let Err(e) = stdin.flush() {
+                                    log::error!(
+                                        "auto-approve stdin flush failed: {e}; dropping stream"
+                                    );
+                                    let _ = app_handle.emit(
+                                        "chat_stream",
+                                        StreamChunk::Error {
+                                            content: format!(
+                                                "Failed to flush auto-approve to stdin: {e}"
+                                            ),
+                                        },
+                                    );
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("stdin mutex poisoned: {e}; dropping stream");
+                                let _ = app_handle.emit(
+                                    "chat_stream",
+                                    StreamChunk::Error {
+                                        content: "Internal error: stdin lock poisoned".to_string(),
+                                    },
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                // 2. Normal stream events
+                if let Some(chunk) = parser.parse_line(&parsed) {
+                    if let Err(e) = app_handle.emit("chat_stream", chunk) {
+                        log::warn!("failed to emit chat_stream event: {e}");
+                    }
                 }
             }
         });
@@ -253,23 +717,84 @@ impl ChatSession {
             anyhow::bail!("session exited ({})", status);
         }
 
-        let stdin = child
-            .stdin
-            .as_mut()
+        let shared = self
+            .shared_stdin
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("stdin not available"))?;
         let input = build_user_message(message);
+        let mut stdin = shared
+            .lock()
+            .map_err(|e| anyhow::anyhow!("stdin lock poisoned: {e}"))?;
         writeln!(stdin, "{}", input)?;
         stdin.flush()?;
         Ok(())
     }
 
+    /// Send a control_response for an AskUserQuestion prompt.
+    /// Looks up the pending request by `tool_use_id`, builds a control_response
+    /// with the user's answer, and writes it to Claude's stdin.
+    pub fn answer_question(&mut self, tool_use_id: &str, answer: &str) -> anyhow::Result<()> {
+        let child = self
+            .child
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("no active session"))?;
+
+        if let Some(status) = child.try_wait()? {
+            self.child = None;
+            anyhow::bail!("session exited ({})", status);
+        }
+
+        let pending = self
+            .pending_requests
+            .lock()
+            .map_err(|e| anyhow::anyhow!("pending_requests lock poisoned: {e}"))?
+            .remove(tool_use_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("no pending control request for tool_use_id: {tool_use_id}")
+            })?;
+
+        let response = build_ask_user_response(&pending, answer);
+
+        let shared = self
+            .shared_stdin
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("stdin not available"))?;
+        let mut stdin = shared
+            .lock()
+            .map_err(|e| anyhow::anyhow!("stdin lock poisoned: {e}"))?;
+
+        if let Err(e) = writeln!(stdin, "{}", response).and_then(|_| stdin.flush()) {
+            log::error!(
+                "failed to write answer for {} (tool_use_id={tool_use_id}): {e}",
+                pending.tool_name
+            );
+            // Restore the pending request so the user can retry
+            match self.pending_requests.lock() {
+                Ok(mut map) => {
+                    map.insert(tool_use_id.to_string(), pending);
+                }
+                Err(poison_err) => {
+                    log::error!("failed to restore pending request: mutex poisoned: {poison_err}");
+                }
+            }
+            return Err(anyhow::anyhow!("failed to write answer to stdin: {e}"));
+        }
+
+        Ok(())
+    }
+
     /// Stop the Claude subprocess.
     pub fn stop(&mut self) -> anyhow::Result<()> {
+        // Drop stdin first to signal EOF to the child
+        self.shared_stdin = None;
         if let Some(ref mut child) = self.child {
             child.kill().ok();
             child.wait().ok();
         }
         self.child = None;
+        if let Ok(mut map) = self.pending_requests.lock() {
+            map.clear();
+        }
         Ok(())
     }
 }
@@ -288,29 +813,91 @@ pub type SharedChatSession = Arc<Mutex<ChatSession>>;
 mod tests {
     use super::*;
 
+    /// Convenience: parse a JSON string and call `parser.parse_line`.
+    fn parse_line_str(parser: &mut StreamParser, line: &str) -> Option<StreamChunk> {
+        let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
+        parser.parse_line(&parsed)
+    }
+
+    /// Convenience: parse a JSON string and call `StreamParser::try_parse_control_request`.
+    fn try_parse_control_request_str(line: &str) -> Option<ControlRequest> {
+        let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
+        StreamParser::try_parse_control_request(&parsed)
+    }
+
     // ── StreamChunk serialization ────────────────────────────────────
 
     #[test]
-    fn stream_chunk_serializes_to_json_with_correct_fields() {
-        let chunk = StreamChunk {
-            chunk_type: "text".to_string(),
+    fn stream_chunk_text_serializes_tagged() {
+        let chunk = StreamChunk::Text {
             content: "hello".to_string(),
         };
         let json = serde_json::to_value(&chunk).unwrap();
-        assert_eq!(json["chunk_type"], "text");
-        assert_eq!(json["content"], "hello");
+        assert_eq!(json["chunk_type"], "Text");
+        assert_eq!(json["data"]["content"], "hello");
     }
 
     #[test]
     fn stream_chunk_round_trips_through_json() {
-        let original = StreamChunk {
-            chunk_type: "text".to_string(),
+        let original = StreamChunk::Text {
             content: "hello".to_string(),
         };
         let serialized = serde_json::to_string(&original).unwrap();
         let deserialized: StreamChunk = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(deserialized.chunk_type, "text");
-        assert_eq!(deserialized.content, "hello");
+        match deserialized {
+            StreamChunk::Text { content } => assert_eq!(content, "hello"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_chunk_tool_start_round_trips() {
+        let original = StreamChunk::ToolStart {
+            tool_id: "t1".to_string(),
+            tool_name: "Read".to_string(),
+        };
+        let serialized = serde_json::to_string(&original).unwrap();
+        let deserialized: StreamChunk = serde_json::from_str(&serialized).unwrap();
+        match deserialized {
+            StreamChunk::ToolStart { tool_id, tool_name } => {
+                assert_eq!(tool_id, "t1");
+                assert_eq!(tool_name, "Read");
+            }
+            other => panic!("expected ToolStart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_chunk_result_round_trips() {
+        let original = StreamChunk::Result {
+            session_id: "abc".to_string(),
+            cost_usd: Some(0.01),
+            total_cost: Some(0.05),
+            usage: Some(UsageInfo {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_tokens: Some(10),
+                cache_write_tokens: None,
+            }),
+            result_text: None,
+        };
+        let serialized = serde_json::to_string(&original).unwrap();
+        let deserialized: StreamChunk = serde_json::from_str(&serialized).unwrap();
+        match deserialized {
+            StreamChunk::Result {
+                session_id,
+                cost_usd,
+                usage,
+                ..
+            } => {
+                assert_eq!(session_id, "abc");
+                assert_eq!(cost_usd, Some(0.01));
+                let u = usage.unwrap();
+                assert_eq!(u.input_tokens, 100);
+                assert_eq!(u.cache_read_tokens, Some(10));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
     }
 
     // ── send_message JSON format ─────────────────────────────────────
@@ -338,78 +925,272 @@ mod tests {
         assert_eq!(text, "hello \"world\" \n\ttab");
     }
 
-    // ── Stream-json parsing ──────────────────────────────────────────
+    // ── StreamParser: text delta ─────────────────────────────────────
 
     #[test]
     fn parse_text_delta_produces_text_chunk() {
+        let mut parser = StreamParser::new();
         let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello world"}}}"#;
-        let chunk = parse_stream_line(line).unwrap();
-        assert_eq!(chunk.chunk_type, "text");
-        assert_eq!(chunk.content, "Hello world");
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Text { content } => assert_eq!(content, "Hello world"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    // ── StreamParser: thinking delta ─────────────────────────────────
+
+    #[test]
+    fn parse_thinking_delta_emits_thinking_chunk() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"Let me think..."}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Thinking { content } => assert_eq!(content, "Let me think..."),
+            other => panic!("expected Thinking, got {other:?}"),
+        }
     }
 
     #[test]
-    fn parse_content_block_start_tool_use_produces_tool_use_chunk() {
-        let line = r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","name":"Read"}}}"#;
-        let chunk = parse_stream_line(line).unwrap();
-        assert_eq!(chunk.chunk_type, "tool_use");
-        assert_eq!(chunk.content, "Read");
+    fn parse_thinking_block_start_emits_empty_thinking() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Thinking { content } => assert_eq!(content, ""),
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    // ── StreamParser: tool_use with input_json_delta ──────────────────
+
+    #[test]
+    fn parse_tool_use_with_input_json_delta_correlates_by_index() {
+        let mut parser = StreamParser::new();
+
+        // content_block_start: tool_use at index 1
+        let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01ABC","name":"Read","input":{}}}}"#;
+        let chunk = parse_line_str(&mut parser, start).unwrap();
+        match &chunk {
+            StreamChunk::ToolStart { tool_id, tool_name } => {
+                assert_eq!(tool_id, "toolu_01ABC");
+                assert_eq!(tool_name, "Read");
+            }
+            other => panic!("expected ToolStart, got {other:?}"),
+        }
+
+        // content_block_delta: input_json_delta at index 1
+        let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"/src/main.rs\"}"}}}"#;
+        let chunk = parse_line_str(&mut parser, delta).unwrap();
+        match chunk {
+            StreamChunk::ToolInputDelta {
+                tool_id,
+                partial_json,
+            } => {
+                assert_eq!(tool_id, "toolu_01ABC");
+                assert_eq!(partial_json, r#"{"file_path":"/src/main.rs"}"#);
+            }
+            other => panic!("expected ToolInputDelta, got {other:?}"),
+        }
     }
 
     #[test]
-    fn parse_result_success_produces_result_chunk() {
-        let line = r#"{"type":"result","is_error":false,"result":"Done."}"#;
-        let chunk = parse_stream_line(line).unwrap();
-        assert_eq!(chunk.chunk_type, "result");
-        assert_eq!(chunk.content, "Done.");
+    fn parse_input_json_delta_without_matching_start_returns_none() {
+        let mut parser = StreamParser::new();
+        let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":5,"delta":{"type":"input_json_delta","partial_json":"{}"}}}"#;
+        assert!(parse_line_str(&mut parser, delta).is_none());
+    }
+
+    // ── StreamParser: content_block_stop cleans up ────────────────────
+
+    #[test]
+    fn parse_content_block_stop_cleans_up_active_blocks() {
+        let mut parser = StreamParser::new();
+
+        // Start a tool at index 2
+        let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_X","name":"Bash","input":{}}}}"#;
+        parse_line_str(&mut parser, start);
+
+        // Stop at index 2 — should clean up
+        let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":2}}"#;
+        parse_line_str(&mut parser, stop);
+
+        // Now a delta at index 2 should return None (cleaned up)
+        let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{}"}}}"#;
+        assert!(parse_line_str(&mut parser, delta).is_none());
+    }
+
+    // ── StreamParser: message_stop resets state ───────────────────────
+
+    #[test]
+    fn parse_message_stop_resets_parser_state() {
+        let mut parser = StreamParser::new();
+
+        // Start a tool
+        let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_Y","name":"Edit","input":{}}}}"#;
+        parse_line_str(&mut parser, start);
+
+        // message_stop should reset
+        let stop = r#"{"type":"stream_event","event":{"type":"message_stop"}}"#;
+        parse_line_str(&mut parser, stop);
+
+        assert!(parser.active_blocks.is_empty());
+    }
+
+    // ── StreamParser: user tool_result ────────────────────────────────
+
+    #[test]
+    fn parse_user_tool_result_emits_tool_result() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01ABC","content":"file contents here"}]}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::ToolResult {
+                tool_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_id, "toolu_01ABC");
+                assert_eq!(content, "file contents here");
+                assert!(!is_error);
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_user_tool_result_with_error_flag() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"command failed","is_error":true}]}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::ToolResult { is_error, .. } => assert!(is_error),
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_user_tool_result_with_array_content() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"line1"},{"type":"text","text":"line2"}]}]}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::ToolResult { content, .. } => assert_eq!(content, "line1\nline2"),
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    // ── StreamParser: result ──────────────────────────────────────────
+
+    #[test]
+    fn parse_result_extracts_cost_and_usage() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","session_id":"550e8400-e29b-41d4-a716-446655440000","cost_usd":0.003,"total_cost":0.015,"usage":{"input_tokens":500,"output_tokens":100,"cache_read_tokens":50},"is_error":false,"result":""}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                session_id,
+                cost_usd,
+                total_cost,
+                usage,
+                result_text,
+            } => {
+                assert_eq!(session_id, "550e8400-e29b-41d4-a716-446655440000");
+                assert_eq!(cost_usd, Some(0.003));
+                assert_eq!(total_cost, Some(0.015));
+                let u = usage.unwrap();
+                assert_eq!(u.input_tokens, 500);
+                assert_eq!(u.output_tokens, 100);
+                assert_eq!(u.cache_read_tokens, Some(50));
+                assert!(u.cache_write_tokens.is_none());
+                assert!(result_text.is_none(), "empty result should produce None");
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
     }
 
     #[test]
     fn parse_result_error_produces_error_chunk() {
+        let mut parser = StreamParser::new();
         let line = r#"{"type":"result","is_error":true,"result":"Something went wrong"}"#;
-        let chunk = parse_stream_line(line).unwrap();
-        assert_eq!(chunk.chunk_type, "error");
-        assert_eq!(chunk.content, "Something went wrong");
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Error { content } => assert_eq!(content, "Something went wrong"),
+            other => panic!("expected Error, got {other:?}"),
+        }
     }
 
     #[test]
+    fn parse_result_error_with_empty_result_returns_none() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","is_error":true,"result":""}"#;
+        assert!(
+            parse_line_str(&mut parser, line).is_none(),
+            "empty error result should be skipped"
+        );
+
+        let line_no_key = r#"{"type":"result","is_error":true}"#;
+        assert!(
+            parse_line_str(&mut parser, line_no_key).is_none(),
+            "missing result key with is_error should be skipped"
+        );
+    }
+
+    #[test]
+    fn parse_result_without_usage_or_cost() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","is_error":false,"result":"","session_id":"abc"}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                cost_usd,
+                total_cost,
+                usage,
+                ..
+            } => {
+                assert!(cost_usd.is_none());
+                assert!(total_cost.is_none());
+                assert!(usage.is_none());
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    // ── StreamParser: ignored types ──────────────────────────────────
+
+    #[test]
     fn parse_assistant_type_is_ignored() {
+        let mut parser = StreamParser::new();
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#;
-        assert!(parse_stream_line(line).is_none());
+        assert!(parse_line_str(&mut parser, line).is_none());
     }
 
     #[test]
     fn parse_system_type_is_ignored() {
+        let mut parser = StreamParser::new();
         let line = r#"{"type":"system","message":"hello"}"#;
-        assert!(parse_stream_line(line).is_none());
+        assert!(parse_line_str(&mut parser, line).is_none());
     }
 
     #[test]
     fn parse_invalid_json_is_skipped() {
-        assert!(parse_stream_line("not json at all").is_none());
+        let mut parser = StreamParser::new();
+        assert!(parse_line_str(&mut parser, "not json at all").is_none());
     }
 
     #[test]
     fn parse_empty_line_is_skipped() {
-        assert!(parse_stream_line("").is_none());
-        assert!(parse_stream_line("   ").is_none());
-        assert!(parse_stream_line("\t\n").is_none());
+        let mut parser = StreamParser::new();
+        assert!(parse_line_str(&mut parser, "").is_none());
+        assert!(parse_line_str(&mut parser, "   ").is_none());
+        assert!(parse_line_str(&mut parser, "\t\n").is_none());
     }
 
     #[test]
-    fn parse_result_without_is_error_defaults_to_result() {
-        let line = r#"{"type":"result","result":"ok"}"#;
-        let chunk = parse_stream_line(line).unwrap();
-        assert_eq!(chunk.chunk_type, "result");
-        assert_eq!(chunk.content, "ok");
-    }
-
-    #[test]
-    fn parse_result_without_result_field_gives_empty_content() {
-        let line = r#"{"type":"result","is_error":false}"#;
-        let chunk = parse_stream_line(line).unwrap();
-        assert_eq!(chunk.chunk_type, "result");
-        assert_eq!(chunk.content, "");
+    fn parse_signature_delta_is_ignored() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"signature_delta","signature":"sig..."}}}"#;
+        assert!(parse_line_str(&mut parser, line).is_none());
     }
 
     // ── ChatSession::new() ───────────────────────────────────────────
@@ -424,6 +1205,8 @@ mod tests {
     fn chat_session_new_has_no_child() {
         let session = ChatSession::new("acme-corp");
         assert!(session.child.is_none());
+        assert!(session.shared_stdin.is_none());
+        assert!(session.pending_requests.lock().unwrap().is_empty());
     }
 
     // ── Container name construction ──────────────────────────────────
@@ -448,6 +1231,7 @@ mod tests {
         assert!(args.contains(&consts::CLAUDE_BINARY.to_string()));
         assert!(args.contains(&"-p".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"--permission-prompt-tool".to_string()));
     }
 
     #[test]
@@ -462,5 +1246,740 @@ mod tests {
     fn build_claude_args_includes_flags() {
         let args = build_claude_args(None, &["--dangerously-skip-permissions"]);
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    // ── Multi-event fixture test ─────────────────────────────────────
+
+    #[test]
+    fn full_turn_fixture_produces_expected_chunk_sequence() {
+        let fixture = include_str!("../tests/fixtures/full_turn.ndjson");
+        let mut parser = StreamParser::new();
+        let chunks: Vec<StreamChunk> = fixture
+            .lines()
+            .filter_map(|line| parse_line_str(&mut parser, line))
+            .collect();
+
+        // Expected sequence:
+        // 0: Text("I'll read ")
+        // 1: Text("the file.")
+        // 2: Thinking("")  (start marker)
+        // 3: Thinking("Let me think about this...")
+        // 4: ToolStart { toolu_01ABC, Read }
+        // 5: ToolInputDelta { toolu_01ABC, ... }
+        // 6: ToolInputDelta { toolu_01ABC, ... }
+        // 7: ToolResult { toolu_01ABC, "fn main() {}", false }
+        // 8: Text("The file contains a main function.")
+        // 9: Result { session_id, cost, usage }
+
+        assert_eq!(chunks.len(), 10, "expected 10 chunks, got {}", chunks.len());
+
+        match &chunks[0] {
+            StreamChunk::Text { content } => assert_eq!(content, "I'll read "),
+            other => panic!("chunk 0: expected Text, got {other:?}"),
+        }
+        match &chunks[1] {
+            StreamChunk::Text { content } => assert_eq!(content, "the file."),
+            other => panic!("chunk 1: expected Text, got {other:?}"),
+        }
+        match &chunks[2] {
+            StreamChunk::Thinking { content } => assert_eq!(content, ""),
+            other => panic!("chunk 2: expected Thinking(''), got {other:?}"),
+        }
+        match &chunks[3] {
+            StreamChunk::Thinking { content } => assert_eq!(content, "Let me think about this..."),
+            other => panic!("chunk 3: expected Thinking, got {other:?}"),
+        }
+        match &chunks[4] {
+            StreamChunk::ToolStart { tool_id, tool_name } => {
+                assert_eq!(tool_id, "toolu_01ABC");
+                assert_eq!(tool_name, "Read");
+            }
+            other => panic!("chunk 4: expected ToolStart, got {other:?}"),
+        }
+        match &chunks[5] {
+            StreamChunk::ToolInputDelta {
+                tool_id,
+                partial_json,
+            } => {
+                assert_eq!(tool_id, "toolu_01ABC");
+                assert!(partial_json.contains("file_path"));
+            }
+            other => panic!("chunk 5: expected ToolInputDelta, got {other:?}"),
+        }
+        match &chunks[6] {
+            StreamChunk::ToolInputDelta { tool_id, .. } => {
+                assert_eq!(tool_id, "toolu_01ABC");
+            }
+            other => panic!("chunk 6: expected ToolInputDelta, got {other:?}"),
+        }
+        match &chunks[7] {
+            StreamChunk::ToolResult {
+                tool_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_id, "toolu_01ABC");
+                assert_eq!(content, "fn main() {}");
+                assert!(!is_error);
+            }
+            other => panic!("chunk 7: expected ToolResult, got {other:?}"),
+        }
+        match &chunks[8] {
+            StreamChunk::Text { content } => {
+                assert_eq!(content, "The file contains a main function.")
+            }
+            other => panic!("chunk 8: expected Text, got {other:?}"),
+        }
+        match &chunks[9] {
+            StreamChunk::Result {
+                session_id,
+                cost_usd,
+                usage,
+                result_text,
+                ..
+            } => {
+                assert_eq!(session_id, "550e8400-e29b-41d4-a716-446655440000");
+                assert_eq!(cost_usd, &Some(0.003));
+                let u = usage.as_ref().unwrap();
+                assert_eq!(u.input_tokens, 100);
+                assert_eq!(u.output_tokens, 50);
+                assert!(result_text.is_none(), "empty result should produce None");
+            }
+            other => panic!("chunk 9: expected Result, got {other:?}"),
+        }
+    }
+
+    // ── AskUserQuestion tests ───────────────────────────────────────
+
+    #[test]
+    fn parse_ask_user_question_suppressed_in_stream_events() {
+        let mut parser = StreamParser::new();
+
+        // 1. content_block_start: tool_use with AskUserQuestion — suppressed (no ToolStart emitted)
+        let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_ask1","name":"AskUserQuestion"}}}"#;
+        let chunk = parse_line_str(&mut parser, start);
+        assert!(chunk.is_none(), "AskUserQuestion should suppress ToolStart");
+
+        // 2. input_json_delta — also suppressed for AskUserQuestion
+        let delta1 = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"question\":\"Pick a fruit\","}}}"#;
+        assert!(
+            parse_line_str(&mut parser, delta1).is_none(),
+            "AskUserQuestion input_json_delta should be suppressed"
+        );
+
+        let delta2 = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"header\":\"Fruits\",\"multiSelect\":false,\"options\":[{\"label\":\"Apple\",\"value\":\"apple\"},{\"label\":\"Banana\",\"value\":\"banana\"}]}"}}}"#;
+        assert!(
+            parse_line_str(&mut parser, delta2).is_none(),
+            "AskUserQuestion input_json_delta should be suppressed"
+        );
+
+        // 3. content_block_stop → AskUserQuestion is now handled via control_request,
+        //    stream events should NOT emit it (returns None)
+        let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
+        assert!(
+            parse_line_str(&mut parser, stop).is_none(),
+            "AskUserQuestion should not be emitted from stream events (handled via control_request)"
+        );
+    }
+
+    #[test]
+    fn parse_ask_user_question_cleans_up_tool_input() {
+        let mut parser = StreamParser::new();
+
+        let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_ask2","name":"AskUserQuestion"}}}"#;
+        parse_line_str(&mut parser, start);
+
+        let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"question\":\"Yes or no?\",\"header\":\"\",\"multiSelect\":false,\"options\":[]}"}}}"#;
+        parse_line_str(&mut parser, delta);
+
+        let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
+        parse_line_str(&mut parser, stop);
+
+        // tool_input should be cleaned up after emission
+        assert!(parser.tool_input.is_empty());
+        assert!(parser.active_blocks.is_empty());
+    }
+
+    #[test]
+    fn parse_non_ask_tool_does_not_emit_ask_user_question() {
+        let mut parser = StreamParser::new();
+
+        let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_read1","name":"Read"}}}"#;
+        parse_line_str(&mut parser, start);
+
+        let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"/tmp/test.rs\"}"}}}"#;
+        parse_line_str(&mut parser, delta);
+
+        let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
+        let chunk = parse_line_str(&mut parser, stop);
+        assert!(
+            chunk.is_none(),
+            "non-AskUserQuestion tool should not emit AskUserQuestion chunk"
+        );
+    }
+
+    #[test]
+    fn ask_user_question_round_trips_through_json() {
+        let original = StreamChunk::AskUserQuestion {
+            tool_id: "t1".to_string(),
+            question: "Pick one".to_string(),
+            options: vec![
+                AskUserOption {
+                    label: "A".to_string(),
+                    value: "a".to_string(),
+                },
+                AskUserOption {
+                    label: "B".to_string(),
+                    value: "b".to_string(),
+                },
+            ],
+            header: "Test".to_string(),
+            multi_select: true,
+        };
+        let serialized = serde_json::to_string(&original).unwrap();
+        let deserialized: StreamChunk = serde_json::from_str(&serialized).unwrap();
+        match deserialized {
+            StreamChunk::AskUserQuestion {
+                tool_id,
+                question,
+                options,
+                header,
+                multi_select,
+            } => {
+                assert_eq!(tool_id, "t1");
+                assert_eq!(question, "Pick one");
+                assert_eq!(options.len(), 2);
+                assert_eq!(header, "Test");
+                assert!(multi_select);
+            }
+            other => panic!("expected AskUserQuestion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_ask_user_question_wrapped_format_suppressed_in_stream() {
+        let mut parser = StreamParser::new();
+
+        let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_ask3","name":"AskUserQuestion"}}}"#;
+        parse_line_str(&mut parser, start);
+
+        // Wrapped format: {"questions":[{...}]}
+        let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"questions\":[{\"question\":\"Co wolisz?\",\"header\":\"Owoc\",\"multiSelect\":false,\"options\":[{\"label\":\"Gruszki\",\"description\":\"Zielone\"},{\"label\":\"Banany\",\"description\":\"Żółte\"}]}]}"}}}"#;
+        parse_line_str(&mut parser, delta);
+
+        // content_block_stop should NOT emit AskUserQuestion (handled via control_request)
+        let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
+        assert!(
+            parse_line_str(&mut parser, stop).is_none(),
+            "AskUserQuestion should not be emitted from stream events"
+        );
+    }
+
+    // ── Control protocol tests ────────────────────────────────────
+
+    #[test]
+    fn try_parse_control_request_returns_none_for_stream_event() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}}"#;
+        assert!(try_parse_control_request_str(line).is_none());
+    }
+
+    #[test]
+    fn try_parse_control_request_parses_ask_user_question() {
+        let line = r#"{"type":"control_request","request_id":"req_1","request":{"tool_name":"AskUserQuestion","tool_use_id":"toolu_ask_ctrl","input":{"question":"Pick one","header":"Choice","multiSelect":false,"options":[{"label":"A","value":"a"},{"label":"B","value":"b"}]}}}"#;
+        let req = try_parse_control_request_str(line).unwrap();
+        assert_eq!(req.request_id, "req_1");
+        assert_eq!(req.tool_name, "AskUserQuestion");
+        assert_eq!(req.tool_use_id, "toolu_ask_ctrl");
+        assert_eq!(req.input["question"], "Pick one");
+    }
+
+    #[test]
+    fn try_parse_control_request_parses_regular_tool() {
+        let line = r#"{"type":"control_request","request_id":"req_2","request":{"tool_name":"Bash","tool_use_id":"toolu_bash1","input":{"command":"ls"}}}"#;
+        let req = try_parse_control_request_str(line).unwrap();
+        assert_eq!(req.request_id, "req_2");
+        assert_eq!(req.tool_name, "Bash");
+        assert_eq!(req.tool_use_id, "toolu_bash1");
+    }
+
+    #[test]
+    fn build_auto_approve_response_structure() {
+        let req = ControlRequest {
+            request_id: "req_42".to_string(),
+            tool_name: "Read".to_string(),
+            input: serde_json::json!({"file_path": "/tmp/test.rs"}),
+            tool_use_id: "toolu_read1".to_string(),
+        };
+        let resp = build_auto_approve_response(&req);
+        assert_eq!(resp["type"], "control_response");
+        assert_eq!(resp["response"]["subtype"], "success");
+        assert_eq!(resp["response"]["request_id"], "req_42");
+        assert_eq!(resp["response"]["response"]["behavior"], "allow");
+        assert_eq!(
+            resp["response"]["response"]["updatedInput"]["file_path"],
+            "/tmp/test.rs"
+        );
+    }
+
+    #[test]
+    fn build_ask_user_response_flat_format() {
+        let pending = ControlRequest {
+            request_id: "req_10".to_string(),
+            tool_name: "AskUserQuestion".to_string(),
+            input: serde_json::json!({
+                "question": "Pick a fruit",
+                "header": "Fruits",
+                "multiSelect": false,
+                "options": [{"label": "Apple", "value": "apple"}, {"label": "Banana", "value": "banana"}]
+            }),
+            tool_use_id: "toolu_flat_test".to_string(),
+        };
+        let resp = build_ask_user_response(&pending, "Apple");
+        assert_eq!(resp["type"], "control_response");
+        assert_eq!(resp["response"]["request_id"], "req_10");
+        assert_eq!(resp["response"]["response"]["behavior"], "allow");
+        let updated = &resp["response"]["response"]["updatedInput"];
+        assert_eq!(updated["answers"]["Pick a fruit"], "Apple");
+        assert_eq!(updated["question"], "Pick a fruit");
+    }
+
+    #[test]
+    fn build_ask_user_response_wrapped_format() {
+        let pending = ControlRequest {
+            request_id: "req_11".to_string(),
+            tool_name: "AskUserQuestion".to_string(),
+            input: serde_json::json!({
+                "questions": [{
+                    "question": "Co wolisz?",
+                    "header": "Owoc",
+                    "multiSelect": false,
+                    "options": [{"label": "Gruszki"}, {"label": "Banany"}]
+                }]
+            }),
+            tool_use_id: "toolu_wrapped_test".to_string(),
+        };
+        let resp = build_ask_user_response(&pending, "Gruszki");
+        assert_eq!(resp["type"], "control_response");
+        let updated = &resp["response"]["response"]["updatedInput"];
+        assert_eq!(updated["answers"]["Co wolisz?"], "Gruszki");
+        // Original questions array should still be present
+        assert!(updated["questions"].as_array().unwrap().len() == 1);
+    }
+
+    #[test]
+    fn build_ask_user_response_empty_questions_array_sets_answers() {
+        let pending = ControlRequest {
+            request_id: "req_empty".to_string(),
+            tool_name: "AskUserQuestion".to_string(),
+            input: serde_json::json!({
+                "questions": []
+            }),
+            tool_use_id: "toolu_empty_q".to_string(),
+        };
+        let resp = build_ask_user_response(&pending, "fallback");
+        assert_eq!(resp["type"], "control_response");
+        let updated = &resp["response"]["response"]["updatedInput"];
+        // With empty questions, the answer key is "" (empty question text)
+        assert_eq!(updated["answers"][""], "fallback");
+    }
+
+    #[test]
+    fn emit_ask_user_from_control_request_flat() {
+        let req = ControlRequest {
+            request_id: "req_20".to_string(),
+            tool_name: "AskUserQuestion".to_string(),
+            input: serde_json::json!({
+                "question": "Yes or no?",
+                "header": "Confirm",
+                "multiSelect": false,
+                "options": [{"label": "Yes", "value": "yes"}, {"label": "No", "value": "no"}]
+            }),
+            tool_use_id: "toolu_ask_flat".to_string(),
+        };
+        let chunk = StreamParser::emit_ask_user_from_control_request(&req).unwrap();
+        match chunk {
+            StreamChunk::AskUserQuestion {
+                tool_id,
+                question,
+                options,
+                header,
+                multi_select,
+            } => {
+                assert_eq!(tool_id, "toolu_ask_flat");
+                assert_eq!(question, "Yes or no?");
+                assert_eq!(header, "Confirm");
+                assert!(!multi_select);
+                assert_eq!(options.len(), 2);
+                assert_eq!(options[0].label, "Yes");
+                assert_eq!(options[1].label, "No");
+            }
+            other => panic!("expected AskUserQuestion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emit_ask_user_from_control_request_wrapped() {
+        let req = ControlRequest {
+            request_id: "req_21".to_string(),
+            tool_name: "AskUserQuestion".to_string(),
+            input: serde_json::json!({
+                "questions": [{
+                    "question": "Wybierz kolor",
+                    "header": "Kolor",
+                    "multiSelect": true,
+                    "options": [{"label": "Czerwony", "value": "red"}, {"label": "Niebieski", "value": "blue"}]
+                }]
+            }),
+            tool_use_id: "toolu_ask_wrapped".to_string(),
+        };
+        let chunk = StreamParser::emit_ask_user_from_control_request(&req).unwrap();
+        match chunk {
+            StreamChunk::AskUserQuestion {
+                tool_id,
+                question,
+                header,
+                multi_select,
+                options,
+            } => {
+                assert_eq!(tool_id, "toolu_ask_wrapped");
+                assert_eq!(question, "Wybierz kolor");
+                assert_eq!(header, "Kolor");
+                assert!(multi_select);
+                assert_eq!(options.len(), 2);
+                assert_eq!(options[0].value, "red");
+                assert_eq!(options[1].value, "blue");
+            }
+            other => panic!("expected AskUserQuestion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emit_ask_user_from_control_request_empty_questions_array() {
+        let req = ControlRequest {
+            request_id: "req_empty".to_string(),
+            tool_name: "AskUserQuestion".to_string(),
+            input: serde_json::json!({
+                "questions": []
+            }),
+            tool_use_id: "toolu_empty_q".to_string(),
+        };
+        let chunk = StreamParser::emit_ask_user_from_control_request(&req).unwrap();
+        match chunk {
+            StreamChunk::AskUserQuestion {
+                question, options, ..
+            } => {
+                assert_eq!(question, "");
+                assert!(options.is_empty());
+            }
+            other => panic!("expected AskUserQuestion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_claude_args_includes_permission_prompt_tool() {
+        let args = build_claude_args(None, &[]);
+        let pos = args
+            .iter()
+            .position(|a| a == "--permission-prompt-tool")
+            .expect("--permission-prompt-tool should be in args");
+        assert_eq!(args[pos + 1], "stdio");
+    }
+
+    // ── Control request fixture test ────────────────────────────────
+
+    // ── prepare_start tests ─────────────────────────────────────────
+
+    #[test]
+    fn prepare_start_fails_when_project_not_in_config() {
+        let user_config = config::SpeedwaveUserConfig {
+            projects: vec![],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        };
+        let result = ChatSession::prepare_start("nonexistent", &user_config, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("nonexistent"),
+            "error should mention project name, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn prepare_start_fails_with_invalid_resume_session_id() {
+        let user_config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "test".to_string(),
+                dir: "/tmp/test".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        };
+        let result = ChatSession::prepare_start("test", &user_config, Some("../../../etc/passwd"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn prepare_start_succeeds_with_valid_project() {
+        let user_config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "myproject".to_string(),
+                dir: "/home/user/myproject".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        };
+        let result = ChatSession::prepare_start("myproject", &user_config, None);
+        assert!(result.is_ok());
+        let (args, container) = result.unwrap();
+        assert!(args.contains(&"-p".to_string()));
+        assert!(container.contains("myproject"));
+    }
+
+    #[test]
+    fn prepare_start_with_resume_includes_resume_flag() {
+        let user_config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        };
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        let result = ChatSession::prepare_start("proj", &user_config, Some(session_id));
+        assert!(result.is_ok());
+        let (args, _container) = result.unwrap();
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&session_id.to_string()));
+    }
+
+    // ── Silent failure prevention tests ──────────────────────────────
+
+    #[test]
+    fn tool_use_with_empty_id_returns_none() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"Read"}}}"#;
+        assert!(
+            parse_line_str(&mut parser, line).is_none(),
+            "empty tool_use id should return None"
+        );
+    }
+
+    #[test]
+    fn tool_use_with_missing_id_returns_none() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","name":"Read"}}}"#;
+        assert!(
+            parse_line_str(&mut parser, line).is_none(),
+            "missing tool_use id should return None"
+        );
+    }
+
+    #[test]
+    fn tool_use_with_empty_name_returns_none() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":""}}}"#;
+        assert!(
+            parse_line_str(&mut parser, line).is_none(),
+            "empty tool_use name should return None"
+        );
+    }
+
+    #[test]
+    fn tool_use_with_missing_name_returns_none() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01"}}}"#;
+        assert!(
+            parse_line_str(&mut parser, line).is_none(),
+            "missing tool_use name should return None"
+        );
+    }
+
+    #[test]
+    fn tool_result_with_empty_tool_use_id_returns_none() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":"file contents"}]}}"#;
+        assert!(
+            parse_line_str(&mut parser, line).is_none(),
+            "empty tool_use_id in tool_result should return None"
+        );
+    }
+
+    #[test]
+    fn tool_result_with_missing_tool_use_id_returns_none() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"file contents"}]}}"#;
+        assert!(
+            parse_line_str(&mut parser, line).is_none(),
+            "missing tool_use_id in tool_result should return None"
+        );
+    }
+
+    #[test]
+    fn result_with_missing_session_id_still_emits_result() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","is_error":false,"result":"","cost_usd":0.01}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { session_id, .. } => {
+                assert_eq!(
+                    session_id, "",
+                    "missing session_id should default to empty string"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn control_request_stores_tool_name() {
+        let ctrl = ControlRequest {
+            request_id: "req_1".to_string(),
+            tool_name: "AskUserQuestion".to_string(),
+            input: serde_json::json!({"question": "test"}),
+            tool_use_id: "toolu_test".to_string(),
+        };
+        assert_eq!(ctrl.tool_name, "AskUserQuestion");
+    }
+
+    #[test]
+    fn control_request_turn_fixture_produces_expected_chunks() {
+        let fixture = include_str!("../tests/fixtures/control_request_turn.ndjson");
+        let mut parser = StreamParser::new();
+        let mut chunks: Vec<StreamChunk> = Vec::new();
+
+        for line in fixture.lines() {
+            // control_requests are handled separately from stream events
+            if let Some(ctrl) = try_parse_control_request_str(line) {
+                if ctrl.tool_name == ASK_USER_TOOL_NAME {
+                    if let Some(chunk) = StreamParser::emit_ask_user_from_control_request(&ctrl) {
+                        chunks.push(chunk);
+                    }
+                }
+                // auto-approve for non-AskUserQuestion is a stdin write, not a chunk
+                continue;
+            }
+            if let Some(chunk) = parse_line_str(&mut parser, line) {
+                chunks.push(chunk);
+            }
+        }
+
+        // Expected: Text, AskUserQuestion (from control_request), Text, Result
+        assert_eq!(chunks.len(), 4, "expected 4 chunks, got {}", chunks.len());
+
+        match &chunks[0] {
+            StreamChunk::Text { content } => assert_eq!(content, "Let me check."),
+            other => panic!("chunk 0: expected Text, got {other:?}"),
+        }
+        match &chunks[1] {
+            StreamChunk::AskUserQuestion {
+                tool_id, question, ..
+            } => {
+                assert_eq!(tool_id, "toolu_ask_ctrl1");
+                assert_eq!(question, "Allow file read?");
+            }
+            other => panic!("chunk 1: expected AskUserQuestion, got {other:?}"),
+        }
+        match &chunks[2] {
+            StreamChunk::Text { content } => assert_eq!(content, "Done."),
+            other => panic!("chunk 2: expected Text, got {other:?}"),
+        }
+        match &chunks[3] {
+            StreamChunk::Result { session_id, .. } => {
+                assert_eq!(session_id, "ctrl-session-001");
+            }
+            other => panic!("chunk 3: expected Result, got {other:?}"),
+        }
+    }
+
+    // ── Slash command result_text tests ──────────────────────────────
+
+    #[test]
+    fn slash_command_result_includes_result_text() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","session_id":"abc","cost_usd":0.0,"total_cost":0.0,"usage":{"input_tokens":0,"output_tokens":0},"is_error":false,"result":"Session cost: $0.003\nTotal cost: $0.015"}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { result_text, .. } => {
+                assert_eq!(
+                    result_text.as_deref(),
+                    Some("Session cost: $0.003\nTotal cost: $0.015")
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn whitespace_only_result_is_none() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"result":"  \n  "}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { result_text, .. } => {
+                assert!(
+                    result_text.is_none(),
+                    "whitespace-only result should be None"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn result_text_skipped_in_serialization_when_none() {
+        let chunk = StreamChunk::Result {
+            session_id: "abc".to_string(),
+            cost_usd: None,
+            total_cost: None,
+            usage: None,
+            result_text: None,
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(
+            !json.contains("result_text"),
+            "result_text should be absent when None, got: {json}"
+        );
+    }
+
+    #[test]
+    fn slash_command_fixture_produces_result_with_text() {
+        let fixture = include_str!("../tests/fixtures/slash_command_turn.ndjson");
+        let mut parser = StreamParser::new();
+        let chunks: Vec<StreamChunk> = fixture
+            .lines()
+            .filter_map(|line| parse_line_str(&mut parser, line))
+            .collect();
+
+        assert_eq!(chunks.len(), 1, "expected 1 chunk, got {}", chunks.len());
+        match &chunks[0] {
+            StreamChunk::Result {
+                result_text,
+                session_id,
+                ..
+            } => {
+                assert_eq!(session_id, "550e8400-e29b-41d4-a716-446655440000");
+                assert!(
+                    result_text.is_some(),
+                    "slash command should have result_text"
+                );
+                assert!(result_text.as_ref().unwrap().contains("Session cost"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
     }
 }

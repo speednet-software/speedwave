@@ -7,20 +7,31 @@ Speedwave supports macOS, Linux, and Windows with platform-specific VM, containe
 | OS      | VM              | Containers              | mcp-os                    | Installer |
 | ------- | --------------- | ----------------------- | ------------------------- | --------- |
 | macOS   | Lima + Apple VZ | nerdctl                 | AppleScript / EventKit    | .dmg      |
-| Linux   | none (native)   | nerdctl (rootless)      | CalDAV (EDS via zbus)     | AppImage  |
+| Linux   | none (native)   | nerdctl (rootless)      | CalDAV (EDS via zbus)     | .deb      |
 | Windows | WSL2 + Hyper-V  | nerdctl (wsl.exe proxy) | WinRT + mapi-rs (Outlook) | .exe      |
 
 ## macOS
 
-<!-- Content to be written: Lima + Apple Virtualization Framework, bundled Lima, LIMA_HOME isolation -->
+- Lima manages the VM using Apple Virtualization Framework (same hypervisor as Docker Desktop 4.15+)
+- Lima is bundled inside `.app/Contents/Resources/lima/` with `LIMA_HOME=~/.speedwave/lima` for isolation (see [ADR-021](../adr/ADR-021-bundled-dependencies-and-zero-install-strategy.md))
+- IDE lock file: `~/.claude/ide/<port>.lock`
 
 ## Linux
 
-<!-- Content to be written: nerdctl-full bundled in AppImage, rootless containerd, systemd --user, system requirements -->
+- nerdctl-full (rootless) is bundled inside the .deb package — no additional system package dependencies for the container runtime
+- On first launch, nerdctl-full is extracted to `~/.speedwave/nerdctl-full/` and containerd starts as a systemd --user service
+- System requirements: uidmap, systemd --user, /etc/subuid + /etc/subgid
+- Optional: `libappindicator3-1` or `libayatana-appindicator3-1` for system tray icon support (app works without it — falls back to a regular visible window)
+- mcp-os: no EventKit equivalent; CalDAV (RFC 4791) is the cross-DE standard; `zbus` crate for GNOME EDS access
+- IDE lock file: `~/.claude/ide/<port>.lock`
 
 ## Windows
 
-<!-- Content to be written: WSL2 + nerdctl, wsl.exe proxy calls, setup wizard, windows-rs + mapi-rs -->
+- `wsl.exe -d Speedwave -- nerdctl ...` called from Tauri/Rust
+- `windows-rs` (Microsoft-maintained) for WinRT API access
+- `mapi-rs` (Microsoft-maintained) for Outlook mail/calendar
+- Setup Wizard auto-installs WSL2, imports Ubuntu rootfs, and sets up nerdctl-full
+- IDE lock file: `%USERPROFILE%\.claude\ide\<port>.lock`
 
 ## See Also
 

@@ -5,10 +5,9 @@ const { createMCPServerMock, initializeSharePointClientMock } = vi.hoisted(() =>
   initializeSharePointClientMock: vi.fn(),
 }));
 
-vi.mock('../../shared/dist/index.js', async () => {
-  const actual = await vi.importActual<typeof import('../../shared/dist/index.js')>(
-    '../../shared/dist/index.js'
-  );
+vi.mock('@speedwave/mcp-shared', async () => {
+  const actual =
+    await vi.importActual<typeof import('@speedwave/mcp-shared')>('@speedwave/mcp-shared');
   return {
     ...actual,
     createMCPServer: createMCPServerMock,
@@ -29,10 +28,11 @@ describe('MCP SharePoint Server', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
-    process.env = { ...originalEnv };
+    process.env = { ...originalEnv, MCP_SHAREPOINT_AUTH_TOKEN: 'test-token' };
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
   });
 
   afterEach(() => {
@@ -41,7 +41,7 @@ describe('MCP SharePoint Server', () => {
   });
 
   it('health check succeeds when no token save error', async () => {
-    const startMock = vi.fn().mockResolvedValue(undefined);
+    const startMock = vi.fn().mockResolvedValue(3002);
     createMCPServerMock.mockReturnValue({ start: startMock });
 
     const mockClient = {
@@ -57,7 +57,7 @@ describe('MCP SharePoint Server', () => {
   });
 
   it('health check throws when token refresh has failed', async () => {
-    const startMock = vi.fn().mockResolvedValue(undefined);
+    const startMock = vi.fn().mockResolvedValue(3002);
     createMCPServerMock.mockReturnValue({ start: startMock });
 
     const mockClient = {

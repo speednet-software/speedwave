@@ -54,6 +54,9 @@ export const TIMEOUTS = {
   /** Worker health check - fixed 5s */
   HEALTH_CHECK_MS: 5_000,
 
+  /** Tool discovery via JSON-RPC tools/list - fixed 10s (heavier than health check) */
+  TOOL_DISCOVERY_MS: 10_000,
+
   /** Worker status cache TTL - fixed 1 min */
   CACHE_TTL_MS: 60_000,
 

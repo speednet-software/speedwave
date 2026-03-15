@@ -2,19 +2,17 @@
  * Pipeline Tools - 5 tools for GitLab CI/CD pipelines
  */
 
-import {
-  Tool,
-  ToolDefinition,
-  jsonResult,
-  textResult,
-  errorResult,
-} from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition, jsonResult, textResult, errorResult } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
 
 const listPipelineIdsTool: Tool = {
   name: 'listPipelineIds',
   description: 'List pipeline IDs. Use get_pipeline_full for details.',
+  category: 'read',
+  keywords: ['gitlab', 'pipeline', 'ci', 'cd', 'list', 'build', 'ids'],
+  example:
+    'const { pipelines, count } = await gitlab.listPipelineIds({ project_id: "speedwave/core", status: "failed" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -25,11 +23,54 @@ const listPipelineIdsTool: Tool = {
     },
     required: ['project_id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      pipelines: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'number' },
+            status: {
+              type: 'string',
+              enum: ['running', 'pending', 'success', 'failed', 'canceled'],
+            },
+            ref: { type: 'string', description: 'Branch or tag name' },
+            sha: { type: 'string', description: 'Commit SHA' },
+            web_url: { type: 'string' },
+            created_at: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: recent pipelines',
+      input: { project_id: 'my-group/my-project' },
+    },
+    {
+      description: 'Partial: failed pipelines',
+      input: { project_id: 'my-group/my-project', status: 'failed' },
+    },
+    {
+      description: 'Full: branch pipelines',
+      input: { project_id: 'my-group/my-project', status: 'success', ref: 'main', limit: 20 },
+    },
+  ],
 };
 
 const getPipelineFullTool: Tool = {
   name: 'getPipelineFull',
   description: 'Get complete pipeline data. No truncation.',
+  category: 'read',
+  keywords: ['gitlab', 'pipeline', 'ci', 'details', 'jobs', 'status', 'full'],
+  example:
+    'const pipeline = await gitlab.getPipelineFull({ project_id: "speedwave/core", pipeline_id: 123456 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -38,11 +79,62 @@ const getPipelineFullTool: Tool = {
     },
     required: ['project_id', 'pipeline_id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      pipeline: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' },
+          status: { type: 'string' },
+          ref: { type: 'string' },
+          sha: { type: 'string' },
+          web_url: { type: 'string' },
+          created_at: { type: 'string' },
+          updated_at: { type: 'string' },
+          duration: { type: 'number', description: 'Duration in seconds' },
+        },
+      },
+      jobs: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'number' },
+            name: { type: 'string' },
+            stage: { type: 'string' },
+            status: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: get pipeline details',
+      input: { project_id: 'my-group/my-project', pipeline_id: 98765 },
+    },
+    {
+      description: 'Partial: pipeline by path',
+      input: { project_id: 'web-app', pipeline_id: 11111 },
+    },
+    {
+      description: 'Full: pipeline by numeric ID',
+      input: { project_id: 789, pipeline_id: 54321 },
+    },
+  ],
 };
 
 const getJobLogTool: Tool = {
   name: 'getJobLog',
   description: 'Get log output of a pipeline job',
+  category: 'read',
+  keywords: ['gitlab', 'job', 'log', 'ci', 'build', 'debug'],
+  example:
+    'const log = await gitlab.getJobLog({ project_id: "speedwave/core", job_id: 12345, tail_lines: 50 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -52,11 +144,41 @@ const getJobLogTool: Tool = {
     },
     required: ['project_id', 'job_id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      log: { type: 'string', description: 'Job log content (plain text)' },
+      job: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' },
+          name: { type: 'string' },
+          status: { type: 'string' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: get full job log',
+      input: { project_id: 'my-group/my-project', job_id: 98765 },
+    },
+    {
+      description: 'Full: get last 50 lines',
+      input: { project_id: 'my-group/my-project', job_id: 98765, tail_lines: 50 },
+    },
+  ],
 };
 
 const retryPipelineTool: Tool = {
   name: 'retryPipeline',
   description: 'Retry a failed pipeline',
+  category: 'write',
+  keywords: ['gitlab', 'pipeline', 'retry', 'rerun', 'ci', 'build'],
+  example: 'await gitlab.retryPipeline({ project_id: "speedwave/core", pipeline_id: 123456 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -65,11 +187,49 @@ const retryPipelineTool: Tool = {
     },
     required: ['project_id', 'pipeline_id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      pipeline: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' },
+          status: { type: 'string' },
+          web_url: { type: 'string' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: retry failed pipeline',
+      input: { project_id: 'my-group/my-project', pipeline_id: 98765 },
+    },
+    {
+      description: 'Partial: retry by path',
+      input: { project_id: 'web-app', pipeline_id: 11111 },
+    },
+    {
+      description: 'Full: retry by numeric ID',
+      input: { project_id: 789, pipeline_id: 54321 },
+    },
+  ],
 };
 
 const triggerPipelineTool: Tool = {
   name: 'triggerPipeline',
   description: 'Trigger a new pipeline with optional variables',
+  category: 'write',
+  keywords: ['gitlab', 'pipeline', 'trigger', 'create', 'run', 'ci', 'release', 'variables'],
+  example: `// Trigger pipeline with CI variable
+await gitlab.triggerPipeline({
+  project_id: "group/project",
+  ref: "main",
+  variables: [{ key: "DEPLOY_ENV", value: "staging" }]
+})`,
   inputSchema: {
     type: 'object',
     properties: {
@@ -90,6 +250,48 @@ const triggerPipelineTool: Tool = {
     },
     required: ['project_id', 'ref'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      pipeline: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' },
+          status: { type: 'string' },
+          ref: { type: 'string' },
+          web_url: { type: 'string' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: trigger pipeline on branch',
+      input: { project_id: 'my-group/my-project', ref: 'main' },
+    },
+    {
+      description: 'With single CI variable',
+      input: {
+        project_id: 123,
+        ref: 'main',
+        variables: [{ key: 'DEPLOY_ENV', value: 'production' }],
+      },
+    },
+    {
+      description: 'With multiple CI variables',
+      input: {
+        project_id: 'backend-api',
+        ref: 'develop',
+        variables: [
+          { key: 'DEPLOY_ENV', value: 'staging' },
+          { key: 'SKIP_TESTS', value: 'false' },
+        ],
+      },
+    },
+  ],
 };
 
 /**

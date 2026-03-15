@@ -28,7 +28,7 @@ vi.mock('@gitbeaker/rest', () => {
 });
 
 // Mock shared module
-vi.mock('../../shared/dist/index.js', () => ({
+vi.mock('@speedwave/mcp-shared', () => ({
   loadToken: mockLoadToken,
   ts: () => '[00:00:00]',
 }));

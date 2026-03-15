@@ -124,3 +124,58 @@ export function validateToolName(toolName: string): boolean {
   const toolNameRegex = /^[a-zA-Z0-9_-]+$/;
   return toolNameRegex.test(toolName) && toolName.length > 0 && toolName.length < 100;
 }
+
+const CONTAINER_HOSTNAME_RE = /^mcp-[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+
+const HOST_GATEWAY_ALLOWLIST = new Set([
+  'host.lima.internal',
+  'host.docker.internal',
+  'host.containers.internal',
+  'host.speedwave.internal',
+]);
+
+/**
+ * Validate that a worker URL matches canonical Speedwave internal endpoints.
+ * Defense-in-depth: asserts that runtime provided a correct internal URL.
+ *
+ * Accepted patterns:
+ * - Container workers: http://mcp-{name}:{port} (Docker internal DNS)
+ * - Host gateway (OS worker): http://host.{lima,docker,containers,speedwave}.internal:{port}
+ *
+ * Rejects everything else (external hosts, IPs, wrong protocols, paths, query strings).
+ * @param url - URL string to validate
+ * @returns true if the URL matches a canonical worker endpoint
+ */
+export function validateWorkerUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+
+  if (parsed.protocol !== 'http:') return false;
+
+  if (parsed.port === '') return false;
+  const port = Number(parsed.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return false;
+
+  // URL constructor lowercases hostname, so also check the original string
+  // to reject uppercase input (Docker DNS is lowercase)
+  const hostnameStart = url.indexOf('://') + 3;
+  const hostnameEnd = url.indexOf(':', hostnameStart);
+  const rawHostname = url.substring(hostnameStart, hostnameEnd);
+  if (rawHostname !== parsed.hostname) return false;
+
+  const hostname = parsed.hostname;
+  if (!CONTAINER_HOSTNAME_RE.test(hostname) && !HOST_GATEWAY_ALLOWLIST.has(hostname)) {
+    return false;
+  }
+
+  if (parsed.pathname !== '/') return false;
+  if (parsed.search !== '') return false;
+  if (parsed.hash !== '') return false;
+  if (parsed.username !== '' || parsed.password !== '') return false;
+
+  return true;
+}

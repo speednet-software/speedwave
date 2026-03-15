@@ -1,5 +1,5 @@
 name: 'Download nerdctl-full'
-description: 'Downloads and extracts the nerdctl-full bundle for Linux AppImage bundling'
+description: 'Downloads and extracts the nerdctl-full bundle for Linux .deb bundling'
 inputs:
   arch:
     description: 'Architecture (amd64 or arm64)'

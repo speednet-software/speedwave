@@ -5,7 +5,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import http from 'node:http';
 import { createToolDefinitions } from './tools/index.js';
-import { createMCPServer } from '../../shared/dist/index.js';
+import { createMCPServer } from '@speedwave/mcp-shared';
 
 // Mock the platform runner so tests don't need real binaries
 vi.mock('./platform-runner.js', () => ({

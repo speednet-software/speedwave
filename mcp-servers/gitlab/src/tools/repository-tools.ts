@@ -2,13 +2,16 @@
  * Repository Tools - 3 tools for GitLab repository operations
  */
 
-import { Tool, ToolDefinition, jsonResult, errorResult } from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition, jsonResult, errorResult } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
 
 const getTreeTool: Tool = {
   name: 'getTree',
   description: 'Get repository file tree',
+  category: 'read',
+  keywords: ['gitlab', 'tree', 'files', 'repository', 'ls'],
+  example: 'const tree = await gitlab.getTree({ project_id: "speedwave/core", path: "src" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -20,11 +23,46 @@ const getTreeTool: Tool = {
     },
     required: ['project_id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      tree: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            name: { type: 'string' },
+            type: { type: 'string' },
+            path: { type: 'string' },
+            mode: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'List root directory',
+      input: { project_id: 'my-group/my-project' },
+    },
+    {
+      description: 'List specific path',
+      input: { project_id: 'my-group/my-project', path: 'src', ref: 'develop' },
+    },
+  ],
 };
 
 const getFileTool: Tool = {
   name: 'getFile',
   description: 'Get file content from repository',
+  category: 'read',
+  keywords: ['gitlab', 'file', 'content', 'read', 'cat'],
+  example:
+    'const file = await gitlab.getFile({ project_id: "speedwave/core", file_path: "README.md" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -34,11 +72,48 @@ const getFileTool: Tool = {
     },
     required: ['project_id', 'file_path'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      file: {
+        type: 'object',
+        properties: {
+          file_name: { type: 'string' },
+          file_path: { type: 'string' },
+          size: { type: 'number' },
+          encoding: { type: 'string' },
+          content: { type: 'string' },
+          ref: { type: 'string' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Get file from default branch',
+      input: { project_id: 'my-group/my-project', file_path: 'package.json' },
+    },
+    {
+      description: 'Get file from specific branch',
+      input: {
+        project_id: 'my-group/my-project',
+        file_path: 'src/index.ts',
+        ref: 'develop',
+      },
+    },
+  ],
 };
 
 const getBlameTool: Tool = {
   name: 'getBlame',
   description: 'Get git blame for a file',
+  category: 'read',
+  keywords: ['gitlab', 'blame', 'annotate', 'history', 'git'],
+  example:
+    'const blame = await gitlab.getBlame({ project_id: "speedwave/core", file_path: "src/index.ts" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -48,6 +123,30 @@ const getBlameTool: Tool = {
     },
     required: ['project_id', 'file_path'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      blame: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            commit: { type: 'object' },
+            lines: { type: 'array' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Get blame for file',
+      input: { project_id: 'my-group/my-project', file_path: 'src/main.js' },
+    },
+  ],
 };
 
 /**

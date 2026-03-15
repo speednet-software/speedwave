@@ -16,6 +16,8 @@ describe('SetupWizardComponent', () => {
     mockTauri = new MockTauriService();
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
+        case 'get_platform':
+          return 'macos';
         case 'check_runtime':
           return 'NotReady';
         case 'init_vm':
@@ -95,6 +97,7 @@ describe('SetupWizardComponent', () => {
   it('should show error on step failure and allow retry', async () => {
     let callCount = 0;
     mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_platform') return 'macos';
       if (cmd === 'check_runtime') {
         callCount++;
         if (callCount === 1) throw new Error('runtime check failed');
@@ -115,6 +118,7 @@ describe('SetupWizardComponent', () => {
 
   it('should show error when createProject fails', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_platform') return 'macos';
       if (cmd === 'create_project') throw new Error('project creation failed');
       if (cmd === 'check_runtime') return 'NotReady';
       return undefined;
@@ -127,6 +131,38 @@ describe('SetupWizardComponent', () => {
 
     expect(component.error).toContain('project creation failed');
     expect(component.steps[3].status).toBe('error');
+  });
+
+  it('should set platform-specific step descriptions for macOS', async () => {
+    await fixture.whenStable();
+    expect(component.steps[0].description).toBe('Verify Lima / nerdctl');
+    expect(component.steps[1].description).toBe('Create and start the Lima VM');
+  });
+
+  it('should set platform-specific step descriptions for windows', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_platform') return 'windows';
+      if (cmd === 'check_runtime') return 'NotReady';
+      return undefined;
+    };
+    const winFixture = TestBed.createComponent(SetupWizardComponent);
+    winFixture.detectChanges();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(winFixture.componentInstance.steps[0].description).toBe('Verify WSL2 / nerdctl');
+    expect(winFixture.componentInstance.steps[1].description).toBe('Set up WSL2 distribution');
+  });
+
+  it('should set platform-specific step descriptions for linux', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_platform') return 'linux';
+      if (cmd === 'check_runtime') return 'NotReady';
+      return undefined;
+    };
+    const linFixture = TestBed.createComponent(SetupWizardComponent);
+    linFixture.detectChanges();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(linFixture.componentInstance.steps[0].description).toBe('Verify nerdctl (rootless)');
+    expect(linFixture.componentInstance.steps[1].description).toBe('Set up rootless containerd');
   });
 
   it('should return to welcome phase on backToWelcome', async () => {

@@ -17,6 +17,9 @@ Desktop.ini
 *.swo
 *~
 
+# Claude Code
+.claude/*.lock
+
 # Environment / secrets
 .env
 .env.*
@@ -47,8 +50,6 @@ coverage/
 *.exe
 *.msi
 *.deb
-*.rpm
-*.AppImage
 
 # Bundled Lima binaries (downloaded by `make download-lima`)
 desktop/src-tauri/lima/
@@ -60,3 +61,4 @@ desktop/src-tauri/nodejs/
 # Bundled container build context and mcp-os (copied before Tauri build)
 desktop/src-tauri/build-context/
 desktop/src-tauri/mcp-os/
+.e2e-artifacts/

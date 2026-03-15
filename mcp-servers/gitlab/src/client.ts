@@ -13,7 +13,7 @@
  */
 
 import { Gitlab } from '@gitbeaker/rest';
-import { loadToken, ts } from '../../shared/dist/index.js';
+import { loadToken, ts } from '@speedwave/mcp-shared';
 import fs from 'fs/promises';
 
 //═══════════════════════════════════════════════════════════════════════════════

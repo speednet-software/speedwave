@@ -9,8 +9,7 @@
  */
 
 import { WebClient } from '@slack/web-api';
-import { ToolHandler, ToolsCallResult, loadToken } from '@speedwave/mcp-shared';
-import { ts } from '../../shared/dist/index.js';
+import { ToolHandler, ToolsCallResult, loadToken, ts } from '@speedwave/mcp-shared';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Helper Functions & Types

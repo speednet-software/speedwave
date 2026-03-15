@@ -224,6 +224,14 @@ export interface Tool {
     /** Example input parameters */
     input: Record<string, unknown>;
   }>;
+  /** Tool category for audit logging: read, write, or delete */
+  category?: 'read' | 'write' | 'delete';
+  /** Search keywords for tool discovery */
+  keywords?: string[];
+  /** Usage example showing how to call the tool */
+  example?: string;
+  /** JSON Schema describing the tool's output structure */
+  outputSchema?: Record<string, unknown>;
 }
 
 /**

@@ -4,18 +4,11 @@
 # Stubs out 'curl' and 'bash' execution to avoid network calls.
 
 INSTALL_SCRIPT="$BATS_TEST_DIRNAME/../../containers/install-claude.sh"
+DEFAULTS_RS="$BATS_TEST_DIRNAME/../../crates/speedwave-runtime/src/defaults.rs"
 
-# Portable SHA256: same logic as install-claude.sh
-compute_sha256() {
-    if command -v sha256sum &>/dev/null; then
-        sha256sum "$1" | awk '{print $1}'
-    elif command -v shasum &>/dev/null; then
-        shasum -a 256 "$1" | awk '{print $1}'
-    else
-        echo "FATAL: no sha256sum or shasum" >&2
-        exit 1
-    fi
-}
+# Extract pinned version from defaults.rs (SSOT) — avoids hardcoding "2.1.76" in tests.
+PINNED_VERSION="$(grep 'pub const CLAUDE_VERSION' "$DEFAULTS_RS" | sed 's/.*"\(.*\)".*/\1/')"
+[[ -n "$PINNED_VERSION" ]] || { echo "ERROR: could not extract CLAUDE_VERSION from defaults.rs" >&2; exit 1; }
 
 setup() {
     TEST_HOME="$(mktemp -d)"
@@ -51,55 +44,13 @@ teardown() {
 }
 
 # ---------------------------------------------------------------------------
-# SHA256 verification — checksum match (success)
+# Version argument is required — no default
 # ---------------------------------------------------------------------------
 
-@test "install-claude.sh verifies checksum and succeeds on match" {
-    # curl stub writes known content; compute its SHA256
-    local probe
-    probe="$(mktemp)"
-    # Simulate what curl stub writes
-    printf '#!/bin/bash\necho "installed $1"\n' > "$probe"
-    local expected_sha
-    expected_sha="$(compute_sha256 "$probe")"
-    rm -f "$probe"
-
-    export CLAUDE_INSTALLER_SHA256="$expected_sha"
-    run bash "$INSTALL_SCRIPT" "latest"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"Installer checksum verified: $expected_sha"* ]]
-    [[ "$output" == *"installed latest"* ]]
-}
-
-# ---------------------------------------------------------------------------
-# SHA256 verification — checksum mismatch (failure)
-# ---------------------------------------------------------------------------
-
-@test "install-claude.sh fails on checksum mismatch" {
-    export CLAUDE_INSTALLER_SHA256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    run bash "$INSTALL_SCRIPT" "latest"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"SECURITY: installer checksum mismatch!"* ]]
-    [[ "$output" == *"expected: $CLAUDE_INSTALLER_SHA256"* ]]
-    [[ "$output" == *"actual:"* ]]
-    # Must NOT contain "installed" — the installer should not have run
-    [[ "$output" != *"installed latest"* ]]
-}
-
-# ---------------------------------------------------------------------------
-# SHA256 verification — skipped when empty (opt-in, backwards-compatible)
-# ---------------------------------------------------------------------------
-
-@test "install-claude.sh warns and skips verification when CLAUDE_INSTALLER_SHA256 is empty" {
-    export CLAUDE_INSTALLER_SHA256=""
-    run bash "$INSTALL_SCRIPT" "latest"
-    [ "$status" -eq 0 ]
-    # Should NOT print verification message
-    [[ "$output" != *"Installer checksum verified"* ]]
-    # Should print warning about skipping verification
-    [[ "$output" == *"WARNING: CLAUDE_INSTALLER_SHA256 not set"* ]]
-    # Should still install
-    [[ "$output" == *"installed latest"* ]]
+@test "install-claude.sh fails without version argument" {
+    run bash "$INSTALL_SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Usage: install-claude.sh"* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -107,17 +58,15 @@ teardown() {
 # ---------------------------------------------------------------------------
 
 @test "install-claude.sh passes version argument to installer" {
-    unset CLAUDE_INSTALLER_SHA256
-    run bash "$INSTALL_SCRIPT" "stable"
+    run bash "$INSTALL_SCRIPT" "$PINNED_VERSION"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"installed stable"* ]]
+    [[ "$output" == *"installed ${PINNED_VERSION}"* ]]
 }
 
-@test "install-claude.sh defaults version to latest" {
-    unset CLAUDE_INSTALLER_SHA256
-    run bash "$INSTALL_SCRIPT"
+@test "install-claude.sh passes arbitrary semver to installer" {
+    run bash "$INSTALL_SCRIPT" "3.0.0"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"installed latest"* ]]
+    [[ "$output" == *"installed 3.0.0"* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -131,8 +80,7 @@ exit 1
 EOF
     chmod +x "$STUBS_DIR/curl"
 
-    unset CLAUDE_INSTALLER_SHA256
-    run bash "$INSTALL_SCRIPT" "latest"
+    run bash "$INSTALL_SCRIPT" "$PINNED_VERSION"
     [ "$status" -ne 0 ]
 }
 
@@ -141,23 +89,10 @@ EOF
 # ---------------------------------------------------------------------------
 
 @test "install-claude.sh cleans up temp file on success" {
-    unset CLAUDE_INSTALLER_SHA256
-
-    run bash "$INSTALL_SCRIPT" "latest"
+    run bash "$INSTALL_SCRIPT" "$PINNED_VERSION"
     [ "$status" -eq 0 ]
 
     # The install dir should have no leftover install-claude.* files
-    local leftover
-    leftover="$(ls "$HOME/.cache/speedwave-install"/install-claude.* 2>/dev/null | wc -l || echo 0)"
-    [ "$leftover" -eq 0 ]
-}
-
-@test "install-claude.sh cleans up temp file on failure (checksum mismatch)" {
-    export CLAUDE_INSTALLER_SHA256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-
-    run bash "$INSTALL_SCRIPT" "latest"
-    [ "$status" -eq 1 ]
-
     local leftover
     leftover="$(ls "$HOME/.cache/speedwave-install"/install-claude.* 2>/dev/null | wc -l || echo 0)"
     [ "$leftover" -eq 0 ]
@@ -177,4 +112,18 @@ EOF
 
 @test "install-claude.sh downloads from claude.ai" {
     grep -q 'INSTALLER_URL="https://claude.ai/install.sh"' "$INSTALL_SCRIPT"
+}
+
+# ---------------------------------------------------------------------------
+# Containerfile.claude does not contain curl | bash (DRY regression guard)
+# ---------------------------------------------------------------------------
+
+@test "Containerfile.claude does not pipe curl to bash" {
+    local containerfile="$BATS_TEST_DIRNAME/../../containers/Containerfile.claude"
+    ! grep -q 'curl.*|.*bash' "$containerfile"
+}
+
+@test "Containerfile.claude uses install-claude.sh" {
+    local containerfile="$BATS_TEST_DIRNAME/../../containers/Containerfile.claude"
+    grep -q 'install-claude.sh' "$containerfile"
 }

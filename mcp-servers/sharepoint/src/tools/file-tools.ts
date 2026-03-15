@@ -3,7 +3,7 @@
  */
 
 import * as fs from 'fs/promises';
-import { Tool, ToolDefinition, ts } from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition, ts } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
 import { SharePointClient } from '../client.js';
 import { handleSyncDirectory } from './sync-tools.js';
@@ -47,6 +47,39 @@ const listFileIdsTool: Tool = {
       path: { type: 'string', description: 'Folder path (default: /)' },
     },
   },
+  category: 'read',
+  keywords: ['sharepoint', 'files', 'list', 'directory', 'folder'],
+  example: 'const files = await sharepoint.listFileIds({ path: "documents" })',
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      files: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            size: { type: 'number', description: 'File size in bytes' },
+            lastModified: { type: 'string', description: 'ISO 8601 timestamp' },
+            isFolder: { type: 'boolean' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: list root directory',
+      input: {},
+    },
+    {
+      description: 'Full: list specific subdirectory',
+      input: { path: 'documents/reports/2024' },
+    },
+  ],
 };
 
 const getFileFullTool: Tool = {
@@ -59,6 +92,37 @@ const getFileFullTool: Tool = {
     },
     required: ['file_id'],
   },
+  category: 'read',
+  keywords: ['sharepoint', 'file', 'get', 'detail', 'download', 'metadata'],
+  example: 'const file = await sharepoint.getFileFull({ file_id: "abc123", include: ["content"] })',
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      file: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          name: { type: 'string' },
+          size: { type: 'number' },
+          content: { type: 'string', description: 'File content (if requested)' },
+          metadata: { type: 'object', description: 'File metadata' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: get file metadata only',
+      input: { file_id: 'abc123' },
+    },
+    {
+      description: 'Full: get file with content',
+      input: { file_id: 'document.pdf', include: ['content', 'metadata'] },
+    },
+  ],
 };
 
 const syncTool: Tool = {
@@ -108,6 +172,77 @@ const syncTool: Tool = {
     // Note: required validation moved to handler after normalization
     // to support both snake_case and camelCase
   },
+  category: 'write',
+  keywords: ['sharepoint', 'sync', 'upload', 'download', 'file', 'onedrive'],
+  example: `// Directory sync (with mode):
+await sharepoint.sync({ local_path: "/home/speedwave/.claude/context", mode: "pull" });
+
+// File sync (without mode):
+await sharepoint.sync({ local_path: "/path/to/file.json", sharepoint_path: "context/file.json" });`,
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      synced_files: { type: 'number', description: 'Number of files synced' },
+      conflicts: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            path: { type: 'string' },
+            reason: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Upload single file (FILE MODE - no mode param)',
+      input: {
+        local_path: '/home/speedwave/.claude/context/opportunities/acme/state.json',
+        sharepoint_path: 'context/opportunities/acme/state.json',
+      },
+    },
+    {
+      description: 'Upload file only if not exists (FILE MODE)',
+      input: {
+        local_path: '/home/speedwave/.claude/context/opportunities/acme/state.json',
+        sharepoint_path: 'context/opportunities/acme/state.json',
+        create_only: true,
+      },
+    },
+    {
+      description: 'Upload file with ETag conflict check (FILE MODE)',
+      input: {
+        local_path: '/home/speedwave/.claude/context/opportunities/acme/state.json',
+        sharepoint_path: 'context/opportunities/acme/state.json',
+        expected_etag: '"abc123"',
+      },
+    },
+    {
+      description: 'Pull from SharePoint (DIRECTORY MODE)',
+      input: { local_path: '/home/speedwave/.claude/context', mode: 'pull' },
+    },
+    {
+      description: 'Two-way sync (DIRECTORY MODE)',
+      input: { local_path: '/home/speedwave/.claude/context', mode: 'two_way' },
+    },
+    {
+      description: 'Push to SharePoint (DIRECTORY MODE)',
+      input: { local_path: '/home/speedwave/.claude/context', mode: 'push' },
+    },
+    {
+      description: 'Dry run to preview changes (DIRECTORY MODE)',
+      input: {
+        local_path: '/home/speedwave/.claude/context',
+        mode: 'two_way',
+        dry_run: true,
+      },
+    },
+  ],
 };
 
 //═══════════════════════════════════════════════════════════════════════════════

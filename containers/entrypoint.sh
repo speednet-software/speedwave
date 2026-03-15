@@ -11,32 +11,14 @@ export TERM="${TERM:-xterm-256color}"
 # Fallback: if missing (e.g. custom image), install at runtime.
 export PATH="/usr/local/bin:${HOME}/.local/bin:${PATH}"
 
-CLAUDE_VERSION="${CLAUDE_VERSION:-latest}"
+CLAUDE_VERSION="${CLAUDE_VERSION:?CLAUDE_VERSION env var is required}"
 
 # Resources mount point — overridable for testing
 SPEEDWAVE_RESOURCES="${SPEEDWAVE_RESOURCES:-/speedwave/resources}"
 
 if ! command -v claude &> /dev/null; then
-    echo "Installing Claude Code (${CLAUDE_VERSION})..."
-    INSTALLER=$(mktemp)
-    curl -fsSL https://claude.ai/install.sh -o "$INSTALLER"
-    # SHA256 verification — update hash when CLAUDE_VERSION changes
-    EXPECTED_SHA256="${CLAUDE_INSTALLER_SHA256:-}"
-    if [ -n "$EXPECTED_SHA256" ]; then
-        ACTUAL_SHA256=$(sha256sum "$INSTALLER" | cut -d' ' -f1)
-        if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
-            echo "FATAL: install.sh SHA256 mismatch!" >&2
-            echo "  expected: $EXPECTED_SHA256" >&2
-            echo "  actual:   $ACTUAL_SHA256" >&2
-            rm -f "$INSTALLER"
-            exit 1
-        fi
-        echo "SHA256 verified: $ACTUAL_SHA256"
-    else
-        echo "WARNING: CLAUDE_INSTALLER_SHA256 not set — skipping verification"
-    fi
-    bash "$INSTALLER" "${CLAUDE_VERSION}"
-    rm -f "$INSTALLER"
+    echo "Claude Code not found — installing via install-claude.sh (${CLAUDE_VERSION})..."
+    /usr/local/bin/install-claude.sh "${CLAUDE_VERSION}"
 fi
 
 # Ensure ~/.local/bin is in PATH for interactive shells (nerdctl exec runs bash).
@@ -56,10 +38,28 @@ fi
 # Ensure ~/.claude exists before symlinking anything
 mkdir -p "${HOME}/.claude"
 
-# Symlink core resource directories (skills, commands, agents, hooks) from read-only mount
+# Determine if plugins env var is set — if so, we must use per-entry symlinks
+# (writable local dir) instead of whole-directory symlinks (which point into
+# a read-only mount and cannot be extended by plugin entries).
+HAS_PLUGINS=false
+if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
+    HAS_PLUGINS=true
+fi
+
+# Symlink core resource directories (skills, commands, agents, hooks) from read-only mount.
+# When plugins are present: create a real directory and symlink each entry individually,
+# so plugin entries can be added alongside core entries.
+# When no plugins: symlink the whole directory (simpler, no per-entry overhead).
 for resource_type in skills commands agents hooks; do
     if [ -d "${SPEEDWAVE_RESOURCES}/${resource_type}" ]; then
-        ln -sfn "${SPEEDWAVE_RESOURCES}/${resource_type}" "${HOME}/.claude/${resource_type}"
+        if [ "${HAS_PLUGINS}" = true ]; then
+            mkdir -p "${HOME}/.claude/${resource_type}"
+            for entry in "${SPEEDWAVE_RESOURCES}/${resource_type}"/*; do
+                [ -e "${entry}" ] && ln -sfn "${entry}" "${HOME}/.claude/${resource_type}/$(basename "${entry}")"
+            done
+        else
+            ln -sfn "${SPEEDWAVE_RESOURCES}/${resource_type}" "${HOME}/.claude/${resource_type}"
+        fi
     fi
 done
 
@@ -78,16 +78,26 @@ if [ -f "${SPEEDWAVE_RESOURCES}/output-styles/Speedwave.md" ]; then
     ln -sf "${SPEEDWAVE_RESOURCES}/output-styles/Speedwave.md" "${HOME}/.claude/output-styles/Speedwave.md"
 fi
 
-# Symlink addon resources if any addons are configured
-if [ -n "${SPEEDWAVE_ADDONS:-}" ]; then
-    for addon in ${SPEEDWAVE_ADDONS//,/ }; do
-        addon_path="/speedwave/addons/${addon}"
-        if [ -d "${addon_path}" ]; then
-            for resource_type in commands agents skills; do
-                if [ -d "${addon_path}/${resource_type}" ]; then
+# Symlink plugin resources — directories were already created as real dirs above
+if [ "${HAS_PLUGINS}" = true ]; then
+    for plugin in ${SPEEDWAVE_PLUGINS//,/ }; do
+        if ! echo "${plugin}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
+            echo "WARNING: Skipping invalid plugin slug: ${plugin}" >&2
+            continue
+        fi
+        plugin_path="/speedwave/plugins/${plugin}"
+        if [ -d "${plugin_path}" ]; then
+            for resource_type in skills commands agents hooks; do
+                if [ -d "${plugin_path}/${resource_type}" ]; then
                     mkdir -p "${HOME}/.claude/${resource_type}"
-                    for file in "${addon_path}/${resource_type}"/*; do
-                        [ -f "${file}" ] && ln -sf "${file}" "${HOME}/.claude/${resource_type}/$(basename "${file}")"
+                    for entry in "${plugin_path}/${resource_type}"/*; do
+                        if [ -e "${entry}" ]; then
+                            target="${HOME}/.claude/${resource_type}/$(basename "${entry}")"
+                            if [ -L "${target}" ] && [ "$(readlink "${target}")" != "${entry}" ]; then
+                                echo "WARNING: plugin '${plugin}' overwrites ${resource_type}/$(basename "${entry}") from another plugin" >&2
+                            fi
+                            ln -sfn "${entry}" "${target}"
+                        fi
                     done
                 fi
             done

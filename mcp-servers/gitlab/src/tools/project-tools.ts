@@ -2,13 +2,16 @@
  * Project Tools - 3 tools for GitLab project operations
  */
 
-import { Tool, ToolDefinition, jsonResult, errorResult } from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition, jsonResult, errorResult } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
 
 const listProjectIdsTool: Tool = {
   name: 'listProjectIds',
   description: 'List project IDs and paths. Use get_project_full for details.',
+  category: 'read',
+  keywords: ['gitlab', 'projects', 'list', 'repositories', 'repos', 'ids'],
+  example: 'const { projects, count } = await gitlab.listProjectIds({ search: "speedwave" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -18,11 +21,49 @@ const listProjectIdsTool: Tool = {
       limit: { type: 'number', description: 'Max results (default 100)' },
     },
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      projects: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'number' },
+            name: { type: 'string' },
+            path_with_namespace: { type: 'string' },
+            web_url: { type: 'string' },
+            default_branch: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: list all projects',
+      input: {},
+    },
+    {
+      description: 'Partial: search projects',
+      input: { search: 'backend' },
+    },
+    {
+      description: 'Full: owned projects only',
+      input: { search: 'api', owned: true, limit: 50 },
+    },
+  ],
 };
 
 const getProjectFullTool: Tool = {
   name: 'getProjectFull',
   description: 'Get complete project data. No truncation.',
+  category: 'read',
+  keywords: ['gitlab', 'project', 'show', 'get', 'detail', 'full'],
+  example: 'const project = await gitlab.getProjectFull({ project_id: "speedwave/core" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -35,11 +76,46 @@ const getProjectFullTool: Tool = {
     },
     required: ['project_id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      project: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' },
+          name: { type: 'string' },
+          description: { type: 'string' },
+          path_with_namespace: { type: 'string' },
+          web_url: { type: 'string' },
+          default_branch: { type: 'string' },
+          visibility: { type: 'string' },
+          created_at: { type: 'string' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'By path',
+      input: { project_id: 'my-group/my-project' },
+    },
+    {
+      description: 'By numeric ID',
+      input: { project_id: 123 },
+    },
+  ],
 };
 
 const searchCodeTool: Tool = {
   name: 'searchCode',
   description: 'Search for code in GitLab projects',
+  category: 'read',
+  keywords: ['gitlab', 'search', 'code', 'find', 'grep', 'regex'],
+  example:
+    'const results = await gitlab.searchCode({ query: "function authenticate", project_id: "speedwave/core" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -51,6 +127,42 @@ const searchCodeTool: Tool = {
     },
     required: ['query'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      results: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            filename: { type: 'string' },
+            path: { type: 'string' },
+            ref: { type: 'string', description: 'Branch name' },
+            startline: { type: 'number' },
+            data: { type: 'string', description: 'Matched content' },
+            project_id: { type: 'number' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: search all projects',
+      input: { query: 'TODO' },
+    },
+    {
+      description: 'Partial: search in specific project',
+      input: { query: 'function authenticate', project_id: 'my-group/my-project' },
+    },
+    {
+      description: 'Full: search with scope',
+      input: { query: 'async.*error', project_id: 'backend-api', scope: 'blobs' },
+    },
+  ],
 };
 
 /**

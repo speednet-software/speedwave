@@ -2,13 +2,17 @@
  * Release Tools - 3 tools for GitLab tags and releases
  */
 
-import { Tool, ToolDefinition, jsonResult, errorResult } from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition, jsonResult, errorResult } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
 
 const createTagTool: Tool = {
   name: 'createTag',
   description: 'Create a new Git tag',
+  category: 'write',
+  keywords: ['gitlab', 'tag', 'create', 'release', 'version', 'git'],
+  example:
+    'const tag = await gitlab.createTag({ project_id: "speedwave/core", tag_name: "v1.0.0", ref: "main", message: "Release v1.0.0 - Initial stable release" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -19,11 +23,49 @@ const createTagTool: Tool = {
     },
     required: ['project_id', 'tag_name', 'ref'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      tag: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          message: { type: 'string' },
+          target: { type: 'string', description: 'Commit SHA' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: lightweight tag from main',
+      input: { project_id: 'my-group/my-project', tag_name: 'v1.0.0', ref: 'main' },
+    },
+    {
+      description: 'Partial: tag from specific branch',
+      input: { project_id: 'web-app', tag_name: 'v2.1.0', ref: 'develop' },
+    },
+    {
+      description: 'Full: annotated tag with message',
+      input: {
+        project_id: 'backend-api',
+        tag_name: 'v1.5.0',
+        ref: 'feature/user-auth',
+        message: 'Release v1.5.0 - New authentication system',
+      },
+    },
+  ],
 };
 
 const deleteTagTool: Tool = {
   name: 'deleteTag',
   description: 'Delete a Git tag from the repository',
+  category: 'delete',
+  keywords: ['gitlab', 'tag', 'delete', 'remove', 'git', 'version', 'release'],
+  example: 'await gitlab.deleteTag({ project_id: "speedwave/core", tag_name: "v1.0.0" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -32,11 +74,34 @@ const deleteTagTool: Tool = {
     },
     required: ['project_id', 'tag_name'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      message: { type: 'string' },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Delete tag by project path',
+      input: { project_id: 'my-group/my-project', tag_name: 'v1.0.0' },
+    },
+    {
+      description: 'Delete tag by project ID',
+      input: { project_id: 123, tag_name: 'v0.0.1-test' },
+    },
+  ],
 };
 
 const createReleaseTool: Tool = {
   name: 'createRelease',
   description: 'Create a new release from a tag',
+  category: 'write',
+  keywords: ['gitlab', 'release', 'create', 'changelog', 'version', 'publish'],
+  example:
+    'const release = await gitlab.createRelease({ project_id: "speedwave/core", tag_name: "v1.0.0", name: "Initial Release", description: "## Changelog\\n- Feature: Authentication\\n- Feature: MCP integration" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -47,6 +112,43 @@ const createReleaseTool: Tool = {
     },
     required: ['project_id', 'tag_name'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      release: {
+        type: 'object',
+        properties: {
+          tag_name: { type: 'string' },
+          name: { type: 'string' },
+          description: { type: 'string' },
+          created_at: { type: 'string' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: create release with tag only',
+      input: { project_id: 'my-group/my-project', tag_name: 'v1.0.0' },
+    },
+    {
+      description: 'Partial: release with custom name',
+      input: { project_id: 'web-app', tag_name: 'v2.1.3', name: 'Security Update v2.1.3' },
+    },
+    {
+      description: 'Full: release with changelog',
+      input: {
+        project_id: 'backend-api',
+        tag_name: 'v1.5.0',
+        name: 'Release v1.5.0',
+        description:
+          '## Features\\n- New authentication flow\\n- API rate limiting\\n\\n## Bug Fixes\\n- Fixed memory leak in worker process',
+      },
+    },
+  ],
 };
 
 /**

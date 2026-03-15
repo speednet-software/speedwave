@@ -4,7 +4,7 @@
  * Central registry for all Slack tools following the domain-tools pattern.
  */
 
-import { ToolDefinition } from '../../../shared/dist/index.js';
+import { ToolDefinition } from '@speedwave/mcp-shared';
 import { SlackClients } from '../client.js';
 
 export { withValidation, ToolResult } from './validation.js';

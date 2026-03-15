@@ -1,5 +1,5 @@
 import * as acorn from 'acorn';
-import { ts } from '../../shared/dist/index.js';
+import { ts } from '@speedwave/mcp-shared';
 
 /**
  * Result of addAutoReturn function

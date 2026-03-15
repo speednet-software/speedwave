@@ -2,13 +2,17 @@
  * Commit Tools - 4 tools for GitLab commit operations
  */
 
-import { Tool, ToolDefinition, jsonResult, errorResult } from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition, jsonResult, errorResult } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
 
 const listBranchCommitsTool: Tool = {
   name: 'listBranchCommits',
   description: 'List commits on a specific branch',
+  category: 'read',
+  keywords: ['gitlab', 'commits', 'branch', 'history', 'log', 'git'],
+  example:
+    'const commits = await gitlab.listBranchCommits({ project_id: "speedwave/core", branch: "main" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -18,11 +22,53 @@ const listBranchCommitsTool: Tool = {
     },
     required: ['project_id', 'branch'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      commits: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Commit SHA' },
+            short_id: { type: 'string' },
+            title: { type: 'string' },
+            message: { type: 'string' },
+            author_name: { type: 'string' },
+            author_email: { type: 'string' },
+            authored_date: { type: 'string' },
+            web_url: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: list commits from main',
+      input: { project_id: 'my-group/my-project', branch: 'main' },
+    },
+    {
+      description: 'Partial: commits from develop branch',
+      input: { project_id: 'web-app', branch: 'develop' },
+    },
+    {
+      description: 'Full: limited commits from feature branch',
+      input: { project_id: 'backend-api', branch: 'feature/user-auth', limit: 50 },
+    },
+  ],
 };
 
 const listCommitsTool: Tool = {
   name: 'listCommits',
   description: 'List commits with filters',
+  category: 'read',
+  keywords: ['gitlab', 'commits', 'history', 'log', 'git'],
+  example:
+    'const commits = await gitlab.listCommits({ project_id: "speedwave/core", ref: "main", limit: 10 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -35,11 +81,50 @@ const listCommitsTool: Tool = {
     },
     required: ['project_id'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      commits: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            title: { type: 'string' },
+            message: { type: 'string' },
+            author_name: { type: 'string' },
+            created_at: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'List recent commits',
+      input: { project_id: 'my-group/my-project', ref: 'main' },
+    },
+    {
+      description: 'List commits for specific file',
+      input: {
+        project_id: 'my-group/my-project',
+        ref: 'main',
+        path: 'src/index.ts',
+      },
+    },
+  ],
 };
 
 const searchCommitsTool: Tool = {
   name: 'searchCommits',
   description: 'Search commits by message',
+  category: 'read',
+  keywords: ['gitlab', 'commits', 'search', 'find', 'git'],
+  example:
+    'const commits = await gitlab.searchCommits({ project_id: "speedwave/core", query: "fix bug" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -50,11 +135,41 @@ const searchCommitsTool: Tool = {
     },
     required: ['project_id', 'query'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      commits: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            title: { type: 'string' },
+            message: { type: 'string' },
+            author_name: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Search commits',
+      input: { project_id: 'my-group/my-project', query: 'refactor' },
+    },
+  ],
 };
 
 const getCommitDiffTool: Tool = {
   name: 'getCommitDiff',
   description: 'Get diff of a specific commit',
+  category: 'read',
+  keywords: ['gitlab', 'commit', 'diff', 'changes', 'files', 'git'],
+  example:
+    'const diff = await gitlab.getCommitDiff({ project_id: "speedwave/core", commit_sha: "abc123" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -63,6 +178,41 @@ const getCommitDiffTool: Tool = {
     },
     required: ['project_id', 'commit_sha'],
   },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      diffs: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            old_path: { type: 'string' },
+            new_path: { type: 'string' },
+            new_file: { type: 'boolean' },
+            deleted_file: { type: 'boolean' },
+            diff: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: get commit diff by short SHA',
+      input: { project_id: 'my-group/my-project', commit_sha: 'abc123' },
+    },
+    {
+      description: 'Partial: diff by full SHA',
+      input: { project_id: 'web-app', commit_sha: 'abc123def456789' },
+    },
+    {
+      description: 'Full: diff for specific project',
+      input: { project_id: 'backend-api', commit_sha: 'def456' },
+    },
+  ],
 };
 
 /**

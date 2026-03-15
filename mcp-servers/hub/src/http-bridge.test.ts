@@ -1,10 +1,9 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import {
   createGitLabBridge,
   createSlackBridge,
   createSharePointBridge,
   createRedmineBridge,
-  createGeminiBridge,
   createOsBridge,
   callWorker,
   isWorkerAvailable,
@@ -12,9 +11,19 @@ import {
   clearWorkerCache,
   parseServiceError,
   getRequestTimeout,
+  initializeAllBridges,
+  STARTUP_HEALTH_RETRIES,
+  STARTUP_RETRY_DELAYS_MS,
 } from './http-bridge.js';
-import { getServiceMethods } from './tool-registry.js';
+import {
+  getServiceMethods,
+  stopBackgroundRefresh,
+  TOOL_REGISTRY,
+  buildServiceBridge,
+} from './tool-registry.js';
 import { SERVICES } from './http-bridge.js';
+import { populateRegistryFromPolicies, _resetRegistryForTesting } from './test-helpers.js';
+import * as authTokens from './auth-tokens.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Tests for HTTP Bridge
@@ -26,6 +35,15 @@ import { SERVICES } from './http-bridge.js';
 //═══════════════════════════════════════════════════════════════════════════════
 
 describe('http-bridge', () => {
+  beforeAll(() => {
+    _resetRegistryForTesting();
+    populateRegistryFromPolicies();
+  });
+
+  afterAll(() => {
+    stopBackgroundRefresh();
+  });
+
   const savedEnv: Record<string, string | undefined> = {};
 
   beforeEach(() => {
@@ -272,7 +290,7 @@ describe('http-bridge', () => {
 
       const services = await getAvailableServices();
 
-      expect(services.length).toBe(6);
+      expect(services.length).toBe(5);
       expect(services).toContain('gitlab');
       expect(services).toContain('slack');
       expect(services).toContain('os');
@@ -292,7 +310,6 @@ describe('http-bridge', () => {
       expect(services).toContain('slack');
       expect(services).not.toContain('redmine');
       expect(services).not.toContain('sharepoint');
-      expect(services).not.toContain('gemini');
     });
   });
 
@@ -591,15 +608,6 @@ describe('http-bridge', () => {
     });
   });
 
-  describe('createGeminiBridge', () => {
-    it('should define all Gemini methods', () => {
-      const bridge = createGeminiBridge();
-
-      expect(bridge).toHaveProperty('chat');
-      expect(Object.keys(bridge).length).toBe(1);
-    });
-  });
-
   describe('createOsBridge', () => {
     it('should define all 25 OS methods', () => {
       const bridge = createOsBridge();
@@ -638,6 +646,98 @@ describe('http-bridge', () => {
       expect(bridge).toHaveProperty('createNote');
       expect(bridge).toHaveProperty('updateNote');
       expect(bridge).toHaveProperty('deleteNote');
+    });
+  });
+
+  describe('plugin service bridge', () => {
+    it('should create bridge for plugin service when registered', () => {
+      // Manually register a plugin service in the registry for testing
+      const mutableRegistry = TOOL_REGISTRY as Record<
+        string,
+        Record<string, Record<string, unknown>>
+      >;
+      mutableRegistry['presale'] = {
+        searchCustomers: {
+          name: 'searchCustomers',
+          service: 'presale',
+          category: 'read',
+          description: 'Search CRM customers',
+          inputSchema: { type: 'object', properties: {} },
+          keywords: ['crm'],
+          example: '',
+          deferLoading: false,
+        },
+      };
+
+      process.env.WORKER_PRESALE_URL = 'http://mcp-presale:4010';
+
+      const bridge = buildServiceBridge('presale', callWorker);
+
+      expect(bridge).toHaveProperty('searchCustomers');
+      expect(typeof bridge.searchCustomers).toBe('function');
+
+      // Cleanup
+      delete mutableRegistry['presale'];
+      delete process.env.WORKER_PRESALE_URL;
+    });
+
+    it('should create bridge for plugin service from ENABLED_SERVICES via initializeAllBridges', async () => {
+      vi.useFakeTimers();
+
+      // Register a plugin service in the registry
+      const mutableRegistry = TOOL_REGISTRY as Record<
+        string,
+        Record<string, Record<string, unknown>>
+      >;
+      mutableRegistry['analytics'] = {
+        runReport: {
+          name: 'runReport',
+          service: 'analytics',
+          category: 'read',
+          description: 'Run analytics report',
+          inputSchema: { type: 'object', properties: {} },
+          keywords: ['report'],
+          example: '',
+          deferLoading: false,
+        },
+      };
+
+      // Set ENABLED_SERVICES to include the plugin service
+      const origEnabled = process.env.ENABLED_SERVICES;
+      process.env.ENABLED_SERVICES = 'gitlab,analytics';
+      process.env.WORKER_ANALYTICS_URL = 'http://mcp-analytics:4020';
+
+      // Reset enabled services cache so new env value is picked up
+      const { resetServiceCaches } = await import('./tool-registry.js');
+      resetServiceCaches();
+
+      // Mock fetch for health checks — always fail
+      const fetchMock = vi.fn().mockResolvedValue({ ok: false });
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      // Run initializeAllBridges with fake timers to skip retry delays
+      const bridgesPromise = initializeAllBridges();
+      for (let i = 0; i < STARTUP_HEALTH_RETRIES; i++) {
+        await vi.advanceTimersByTimeAsync(STARTUP_RETRY_DELAYS_MS[i]);
+      }
+      const bridges = await bridgesPromise;
+
+      // Plugin service should have a bridge (not null)
+      expect(bridges['analytics']).not.toBeNull();
+      expect(bridges['analytics']).toHaveProperty('runReport');
+      expect(typeof bridges['analytics']!.runReport).toBe('function');
+
+      // Cleanup
+      delete mutableRegistry['analytics'];
+      delete process.env.WORKER_ANALYTICS_URL;
+      if (origEnabled === undefined) {
+        delete process.env.ENABLED_SERVICES;
+      } else {
+        process.env.ENABLED_SERVICES = origEnabled;
+      }
+      resetServiceCaches();
+      vi.useRealTimers();
+      vi.restoreAllMocks();
     });
   });
 
@@ -811,6 +911,156 @@ describe('http-bridge', () => {
     });
   });
 
+  describe('callWorker - Bearer auth header injection', () => {
+    let fetchMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      fetchMock = vi.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('sends Authorization: Bearer header when auth token exists', async () => {
+      vi.spyOn(authTokens, 'getAuthToken').mockReturnValue('test-secret-token');
+
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: '123',
+          result: { content: [{ type: 'text', text: '{"ok":true}' }] },
+        }),
+      });
+
+      await callWorker('gitlab', 'list_branches', { project_id: '1' });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining('gitlab'),
+        expect.objectContaining({
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer test-secret-token',
+          },
+        })
+      );
+    });
+
+    it('does not send Authorization header when no auth token', async () => {
+      vi.spyOn(authTokens, 'getAuthToken').mockReturnValue(undefined);
+
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: '123',
+          result: { content: [{ type: 'text', text: '{"ok":true}' }] },
+        }),
+      });
+
+      await callWorker('gitlab', 'list_branches', { project_id: '1' });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining('gitlab'),
+        expect.objectContaining({
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+      // Verify no Authorization key in headers
+      const calledHeaders = fetchMock.mock.calls[0][1].headers;
+      expect(calledHeaders).not.toHaveProperty('Authorization');
+    });
+  });
+
+  describe('SSRF protection', () => {
+    let fetchMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      clearWorkerCache();
+      fetchMock = vi.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('should reject cloud metadata URL in callWorker', async () => {
+      process.env.WORKER_GITLAB_URL = 'http://169.254.169.254:80';
+
+      await expect(callWorker('gitlab', 'list_branches', {})).rejects.toThrow(
+        'Unknown service: gitlab'
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('should reject external hostname in isWorkerAvailable', async () => {
+      process.env.WORKER_SLACK_URL = 'http://evil.com:4001';
+
+      const result = await isWorkerAvailable('slack');
+
+      expect(result).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('should reject URL with pathname in callWorker', async () => {
+      process.env.WORKER_REDMINE_URL = 'http://mcp-redmine:4001/admin/exec';
+
+      await expect(callWorker('redmine', 'list_issues', {})).rejects.toThrow(
+        'Unknown service: redmine'
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('should accept host gateway URL for OS worker', async () => {
+      process.env.WORKER_OS_URL = 'http://host.lima.internal:4007';
+
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: '123',
+          result: {
+            content: [{ type: 'text', text: '{"ok":true}' }],
+          },
+        }),
+      });
+
+      const result = await callWorker('os', 'listReminders', {});
+
+      expect(fetchMock).toHaveBeenCalled();
+      expect(result).toEqual({ ok: true });
+    });
+
+    it('should pass redirect: error in callWorker fetch', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: '123',
+          result: {
+            content: [{ type: 'text', text: '{}' }],
+          },
+        }),
+      });
+
+      await callWorker('gitlab', 'test', {});
+
+      expect(fetchMock.mock.calls[0][1].redirect).toBe('error');
+    });
+
+    it('should pass redirect: error in isWorkerAvailable fetch', async () => {
+      fetchMock.mockResolvedValue({ ok: true });
+
+      await isWorkerAvailable('gitlab');
+
+      expect(fetchMock.mock.calls[0][1].redirect).toBe('error');
+    });
+  });
+
   describe('parseServiceError', () => {
     it('should extract GitBeaker cause.description', () => {
       const error = { cause: { description: 'Invalid parameter: ref' } };
@@ -921,6 +1171,118 @@ describe('http-bridge', () => {
         },
       };
       expect(parseServiceError(error, 'api')).toBe('api: Specific error message');
+    });
+  });
+
+  describe('startup health check retry', () => {
+    let fetchMock: ReturnType<typeof vi.fn>;
+    let origEnabled: string | undefined;
+
+    beforeEach(async () => {
+      vi.useFakeTimers();
+      clearWorkerCache();
+      fetchMock = vi.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      // Enable only gitlab for simpler test setup
+      origEnabled = process.env.ENABLED_SERVICES;
+      process.env.ENABLED_SERVICES = 'gitlab';
+      process.env.WORKER_GITLAB_URL = 'http://mcp-gitlab:3004';
+      const { resetServiceCaches } = await import('./tool-registry.js');
+      resetServiceCaches();
+    });
+
+    afterEach(async () => {
+      if (origEnabled === undefined) {
+        delete process.env.ENABLED_SERVICES;
+      } else {
+        process.env.ENABLED_SERVICES = origEnabled;
+      }
+      delete process.env.WORKER_GITLAB_URL;
+      const { resetServiceCaches } = await import('./tool-registry.js');
+      resetServiceCaches();
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    it('retries startup health checks with backoff when worker is not ready', async () => {
+      // Fail first 3 attempts, succeed on 4th (attempt index 3)
+      let callCount = 0;
+      fetchMock.mockImplementation(() => {
+        callCount++;
+        if (callCount <= 3) return Promise.reject(new Error('Connection refused'));
+        return Promise.resolve({ ok: true });
+      });
+
+      const bridgesPromise = initializeAllBridges();
+      for (let i = 0; i < STARTUP_HEALTH_RETRIES; i++) {
+        await vi.advanceTimersByTimeAsync(STARTUP_RETRY_DELAYS_MS[i]);
+      }
+      await bridgesPromise;
+
+      // Should have retried — 4 total calls (3 failures + 1 success)
+      expect(fetchMock.mock.calls.length).toBe(4);
+    });
+
+    it('succeeds on first attempt without retrying', async () => {
+      fetchMock.mockResolvedValue({ ok: true });
+
+      const bridgesPromise = initializeAllBridges();
+      await vi.advanceTimersByTimeAsync(0);
+      await bridgesPromise;
+
+      // Checked exactly once — no retries needed
+      expect(fetchMock.mock.calls.length).toBe(1);
+      expect(fetchMock.mock.calls[0][0]).toContain('/health');
+    });
+
+    it('logs at info level (not warn) during startup retries', async () => {
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fetchMock.mockRejectedValue(new Error('Connection refused'));
+
+      const bridgesPromise = initializeAllBridges();
+      for (let i = 0; i < STARTUP_HEALTH_RETRIES; i++) {
+        await vi.advanceTimersByTimeAsync(STARTUP_RETRY_DELAYS_MS[i]);
+      }
+      await bridgesPromise;
+
+      // Retry messages should be logged at info level (console.log)
+      const retryLogs = consoleSpy.mock.calls
+        .map((c) => c.join(' '))
+        .filter((msg) => msg.includes('not ready, retrying'));
+      expect(retryLogs.length).toBeGreaterThan(0);
+
+      // No warn-level logs for startup health checks
+      const startupWarns = warnSpy.mock.calls
+        .map((c) => c.join(' '))
+        .filter((msg) => msg.includes('Worker health check failed'));
+      expect(startupWarns).toHaveLength(0);
+
+      consoleSpy.mockRestore();
+      warnSpy.mockRestore();
+    });
+
+    it('STARTUP_RETRY_DELAYS_MS has an entry for each retry index', () => {
+      // Guard: if STARTUP_HEALTH_RETRIES is bumped, STARTUP_RETRY_DELAYS_MS must grow too.
+      // The nullish fallback (?? 4_000) in checkWorkerHealthAtStartup handles the drift,
+      // but the arrays should stay aligned by design.
+      expect(STARTUP_RETRY_DELAYS_MS.length).toBeGreaterThanOrEqual(STARTUP_HEALTH_RETRIES);
+    });
+
+    it('seeds worker cache after startup checks', async () => {
+      fetchMock.mockResolvedValue({ ok: true });
+
+      const bridgesPromise = initializeAllBridges();
+      await vi.advanceTimersByTimeAsync(0);
+      await bridgesPromise;
+
+      const callsBefore = fetchMock.mock.calls.length;
+
+      // Subsequent isWorkerAvailable should use cache (no new fetch)
+      const available = await isWorkerAvailable('gitlab');
+      expect(available).toBe(true);
+      expect(fetchMock.mock.calls.length).toBe(callsBefore);
     });
   });
 });

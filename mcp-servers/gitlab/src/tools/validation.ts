@@ -2,12 +2,7 @@
  * Validation Helpers for GitLab Tool Parameters
  */
 
-import {
-  ToolsCallResult,
-  jsonResult,
-  textResult,
-  errorResult,
-} from '../../../shared/dist/index.js';
+import { ToolsCallResult, jsonResult, textResult, errorResult } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 
 /**

@@ -5,6 +5,13 @@ use crate::consts;
 
 use crate::consts::BUNDLE_RESOURCES_ENV;
 
+/// Platform-specific PATH environment variable separator.
+/// Windows uses `;`, all other platforms use `:`.
+#[cfg(windows)]
+const PATH_SEP: char = ';';
+#[cfg(not(windows))]
+const PATH_SEP: char = ':';
+
 /// Resolves the path to a binary command.
 ///
 /// Lima (macOS), nerdctl-full (Linux), and Node.js (all platforms) binaries
@@ -62,13 +69,64 @@ pub fn resolve_binary(cmd: &str) -> String {
     cmd.to_string()
 }
 
+/// Windows process creation flag that prevents a visible console window from
+/// being allocated for child processes. Applied to all background subprocesses
+/// so that `wsl.exe`, `powershell.exe`, `node.exe`, etc. do not flash a black
+/// console window over the Desktop app's UI.
+///
+/// **Warning:** `Command::creation_flags()` is a setter, not OR. Calling it
+/// twice replaces the previous value. If you need additional flags, OR them
+/// with this constant.
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Creates a `Command` for the given binary with bundled-binary resolution.
 ///
-/// For `limactl`, also sets `LIMA_HOME` to the isolated Speedwave directory
-/// and ensures that directory exists.
+/// - Applies `CREATE_NO_WINDOW` on Windows to prevent console window flashing.
+/// - For `limactl`, sets `LIMA_HOME` to the isolated Speedwave directory.
+/// - For bundled binaries, prepends their parent directory to `PATH` so that
+///   child processes (e.g. `buildctl` spawned by `nerdctl build`) can find
+///   sibling binaries in the same bundle.
+///
+/// **Note:** `container_exec()` methods intentionally bypass this function
+/// and use raw `Command::new()` because interactive TTY sessions need a
+/// console window on Windows.
 pub fn command(cmd: &str) -> Command {
     let resolved = resolve_binary(cmd);
     let mut command = Command::new(&resolved);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    // If the resolved path is absolute (= bundled), prepend its parent dir to PATH
+    // and set CNI_PATH for nerdctl-full bundles (CNI plugins live in libexec/cni/).
+    let resolved_path = std::path::Path::new(&resolved);
+    if resolved_path.is_absolute() {
+        if let Some(bin_dir) = resolved_path.parent() {
+            let system_path = std::env::var("PATH").unwrap_or_default();
+            let bin_dir_str = bin_dir.to_string_lossy();
+            if !system_path
+                .split(PATH_SEP)
+                .any(|p| p == bin_dir_str.as_ref())
+            {
+                command.env("PATH", format!("{bin_dir_str}{PATH_SEP}{system_path}"));
+            }
+
+            // nerdctl-full bundles CNI plugins in <bundle>/libexec/cni/.
+            // Without CNI_PATH, nerdctl defaults to /opt/cni/bin which doesn't
+            // exist on systems where nerdctl-full is installed as a .deb resource.
+            if let Some(bundle_root) = bin_dir.parent() {
+                let cni_dir = bundle_root.join("libexec").join("cni");
+                if cni_dir.is_dir() {
+                    command.env("CNI_PATH", &cni_dir);
+                }
+            }
+        }
+    }
+
     if cmd == "limactl" {
         match lima_home() {
             Some(home) => {
@@ -85,6 +143,24 @@ pub fn command(cmd: &str) -> Command {
                 log::error!("LIMA_HOME not set: could not determine home directory");
             }
         }
+    }
+    command
+}
+
+/// Creates a `Command` for a system binary (no bundled-binary resolution).
+///
+/// Use this for system utilities like `wsl.exe`, `powershell.exe`, `tasklist`,
+/// `taskkill`, `icacls`, etc. that are never bundled in the app resources.
+///
+/// Applies `CREATE_NO_WINDOW` on Windows to prevent console window flashing.
+/// For interactive TTY commands, use raw `Command::new()` instead.
+pub fn system_command(program: &str) -> Command {
+    #[allow(unused_mut)] // mut needed on Windows for creation_flags()
+    let mut command = Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
     }
     command
 }
@@ -308,5 +384,141 @@ pub(crate) mod tests {
             "command() should use the bundled binary path"
         );
         env::remove_var(BUNDLE_RESOURCES_ENV);
+    }
+
+    #[test]
+    fn command_bundled_nerdctl_prepends_bin_dir_to_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = tmp
+            .path()
+            .join(crate::consts::NERDCTL_FULL_SUBDIR)
+            .join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("mkdir");
+        std::fs::write(bin_dir.join("nerdctl"), "fake").expect("write");
+
+        env::set_var(BUNDLE_RESOURCES_ENV, tmp.path().to_string_lossy().as_ref());
+        let cmd = command("nerdctl");
+
+        let path_env = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "PATH")
+            .expect("PATH should be set for bundled binary");
+        let path_value = path_env
+            .1
+            .expect("PATH should have a value")
+            .to_string_lossy();
+        let bin_dir_str = bin_dir.to_string_lossy();
+        assert!(
+            path_value.starts_with(bin_dir_str.as_ref()),
+            "PATH should start with bundled bin dir {}, got: {}",
+            bin_dir_str,
+            path_value
+        );
+
+        env::remove_var(BUNDLE_RESOURCES_ENV);
+    }
+
+    #[test]
+    fn command_system_binary_does_not_modify_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        env::remove_var(BUNDLE_RESOURCES_ENV);
+
+        let cmd = command("nerdctl");
+        let path_env = cmd.get_envs().find(|(k, _)| *k == "PATH");
+        assert!(
+            path_env.is_none(),
+            "PATH should not be modified for system-resolved binaries"
+        );
+    }
+
+    #[test]
+    fn command_bundled_nerdctl_sets_cni_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = tmp
+            .path()
+            .join(crate::consts::NERDCTL_FULL_SUBDIR)
+            .join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("mkdir");
+        std::fs::write(bin_dir.join("nerdctl"), "fake").expect("write");
+
+        // Create the libexec/cni directory that nerdctl-full bundles include
+        let cni_dir = tmp
+            .path()
+            .join(crate::consts::NERDCTL_FULL_SUBDIR)
+            .join("libexec")
+            .join("cni");
+        std::fs::create_dir_all(&cni_dir).expect("mkdir cni");
+
+        env::set_var(BUNDLE_RESOURCES_ENV, tmp.path().to_string_lossy().as_ref());
+        let cmd = command("nerdctl");
+
+        let cni_env = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "CNI_PATH")
+            .expect("CNI_PATH should be set for bundled nerdctl with libexec/cni");
+        let cni_value = cni_env
+            .1
+            .expect("CNI_PATH should have a value")
+            .to_string_lossy();
+        assert_eq!(
+            cni_value,
+            cni_dir.to_string_lossy(),
+            "CNI_PATH should point to nerdctl-full/libexec/cni/"
+        );
+
+        env::remove_var(BUNDLE_RESOURCES_ENV);
+    }
+
+    #[test]
+    fn command_bundled_nerdctl_no_cni_path_without_cni_dir() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = tmp
+            .path()
+            .join(crate::consts::NERDCTL_FULL_SUBDIR)
+            .join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("mkdir");
+        std::fs::write(bin_dir.join("nerdctl"), "fake").expect("write");
+        // No libexec/cni directory
+
+        env::set_var(BUNDLE_RESOURCES_ENV, tmp.path().to_string_lossy().as_ref());
+        let cmd = command("nerdctl");
+
+        let cni_env = cmd.get_envs().find(|(k, _)| *k == "CNI_PATH");
+        assert!(
+            cni_env.is_none(),
+            "CNI_PATH should not be set when libexec/cni does not exist"
+        );
+
+        env::remove_var(BUNDLE_RESOURCES_ENV);
+    }
+
+    #[test]
+    fn system_command_returns_correct_program() {
+        let cmd = system_command("wsl.exe");
+        assert_eq!(
+            cmd.get_program().to_string_lossy(),
+            "wsl.exe",
+            "system_command should use the given program name verbatim"
+        );
+    }
+
+    #[test]
+    fn system_command_does_not_modify_path() {
+        let cmd = system_command("powershell.exe");
+        let path_env = cmd.get_envs().find(|(k, _)| *k == "PATH");
+        assert!(path_env.is_none(), "system_command should not modify PATH");
+    }
+
+    #[test]
+    fn system_command_does_not_set_lima_home() {
+        let cmd = system_command("limactl");
+        let lima_home_env = cmd.get_envs().find(|(k, _)| *k == "LIMA_HOME");
+        assert!(
+            lima_home_env.is_none(),
+            "system_command should not set LIMA_HOME even for 'limactl'"
+        );
     }
 }

@@ -4,20 +4,82 @@ Security is a core obsession in Speedwave. Every architectural decision preserve
 
 ## Principles
 
-<!-- Content to be written: Claude container isolation (no tokens, no socket), OWASP container hardening, token isolation, Lima/WSL2 kernel-level isolation -->
+The following security principles are inherited from Speedwave v1 and are **non-negotiable**:
+
+- **Claude container isolation** — no tokens, no container socket, per-platform container user (UID 1000 on macOS/Windows, UID 0 in Linux rootless user namespace — see [ADR-026](../adr/ADR-026-linux-rootless-container-user.md))
+- **OWASP container hardening** — `cap_drop: ALL`, `no-new-privileges`, `read_only` filesystem, `tmpfs: /tmp:noexec,nosuid`
+- **Token isolation** — each MCP worker mounts **only its own** service credentials at `/tokens` read-only. A compromised worker exposes only that service
+- **Hub has zero tokens** — compromise of the hub exposes nothing
+- **Kernel-level isolation** — Lima VM (macOS) / WSL2 (Windows) provides an additional isolation layer on top of container isolation
+- **Resource limits** — CPU + memory caps per container
+- **Verified downloads** — pinned version with SHA256-verified binary downloads (verified by official installer via GCS manifest)
+- **Minimal health endpoints** — return only `{ "status": "ok" }`, no service metadata leaked
 
 ## Container Hardening
 
-<!-- Content to be written: cap_drop ALL, no-new-privileges, read_only filesystem, tmpfs /tmp:noexec,nosuid, resource limits -->
+All containers follow OWASP container hardening guidelines:
+
+- `cap_drop: ALL` — drop all Linux capabilities
+- `no-new-privileges: true` — prevent privilege escalation
+- `read_only: true` — read-only root filesystem
+- `tmpfs: /tmp:noexec,nosuid` — temporary filesystem with restricted execution
+- Resource limits: CPU and memory caps defined per container in `compose.template.yml`
 
 ## Token Isolation
 
-<!-- Content to be written: per-service credentials, read-only mounts, SharePoint exception (ADR-009) -->
+Each MCP worker container mounts **only its own** service credentials:
+
+```
+~/.speedwave/tokens/<project>/<service>/  → /tokens (read-only mount)
+```
+
+- Slack worker sees only Slack tokens
+- GitLab worker sees only GitLab tokens
+- Hub has **zero** token mounts — it routes requests to workers via HTTP
+
+**Exception:** SharePoint uses `:rw` mount for OAuth token refresh (see [ADR-009](../adr/ADR-009-per-project-isolation-preserved.md)).
 
 ## Threat Model
 
-<!-- Content to be written: attack surfaces, mitigations, security boundaries -->
+When implementing any feature, ask these questions:
+
+1. **Does this require relaxing any of the above principles?** If yes — find a different approach.
+2. **Does this add a new attack surface?** Document it and mitigate it.
+3. **Does this require mounting host filesystem into a container?** Minimize scope, use `:ro` wherever possible.
+
+### Security Boundaries
+
+- **Host ↔ VM**: Lima/WSL2 kernel isolation
+- **VM ↔ Container**: nerdctl/containerd container isolation with OWASP hardening
+- **Container ↔ Container**: per-project network isolation (`speedwave_<project>_network`)
+- **Worker ↔ Worker**: token isolation — each worker has access only to its own service credentials
+
+## Executor Sandbox (MCP Hub)
+
+The MCP Hub executes model-generated JavaScript in a restricted `AsyncFunction` sandbox. Security is provided by multiple layers:
+
+- **Forbidden pattern denylist** — regex-based validation blocks dangerous APIs (`eval`, `require`, `process`, `globalThis`, etc.) and prototype chain traversal vectors (`.constructor`, `.__proto__`, `getPrototypeOf`, `Reflect`, `Proxy`, bracket-notation equivalents) before code execution
+- **Restricted context** — only whitelisted globals (service bridges, `JSON`, `Date`, `Math`, `Array`, `Object`, etc.) are injected into the sandbox scope
+- **Execution timeout** — prevents denial-of-service via infinite loops
+- **PII tokenization** — sensitive data is replaced with tokens before reaching the model
+
+This is **defense-in-depth**: even if the sandbox is bypassed, the attacker lands in a container with zero tokens, `cap_drop: ALL`, `no-new-privileges`, and a read-only filesystem. See [ADR-029](../adr/ADR-029-sandbox-prototype-chain-hardening.md) for the prototype chain hardening decision.
+
+## SSRF Protection (SEC-015)
+
+The MCP Hub HTTP bridge validates all outbound worker URLs at the single resolution
+point (`getWorkerUrl()`) before any `fetch()` call:
+
+- **Canonical URL allowlist**: Only Docker internal service names (`mcp-*`) and
+  platform host gateways (`host.{lima,docker,containers,speedwave}.internal`) are accepted
+- **Port enforcement**: Port must be present and in range 1-65535
+- **Protocol enforcement**: Only `http:` (internal Docker network, no TLS needed)
+- **No pathname/query**: Worker URLs must be bare endpoints
+- **Redirect blocking**: All `fetch()` calls use `redirect: 'error'`
+
+Invalid URLs are treated as unconfigured services (fail-closed).
 
 ## See Also
 
 - [ADR-009: Per-Project Isolation Preserved](../adr/ADR-009-per-project-isolation-preserved.md)
+- [ADR-026: Linux Rootless nerdctl — Per-Platform Container User](../adr/ADR-026-linux-rootless-container-user.md)

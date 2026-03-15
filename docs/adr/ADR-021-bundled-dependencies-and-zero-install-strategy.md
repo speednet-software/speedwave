@@ -34,12 +34,13 @@ Speedwave.app/
 Binary resolution order:
 
 1. `SPEEDWAVE_RESOURCES_DIR` environment variable (if set — used in development)
-2. `.app/Contents/Resources/lima/bin/` (production, resolved via `std::env::current_exe()`)
-3. System PATH fallback (development mode only)
+2. `~/.speedwave/resources-dir` marker file (written by the Desktop app, read by the CLI to discover bundled resources when `SPEEDWAVE_RESOURCES_DIR` is not set)
+3. `.app/Contents/Resources/lima/bin/` (production, resolved via `std::env::current_exe()`)
+4. System PATH fallback (development mode only)
 
-### Linux: Bundle nerdctl-full in AppImage
+### Linux: Bundle nerdctl-full in .deb
 
-nerdctl-full is bundled inside the AppImage at `<AppImage>/usr/share/speedwave/nerdctl-full/`. On first launch, Speedwave extracts these binaries to `~/.speedwave/nerdctl-full/` and runs `containerd-rootless-setuptool.sh install` to start containerd as a systemd --user service.
+nerdctl-full is bundled inside the .deb package at `/usr/lib/Speedwave/nerdctl-full/`. On first launch, Speedwave runs `containerd-rootless-setuptool.sh install` to start containerd as a systemd --user service.
 
 System requirements (not bundled):
 
@@ -106,7 +107,7 @@ Bundling is the established pattern for macOS GUI apps. Rancher Desktop (CNCF sa
 
 ### Why bundle nerdctl-full on Linux?
 
-The previous approach (Podman as .deb/.rpm dependency) prevented AppImage distribution, which in turn prevented auto-update via the Tauri updater. Bundling nerdctl-full inside the AppImage makes Linux self-contained — matching the macOS and Windows experience. All three platforms now use the same container runtime (nerdctl), reducing the maintenance surface from three runtime implementations to two (LimaRuntime wraps nerdctl-in-VM, NerdctlRuntime and WslRuntime call nerdctl directly).
+The previous approach (Podman as .deb dependency) added external dependency management burden. Bundling nerdctl-full inside the .deb package makes Linux self-contained — matching the macOS and Windows experience. All three platforms now use the same container runtime (nerdctl), reducing the maintenance surface from three runtime implementations to two (LimaRuntime wraps nerdctl-in-VM, NerdctlRuntime and WslRuntime call nerdctl directly).
 
 ### Why auto-install WSL2 on Windows?
 
@@ -122,11 +123,11 @@ Rejected. This would duplicate setup logic between CLI and Desktop, complicate s
 
 Rejected. This requires an internet connection after installation, which is a worse user experience than bundling. Users in corporate environments may have restricted internet access. The download could also fail silently, leading to a broken first-run experience.
 
-### 3. Podman as package dependency (.deb/.rpm only)
+### 3. Podman as package dependency (.deb only)
 
-Previously used (see ADR-003 history). Rejected because it prevents AppImage distribution, which prevents auto-update and offline install. Also requires maintaining a separate container runtime alongside nerdctl used on macOS/Windows.
+Previously used (see ADR-003 history). Rejected because it added external dependency management burden. Also requires maintaining a separate container runtime alongside nerdctl used on macOS/Windows.
 
-### 4. Flatpak instead of AppImage
+### 4. Flatpak instead of .deb
 
 Rejected. Flatpak's sandbox model conflicts with rootless container management[^10]. containerd/nerdctl needs direct access to cgroups, namespaces, and the container storage directory — all of which are restricted by Flatpak's Bubblewrap sandbox.
 
@@ -155,9 +156,7 @@ The Makefile and CI pipeline enforce checksum verification — builds fail if ch
 
 [^1]: [Debian Policy Manual - Package relationships](https://www.debian.org/doc/debian-policy/ch-relationships.html)
 
-[^2]: [RPM Packaging Guide - Dependencies](https://rpm-packaging-guide.github.io/#requires)
-
-[^3]: [AppImage documentation - No dependency management](https://docs.appimage.org/introduction/concepts.html)
+[^3]: [rootless containers — uidmap / newuidmap requirement](https://rootlesscontaine.rs/getting-started/common/uidmap/)
 
 [^4]: [Install WSL - Microsoft Learn](https://learn.microsoft.com/en-us/windows/wsl/install)
 

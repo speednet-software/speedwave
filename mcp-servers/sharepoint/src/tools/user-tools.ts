@@ -2,7 +2,7 @@
  * User Tools - Tools for SharePoint user operations
  */
 
-import { Tool, ToolDefinition } from '../../../shared/dist/index.js';
+import { Tool, ToolDefinition } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
 import { SharePointClient } from '../client.js';
 
@@ -13,6 +13,32 @@ const getCurrentUserTool: Tool = {
     type: 'object',
     properties: {},
   },
+  category: 'read',
+  keywords: ['sharepoint', 'user', 'current', 'me', 'auth'],
+  example: 'const user = await sharepoint.getCurrentUser()',
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      user: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          displayName: { type: 'string' },
+          email: { type: 'string' },
+          userPrincipalName: { type: 'string' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Get current user (no params)',
+      input: {},
+    },
+  ],
 };
 
 /**
