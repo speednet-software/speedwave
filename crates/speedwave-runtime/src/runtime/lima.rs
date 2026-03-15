@@ -6,6 +6,7 @@ use std::process::Command;
 
 pub struct LimaRuntime {
     runner: Box<dyn CommandRunner>,
+    restart_ready_delay: std::time::Duration,
 }
 
 /// Returns the Lima SSH config path for the VM.
@@ -27,11 +28,26 @@ impl LimaRuntime {
     pub fn new() -> Self {
         Self {
             runner: Box::new(RealRunner),
+            restart_ready_delay: std::time::Duration::from_secs(
+                consts::CONTAINERD_RESTART_READY_DELAY_SECS,
+            ),
         }
     }
 
     pub fn with_runner(runner: Box<dyn CommandRunner>) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            restart_ready_delay: std::time::Duration::from_secs(
+                consts::CONTAINERD_RESTART_READY_DELAY_SECS,
+            ),
+        }
+    }
+
+    /// Sets restart ready delay to zero for tests to avoid sleeping.
+    #[cfg(test)]
+    fn with_zero_restart_delay(mut self) -> Self {
+        self.restart_ready_delay = std::time::Duration::ZERO;
+        self
     }
 
     /// Returns `Ok(())` if the VM is running, or a clear error if stopped/missing.
@@ -415,6 +431,100 @@ impl ContainerRuntime for LimaRuntime {
             ],
         )?;
         Ok(())
+    }
+
+    fn restart_container_engine(&self) -> anyhow::Result<()> {
+        self.require_running()?;
+
+        log::info!("restarting containerd inside Lima VM");
+        self.runner.run(
+            "limactl",
+            &[
+                "shell",
+                consts::LIMA_VM_NAME,
+                "--",
+                "sudo",
+                "systemctl",
+                "restart",
+                "containerd",
+            ],
+        )?;
+
+        log::info!("restarting buildkit inside Lima VM");
+        match self.runner.run(
+            "limactl",
+            &[
+                "shell",
+                consts::LIMA_VM_NAME,
+                "--",
+                "sudo",
+                "systemctl",
+                "restart",
+                "buildkit",
+            ],
+        ) {
+            Ok(_) => {}
+            Err(e) => {
+                let msg = e.to_string().to_ascii_lowercase();
+                if msg.contains("unit not found") || msg.contains("not loaded") {
+                    log::info!("buildkit unit not found in Lima VM, skipping restart");
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+
+        let max = consts::CONTAINERD_RESTART_READY_MAX_RETRIES;
+        for attempt in 1..=max {
+            std::thread::sleep(self.restart_ready_delay);
+
+            let nerdctl_ok = self
+                .runner
+                .run(
+                    "limactl",
+                    &[
+                        "shell",
+                        consts::LIMA_VM_NAME,
+                        "--",
+                        "sudo",
+                        "nerdctl",
+                        "info",
+                    ],
+                )
+                .is_ok();
+
+            let buildctl_ok = self
+                .runner
+                .run(
+                    "limactl",
+                    &[
+                        "shell",
+                        consts::LIMA_VM_NAME,
+                        "--",
+                        "sudo",
+                        "buildctl",
+                        "debug",
+                        "workers",
+                    ],
+                )
+                .is_ok();
+
+            if nerdctl_ok && buildctl_ok {
+                log::info!("containerd + buildkit ready after {attempt} attempt(s)");
+                return Ok(());
+            }
+            if attempt == max {
+                anyhow::bail!(
+                    "containerd/buildkit not ready after restart ({max} attempts). \
+                     Try: limactl shell {vm} -- sudo systemctl restart containerd && \
+                     limactl shell {vm} -- sudo systemctl restart buildkit",
+                    vm = consts::LIMA_VM_NAME,
+                );
+            }
+            log::info!("waiting for containerd/buildkit readiness (attempt {attempt}/{max})");
+        }
+
+        unreachable!("loop always returns or bails")
     }
 
     fn ensure_ready(&self) -> anyhow::Result<()> {
@@ -1148,6 +1258,124 @@ mod tests {
         assert!(
             err.to_string().contains("not running"),
             "should report VM not running, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_restart_container_engine_ok() {
+        let runner = mock_runner_with_vm_running()
+            .with_response(
+                &format!(
+                    "limactl shell {} -- sudo systemctl restart containerd",
+                    consts::LIMA_VM_NAME
+                ),
+                "",
+            )
+            .with_response(
+                &format!(
+                    "limactl shell {} -- sudo systemctl restart buildkit",
+                    consts::LIMA_VM_NAME
+                ),
+                "",
+            )
+            .with_response(
+                &format!(
+                    "limactl shell {} -- sudo nerdctl info",
+                    consts::LIMA_VM_NAME
+                ),
+                "containerd running",
+            )
+            .with_response(
+                &format!(
+                    "limactl shell {} -- sudo buildctl debug workers",
+                    consts::LIMA_VM_NAME
+                ),
+                "buildkit ready",
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner)).with_zero_restart_delay();
+        assert!(rt.restart_container_engine().is_ok());
+    }
+
+    #[test]
+    fn test_restart_container_engine_buildkit_unit_not_found_still_polls() {
+        let runner = mock_runner_with_vm_running()
+            .with_response(
+                &format!(
+                    "limactl shell {} -- sudo systemctl restart containerd",
+                    consts::LIMA_VM_NAME
+                ),
+                "",
+            )
+            .with_error(
+                &format!(
+                    "limactl shell {} -- sudo systemctl restart buildkit",
+                    consts::LIMA_VM_NAME
+                ),
+                "unit not found",
+            )
+            .with_response(
+                &format!(
+                    "limactl shell {} -- sudo nerdctl info",
+                    consts::LIMA_VM_NAME
+                ),
+                "containerd running",
+            )
+            .with_response(
+                &format!(
+                    "limactl shell {} -- sudo buildctl debug workers",
+                    consts::LIMA_VM_NAME
+                ),
+                "buildkit ready",
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner)).with_zero_restart_delay();
+        assert!(
+            rt.restart_container_engine().is_ok(),
+            "should succeed when buildkit unit not found but buildctl works"
+        );
+    }
+
+    #[test]
+    fn test_restart_container_engine_fails_when_vm_stopped() {
+        let runner = MockRunner::new()
+            .with_response("limactl --version", "limactl version 1.0.0")
+            .with_response(
+                &format!(
+                    "limactl list --format {{{{.Status}}}} {}",
+                    consts::LIMA_VM_NAME
+                ),
+                "Stopped",
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner)).with_zero_restart_delay();
+        let err = rt.restart_container_engine().unwrap_err();
+        assert!(
+            err.to_string().contains("not running"),
+            "should report VM not running, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_restart_container_engine_propagates_buildkit_error() {
+        let runner = mock_runner_with_vm_running()
+            .with_response(
+                &format!(
+                    "limactl shell {} -- sudo systemctl restart containerd",
+                    consts::LIMA_VM_NAME
+                ),
+                "",
+            )
+            .with_error(
+                &format!(
+                    "limactl shell {} -- sudo systemctl restart buildkit",
+                    consts::LIMA_VM_NAME
+                ),
+                "some other error",
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner)).with_zero_restart_delay();
+        let result = rt.restart_container_engine();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("some other error"),
+            "should propagate non-unit-not-found buildkit errors"
         );
     }
 }

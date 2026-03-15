@@ -10,6 +10,7 @@ export const config = {
     './specs/02-setup-wizard.spec.ts',
     './specs/03-navigation.spec.ts',
     './specs/04-settings.spec.ts',
+    './specs/05-project-management.spec.ts',
   ],
   maxInstances: 1,
   bail: 1,

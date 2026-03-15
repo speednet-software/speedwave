@@ -7,6 +7,7 @@
 use speedwave_runtime::config;
 use speedwave_runtime::runtime::ContainerRuntime;
 
+use crate::reconcile::{SharedIdeBridge, SharedMcpOs};
 use crate::setup_wizard;
 use crate::types::{check_project, LlmConfigResponse};
 
@@ -253,7 +254,12 @@ pub async fn add_project(
     dir: String,
     app: tauri::AppHandle,
     chat_state: tauri::State<'_, crate::chat::SharedChatSession>,
+    mcp_os: tauri::State<'_, SharedMcpOs>,
+    ide_bridge: tauri::State<'_, SharedIdeBridge>,
 ) -> Result<(), String> {
+    // Start subsystems on-demand (e.g. after factory reset / fresh install)
+    crate::ensure_mcp_os_running(&mcp_os, &app);
+    crate::ensure_ide_bridge_running(&ide_bridge, &app);
     // Capture previous active project BEFORE runtime sets new one
     let previous = config::with_config_lock(|| {
         let cfg = config::load_user_config()?;
@@ -346,7 +352,16 @@ pub async fn build_images() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn start_containers(project: String) -> Result<(), String> {
+pub async fn start_containers(
+    project: String,
+    app: tauri::AppHandle,
+    mcp_os: tauri::State<'_, SharedMcpOs>,
+    ide_bridge: tauri::State<'_, SharedIdeBridge>,
+) -> Result<(), String> {
+    // Start subsystems on-demand (e.g. after factory reset / fresh install)
+    crate::ensure_mcp_os_running(&mcp_os, &app);
+    crate::ensure_ide_bridge_running(&ide_bridge, &app);
+
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
         log::info!("start_containers: project={project}");
@@ -433,16 +448,53 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn factory_reset() -> Result<(), String> {
-    tokio::task::spawn_blocking(|| {
-        log::info!("factory_reset: starting");
+pub async fn factory_reset(
+    app: tauri::AppHandle,
+    ide_bridge: tauri::State<'_, SharedIdeBridge>,
+    mcp_os: tauri::State<'_, SharedMcpOs>,
+) -> Result<(), String> {
+    // 1. Stop mcp-os watchdog
+    crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    // 2. Stop IDE Bridge
+    if let Ok(mut guard) = ide_bridge.lock() {
+        if let Some(mut bridge) = guard.take() {
+            if let Err(e) = bridge.stop() {
+                log::warn!("factory_reset: IDE Bridge stop: {e}");
+            }
+        }
+    }
+
+    // 3. Stop mcp-os (kill child, join drain threads → log file handles released)
+    //    Explicit stop + cleanup_files before drop; wipe_data_dir will remove
+    //    everything anyway, but this keeps behaviour consistent with run_exit_cleanup.
+    if let Ok(mut guard) = mcp_os.lock() {
+        if let Some(mut proc) = guard.take() {
+            if let Err(e) = proc.stop() {
+                log::warn!("factory_reset: mcp-os stop: {e}");
+            }
+            proc.cleanup_files();
+        }
+    }
+
+    // 4. Wipe (compose_down, VM delete, CLI removal, remove_dir_all)
+    let result = tokio::task::spawn_blocking(|| {
+        log::info!("factory_reset: starting wipe");
         setup_wizard::factory_reset().map_err(|e| {
             log::error!("factory_reset: error: {e}");
             e.to_string()
         })
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    // 5. Always restart:
+    //    Success → clean start, wizard shows (data dir gone).
+    //    Failure → recover subsystems (data dir may partially exist).
+    if let Err(ref e) = result {
+        log::error!("factory_reset: wipe failed ({e}), restarting to recover");
+    }
+    app.restart();
 }
 
 #[tauri::command]

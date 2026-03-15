@@ -5,6 +5,7 @@ use std::process::Command;
 
 pub struct NerdctlRuntime {
     runner: Box<dyn CommandRunner>,
+    restart_ready_delay: std::time::Duration,
 }
 
 impl Default for NerdctlRuntime {
@@ -17,11 +18,26 @@ impl NerdctlRuntime {
     pub fn new() -> Self {
         Self {
             runner: Box::new(RealRunner),
+            restart_ready_delay: std::time::Duration::from_secs(
+                consts::CONTAINERD_RESTART_READY_DELAY_SECS,
+            ),
         }
     }
 
     pub fn with_runner(runner: Box<dyn CommandRunner>) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            restart_ready_delay: std::time::Duration::from_secs(
+                consts::CONTAINERD_RESTART_READY_DELAY_SECS,
+            ),
+        }
+    }
+
+    /// Sets restart ready delay to zero for tests to avoid sleeping.
+    #[cfg(test)]
+    fn with_zero_restart_delay(mut self) -> Self {
+        self.restart_ready_delay = std::time::Duration::ZERO;
+        self
     }
 
     fn parse_version(version_output: &str) -> Option<(u32, u32, u32)> {
@@ -189,6 +205,73 @@ impl ContainerRuntime for NerdctlRuntime {
         self.runner
             .run("nerdctl", &["system", "prune", "--force"])?;
         Ok(())
+    }
+
+    fn restart_container_engine(&self) -> anyhow::Result<()> {
+        log::info!("restarting containerd (rootless)");
+        self.runner
+            .run("systemctl", &["--user", "restart", "containerd"])?;
+
+        log::info!("restarting buildkit (rootless)");
+        self.runner
+            .run("systemctl", &["--user", "restart", "buildkit"])?;
+
+        // Phase 1: wait for systemd units to reach "active" state.
+        // In rootless mode, containerd runs inside rootlesskit which needs time
+        // to set up network namespaces (slirp4netns). `systemctl is-active` is
+        // the fastest reliable signal that the unit's ExecStart succeeded.
+        let max = consts::CONTAINERD_RESTART_READY_MAX_RETRIES;
+        for attempt in 1..=max {
+            std::thread::sleep(self.restart_ready_delay);
+
+            let containerd_active = self
+                .runner
+                .run("systemctl", &["--user", "is-active", "containerd"])
+                .is_ok();
+            let buildkit_active = self
+                .runner
+                .run("systemctl", &["--user", "is-active", "buildkit"])
+                .is_ok();
+
+            if containerd_active && buildkit_active {
+                log::info!("systemd units active after {attempt} attempt(s)");
+                break;
+            }
+            if attempt == max {
+                anyhow::bail!(
+                    "containerd/buildkit not ready after restart ({max} attempts). \
+                     Try: systemctl --user restart containerd && systemctl --user restart buildkit"
+                );
+            }
+            log::info!("waiting for containerd/buildkit readiness (attempt {attempt}/{max})");
+        }
+
+        // Phase 2: verify end-to-end connectivity through rootlesskit namespace.
+        // rootlesskit needs a moment after systemd reports "active" before the
+        // nerdctl socket is reachable from the host side.
+        for attempt in 1..=max {
+            std::thread::sleep(self.restart_ready_delay);
+
+            let nerdctl_ok = self.runner.run("nerdctl", &["info"]).is_ok();
+            let buildctl_ok = self.runner.run("buildctl", &["debug", "workers"]).is_ok();
+
+            if nerdctl_ok && buildctl_ok {
+                log::info!("containerd + buildkit fully ready after phase 2 attempt {attempt}");
+                return Ok(());
+            }
+            if attempt == max {
+                anyhow::bail!(
+                    "containerd/buildkit systemd units active but nerdctl/buildctl not reachable \
+                     after restart ({max} phase-2 attempts). \
+                     Try: systemctl --user restart containerd && systemctl --user restart buildkit"
+                );
+            }
+            log::info!(
+                "waiting for rootlesskit namespace readiness (phase 2 attempt {attempt}/{max})"
+            );
+        }
+
+        unreachable!("loop always returns or bails")
     }
 
     fn ensure_ready(&self) -> anyhow::Result<()> {
@@ -675,5 +758,70 @@ mod tests {
         let path = std::path::PathBuf::from("/some/arbitrary/path");
         let result = rt.prepare_build_context(&path).unwrap();
         assert_eq!(result, path);
+    }
+
+    #[test]
+    fn test_restart_container_engine_ok() {
+        let runner = MockRunner::new()
+            .with_response("systemctl --user restart containerd", "")
+            .with_response("systemctl --user restart buildkit", "")
+            .with_response("systemctl --user is-active containerd", "active")
+            .with_response("systemctl --user is-active buildkit", "active")
+            .with_response(
+                "nerdctl info",
+                "containerd: running\nSecurity Options: rootless",
+            )
+            .with_response("buildctl debug workers", "buildkit ready");
+        let rt = NerdctlRuntime::with_runner(Box::new(runner)).with_zero_restart_delay();
+        assert!(rt.restart_container_engine().is_ok());
+    }
+
+    #[test]
+    fn test_restart_container_engine_propagates_containerd_error() {
+        let runner = MockRunner::new().with_error(
+            "systemctl --user restart containerd",
+            "Failed to restart containerd.service",
+        );
+        let rt = NerdctlRuntime::with_runner(Box::new(runner)).with_zero_restart_delay();
+        let result = rt.restart_container_engine();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to restart"));
+    }
+
+    #[test]
+    fn test_restart_container_engine_units_not_active_after_retries() {
+        let runner = MockRunner::new()
+            .with_response("systemctl --user restart containerd", "")
+            .with_response("systemctl --user restart buildkit", "")
+            .with_error("systemctl --user is-active containerd", "inactive")
+            .with_error("systemctl --user is-active buildkit", "inactive");
+        let rt = NerdctlRuntime::with_runner(Box::new(runner)).with_zero_restart_delay();
+        let result = rt.restart_container_engine();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("not ready"),
+            "should report not ready after retries"
+        );
+    }
+
+    #[test]
+    fn test_restart_container_engine_units_active_but_nerdctl_unreachable() {
+        let runner = MockRunner::new()
+            .with_response("systemctl --user restart containerd", "")
+            .with_response("systemctl --user restart buildkit", "")
+            .with_response("systemctl --user is-active containerd", "active")
+            .with_response("systemctl --user is-active buildkit", "active")
+            .with_error("nerdctl info", "connection refused")
+            .with_error("buildctl debug workers", "connection refused");
+        let rt = NerdctlRuntime::with_runner(Box::new(runner)).with_zero_restart_delay();
+        let result = rt.restart_container_engine();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("not reachable"),
+            "should report nerdctl/buildctl not reachable in phase 2"
+        );
     }
 }

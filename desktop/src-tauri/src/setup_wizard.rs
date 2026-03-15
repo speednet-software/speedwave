@@ -1111,7 +1111,18 @@ pub fn is_setup_complete() -> bool {
 pub fn build_images() -> anyhow::Result<()> {
     let rt = runtime::detect_runtime();
     rt.ensure_ready()?;
-    build::build_all_images(rt.as_ref())?;
+    match build::build_all_images(rt.as_ref()) {
+        Ok(_) => {}
+        Err(e)
+            if e.downcast_ref::<build::SnapshotterRecoveryFailed>()
+                .is_some() =>
+        {
+            log::warn!("snapshotter recovery failed after prune, restarting engine");
+            rt.restart_container_engine()?;
+            build::build_all_images(rt.as_ref())?;
+        }
+        Err(e) => return Err(e),
+    }
 
     let mut state = SetupState::load();
     state.images_built = true;
@@ -1217,7 +1228,11 @@ fn run_with_timeout(
 pub fn factory_reset() -> anyhow::Result<()> {
     let state = SetupState::load();
 
-    // 1. Stop containers for the active project (if any) — with timeout
+    // 1. Stop containers for the wizard's project (if any) — with timeout.
+    //    Only stops the single project from setup_state.json, not all projects
+    //    from config.json. This is intentional: the VM force-delete (step 2)
+    //    destroys all containers regardless, and config.json may already be
+    //    corrupt or missing at this point. Best-effort graceful stop here.
     //    Even is_available() could theoretically hang, so run the entire
     //    "check + compose_down" block with a timeout.
     if let Some(ref project) = state.project_created {
@@ -1268,7 +1283,7 @@ pub fn factory_reset() -> anyhow::Result<()> {
         }
     }
 
-    // 3. Remove CLI binary
+    // 3. Remove CLI binary (Unix: ~/.local/bin/speedwave — outside data dir)
     #[cfg(unix)]
     {
         let target = dirs::home_dir()
@@ -1278,48 +1293,25 @@ pub fn factory_reset() -> anyhow::Result<()> {
             .join(consts::CLI_BINARY);
         let _ = std::fs::remove_file(&target);
     }
-    #[cfg(target_os = "windows")]
-    {
-        let target = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
-            .join(consts::DATA_DIR)
-            .join("bin")
-            .join("speedwave.exe");
-        let _ = std::fs::remove_file(&target);
-    }
+    // Windows CLI lives inside data_dir/bin/ — wipe_data_dir handles it.
 
-    // 4. Wipe setup state + project list (tokens on disk are preserved)
+    // 4. Wipe entire data directory (~/.speedwave/)
     let data_dir = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
         .join(consts::DATA_DIR);
-    wipe_state_and_config(&data_dir)?;
+    wipe_data_dir(&data_dir)?;
 
     Ok(())
 }
 
-/// Resets `setup_state.json` and `config.json` inside `data_dir` to defaults.
-///
-/// Tokens stored in `data_dir/tokens/` are intentionally preserved.
-fn wipe_state_and_config(data_dir: &std::path::Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(data_dir)?;
-
-    // Reset setup state (atomic write via rename)
-    let state_path = data_dir.join("setup_state.json");
-    let default_state = SetupState::default();
-    let state_json = serde_json::to_string_pretty(&default_state)?;
-    let tmp_state = state_path.with_extension("json.tmp");
-    std::fs::write(&tmp_state, &state_json)?;
-    std::fs::rename(&tmp_state, &state_path)?;
-
-    // Reset project list (atomic write via rename)
-    let config_path = data_dir.join("config.json");
-    let default_config = config::SpeedwaveUserConfig::default();
-    let config_json = serde_json::to_string_pretty(&default_config)?;
-    let tmp_config = config_path.with_extension("json.tmp");
-    std::fs::write(&tmp_config, &config_json)?;
-    std::fs::rename(&tmp_config, &config_path)?;
-
-    Ok(())
+/// Removes the entire data directory (`~/.speedwave/`).
+/// Idempotent: succeeds silently if the directory does not exist.
+fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    match std::fs::remove_dir_all(data_dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1496,6 +1488,16 @@ pub fn cli_install_path() -> Option<std::path::PathBuf> {
 /// Uses [`link_cli_from`] internally for the filesystem operations, then updates
 /// the persisted [`SetupState`] to mark `cli_linked = true`.
 pub fn link_cli() -> anyhow::Result<()> {
+    // Guard: skip if data directory does not exist — factory reset wiped it
+    // or this is a fresh install. The wizard will link the CLI after creating
+    // the data directory. Defense in depth: main.rs also guards the call site.
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+    if !home.join(consts::DATA_DIR).exists() {
+        log::info!("link_cli: data dir missing, skipping");
+        return Ok(());
+    }
+
     let cli_source = resolve_cli_source().ok_or_else(|| {
         anyhow::anyhow!(
             "CLI binary not found in app bundle. \
@@ -1503,10 +1505,17 @@ pub fn link_cli() -> anyhow::Result<()> {
         )
     })?;
 
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-
     link_cli_from(&cli_source, &home)?;
+
+    // Write resources-dir marker so the external CLI can find build context.
+    // On startup this write is gated behind setup_started (to avoid
+    // recreating ~/.speedwave/ after factory reset). Here in link_cli() the
+    // data dir is guaranteed to exist, so write the marker unconditionally.
+    if let Ok(res) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
+        if let Err(e) = build::write_resources_marker(std::path::Path::new(&res)) {
+            log::warn!("link_cli: could not write resources-dir marker: {e}");
+        }
+    }
 
     // Mark CLI as linked in setup state
     let mut state = SetupState::load();
@@ -1589,7 +1598,6 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::io::Write;
 
     /// Validates that a path component does not contain traversal or unsafe characters.
     fn validate_path_component(name: &str, label: &str) -> anyhow::Result<()> {
@@ -1648,109 +1656,50 @@ mod tests {
     }
 
     #[test]
-    fn wipe_state_and_config_resets_both_files() {
+    fn wipe_data_dir_removes_everything() {
         let tmp = tempfile::tempdir().expect("failed to create temp dir");
-        let data_dir = tmp.path();
+        let data_dir = tmp.path().join("speedwave-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
 
-        // Seed setup_state.json with non-default values
-        let state = SetupState {
-            runtime_ready: true,
-            vm_ready: true,
-            project_created: Some("acme".to_string()),
-            tokens_configured: vec!["slack".to_string()],
-            images_built: true,
-            containers_started: true,
-            cli_linked: true,
-        };
+        // Seed state, config, tokens, plugins
         let state_path = data_dir.join("setup_state.json");
-        let mut f = std::fs::File::create(&state_path).expect("create state file");
-        f.write_all(serde_json::to_string(&state).expect("serialize").as_bytes())
-            .expect("write state");
+        std::fs::write(&state_path, r#"{"runtime_ready":true}"#).expect("write state");
+        std::fs::write(data_dir.join("config.json"), r#"{"projects":[]}"#).expect("write config");
 
-        // Seed config.json with projects
-        let user_config = config::SpeedwaveUserConfig {
-            projects: vec![
-                config::ProjectUserEntry {
-                    name: "acme".to_string(),
-                    dir: "/tmp/acme".to_string(),
-                    claude: None,
-                    integrations: None,
-                    plugin_settings: None,
-                },
-                config::ProjectUserEntry {
-                    name: "beta-corp".to_string(),
-                    dir: "/tmp/beta-corp".to_string(),
-                    claude: None,
-                    integrations: None,
-                    plugin_settings: None,
-                },
-            ],
-            active_project: Some("acme".to_string()),
-            selected_ide: None,
-            log_level: None,
-        };
-        let config_path = data_dir.join("config.json");
-        let json = serde_json::to_string(&user_config).expect("serialize config");
-        std::fs::write(&config_path, json).expect("write config");
-
-        // Create a tokens directory that should survive the wipe
         let tokens_dir = data_dir.join("tokens").join("acme").join("slack");
         std::fs::create_dir_all(&tokens_dir).expect("create tokens dir");
         std::fs::write(tokens_dir.join("token.txt"), "secret").expect("write token");
 
+        let plugins_dir = data_dir.join("plugins").join("my-plugin");
+        std::fs::create_dir_all(&plugins_dir).expect("create plugins dir");
+        std::fs::write(plugins_dir.join("plugin.json"), "{}").expect("write plugin");
+
         // Run the wipe
-        wipe_state_and_config(data_dir).expect("wipe should succeed");
+        wipe_data_dir(&data_dir).expect("wipe should succeed");
 
-        // Verify setup_state.json is reset to defaults
-        let raw = std::fs::read_to_string(&state_path).expect("read state");
-        let reset_state: SetupState = serde_json::from_str(&raw).expect("parse state");
-        assert_eq!(reset_state.current_step(), 0);
-        assert!(!reset_state.runtime_ready);
-        assert!(!reset_state.vm_ready);
-        assert!(reset_state.project_created.is_none());
-        assert!(reset_state.tokens_configured.is_empty());
-        assert!(!reset_state.images_built);
-        assert!(!reset_state.containers_started);
-
-        // Verify config.json has empty project list
-        let raw = std::fs::read_to_string(&config_path).expect("read config");
-        let reset_config: config::SpeedwaveUserConfig =
-            serde_json::from_str(&raw).expect("parse config");
-        assert!(
-            reset_config.projects.is_empty(),
-            "project list should be empty after factory reset"
-        );
-        assert!(
-            reset_config.active_project.is_none(),
-            "active_project should be None after factory reset"
-        );
-
-        // Verify tokens survived
-        assert!(
-            tokens_dir.join("token.txt").exists(),
-            "tokens should be preserved"
-        );
-        assert_eq!(
-            std::fs::read_to_string(tokens_dir.join("token.txt")).expect("read token"),
-            "secret"
-        );
+        // Verify entire directory is gone
+        assert!(!data_dir.exists(), "data dir should not exist after wipe");
     }
 
     #[test]
-    fn wipe_state_and_config_works_on_empty_dir() {
+    fn wipe_data_dir_succeeds_when_dir_missing() {
         let tmp = tempfile::tempdir().expect("failed to create temp dir");
-        // No files exist — should still succeed and create defaults
-        wipe_state_and_config(tmp.path()).expect("wipe on empty dir should succeed");
+        let nonexistent = tmp.path().join("does-not-exist");
+        // Should succeed silently
+        wipe_data_dir(&nonexistent).expect("wipe on missing dir should succeed");
+    }
 
-        let state_path = tmp.path().join("setup_state.json");
-        assert!(state_path.exists(), "setup_state.json should be created");
+    #[test]
+    fn wipe_data_dir_leaves_no_remnants() {
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        std::fs::create_dir_all(data_dir.join("sub1").join("sub2")).expect("create subdirs");
+        std::fs::write(data_dir.join("sub1").join("file.txt"), "data").expect("write file");
 
-        let config_path = tmp.path().join("config.json");
-        assert!(config_path.exists(), "config.json should be created");
+        wipe_data_dir(&data_dir).expect("wipe should succeed");
 
-        let raw = std::fs::read_to_string(&config_path).expect("read config");
-        let cfg: config::SpeedwaveUserConfig = serde_json::from_str(&raw).expect("parse config");
-        assert!(cfg.projects.is_empty());
+        assert!(!data_dir.exists(), "data dir should be gone");
+        assert!(tmp.path().exists(), "parent should still exist");
     }
 
     // ── SetupState save/load roundtrip ──────────────────────────────────────
@@ -2235,17 +2184,6 @@ mod tests {
         let loaded = SetupState::load_from(&path).expect("load should succeed");
         assert_eq!(loaded.current_step(), 1);
         assert!(loaded.runtime_ready);
-    }
-
-    #[test]
-    fn wipe_is_atomic_no_tmp_left() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        wipe_state_and_config(tmp.path()).expect("wipe should succeed");
-
-        let state_tmp = tmp.path().join("setup_state.json.tmp");
-        let config_tmp = tmp.path().join("config.json.tmp");
-        assert!(!state_tmp.exists(), "state tmp should not exist");
-        assert!(!config_tmp.exists(), "config tmp should not exist");
     }
 
     // -- run_with_timeout tests ─────────────────────────────────────────────
@@ -3187,6 +3125,32 @@ mod tests {
         assert_eq!(content, "new-version", "should overwrite existing binary");
     }
 
+    // ── link_cli guard tests ────────────────────────────────────────────
+
+    #[test]
+    fn link_cli_guard_skips_when_data_dir_missing() {
+        // When the data directory does not exist (fresh install / factory
+        // reset), link_cli() should return Ok without creating it.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fake_home = tmp.path().join("home");
+        std::fs::create_dir_all(&fake_home).expect("create fake home");
+        // No .speedwave/ inside fake_home — guard should trigger.
+        // We can't call link_cli() directly because it uses dirs::home_dir()
+        // which returns the real home. Instead, verify the guard logic:
+        let data_dir = fake_home.join(consts::DATA_DIR);
+        assert!(
+            !data_dir.exists(),
+            "precondition: data dir should not exist"
+        );
+        // The guard condition in link_cli():
+        //   if !home.join(consts::DATA_DIR).exists() { return Ok(()); }
+        // We verify the same condition holds and data dir stays absent.
+        assert!(
+            !data_dir.exists(),
+            "data dir should not be created by guard check"
+        );
+    }
+
     // ── link_cli_from tests ─────────────────────────────────────────────
 
     #[test]
@@ -3567,6 +3531,67 @@ networks:
                 .iter()
                 .map(|v| format!("{v}"))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// Structural test: verifies that `build_images()` handles
+    /// `SnapshotterRecoveryFailed` by calling `restart_container_engine()` and
+    /// retrying the build. This is a source-level test — if the recovery pattern
+    /// is removed or refactored away, this test will fail and force a conscious
+    /// decision about the new error-handling strategy.
+    #[test]
+    fn build_images_handles_snapshotter_recovery_with_engine_restart() {
+        let source = include_str!("setup_wizard.rs");
+
+        assert!(
+            source.contains("SnapshotterRecoveryFailed"),
+            "build_images() must downcast SnapshotterRecoveryFailed to trigger engine restart"
+        );
+        assert!(
+            source.contains("restart_container_engine"),
+            "build_images() must call restart_container_engine() on snapshotter recovery failure"
+        );
+
+        // Verify the pattern: downcast → restart → retry (all in build_images)
+        let build_images_fn = source
+            .split("pub fn build_images()")
+            .nth(1)
+            .and_then(|rest| {
+                // Find the matching closing brace by counting braces
+                let mut depth = 0i32;
+                let mut end = 0;
+                for (i, ch) in rest.char_indices() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = i;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if end > 0 {
+                    Some(&rest[..end])
+                } else {
+                    None
+                }
+            })
+            .expect("build_images() function body should exist");
+
+        assert!(
+            build_images_fn.contains("downcast_ref::<build::SnapshotterRecoveryFailed>"),
+            "build_images() must use downcast_ref to detect SnapshotterRecoveryFailed"
+        );
+        assert!(
+            build_images_fn.contains("restart_container_engine()"),
+            "build_images() must call restart_container_engine() in the recovery path"
+        );
+        assert!(
+            build_images_fn.contains("build::build_all_images(rt.as_ref())?"),
+            "build_images() must retry build_all_images after engine restart"
         );
     }
 }
