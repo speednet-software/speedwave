@@ -1576,7 +1576,7 @@ dependencies = [
 
 [[package]]
 name = "speedwave-cli"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1592,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "speedwave-runtime"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
