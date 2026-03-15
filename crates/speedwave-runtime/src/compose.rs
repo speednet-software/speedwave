@@ -3,6 +3,7 @@ use crate::consts;
 use crate::defaults;
 use crate::plugin::{self, PluginManifest};
 use crate::runtime::ContainerRuntime;
+use crate::{build, bundle};
 use std::path::PathBuf;
 
 /// Converts a host path to the path seen by the container engine.
@@ -52,6 +53,7 @@ pub fn render_compose(
     let port_sharepoint = consts::PORT_BASE + 2;
     let port_redmine = consts::PORT_BASE + 3;
     let port_gitlab = consts::PORT_BASE + 4;
+    let bundle_manifest = bundle::load_current_bundle_manifest()?;
 
     let mut yaml = COMPOSE_TEMPLATE.to_string();
     yaml = yaml.replace("${COMPOSE_PREFIX}", consts::COMPOSE_PREFIX);
@@ -67,6 +69,30 @@ pub fn render_compose(
     yaml = yaml.replace("${PORT_SHAREPOINT}", &port_sharepoint.to_string());
     yaml = yaml.replace("${PORT_REDMINE}", &port_redmine.to_string());
     yaml = yaml.replace("${PORT_GITLAB}", &port_gitlab.to_string());
+    yaml = yaml.replace(
+        "${IMAGE_CLAUDE}",
+        &build::image_ref(build::IMAGE_CLAUDE, &bundle_manifest.bundle_id),
+    );
+    yaml = yaml.replace(
+        "${IMAGE_MCP_HUB}",
+        &build::image_ref(build::IMAGE_MCP_HUB, &bundle_manifest.bundle_id),
+    );
+    yaml = yaml.replace(
+        "${IMAGE_MCP_SLACK}",
+        &build::image_ref(build::IMAGE_MCP_SLACK, &bundle_manifest.bundle_id),
+    );
+    yaml = yaml.replace(
+        "${IMAGE_MCP_SHAREPOINT}",
+        &build::image_ref(build::IMAGE_MCP_SHAREPOINT, &bundle_manifest.bundle_id),
+    );
+    yaml = yaml.replace(
+        "${IMAGE_MCP_REDMINE}",
+        &build::image_ref(build::IMAGE_MCP_REDMINE, &bundle_manifest.bundle_id),
+    );
+    yaml = yaml.replace(
+        "${IMAGE_MCP_GITLAB}",
+        &build::image_ref(build::IMAGE_MCP_GITLAB, &bundle_manifest.bundle_id),
+    );
 
     // Bridge writes lock files directly to ~/.speedwave/ide-bridge/
     // Mount it as /home/speedwave/.claude/ide/ — no copying needed.
@@ -1770,6 +1796,51 @@ services:
         // Verify it's valid YAML
         let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         assert!(parsed.get("services").is_some());
+    }
+
+    #[test]
+    fn test_render_compose_uses_bundle_scoped_image_refs() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig::default(),
+        };
+        let manifest = bundle::load_current_bundle_manifest().unwrap();
+
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &all_enabled_integrations(),
+            None,
+        )
+        .unwrap();
+
+        assert!(yaml.contains(&build::image_ref(build::IMAGE_CLAUDE, &manifest.bundle_id)));
+        assert!(yaml.contains(&build::image_ref(build::IMAGE_MCP_HUB, &manifest.bundle_id)));
+        assert!(yaml.contains(&build::image_ref(
+            build::IMAGE_MCP_SLACK,
+            &manifest.bundle_id
+        )));
+        assert!(yaml.contains(&build::image_ref(
+            build::IMAGE_MCP_SHAREPOINT,
+            &manifest.bundle_id,
+        )));
+        assert!(yaml.contains(&build::image_ref(
+            build::IMAGE_MCP_REDMINE,
+            &manifest.bundle_id,
+        )));
+        assert!(yaml.contains(&build::image_ref(
+            build::IMAGE_MCP_GITLAB,
+            &manifest.bundle_id
+        )));
+
+        assert!(!yaml.contains("image: speedwave-claude:latest"));
+        assert!(!yaml.contains("image: speedwave-mcp-hub:latest"));
+        assert!(!yaml.contains("image: speedwave-mcp-slack:latest"));
+        assert!(!yaml.contains("image: speedwave-mcp-sharepoint:latest"));
+        assert!(!yaml.contains("image: speedwave-mcp-redmine:latest"));
+        assert!(!yaml.contains("image: speedwave-mcp-gitlab:latest"));
     }
 
     #[test]

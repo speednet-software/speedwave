@@ -368,15 +368,16 @@ export class UpdateSectionComponent implements OnInit {
     this.cdr.markForCheck();
   }
 
-  /** Downloads and installs the available update, then restarts the app. */
+  /** Downloads and installs the available update, then lets the backend restart the app. */
   async installUpdate(): Promise<void> {
     if (!this.updateAvailableVersion) return;
     this.updateInstalling = true;
     this.updateInstallError = '';
     this.cdr.markForCheck();
     try {
-      await this.tauri.invoke('install_update', { expectedVersion: this.updateAvailableVersion });
-      await this.tauri.invoke('restart_app', { force: true });
+      await this.tauri.invoke('install_update_and_reconcile', {
+        expectedVersion: this.updateAvailableVersion,
+      });
     } catch (e: unknown) {
       this.updateInstallError = e instanceof Error ? e.message : String(e);
     }

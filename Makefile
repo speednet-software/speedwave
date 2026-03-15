@@ -26,7 +26,7 @@ LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
 
 .PHONY: all build test check clean dev install-deps setup-dev install-hooks \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
-        build-native-macos build-os-cli \
+        build-native-macos build-os-cli bundle-native-assets verify-bundled-assets \
         test-rust test-cli test-desktop test-angular test-mcp test-os test-e2e test-entrypoint test-desktop-build \
         test-e2e-desktop _e2e-macos _e2e-linux _e2e-windows test-e2e-all setup-e2e-vms \
         check-clippy check-desktop-clippy check-angular check-mcp check-fmt \
@@ -188,16 +188,19 @@ build-cli:
 build-desktop:
 	cd desktop/src-tauri && cargo build
 
-build-tauri: build-cli build-angular build-mcp download-nodejs
+build-tauri: build-cli build-angular build-mcp build-os-cli download-nodejs
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) download-lima; fi
 	@if [ "$$(uname)" = "Linux" ]; then $(MAKE) download-nerdctl-full; fi
+	@if [ "$(OS)" = "Windows_NT" ]; then $(MAKE) download-wsl-resources; fi
 	@scripts/bundle-build-context.sh
+	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
 	mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
 else
 	cp target/debug/speedwave desktop/src-tauri/cli/speedwave
 endif
+	@$(MAKE) verify-bundled-assets
 	cd desktop/src-tauri && cargo tauri build
 	@echo "\n✅ Tauri production bundle built"
 
@@ -213,6 +216,23 @@ build-native-macos:
 	@echo "✅ macOS native CLI binaries built"
 
 build-os-cli: build-native-macos
+
+bundle-native-assets:
+	@scripts/bundle-native-assets.sh
+
+verify-bundled-assets:
+ifeq ($(OS),Windows_NT)
+	@scripts/verify-bundled-assets.sh windows
+else
+	@if [ "$$(uname)" = "Darwin" ]; then \
+		scripts/verify-bundled-assets.sh macos; \
+	elif [ "$$(uname)" = "Linux" ]; then \
+		scripts/verify-bundled-assets.sh linux; \
+	else \
+		echo "Unsupported host for bundled asset verification"; \
+		exit 1; \
+	fi
+endif
 
 # ── MCP servers ──────────────────────────────────────────────────────────────
 
@@ -235,17 +255,20 @@ test-cli:
 	@cargo test -p speedwave-cli
 	@echo "✅ CLI tests passed"
 
-test-desktop: build-cli build-angular build-mcp
+test-desktop: build-cli build-angular build-mcp build-os-cli
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -f desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
 	@if [ "$$(uname)" = "Linux" ] && [ ! -d desktop/src-tauri/nerdctl-full ]; then $(MAKE) download-nerdctl-full; fi
+	@if [ "$(OS)" = "Windows_NT" ] && [ ! -f desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then $(MAKE) download-wsl-resources; fi
 	@if [ ! -f desktop/src-tauri/nodejs/bin/node ] && [ ! -f desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
 	@scripts/bundle-build-context.sh
+	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
 	@mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	@cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
 else
 	@cp target/debug/speedwave desktop/src-tauri/cli/speedwave
 endif
+	@$(MAKE) verify-bundled-assets
 	cd desktop/src-tauri && cargo test
 	@echo "✅ Desktop tests passed"
 
@@ -311,6 +334,7 @@ test-desktop-build: build-angular build-mcp
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
 	bats _tests/desktop/desktop-build.bats
 	bats _tests/desktop/bundle-build-context.bats
+	bats _tests/desktop/verify-bundled-assets.bats
 	@echo "✅ Desktop build tests passed"
 
 # ── Desktop E2E tests ────────────────────────────────────────────────────────
@@ -319,15 +343,18 @@ test-desktop-build: build-angular build-mcp
 
 # Build only: download deps, compile CLI + MCP + Tauri binary. No test run.
 # Used by e2e-vm.sh (build as root, test as desktop user with display access).
-test-e2e-desktop-build: build-cli build-mcp
+test-e2e-desktop-build: build-cli build-mcp build-os-cli
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -f desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
 	@if [ "$$(uname)" = "Linux" ] && [ ! -d desktop/src-tauri/nerdctl-full ]; then $(MAKE) download-nerdctl-full; fi
+	@if [ "$(OS)" = "Windows_NT" ] && [ ! -f desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then $(MAKE) download-wsl-resources; fi
 	@if [ ! -f desktop/src-tauri/nodejs/bin/node ] && [ ! -f desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
 	@scripts/bundle-build-context.sh
+	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
 	@mkdir -p desktop/src-tauri/cli
 	@cargo build -p speedwave-cli --release
 	@cp target/release/speedwave desktop/src-tauri/cli/speedwave 2>/dev/null || \
 	  cp target/release/speedwave.exe desktop/src-tauri/cli/speedwave.exe 2>/dev/null || true
+	@$(MAKE) verify-bundled-assets
 	@echo "── Building release binary with bundle (e2e feature = WebDriver on :4445)..."
 	cd desktop/src-tauri && cargo tauri build --features e2e $(if $(TAURI_SIGNING_PRIVATE_KEY),,--no-sign)
 	@echo "── Installing E2E deps..."
@@ -653,16 +680,21 @@ clean-wsl-resources:
 
 # ── Development ──────────────────────────────────────────────────────────────
 
-dev: build-cli build-native-macos build-mcp
+dev: build-cli build-os-cli build-mcp download-nodejs
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
+	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) download-lima; fi
+	@if [ "$$(uname)" = "Linux" ]; then $(MAKE) download-nerdctl-full; fi
+	@if [ "$(OS)" = "Windows_NT" ]; then $(MAKE) download-wsl-resources; fi
 	@echo "Preparing build context..."
 	@scripts/bundle-build-context.sh
+	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
 	mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
 else
 	cp target/debug/speedwave desktop/src-tauri/cli/speedwave
 endif
+	@$(MAKE) verify-bundled-assets
 	cd desktop/src-tauri && SPEEDWAVE_ALLOW_UNSIGNED=1 cargo tauri dev
 
 # ── Quick status ─────────────────────────────────────────────────────────────

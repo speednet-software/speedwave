@@ -881,6 +881,8 @@ fn main() {
                 }
             }
 
+            reconcile::reconcile_bundle_update(app.handle());
+
             // Linux safety net: show the window immediately on startup.
             // Tray icon support on Linux depends on libappindicator/libayatana
             // and may be invisible even when tray_builder.build() succeeds
@@ -937,10 +939,25 @@ fn main() {
                         tauri::async_runtime::spawn(async move {
                             let version = uv.lock().ok().and_then(|g| g.clone());
                             if let Some(expected) = version {
-                                match updater::install_update(&app_clone, expected).await {
+                                #[cfg(target_os = "linux")]
+                                let result = {
+                                    let _ = expected;
+                                    open::that(
+                                        "https://github.com/speednet-software/speedwave/releases",
+                                    )
+                                    .map_err(|e| e.to_string())
+                                };
+
+                                #[cfg(not(target_os = "linux"))]
+                                let result = update_commands::install_update_and_reconcile(
+                                    app_clone.clone(),
+                                    expected,
+                                )
+                                .await;
+
+                                match result {
                                     Ok(()) => {
-                                        log::info!("tray: update installed, restarting");
-                                        app_clone.restart();
+                                        log::info!("tray: update action completed");
                                     }
                                     Err(e) => {
                                         log::error!("tray: install failed: {e}");
@@ -1137,8 +1154,11 @@ fn main() {
             // Update
             update_commands::check_for_update,
             update_commands::install_update,
+            update_commands::install_update_and_reconcile,
             update_commands::get_update_settings,
             update_commands::set_update_settings,
+            update_commands::get_bundle_reconcile_state,
+            update_commands::retry_bundle_reconcile,
             update_commands::restart_app,
             // Logging
             set_log_level,

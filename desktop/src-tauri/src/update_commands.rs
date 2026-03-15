@@ -1,8 +1,9 @@
 // Tauri commands for container updates, app updates, and restart.
 
-use crate::types::check_project;
+use crate::reconcile;
+use crate::types::{check_project, BundleReconcileStatus};
 use crate::updater;
-use speedwave_runtime::config;
+use speedwave_runtime::{bundle, config};
 
 // ---------------------------------------------------------------------------
 // Container update commands
@@ -70,6 +71,113 @@ pub(crate) async fn install_update(
 }
 
 #[tauri::command]
+pub(crate) async fn install_update_and_reconcile(
+    app: tauri::AppHandle,
+    expected_version: String,
+) -> Result<(), String> {
+    log::info!("install_update_and_reconcile: starting (expected_version={expected_version})");
+    updater::verify_update_installable(&app, &expected_version)
+        .await
+        .map_err(|e| {
+            log::error!("install_update_and_reconcile: preflight failed: {e}");
+            e
+        })?;
+
+    let running_projects = tokio::task::spawn_blocking(|| {
+        let user_config = match config::load_user_config() {
+            Ok(config) => config,
+            Err(e) => {
+                log::warn!(
+                    "install_update_and_reconcile: failed to load user config, assuming no configured projects: {e}"
+                );
+                config::SpeedwaveUserConfig::default()
+            }
+        };
+        let rt = speedwave_runtime::runtime::detect_runtime();
+        let running_projects = if rt.is_available() {
+            reconcile::list_running_projects(rt.as_ref(), &user_config)?
+        } else {
+            Vec::new()
+        };
+
+        let mut state = bundle::load_bundle_state();
+        state.phase = bundle::BundleReconcilePhase::Pending;
+        state.pending_running_projects = running_projects.clone();
+        state.last_error = None;
+        bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
+
+        if !running_projects.is_empty() && rt.is_available() {
+            if let Err(stop_error) = reconcile::stop_projects(&running_projects, rt.as_ref()) {
+                if let Err(restore_error) = reconcile::restore_projects(&running_projects, rt.as_ref())
+                {
+                    log::error!(
+                        "install_update_and_reconcile: failed to restore projects after stop error: {restore_error}"
+                    );
+                }
+
+                state.phase = bundle::BundleReconcilePhase::Done;
+                state.pending_running_projects.clear();
+                state.last_error = None;
+                let _ = bundle::save_bundle_state(&state);
+                return Err(stop_error);
+            }
+        }
+
+        Ok::<Vec<String>, String>(running_projects)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    if let Err(install_error) = updater::install_update(&app, expected_version).await {
+        let projects_to_restore = running_projects.clone();
+        let restore_error = tokio::task::spawn_blocking(move || {
+            if projects_to_restore.is_empty() {
+                return Ok::<(), String>(());
+            }
+
+            let rt = speedwave_runtime::runtime::detect_runtime();
+            if !rt.is_available() {
+                return Err(
+                    "Runtime unavailable while restoring containers after failed update"
+                        .to_string(),
+                );
+            }
+
+            reconcile::restore_projects(&projects_to_restore, rt.as_ref())
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let clear_state_error = tokio::task::spawn_blocking(|| {
+            let mut state = bundle::load_bundle_state();
+            state.phase = bundle::BundleReconcilePhase::Done;
+            state.pending_running_projects.clear();
+            state.last_error = None;
+            bundle::save_bundle_state(&state).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let mut error = install_error;
+        if let Err(restore_error) = restore_error {
+            error.push_str(&format!(
+                " Restore after failed update also failed: {restore_error}."
+            ));
+        }
+        if let Err(clear_state_error) = clear_state_error {
+            error.push_str(&format!(
+                " Failed to clear pending bundle update state: {clear_state_error}."
+            ));
+        }
+        log::error!("install_update_and_reconcile: install failed: {error}");
+        return Err(error);
+    }
+
+    log::info!("install_update_and_reconcile: update installed, restarting");
+    app.restart()
+}
+
+#[tauri::command]
 pub(crate) fn get_update_settings() -> Result<updater::UpdateSettings, String> {
     log::debug!("get_update_settings");
     Ok(updater::load_update_settings())
@@ -83,6 +191,17 @@ pub(crate) fn set_update_settings(settings: updater::UpdateSettings) -> Result<(
         settings.check_interval_hours
     );
     updater::save_update_settings(&settings)
+}
+
+#[tauri::command]
+pub(crate) fn get_bundle_reconcile_state() -> Result<BundleReconcileStatus, String> {
+    Ok(reconcile::current_bundle_status())
+}
+
+#[tauri::command]
+pub(crate) fn retry_bundle_reconcile(app: tauri::AppHandle) -> Result<(), String> {
+    reconcile::reconcile_bundle_update(&app);
+    Ok(())
 }
 
 // `app.restart()` returns `-> !` (the never type) — it terminates the

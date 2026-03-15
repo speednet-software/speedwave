@@ -2,8 +2,11 @@
 
 use crate::ide_bridge;
 use crate::mcp_os_process;
-use speedwave_runtime::config;
+use crate::types::BundleReconcileStatus;
+use speedwave_runtime::{build, bundle, config};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tauri::Emitter;
 
 /// Shared handle for the IDE Bridge instance.
 pub(crate) type SharedIdeBridge = Arc<Mutex<Option<ide_bridge::IdeBridge>>>;
@@ -13,6 +16,223 @@ pub(crate) type SharedMcpOs = Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>;
 
 /// Shared handle for the background auto-update check task.
 pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>;
+
+static BUNDLE_RECONCILE_RUNNING: AtomicBool = AtomicBool::new(false);
+
+fn phase_name(phase: bundle::BundleReconcilePhase) -> &'static str {
+    match phase {
+        bundle::BundleReconcilePhase::Pending => "pending",
+        bundle::BundleReconcilePhase::ResourcesSynced => "resources_synced",
+        bundle::BundleReconcilePhase::ImagesBuilt => "images_built",
+        bundle::BundleReconcilePhase::ProjectsRestored => "projects_restored",
+        bundle::BundleReconcilePhase::Done => "done",
+    }
+}
+
+pub(crate) fn current_bundle_status() -> BundleReconcileStatus {
+    let state = bundle::load_bundle_state();
+    let current_bundle_id = bundle::load_current_bundle_manifest()
+        .ok()
+        .map(|manifest| manifest.bundle_id);
+    let bundle_changed = current_bundle_id
+        .as_deref()
+        .map(|current| state.applied_bundle_id.as_deref() != Some(current))
+        .unwrap_or(false);
+
+    BundleReconcileStatus {
+        phase: phase_name(state.phase).to_string(),
+        in_progress: BUNDLE_RECONCILE_RUNNING.load(Ordering::Relaxed)
+            || (bundle_changed && state.last_error.is_none()),
+        last_error: if bundle_changed {
+            state.last_error.clone()
+        } else {
+            None
+        },
+        pending_running_projects: if bundle_changed {
+            state.pending_running_projects.clone()
+        } else {
+            Vec::new()
+        },
+        applied_bundle_id: state.applied_bundle_id.clone(),
+    }
+}
+
+fn emit_bundle_status(app_handle: &tauri::AppHandle) {
+    let _ = app_handle.emit("bundle_reconcile_status", current_bundle_status());
+}
+
+pub(crate) fn list_running_projects(
+    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    user_config: &config::SpeedwaveUserConfig,
+) -> Result<Vec<String>, String> {
+    let mut running = Vec::new();
+    for project in &user_config.projects {
+        let containers = rt
+            .compose_ps(&project.name)
+            .map_err(|e| format!("compose_ps failed for '{}': {}", project.name, e))?;
+        if !containers.is_empty() {
+            running.push(project.name.clone());
+        }
+    }
+    Ok(running)
+}
+
+pub(crate) fn restore_projects(
+    projects: &[String],
+    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+) -> Result<(), String> {
+    for project in projects {
+        let _ = rt.compose_down(project);
+        crate::containers_cmd::render_and_save_compose(project, rt)?;
+        rt.compose_up_recreate(project)
+            .map_err(|e| format!("compose_up_recreate failed for '{}': {}", project, e))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn stop_projects(
+    projects: &[String],
+    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+) -> Result<(), String> {
+    for project in projects {
+        rt.compose_down(project)
+            .map_err(|e| format!("compose_down failed for '{}': {}", project, e))?;
+    }
+    Ok(())
+}
+
+fn save_bundle_error(state: &mut bundle::BundleState, message: String) -> Result<(), String> {
+    state.last_error = Some(message.clone());
+    bundle::save_bundle_state(state)
+        .map_err(|e| format!("{message}. Additionally failed to save bundle state: {e}"))?;
+    Err(message)
+}
+
+fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    let manifest = bundle::load_current_bundle_manifest().map_err(|e| e.to_string())?;
+    let mut state = bundle::load_bundle_state();
+    let bundle_changed = state.applied_bundle_id.as_deref() != Some(manifest.bundle_id.as_str());
+
+    if !bundle_changed {
+        if state.phase != bundle::BundleReconcilePhase::Done
+            || state.last_error.is_some()
+            || !state.pending_running_projects.is_empty()
+        {
+            state.phase = bundle::BundleReconcilePhase::Done;
+            state.last_error = None;
+            state.pending_running_projects.clear();
+            bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
+        }
+        emit_bundle_status(app_handle);
+        return Ok(());
+    }
+
+    emit_bundle_status(app_handle);
+
+    let rt = speedwave_runtime::runtime::detect_runtime();
+    if !rt.is_available() {
+        return save_bundle_error(
+            &mut state,
+            "Runtime not available while applying the new bundle".to_string(),
+        );
+    }
+    rt.ensure_ready().map_err(|e| {
+        let msg = format!("Runtime is not ready while applying the new bundle: {e}");
+        state.last_error = Some(msg.clone());
+        let _ = bundle::save_bundle_state(&state);
+        msg
+    })?;
+
+    let build_root = build::resolve_build_root().map_err(|e| e.to_string())?;
+
+    if state
+        .phase
+        .is_before(bundle::BundleReconcilePhase::ResourcesSynced)
+    {
+        bundle::sync_claude_resources(&build_root).map_err(|e| {
+            save_bundle_error(&mut state, format!("Claude resources sync failed: {e}")).unwrap_err()
+        })?;
+        state.phase = bundle::BundleReconcilePhase::ResourcesSynced;
+        state.last_error = None;
+        bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
+        emit_bundle_status(app_handle);
+    }
+
+    if state
+        .phase
+        .is_before(bundle::BundleReconcilePhase::ImagesBuilt)
+    {
+        build::build_all_images_for_bundle(rt.as_ref(), &manifest.bundle_id).map_err(|e| {
+            save_bundle_error(&mut state, format!("Image rebuild failed: {e}")).unwrap_err()
+        })?;
+        state.phase = bundle::BundleReconcilePhase::ImagesBuilt;
+        state.last_error = None;
+        bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
+        emit_bundle_status(app_handle);
+    }
+
+    let user_config = match config::load_user_config() {
+        Ok(config) => config,
+        Err(e) => {
+            log::warn!(
+                "reconcile_bundle_update: failed to load user config, proceeding with pending project list only: {e}"
+            );
+            config::SpeedwaveUserConfig::default()
+        }
+    };
+    let mut projects = state.pending_running_projects.clone();
+    let running_projects = list_running_projects(rt.as_ref(), &user_config)?;
+    for project in running_projects {
+        if !projects.contains(&project) {
+            projects.push(project);
+        }
+    }
+    projects.sort();
+    projects.dedup();
+
+    if state
+        .phase
+        .is_before(bundle::BundleReconcilePhase::ProjectsRestored)
+    {
+        restore_projects(&projects, rt.as_ref()).map_err(|e| {
+            save_bundle_error(&mut state, format!("Project restore failed: {e}")).unwrap_err()
+        })?;
+        state.phase = bundle::BundleReconcilePhase::ProjectsRestored;
+        state.pending_running_projects = projects;
+        state.last_error = None;
+        bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
+        emit_bundle_status(app_handle);
+    }
+
+    state.applied_bundle_id = Some(manifest.bundle_id);
+    state.phase = bundle::BundleReconcilePhase::Done;
+    state.pending_running_projects.clear();
+    state.last_error = None;
+    bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
+    emit_bundle_status(app_handle);
+
+    Ok(())
+}
+
+pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) {
+    if BUNDLE_RECONCILE_RUNNING
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        emit_bundle_status(app_handle);
+        return;
+    }
+
+    emit_bundle_status(app_handle);
+    let handle = app_handle.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = reconcile_bundle_update_inner(&handle) {
+            log::error!("reconcile_bundle_update failed: {e}");
+        }
+        BUNDLE_RECONCILE_RUNNING.store(false, Ordering::Relaxed);
+        emit_bundle_status(&handle);
+    });
+}
 
 /// After mcp-os starts on a new dynamic port, check if running containers have
 /// a stale WORKER_OS_URL in their compose.yml. If so, regenerate compose and
@@ -273,6 +493,29 @@ pub(crate) fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std:
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    struct HomeGuard {
+        original_home: Option<std::ffi::OsString>,
+    }
+
+    impl HomeGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let original_home = std::env::var_os("HOME");
+            std::env::set_var("HOME", path);
+            Self { original_home }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            if let Some(home) = &self.original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
 
     mod stop_all_containers_tests {
         use super::stop_all_containers;
@@ -399,6 +642,78 @@ mod tests {
                 *recorded,
                 vec!["alpha", "beta", "gamma"],
                 "all projects should be attempted even when one fails"
+            );
+        }
+    }
+
+    mod bundle_status_tests {
+        use super::*;
+
+        #[test]
+        #[serial]
+        fn current_bundle_status_marks_bundle_change_as_in_progress() {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = HomeGuard::set(temp.path());
+            let manifest = bundle::load_current_bundle_manifest().unwrap();
+
+            bundle::save_bundle_state(&bundle::BundleState {
+                applied_bundle_id: Some("older-bundle".to_string()),
+                phase: bundle::BundleReconcilePhase::Pending,
+                pending_running_projects: vec!["alpha".to_string()],
+                last_error: None,
+            })
+            .unwrap();
+
+            let status = current_bundle_status();
+            assert!(status.in_progress);
+            assert_eq!(status.phase, "pending");
+            assert_eq!(status.pending_running_projects, vec!["alpha"]);
+            assert_eq!(status.applied_bundle_id, Some("older-bundle".to_string()));
+            assert_ne!(status.applied_bundle_id, Some(manifest.bundle_id));
+        }
+
+        #[test]
+        #[serial]
+        fn current_bundle_status_hides_stale_error_when_bundle_already_applied() {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = HomeGuard::set(temp.path());
+            let manifest = bundle::load_current_bundle_manifest().unwrap();
+
+            bundle::save_bundle_state(&bundle::BundleState {
+                applied_bundle_id: Some(manifest.bundle_id),
+                phase: bundle::BundleReconcilePhase::ImagesBuilt,
+                pending_running_projects: vec!["alpha".to_string()],
+                last_error: Some("stale error".to_string()),
+            })
+            .unwrap();
+
+            let status = current_bundle_status();
+            assert!(!status.in_progress);
+            assert!(status.last_error.is_none());
+            assert!(status.pending_running_projects.is_empty());
+        }
+
+        #[test]
+        #[serial]
+        fn current_bundle_status_surfaces_reconcile_error_for_new_bundle() {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = HomeGuard::set(temp.path());
+
+            bundle::save_bundle_state(&bundle::BundleState {
+                applied_bundle_id: Some("older-bundle".to_string()),
+                phase: bundle::BundleReconcilePhase::ImagesBuilt,
+                pending_running_projects: vec!["alpha".to_string(), "beta".to_string()],
+                last_error: Some("Image rebuild failed".to_string()),
+            })
+            .unwrap();
+
+            let status = current_bundle_status();
+            assert!(!status.in_progress);
+            assert_eq!(status.phase, "images_built");
+            assert_eq!(status.last_error.as_deref(), Some("Image rebuild failed"));
+            assert_eq!(
+                status.pending_running_projects,
+                vec!["alpha".to_string(), "beta".to_string()]
             );
         }
     }
