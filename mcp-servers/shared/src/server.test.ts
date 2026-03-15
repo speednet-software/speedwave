@@ -402,7 +402,7 @@ describe('server', () => {
         const req = createMockRequest({});
         const res = createMockResponse();
 
-        const routes = (server.app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (server.app as any).router.stack.filter((layer: any) => layer.route);
         const healthRoute = routes.find((layer: any) => layer.route?.path === '/health');
 
         await healthRoute.route.stack[0].handle(req, res);
@@ -426,7 +426,7 @@ describe('server', () => {
         const req = createMockRequest({});
         const res = createMockResponse();
 
-        const routes = (server.app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (server.app as any).router.stack.filter((layer: any) => layer.route);
         const healthRoute = routes.find((layer: any) => layer.route?.path === '/health');
 
         await healthRoute.route.stack[0].handle(req, res);
@@ -452,7 +452,7 @@ describe('server', () => {
         const req = createMockRequest({});
         const res = createMockResponse();
 
-        const routes = (server.app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (server.app as any).router.stack.filter((layer: any) => layer.route);
         const healthRoute = routes.find((layer: any) => layer.route?.path === '/health');
 
         await healthRoute.route.stack[0].handle(req, res);
