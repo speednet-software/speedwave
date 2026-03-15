@@ -378,10 +378,13 @@ fn list_conversations_impl(base: &Path, project: &str) -> anyhow::Result<Vec<Con
                 Err(_) => break,
             };
             if let Some(msg) = parse_jsonl_message(&line) {
-                // Deduplicate: skip result whose content matches preceding assistant
+                // Deduplicate: skip result whose content is contained in the
+                // preceding assistant message.  `parse_assistant_message`
+                // concatenates text + "[Tool: X]" placeholders, so the result
+                // text (plain text only) is a substring of the assistant content.
                 if msg.role == "assistant" {
                     if let Some(ref prev) = last_assistant_content {
-                        if &msg.content == prev {
+                        if prev.contains(&msg.content) {
                             continue;
                         }
                     }
@@ -440,11 +443,13 @@ fn get_conversation_impl(
     for line in reader.lines().take(MAX_TRANSCRIPT_LINES) {
         let line = line.map_err(|e| anyhow::anyhow!("io error reading session: {e}"))?;
         if let Some(msg) = parse_jsonl_message(&line) {
-            // Deduplicate: skip result message whose content matches the
-            // preceding assistant message (Claude writes both for normal turns).
+            // Deduplicate: skip result message whose content is contained in
+            // the preceding assistant message.  `parse_assistant_message`
+            // concatenates text + "[Tool: X]" placeholders, so the result
+            // text (plain text only) is a substring of the assistant content.
             if msg.role == "assistant" {
                 if let Some(ref prev) = last_assistant_content {
-                    if &msg.content == prev {
+                    if prev.contains(&msg.content) {
                         continue;
                     }
                 }
@@ -969,5 +974,32 @@ mod tests {
         assert_eq!(result.messages[0].content, "/cost");
         assert_eq!(result.messages[1].role, "assistant");
         assert_eq!(result.messages[1].content, "Session cost: $0.003");
+    }
+
+    #[test]
+    fn get_conversation_deduplicates_tool_use_turn_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        // Assistant message with text + tool_use → content = "I will read\n[Tool: Read]"
+        // Result has only the text portion → content = "I will read"
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"read it"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I will read"},{"type":"tool_use","name":"Read","input":{}}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"result","is_error":false,"result":"I will read","timestamp":"2025-01-01T00:00:02Z"}"#,
+            ],
+        );
+
+        let result = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        // Should have 2 messages: user + assistant (result deduplicated even
+        // though assistant content includes "[Tool: Read]" suffix)
+        assert_eq!(result.messages.len(), 2);
+        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[1].role, "assistant");
+        assert_eq!(result.messages[1].content, "I will read\n[Tool: Read]");
     }
 }

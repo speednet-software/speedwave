@@ -344,9 +344,13 @@ impl StreamParser {
         let is_error = parsed["is_error"].as_bool().unwrap_or(false);
 
         if is_error {
-            let result_text = parsed["result"].as_str().unwrap_or("").to_string();
+            let result_text = parsed["result"].as_str().unwrap_or("");
+            if result_text.trim().is_empty() {
+                log::warn!("parse_result: is_error=true but result text is empty");
+                return None;
+            }
             return Some(StreamChunk::Error {
-                content: result_text,
+                content: result_text.to_string(),
             });
         }
 
@@ -1114,6 +1118,22 @@ mod tests {
             StreamChunk::Error { content } => assert_eq!(content, "Something went wrong"),
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_result_error_with_empty_result_returns_none() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","is_error":true,"result":""}"#;
+        assert!(
+            parse_line_str(&mut parser, line).is_none(),
+            "empty error result should be skipped"
+        );
+
+        let line_no_key = r#"{"type":"result","is_error":true}"#;
+        assert!(
+            parse_line_str(&mut parser, line_no_key).is_none(),
+            "missing result key with is_error should be skipped"
+        );
     }
 
     #[test]
