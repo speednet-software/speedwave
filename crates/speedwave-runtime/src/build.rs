@@ -246,6 +246,59 @@ fn write_resources_marker_to(
     Ok(())
 }
 
+/// Containerd overlayfs snapshotter corruption that survived a prune attempt.
+///
+/// Returned by `build_all_images` when:
+/// 1. First build fails with a snapshotter error (e.g. "failed to rename: file exists")
+/// 2. `system_prune` + retry also fails
+///
+/// The `Display` impl includes platform-specific restart commands so callers
+/// can interpolate `{e}` directly without adding their own diagnostic hints.
+#[derive(Debug)]
+pub struct SnapshotterRecoveryFailed {
+    pub inner: anyhow::Error,
+}
+
+impl std::fmt::Display for SnapshotterRecoveryFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Containerd snapshotter corrupted. Prune did not help (second build: {inner}).\n\
+             Fix: {hint}",
+            inner = self.inner,
+            hint = platform_restart_hint(),
+        )
+    }
+}
+
+impl std::error::Error for SnapshotterRecoveryFailed {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.inner.as_ref())
+    }
+}
+
+fn platform_restart_hint() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        "systemctl --user restart containerd && systemctl --user restart buildkit"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "limactl shell speedwave -- sudo systemctl restart containerd && \
+         limactl shell speedwave -- sudo systemctl restart buildkit; \
+         limactl shell speedwave -- sudo buildctl debug workers"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "wsl.exe -d Speedwave -- systemctl restart containerd && \
+         wsl.exe -d Speedwave -- systemctl restart buildkit"
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        "restart containerd and buildkit manually"
+    }
+}
+
 /// Rebuilds all container images from their Containerfiles.
 ///
 /// Calls `runtime.prepare_build_context()` to translate the host build-root into
@@ -254,8 +307,12 @@ fn write_resources_marker_to(
 ///
 /// If the build fails with a containerd overlayfs snapshotter error
 /// ("failed to rename: file exists"), automatically prunes dangling images and
-/// build cache, then retries once. This is a known containerd bug
-/// (containerd#11719, nerdctl#3420).
+/// build cache, then retries once. If the retry also fails, returns
+/// `SnapshotterRecoveryFailed` so callers can decide whether to restart the
+/// container engine (safe during setup) or propagate with diagnostics
+/// (when containers are running).
+///
+/// This is a known containerd bug (containerd#11719, nerdctl#3420).
 ///
 /// Returns the number of images successfully built.
 pub fn build_all_images(runtime: &dyn ContainerRuntime) -> anyhow::Result<u32> {
@@ -263,15 +320,19 @@ pub fn build_all_images(runtime: &dyn ContainerRuntime) -> anyhow::Result<u32> {
     let vm_root = runtime.prepare_build_context(&root)?;
     let needs_cleanup = vm_root != root;
 
-    let result = try_build_all(runtime, &vm_root).or_else(|e| {
-        if is_snapshotter_error(&e) {
-            log::warn!("build failed with containerd snapshotter error, pruning and retrying: {e}");
+    let result = try_build_all(runtime, &vm_root).or_else(|first_err| {
+        if is_snapshotter_error(&first_err) {
+            log::warn!(
+                "build failed with containerd snapshotter error, pruning and retrying: {first_err}"
+            );
             if let Err(prune_err) = runtime.system_prune() {
                 log::warn!("system prune failed: {prune_err}");
             }
-            try_build_all(runtime, &vm_root)
+            try_build_all(runtime, &vm_root).map_err(|second_err| {
+                anyhow::Error::new(SnapshotterRecoveryFailed { inner: second_err })
+            })
         } else {
-            Err(e)
+            Err(first_err)
         }
     });
 
@@ -1245,5 +1306,104 @@ mod tests {
         let recorded = calls.lock().unwrap();
         let prune_count = recorded.iter().filter(|c| *c == "system_prune").count();
         assert_eq!(prune_count, 1, "system_prune should be called once");
+    }
+
+    #[test]
+    fn test_snapshotter_recovery_failed_downcast() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let image_count = IMAGES.len() as u32;
+
+        // First attempt: fail on call 3 with snapshotter error
+        // Retry: fail on call (3 + image_count) with a different error
+        let mut fail_on = std::collections::HashMap::new();
+        fail_on.insert(
+            3,
+            "apply layer error for \"docker.io/library/img:latest\"".to_string(),
+        );
+        fail_on.insert(3 + image_count, "still broken after prune".to_string());
+
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = RetryMockRuntime {
+            build_root,
+            calls: Arc::clone(&calls),
+            build_call_counter: Arc::clone(&counter),
+            fail_on,
+        };
+
+        let result = build_all_images(&rt);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert!(
+            err.downcast_ref::<SnapshotterRecoveryFailed>().is_some(),
+            "should return SnapshotterRecoveryFailed, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_snapshotter_recovery_failed_source_preserves_chain() {
+        let inner = anyhow::anyhow!("still broken");
+        let recovery = SnapshotterRecoveryFailed { inner };
+        let source = std::error::Error::source(&recovery);
+        assert!(source.is_some(), "source() should return the inner error");
+        assert!(
+            source.unwrap().to_string().contains("still broken"),
+            "source should preserve the inner error message"
+        );
+    }
+
+    #[test]
+    fn test_snapshotter_recovery_failed_display_contains_hint() {
+        let inner = anyhow::anyhow!("build failed again");
+        let recovery = SnapshotterRecoveryFailed { inner };
+        let display = recovery.to_string();
+        assert!(
+            display.contains("Containerd snapshotter corrupted"),
+            "Display should describe root cause, got: {display}"
+        );
+        assert!(
+            display.contains("Prune did not help"),
+            "Display should mention prune failure, got: {display}"
+        );
+        assert!(
+            display.contains("build failed again"),
+            "Display should contain inner error, got: {display}"
+        );
+        assert!(
+            display.contains("Fix:"),
+            "Display should contain platform-specific fix hint, got: {display}"
+        );
+    }
+
+    #[test]
+    fn test_build_all_images_non_snapshotter_error_not_wrapped() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        // Fail on 2nd call with a non-snapshotter error
+        let mut fail_on = std::collections::HashMap::new();
+        fail_on.insert(2, "network timeout".to_string());
+
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = RetryMockRuntime {
+            build_root,
+            calls: Arc::clone(&calls),
+            build_call_counter: Arc::clone(&counter),
+            fail_on,
+        };
+
+        let result = build_all_images(&rt);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert!(
+            err.downcast_ref::<SnapshotterRecoveryFailed>().is_none(),
+            "non-snapshotter error should NOT be wrapped as SnapshotterRecoveryFailed"
+        );
+        assert!(
+            err.to_string().contains("network timeout"),
+            "original error should propagate unchanged"
+        );
     }
 }

@@ -111,6 +111,16 @@ pub const WSL_SERVICE_START_DELAY_SECS: u64 = 3;
 /// longer than a single retry to bring up containerd/buildkitd.
 pub const WSL_SERVICE_CHECK_MAX_RETRIES: u32 = 10;
 
+/// Delay in seconds after restarting containerd/buildkitd before checking readiness.
+/// Gives systemd time to bring up the service after a `systemctl restart`.
+pub const CONTAINERD_RESTART_READY_DELAY_SECS: u64 = 5;
+
+/// Maximum number of readiness retries after restarting containerd/buildkitd.
+/// Each retry waits `CONTAINERD_RESTART_READY_DELAY_SECS` seconds. Worst-case wait
+/// per phase: 6 × 5s = 30s. NerdctlRuntime runs two phases (systemd is-active then
+/// nerdctl info), so Linux rootless worst-case is 60s. Lima/WSL2 are single-phase (30s).
+pub const CONTAINERD_RESTART_READY_MAX_RETRIES: u32 = 6;
+
 /// Descriptor for a single auth/credential field of an MCP service.
 pub struct McpAuthFieldDescriptor {
     /// Field key used as filename in the tokens directory (e.g. "bot_token").

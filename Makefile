@@ -361,7 +361,7 @@ _e2e-run:
 		systemctl --user stop containerd 2>/dev/null || true; \
 	fi
 	@sleep 1
-	@mkdir -p /tmp/speedwave-e2e-project
+	@mkdir -p /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
 	@E2E_BAK=$$HOME/.speedwave.e2e-bak; \
 	backup_dir() { \
 		if [ -d "$$1" ]; then rm -rf "$$2"; mv "$$1" "$$2"; fi; \
@@ -405,7 +405,7 @@ _e2e-run:
 	$(E2E_BINARY) & APP_PID=$$!; \
 	trap "kill $$APP_PID 2>/dev/null; restore_state" EXIT; \
 	for i in $$(seq 1 30); do curl -sf http://127.0.0.1:4445/status >/dev/null 2>&1 && break; sleep 1; done; \
-	cd desktop/e2e && E2E_PROJECT_DIR=/tmp/speedwave-e2e-project npx wdio run wdio.conf.ts; \
+	cd desktop/e2e && E2E_PROJECT_DIR=/tmp/speedwave-e2e-project E2E_SECOND_PROJECT_DIR=/tmp/speedwave-e2e-project-2 npx wdio run wdio.conf.ts; \
 	E2E_EXIT=$$?; \
 	kill $$APP_PID 2>/dev/null; \
 	restore_state; \
