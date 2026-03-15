@@ -211,6 +211,8 @@ async fn switch_project(
     app: tauri::AppHandle,
     chat_state: tauri::State<'_, SharedChatSession>,
 ) -> Result<(), String> {
+    use containers_cmd::{switch_project_core, teardown_and_restore, teardown_only, SwitchResult};
+
     let previous = config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
         let prev = user_config.active_project.clone();
@@ -226,16 +228,77 @@ async fn switch_project(
         serde_json::json!({ "project": name }),
     );
 
-    // Phase 1: recreate containers
-    if let Err(e) = containers_cmd::recreate_project_containers(name.clone()).await {
-        rollback_and_emit_failed(&app, previous, &e.to_string());
-        return Err(e);
+    // Container transaction: ensure_ready → stop previous → recreate new
+    let prev_clone = previous.clone();
+    let new_clone = name.clone();
+    let switch_result = tokio::task::spawn_blocking(move || {
+        let rt = speedwave_runtime::runtime::detect_runtime();
+        switch_project_core(&prev_clone, &new_clone, &*rt, &|proj, rt| {
+            check_project(proj)?;
+            let _ = rt.compose_down(proj);
+            containers_cmd::render_and_save_compose(proj, rt)?;
+            rt.compose_up_recreate(proj).map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if let SwitchResult::Err {
+        error,
+        cleanup_error,
+    } = switch_result
+    {
+        let full_error = rollback_and_emit_failed(&app, previous, &error, cleanup_error.as_deref());
+        return Err(full_error);
     }
 
-    // Phase 2: rebind chat session
+    // Rebind chat session
     if let Err(e) = rebind_chat(&name, &app, &chat_state) {
-        rollback_and_emit_failed(&app, previous, &e.to_string());
-        return Err(e);
+        // Restore previous project containers + chat
+        let mut cleanup_parts: Vec<String> = Vec::new();
+
+        let prev_for_restore = previous.clone();
+        let new_for_teardown = name.clone();
+        let restore_result: Result<(), String> = tokio::task::spawn_blocking(move || {
+            let rt = speedwave_runtime::runtime::detect_runtime();
+            match &prev_for_restore {
+                Some(prev) => teardown_and_restore(&new_for_teardown, prev, &*rt),
+                None => teardown_only(&new_for_teardown, &*rt).map_or(Ok(()), Err),
+            }
+        })
+        .await
+        .unwrap_or_else(|je| Err(format!("join error: {je}")));
+
+        if let Err(ref re) = restore_result {
+            if previous.is_some() {
+                cleanup_parts.push(format!(
+                    "Container restore failed: {re}. \
+                     System may be without running containers — run speedwave to restart."
+                ));
+            } else {
+                cleanup_parts.push(format!("Teardown of new project incomplete: {re}"));
+            }
+        }
+
+        if let Some(ref prev) = previous {
+            if restore_result.is_ok() {
+                if let Err(re) = rebind_chat(prev, &app, &chat_state) {
+                    cleanup_parts.push(format!(
+                        "Containers restored but chat rebind to '{prev}' failed: {re}"
+                    ));
+                }
+            }
+        }
+
+        let cleanup_error = if cleanup_parts.is_empty() {
+            None
+        } else {
+            Some(cleanup_parts.join(". "))
+        };
+
+        let full_error =
+            rollback_and_emit_failed(&app, previous, &e.to_string(), cleanup_error.as_deref());
+        return Err(full_error);
     }
 
     let _ = app.emit(
@@ -263,7 +326,8 @@ pub(crate) fn rollback_and_emit_failed(
     app: &tauri::AppHandle,
     previous: Option<String>,
     error: &str,
-) {
+    cleanup_error: Option<&str>,
+) -> String {
     let rollback_err = config::with_config_lock(|| {
         let mut cfg = config::load_user_config()?;
         cfg.active_project = previous.clone();
@@ -272,10 +336,14 @@ pub(crate) fn rollback_and_emit_failed(
     })
     .err();
 
-    let full_error = match rollback_err {
-        Some(rb) => format!("{error}. Rollback also failed: {rb}"),
-        None => error.to_string(),
-    };
+    let mut parts = vec![error.to_string()];
+    if let Some(ce) = cleanup_error {
+        parts.push(ce.to_string());
+    }
+    if let Some(rb) = rollback_err {
+        parts.push(format!("Config rollback failed: {rb}"));
+    }
+    let full_error = parts.join(". ");
 
     use tauri::Emitter;
     let _ = app.emit(
@@ -285,6 +353,8 @@ pub(crate) fn rollback_and_emit_failed(
             "error": full_error,
         }),
     );
+
+    full_error
 }
 
 // ---------------------------------------------------------------------------
