@@ -43,6 +43,7 @@ export const config = {
     { passed, error }: { passed: boolean; error?: Error },
   ) {
     if (!passed) {
+      if (error) console.error(`Test failed: ${error.message}`);
       try {
         mkdirSync(SCREENSHOT_DIR, { recursive: true });
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
