@@ -296,6 +296,19 @@ export class ChatStateService {
       }
 
       case 'Result':
+        if (chunk.data.result_text) {
+          // Only append result_text when no streamed text blocks exist yet.
+          // Claude Code always copies the full response into `result`, so for
+          // normal turns the text was already streamed via Text deltas.  Slash
+          // commands (e.g. /cost) produce *only* a result — no text deltas.
+          const hasStreamedText = this._currentBlocks.some((b) => b.type === 'text');
+          if (!hasStreamedText) {
+            this._currentBlocks = [
+              ...this._currentBlocks,
+              { type: 'text', content: chunk.data.result_text },
+            ];
+          }
+        }
         if (this._currentBlocks.length > 0) {
           this._messages = [
             ...this._messages,
