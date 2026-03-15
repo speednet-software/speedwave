@@ -107,9 +107,9 @@ The `scripts/e2e-vm.sh` script orchestrates the following three-phase flow for e
 
 1. **Phase 1 — Build artifact:** Copy repo source via rsync/tar-over-SSH, build release artifact (.deb on Linux, NSIS installer on Windows, .dmg on macOS), copy artifact back to host
 2. **Phase 2 — Test on clean system:** Clean previous state (uninstall app, remove user data, stop containers). Copy only the artifact + E2E test suite. Install the artifact like a real user would, launch it, and run WebdriverIO tests against it
-3. **Phase 3 — Test on stale system:** Remove the setup-complete marker but keep all other state (containers, Lima VM, systemd units). Launch the app again and run the full E2E suite — the app must handle pre-existing state gracefully
+3. **Phase 3 — Second fresh install:** Clean ALL state again (same as Phase 2), reinstall the artifact, and run the full E2E suite a second time. This catches issues with leftover system-level state (systemd units, Lima cache, WSL2 distros, registry entries) that survive user-data removal
 
-This three-phase approach simulates both a fresh install and a returning user reopening the app after a previous session.
+This three-phase approach verifies the app works correctly on both a first and second fresh install.
 
 #### Test machine requirements
 
@@ -141,13 +141,15 @@ desktop/e2e/
 ├── wdio.conf.ts           # WebdriverIO config (port 4445, 30s default timeout; individual tests override up to 20 min)
 ├── tsconfig.json          # TypeScript config
 └── specs/
-    ├── 01-app-lifecycle.spec.ts   # Basic launch: title, Angular root, setup wizard shown
-    ├── 02-setup-wizard.spec.ts    # Full flow: welcome → all 6 steps → project form → redirect
-    ├── 03-navigation.spec.ts      # Shell nav: Chat, Integrations, Settings routing
-    └── 04-settings.spec.ts        # Settings page: project name, LLM, reset, updates
+    ├── 01-app-lifecycle.spec.ts       # Basic launch: title, Angular root, setup wizard shown
+    ├── 02-setup-wizard.spec.ts        # Full flow: welcome → all 6 steps → project form → redirect
+    ├── 03-navigation.spec.ts          # Shell nav: Chat, Integrations, Settings routing
+    ├── 04-settings.spec.ts            # Settings page: project name, LLM, reset, updates
+    ├── 05-project-management.spec.ts  # Add second project, switch between projects
+    └── 06-factory-reset.spec.ts       # Factory reset: confirm → wipe state → app restart (MUST be last)
 ```
 
-Specs run in numeric order. `02-setup-wizard` drives the entire setup wizard to completion (including filling the project form with name `e2e-test` and directory `/tmp/speedwave-e2e-project`). Subsequent specs (`03-*`, `04-*`) depend on setup being complete and fail explicitly if the shell is not present — no silent early returns.
+Specs run in numeric order. `02-setup-wizard` drives the entire setup wizard to completion (including filling the project form with name `e2e-test` and directory `/tmp/speedwave-e2e-project`). Subsequent specs (`03-*` through `05-*`) depend on setup being complete and fail explicitly if the shell is not present — no silent early returns. `06-factory-reset` MUST be last — it verifies `is_setup_complete` is true, triggers factory reset (wipes `~/.speedwave/`), and confirms `app.restart()` fires by polling until the new process is listening on port 4445.
 
 ### Selectors Convention
 

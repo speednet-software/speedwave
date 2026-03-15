@@ -118,7 +118,7 @@ if [ -x "$NERDCTL" ]; then
         | xargs -r "$NERDCTL" rm -f 2>/dev/null || true
 fi
 # Remove installed .deb if present
-sudo dpkg --remove speedwave-desktop 2>/dev/null || true
+sudo dpkg --remove speedwave 2>/dev/null || sudo dpkg --remove speedwave-desktop 2>/dev/null || true
 sudo apt-get autoremove -y 2>/dev/null || true
 # Stop rootless containerd (installed as systemd --user service by setup wizard)
 systemctl --user stop containerd 2>/dev/null || true
@@ -432,6 +432,11 @@ run_linux() {
 set -euo pipefail
 cd /tmp/speedwave-e2e
 export PATH="$HOME/.cargo/bin:$PATH"
+# Limit cargo parallelism to half the CPU cores to avoid freezing the GUI desktop.
+# Full parallelism (22 threads on this machine) starves X11/Wayland compositor.
+TOTAL_CPUS=$(nproc 2>/dev/null || echo 8)
+export CARGO_BUILD_JOBS=$(( TOTAL_CPUS / 2 > 1 ? TOTAL_CPUS / 2 : 2 ))
+echo "── Using CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS (of $TOTAL_CPUS cores)"
 
 npm ci
 cd mcp-servers && npm ci && cd ..
