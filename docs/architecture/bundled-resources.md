@@ -1,6 +1,6 @@
 # Bundled Resources
 
-Speedwave bundles a set of Claude Code resources that are mounted read-only into the Claude container at `/speedwave/resources/` and injected into `~/.claude/` by `entrypoint.sh` at container start. This document is the single reference for **what** is bundled, **how** it reaches the container, and **how** teams can override it.
+Speedwave bundles a set of Claude Code resources that are synced into `~/.speedwave/claude-resources`, mounted read-only into the Claude container at `/speedwave/resources/`, and injected into `~/.claude/` by `entrypoint.sh` at container start. This document is the single reference for **what** is bundled, **how** it reaches the container, and **how** teams can override it.
 
 ## Resource Catalog
 
@@ -56,6 +56,30 @@ volumes:
   - ${IDE_LOCK_DIR}:/home/speedwave/.claude/ide:ro # IDE Bridge lock files (read-only)
 ```
 
+## Bundle Reconcile Lifecycle
+
+The desktop bundle ships `build-context/containers/claude-resources/` plus a generated `bundle-manifest.json`. On app startup, the backend compares the installed `bundle_id` with `~/.speedwave/bundle-state.json`.
+
+When the bundle changed, the desktop app:
+
+1. Validates the bundled `claude-resources`
+2. Atomically syncs them into `~/.speedwave/claude-resources`
+3. Rebuilds built-in images for the current `bundle_id`
+4. Recreates previously running projects if the update flow stored them in `pending_running_projects`
+
+This means compose always mounts the stable host path `~/.speedwave/claude-resources`, but the content of that directory is managed by the startup reconcile rather than read directly from the installed app bundle on every container start.
+
+## Bundle Asset Gate
+
+Desktop packaging now treats the staged Tauri resources as a validated runtime contract, not a best-effort copy step. Before `cargo tauri build` runs, the desktop build verifies:
+
+- bundled `build-context/` and `mcp-os/` trees exist and are non-empty
+- the platform runtime is present (`node`, CLI, Lima or nerdctl/WSL assets)
+- macOS bundles include `reminders-cli`, `calendar-cli`, `mail-cli`, and `notes-cli`
+- the matching `tauri.<platform>.conf.json` actually declares those resources for bundling
+
+This closes the failure mode where a release could build successfully even though a runtime helper was missing from the final app bundle.
+
 ## Scope Hierarchy
 
 Claude Code resolves settings and resources using a scope hierarchy where **project-level takes precedence over user-level**:
@@ -93,6 +117,7 @@ The Claude container's home directory (`/home/speedwave/`) is backed by a persis
 
 - **Symlinked resources** (`statusline.sh`, `settings.json`, `CLAUDE.md`, `output-styles/Speedwave.md`, `skills/`, `commands/`, `agents/`, `hooks/`) — re-created on every start via `ln -sf` (files) or `ln -sfn` (directories). They point to the read-only mount, so their content updates automatically when Speedwave ships new versions. Teams override via project-level `.claude/` (ADR-022 scope precedence).
 - **Always-regenerated resources** (`mcp-config.json`) — overwritten on every container start, because the MCP hub port may change between runs. This is the only resource generated inline by `entrypoint.sh`.
+- **Host-side resource sync** (`~/.speedwave/claude-resources`) — updated only when `claude_resources_hash` changes in the installed bundle manifest. The sync uses a staging directory plus rename, so the compose mount never points at a partially copied resource tree.
 
 ## Adding a New Bundled Resource
 

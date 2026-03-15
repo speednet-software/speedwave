@@ -19,7 +19,7 @@ The CLI uses the current working directory as project context:
 cd ~/projects/acme && speedwave
 ```
 
-This starts containers for the project, then launches an interactive Claude Code session inside the Claude container with all configured MCP integrations available.
+This renders compose for the current bundle, starts containers for the project, then launches an interactive Claude Code session inside the Claude container with all configured MCP integrations available.
 
 ## Subcommands
 
@@ -27,7 +27,7 @@ This starts containers for the project, then launches an interactive Claude Code
 speedwave                      # default: compose_up + exec claude in container
 speedwave init [name]          # register CWD as a project
 speedwave check                # run security checks, exit 0/1
-speedwave update               # rebuild images + recreate containers
+speedwave update               # rebuild current bundle images + recreate containers
 speedwave self-update          # download latest CLI from GitHub Releases
 speedwave plugin install <path.zip>  # install plugin from signed ZIP
 speedwave plugin list                # list installed plugins with status
@@ -44,7 +44,7 @@ speedwave plugin disable <slug> --project <name>  # disable plugin for a project
   ```
   If the directory is already registered, prints the existing project name and exits.
 - **`speedwave check`** — validates the environment (Lima/WSL2/nerdctl availability, container health), exits 0 on success or 1 on failure
-- **`speedwave update`** — rebuilds container images and recreates containers with the latest configuration
+- **`speedwave update`** — rebuilds the built-in images for the current `bundle_id` and recreates containers with the current bundle manifest
 - **`speedwave self-update`** — downloads the latest CLI binary from GitHub Releases and replaces the current binary
 - **`speedwave plugin install <path.zip>`** — verifies the Ed25519 signature, extracts the plugin to `~/.speedwave/plugins/<slug>/`, and registers it
 - **`speedwave plugin list`** — lists all installed plugins, showing name, version, and enabled/configured status per project
@@ -61,6 +61,17 @@ When running `speedwave` (no subcommand), the CLI resolves which project to use:
 3. **Fallback** — uses `active_project` from config (with a warning and hint to run `speedwave init`)
 
 All path comparisons use canonicalized paths (symlinks resolved, trailing slashes normalized).
+
+## Bundle Compatibility
+
+Built-in images are versioned by the installed desktop bundle, not by a shared `:latest` tag.
+
+- Compose rendering resolves built-in images as `speedwave-*:<bundle_id>`
+- `speedwave` uses the compose file rendered for the current bundle
+- `speedwave update` rebuilds and recreates containers for the current bundle
+- Old local `:latest` images may remain in the cache, but they are not used by newly rendered compose files
+
+This keeps CLI-driven container starts aligned with the desktop bundle that installed the CLI.
 
 ## See Also
 

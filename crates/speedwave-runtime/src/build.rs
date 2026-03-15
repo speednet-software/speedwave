@@ -1,10 +1,10 @@
-use crate::runtime::ContainerRuntime;
+use crate::{bundle, runtime::ContainerRuntime};
 use std::path::PathBuf;
 
 /// A container image definition used by `build_all_images`.
 pub struct ImageDef {
-    /// Docker/OCI tag, e.g. `"speedwave-claude:latest"`.
-    pub tag: &'static str,
+    /// Docker/OCI repository name, e.g. `"speedwave-claude"`.
+    pub name: &'static str,
     /// Context directory relative to the build root (as resolved by `resolve_build_root()`).
     pub context_dir: &'static str,
     /// Containerfile path relative to the build root.
@@ -19,44 +19,55 @@ pub struct ImageDef {
 /// Build args for the Claude container — passes the pinned version to Containerfile.claude.
 const CLAUDE_BUILD_ARGS: &[(&str, &str)] = &[("CLAUDE_VERSION", crate::defaults::CLAUDE_VERSION)];
 
+pub const IMAGE_CLAUDE: &str = "speedwave-claude";
+pub const IMAGE_MCP_HUB: &str = "speedwave-mcp-hub";
+pub const IMAGE_MCP_SLACK: &str = "speedwave-mcp-slack";
+pub const IMAGE_MCP_SHAREPOINT: &str = "speedwave-mcp-sharepoint";
+pub const IMAGE_MCP_REDMINE: &str = "speedwave-mcp-redmine";
+pub const IMAGE_MCP_GITLAB: &str = "speedwave-mcp-gitlab";
+
 pub const IMAGES: &[ImageDef] = &[
     ImageDef {
-        tag: "speedwave-claude:latest",
+        name: IMAGE_CLAUDE,
         context_dir: "containers",
         containerfile: "containers/Containerfile.claude",
         build_args: CLAUDE_BUILD_ARGS,
     },
     ImageDef {
-        tag: "speedwave-mcp-hub:latest",
+        name: IMAGE_MCP_HUB,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/hub/Containerfile",
         build_args: &[],
     },
     ImageDef {
-        tag: "speedwave-mcp-slack:latest",
+        name: IMAGE_MCP_SLACK,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/slack/Dockerfile",
         build_args: &[],
     },
     ImageDef {
-        tag: "speedwave-mcp-sharepoint:latest",
+        name: IMAGE_MCP_SHAREPOINT,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/sharepoint/Dockerfile",
         build_args: &[],
     },
     ImageDef {
-        tag: "speedwave-mcp-redmine:latest",
+        name: IMAGE_MCP_REDMINE,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/redmine/Dockerfile",
         build_args: &[],
     },
     ImageDef {
-        tag: "speedwave-mcp-gitlab:latest",
+        name: IMAGE_MCP_GITLAB,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/gitlab/Dockerfile",
         build_args: &[],
     },
 ];
+
+pub fn image_ref(name: &str, bundle_id: &str) -> String {
+    format!("{name}:{bundle_id}")
+}
 
 /// Resolves the root directory containing container build context (`containers/`, `mcp-servers/`).
 ///
@@ -316,11 +327,19 @@ fn platform_restart_hint() -> &'static str {
 ///
 /// Returns the number of images successfully built.
 pub fn build_all_images(runtime: &dyn ContainerRuntime) -> anyhow::Result<u32> {
+    let manifest = bundle::load_current_bundle_manifest()?;
+    build_all_images_for_bundle(runtime, &manifest.bundle_id)
+}
+
+pub fn build_all_images_for_bundle(
+    runtime: &dyn ContainerRuntime,
+    bundle_id: &str,
+) -> anyhow::Result<u32> {
     let root = resolve_build_root()?;
     let vm_root = runtime.prepare_build_context(&root)?;
     let needs_cleanup = vm_root != root;
 
-    let result = try_build_all(runtime, &vm_root).or_else(|first_err| {
+    let result = try_build_all(runtime, &vm_root, bundle_id).or_else(|first_err| {
         if is_snapshotter_error(&first_err) {
             log::warn!(
                 "build failed with containerd snapshotter error, pruning and retrying: {first_err}"
@@ -328,7 +347,7 @@ pub fn build_all_images(runtime: &dyn ContainerRuntime) -> anyhow::Result<u32> {
             if let Err(prune_err) = runtime.system_prune() {
                 log::warn!("system prune failed: {prune_err}");
             }
-            try_build_all(runtime, &vm_root).map_err(|second_err| {
+            try_build_all(runtime, &vm_root, bundle_id).map_err(|second_err| {
                 anyhow::Error::new(SnapshotterRecoveryFailed { inner: second_err })
             })
         } else {
@@ -347,7 +366,11 @@ pub fn build_all_images(runtime: &dyn ContainerRuntime) -> anyhow::Result<u32> {
 }
 
 /// Builds all images in sequence. Extracted so the retry logic in `build_all_images` can re-call it.
-fn try_build_all(runtime: &dyn ContainerRuntime, vm_root: &std::path::Path) -> anyhow::Result<u32> {
+fn try_build_all(
+    runtime: &dyn ContainerRuntime,
+    vm_root: &std::path::Path,
+    bundle_id: &str,
+) -> anyhow::Result<u32> {
     let total = IMAGES.len();
     let mut built = 0u32;
     log::info!(
@@ -357,11 +380,12 @@ fn try_build_all(runtime: &dyn ContainerRuntime, vm_root: &std::path::Path) -> a
     let root_str = vm_root.to_string_lossy();
     let root_str = root_str.trim_end_matches('/');
     for (i, img) in IMAGES.iter().enumerate() {
+        let tag = image_ref(img.name, bundle_id);
         log::info!(
             "build_all_images: [{}/{}] building {} (context={}, file={})",
             i + 1,
             total,
-            img.tag,
+            tag,
             img.context_dir,
             img.containerfile
         );
@@ -371,14 +395,9 @@ fn try_build_all(runtime: &dyn ContainerRuntime, vm_root: &std::path::Path) -> a
         // on Windows, replacing the base entirely instead of appending.
         let abs_context = format!("{}/{}", root_str, img.context_dir);
         let abs_containerfile = format!("{}/{}", root_str, img.containerfile);
-        runtime.build_image(img.tag, &abs_context, &abs_containerfile, img.build_args)?;
+        runtime.build_image(&tag, &abs_context, &abs_containerfile, img.build_args)?;
         built += 1;
-        log::info!(
-            "build_all_images: [{}/{}] {} built OK",
-            i + 1,
-            total,
-            img.tag
-        );
+        log::info!("build_all_images: [{}/{}] {} built OK", i + 1, total, tag);
     }
     log::info!("build_all_images: all {total} images built successfully");
     Ok(built)
@@ -419,12 +438,12 @@ mod tests {
     }
 
     #[test]
-    fn test_images_tags_are_latest() {
+    fn test_image_names_are_unversioned() {
         for img in IMAGES {
             assert!(
-                img.tag.ends_with(":latest"),
-                "image tag '{}' should end with :latest",
-                img.tag
+                !img.name.contains(':'),
+                "image name '{}' should not contain a tag suffix",
+                img.name
             );
         }
     }
@@ -437,7 +456,7 @@ mod tests {
             assert!(
                 path.exists(),
                 "Containerfile for '{}' not found at {}",
-                img.tag,
+                img.name,
                 path.display()
             );
         }
@@ -451,7 +470,7 @@ mod tests {
             assert!(
                 path.is_dir(),
                 "context dir for '{}' not found at {}",
-                img.tag,
+                img.name,
                 path.display()
             );
         }
@@ -1020,7 +1039,8 @@ mod tests {
 
         // build_all_images resolves the real build root, then calls prepare_build_context.
         // Since our mock overrides prepare_build_context, the translated path should be used.
-        let result = build_all_images(&rt);
+        let bundle_id = "test-bundle";
+        let result = build_all_images_for_bundle(&rt, bundle_id);
         assert!(result.is_ok());
 
         assert!(
@@ -1032,7 +1052,7 @@ mod tests {
         assert_eq!(calls.len(), IMAGES.len());
 
         for (call, img) in calls.iter().zip(IMAGES.iter()) {
-            assert_eq!(call.tag, img.tag);
+            assert_eq!(call.tag, image_ref(img.name, bundle_id));
             assert!(
                 call.context_dir
                     .starts_with(&translated.to_string_lossy().to_string()),
@@ -1062,7 +1082,7 @@ mod tests {
     fn test_claude_image_has_build_args() {
         let claude_img = IMAGES
             .iter()
-            .find(|img| img.tag.contains("claude"))
+            .find(|img| img.name.contains("claude"))
             .unwrap();
         assert_eq!(claude_img.build_args.len(), 1);
         assert_eq!(claude_img.build_args[0].0, "CLAUDE_VERSION");
@@ -1071,11 +1091,11 @@ mod tests {
 
     #[test]
     fn test_non_claude_images_have_no_build_args() {
-        for img in IMAGES.iter().filter(|img| !img.tag.contains("claude")) {
+        for img in IMAGES.iter().filter(|img| !img.name.contains("claude")) {
             assert!(
                 img.build_args.is_empty(),
                 "non-claude image '{}' should have empty build_args",
-                img.tag
+                img.name
             );
         }
     }
@@ -1190,12 +1210,12 @@ mod tests {
             fail_on,
         };
 
-        let result = try_build_all(&rt, &rt.build_root.clone()).or_else(|e| {
+        let result = try_build_all(&rt, &rt.build_root.clone(), "test-bundle").or_else(|e| {
             if is_snapshotter_error(&e) {
                 if let Err(prune_err) = rt.system_prune() {
                     log::warn!("system prune failed: {prune_err}");
                 }
-                try_build_all(&rt, &rt.build_root.clone())
+                try_build_all(&rt, &rt.build_root.clone(), "test-bundle")
             } else {
                 Err(e)
             }
@@ -1238,12 +1258,12 @@ mod tests {
             fail_on,
         };
 
-        let result = try_build_all(&rt, &rt.build_root.clone()).or_else(|e| {
+        let result = try_build_all(&rt, &rt.build_root.clone(), "test-bundle").or_else(|e| {
             if is_snapshotter_error(&e) {
                 if let Err(prune_err) = rt.system_prune() {
                     log::warn!("system prune failed: {prune_err}");
                 }
-                try_build_all(&rt, &rt.build_root.clone())
+                try_build_all(&rt, &rt.build_root.clone(), "test-bundle")
             } else {
                 Err(e)
             }
@@ -1335,12 +1355,12 @@ mod tests {
             fail_on,
         };
 
-        let result = try_build_all(&rt, &rt.build_root.clone()).or_else(|e| {
+        let result = try_build_all(&rt, &rt.build_root.clone(), "test-bundle").or_else(|e| {
             if is_snapshotter_error(&e) {
                 if let Err(prune_err) = rt.system_prune() {
                     log::warn!("system prune failed: {prune_err}");
                 }
-                try_build_all(&rt, &rt.build_root.clone())
+                try_build_all(&rt, &rt.build_root.clone(), "test-bundle")
             } else {
                 Err(e)
             }
@@ -1383,7 +1403,7 @@ mod tests {
             fail_on,
         };
 
-        let result = build_all_images(&rt);
+        let result = build_all_images_for_bundle(&rt, "test-bundle");
         assert!(result.is_err());
 
         let err = result.unwrap_err();
@@ -1445,7 +1465,7 @@ mod tests {
             fail_on,
         };
 
-        let result = build_all_images(&rt);
+        let result = build_all_images_for_bundle(&rt, "test-bundle");
         assert!(result.is_err());
 
         let err = result.unwrap_err();

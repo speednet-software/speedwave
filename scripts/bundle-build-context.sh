@@ -59,3 +59,7 @@ cp -r "$REPO_ROOT/mcp-servers/shared/dist" "$DEST/mcp-os/shared/"
 cp "$REPO_ROOT/mcp-servers/shared/package.json" "$DEST/mcp-os/shared/"
 cp "$REPO_ROOT/mcp-servers/package-lock.json" "$DEST/mcp-os/shared/"
 (cd "$DEST/mcp-os/shared" && npm ci --omit=dev --ignore-scripts)
+
+# Link @speedwave/mcp-shared so Node.js resolves it from os/dist/index.js
+mkdir -p "$DEST/mcp-os/os/node_modules/@speedwave"
+ln -s ../../../shared "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared"
