@@ -214,17 +214,12 @@ export class UpdateNotificationComponent implements OnDestroy {
   private async checkContainers(): Promise<void> {
     try {
       const projectList = await this.tauri.invoke<ProjectList>('list_projects');
-      let anyRunning = false;
-      for (const project of projectList.projects) {
-        const running = await this.tauri.invoke<boolean>('check_containers_running', {
-          project: project.name,
-        });
-        if (running) {
-          anyRunning = true;
-          break;
-        }
-      }
-      this.containersRunning = anyRunning;
+      const results = await Promise.all(
+        projectList.projects.map((p) =>
+          this.tauri.invoke<boolean>('check_containers_running', { project: p.name })
+        )
+      );
+      this.containersRunning = results.some(Boolean);
       this.cdr.markForCheck();
     } catch {
       this.containersRunning = false;
