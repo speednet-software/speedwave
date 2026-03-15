@@ -25,8 +25,6 @@ pub struct McpOsProcess {
     port: u16,
     port_path: PathBuf,
     pid_path: PathBuf,
-    #[allow(dead_code)] // used by drain threads; field kept for future log rotation
-    log_path: PathBuf,
     script_path: String,
 }
 
@@ -171,7 +169,6 @@ impl McpOsProcess {
             port,
             port_path,
             pid_path,
-            log_path,
             script_path: script_path.to_string(),
         })
     }
@@ -191,17 +188,17 @@ impl McpOsProcess {
         port: u16,
         port_path: PathBuf,
         pid_path: PathBuf,
+        data_dir: PathBuf,
     ) -> Self {
         Self {
             child: Some(child),
             drain_handles: Vec::new(),
-            data_dir: PathBuf::new(),
+            data_dir,
             token,
             token_path,
             port,
             port_path,
             pid_path,
-            log_path: PathBuf::new(),
             script_path: String::new(),
         }
     }
@@ -273,15 +270,24 @@ impl McpOsProcess {
             let _ = handle.join();
         }
         // 2. child is now None → Drop.stop() will be a no-op
-        // 3. Clear paths so Drop.cleanup_files() deletes nothing
+        // 3. Save old paths, then clear so Drop.cleanup_files() deletes nothing
         //    (spawn_in() writes fresh files at these same paths)
-        self.token_path = PathBuf::new();
-        self.port_path = PathBuf::new();
-        self.pid_path = PathBuf::new();
+        let old_token_path = std::mem::replace(&mut self.token_path, PathBuf::new());
+        let old_port_path = std::mem::replace(&mut self.port_path, PathBuf::new());
+        let old_pid_path = std::mem::replace(&mut self.pid_path, PathBuf::new());
 
         // 4. Spawn new process using the same data_dir (not dirs::home_dir())
         let data_dir = self.data_dir.clone();
-        let new = Self::spawn_in(&self.script_path, &data_dir)?;
+        let new = match Self::spawn_in(&self.script_path, &data_dir) {
+            Ok(new) => new,
+            Err(e) => {
+                // Spawn failed — clean up stale files (auth token is security-sensitive)
+                let _ = std::fs::remove_file(&old_token_path);
+                let _ = std::fs::remove_file(&old_port_path);
+                let _ = std::fs::remove_file(&old_pid_path);
+                return Err(e);
+            }
+        };
         let new_port = new.port;
         *self = new; // old self dropped — Drop is now harmless (empty paths, no child, no handles)
         Ok(new_port)
@@ -751,6 +757,7 @@ srv.listen(0, '127.0.0.1', () => {
                 1234,
                 port_path,
                 pid_path,
+                tmp.path().to_path_buf(),
             );
             assert!(proc.health_check(), "Process should be alive");
 
@@ -783,6 +790,7 @@ srv.listen(0, '127.0.0.1', () => {
                 1234,
                 port_path,
                 pid_path,
+                tmp.path().to_path_buf(),
             );
             assert!(proc.health_check(), "Running process should be healthy");
             proc.stop().unwrap();
@@ -812,6 +820,7 @@ srv.listen(0, '127.0.0.1', () => {
                 1234,
                 port_path,
                 pid_path,
+                tmp.path().to_path_buf(),
             );
             std::thread::sleep(std::time::Duration::from_millis(100));
             assert!(!proc.health_check(), "Exited process should be unhealthy");
@@ -846,6 +855,7 @@ srv.listen(0, '127.0.0.1', () => {
                 1234,
                 port_path.clone(),
                 pid_path.clone(),
+                tmp.path().to_path_buf(),
             );
             drop(proc);
             assert!(!token_path.exists(), "Token file should be removed on drop");
@@ -1023,6 +1033,7 @@ srv.listen(0, '127.0.0.1', () => {
                 1234,
                 port_path,
                 pid_path,
+                tmp.path().to_path_buf(),
             );
             proc.stop().unwrap();
             proc.stop().unwrap();
@@ -1499,7 +1510,7 @@ srv.listen(0, '127.0.0.1', () => {
 
         let result = McpOsProcess::spawn_in_dir(&script.to_string_lossy(), &data_dir);
         if let Ok(mut proc) = result {
-            let log_path = proc.log_path.clone();
+            let log_path = data_dir.join(consts::MCP_OS_LOG_FILE);
             proc.stop().unwrap();
             // After stop() + drain thread join, the log file handle is released.
             // Verify by successfully removing the file (would fail if still open

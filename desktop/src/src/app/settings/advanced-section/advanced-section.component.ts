@@ -308,11 +308,17 @@ export class AdvancedSectionComponent {
     this.cdr.markForCheck();
   }
 
-  /** Performs a factory reset, destroying containers and VM. */
+  /**
+   * Performs a factory reset, destroying containers and VM.
+   * The backend calls app.restart() and never returns a response,
+   * so the lines after invoke() are unreachable in practice —
+   * they exist only as a safety net if restart behaviour changes.
+   */
   async resetEnvironment(): Promise<void> {
     this.resetting = true;
     try {
       await this.tauri.invoke('factory_reset');
+      // app.restart() fires before Tauri can return — this line is unreachable
       this.resetCompleted.emit();
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));

@@ -466,11 +466,14 @@ pub async fn factory_reset(
     }
 
     // 3. Stop mcp-os (kill child, join drain threads → log file handles released)
+    //    Explicit stop + cleanup_files before drop; wipe_data_dir will remove
+    //    everything anyway, but this keeps behaviour consistent with run_exit_cleanup.
     if let Ok(mut guard) = mcp_os.lock() {
         if let Some(mut proc) = guard.take() {
             if let Err(e) = proc.stop() {
                 log::warn!("factory_reset: mcp-os stop: {e}");
             }
+            proc.cleanup_files();
         }
     }
 

@@ -658,6 +658,8 @@ fn ensure_ide_bridge_running(ide_bridge: &SharedIdeBridge, app_handle: &tauri::A
 
 /// Start mcp-os if not already running. Holds the mutex for the entire
 /// spawn to prevent races (two callers both seeing None and double-spawning).
+/// This can block up to `PORT_READ_TIMEOUT` (10 s) — acceptable for a
+/// single-user desktop app where concurrent Tauri commands are rare.
 fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
     let mut guard = match mcp_os.lock() {
         Ok(g) => g,
