@@ -12,9 +12,18 @@ import { createToolDefinitions } from './tools/index.js';
 
 const PORT = parseInt(process.env.PORT || '3004', 10);
 const SERVER_NAME = 'mcp-gitlab';
+const AUTH_TOKEN = process.env.MCP_GITLAB_AUTH_TOKEN;
 
 async function main(): Promise<void> {
   console.log(`${ts()} 🚀 Starting ${SERVER_NAME}...`);
+
+  if (!AUTH_TOKEN) {
+    console.error(
+      `${ts()} FATAL: MCP_GITLAB_AUTH_TOKEN is required. ` +
+        `${SERVER_NAME} must not run without authentication.`
+    );
+    process.exit(1);
+  }
 
   const gitlabClient = await initializeGitLabClient();
 
@@ -34,6 +43,7 @@ async function main(): Promise<void> {
     port: PORT,
     host: '0.0.0.0', // inside container — must be reachable from Docker network
     tools,
+    auth: { token: AUTH_TOKEN },
     healthCheck: async () => {
       if (!gitlabClient) {
         throw new Error('GitLab client not configured');
@@ -41,7 +51,9 @@ async function main(): Promise<void> {
     },
   });
 
-  await server.start();
+  const actualPort = await server.start();
+  process.stdout.write(JSON.stringify({ port: actualPort }) + '\n');
+  console.log(`${ts()} ✅ ${SERVER_NAME} started on port ${actualPort} (auth enforced)`);
 }
 
 main().catch((error) => {

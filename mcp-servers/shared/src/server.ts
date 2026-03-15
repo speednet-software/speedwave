@@ -230,17 +230,13 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
   //─────────────────────────────────────────────────────────────────────────────
 
   app.get('/health', async (_req: Request, res: Response) => {
-    // When auth is configured, health is a public path — return minimal data only
-    if (options.auth) {
-      res.json({ status: 'ok' });
-      return;
-    }
-
     if (options.healthCheck) {
       try {
         await options.healthCheck();
       } catch (error) {
-        console.error(`[${name}] Health check failed:`, error);
+        if (!options.auth) {
+          console.error(`[${name}] Health check failed:`, error);
+        }
         res.status(500).json({ status: 'error' });
         return;
       }
@@ -352,6 +348,8 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
 // Internal Helpers
 //═══════════════════════════════════════════════════════════════════════════════
 
+// Double-HMAC: avoids length-leak since timingSafeEqual requires equal-length buffers.
+// Keyed by `expected` so the comparison is constant-time regardless of input lengths.
 function safeTokenCompare(provided: string, expected: string): boolean {
   const hmac = (data: string) => createHmac('sha256', expected).update(data).digest();
   return timingSafeEqual(hmac(provided), hmac(expected));
