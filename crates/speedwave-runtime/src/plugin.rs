@@ -679,13 +679,13 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> anyhow::Result<()> {
     for i in 0..archive.len() {
         let entry = archive.by_index(i)?;
         let name = entry.name().to_owned();
+        // Reject absolute paths explicitly (zip v8 `enclosed_name()` strips
+        // leading slashes instead of returning None, so we check raw name).
+        if name.starts_with('/') || name.starts_with('\\') {
+            anyhow::bail!("Rejected ZIP entry with absolute path: '{}'", name);
+        }
         if entry.enclosed_name().is_none() {
-            let reason = if name.starts_with('/') || name.starts_with('\\') {
-                "absolute path"
-            } else {
-                "path traversal"
-            };
-            anyhow::bail!("Rejected ZIP entry with {}: '{}'", reason, name);
+            anyhow::bail!("Rejected ZIP entry with path traversal: '{}'", name);
         }
         if entry.is_symlink() {
             anyhow::bail!("Rejected symlink entry '{}' in plugin archive", name);
