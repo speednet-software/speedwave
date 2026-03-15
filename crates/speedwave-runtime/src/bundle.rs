@@ -55,6 +55,10 @@ const COMMON_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
         path: "mcp-os/shared/node_modules",
         kind: BundledAssetKind::Directory,
     },
+    BundledAssetSpec {
+        path: "mcp-os/os/node_modules/@speedwave/mcp-shared",
+        kind: BundledAssetKind::Directory,
+    },
 ];
 
 const MACOS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
@@ -499,6 +503,24 @@ mod tests {
             "module.exports = {};",
         )
         .unwrap();
+
+        // Symlink for module resolution (or real dir — both work for Node.js)
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(root.join("mcp-os/os/node_modules/@speedwave")).unwrap();
+            std::os::unix::fs::symlink(
+                root.join("mcp-os/shared"),
+                root.join("mcp-os/os/node_modules/@speedwave/mcp-shared"),
+            )
+            .unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            // On Windows tests, just create a real directory with content
+            let target = root.join("mcp-os/os/node_modules/@speedwave/mcp-shared/dist");
+            std::fs::create_dir_all(&target).unwrap();
+            std::fs::write(target.join("index.js"), "export {};").unwrap();
+        }
     }
 
     #[cfg(unix)]
@@ -690,6 +712,11 @@ mod tests {
         std::fs::create_dir_all(temp.path().join("mcp-os/os/dist")).unwrap();
         std::fs::create_dir_all(temp.path().join("mcp-os/shared/dist")).unwrap();
         std::fs::create_dir_all(temp.path().join("mcp-os/shared/node_modules")).unwrap();
+        std::fs::create_dir_all(
+            temp.path()
+                .join("mcp-os/os/node_modules/@speedwave/mcp-shared"),
+        )
+        .unwrap();
         std::fs::create_dir_all(temp.path().join("lima/bin")).unwrap();
         std::fs::create_dir_all(temp.path().join("lima/share")).unwrap();
         std::fs::create_dir_all(temp.path().join("nodejs/bin")).unwrap();
@@ -706,5 +733,18 @@ mod tests {
         std::fs::write(temp.path().join("notes-cli"), "").unwrap();
 
         validate_bundled_runtime_assets(temp.path(), "macos", true).unwrap();
+    }
+
+    #[test]
+    fn validate_bundled_runtime_assets_rejects_missing_mcp_shared_link() {
+        let temp = tempfile::tempdir().unwrap();
+        write_common_bundled_assets(temp.path());
+        write_platform_bundled_assets(temp.path(), "macos");
+        std::fs::remove_dir_all(temp.path().join("mcp-os/os/node_modules")).unwrap();
+
+        let err = validate_bundled_runtime_assets(temp.path(), "macos", false).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("mcp-os/os/node_modules/@speedwave/mcp-shared"));
     }
 }

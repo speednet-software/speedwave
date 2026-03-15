@@ -34,6 +34,8 @@ populate_common() {
     write_file "$ROOT/mcp-os/shared/package.json"
     write_file "$ROOT/mcp-os/shared/package-lock.json"
     write_file "$ROOT/mcp-os/shared/node_modules/express/index.js"
+    mkdir -p "$ROOT/mcp-os/os/node_modules/@speedwave"
+    ln -s ../../../shared "$ROOT/mcp-os/os/node_modules/@speedwave/mcp-shared"
 }
 
 populate_macos() {
@@ -87,6 +89,17 @@ populate_linux() {
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"notes-cli"* ]]
+}
+
+@test "verify-bundled-assets rejects missing mcp-shared symlink" {
+    populate_common
+    populate_macos
+    rm -rf "$ROOT/mcp-os/os/node_modules"
+
+    run "$SCRIPT" macos "$ROOT"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"mcp-shared"* ]]
 }
 
 @test "verify-bundled-assets accepts complete linux tree" {

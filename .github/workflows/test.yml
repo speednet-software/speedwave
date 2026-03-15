@@ -180,6 +180,7 @@ jobs:
           mkdir -p desktop/src-tauri/mcp-os/os/dist
           mkdir -p desktop/src-tauri/mcp-os/shared/dist
           mkdir -p desktop/src-tauri/mcp-os/shared/node_modules
+          mkdir -p desktop/src-tauri/mcp-os/os/node_modules/@speedwave/mcp-shared
           mkdir -p desktop/src-tauri/nodejs/bin
           touch desktop/src-tauri/build-context/containers/Containerfile.claude
           touch desktop/src-tauri/build-context/mcp-servers/tsconfig.base.json

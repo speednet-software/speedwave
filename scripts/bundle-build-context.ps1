@@ -53,4 +53,8 @@ Push-Location "$dest\mcp-os\shared"
 npm ci --omit=dev --ignore-scripts
 Pop-Location
 
+# Link @speedwave/mcp-shared so Node.js resolves it from os/dist/index.js
+New-Item -ItemType Directory -Path "$dest\mcp-os\os\node_modules\@speedwave" -Force | Out-Null
+New-Item -ItemType Junction -Path "$dest\mcp-os\os\node_modules\@speedwave\mcp-shared" -Target (Resolve-Path "$dest\mcp-os\shared").Path | Out-Null
+
 Write-Host "Build context bundled into $dest"
