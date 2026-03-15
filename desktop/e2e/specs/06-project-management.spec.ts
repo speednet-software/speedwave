@@ -2,12 +2,69 @@
  * Project Management E2E tests.
  *
  * Verifies adding a second project via the project switcher and
- * switching between projects. Runs after setup and navigation specs
+ * switching between projects. Also verifies container health after
+ * each operation (covering both add_project and switch_project
+ * backend code paths). Runs after setup and navigation specs
  * have completed — the app is on the shell with 'e2e-test' active.
  *
  * The second project directory must exist before the test runs.
  * The e2e runner (Makefile / e2e-vm.sh) creates it.
  */
+
+export {};
+
+interface ContainerHealth {
+  name: string;
+  status: string;
+  healthy: boolean;
+}
+
+interface HealthReport {
+  containers: ContainerHealth[];
+  vm: { running: boolean; vm_type: string };
+  mcp_os: { running: boolean };
+  ide_bridge: { running: boolean; port: number | null; ws_url: string | null; detected_ides: unknown[] };
+  overall_healthy: boolean;
+}
+
+async function getHealth(project: string): Promise<HealthReport | { error: string }> {
+  return browser.executeAsync(
+    (proj: string, done: (r: any) => void) => {
+      (window as any).__TAURI_INTERNALS__
+        .invoke('get_health', { project: proj })
+        .then((r: any) => done(r))
+        .catch((e: any) => done({ error: String(e) }));
+    },
+    project,
+  ) as Promise<HealthReport | { error: string }>;
+}
+
+async function waitForHealthy(project: string): Promise<void> {
+  let lastObservation = 'no response received';
+  try {
+    await browser.waitUntil(
+      async () => {
+        const result = await getHealth(project);
+        if ('error' in result) {
+          lastObservation = `Backend error: ${result.error}`;
+          return false;
+        }
+        lastObservation = JSON.stringify(result);
+        return (
+          result.overall_healthy &&
+          result.vm.running &&
+          result.containers.length >= 2 &&
+          result.containers.some((c) => c.name.endsWith('_claude')) &&
+          result.containers.some((c) => c.name.endsWith('_mcp_hub')) &&
+          result.containers.every((c) => c.healthy)
+        );
+      },
+      { timeout: 120_000, interval: 5_000 },
+    );
+  } catch {
+    throw new Error(`Containers for '${project}' not healthy within 120s. Last: ${lastObservation}`);
+  }
+}
 
 const SECOND_PROJECT_NAME = 'e2e-second';
 const SECOND_PROJECT_DIR = process.env.E2E_SECOND_PROJECT_DIR || '/tmp/speedwave-e2e-project-2';
@@ -109,6 +166,11 @@ describe('Project Management', function () {
       // Close dropdown
       await btn.click();
     });
+
+    it('should report healthy containers for the new project', async function () {
+      this.timeout(150_000);
+      await waitForHealthy(SECOND_PROJECT_NAME);
+    });
   });
 
   describe('Switch Project', function () {
@@ -155,6 +217,11 @@ describe('Project Management', function () {
         async () => (await activeProject.getText()).includes('e2e-test'),
         { timeout: 10_000, timeoutMsg: 'Settings page does not show e2e-test as active project' },
       );
+    });
+
+    it('should report healthy containers after switching back', async function () {
+      this.timeout(150_000);
+      await waitForHealthy('e2e-test');
     });
   });
 });

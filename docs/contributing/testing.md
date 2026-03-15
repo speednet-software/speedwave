@@ -138,18 +138,19 @@ To run a single platform: `scripts/e2e-vm.sh ubuntu`, `scripts/e2e-vm.sh windows
 ```
 desktop/e2e/
 ├── package.json           # WebdriverIO deps
-├── wdio.conf.ts           # WebdriverIO config (port 4445, 30s default timeout; individual tests override up to 20 min)
+├── wdio.conf.ts           # WebdriverIO config (port 4445, 45 min default timeout; individual tests override)
 ├── tsconfig.json          # TypeScript config
 └── specs/
     ├── 01-app-lifecycle.spec.ts       # Basic launch: title, Angular root, setup wizard shown
     ├── 02-setup-wizard.spec.ts        # Full flow: welcome → all 6 steps → project form → redirect
-    ├── 03-navigation.spec.ts          # Shell nav: Chat, Integrations, Settings routing
-    ├── 04-settings.spec.ts            # Settings page: project name, LLM, reset, updates
-    ├── 05-project-management.spec.ts  # Add second project, switch between projects
-    └── 06-factory-reset.spec.ts       # Factory reset: confirm → wipe state → app restart (MUST be last)
+    ├── 03-container-health.spec.ts    # Verify all containers running and healthy via get_health
+    ├── 04-navigation.spec.ts          # Shell nav: Chat, Integrations, Settings routing
+    ├── 05-settings.spec.ts            # Settings page: project name, LLM, reset, updates
+    ├── 06-project-management.spec.ts  # Add second project, switch projects, verify health after each
+    └── 07-factory-reset.spec.ts       # Factory reset: confirm → wipe state → app restart (MUST be last)
 ```
 
-Specs run in numeric order. `02-setup-wizard` drives the entire setup wizard to completion (including filling the project form with name `e2e-test` and directory `/tmp/speedwave-e2e-project`). Subsequent specs (`03-*` through `05-*`) depend on setup being complete and fail explicitly if the shell is not present — no silent early returns. `06-factory-reset` MUST be last — it verifies `is_setup_complete` is true, triggers factory reset (wipes `~/.speedwave/`), and confirms `app.restart()` fires by polling until the new process is listening on port 4445.
+Specs run in numeric order. `02-setup-wizard` drives the entire setup wizard to completion (including filling the project form with name `e2e-test` and directory `/tmp/speedwave-e2e-project`). `03-container-health` verifies all containers are running and healthy by calling the `get_health` Tauri command — the same data source the System Health UI uses. Subsequent specs (`04-*` through `06-*`) depend on setup being complete and fail explicitly if the shell is not present — no silent early returns. `06-project-management` also verifies container health after adding a project and after switching projects (covering both backend code paths). `07-factory-reset` MUST be last — it triggers factory reset (wipes `~/.speedwave/`), and confirms `app.restart()` fires by polling until the new process is listening on port 4445.
 
 ### Selectors Convention
 
