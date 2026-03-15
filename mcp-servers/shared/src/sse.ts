@@ -10,7 +10,7 @@ import type { SSEEvent, JSONRPCResponse, JSONRPCError } from './types.js';
  * Strip newlines and carriage returns — SSE single-value fields must be one line.
  * @param value - raw field value to sanitize
  */
-function sanitizeSSEField(value: string): string {
+export function sanitizeSSEField(value: string): string {
   return value.replace(/[\r\n]/g, '');
 }
 
@@ -87,6 +87,7 @@ export class SSEStream {
 
     if (event.data) {
       for (const line of String(event.data).split('\n')) {
+        // \r stripped inline (not via sanitizeSSEField) to preserve intentional \n-splitting
         message += `data: ${line.replace(/\r/g, '')}\n`;
       }
     }

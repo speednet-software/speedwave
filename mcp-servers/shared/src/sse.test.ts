@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { SSEStream, createSSEStream, sendJSONResponse } from './sse.js';
+import { SSEStream, createSSEStream, sendJSONResponse, sanitizeSSEField } from './sse.js';
 import type { JSONRPCResponse, JSONRPCError } from './types.js';
 import { JSONRPCErrorCode } from './types.js';
 import type { Response } from 'express';
@@ -665,6 +665,36 @@ describe('sse', () => {
 
       expect(mockRes.setHeader).toHaveBeenCalledTimes(2);
       expect(mockRes.json).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('sanitizeSSEField', () => {
+    it('strips newline', () => {
+      expect(sanitizeSSEField('foo\nbar')).toBe('foobar');
+    });
+
+    it('strips carriage return', () => {
+      expect(sanitizeSSEField('foo\rbar')).toBe('foobar');
+    });
+
+    it('strips CRLF', () => {
+      expect(sanitizeSSEField('foo\r\nbar')).toBe('foobar');
+    });
+
+    it('leaves clean values unchanged', () => {
+      expect(sanitizeSSEField('message')).toBe('message');
+    });
+
+    it('strips injection payload', () => {
+      expect(sanitizeSSEField('0\r\nevent: injected')).toBe('0event: injected');
+    });
+
+    it('strips multiple newlines', () => {
+      expect(sanitizeSSEField('a\nb\nc\r\nd')).toBe('abcd');
+    });
+
+    it('handles empty string', () => {
+      expect(sanitizeSSEField('')).toBe('');
     });
   });
 });
