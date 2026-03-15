@@ -387,6 +387,82 @@ describe('server', () => {
         expect(response).not.toHaveProperty('timestamp');
         expect(response).not.toHaveProperty('sessions');
       });
+
+      it('runs healthCheck callback when auth is configured and check passes', async () => {
+        const customHealthCheck = vi.fn().mockResolvedValue(undefined);
+
+        const server = createMCPServer({
+          name: 'auth-health-test',
+          version: '1.0.0',
+          port: 3000,
+          auth: { token: 'secret-token' },
+          healthCheck: customHealthCheck,
+        });
+
+        const req = createMockRequest({});
+        const res = createMockResponse();
+
+        const routes = (server.app as any)._router.stack.filter((layer: any) => layer.route);
+        const healthRoute = routes.find((layer: any) => layer.route?.path === '/health');
+
+        await healthRoute.route.stack[0].handle(req, res);
+
+        expect(customHealthCheck).toHaveBeenCalled();
+        const response = (res.json as any).mock.calls[0][0];
+        expect(response).toEqual({ status: 'ok' });
+      });
+
+      it('returns 500 when healthCheck fails and auth is configured', async () => {
+        const customHealthCheck = vi.fn().mockRejectedValue(new Error('Client not configured'));
+
+        const server = createMCPServer({
+          name: 'auth-health-test',
+          version: '1.0.0',
+          port: 3000,
+          auth: { token: 'secret-token' },
+          healthCheck: customHealthCheck,
+        });
+
+        const req = createMockRequest({});
+        const res = createMockResponse();
+
+        const routes = (server.app as any)._router.stack.filter((layer: any) => layer.route);
+        const healthRoute = routes.find((layer: any) => layer.route?.path === '/health');
+
+        await healthRoute.route.stack[0].handle(req, res);
+
+        expect(customHealthCheck).toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(500);
+        const response = (res.json as any).mock.calls[0][0];
+        expect(response).toEqual({ status: 'error' });
+      });
+
+      it('does not log health check error details when auth is configured', async () => {
+        const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const customHealthCheck = vi.fn().mockRejectedValue(new Error('Secret database info'));
+
+        const server = createMCPServer({
+          name: 'auth-health-test',
+          version: '1.0.0',
+          port: 3000,
+          auth: { token: 'secret-token' },
+          healthCheck: customHealthCheck,
+        });
+
+        const req = createMockRequest({});
+        const res = createMockResponse();
+
+        const routes = (server.app as any)._router.stack.filter((layer: any) => layer.route);
+        const healthRoute = routes.find((layer: any) => layer.route?.path === '/health');
+
+        await healthRoute.route.stack[0].handle(req, res);
+
+        // Should NOT log error details when auth is configured
+        const errorCalls = consoleSpy.mock.calls.map((call) => call.join(' '));
+        expect(errorCalls.some((msg) => msg.includes('Secret database info'))).toBe(false);
+
+        consoleSpy.mockRestore();
+      });
     });
 
     describe('MCP Endpoint (/)', () => {

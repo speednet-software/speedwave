@@ -56,27 +56,29 @@ export class SSEStream {
   }
 
   /**
-   * Send a raw SSE event
+   * Send a raw SSE event.
+   * Safety: event.data is always produced by JSON.stringify() in sendMessage(),
+   * so it cannot contain raw user input. The SSE spec fields (id, event, retry)
+   * are set internally — never from external input.
    * @param event - SSE event structure to send
    */
   private sendEvent(event: SSEEvent): void {
     let message = '';
 
     if (event.id !== undefined) {
-      message += `id: ${event.id}\n`;
+      message += `id: ${String(event.id)}\n`;
     }
 
     if (event.event) {
-      message += `event: ${event.event}\n`;
+      message += `event: ${String(event.event)}\n`;
     }
 
     if (event.retry !== undefined) {
-      message += `retry: ${event.retry}\n`;
+      message += `retry: ${String(event.retry)}\n`;
     }
 
     if (event.data) {
-      const lines = event.data.split('\n');
-      for (const line of lines) {
+      for (const line of String(event.data).split('\n')) {
         message += `data: ${line}\n`;
       }
     }
