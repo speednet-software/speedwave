@@ -42,7 +42,7 @@ Tauri's built-in updater supports only AppImage on Linux.[^7] With `.deb`, in-pl
 
 - `check_for_update()` continues to work — it compares versions via the GitHub Releases endpoint
 - The UI shows a "Download" button (instead of "Restart") on Linux, linking to GitHub Releases
-- `install_update()` returns an error on Linux with a message directing the user to GitHub Releases
+- Desktop app installation remains manual on Linux `.deb`; the desktop UI directs the user to GitHub Releases, and startup reconcile applies the new bundle on the next launch
 
 ### Binary Paths
 

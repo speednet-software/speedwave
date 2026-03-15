@@ -21,6 +21,15 @@ pub(crate) struct ProjectList {
     pub(crate) active_project: Option<String>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct BundleReconcileStatus {
+    pub(crate) phase: String,
+    pub(crate) in_progress: bool,
+    pub(crate) last_error: Option<String>,
+    pub(crate) pending_running_projects: Vec<String>,
+    pub(crate) applied_bundle_id: Option<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct LlmConfigResponse {
     pub(crate) provider: Option<String>,

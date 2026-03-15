@@ -72,6 +72,18 @@ assert 'cli/speedwave' in resources, f'CLI missing from macos bundle resources: 
     [ "$status" -eq 0 ]
 }
 
+@test "macOS native helpers declared in tauri.macos.conf.json resources" {
+    run python3 -c "
+import json, sys
+conf = json.load(open('$TAURI_DIR/tauri.macos.conf.json'))
+resources = conf.get('bundle', {}).get('resources', {})
+required = ['reminders-cli', 'calendar-cli', 'mail-cli', 'notes-cli']
+missing = [key for key in required if key not in resources]
+assert not missing, f'macOS helpers missing from bundle resources: {missing}; have {list(resources.keys())}'
+"
+    [ "$status" -eq 0 ]
+}
+
 @test "CLI binary declared in tauri.linux.conf.json resources" {
     run python3 -c "
 import json, sys

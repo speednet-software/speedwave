@@ -52,6 +52,8 @@ e2e = ["dep:tauri-plugin-webdriver"]
 serial_test = "3"
 
 [build-dependencies]
+serde_json = "1"
+speedwave-runtime = { path = "../../crates/speedwave-runtime" }
 tauri-build = { version = "2", features = [] }
 
 [lints.clippy]

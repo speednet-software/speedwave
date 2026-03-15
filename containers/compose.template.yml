@@ -4,7 +4,7 @@
 
 services:
   claude:
-    image: speedwave-claude:latest
+    image: ${IMAGE_CLAUDE}
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_claude
     read_only: true
     user: "${CONTAINER_USER}"
@@ -38,7 +38,7 @@ services:
           memory: 4g
 
   mcp-hub:
-    image: speedwave-mcp-hub:latest
+    image: ${IMAGE_MCP_HUB}
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_hub
     read_only: true
     user: "${CONTAINER_USER}"
@@ -63,7 +63,7 @@ services:
           memory: 512m
 
   mcp-slack:
-    image: speedwave-mcp-slack:latest
+    image: ${IMAGE_MCP_SLACK}
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_slack
     read_only: true
     user: "${CONTAINER_USER}"
@@ -86,7 +86,7 @@ services:
           memory: 256m
 
   mcp-sharepoint:
-    image: speedwave-mcp-sharepoint:latest
+    image: ${IMAGE_MCP_SHAREPOINT}
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_sharepoint
     read_only: true
     user: "${CONTAINER_USER}"
@@ -111,7 +111,7 @@ services:
           memory: 256m
 
   mcp-redmine:
-    image: speedwave-mcp-redmine:latest
+    image: ${IMAGE_MCP_REDMINE}
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_redmine
     read_only: true
     user: "${CONTAINER_USER}"
@@ -134,7 +134,7 @@ services:
           memory: 256m
 
   mcp-gitlab:
-    image: speedwave-mcp-gitlab:latest
+    image: ${IMAGE_MCP_GITLAB}
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_gitlab
     read_only: true
     user: "${CONTAINER_USER}"

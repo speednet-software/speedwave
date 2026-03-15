@@ -31,3 +31,20 @@ export interface ContainerUpdateResult {
   containers_recreated: number;
   error: string | null;
 }
+
+/** Reconcile phase names — must match Rust BundleReconcilePhase serde(rename_all = "snake_case"). */
+export type BundleReconcilePhase =
+  | 'pending'
+  | 'resources_synced'
+  | 'images_built'
+  | 'projects_restored'
+  | 'done';
+
+/** Startup reconcile status for applying a newly installed bundle. */
+export interface BundleReconcileStatus {
+  phase: BundleReconcilePhase;
+  in_progress: boolean;
+  last_error: string | null;
+  pending_running_projects: string[];
+  applied_bundle_id: string | null;
+}

@@ -175,11 +175,18 @@ jobs:
         run: |
           mkdir -p desktop/src-tauri/nerdctl-full/{bin,lib,libexec,share}
           mkdir -p desktop/src-tauri/THIRD-PARTY-LICENSES
-          mkdir -p desktop/src-tauri/build-context/containers
+          mkdir -p desktop/src-tauri/build-context/containers/claude-resources
           mkdir -p desktop/src-tauri/build-context/mcp-servers
           mkdir -p desktop/src-tauri/mcp-os/os/dist
           mkdir -p desktop/src-tauri/mcp-os/shared/dist
+          mkdir -p desktop/src-tauri/mcp-os/shared/node_modules
+          mkdir -p desktop/src-tauri/mcp-os/os/node_modules/@speedwave/mcp-shared
           mkdir -p desktop/src-tauri/nodejs/bin
+          touch desktop/src-tauri/build-context/containers/Containerfile.claude
+          touch desktop/src-tauri/build-context/mcp-servers/tsconfig.base.json
+          touch desktop/src-tauri/mcp-os/os/dist/index.js
+          touch desktop/src-tauri/mcp-os/shared/package.json
+          touch desktop/src-tauri/mcp-os/shared/package-lock.json
           touch desktop/src-tauri/nodejs/bin/node
           touch desktop/src-tauri/nodejs/node.exe
           mkdir -p desktop/src-tauri/cli
@@ -187,6 +194,8 @@ jobs:
 
       - name: Desktop clippy
         working-directory: desktop/src-tauri
+        env:
+          SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
         run: cargo clippy -- -D warnings
 
       - name: Angular ESLint
