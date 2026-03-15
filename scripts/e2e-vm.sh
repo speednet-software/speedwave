@@ -126,6 +126,11 @@ systemctl --user disable containerd 2>/dev/null || true
 # Remove containerd user service file and state
 rm -f ~/.config/systemd/user/containerd.service 2>/dev/null || true
 systemctl --user daemon-reload 2>/dev/null || true
+# Kill rootlesskit process tree (containerd runs inside rootlesskit in rootless mode).
+# Without this, stale containerd processes hold locks on snapshot directories,
+# causing "failed to rename: file exists" errors in the next test run.
+pkill -9 -f 'rootlesskit.*containerd' 2>/dev/null || true
+sleep 1
 # Remove containerd rootless data (images, snapshots, state)
 rm -rf ~/.local/share/containerd ~/.local/share/buildkit ~/.local/share/nerdctl 2>/dev/null || true
 rm -rf /run/user/$(id -u)/containerd-rootless 2>/dev/null || true
@@ -523,7 +528,7 @@ pkill -f Xvfb 2>/dev/null || true
 sleep 1
 
 # E2E tests create a project with this directory — it must exist.
-mkdir -p /tmp/speedwave-e2e-project
+mkdir -p /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
 
 # Ubuntu 24.04 defaults to Wayland — there may be no X server available.
 # Xvfb provides a virtual X11 framebuffer — no real display or Wayland needed.
@@ -550,6 +555,7 @@ for i in $(seq 1 15); do
 done
 
 export E2E_PROJECT_DIR=/tmp/speedwave-e2e-project
+export E2E_SECOND_PROJECT_DIR=/tmp/speedwave-e2e-project-2
 cd /tmp/speedwave-e2e && node_modules/.bin/wdio run wdio.conf.ts
 E2E_EXIT=$?
 
@@ -805,8 +811,11 @@ if (-not (Test-Path $appExe)) {
 
 # E2E tests create a project with this directory — it must exist.
 $e2eProjectDir = "$env:TEMP\speedwave-e2e-project"
+$e2eSecondProjectDir = "$env:TEMP\speedwave-e2e-project-2"
 New-Item -ItemType Directory -Path $e2eProjectDir -Force | Out-Null
+New-Item -ItemType Directory -Path $e2eSecondProjectDir -Force | Out-Null
 $env:E2E_PROJECT_DIR = $e2eProjectDir
+$env:E2E_SECOND_PROJECT_DIR = $e2eSecondProjectDir
 
 Write-Host "── Launching $appExe in interactive session..."
 # SSH runs in session 0 (services) which has no desktop.
@@ -1005,7 +1014,7 @@ pkill -f 'mcp-os.*index.js' 2>/dev/null || true
 sleep 1
 
 # E2E tests create a project with this directory — it must exist.
-mkdir -p /tmp/speedwave-e2e-project
+mkdir -p /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
 
 # Launch the app in the background.
 # macOS requires a GUI session — SSH must connect to a user with an active
@@ -1033,6 +1042,7 @@ for i in $(seq 1 30); do
 done
 
 export E2E_PROJECT_DIR=/tmp/speedwave-e2e-project
+export E2E_SECOND_PROJECT_DIR=/tmp/speedwave-e2e-project-2
 cd /tmp/speedwave-e2e && node_modules/.bin/wdio run wdio.conf.ts
 E2E_EXIT=$?
 

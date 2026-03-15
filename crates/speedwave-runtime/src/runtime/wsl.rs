@@ -50,6 +50,7 @@ pub fn decode_wsl_output(bytes: &[u8]) -> String {
 pub struct WslRuntime {
     runner: Box<dyn CommandRunner>,
     retry_delay: std::time::Duration,
+    restart_ready_delay: std::time::Duration,
 }
 
 impl Default for WslRuntime {
@@ -63,6 +64,9 @@ impl WslRuntime {
         Self {
             runner: Box::new(RealRunner),
             retry_delay: std::time::Duration::from_secs(consts::WSL_SERVICE_START_DELAY_SECS),
+            restart_ready_delay: std::time::Duration::from_secs(
+                consts::CONTAINERD_RESTART_READY_DELAY_SECS,
+            ),
         }
     }
 
@@ -70,13 +74,17 @@ impl WslRuntime {
         Self {
             runner,
             retry_delay: std::time::Duration::from_secs(consts::WSL_SERVICE_START_DELAY_SECS),
+            restart_ready_delay: std::time::Duration::from_secs(
+                consts::CONTAINERD_RESTART_READY_DELAY_SECS,
+            ),
         }
     }
 
-    /// Sets retry delay to zero for tests to avoid sleeping.
+    /// Sets retry delay and restart ready delay to zero for tests to avoid sleeping.
     #[cfg(test)]
     fn with_zero_delay(mut self) -> Self {
         self.retry_delay = std::time::Duration::ZERO;
+        self.restart_ready_delay = std::time::Duration::ZERO;
         self
     }
 
@@ -441,6 +449,52 @@ impl ContainerRuntime for WslRuntime {
             ],
         )?;
         Ok(())
+    }
+
+    fn restart_container_engine(&self) -> anyhow::Result<()> {
+        let distro = consts::WSL_DISTRO_NAME;
+
+        log::info!("restarting containerd inside WSL2");
+        self.runner.run(
+            "wsl.exe",
+            &["-d", distro, "--", "systemctl", "restart", "containerd"],
+        )?;
+
+        log::info!("restarting buildkit inside WSL2");
+        self.runner.run(
+            "wsl.exe",
+            &["-d", distro, "--", "systemctl", "restart", "buildkit"],
+        )?;
+
+        let max = consts::CONTAINERD_RESTART_READY_MAX_RETRIES;
+        for attempt in 1..=max {
+            std::thread::sleep(self.restart_ready_delay);
+
+            let nerdctl_ok = self
+                .runner
+                .run("wsl.exe", &["-d", distro, "--", "nerdctl", "info"])
+                .is_ok();
+
+            let buildctl_ok = self
+                .runner
+                .run(
+                    "wsl.exe",
+                    &["-d", distro, "--", "buildctl", "debug", "workers"],
+                )
+                .is_ok();
+
+            if nerdctl_ok && buildctl_ok {
+                log::info!("containerd + buildkit ready after {attempt} attempt(s)");
+                return Ok(());
+            }
+            log::info!("waiting for containerd/buildkit readiness (attempt {attempt}/{max})");
+        }
+
+        anyhow::bail!(
+            "containerd/buildkit not ready after restart ({max} attempts). \
+             Try: wsl.exe -d {distro} -- systemctl restart containerd && \
+             wsl.exe -d {distro} -- systemctl restart buildkit"
+        )
     }
 
     fn ensure_ready(&self) -> anyhow::Result<()> {
@@ -1177,6 +1231,7 @@ mod tests {
         let rt = WslRuntime {
             runner: Box::new(runner),
             retry_delay: std::time::Duration::ZERO,
+            restart_ready_delay: std::time::Duration::ZERO,
         };
         assert!(rt.ensure_ready().is_ok());
     }
@@ -1210,6 +1265,7 @@ mod tests {
         let rt = WslRuntime {
             runner: Box::new(runner),
             retry_delay: std::time::Duration::ZERO,
+            restart_ready_delay: std::time::Duration::ZERO,
         };
         assert!(rt.ensure_ready().is_ok());
     }
@@ -1248,6 +1304,7 @@ mod tests {
         let rt = WslRuntime {
             runner: Box::new(runner),
             retry_delay: std::time::Duration::ZERO,
+            restart_ready_delay: std::time::Duration::ZERO,
         };
         let result = rt.ensure_ready();
         assert!(result.is_err());
@@ -1273,6 +1330,51 @@ mod tests {
         assert!(
             err.contains(&format!("after {max} attempts")),
             "error should mention retry count, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_restart_container_engine_ok() {
+        let runner = MockRunner::new()
+            .with_response("wsl.exe -d Speedwave -- systemctl restart containerd", "")
+            .with_response("wsl.exe -d Speedwave -- systemctl restart buildkit", "")
+            .with_response("wsl.exe -d Speedwave -- nerdctl info", "containerd running")
+            .with_response(
+                "wsl.exe -d Speedwave -- buildctl debug workers",
+                "buildkit ready",
+            );
+        let rt = WslRuntime::with_runner(Box::new(runner)).with_zero_delay();
+        assert!(rt.restart_container_engine().is_ok());
+    }
+
+    #[test]
+    fn test_restart_container_engine_propagates_containerd_error() {
+        let runner = MockRunner::new().with_error(
+            "wsl.exe -d Speedwave -- systemctl restart containerd",
+            "restart failed",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner)).with_zero_delay();
+        let result = rt.restart_container_engine();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("restart failed"));
+    }
+
+    #[test]
+    fn test_restart_container_engine_not_ready_after_retries() {
+        let runner = MockRunner::new()
+            .with_response("wsl.exe -d Speedwave -- systemctl restart containerd", "")
+            .with_response("wsl.exe -d Speedwave -- systemctl restart buildkit", "")
+            .with_error("wsl.exe -d Speedwave -- nerdctl info", "connection refused")
+            .with_error(
+                "wsl.exe -d Speedwave -- buildctl debug workers",
+                "connection refused",
+            );
+        let rt = WslRuntime::with_runner(Box::new(runner)).with_zero_delay();
+        let result = rt.restart_container_engine();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("not ready"),
+            "should report not ready after retries"
         );
     }
 }
