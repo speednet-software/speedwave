@@ -37,6 +37,8 @@ pub enum StreamChunk {
         cost_usd: Option<f64>,
         total_cost: Option<f64>,
         usage: Option<UsageInfo>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result_text: Option<String>,
     },
     /// Interactive question from Claude (AskUserQuestion tool).
     /// The frontend must display the question and send the answer back via `answer_question`.
@@ -366,11 +368,17 @@ impl StreamParser {
             None
         };
 
+        let result_text = parsed["result"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .map(String::from);
+
         Some(StreamChunk::Result {
             session_id,
             cost_usd,
             total_cost,
             usage,
+            result_text,
         })
     }
 }
@@ -867,6 +875,7 @@ mod tests {
                 cache_read_tokens: Some(10),
                 cache_write_tokens: None,
             }),
+            result_text: None,
         };
         let serialized = serde_json::to_string(&original).unwrap();
         let deserialized: StreamChunk = serde_json::from_str(&serialized).unwrap();
@@ -1080,6 +1089,7 @@ mod tests {
                 cost_usd,
                 total_cost,
                 usage,
+                result_text,
             } => {
                 assert_eq!(session_id, "550e8400-e29b-41d4-a716-446655440000");
                 assert_eq!(cost_usd, Some(0.003));
@@ -1089,6 +1099,7 @@ mod tests {
                 assert_eq!(u.output_tokens, 100);
                 assert_eq!(u.cache_read_tokens, Some(50));
                 assert!(u.cache_write_tokens.is_none());
+                assert!(result_text.is_none(), "empty result should produce None");
             }
             other => panic!("expected Result, got {other:?}"),
         }
@@ -1304,6 +1315,7 @@ mod tests {
                 session_id,
                 cost_usd,
                 usage,
+                result_text,
                 ..
             } => {
                 assert_eq!(session_id, "550e8400-e29b-41d4-a716-446655440000");
@@ -1311,6 +1323,7 @@ mod tests {
                 let u = usage.as_ref().unwrap();
                 assert_eq!(u.input_tokens, 100);
                 assert_eq!(u.output_tokens, 50);
+                assert!(result_text.is_none(), "empty result should produce None");
             }
             other => panic!("chunk 9: expected Result, got {other:?}"),
         }
@@ -1870,6 +1883,83 @@ mod tests {
                 assert_eq!(session_id, "ctrl-session-001");
             }
             other => panic!("chunk 3: expected Result, got {other:?}"),
+        }
+    }
+
+    // ── Slash command result_text tests ──────────────────────────────
+
+    #[test]
+    fn slash_command_result_includes_result_text() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","session_id":"abc","cost_usd":0.0,"total_cost":0.0,"usage":{"input_tokens":0,"output_tokens":0},"is_error":false,"result":"Session cost: $0.003\nTotal cost: $0.015"}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { result_text, .. } => {
+                assert_eq!(
+                    result_text.as_deref(),
+                    Some("Session cost: $0.003\nTotal cost: $0.015")
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn whitespace_only_result_is_none() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"result":"  \n  "}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { result_text, .. } => {
+                assert!(
+                    result_text.is_none(),
+                    "whitespace-only result should be None"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn result_text_skipped_in_serialization_when_none() {
+        let chunk = StreamChunk::Result {
+            session_id: "abc".to_string(),
+            cost_usd: None,
+            total_cost: None,
+            usage: None,
+            result_text: None,
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(
+            !json.contains("result_text"),
+            "result_text should be absent when None, got: {json}"
+        );
+    }
+
+    #[test]
+    fn slash_command_fixture_produces_result_with_text() {
+        let fixture = include_str!("../tests/fixtures/slash_command_turn.ndjson");
+        let mut parser = StreamParser::new();
+        let chunks: Vec<StreamChunk> = fixture
+            .lines()
+            .filter_map(|line| parse_line_str(&mut parser, line))
+            .collect();
+
+        assert_eq!(chunks.len(), 1, "expected 1 chunk, got {}", chunks.len());
+        match &chunks[0] {
+            StreamChunk::Result {
+                result_text,
+                session_id,
+                ..
+            } => {
+                assert_eq!(session_id, "550e8400-e29b-41d4-a716-446655440000");
+                assert!(
+                    result_text.is_some(),
+                    "slash command should have result_text"
+                );
+                assert!(result_text.as_ref().unwrap().contains("Session cost"));
+            }
+            other => panic!("expected Result, got {other:?}"),
         }
     }
 }

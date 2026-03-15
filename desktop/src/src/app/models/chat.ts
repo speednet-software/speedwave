@@ -22,6 +22,7 @@ export type StreamChunk =
         cost_usd?: number;
         total_cost?: number;
         usage?: UsageInfo;
+        result_text?: string;
       };
     }
   | { chunk_type: 'Error'; data: { content: string } };
