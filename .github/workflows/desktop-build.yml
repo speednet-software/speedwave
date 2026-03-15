@@ -133,6 +133,16 @@ jobs:
         shell: bash
         run: scripts/bundle-build-context.sh --ci
 
+      - name: Build macOS native CLI binaries
+        if: contains(matrix.platform, 'macos')
+        shell: bash
+        run: scripts/build-native-macos.sh
+
+      - name: Bundle macOS native CLI binaries
+        if: contains(matrix.platform, 'macos')
+        shell: bash
+        run: scripts/bundle-native-assets.sh
+
       - name: Build CLI for bundling
         shell: bash
         env:
@@ -154,6 +164,17 @@ jobs:
           fi
           mkdir -p desktop/src-tauri/cli
           cp "$CLI_BIN" desktop/src-tauri/cli/
+
+      - name: Verify bundled runtime assets
+        shell: bash
+        run: |
+          if [ "${{ matrix.platform }}" = "windows-latest" ]; then
+            scripts/verify-bundled-assets.sh windows
+          elif [ "${{ matrix.platform }}" = "ubuntu-22.04" ]; then
+            scripts/verify-bundled-assets.sh linux
+          else
+            scripts/verify-bundled-assets.sh macos
+          fi
 
       - name: Build Tauri app
         working-directory: desktop/src-tauri

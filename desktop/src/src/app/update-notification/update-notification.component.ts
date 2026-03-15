@@ -7,7 +7,7 @@ import {
 } from '@angular/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
 import { TauriService } from '../services/tauri.service';
-import { UpdateInfo, ProjectList } from '../models/update';
+import { BundleReconcileStatus, ProjectList, UpdateInfo } from '../models/update';
 
 /** Shows a banner when a new Speedwave version is available for install. */
 @Component({
@@ -15,69 +15,62 @@ import { UpdateInfo, ProjectList } from '../models/update';
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    @if (updateInfo && !dismissed) {
+    @if (showBundleBanner || showUpdateBanner) {
       <div class="update-banner" data-testid="update-banner">
         <span class="update-text">
-          @if (updateInstalled) {
-            Speedwave v{{ updateInfo.version }} downloaded
-            @if (containersRunning) {
-              — will apply on next restart
-            } @else {
-              — restart to apply
-            }
+          @if (showBundleBanner) {
+            {{ bundleStatusMessage }}
           } @else {
-            Speedwave v{{ updateInfo.version }} is ready
+            Speedwave v{{ updateInfo!.version }} is ready
             @if (installing) {
-              — installing...
+              — updating...
             } @else if (containersRunning) {
-              — containers running, restart to update
+              — running containers will be restarted
             } @else {
-              — restart to update
+              — update and restart now
             }
           }
         </span>
         <div class="update-actions">
-          @if (error) {
+          @if (showBundleBanner && bundleStatus?.last_error) {
+            <span class="update-error" data-testid="bundle-reconcile-error">
+              {{ bundleStatus?.last_error }}
+            </span>
+          } @else if (error) {
             <span class="update-error" data-testid="update-error">{{ error }}</span>
           }
-          @if (!updateInstalled) {
+          @if (showBundleBanner) {
+            @if (bundleStatus?.last_error) {
+              <button class="btn-restart" (click)="retryBundleReconcile()" [disabled]="retrying">
+                {{ retrying ? 'Retrying...' : 'Retry' }}
+              </button>
+            }
+          } @else {
             @if (isLinux) {
               <button class="btn-restart" (click)="openReleasesPage()">
-                Download v{{ updateInfo.version }}
+                Download v{{ updateInfo!.version }}
               </button>
             } @else {
-              @if (!confirmRestart) {
-                <button class="btn-restart" (click)="confirmRestart = true" [disabled]="installing">
-                  Restart
+              @if (!confirmUpdate) {
+                <button class="btn-restart" (click)="confirmUpdate = true" [disabled]="installing">
+                  Update now
                 </button>
               } @else {
                 <button class="btn-restart" (click)="installAndRestart()" [disabled]="installing">
-                  {{ installing ? 'Installing...' : 'Confirm Restart' }}
+                  {{ installing ? 'Updating...' : 'Confirm Update' }}
                 </button>
-                <button class="btn-later" (click)="confirmRestart = false" [disabled]="installing">
+                <button class="btn-later" (click)="confirmUpdate = false" [disabled]="installing">
                   Cancel
                 </button>
               }
             }
-            @if (!confirmRestart || isLinux) {
+            @if (!confirmUpdate || isLinux) {
               @if (containersRunning && !isLinux) {
                 <span class="containers-warning">Running containers will be interrupted</span>
               }
-              @if (!updateInfo.is_critical) {
+              @if (!updateInfo!.is_critical) {
                 <button class="btn-later" (click)="dismiss()" [disabled]="installing">Later</button>
               }
-            }
-          } @else {
-            @if (!containersRunning) {
-              @if (!confirmRestart) {
-                <button class="btn-restart" (click)="confirmRestart = true">Restart now</button>
-              } @else {
-                <button class="btn-restart" (click)="restartApp()">Confirm Restart</button>
-                <button class="btn-later" (click)="confirmRestart = false">Cancel</button>
-              }
-            }
-            @if (!updateInfo.is_critical) {
-              <button class="btn-later" (click)="dismiss()">Later</button>
             }
           }
         </div>
@@ -154,16 +147,17 @@ import { UpdateInfo, ProjectList } from '../models/update';
 })
 export class UpdateNotificationComponent implements OnDestroy {
   updateInfo: UpdateInfo | null = null;
+  bundleStatus: BundleReconcileStatus | null = null;
   dismissed = false;
   installing = false;
+  retrying = false;
   error = '';
-  confirmRestart = false;
-  updateInstalled = false;
+  confirmUpdate = false;
   containersRunning = false;
   isLinux = false;
 
   private unlisten: UnlistenFn | null = null;
-  private unlistenInstalled: UnlistenFn | null = null;
+  private unlistenBundleStatus: UnlistenFn | null = null;
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
 
@@ -180,25 +174,30 @@ export class UpdateNotificationComponent implements OnDestroy {
       this.unlisten = await this.tauri.listen<UpdateInfo>('update_available', (event) => {
         this.updateInfo = event.payload;
         this.dismissed = false;
-        this.updateInstalled = false;
         this.error = '';
-        this.confirmRestart = false;
+        this.confirmUpdate = false;
         this.checkContainers();
         this.cdr.markForCheck();
       });
 
-      this.unlistenInstalled = await this.tauri.listen<UpdateInfo>('update_installed', (event) => {
-        if (this.updateInfo?.version !== event.payload.version) {
-          this.dismissed = false;
+      this.unlistenBundleStatus = await this.tauri.listen<BundleReconcileStatus>(
+        'bundle_reconcile_status',
+        (event) => {
+          this.bundleStatus = event.payload;
+          this.retrying = false;
+          if (event.payload.last_error) {
+            this.dismissed = false;
+          }
+          this.cdr.markForCheck();
         }
-        this.updateInfo = event.payload;
-        this.updateInstalled = true;
-        this.installing = false;
-        this.error = '';
-        this.confirmRestart = false;
-        this.checkContainers();
-        this.cdr.markForCheck();
-      });
+      );
+
+      this.bundleStatus = await this.tauri.invoke<BundleReconcileStatus>(
+        'get_bundle_reconcile_state'
+      );
+      if (this.bundleStatus?.last_error) {
+        this.dismissed = false;
+      }
 
       // Proactive check in case event fired before listener registration
       const info = await this.tauri.invoke<UpdateInfo | null>('check_for_update');
@@ -215,48 +214,60 @@ export class UpdateNotificationComponent implements OnDestroy {
   private async checkContainers(): Promise<void> {
     try {
       const projectList = await this.tauri.invoke<ProjectList>('list_projects');
-      let anyRunning = false;
-      for (const project of projectList.projects) {
-        const running = await this.tauri.invoke<boolean>('check_containers_running', {
-          project: project.name,
-        });
-        if (running) {
-          anyRunning = true;
-          break;
-        }
-      }
-      this.containersRunning = anyRunning;
+      const results = await Promise.all(
+        projectList.projects.map((p) =>
+          this.tauri.invoke<boolean>('check_containers_running', { project: p.name })
+        )
+      );
+      this.containersRunning = results.some(Boolean);
       this.cdr.markForCheck();
     } catch {
       this.containersRunning = false;
     }
   }
 
-  /** Downloads and installs the update, then restarts the app. */
+  /** Downloads and installs the update, then lets the backend restart the app. */
   async installAndRestart(): Promise<void> {
     this.installing = true;
     this.error = '';
     this.cdr.markForCheck();
     try {
-      await this.tauri.invoke('install_update', { expectedVersion: this.updateInfo!.version });
+      await this.tauri.invoke('install_update_and_reconcile', {
+        expectedVersion: this.updateInfo!.version,
+      });
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
-      this.confirmRestart = false;
+      this.confirmUpdate = false;
     } finally {
       this.installing = false;
       this.cdr.markForCheck();
     }
   }
 
-  /** Restarts the app after update is already installed. */
-  async restartApp(): Promise<void> {
-    this.error = '';
+  /** Retries the startup reconcile after a failed bundle update. */
+  async retryBundleReconcile(): Promise<void> {
+    this.retrying = true;
     this.cdr.markForCheck();
     try {
-      await this.tauri.invoke('restart_app', { force: false });
+      await this.tauri.invoke('retry_bundle_reconcile');
+      if (this.bundleStatus) {
+        this.bundleStatus = {
+          ...this.bundleStatus,
+          in_progress: true,
+          last_error: null,
+        };
+      }
     } catch (e: unknown) {
-      this.error = e instanceof Error ? e.message : String(e);
-      this.confirmRestart = false;
+      const message = e instanceof Error ? e.message : String(e);
+      this.bundleStatus = {
+        phase: this.bundleStatus?.phase ?? 'pending',
+        in_progress: false,
+        last_error: message,
+        pending_running_projects: this.bundleStatus?.pending_running_projects ?? [],
+        applied_bundle_id: this.bundleStatus?.applied_bundle_id ?? null,
+      };
+    } finally {
+      this.retrying = false;
       this.cdr.markForCheck();
     }
   }
@@ -264,8 +275,40 @@ export class UpdateNotificationComponent implements OnDestroy {
   /** Hides the notification banner until the next update event. */
   dismiss(): void {
     this.dismissed = true;
-    this.confirmRestart = false;
+    this.confirmUpdate = false;
     this.cdr.markForCheck();
+  }
+
+  /** Whether the bundle reconcile banner should be shown. */
+  get showBundleBanner(): boolean {
+    return !!this.bundleStatus && (this.bundleStatus.in_progress || !!this.bundleStatus.last_error);
+  }
+
+  /** Whether the app update banner should be shown. */
+  get showUpdateBanner(): boolean {
+    return !!this.updateInfo && !this.dismissed && !this.showBundleBanner;
+  }
+
+  /** Human-readable message describing the current bundle reconcile phase. */
+  get bundleStatusMessage(): string {
+    if (!this.bundleStatus) {
+      return '';
+    }
+
+    if (this.bundleStatus.last_error) {
+      return 'Update failed';
+    }
+
+    switch (this.bundleStatus.phase) {
+      case 'resources_synced':
+      case 'images_built':
+        return 'Rebuilding containers';
+      case 'projects_restored':
+        return 'Restoring projects';
+      case 'pending':
+      default:
+        return 'Preparing update';
+    }
   }
 
   /** Opens the GitHub Releases page for the latest version (Linux .deb). */
@@ -281,11 +324,7 @@ export class UpdateNotificationComponent implements OnDestroy {
 
   /** Cleans up the Tauri event listeners on component destruction. */
   ngOnDestroy(): void {
-    if (this.unlisten) {
-      this.unlisten();
-    }
-    if (this.unlistenInstalled) {
-      this.unlistenInstalled();
-    }
+    void this.unlisten?.();
+    void this.unlistenBundleStatus?.();
   }
 }

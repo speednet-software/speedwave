@@ -8,7 +8,11 @@
       "build-context/mcp-servers/": "build-context/mcp-servers/",
       "nodejs/bin/node": "nodejs/bin/node",
       "mcp-os/": "mcp-os/",
-      "cli/speedwave": "cli/speedwave"
+      "cli/speedwave": "cli/speedwave",
+      "reminders-cli": "reminders-cli",
+      "calendar-cli": "calendar-cli",
+      "mail-cli": "mail-cli",
+      "notes-cli": "notes-cli"
     }
   }
 }
