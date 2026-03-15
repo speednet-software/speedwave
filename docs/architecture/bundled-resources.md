@@ -79,10 +79,11 @@ When plugins are installed (`SPEEDWAVE_PLUGINS` env variable), `entrypoint.sh` s
 /speedwave/plugins/<plugin-slug>/        ← container path (host: ~/.speedwave/plugins/<plugin-slug>/claude-resources/)
 ├── commands/    ← per-file symlinks into ~/.claude/commands/
 ├── agents/      ← per-file symlinks into ~/.claude/agents/
-└── skills/      ← per-file symlinks into ~/.claude/skills/
+├── skills/      ← per-file symlinks into ~/.claude/skills/
+└── hooks/       ← per-file symlinks into ~/.claude/hooks/
 ```
 
-Unlike core resources (which symlink entire directories), plugin resources create per-entry symlinks using `[ -e ]` and `ln -sfn`, supporting both files and directories. This allows core and plugin resources to coexist within the same user-level directory. Plugin resources support `commands`, `agents`, and `skills` only — `hooks` are intentionally excluded because hooks execute shell commands, and allowing third-party plugins to inject hooks would expand the attack surface without user consent.
+Unlike core resources (which symlink entire directories), plugin resources create per-entry symlinks using `[ -e ]` and `ln -sfn`, supporting both files and directories. This allows core and plugin resources to coexist within the same user-level directory. Plugin resources support all four resource types: `commands`, `agents`, `skills`, and `hooks`. Plugins run inside the container (sandboxed with `cap_drop: ALL`, `no-new-privileges`, `read_only`), so plugin hooks have the same trust boundary as plugin skills and commands.
 
 See [ADR-015](../adr/ADR-015-plugin-system.md) for the plugin system design.
 

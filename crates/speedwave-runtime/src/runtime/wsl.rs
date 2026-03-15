@@ -49,6 +49,7 @@ pub fn decode_wsl_output(bytes: &[u8]) -> String {
 
 pub struct WslRuntime {
     runner: Box<dyn CommandRunner>,
+    retry_delay: std::time::Duration,
 }
 
 impl Default for WslRuntime {
@@ -61,57 +62,119 @@ impl WslRuntime {
     pub fn new() -> Self {
         Self {
             runner: Box::new(RealRunner),
+            retry_delay: std::time::Duration::from_secs(consts::WSL_SERVICE_START_DELAY_SECS),
         }
     }
 
     pub fn with_runner(runner: Box<dyn CommandRunner>) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            retry_delay: std::time::Duration::from_secs(consts::WSL_SERVICE_START_DELAY_SECS),
+        }
+    }
+
+    /// Sets retry delay to zero for tests to avoid sleeping.
+    #[cfg(test)]
+    fn with_zero_delay(mut self) -> Self {
+        self.retry_delay = std::time::Duration::ZERO;
+        self
     }
 
     /// Checks that a service is running inside the WSL distro. If the check
-    /// command fails, tries to start the service via systemctl and re-checks
-    /// once after a short delay.
+    /// command fails, tries to start the service via systemctl and retries
+    /// with a delay up to `WSL_SERVICE_CHECK_MAX_RETRIES` times.
+    ///
+    /// - `service_name`: display name for logs/errors (e.g. "buildkitd")
+    /// - `systemd_unit`: systemd unit name for `systemctl start` (e.g. "buildkit")
     fn check_service(
         &self,
         distro: &str,
         check_cmd: &[&str],
         service_name: &str,
+        systemd_unit: &str,
     ) -> anyhow::Result<()> {
         let mut args = vec!["-d", distro, "--"];
         args.extend_from_slice(check_cmd);
+
+        // Fast path: service already running
         if self.runner.run("wsl.exe", &args).is_ok() {
             return Ok(());
         }
-        // Service not ready — try starting it and wait briefly
-        if let Err(e) = self.runner.run(
-            "wsl.exe",
-            &["-d", distro, "--", "systemctl", "start", service_name],
-        ) {
-            log::warn!("systemctl start {service_name} failed: {e}");
-        }
-        std::thread::sleep(std::time::Duration::from_secs(
-            consts::WSL_SERVICE_START_DELAY_SECS,
-        ));
-        self.runner.run("wsl.exe", &args).map_err(|_| {
-            anyhow::anyhow!(
-                "{service_name} is not running inside WSL2 distribution '{distro}'. \
-                 Try: wsl -d {distro} -- systemctl start {service_name}"
+
+        // Try starting the service, preserve error for diagnostics
+        let start_err = self
+            .runner
+            .run(
+                "wsl.exe",
+                &["-d", distro, "--", "systemctl", "start", systemd_unit],
             )
-        })?;
-        Ok(())
+            .err();
+        if let Some(ref e) = start_err {
+            log::warn!("systemctl start {systemd_unit} failed: {e}");
+        }
+
+        let max = consts::WSL_SERVICE_CHECK_MAX_RETRIES;
+        let mut last_check_err = None;
+
+        for attempt in 1..=max {
+            // Check first, sleep after — avoids unnecessary wait when service is already up
+            match self.runner.run("wsl.exe", &args) {
+                Ok(_) => {
+                    log::info!("{service_name} ready after {attempt} attempt(s)");
+                    return Ok(());
+                }
+                Err(e) => {
+                    last_check_err = Some(e);
+                    log::info!("Waiting for {service_name} (attempt {attempt}/{max})");
+                }
+            }
+            std::thread::sleep(self.retry_delay);
+        }
+
+        // Build diagnostic error with both start and check errors
+        let mut msg = format!(
+            "{service_name} is not running inside WSL2 distribution '{distro}' after {max} attempts."
+        );
+        if let Some(e) = start_err {
+            msg.push_str(&format!(" systemctl start {systemd_unit}: {e}."));
+        }
+        if let Some(e) = last_check_err {
+            msg.push_str(&format!(" Last health check: {e}."));
+        }
+        msg.push_str(&format!(
+            " Try: wsl -d {distro} -- systemctl start {systemd_unit}"
+        ));
+        Err(anyhow::anyhow!(msg))
     }
 }
 
 /// Converts a Windows-style path (`C:\foo\bar` or `C:/foo/bar`) to a WSL mount path
 /// (`/mnt/c/foo/bar`). Passes through paths that are already Unix-style.
 ///
-/// Returns an error for UNC paths (`\\server\share`) and extended-length prefixes
-/// (`\\?\C:\...`) which cannot be mapped to WSL mount points.
+/// Handles the extended-length prefix (`\\?\C:\...`) that Windows APIs sometimes
+/// return (e.g. from `canonicalize()` or `GetTempPath()`), stripping it to extract
+/// the underlying drive-letter path.
+///
+/// Returns an error for true UNC paths (`\\server\share`) which cannot be mapped
+/// to WSL mount points.
 pub fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
     let s = path.to_string_lossy();
     let bytes = s.as_bytes();
 
-    // Reject UNC and extended-length paths — they can't be mapped to /mnt/<drive>/
+    // Handle extended-length prefix: \\?\C:\... → strip prefix and recurse
+    if bytes.len() >= 6
+        && bytes[0] == b'\\'
+        && bytes[1] == b'\\'
+        && bytes[2] == b'?'
+        && bytes[3] == b'\\'
+        && bytes[4].is_ascii_alphabetic()
+        && bytes[5] == b':'
+    {
+        // Safe: first 4 bytes are ASCII (`\\?\`), remainder is a normal path
+        return windows_to_wsl_path(Path::new(&s[4..]));
+    }
+
+    // Reject true UNC paths (\\server\share) — they can't be mapped to /mnt/<drive>/
     if bytes.len() >= 2 && bytes[0] == b'\\' && bytes[1] == b'\\' {
         anyhow::bail!(
             "UNC path '{}' is not supported. Move your project under a drive-letter path (e.g. C:\\Users\\...)",
@@ -170,8 +233,10 @@ impl ContainerRuntime for WslRuntime {
 
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
         let compose_file = wsl_compose_file_path(project)?;
-        self.runner.run(
+        super::compose_down_and_cleanup(
+            &*self.runner,
             "wsl.exe",
+            project,
             &[
                 "-d",
                 consts::WSL_DISTRO_NAME,
@@ -183,9 +248,10 @@ impl ContainerRuntime for WslRuntime {
                 "-p",
                 project,
                 "down",
+                "--remove-orphans",
             ],
-        )?;
-        Ok(())
+            &["-d", consts::WSL_DISTRO_NAME, "--", "nerdctl"],
+        )
     }
 
     fn compose_ps(&self, project: &str) -> anyhow::Result<Vec<Value>> {
@@ -402,11 +468,16 @@ impl ContainerRuntime for WslRuntime {
 
         // Verify containerd and buildkitd are running inside the WSL distro.
         // After a WSL session closes, the VM may restart and systemd services
-        // need time to come up. check_service() tries once, attempts
-        // `systemctl start` on failure, waits 3s, and retries once.
+        // need time to come up. check_service() attempts `systemctl start` on
+        // failure and retries up to WSL_SERVICE_CHECK_MAX_RETRIES times.
         let distro = consts::WSL_DISTRO_NAME;
-        self.check_service(distro, &["nerdctl", "info"], "containerd")?;
-        self.check_service(distro, &["buildctl", "debug", "workers"], "buildkitd")?;
+        self.check_service(distro, &["nerdctl", "info"], "containerd", "containerd")?;
+        self.check_service(
+            distro,
+            &["buildctl", "debug", "workers"],
+            "buildkitd",
+            "buildkit",
+        )?;
 
         Ok(())
     }
@@ -523,14 +594,26 @@ mod tests {
     fn test_ensure_ready_containerd_not_running() {
         let runner = MockRunner::new()
             .with_response("wsl.exe --list --quiet", "Speedwave\n")
-            .with_error("wsl.exe -d Speedwave -- nerdctl info", "connection refused");
-        let rt = WslRuntime::with_runner(Box::new(runner));
+            .with_error("wsl.exe -d Speedwave -- nerdctl info", "connection refused")
+            .with_error(
+                "wsl.exe -d Speedwave -- systemctl start containerd",
+                "start failed",
+            );
+        let rt = WslRuntime::with_runner(Box::new(runner)).with_zero_delay();
         let result = rt.ensure_ready();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("containerd"),
             "error should mention containerd, got: {err}"
+        );
+        assert!(
+            err.contains("start failed"),
+            "error should include start error, got: {err}"
+        );
+        assert!(
+            err.contains("Last health check"),
+            "error should include last health check error, got: {err}"
         );
     }
 
@@ -542,14 +625,27 @@ mod tests {
             .with_error(
                 "wsl.exe -d Speedwave -- buildctl debug workers",
                 "connection refused",
+            )
+            .with_error(
+                "wsl.exe -d Speedwave -- systemctl start buildkit",
+                "start failed",
             );
-        let rt = WslRuntime::with_runner(Box::new(runner));
+        let rt = WslRuntime::with_runner(Box::new(runner)).with_zero_delay();
         let result = rt.ensure_ready();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("buildkitd"),
             "error should mention buildkitd, got: {err}"
+        );
+        // Verify correct systemd unit name is used (buildkit, not buildkitd)
+        assert!(
+            err.contains("systemctl start buildkit"),
+            "error hint should use systemd unit 'buildkit', got: {err}"
+        );
+        assert!(
+            err.contains("Last health check"),
+            "error should include last health check error, got: {err}"
         );
     }
 
@@ -644,6 +740,24 @@ mod tests {
     }
 
     #[test]
+    fn test_compose_down_includes_remove_orphans() {
+        let compose_file = crate::runtime::compose_file_path("wsl-cleanup-test").unwrap();
+        let expected_key = format!(
+            "wsl.exe -d Speedwave -- nerdctl compose -f {} -p wsl-cleanup-test down --remove-orphans",
+            compose_file
+        );
+        let runner = MockRunner::new()
+            .with_response(&expected_key, "")
+            .with_response(
+                "wsl.exe -d Speedwave -- nerdctl ps -a --filter label=com.docker.compose.project=wsl-cleanup-test -q",
+                "stale-id",
+            )
+            .with_response("wsl.exe -d Speedwave -- nerdctl rm -f stale-id", "");
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        assert!(rt.compose_down("wsl-cleanup-test").is_ok());
+    }
+
+    #[test]
     fn test_compose_up_recreate_includes_force_recreate() {
         let compose_file = crate::runtime::compose_file_path("acme").unwrap();
         let expected_key = format!(
@@ -692,15 +806,35 @@ mod tests {
     }
 
     #[test]
-    fn test_windows_to_wsl_path_rejects_extended_length_path() {
-        let result = windows_to_wsl_path(Path::new(r"\\?\C:\Users\dev"));
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("UNC path"),
-            "error should mention UNC, got: {}",
-            err
+    fn test_windows_to_wsl_path_strips_extended_length_prefix() {
+        let result = windows_to_wsl_path(Path::new(r"\\?\C:\Users\dev")).unwrap();
+        assert_eq!(result, PathBuf::from("/mnt/c/Users/dev"));
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_strips_extended_length_prefix_lowercase() {
+        let result = windows_to_wsl_path(Path::new(r"\\?\d:\temp\project")).unwrap();
+        assert_eq!(result, PathBuf::from("/mnt/d/temp/project"));
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_extended_length_temp_path() {
+        // Regression: Windows GetTempPath/canonicalize can return \\?\C:\Users\...
+        let result = windows_to_wsl_path(Path::new(
+            r"\\?\C:\Users\User\AppData\Local\Temp\speedwave-e2e-project",
+        ))
+        .unwrap();
+        assert_eq!(
+            result,
+            PathBuf::from("/mnt/c/Users/User/AppData/Local/Temp/speedwave-e2e-project")
         );
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_rejects_unc_without_drive() {
+        // \\?\UNC\server\share — not a drive-letter path, should still be rejected
+        let result = windows_to_wsl_path(Path::new(r"\\?\UNC\server\share"));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -958,6 +1092,187 @@ mod tests {
         assert!(
             decoded.contains('\u{5F00}'),
             "should preserve non-ASCII chars, got: {decoded:?}"
+        );
+    }
+
+    // ── SequentialMockRunner for retry tests ──────────────────────────────
+
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::Mutex;
+
+    /// A mock runner that returns responses sequentially for the same command key.
+    /// Each call to `run()` pops the next response from the queue for that key.
+    struct SequentialMockRunner {
+        responses: HashMap<String, Mutex<VecDeque<anyhow::Result<String>>>>,
+    }
+
+    impl SequentialMockRunner {
+        fn new() -> Self {
+            Self {
+                responses: HashMap::new(),
+            }
+        }
+
+        fn with_responses(mut self, key: &str, results: Vec<anyhow::Result<String>>) -> Self {
+            self.responses
+                .insert(key.to_string(), Mutex::new(VecDeque::from(results)));
+            self
+        }
+    }
+
+    impl CommandRunner for SequentialMockRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+            let key = format!("{} {}", cmd, args.join(" "));
+            let queue = self
+                .responses
+                .get(&key)
+                .unwrap_or_else(|| panic!("unexpected command: {key}"));
+            let mut q = queue.lock().unwrap();
+            match q.pop_front() {
+                Some(Ok(val)) => Ok(val),
+                Some(Err(e)) => Err(anyhow::anyhow!("{e}")),
+                None => panic!("no more responses for: {key}"),
+            }
+        }
+
+        fn run_raw_stdout(&self, cmd: &str, args: &[&str]) -> anyhow::Result<Vec<u8>> {
+            self.run(cmd, args).map(|s| s.into_bytes())
+        }
+    }
+
+    // ── Retry tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_ensure_ready_recovers_buildkit_after_retries() {
+        // buildctl: fast-path fails, then 3 retry failures, then succeeds on 4th retry
+        let runner = SequentialMockRunner::new()
+            .with_responses(
+                "wsl.exe --list --quiet",
+                vec![Ok("Speedwave\n".to_string())],
+            )
+            // containerd: fast-path OK
+            .with_responses(
+                "wsl.exe -d Speedwave -- nerdctl info",
+                vec![Ok("containerd running".to_string())],
+            )
+            .with_responses("wsl.exe -d Speedwave -- buildctl debug workers", {
+                let mut v: Vec<anyhow::Result<String>> = Vec::new();
+                // Fast-path check fails
+                v.push(Err(anyhow::anyhow!("connection refused")));
+                // Retry checks: 3 failures then success
+                for _ in 0..3 {
+                    v.push(Err(anyhow::anyhow!("connection refused")));
+                }
+                v.push(Ok("buildkit ready".to_string()));
+                v
+            })
+            // systemctl start uses correct unit name "buildkit" (not "buildkitd").
+            // If the code used "buildkitd", this mock wouldn't match and the test
+            // would panic with "unexpected command".
+            .with_responses(
+                "wsl.exe -d Speedwave -- systemctl start buildkit",
+                vec![Ok(String::new())],
+            );
+
+        let rt = WslRuntime {
+            runner: Box::new(runner),
+            retry_delay: std::time::Duration::ZERO,
+        };
+        assert!(rt.ensure_ready().is_ok());
+    }
+
+    #[test]
+    fn test_ensure_ready_recovers_containerd_after_retries() {
+        let runner = SequentialMockRunner::new()
+            .with_responses(
+                "wsl.exe --list --quiet",
+                vec![Ok("Speedwave\n".to_string())],
+            )
+            // containerd: fast-path fails, start succeeds, 1st retry fails, 2nd retry OK
+            .with_responses(
+                "wsl.exe -d Speedwave -- nerdctl info",
+                vec![
+                    Err(anyhow::anyhow!("connection refused")),
+                    Err(anyhow::anyhow!("connection refused")),
+                    Ok("containerd running".to_string()),
+                ],
+            )
+            .with_responses(
+                "wsl.exe -d Speedwave -- systemctl start containerd",
+                vec![Ok(String::new())],
+            )
+            // buildkitd: fast-path OK
+            .with_responses(
+                "wsl.exe -d Speedwave -- buildctl debug workers",
+                vec![Ok("buildkit ready".to_string())],
+            );
+
+        let rt = WslRuntime {
+            runner: Box::new(runner),
+            retry_delay: std::time::Duration::ZERO,
+        };
+        assert!(rt.ensure_ready().is_ok());
+    }
+
+    #[test]
+    fn test_ensure_ready_fails_after_max_retries_with_diagnostics() {
+        let max = consts::WSL_SERVICE_CHECK_MAX_RETRIES;
+
+        // buildctl fails on all attempts (fast-path + max retries)
+        let mut buildctl_responses: Vec<anyhow::Result<String>> = Vec::new();
+        // Fast-path check
+        buildctl_responses.push(Err(anyhow::anyhow!("connection refused")));
+        // All retry checks
+        for _ in 0..max {
+            buildctl_responses.push(Err(anyhow::anyhow!("still refused")));
+        }
+
+        let runner = SequentialMockRunner::new()
+            .with_responses(
+                "wsl.exe --list --quiet",
+                vec![Ok("Speedwave\n".to_string())],
+            )
+            .with_responses(
+                "wsl.exe -d Speedwave -- nerdctl info",
+                vec![Ok("containerd running".to_string())],
+            )
+            .with_responses(
+                "wsl.exe -d Speedwave -- buildctl debug workers",
+                buildctl_responses,
+            )
+            .with_responses(
+                "wsl.exe -d Speedwave -- systemctl start buildkit",
+                vec![Err(anyhow::anyhow!("unit not found"))],
+            );
+
+        let rt = WslRuntime {
+            runner: Box::new(runner),
+            retry_delay: std::time::Duration::ZERO,
+        };
+        let result = rt.ensure_ready();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+
+        // Verify diagnostic error contains all expected information
+        assert!(
+            err.contains("buildkitd"),
+            "error should mention service display name 'buildkitd', got: {err}"
+        );
+        assert!(
+            err.contains("unit not found"),
+            "error should include systemctl start error, got: {err}"
+        );
+        assert!(
+            err.contains("still refused"),
+            "error should include last health check error, got: {err}"
+        );
+        assert!(
+            err.contains("systemctl start buildkit"),
+            "error hint should use systemd unit 'buildkit' (not 'buildkitd'), got: {err}"
+        );
+        assert!(
+            err.contains(&format!("after {max} attempts")),
+            "error should mention retry count, got: {err}"
         );
     }
 }

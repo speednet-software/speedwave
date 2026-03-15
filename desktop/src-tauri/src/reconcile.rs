@@ -103,13 +103,20 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
             return;
         }
 
+        // Stop existing containers before regenerating compose — nerdctl's
+        // name-store can reject `compose up --force-recreate` with "name already
+        // used" if containers are not torn down first.
+        if let Err(e) = rt.compose_down(&project) {
+            log::warn!("reconcile_compose_port: compose_down failed (continuing): {e}");
+        }
+
         // Regenerate compose with the current port
         if let Err(e) = crate::containers_cmd::render_and_save_compose(&project, &*rt) {
             log::error!("reconcile_compose_port: {e}");
             return;
         }
 
-        // Recreate containers with the new compose
+        // Start containers with the new compose
         if let Err(e) = rt.compose_up_recreate(&project) {
             log::error!("reconcile_compose_port: compose_up_recreate failed: {e}");
             return;

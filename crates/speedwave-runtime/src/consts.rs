@@ -105,6 +105,12 @@ pub const CONTAINER_STABILIZATION_DELAY_SECS: u64 = 3;
 /// a service health check. Gives systemd time to bring up containerd/buildkitd.
 pub const WSL_SERVICE_START_DELAY_SECS: u64 = 3;
 
+/// Maximum number of health-check retries after `systemctl start` inside WSL2.
+/// Each retry waits `WSL_SERVICE_START_DELAY_SECS` seconds. Total worst-case
+/// wait per service: 10 × 3s = 30s. Needed because cold-boot WSL may take
+/// longer than a single retry to bring up containerd/buildkitd.
+pub const WSL_SERVICE_CHECK_MAX_RETRIES: u32 = 10;
+
 /// Descriptor for a single auth/credential field of an MCP service.
 pub struct McpAuthFieldDescriptor {
     /// Field key used as filename in the tokens directory (e.g. "bot_token").
@@ -736,6 +742,14 @@ mod tests {
         assert!(
             WSL_SERVICE_START_DELAY_SECS > 0,
             "WSL_SERVICE_START_DELAY_SECS must be positive"
+        );
+    }
+
+    #[test]
+    fn test_wsl_service_check_max_retries_is_positive() {
+        assert!(
+            WSL_SERVICE_CHECK_MAX_RETRIES > 0,
+            "WSL_SERVICE_CHECK_MAX_RETRIES must be positive"
         );
     }
 

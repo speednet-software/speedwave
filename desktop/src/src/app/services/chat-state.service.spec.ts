@@ -475,6 +475,73 @@ describe('ChatStateService', () => {
       expect(service.isStreaming).toBe(false);
     });
 
+    it('Result with result_text creates text block and finalizes', () => {
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 'abc',
+          result_text: 'Session cost: $0.003\nTotal cost: $0.015',
+        },
+      });
+
+      expect(service.messages).toHaveLength(1);
+      expect(service.messages[0].blocks).toHaveLength(1);
+      expect(service.messages[0].blocks[0]).toEqual({
+        type: 'text',
+        content: 'Session cost: $0.003\nTotal cost: $0.015',
+      });
+      expect(service.isStreaming).toBe(false);
+    });
+
+    it('Result without result_text finalizes normally', () => {
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', cost_usd: 0.01 },
+      });
+
+      expect(service.messages).toHaveLength(1);
+      expect(service.messages[0].blocks).toHaveLength(1);
+      expect(service.messages[0].blocks[0]).toEqual({ type: 'text', content: 'Hello' });
+    });
+
+    it('Result with result_text appends after tool blocks', () => {
+      service.handleStreamChunk({
+        chunk_type: 'ToolStart',
+        data: { tool_id: 't1', tool_name: 'Read' },
+      });
+      service.handleStreamChunk({
+        chunk_type: 'ToolResult',
+        data: { tool_id: 't1', content: 'file contents', is_error: false },
+      });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', result_text: 'Review complete.' },
+      });
+
+      expect(service.messages).toHaveLength(1);
+      expect(service.messages[0].blocks).toHaveLength(2);
+      expect(service.messages[0].blocks[0].type).toBe('tool_use');
+      expect(service.messages[0].blocks[1]).toEqual({
+        type: 'text',
+        content: 'Review complete.',
+      });
+    });
+
+    it('Text deltas followed by Result with result_text skips duplicate', () => {
+      // Claude Code always copies the full response into `result`.
+      // When text was already streamed, result_text is redundant and must be skipped.
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Streamed text.' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', result_text: 'Result text.' },
+      });
+
+      expect(service.messages).toHaveLength(1);
+      expect(service.messages[0].blocks).toHaveLength(1);
+      expect(service.messages[0].blocks[0]).toEqual({ type: 'text', content: 'Streamed text.' });
+    });
+
     it('Error chunk finalizes as error message', () => {
       service.isStreaming = true;
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'partial' } });

@@ -140,8 +140,10 @@ impl ContainerRuntime for LimaRuntime {
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
         let compose_file = super::compose_file_path(project)?;
-        self.runner.run(
+        super::compose_down_and_cleanup(
+            &*self.runner,
             "limactl",
+            project,
             &[
                 "shell",
                 consts::LIMA_VM_NAME,
@@ -154,9 +156,10 @@ impl ContainerRuntime for LimaRuntime {
                 "-p",
                 project,
                 "down",
+                "--remove-orphans",
             ],
-        )?;
-        Ok(())
+            &["shell", consts::LIMA_VM_NAME, "--", "sudo", "nerdctl"],
+        )
     }
 
     fn compose_ps(&self, project: &str) -> anyhow::Result<Vec<Value>> {
@@ -646,6 +649,10 @@ mod tests {
                 {
                     return Ok("Running".to_string());
                 }
+                if key.contains(" ps -a --filter label=com.docker.compose.project=") {
+                    self.recorded.lock().unwrap().push(key);
+                    return Ok("stale-id".to_string());
+                }
                 self.recorded.lock().unwrap().push(key);
                 Ok(String::new())
             }
@@ -741,10 +748,11 @@ mod tests {
         rt.compose_down("testproject").unwrap();
 
         let commands = recorded.lock().unwrap();
+        // compose down + force_remove ps -a + rm -f stale-id
         assert_eq!(
             commands.len(),
-            1,
-            "compose_down should issue exactly 1 command, got: {:?}",
+            3,
+            "compose_down should issue 3 commands (down + ps cleanup + rm), got: {:?}",
             *commands
         );
 
@@ -762,6 +770,28 @@ mod tests {
             commands[0].contains("-p testproject"),
             "command should include project name, got: {}",
             commands[0]
+        );
+        assert!(
+            commands[0].contains("--remove-orphans"),
+            "command should include --remove-orphans, got: {}",
+            commands[0]
+        );
+
+        // Second command: ps -a to find ghost containers
+        assert!(
+            commands[1].contains("ps -a"),
+            "second command should be ps -a, got: {}",
+            commands[1]
+        );
+        assert!(
+            commands[1].contains("com.docker.compose.project=testproject"),
+            "second command should filter by project label, got: {}",
+            commands[1]
+        );
+        assert!(
+            commands[2].contains("rm -f stale-id"),
+            "third command should remove stale container id, got: {}",
+            commands[2]
         );
     }
 

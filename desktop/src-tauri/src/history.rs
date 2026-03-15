@@ -138,6 +138,7 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
     match msg_type {
         "user" => parse_user_message(&parsed),
         "assistant" => parse_assistant_message(&parsed),
+        "result" => parse_result_message(&parsed),
         _ => {
             // file-history-snapshot, system, progress, unknown — skip
             None
@@ -265,6 +266,37 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
     })
 }
 
+fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessage> {
+    let is_error = parsed["is_error"].as_bool().unwrap_or(false);
+    let result_text = parsed["result"].as_str().unwrap_or("");
+
+    if result_text.trim().is_empty() {
+        return None;
+    }
+
+    let timestamp = parsed["timestamp"].as_str().map(String::from);
+
+    if is_error {
+        return Some(ConversationMessage {
+            role: "assistant".to_string(),
+            content: result_text.to_string(),
+            blocks: Some(vec![MessageBlock::Error {
+                content: result_text.to_string(),
+            }]),
+            timestamp,
+        });
+    }
+
+    Some(ConversationMessage {
+        role: "assistant".to_string(),
+        content: result_text.to_string(),
+        blocks: Some(vec![MessageBlock::Text {
+            content: result_text.to_string(),
+        }]),
+        timestamp,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -337,6 +369,7 @@ fn list_conversations_impl(base: &Path, project: &str) -> anyhow::Result<Vec<Con
         let mut first_timestamp: Option<String> = None;
         let mut preview = String::new();
         let mut message_count: usize = 0;
+        let mut last_assistant_content: Option<String> = None;
         const MAX_SCAN_LINES: usize = 50;
 
         for line in reader.lines().take(MAX_SCAN_LINES) {
@@ -345,6 +378,20 @@ fn list_conversations_impl(base: &Path, project: &str) -> anyhow::Result<Vec<Con
                 Err(_) => break,
             };
             if let Some(msg) = parse_jsonl_message(&line) {
+                // Deduplicate: skip result whose content is contained in the
+                // preceding assistant message.  `parse_assistant_message`
+                // concatenates text + "[Tool: X]" placeholders, so the result
+                // text (plain text only) is a substring of the assistant content.
+                if msg.role == "assistant" {
+                    if let Some(ref prev) = last_assistant_content {
+                        if prev.contains(&msg.content) {
+                            continue;
+                        }
+                    }
+                    last_assistant_content = Some(msg.content.clone());
+                } else {
+                    last_assistant_content = None;
+                }
                 message_count += 1;
                 if first_timestamp.is_none() {
                     first_timestamp = msg.timestamp.clone();
@@ -392,9 +439,24 @@ fn get_conversation_impl(
     const MAX_TRANSCRIPT_LINES: usize = 10_000;
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
+    let mut last_assistant_content: Option<String> = None;
     for line in reader.lines().take(MAX_TRANSCRIPT_LINES) {
         let line = line.map_err(|e| anyhow::anyhow!("io error reading session: {e}"))?;
         if let Some(msg) = parse_jsonl_message(&line) {
+            // Deduplicate: skip result message whose content is contained in
+            // the preceding assistant message.  `parse_assistant_message`
+            // concatenates text + "[Tool: X]" placeholders, so the result
+            // text (plain text only) is a substring of the assistant content.
+            if msg.role == "assistant" {
+                if let Some(ref prev) = last_assistant_content {
+                    if prev.contains(&msg.content) {
+                        continue;
+                    }
+                }
+                last_assistant_content = Some(msg.content.clone());
+            } else {
+                last_assistant_content = None;
+            }
             messages.push(msg);
         }
     }
@@ -630,6 +692,28 @@ mod tests {
     }
 
     #[test]
+    fn list_conversations_deduplicates_tool_use_turn_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"read it"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I will read"},{"type":"tool_use","name":"Read","input":{}}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"result","is_error":false,"result":"I will read","timestamp":"2025-01-01T00:00:02Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(result.len(), 1);
+        // message_count should be 2 (user + assistant), not 3 (result deduplicated)
+        assert_eq!(result[0].message_count, 2);
+    }
+
+    #[test]
     fn list_conversations_skips_non_uuid_files() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
@@ -825,5 +909,119 @@ mod tests {
     fn parse_assistant_empty_content_array_is_skipped() {
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#;
         assert!(parse_jsonl_message(line).is_none());
+    }
+
+    // ── Result message parsing (slash commands / history) ─────────
+
+    #[test]
+    fn parse_result_message_extracts_slash_command_output() {
+        let line = r#"{"type":"result","is_error":false,"result":"Session cost: $0.003","timestamp":"2025-06-01T00:00:00Z"}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(msg.content, "Session cost: $0.003");
+        let blocks = msg.blocks.unwrap();
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            MessageBlock::Text { content } => assert_eq!(content, "Session cost: $0.003"),
+            other => panic!("expected Text block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_message_renders_error_as_error_block() {
+        let line = r#"{"type":"result","is_error":true,"result":"Command not found","timestamp":"2025-06-01T00:00:00Z"}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert_eq!(msg.role, "assistant");
+        let blocks = msg.blocks.unwrap();
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            MessageBlock::Error { content } => assert_eq!(content, "Command not found"),
+            other => panic!("expected Error block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_message_skips_empty() {
+        let line = r#"{"type":"result","is_error":false,"result":""}"#;
+        assert!(parse_jsonl_message(line).is_none());
+
+        let line_ws = r#"{"type":"result","is_error":false,"result":"   "}"#;
+        assert!(parse_jsonl_message(line_ws).is_none());
+    }
+
+    #[test]
+    fn get_conversation_deduplicates_assistant_and_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        // JSONL with assistant message followed by result with same content
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"answer"}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"result","is_error":false,"result":"answer","timestamp":"2025-01-01T00:00:02Z"}"#,
+            ],
+        );
+
+        let result = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        // Should have 2 messages: user + assistant (result deduplicated)
+        assert_eq!(result.messages.len(), 2);
+        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[1].role, "assistant");
+        assert_eq!(result.messages[1].content, "answer");
+    }
+
+    #[test]
+    fn get_conversation_shows_result_when_no_assistant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        // JSONL with only a result message (slash command — no assistant message)
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"/cost"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"result","is_error":false,"result":"Session cost: $0.003","timestamp":"2025-01-01T00:00:01Z"}"#,
+            ],
+        );
+
+        let result = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(result.messages.len(), 2);
+        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[0].content, "/cost");
+        assert_eq!(result.messages[1].role, "assistant");
+        assert_eq!(result.messages[1].content, "Session cost: $0.003");
+    }
+
+    #[test]
+    fn get_conversation_deduplicates_tool_use_turn_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        // Assistant message with text + tool_use → content = "I will read\n[Tool: Read]"
+        // Result has only the text portion → content = "I will read"
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"read it"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I will read"},{"type":"tool_use","name":"Read","input":{}}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"result","is_error":false,"result":"I will read","timestamp":"2025-01-01T00:00:02Z"}"#,
+            ],
+        );
+
+        let result = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        // Should have 2 messages: user + assistant (result deduplicated even
+        // though assistant content includes "[Tool: Read]" suffix)
+        assert_eq!(result.messages.len(), 2);
+        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[1].role, "assistant");
+        assert_eq!(result.messages[1].content, "I will read\n[Tool: Read]");
     }
 }
