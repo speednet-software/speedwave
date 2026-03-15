@@ -934,6 +934,7 @@ fn main() {
                         });
                     }
                     "install_update" => {
+                        #[cfg(not(target_os = "linux"))]
                         let app_clone = app.clone();
                         let uv = update_version_tray.clone();
                         tauri::async_runtime::spawn(async move {

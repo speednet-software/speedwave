@@ -148,16 +148,17 @@ pub async fn check_for_update(app: &AppHandle) -> Result<Option<UpdateInfo>, Str
 }
 
 pub async fn verify_update_installable(
-    app: &AppHandle,
+    #[cfg(not(target_os = "linux"))] app: &AppHandle,
+    #[cfg(target_os = "linux")] _app: &AppHandle,
     expected_version: &str,
 ) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        return Err(format!(
+        Err(format!(
             "Auto-update is not available for .deb packages. \
              Download v{expected_version} from GitHub Releases: \
              https://github.com/speednet-software/speedwave/releases"
-        ));
+        ))
     }
 
     #[cfg(not(target_os = "linux"))]
