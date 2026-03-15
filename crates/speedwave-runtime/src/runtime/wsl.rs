@@ -461,10 +461,20 @@ impl ContainerRuntime for WslRuntime {
         )?;
 
         log::info!("restarting buildkit inside WSL2");
-        self.runner.run(
+        match self.runner.run(
             "wsl.exe",
             &["-d", distro, "--", "systemctl", "restart", "buildkit"],
-        )?;
+        ) {
+            Ok(_) => {}
+            Err(e) => {
+                let msg = e.to_string().to_ascii_lowercase();
+                if msg.contains("unit not found") || msg.contains("not loaded") {
+                    log::info!("buildkit unit not found in WSL2, skipping restart");
+                } else {
+                    return Err(e);
+                }
+            }
+        }
 
         let max = consts::CONTAINERD_RESTART_READY_MAX_RETRIES;
         for attempt in 1..=max {
@@ -1357,6 +1367,43 @@ mod tests {
         let result = rt.restart_container_engine();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("restart failed"));
+    }
+
+    #[test]
+    fn test_restart_container_engine_buildkit_unit_not_found_still_polls() {
+        let runner = MockRunner::new()
+            .with_response("wsl.exe -d Speedwave -- systemctl restart containerd", "")
+            .with_error(
+                "wsl.exe -d Speedwave -- systemctl restart buildkit",
+                "Failed to restart buildkit.service: Unit not found.",
+            )
+            .with_response("wsl.exe -d Speedwave -- nerdctl info", "containerd running")
+            .with_response(
+                "wsl.exe -d Speedwave -- buildctl debug workers",
+                "buildkit ready",
+            );
+        let rt = WslRuntime::with_runner(Box::new(runner)).with_zero_delay();
+        assert!(
+            rt.restart_container_engine().is_ok(),
+            "should succeed when buildkit unit not found but buildctl works"
+        );
+    }
+
+    #[test]
+    fn test_restart_container_engine_propagates_buildkit_error() {
+        let runner = MockRunner::new()
+            .with_response("wsl.exe -d Speedwave -- systemctl restart containerd", "")
+            .with_error(
+                "wsl.exe -d Speedwave -- systemctl restart buildkit",
+                "Failed to restart buildkit.service: some other error",
+            );
+        let rt = WslRuntime::with_runner(Box::new(runner)).with_zero_delay();
+        let result = rt.restart_container_engine();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("some other error"),
+            "should propagate non-unit-not-found buildkit errors"
+        );
     }
 
     #[test]

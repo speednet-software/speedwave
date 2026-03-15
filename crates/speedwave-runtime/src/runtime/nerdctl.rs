@@ -259,16 +259,19 @@ impl ContainerRuntime for NerdctlRuntime {
                 log::info!("containerd + buildkit fully ready after phase 2 attempt {attempt}");
                 return Ok(());
             }
+            if attempt == max {
+                anyhow::bail!(
+                    "containerd/buildkit systemd units active but nerdctl/buildctl not reachable \
+                     after restart ({max} phase-2 attempts). \
+                     Try: systemctl --user restart containerd && systemctl --user restart buildkit"
+                );
+            }
             log::info!(
                 "waiting for rootlesskit namespace readiness (phase 2 attempt {attempt}/{max})"
             );
         }
 
-        anyhow::bail!(
-            "containerd/buildkit systemd units active but nerdctl/buildctl not reachable \
-             after restart ({max} phase-2 attempts). \
-             Try: systemctl --user restart containerd && systemctl --user restart buildkit"
-        )
+        unreachable!("loop always returns or bails")
     }
 
     fn ensure_ready(&self) -> anyhow::Result<()> {
