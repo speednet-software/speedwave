@@ -175,7 +175,7 @@ jobs:
         run: |
           mkdir -p desktop/src-tauri/nerdctl-full/{bin,lib,libexec,share}
           mkdir -p desktop/src-tauri/THIRD-PARTY-LICENSES
-          mkdir -p desktop/src-tauri/build-context/containers
+          mkdir -p desktop/src-tauri/build-context/containers/claude-resources
           mkdir -p desktop/src-tauri/build-context/mcp-servers
           mkdir -p desktop/src-tauri/mcp-os/os/dist
           mkdir -p desktop/src-tauri/mcp-os/shared/dist
