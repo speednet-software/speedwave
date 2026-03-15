@@ -89,6 +89,7 @@ describe('Factory Reset', function () {
     }
 
     // Wait for old process to die and release port 4445.
+    // 3s covers TCP TIME_WAIT + process teardown on all platforms.
     await new Promise((resolve) => setTimeout(resolve, 3_000));
 
     // Poll until the restarted app binds port 4445 again.
