@@ -323,6 +323,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Ensure cross-compile target is installed
+        run: rustup target add ${{ matrix.target }}
+
       - name: Rust cache
         uses: swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5  # v2.8.2
         with:
