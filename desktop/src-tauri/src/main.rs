@@ -213,6 +213,10 @@ async fn switch_project(
 ) -> Result<(), String> {
     use containers_cmd::{switch_project_core, teardown_and_restore, teardown_only, SwitchResult};
 
+    // Config is committed first to keep the config lock brief — holding it
+    // across the blocking container transition would starve other config
+    // readers. If the container switch fails, rollback_and_emit_failed
+    // restores active_project to `previous`.
     let previous = config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
         let prev = user_config.active_project.clone();
@@ -235,7 +239,8 @@ async fn switch_project(
         let rt = speedwave_runtime::runtime::detect_runtime();
         switch_project_core(&prev_clone, &new_clone, &*rt, &|proj, rt| {
             check_project(proj)?;
-            let _ = rt.compose_down(proj);
+            // compose_down(prev) already handled by switch_project_core step 2.
+            // Here we only render the new compose and start containers.
             containers_cmd::render_and_save_compose(proj, rt)?;
             rt.compose_up_recreate(proj).map_err(|e| e.to_string())
         })
@@ -243,7 +248,7 @@ async fn switch_project(
     .await
     .map_err(|e| e.to_string())?;
 
-    if let SwitchResult::Err {
+    if let SwitchResult::Failed {
         error,
         cleanup_error,
     } = switch_result

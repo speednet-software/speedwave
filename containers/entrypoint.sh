@@ -91,7 +91,13 @@ if [ "${HAS_PLUGINS}" = true ]; then
                 if [ -d "${plugin_path}/${resource_type}" ]; then
                     mkdir -p "${HOME}/.claude/${resource_type}"
                     for entry in "${plugin_path}/${resource_type}"/*; do
-                        [ -e "${entry}" ] && ln -sfn "${entry}" "${HOME}/.claude/${resource_type}/$(basename "${entry}")"
+                        if [ -e "${entry}" ]; then
+                            target="${HOME}/.claude/${resource_type}/$(basename "${entry}")"
+                            if [ -L "${target}" ] && [ "$(readlink "${target}")" != "${entry}" ]; then
+                                echo "WARNING: plugin '${plugin}' overwrites ${resource_type}/$(basename "${entry}") from another plugin" >&2
+                            fi
+                            ln -sfn "${entry}" "${target}"
+                        fi
                     done
                 fi
             done

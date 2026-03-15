@@ -16,9 +16,9 @@ use crate::types::{check_project, LlmConfigResponse};
 
 /// Result of the container-switching transaction.
 pub(crate) enum SwitchResult {
-    Ok,
+    Succeeded,
     /// Primary error + optional cleanup error. Caller handles config rollback + UI.
-    Err {
+    Failed {
         error: String,
         cleanup_error: Option<String>,
     },
@@ -63,7 +63,7 @@ pub(crate) fn switch_project_core(
 ) -> SwitchResult {
     // 1. Ensure runtime is ready
     if let Err(e) = rt.ensure_ready() {
-        return SwitchResult::Err {
+        return SwitchResult::Failed {
             error: format!("Runtime not ready: {e}"),
             cleanup_error: None,
         };
@@ -73,8 +73,11 @@ pub(crate) fn switch_project_core(
     if let Some(prev) = previous {
         if prev != new_project {
             if let Err(e) = rt.compose_down(prev) {
+                // Idempotent re-up: if compose_down left the previous project
+                // in a partial state, compose_up ensures it is fully running.
+                // On an already-running project this is a harmless no-op.
                 let restore_err = rt.compose_up(prev).err();
-                return SwitchResult::Err {
+                return SwitchResult::Failed {
                     error: format!("compose_down('{prev}') failed: {e}"),
                     cleanup_error: restore_err.map(|re| {
                         format!(
@@ -93,13 +96,13 @@ pub(crate) fn switch_project_core(
             Some(prev) if prev != new_project => teardown_and_restore(new_project, prev, rt).err(),
             _ => teardown_only(new_project, rt),
         };
-        return SwitchResult::Err {
+        return SwitchResult::Failed {
             error: e,
             cleanup_error,
         };
     }
 
-    SwitchResult::Ok
+    SwitchResult::Succeeded
 }
 
 // ---------------------------------------------------------------------------
@@ -297,7 +300,7 @@ pub async fn add_project(
     .await
     .map_err(|e| e.to_string())?;
 
-    if let SwitchResult::Err {
+    if let SwitchResult::Failed {
         error,
         cleanup_error,
     } = switch_result
@@ -893,7 +896,7 @@ mod tests {
         let rt = MockRuntime::new();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &ok_recreate);
-        assert!(matches!(result, SwitchResult::Ok));
+        assert!(matches!(result, SwitchResult::Succeeded));
         assert_eq!(rt.down_calls(), vec!["prev"]);
     }
 
@@ -901,7 +904,7 @@ mod tests {
     fn switch_core_happy_path_no_previous() {
         let rt = MockRuntime::new();
         let result = switch_project_core(&None, "new", &rt, &ok_recreate);
-        assert!(matches!(result, SwitchResult::Ok));
+        assert!(matches!(result, SwitchResult::Succeeded));
         assert!(rt.down_calls().is_empty());
     }
 
@@ -910,7 +913,7 @@ mod tests {
         let rt = MockRuntime::new();
         let prev = Some("same".to_string());
         let result = switch_project_core(&prev, "same", &rt, &ok_recreate);
-        assert!(matches!(result, SwitchResult::Ok));
+        assert!(matches!(result, SwitchResult::Succeeded));
         // No down call when prev == new
         assert!(rt.down_calls().is_empty());
     }
@@ -921,14 +924,14 @@ mod tests {
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &ok_recreate);
         match result {
-            SwitchResult::Err {
+            SwitchResult::Failed {
                 ref error,
                 ref cleanup_error,
             } => {
                 assert!(error.contains("Runtime not ready"), "got: {error}");
                 assert!(cleanup_error.is_none());
             }
-            SwitchResult::Ok => panic!("expected Err"),
+            SwitchResult::Succeeded => panic!("expected Failed"),
         }
         // No compose calls when ensure_ready fails
         assert!(rt.down_calls().is_empty());
@@ -941,7 +944,7 @@ mod tests {
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &ok_recreate);
         match result {
-            SwitchResult::Err {
+            SwitchResult::Failed {
                 ref error,
                 ref cleanup_error,
             } => {
@@ -952,7 +955,7 @@ mod tests {
                 // Restore succeeded → no cleanup_error
                 assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
             }
-            SwitchResult::Ok => panic!("expected Err"),
+            SwitchResult::Succeeded => panic!("expected Failed"),
         }
         assert_eq!(rt.down_calls(), vec!["prev"]);
         assert_eq!(rt.up_calls(), vec!["prev"]);
@@ -966,7 +969,7 @@ mod tests {
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &ok_recreate);
         match result {
-            SwitchResult::Err {
+            SwitchResult::Failed {
                 ref error,
                 ref cleanup_error,
             } => {
@@ -977,7 +980,7 @@ mod tests {
                 let ce = cleanup_error.as_ref().expect("should have cleanup_error");
                 assert!(ce.contains("restore 'prev' also failed"), "got: {ce}");
             }
-            SwitchResult::Ok => panic!("expected Err"),
+            SwitchResult::Succeeded => panic!("expected Failed"),
         }
     }
 
@@ -987,7 +990,7 @@ mod tests {
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &fail_recreate);
         match result {
-            SwitchResult::Err {
+            SwitchResult::Failed {
                 ref error,
                 ref cleanup_error,
             } => {
@@ -995,7 +998,7 @@ mod tests {
                 // teardown_and_restore: down(new) + up(prev) both succeed → no cleanup_error
                 assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
             }
-            SwitchResult::Ok => panic!("expected Err"),
+            SwitchResult::Succeeded => panic!("expected Failed"),
         }
         // down(prev) for stop + down(new) for teardown
         assert_eq!(rt.down_calls(), vec!["prev", "new"]);
@@ -1008,7 +1011,7 @@ mod tests {
         let rt = MockRuntime::new();
         let result = switch_project_core(&None, "new", &rt, &fail_recreate);
         match result {
-            SwitchResult::Err {
+            SwitchResult::Failed {
                 ref error,
                 ref cleanup_error,
             } => {
@@ -1016,7 +1019,7 @@ mod tests {
                 // teardown_only succeeded → no cleanup_error
                 assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
             }
-            SwitchResult::Ok => panic!("expected Err"),
+            SwitchResult::Succeeded => panic!("expected Failed"),
         }
         assert_eq!(rt.down_calls(), vec!["new"]);
         assert!(rt.up_calls().is_empty());
@@ -1028,7 +1031,7 @@ mod tests {
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &fail_recreate);
         match result {
-            SwitchResult::Err {
+            SwitchResult::Failed {
                 ref error,
                 ref cleanup_error,
             } => {
@@ -1036,7 +1039,7 @@ mod tests {
                 let ce = cleanup_error.as_ref().expect("should have cleanup_error");
                 assert!(ce.contains("restore 'prev' failed"), "got: {ce}");
             }
-            SwitchResult::Ok => panic!("expected Err"),
+            SwitchResult::Succeeded => panic!("expected Failed"),
         }
     }
 
@@ -1048,10 +1051,10 @@ mod tests {
             Err("render error".to_string())
         });
         match result {
-            SwitchResult::Err { ref error, .. } => {
+            SwitchResult::Failed { ref error, .. } => {
                 assert!(error.contains("render error"), "got: {error}");
             }
-            SwitchResult::Ok => panic!("expected Err"),
+            SwitchResult::Succeeded => panic!("expected Failed"),
         }
         // down(prev) for stop + down(new) for teardown (noop)
         assert_eq!(rt.down_calls(), vec!["prev", "new"]);
@@ -1065,10 +1068,10 @@ mod tests {
             Err("render error".to_string())
         });
         match result {
-            SwitchResult::Err { ref error, .. } => {
+            SwitchResult::Failed { ref error, .. } => {
                 assert!(error.contains("render error"), "got: {error}");
             }
-            SwitchResult::Ok => panic!("expected Err"),
+            SwitchResult::Succeeded => panic!("expected Failed"),
         }
         // down(new) for teardown only
         assert_eq!(rt.down_calls(), vec!["new"]);
@@ -1100,14 +1103,14 @@ mod tests {
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &add_project_recreate);
         match result {
-            SwitchResult::Err {
+            SwitchResult::Failed {
                 ref error,
                 ref cleanup_error,
             } => {
                 assert!(error.contains("Runtime not ready"), "got: {error}");
                 assert!(cleanup_error.is_none());
             }
-            SwitchResult::Ok => panic!("expected Err"),
+            SwitchResult::Succeeded => panic!("expected Failed"),
         }
         assert!(rt.down_calls().is_empty(), "no compose calls when VM fails");
         assert!(rt.up_calls().is_empty());
@@ -1118,7 +1121,7 @@ mod tests {
         let rt = MockRuntime::new();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &add_project_recreate);
-        assert!(matches!(result, SwitchResult::Ok));
+        assert!(matches!(result, SwitchResult::Succeeded));
         // ensure_ready → down(prev) → up(new) via start_containers
         assert_eq!(rt.down_calls(), vec!["prev"]);
         assert_eq!(rt.up_calls(), vec!["new"]);
@@ -1130,7 +1133,7 @@ mod tests {
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &add_project_recreate);
         match result {
-            SwitchResult::Err {
+            SwitchResult::Failed {
                 ref error,
                 ref cleanup_error,
             } => {
@@ -1141,7 +1144,7 @@ mod tests {
                 // up(prev) restore succeeded → no cleanup_error
                 assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
             }
-            SwitchResult::Ok => panic!("expected Err"),
+            SwitchResult::Succeeded => panic!("expected Failed"),
         }
         assert_eq!(rt.down_calls(), vec!["prev"]);
         assert_eq!(rt.up_calls(), vec!["prev"]);
@@ -1154,7 +1157,7 @@ mod tests {
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &add_project_recreate_fail);
         match result {
-            SwitchResult::Err {
+            SwitchResult::Failed {
                 ref error,
                 ref cleanup_error,
             } => {
@@ -1162,7 +1165,7 @@ mod tests {
                 // teardown(new) + restore(prev) both ok → no cleanup_error
                 assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
             }
-            SwitchResult::Ok => panic!("expected Err"),
+            SwitchResult::Succeeded => panic!("expected Failed"),
         }
         // down(prev) for stop + down(new) for teardown
         assert_eq!(rt.down_calls(), vec!["prev", "new"]);
@@ -1174,7 +1177,7 @@ mod tests {
     fn add_project_happy_path_no_previous() {
         let rt = MockRuntime::new();
         let result = switch_project_core(&None, "new", &rt, &add_project_recreate);
-        assert!(matches!(result, SwitchResult::Ok));
+        assert!(matches!(result, SwitchResult::Succeeded));
         // No previous → no down, only up(new)
         assert!(rt.down_calls().is_empty());
         assert_eq!(rt.up_calls(), vec!["new"]);
