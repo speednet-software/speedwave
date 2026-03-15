@@ -189,11 +189,11 @@ export class UpdateNotificationComponent implements OnDestroy {
             this.dismissed = false;
           }
           this.cdr.markForCheck();
-        },
+        }
       );
 
       this.bundleStatus = await this.tauri.invoke<BundleReconcileStatus>(
-        'get_bundle_reconcile_state',
+        'get_bundle_reconcile_state'
       );
       if (this.bundleStatus?.last_error) {
         this.dismissed = false;

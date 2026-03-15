@@ -117,10 +117,7 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       component.updateAvailableVersion = '';
       await component.installUpdate();
-      expect(invokeSpy).not.toHaveBeenCalledWith(
-        'install_update_and_reconcile',
-        expect.anything(),
-      );
+      expect(invokeSpy).not.toHaveBeenCalledWith('install_update_and_reconcile', expect.anything());
     });
 
     it('does not invoke a restart command if install_update_and_reconcile fails', async () => {
