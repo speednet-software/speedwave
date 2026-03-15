@@ -141,13 +141,15 @@ desktop/e2e/
 ├── wdio.conf.ts           # WebdriverIO config (port 4445, 30s default timeout; individual tests override up to 20 min)
 ├── tsconfig.json          # TypeScript config
 └── specs/
-    ├── 01-app-lifecycle.spec.ts   # Basic launch: title, Angular root, setup wizard shown
-    ├── 02-setup-wizard.spec.ts    # Full flow: welcome → all 6 steps → project form → redirect
-    ├── 03-navigation.spec.ts      # Shell nav: Chat, Integrations, Settings routing
-    └── 04-settings.spec.ts        # Settings page: project name, LLM, reset, updates
+    ├── 01-app-lifecycle.spec.ts       # Basic launch: title, Angular root, setup wizard shown
+    ├── 02-setup-wizard.spec.ts        # Full flow: welcome → all 6 steps → project form → redirect
+    ├── 03-navigation.spec.ts          # Shell nav: Chat, Integrations, Settings routing
+    ├── 04-settings.spec.ts            # Settings page: project name, LLM, reset, updates
+    ├── 05-project-management.spec.ts  # Add second project, switch between projects
+    └── 06-factory-reset.spec.ts       # Factory reset: confirm → app restart → setup wizard (MUST be last)
 ```
 
-Specs run in numeric order. `02-setup-wizard` drives the entire setup wizard to completion (including filling the project form with name `e2e-test` and directory `/tmp/speedwave-e2e-project`). Subsequent specs (`03-*`, `04-*`) depend on setup being complete and fail explicitly if the shell is not present — no silent early returns.
+Specs run in numeric order. `02-setup-wizard` drives the entire setup wizard to completion (including filling the project form with name `e2e-test` and directory `/tmp/speedwave-e2e-project`). Subsequent specs (`03-*` through `05-*`) depend on setup being complete and fail explicitly if the shell is not present — no silent early returns. `06-factory-reset` MUST be last — it wipes all state (`~/.speedwave/`), restarts the app, and verifies a clean setup wizard appears.
 
 ### Selectors Convention
 
