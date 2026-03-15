@@ -230,7 +230,7 @@ async function checkWorkerHealthAtStartup(service: string): Promise<boolean> {
     }
 
     if (attempt < STARTUP_HEALTH_RETRIES) {
-      const delay = STARTUP_RETRY_DELAYS_MS[attempt];
+      const delay = STARTUP_RETRY_DELAYS_MS[attempt] ?? 4_000;
       console.log(
         `${ts()} [http-bridge] Worker ${service} not ready, retrying in ${delay / 1000}s (${attempt + 1}/${STARTUP_HEALTH_RETRIES})...`
       );

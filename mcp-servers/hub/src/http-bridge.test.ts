@@ -1263,6 +1263,13 @@ describe('http-bridge', () => {
       warnSpy.mockRestore();
     });
 
+    it('STARTUP_RETRY_DELAYS_MS has an entry for each retry index', () => {
+      // Guard: if STARTUP_HEALTH_RETRIES is bumped, STARTUP_RETRY_DELAYS_MS must grow too.
+      // The nullish fallback (?? 4_000) in checkWorkerHealthAtStartup handles the drift,
+      // but the arrays should stay aligned by design.
+      expect(STARTUP_RETRY_DELAYS_MS.length).toBeGreaterThanOrEqual(STARTUP_HEALTH_RETRIES);
+    });
+
     it('seeds worker cache after startup checks', async () => {
       fetchMock.mockResolvedValue({ ok: true });
 

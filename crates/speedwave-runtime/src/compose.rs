@@ -463,7 +463,13 @@ fn apply_worker_auth_tokens_with_dir(
             }
         } else {
             // Remove stale directory/symlink at token path if present
-            if token_path.exists() {
+            if token_path.is_symlink() {
+                log::warn!(
+                    "Stale symlink at token location, removing: {}",
+                    token_path.display()
+                );
+                std::fs::remove_file(&token_path)?;
+            } else if token_path.exists() {
                 log::warn!(
                     "Stale path at token location, removing: {}",
                     token_path.display()
@@ -4267,6 +4273,40 @@ networks:
         assert!(
             env.iter().any(|e| e.starts_with("MCP_SLACK_AUTH_TOKEN=")),
             "should generate new token even when existing path is a directory"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_worker_auth_token_skipped_when_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = ResolvedIntegrationsConfig {
+            slack: true,
+            ..Default::default()
+        };
+
+        // Create a symlink where the token file should be
+        let target = tmp.path().join("some-target");
+        std::fs::write(&target, "dummy").unwrap();
+        std::os::unix::fs::symlink(&target, tmp.path().join("slack-auth-token")).unwrap();
+
+        let result =
+            apply_worker_auth_tokens_with_dir(VALID_COMPOSE_ALL_WORKERS, tmp.path(), &integrations)
+                .unwrap();
+
+        // Should remove the symlink and generate a new token
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let env = get_service_env_seq(&doc, "mcp-slack");
+        assert!(
+            env.iter().any(|e| e.starts_with("MCP_SLACK_AUTH_TOKEN=")),
+            "should generate new token even when existing path is a symlink"
+        );
+        // The token file should now be a regular file, not a symlink
+        let token_path = tmp.path().join("slack-auth-token");
+        assert!(token_path.is_file(), "token should be a regular file");
+        assert!(
+            !token_path.is_symlink(),
+            "token should not be a symlink after cleanup"
         );
     }
 

@@ -656,17 +656,30 @@ async function loadRedmineConfig(): Promise<RedmineProjectConfig | null> {
 
 /**
  * Sanitize Textile markup to remove potentially dangerous content.
- * Removes script tags, iframes, objects, embeds, and javascript: protocols.
+ * Strips dangerous HTML tags (including multiline), event handler attributes,
+ * and dangerous URI schemes (javascript:, data:, vbscript:).
  * @param textile - The Textile markup to sanitize.
  * @returns Sanitized Textile markup.
  */
 function sanitizeTextile(textile: string): string {
-  return textile
-    .replace(/<script[^>]*>.*?<\/script>/gi, '')
-    .replace(/<iframe[^>]*>.*?<\/iframe>/gi, '')
-    .replace(/<object[^>]*>.*?<\/object>/gi, '')
-    .replace(/<embed[^>]*>/gi, '')
-    .replace(/javascript:/gi, '');
+  // Strip dangerous tags — dotAll (s) flag handles multiline content
+  let result = textile;
+  result = result.replace(/<script[\s>][\s\S]*?<\/script\s*>/gi, '');
+  result = result.replace(/<script[^>]*\/?>/gi, '');
+  result = result.replace(/<iframe[\s>][\s\S]*?<\/iframe\s*>/gi, '');
+  result = result.replace(/<iframe[^>]*\/?>/gi, '');
+  result = result.replace(/<object[\s>][\s\S]*?<\/object\s*>/gi, '');
+  result = result.replace(/<object[^>]*\/?>/gi, '');
+  result = result.replace(/<embed[^>]*\/?>/gi, '');
+  result = result.replace(/<form[\s>][\s\S]*?<\/form\s*>/gi, '');
+  result = result.replace(/<form[^>]*\/?>/gi, '');
+  // Strip event handler attributes (on*="...")
+  result = result.replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+  // Strip dangerous URI schemes
+  result = result.replace(/javascript\s*:/gi, '');
+  result = result.replace(/vbscript\s*:/gi, '');
+  result = result.replace(/data\s*:[^,]*;base64/gi, '');
+  return result;
 }
 
 //═══════════════════════════════════════════════════════════════════════════════
