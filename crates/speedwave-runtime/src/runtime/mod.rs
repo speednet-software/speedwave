@@ -63,6 +63,21 @@ pub trait ContainerRuntime: Send + Sync {
     fn system_prune(&self) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Restarts the container engine (containerd + buildkitd) and waits for readiness.
+    ///
+    /// Implementations MUST restart containerd, MUST restart buildkit (skip
+    /// `systemctl restart buildkit` only if the unit does not exist), and MUST
+    /// wait for both `nerdctl info` and `buildctl debug workers` to succeed.
+    /// `buildctl` is part of the nerdctl-full bundle and must be available in
+    /// all environments.
+    ///
+    /// Only safe to call when no containers are running (e.g. during initial
+    /// setup). Call-sites with running containers should propagate the error
+    /// with diagnostic hints instead.
+    fn restart_container_engine(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 pub trait CommandRunner: Send + Sync {

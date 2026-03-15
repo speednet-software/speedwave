@@ -12,9 +12,7 @@ on:
 
 jobs:
   claude-review:
-    if: >-
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      contains(fromJSON('["slawomir-it"]'), github.event.pull_request.user.login)
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -22,14 +20,22 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
+      actions: read # Required for Claude to read CI results on PRs
 
     steps:
+      - name: Skip non-reviewable PRs
+        if: >-
+          !contains(fromJSON('["slawomir-it"]'), github.event.pull_request.user.login)
+        run: echo "Skipping review — PR author not in allowlist (e.g. release-please bot)"
+
       - name: Checkout repository
+        if: contains(fromJSON('["slawomir-it"]'), github.event.pull_request.user.login)
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
       - name: Run Claude Code Review
+        if: contains(fromJSON('["slawomir-it"]'), github.event.pull_request.user.login)
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:

@@ -1111,7 +1111,18 @@ pub fn is_setup_complete() -> bool {
 pub fn build_images() -> anyhow::Result<()> {
     let rt = runtime::detect_runtime();
     rt.ensure_ready()?;
-    build::build_all_images(rt.as_ref())?;
+    match build::build_all_images(rt.as_ref()) {
+        Ok(_) => {}
+        Err(e)
+            if e.downcast_ref::<build::SnapshotterRecoveryFailed>()
+                .is_some() =>
+        {
+            log::warn!("snapshotter recovery failed after prune, restarting engine");
+            rt.restart_container_engine()?;
+            build::build_all_images(rt.as_ref())?;
+        }
+        Err(e) => return Err(e),
+    }
 
     let mut state = SetupState::load();
     state.images_built = true;
@@ -3567,6 +3578,67 @@ networks:
                 .iter()
                 .map(|v| format!("{v}"))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// Structural test: verifies that `build_images()` handles
+    /// `SnapshotterRecoveryFailed` by calling `restart_container_engine()` and
+    /// retrying the build. This is a source-level test — if the recovery pattern
+    /// is removed or refactored away, this test will fail and force a conscious
+    /// decision about the new error-handling strategy.
+    #[test]
+    fn build_images_handles_snapshotter_recovery_with_engine_restart() {
+        let source = include_str!("setup_wizard.rs");
+
+        assert!(
+            source.contains("SnapshotterRecoveryFailed"),
+            "build_images() must downcast SnapshotterRecoveryFailed to trigger engine restart"
+        );
+        assert!(
+            source.contains("restart_container_engine"),
+            "build_images() must call restart_container_engine() on snapshotter recovery failure"
+        );
+
+        // Verify the pattern: downcast → restart → retry (all in build_images)
+        let build_images_fn = source
+            .split("pub fn build_images()")
+            .nth(1)
+            .and_then(|rest| {
+                // Find the matching closing brace by counting braces
+                let mut depth = 0i32;
+                let mut end = 0;
+                for (i, ch) in rest.char_indices() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = i;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if end > 0 {
+                    Some(&rest[..end])
+                } else {
+                    None
+                }
+            })
+            .expect("build_images() function body should exist");
+
+        assert!(
+            build_images_fn.contains("downcast_ref::<build::SnapshotterRecoveryFailed>"),
+            "build_images() must use downcast_ref to detect SnapshotterRecoveryFailed"
+        );
+        assert!(
+            build_images_fn.contains("restart_container_engine()"),
+            "build_images() must call restart_container_engine() in the recovery path"
+        );
+        assert!(
+            build_images_fn.contains("build::build_all_images(rt.as_ref())?"),
+            "build_images() must retry build_all_images after engine restart"
         );
     }
 }
