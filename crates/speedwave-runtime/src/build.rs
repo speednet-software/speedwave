@@ -476,6 +476,58 @@ mod tests {
         }
     }
 
+    /// Verifies that shell scripts COPY'd into Containerfile.claude have their
+    /// shebang interpreter (`bash`) explicitly installed via `apt-get install`.
+    ///
+    /// node:24-bookworm-slim does NOT include bash — only dash (/bin/sh).
+    /// If a COPY'd script uses `#!/bin/bash` but the Containerfile doesn't
+    /// `apt-get install bash`, the build fails with "not found" at runtime.
+    #[test]
+    fn test_containerfile_claude_installs_bash_for_copied_scripts() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+        let root = resolve_build_root_with_home(None).unwrap();
+        let containerfile = std::fs::read_to_string(root.join("containers/Containerfile.claude"))
+            .expect("Containerfile.claude should be readable");
+
+        // Collect all COPY'd .sh scripts
+        let copied_scripts: Vec<&str> = containerfile
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                trimmed.starts_with("COPY") && trimmed.contains(".sh")
+            })
+            .collect();
+        assert!(
+            !copied_scripts.is_empty(),
+            "Containerfile.claude should COPY at least one .sh script"
+        );
+
+        // Read each script and check its shebang
+        for line in &copied_scripts {
+            // Extract source filename from COPY line (e.g. "COPY --chmod=755 install-claude.sh ...")
+            let src = line
+                .split_whitespace()
+                .find(|s| s.ends_with(".sh"))
+                .unwrap_or_else(|| panic!("cannot parse .sh source from COPY line: {line}"));
+
+            let script_path = root.join("containers").join(src);
+            let content = std::fs::read_to_string(&script_path)
+                .unwrap_or_else(|_| panic!("cannot read COPY'd script: {}", script_path.display()));
+
+            if let Some(shebang) = content.lines().next() {
+                if shebang.contains("bash") {
+                    assert!(
+                        containerfile.contains("apt-get install") && containerfile.contains("bash"),
+                        "Script {} uses #!/bin/bash but Containerfile.claude does not \
+                         `apt-get install bash`. node:24-bookworm-slim has only dash.",
+                        src
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_resolve_build_root_dev_mode() {
         let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
