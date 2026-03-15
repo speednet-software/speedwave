@@ -211,7 +211,7 @@ build-native-macos:
 		echo "⬚  Skipping macOS native build (not macOS)"; \
 	else \
 		echo "🔨 Building macOS native CLI binaries..." && \
-		cd native/macos/reminders && swift build -c release && \
+		cd $(CURDIR)/native/macos/reminders && swift build -c release && \
 		cd $(CURDIR)/native/macos/calendar && swift build -c release && \
 		cd $(CURDIR)/native/macos/mail && swift build -c release && \
 		cd $(CURDIR)/native/macos/notes && swift build -c release && \

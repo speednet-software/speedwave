@@ -13,35 +13,9 @@
  * overall_healthy in a fresh E2E run with clean project dirs.
  */
 
-export {};
-
-interface ContainerHealth {
-  name: string;
-  status: string;
-  healthy: boolean;
-}
-
-interface HealthReport {
-  containers: ContainerHealth[];
-  vm: { running: boolean; vm_type: string };
-  mcp_os: { running: boolean };
-  ide_bridge: { running: boolean; port: number | null; ws_url: string | null; detected_ides: unknown[] };
-  overall_healthy: boolean;
-}
+import { getHealth, HealthReport } from '../helpers/health';
 
 const E2E_PROJECT_NAME = 'e2e-test';
-
-async function getHealth(project: string): Promise<HealthReport | { error: string }> {
-  return browser.executeAsync(
-    (proj: string, done: (r: any) => void) => {
-      (window as any).__TAURI_INTERNALS__
-        .invoke('get_health', { project: proj })
-        .then((r: any) => done(r))
-        .catch((e: any) => done({ error: String(e) }));
-    },
-    project,
-  ) as Promise<HealthReport | { error: string }>;
-}
 
 describe('Container Health', function () {
   it('should report all containers running and healthy', async function () {
