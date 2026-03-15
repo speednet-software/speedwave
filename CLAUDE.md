@@ -118,6 +118,7 @@ All plugins are toggled per-project via `integrations.plugins.<key>.enabled`, wh
 - **NEVER bypass branch protection or CI** — no `--admin`, no disabling checks. Fix CI.
 - **NEVER leave TODO/FIXME/HACK/XXX markers** — fix now or report to user
 - **NEVER leave @deprecated comments** — rewrite the code
+- **NEVER use `#[allow(dead_code)]`** — dead code must be removed, not silenced. If a field/method is only used in tests, gate it behind `#[cfg(test)]`. If a struct field is required by serde but not read, prefix it with `_` and add `#[serde(rename = "original_name")]`.
 - **Every code change must include tests** in the same commit
 - **SharePoint `:rw` mount** — only exception to the `:ro` token mount rule (OAuth refresh, ADR-009)
 - **Linux rootless:** container runs as UID 0 in user namespace (ADR-026)

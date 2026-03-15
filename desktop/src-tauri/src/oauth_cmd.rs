@@ -25,18 +25,18 @@ struct MsDeviceCodeResponse {
     verification_uri: String,
     expires_in: u64,
     interval: u64,
-    #[allow(dead_code)]
-    message: String,
+    #[serde(rename = "message")]
+    _message: String,
 }
 
 #[derive(Deserialize)]
 struct MsTokenResponse {
     access_token: String,
     refresh_token: String,
-    #[allow(dead_code)]
-    token_type: String,
-    #[allow(dead_code)]
-    expires_in: u64,
+    #[serde(rename = "token_type")]
+    _token_type: String,
+    #[serde(rename = "expires_in")]
+    _expires_in: u64,
 }
 
 #[derive(Deserialize)]
@@ -790,8 +790,8 @@ mod tests {
         let tokens = MsTokenResponse {
             access_token: "at-secret".to_string(),
             refresh_token: "rt-secret".to_string(),
-            token_type: "Bearer".to_string(),
-            expires_in: 3600,
+            _token_type: "Bearer".to_string(),
+            _expires_in: 3600,
         };
 
         save_tokens_to_dir(&svc_dir, &tokens).unwrap();
@@ -820,8 +820,8 @@ mod tests {
         let tokens = MsTokenResponse {
             access_token: "x".repeat(crate::types::MAX_CREDENTIAL_BYTES + 1),
             refresh_token: "rt".to_string(),
-            token_type: "Bearer".to_string(),
-            expires_in: 3600,
+            _token_type: "Bearer".to_string(),
+            _expires_in: 3600,
         };
         let result = save_tokens_to_dir(&tmp.path().join("sp"), &tokens);
         assert!(result.is_err(), "should reject oversized access_token");
@@ -834,8 +834,8 @@ mod tests {
         let tokens = MsTokenResponse {
             access_token: "at".to_string(),
             refresh_token: "x".repeat(crate::types::MAX_CREDENTIAL_BYTES + 1),
-            token_type: "Bearer".to_string(),
-            expires_in: 3600,
+            _token_type: "Bearer".to_string(),
+            _expires_in: 3600,
         };
         let result = save_tokens_to_dir(&tmp.path().join("sp"), &tokens);
         assert!(result.is_err(), "should reject oversized refresh_token");
@@ -847,8 +847,8 @@ mod tests {
         let tokens = MsTokenResponse {
             access_token: "at".to_string(),
             refresh_token: "rt".to_string(),
-            token_type: "Bearer".to_string(),
-            expires_in: 3600,
+            _token_type: "Bearer".to_string(),
+            _expires_in: 3600,
         };
         // /dev/null is a file, not a directory — create_dir_all will fail
         let impossible = std::path::Path::new("/dev/null/impossible");
@@ -881,8 +881,8 @@ mod tests {
         let tokens = MsTokenResponse {
             access_token: "at".to_string(),
             refresh_token: "rt".to_string(),
-            token_type: "Bearer".to_string(),
-            expires_in: 3600,
+            _token_type: "Bearer".to_string(),
+            _expires_in: 3600,
         };
         let impossible = std::path::Path::new("/dev/null/impossible");
         let save_result = save_tokens_to_dir(impossible, &tokens);
