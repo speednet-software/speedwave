@@ -19,8 +19,6 @@ pub struct McpOsProcess {
     child: Option<Child>,
     drain_handles: Vec<JoinHandle<()>>,
     data_dir: PathBuf,
-    #[allow(dead_code)] // used in tests
-    token: String,
     token_path: PathBuf,
     port: u16,
     port_path: PathBuf,
@@ -164,7 +162,6 @@ impl McpOsProcess {
             child: Some(child),
             drain_handles,
             data_dir: data_dir.to_path_buf(),
-            token,
             token_path,
             port,
             port_path,
@@ -183,7 +180,6 @@ impl McpOsProcess {
     #[cfg(test)]
     fn new_with(
         child: Child,
-        token: String,
         token_path: PathBuf,
         port: u16,
         port_path: PathBuf,
@@ -194,7 +190,6 @@ impl McpOsProcess {
             child: Some(child),
             drain_handles: Vec::new(),
             data_dir,
-            token,
             token_path,
             port,
             port_path,
@@ -203,30 +198,9 @@ impl McpOsProcess {
         }
     }
 
-    /// Returns the auth token generated for this process.
-    #[allow(dead_code)] // used in tests
-    pub fn token(&self) -> &str {
-        &self.token
-    }
-
     /// Returns the actual port mcp-os is listening on.
     pub fn port(&self) -> u16 {
         self.port
-    }
-
-    /// Returns the path where the auth token is written.
-    #[allow(dead_code)] // used in tests
-    pub fn token_path(&self) -> &PathBuf {
-        &self.token_path
-    }
-
-    /// Check if the child process is still alive.
-    #[allow(dead_code)] // used in tests
-    pub fn health_check(&mut self) -> bool {
-        match &mut self.child {
-            Some(child) => matches!(child.try_wait(), Ok(None)),
-            None => false,
-        }
     }
 
     /// Kill the child process and join drain threads.
@@ -564,6 +538,22 @@ fn write_restricted_file(path: &PathBuf, content: &str) -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Test-only accessors — gated behind cfg(test) so clippy reports dead code
+// in production builds without needing #[allow(dead_code)].
+#[cfg(test)]
+impl McpOsProcess {
+    pub fn token(&self) -> String {
+        std::fs::read_to_string(&self.token_path).unwrap_or_default()
+    }
+
+    pub fn health_check(&mut self) -> bool {
+        match &mut self.child {
+            Some(child) => matches!(child.try_wait(), Ok(None)),
+            None => false,
+        }
+    }
+}
+
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -752,7 +742,6 @@ srv.listen(0, '127.0.0.1', () => {
 
             let mut proc = McpOsProcess::new_with(
                 child,
-                "tok".to_string(),
                 token_path,
                 1234,
                 port_path,
@@ -785,7 +774,6 @@ srv.listen(0, '127.0.0.1', () => {
 
             let mut proc = McpOsProcess::new_with(
                 child,
-                "tok".to_string(),
                 token_path,
                 1234,
                 port_path,
@@ -815,7 +803,6 @@ srv.listen(0, '127.0.0.1', () => {
 
             let mut proc = McpOsProcess::new_with(
                 child,
-                "tok".to_string(),
                 token_path,
                 1234,
                 port_path,
@@ -850,7 +837,6 @@ srv.listen(0, '127.0.0.1', () => {
         if let Ok(child) = child {
             let proc = McpOsProcess::new_with(
                 child,
-                "secret".to_string(),
                 token_path.clone(),
                 1234,
                 port_path.clone(),
@@ -1028,7 +1014,6 @@ srv.listen(0, '127.0.0.1', () => {
 
             let mut proc = McpOsProcess::new_with(
                 child,
-                "tok".to_string(),
                 token_path,
                 1234,
                 port_path,

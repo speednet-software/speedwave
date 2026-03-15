@@ -1228,7 +1228,11 @@ fn run_with_timeout(
 pub fn factory_reset() -> anyhow::Result<()> {
     let state = SetupState::load();
 
-    // 1. Stop containers for the active project (if any) — with timeout
+    // 1. Stop containers for the wizard's project (if any) — with timeout.
+    //    Only stops the single project from setup_state.json, not all projects
+    //    from config.json. This is intentional: the VM force-delete (step 2)
+    //    destroys all containers regardless, and config.json may already be
+    //    corrupt or missing at this point. Best-effort graceful stop here.
     //    Even is_available() could theoretically hang, so run the entire
     //    "check + compose_down" block with a timeout.
     if let Some(ref project) = state.project_created {

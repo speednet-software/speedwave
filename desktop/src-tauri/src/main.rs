@@ -679,6 +679,10 @@ fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
                 log::info!("ensure_mcp_os_running: started (port {})", proc.port());
                 *guard = Some(proc);
                 drop(guard); // release before spawning watchdog thread
+                             // Narrow TOCTOU: factory_reset could set WATCHDOG_STOP=true
+                             // between drop(guard) and the store below, causing a no-op
+                             // watchdog loop on None. Harmless in single-user desktop app
+                             // — the watchdog exits on the next iteration when it sees None.
                 WATCHDOG_STOP.store(false, Ordering::Relaxed);
                 start_mcp_os_watchdog(mcp_os.clone(), app_handle.clone());
             }
