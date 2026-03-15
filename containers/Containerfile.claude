@@ -18,6 +18,7 @@ RUN mkdir -p /home/speedwave && chown 1000:1000 /home/speedwave
 # Install minimal runtime dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+        bash \
         ca-certificates \
         curl \
         git \
