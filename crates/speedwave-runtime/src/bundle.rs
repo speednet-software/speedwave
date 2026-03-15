@@ -319,7 +319,12 @@ fn sync_claude_resources_to(build_root: &Path, home: &Path) -> anyhow::Result<()
     }
 
     if backup.exists() {
-        std::fs::remove_dir_all(&backup)?;
+        if let Err(e) = std::fs::remove_dir_all(&backup) {
+            log::warn!(
+                "sync_claude_resources: failed to remove backup dir {}: {e}",
+                backup.display()
+            );
+        }
     }
 
     Ok(())
@@ -419,6 +424,10 @@ fn collect_directory_entries(
     children.sort();
 
     for child in children {
+        // Skip symlinks to prevent infinite recursion from circular links
+        if child.is_symlink() {
+            continue;
+        }
         let rel_name = child
             .strip_prefix(dir)
             .unwrap_or(&child)

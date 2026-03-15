@@ -259,7 +259,7 @@ test-desktop: build-cli build-angular build-mcp build-os-cli
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -f desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
 	@if [ "$$(uname)" = "Linux" ] && [ ! -d desktop/src-tauri/nerdctl-full ]; then $(MAKE) download-nerdctl-full; fi
 	@if [ "$(OS)" = "Windows_NT" ] && [ ! -f desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then $(MAKE) download-wsl-resources; fi
-	@if [ ! -f desktop/src-tauri/nodejs/bin/node ] && [ ! -f desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
+	@if [ ! -s desktop/src-tauri/nodejs/bin/node ] && [ ! -s desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
 	@scripts/bundle-build-context.sh
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
 	@mkdir -p desktop/src-tauri/cli
@@ -267,6 +267,7 @@ ifeq ($(OS),Windows_NT)
 	@cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
 else
 	@cp target/debug/speedwave desktop/src-tauri/cli/speedwave
+	@chmod +x desktop/src-tauri/cli/speedwave
 endif
 	@$(MAKE) verify-bundled-assets
 	cd desktop/src-tauri && cargo test
@@ -464,10 +465,9 @@ check-clippy:
 	@echo "✅ Clippy: 0 warnings"
 
 check-desktop-clippy: build-angular build-mcp
-	@if [ "$$(uname)" = "Darwin" ] && [ ! -f desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
-	@if [ "$$(uname)" = "Linux" ] && [ ! -d desktop/src-tauri/nerdctl-full ]; then $(MAKE) download-nerdctl-full; fi
 	@scripts/bundle-build-context.sh
-	cd desktop/src-tauri && cargo clippy -- -D warnings
+	@scripts/create-desktop-stubs.sh
+	cd desktop/src-tauri && SPEEDWAVE_ALLOW_BUNDLE_STUBS=1 cargo clippy -- -D warnings
 	@echo "✅ Desktop clippy: 0 warnings"
 
 check-mcp:

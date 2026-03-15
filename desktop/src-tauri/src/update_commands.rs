@@ -158,17 +158,11 @@ pub(crate) async fn install_update_and_reconcile(
         .await
         .map_err(|e| e.to_string())?;
 
-        let mut error = install_error;
-        if let Err(restore_error) = restore_error {
-            error.push_str(&format!(
-                " Restore after failed update also failed: {restore_error}."
-            ));
-        }
-        if let Err(clear_state_error) = clear_state_error {
-            error.push_str(&format!(
-                " Failed to clear pending bundle update state: {clear_state_error}."
-            ));
-        }
+        let error = build_install_failure_message(
+            install_error,
+            restore_error.err(),
+            clear_state_error.err(),
+        );
         log::error!("install_update_and_reconcile: install failed: {error}");
         return Err(error);
     }
@@ -225,13 +219,17 @@ pub(crate) async fn restart_app(app: tauri::AppHandle, force: bool) -> Result<()
                     }
                     Ok(_) => {}
                     Err(e) => {
-                        // Fail-closed: if we can't determine container state, assume
-                        // they're running to prevent data loss from unexpected restart.
+                        // Fail-closed: if we can't determine container state, block
+                        // the restart to prevent data loss.
                         log::warn!(
-                            "restart_app: compose_ps failed for '{}': {e}, assuming running",
+                            "restart_app: compose_ps failed for '{}': {e}",
                             project.name
                         );
-                        return Ok(Some(project.name.clone()));
+                        return Err(format!(
+                            "Cannot restart: failed to check container state for project '{}' ({e}). \
+                             Stop containers manually or use force restart.",
+                            project.name
+                        ));
                     }
                 }
             }
@@ -250,4 +248,69 @@ pub(crate) async fn restart_app(app: tauri::AppHandle, force: bool) -> Result<()
 
     log::info!("restart_app: restarting on frontend request (force={force})");
     app.restart()
+}
+
+fn build_install_failure_message(
+    install_error: String,
+    restore_error: Option<String>,
+    clear_state_error: Option<String>,
+) -> String {
+    let mut error = install_error;
+    if let Some(restore_error) = restore_error {
+        error.push_str(&format!(
+            " Restore after failed update also failed: {restore_error}."
+        ));
+    }
+    if let Some(clear_state_error) = clear_state_error {
+        error.push_str(&format!(
+            " Failed to clear pending bundle update state: {clear_state_error}."
+        ));
+    }
+    error
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_failure_message_install_only() {
+        let msg = build_install_failure_message("install failed".into(), None, None);
+        assert_eq!(msg, "install failed");
+    }
+
+    #[test]
+    fn install_failure_message_with_restore_error() {
+        let msg = build_install_failure_message(
+            "install failed".into(),
+            Some("restore boom".into()),
+            None,
+        );
+        assert!(msg.starts_with("install failed"));
+        assert!(msg.contains("Restore after failed update also failed: restore boom."));
+    }
+
+    #[test]
+    fn install_failure_message_with_clear_state_error() {
+        let msg = build_install_failure_message(
+            "install failed".into(),
+            None,
+            Some("state boom".into()),
+        );
+        assert!(msg.starts_with("install failed"));
+        assert!(msg.contains("Failed to clear pending bundle update state: state boom."));
+    }
+
+    #[test]
+    fn install_failure_message_with_both_errors() {
+        let msg = build_install_failure_message(
+            "install failed".into(),
+            Some("restore boom".into()),
+            Some("state boom".into()),
+        );
+        assert!(msg.starts_with("install failed"));
+        assert!(msg.contains("restore boom"));
+        assert!(msg.contains("state boom"));
+    }
 }

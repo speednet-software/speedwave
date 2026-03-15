@@ -19,14 +19,11 @@ pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::J
 
 static BUNDLE_RECONCILE_RUNNING: AtomicBool = AtomicBool::new(false);
 
-fn phase_name(phase: bundle::BundleReconcilePhase) -> &'static str {
-    match phase {
-        bundle::BundleReconcilePhase::Pending => "pending",
-        bundle::BundleReconcilePhase::ResourcesSynced => "resources_synced",
-        bundle::BundleReconcilePhase::ImagesBuilt => "images_built",
-        bundle::BundleReconcilePhase::ProjectsRestored => "projects_restored",
-        bundle::BundleReconcilePhase::Done => "done",
-    }
+fn phase_name(phase: bundle::BundleReconcilePhase) -> String {
+    serde_json::to_value(phase)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "pending".to_string())
 }
 
 pub(crate) fn current_bundle_status() -> BundleReconcileStatus {
@@ -40,7 +37,7 @@ pub(crate) fn current_bundle_status() -> BundleReconcileStatus {
         .unwrap_or(false);
 
     BundleReconcileStatus {
-        phase: phase_name(state.phase).to_string(),
+        phase: phase_name(state.phase),
         in_progress: BUNDLE_RECONCILE_RUNNING.load(Ordering::Relaxed)
             || (bundle_changed && state.last_error.is_none()),
         last_error: if bundle_changed {
@@ -101,11 +98,12 @@ pub(crate) fn stop_projects(
     Ok(())
 }
 
-fn save_bundle_error(state: &mut bundle::BundleState, message: String) -> Result<(), String> {
+fn set_bundle_error(state: &mut bundle::BundleState, message: String) -> String {
     state.last_error = Some(message.clone());
-    bundle::save_bundle_state(state)
-        .map_err(|e| format!("{message}. Additionally failed to save bundle state: {e}"))?;
-    Err(message)
+    if let Err(e) = bundle::save_bundle_state(state) {
+        log::warn!("Failed to save bundle error state: {e}");
+    }
+    message
 }
 
 fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), String> {
@@ -131,10 +129,10 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
 
     let rt = speedwave_runtime::runtime::detect_runtime();
     if !rt.is_available() {
-        return save_bundle_error(
+        return Err(set_bundle_error(
             &mut state,
             "Runtime not available while applying the new bundle".to_string(),
-        );
+        ));
     }
     rt.ensure_ready().map_err(|e| {
         let msg = format!("Runtime is not ready while applying the new bundle: {e}");
@@ -150,7 +148,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         .is_before(bundle::BundleReconcilePhase::ResourcesSynced)
     {
         bundle::sync_claude_resources(&build_root).map_err(|e| {
-            save_bundle_error(&mut state, format!("Claude resources sync failed: {e}")).unwrap_err()
+            set_bundle_error(&mut state, format!("Claude resources sync failed: {e}"))
         })?;
         state.phase = bundle::BundleReconcilePhase::ResourcesSynced;
         state.last_error = None;
@@ -163,7 +161,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         .is_before(bundle::BundleReconcilePhase::ImagesBuilt)
     {
         build::build_all_images_for_bundle(rt.as_ref(), &manifest.bundle_id).map_err(|e| {
-            save_bundle_error(&mut state, format!("Image rebuild failed: {e}")).unwrap_err()
+            set_bundle_error(&mut state, format!("Image rebuild failed: {e}"))
         })?;
         state.phase = bundle::BundleReconcilePhase::ImagesBuilt;
         state.last_error = None;
@@ -195,7 +193,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         .is_before(bundle::BundleReconcilePhase::ProjectsRestored)
     {
         restore_projects(&projects, rt.as_ref()).map_err(|e| {
-            save_bundle_error(&mut state, format!("Project restore failed: {e}")).unwrap_err()
+            set_bundle_error(&mut state, format!("Project restore failed: {e}"))
         })?;
         state.phase = bundle::BundleReconcilePhase::ProjectsRestored;
         state.pending_running_projects = projects;

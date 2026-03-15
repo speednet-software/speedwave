@@ -34,7 +34,7 @@ import { BundleReconcileStatus, ProjectList, UpdateInfo } from '../models/update
         <div class="update-actions">
           @if (showBundleBanner && bundleStatus?.last_error) {
             <span class="update-error" data-testid="bundle-reconcile-error">
-              {{ bundleStatus.last_error }}
+              {{ bundleStatus?.last_error }}
             </span>
           } @else if (error) {
             <span class="update-error" data-testid="update-error">{{ error }}</span>
@@ -284,14 +284,17 @@ export class UpdateNotificationComponent implements OnDestroy {
     this.cdr.markForCheck();
   }
 
+  /** Whether the bundle reconcile banner should be shown. */
   get showBundleBanner(): boolean {
     return !!this.bundleStatus && (this.bundleStatus.in_progress || !!this.bundleStatus.last_error);
   }
 
+  /** Whether the app update banner should be shown. */
   get showUpdateBanner(): boolean {
     return !!this.updateInfo && !this.dismissed && !this.showBundleBanner;
   }
 
+  /** Human-readable message describing the current bundle reconcile phase. */
   get bundleStatusMessage(): string {
     if (!this.bundleStatus) {
       return '';
