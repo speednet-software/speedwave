@@ -37,6 +37,9 @@ async function main(): Promise<void> {
   // Initialize SharePoint client
   const sharepointClient = await initializeSharePointClient();
 
+  // SharePoint requires a live client at startup — OAuth token refresh
+  // cannot be deferred, so we fail fast rather than starting misconfigured.
+  // This differs from Slack/GitLab/Redmine which warn and let tools surface errors.
   if (!sharepointClient) {
     console.error(`${ts()} ❌ Failed to initialize SharePoint client - tokens not found or empty`);
     console.error(`${ts()}    Run: speedwave setup sharepoint`);

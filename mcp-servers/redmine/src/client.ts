@@ -654,31 +654,107 @@ async function loadRedmineConfig(): Promise<RedmineProjectConfig | null> {
 // Input Validation
 //═══════════════════════════════════════════════════════════════════════════════
 
+/** Tags whose entire content (opening tag + body + closing tag) must be removed */
+const DANGEROUS_TAGS = ['script', 'style', 'iframe', 'object', 'embed', 'form', 'applet'];
+
+/** Textile-safe HTML tags (Redmine Textile allows basic formatting) */
+const SAFE_TAGS = new Set([
+  'a',
+  'abbr',
+  'b',
+  'blockquote',
+  'br',
+  'cite',
+  'code',
+  'dd',
+  'del',
+  'dfn',
+  'dl',
+  'dt',
+  'em',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'hr',
+  'i',
+  'img',
+  'ins',
+  'kbd',
+  'li',
+  'ol',
+  'p',
+  'pre',
+  'q',
+  's',
+  'span',
+  'strong',
+  'sub',
+  'sup',
+  'table',
+  'tbody',
+  'td',
+  'tfoot',
+  'th',
+  'thead',
+  'tr',
+  'u',
+  'ul',
+  'var',
+]);
+
 /**
  * Sanitize Textile markup to remove potentially dangerous content.
- * Strips dangerous HTML tags (including multiline), event handler attributes,
- * and dangerous URI schemes (javascript:, data:, vbscript:).
+ * Phase 1: iteratively strip dangerous tags with their full content.
+ * Phase 2: whitelist remaining tags — only safe formatting tags survive.
+ * Phase 3: strip event handlers and dangerous URI schemes from safe tags.
+ * Runs iteratively until the output stabilizes (handles nested payloads).
  * @param textile - The Textile markup to sanitize.
  * @returns Sanitized Textile markup.
  */
 function sanitizeTextile(textile: string): string {
-  // Strip dangerous tags — dotAll (s) flag handles multiline content
   let result = textile;
-  result = result.replace(/<script[\s>][\s\S]*?<\/script\s*>/gi, '');
-  result = result.replace(/<script[^>]*\/?>/gi, '');
-  result = result.replace(/<iframe[\s>][\s\S]*?<\/iframe\s*>/gi, '');
-  result = result.replace(/<iframe[^>]*\/?>/gi, '');
-  result = result.replace(/<object[\s>][\s\S]*?<\/object\s*>/gi, '');
-  result = result.replace(/<object[^>]*\/?>/gi, '');
-  result = result.replace(/<embed[^>]*\/?>/gi, '');
-  result = result.replace(/<form[\s>][\s\S]*?<\/form\s*>/gi, '');
-  result = result.replace(/<form[^>]*\/?>/gi, '');
-  // Strip event handler attributes (on*="...")
-  result = result.replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
-  // Strip dangerous URI schemes
+  let previous: string;
+
+  // Phase 1: iteratively strip dangerous tags with their content
+  do {
+    previous = result;
+    for (const tag of DANGEROUS_TAGS) {
+      // Full tag with content: <script ...>...</script ...> (multiline, optional whitespace in closing)
+      result = result.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}\\s*>`, 'gi'), '');
+      // Self-closing or orphaned opening tags: <script ...> or <script .../>
+      result = result.replace(new RegExp(`<${tag}\\b[^>]*/?>`, 'gi'), '');
+      // Orphaned closing tags: </script> or </script >
+      result = result.replace(new RegExp(`<\\/${tag}\\s*>`, 'gi'), '');
+    }
+  } while (result !== previous);
+
+  // Phase 2: whitelist remaining tags — strip any tag not in the safe set
+  do {
+    previous = result;
+    result = result.replace(/<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*\/?>/gi, (match, tag: string) => {
+      return SAFE_TAGS.has(tag.toLowerCase()) ? match : '';
+    });
+  } while (result !== previous);
+
+  // Phase 3: strip event handlers and dangerous URI schemes from safe tags
+  do {
+    previous = result;
+    result = result.replace(
+      /(<[^>]*?)[\s/]+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)([^>]*>)/gi,
+      '$1$2'
+    );
+    result = result.replace(/(<[^>]*?(?:href|src|action)\s*=\s*["']?)\s*javascript\s*:/gi, '$1');
+    result = result.replace(/(<[^>]*?(?:href|src|action)\s*=\s*["']?)\s*vbscript\s*:/gi, '$1');
+    result = result.replace(/(<[^>]*?(?:href|src|action)\s*=\s*["']?)\s*data\s*:/gi, '$1');
+  } while (result !== previous);
+
+  // Phase 4: globally strip dangerous URI schemes in plain text (Textile links)
   result = result.replace(/javascript\s*:/gi, '');
   result = result.replace(/vbscript\s*:/gi, '');
-  result = result.replace(/data\s*:[^,]*;base64/gi, '');
+
   return result;
 }
 

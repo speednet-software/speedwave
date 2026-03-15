@@ -531,9 +531,25 @@ describe('RedmineClient', () => {
       });
 
       const call = mockAxiosInstance.post.mock.calls[0];
-      expect(call[1].issue.description).not.toContain('vbscript');
-      expect(call[1].issue.description).not.toMatch(/data\s*:[^,]*;base64/i);
+      expect(call[1].issue.description).not.toContain('vbscript:');
+      expect(call[1].issue.description).not.toContain('data:');
       expect(call[1].issue.description).toContain('Safe');
+    });
+
+    it('should handle nested dangerous tag payloads', async () => {
+      mockAxiosInstance.post.mockResolvedValue({
+        data: { issue: { id: 1 } },
+      });
+
+      await client.createIssue({
+        project_id: 'test-project',
+        subject: 'Test',
+        description: '<scr<script>ipt>alert(1)</script>Safe text',
+      });
+
+      const call = mockAxiosInstance.post.mock.calls[0];
+      expect(call[1].issue.description).not.toContain('<script');
+      expect(call[1].issue.description).toContain('Safe text');
     });
 
     it('should sanitize form tags', async () => {
