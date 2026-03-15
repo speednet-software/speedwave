@@ -1,6 +1,6 @@
 [package]
 name = "speedwave-desktop"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 publish = false
 description = "Speedwave desktop application — Tauri backend"
