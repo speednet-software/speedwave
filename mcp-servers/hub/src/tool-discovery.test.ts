@@ -12,6 +12,7 @@ import {
 } from './tool-discovery.js';
 
 // Mock auth-tokens
+import { getAuthToken } from './auth-tokens.js';
 vi.mock('./auth-tokens.js', () => ({
   getAuthToken: vi.fn(() => null),
 }));
@@ -123,6 +124,31 @@ describe('tool-discovery', () => {
 
       const tools = await discoverServiceTools('slack');
       expect(tools).toEqual([]);
+    });
+
+    it('sends Authorization: Bearer header when auth token exists', async () => {
+      process.env.WORKER_SLACK_URL = 'http://mcp-slack:3001';
+      vi.mocked(getAuthToken).mockReturnValue('discovery-secret');
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ jsonrpc: '2.0', id: 'x', result: { tools: [] } }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      await discoverServiceTools('slack');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer discovery-secret',
+          },
+        })
+      );
+
+      vi.mocked(getAuthToken).mockReturnValue(null as unknown as undefined);
     });
   });
 

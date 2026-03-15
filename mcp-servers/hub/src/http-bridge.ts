@@ -133,6 +133,46 @@ export function clearWorkerCache(): void {
 }
 
 /**
+ * Classify a health-check error for logging.
+ * @param error - The caught error value
+ */
+function classifyHealthError(error: unknown): string {
+  if (!(error instanceof Error)) return 'UNKNOWN';
+  if (error.name === 'AbortError') return 'TIMEOUT';
+  if ('code' in error) {
+    const code = (error as { code?: string }).code;
+    if (code === 'ENOTFOUND') return 'DNS_ERROR';
+    if (code === 'ECONNREFUSED') return 'CONNECTION_REFUSED';
+    if (code) return code;
+  }
+  if (error.message.includes('TLS') || error.message.includes('SSL')) return 'TLS_ERROR';
+  return 'UNKNOWN';
+}
+
+/**
+ * Single health-check fetch (no cache, no retry).
+ * Returns true when the worker responds with 2xx.
+ * @param service - Service name to check
+ */
+async function checkWorkerHealth(service: string): Promise<boolean> {
+  const url = getWorkerUrl(service);
+  if (!url) return false;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.HEALTH_CHECK_MS);
+
+  try {
+    const response = await fetch(`${url}/health`, {
+      signal: controller.signal,
+      redirect: 'error',
+    });
+    return response.ok;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
  * Check if worker is available (with caching)
  * @param service - Service name to check
  * @returns True if worker is available, false otherwise
@@ -146,20 +186,7 @@ export async function isWorkerAvailable(service: string): Promise<boolean> {
   }
 
   try {
-    const url = getWorkerUrl(service);
-    if (!url) return false;
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.HEALTH_CHECK_MS);
-
-    const response = await fetch(`${url}/health`, {
-      signal: controller.signal,
-      redirect: 'error',
-    });
-
-    clearTimeout(timeoutId);
-
-    const available = response.ok;
+    const available = await checkWorkerHealth(service);
     workerStatusCache.set(service, {
       available,
       lastCheck: now,
@@ -168,25 +195,7 @@ export async function isWorkerAvailable(service: string): Promise<boolean> {
 
     return available;
   } catch (error) {
-    // Distinguish between different error types for better debugging
-    let errorType = 'UNKNOWN';
-    if (error instanceof Error) {
-      if (error.name === 'AbortError') {
-        errorType = 'TIMEOUT';
-      } else if ('code' in error) {
-        const code = (error as { code?: string }).code;
-        if (code === 'ENOTFOUND') {
-          errorType = 'DNS_ERROR';
-        } else if (code === 'ECONNREFUSED') {
-          errorType = 'CONNECTION_REFUSED';
-        } else if (code) {
-          errorType = code;
-        }
-      } else if (error.message.includes('TLS') || error.message.includes('SSL')) {
-        errorType = 'TLS_ERROR';
-      }
-    }
-
+    const errorType = classifyHealthError(error);
     console.warn(
       `${ts()} [http-bridge] Worker health check failed for ${service} [${errorType}]:`,
       error instanceof Error ? error.message : error
@@ -198,6 +207,41 @@ export async function isWorkerAvailable(service: string): Promise<boolean> {
     });
     return false;
   }
+}
+
+/** Max retries for startup health checks */
+export const STARTUP_HEALTH_RETRIES = 3;
+/** Delays between startup retries (exponential backoff: 1s, 2s, 4s) */
+export const STARTUP_RETRY_DELAYS_MS = [1_000, 2_000, 4_000];
+
+/**
+ * Check worker health at startup with retry + backoff.
+ * Logs at info level (not warn) because startup races are expected.
+ * @param service - Service name to check
+ */
+async function checkWorkerHealthAtStartup(service: string): Promise<boolean> {
+  // 4 total attempts: attempt 0 (first try) + 3 retries
+  for (let attempt = 0; attempt <= STARTUP_HEALTH_RETRIES; attempt++) {
+    try {
+      const ok = await checkWorkerHealth(service);
+      if (ok) return true;
+    } catch {
+      // expected during startup — worker may not be listening yet
+    }
+
+    if (attempt < STARTUP_HEALTH_RETRIES) {
+      const delay = STARTUP_RETRY_DELAYS_MS[attempt] ?? 4_000;
+      console.log(
+        `${ts()} [http-bridge] Worker ${service} not ready, retrying in ${delay / 1000}s (${attempt + 1}/${STARTUP_HEALTH_RETRIES})...`
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+
+  console.log(
+    `${ts()} [http-bridge] Worker ${service} not available after ${STARTUP_HEALTH_RETRIES} retries — will retry lazily on use`
+  );
+  return false;
 }
 
 /**
@@ -487,10 +531,20 @@ export async function initializeAllBridges(): Promise<AllBridges> {
       : null;
   }
 
-  // Check initial status for logging only
+  // Check initial status with retry+backoff (workers may still be starting)
   const activeServices = allServices.filter((s) => enabledServices.has(s));
-  const statusChecks = await Promise.all(activeServices.map((s) => isWorkerAvailable(s)));
+  const statusChecks = await Promise.all(activeServices.map((s) => checkWorkerHealthAtStartup(s)));
   const workerStatus = Object.fromEntries(activeServices.map((s, i) => [s, statusChecks[i]]));
+
+  // Seed the cache so subsequent calls don't re-check immediately
+  const now = new Date();
+  for (let i = 0; i < activeServices.length; i++) {
+    workerStatusCache.set(activeServices[i], {
+      available: statusChecks[i],
+      lastCheck: now,
+      tools: [],
+    });
+  }
 
   const enabledCount = statusChecks.filter(Boolean).length;
 

@@ -23,10 +23,14 @@ export function loadAuthTokens(): void {
   for (const service of getAllServiceNames()) {
     const path = `/secrets/${service}-auth-token`;
     if (existsSync(path)) {
-      const token = readFileSync(path, 'utf8').trim();
-      if (token) {
-        AUTH_TOKENS.set(service, token);
-        console.log(`${ts()} [auth-tokens] Loaded auth token for ${service}`);
+      try {
+        const token = readFileSync(path, 'utf8').trim();
+        if (token) {
+          AUTH_TOKENS.set(service, token);
+          console.log(`${ts()} [auth-tokens] Loaded auth token for ${service}`);
+        }
+      } catch (err) {
+        console.warn(`${ts()} [auth-tokens] Could not read token for ${service}: ${err}`);
       }
     }
   }
@@ -53,4 +57,11 @@ export function getAuthToken(service: string): string | undefined {
  */
 export function hasAuthToken(service: string): boolean {
   return AUTH_TOKENS.has(service);
+}
+
+/**
+ * Clear all loaded auth tokens (for testing only).
+ */
+export function clearAuthTokens(): void {
+  AUTH_TOKENS.clear();
 }
