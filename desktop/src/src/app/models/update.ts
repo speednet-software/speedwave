@@ -31,3 +31,12 @@ export interface ContainerUpdateResult {
   containers_recreated: number;
   error: string | null;
 }
+
+/** Startup reconcile status for applying a newly installed bundle. */
+export interface BundleReconcileStatus {
+  phase: string;
+  in_progress: boolean;
+  last_error: string | null;
+  pending_running_projects: string[];
+  applied_bundle_id: string | null;
+}
