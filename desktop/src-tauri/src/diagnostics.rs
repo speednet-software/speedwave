@@ -13,6 +13,8 @@ pub(crate) struct DiagnosticsInput {
     pub mcp_os_log: Option<std::path::PathBuf>,
     /// Path to the project's `compose.yml`.
     pub compose_path: Option<std::path::PathBuf>,
+    /// Path to the Claude session log file.
+    pub claude_session_log: Option<std::path::PathBuf>,
 }
 
 /// Builds a diagnostics ZIP at `zip_path` from the provided inputs.
@@ -78,6 +80,17 @@ pub(crate) fn build_diagnostics_zip(
                 let sanitized = speedwave_runtime::log_sanitizer::sanitize(&content);
                 let entry_name = format!("mcp-os/{}", speedwave_runtime::consts::MCP_OS_LOG_FILE);
                 zip.start_file(&entry_name, options)?;
+                zip.write_all(sanitized.as_bytes())?;
+            }
+        }
+    }
+
+    // 4b. Claude session log
+    if let Some(ref path) = input.claude_session_log {
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                let sanitized = speedwave_runtime::log_sanitizer::sanitize(&content);
+                zip.start_file("claude/claude-session.log", options)?;
                 zip.write_all(sanitized.as_bytes())?;
             }
         }
@@ -155,12 +168,16 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
             })
             .filter(|p| p.exists());
 
+        let claude_session_log = speedwave_runtime::consts::claude_session_log_path(&project)
+            .filter(|p| p.exists());
+
         let input = DiagnosticsInput {
             log_dir,
             serial_log,
             container_logs,
             mcp_os_log,
             compose_path,
+            claude_session_log,
         };
 
         build_diagnostics_zip(&zip_path, &input)?;
@@ -240,6 +257,7 @@ mod tests {
             container_logs: Some("container output here".into()),
             mcp_os_log: None,
             compose_path: Some(compose_path),
+            claude_session_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -300,6 +318,7 @@ mod tests {
             ),
             mcp_os_log: None,
             compose_path: None,
+            claude_session_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -343,6 +362,7 @@ mod tests {
             container_logs: None,
             mcp_os_log: None,
             compose_path: Some(compose_path),
+            claude_session_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -382,6 +402,7 @@ mod tests {
             container_logs: None,
             mcp_os_log: None,
             compose_path: None,
+            claude_session_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -411,6 +432,7 @@ mod tests {
             container_logs: None,
             mcp_os_log: None,
             compose_path: None,
+            claude_session_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -437,6 +459,7 @@ mod tests {
             container_logs: None,
             mcp_os_log: None,
             compose_path: None,
+            claude_session_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -463,6 +486,7 @@ mod tests {
             container_logs: None,
             mcp_os_log: Some(mcp_os_log),
             compose_path: None,
+            claude_session_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -475,5 +499,39 @@ mod tests {
             expected_entry,
             names
         );
+    }
+
+    #[test]
+    fn diagnostics_zip_includes_claude_session_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("diag-claude.zip");
+
+        let session_log = tmp.path().join("claude-session.log");
+        std::fs::write(
+            &session_log,
+            "[123] SESSION: started\n[124] TOOL: start: Read (toolu_01)\n",
+        )
+        .unwrap();
+
+        let input = DiagnosticsInput {
+            log_dir: None,
+            serial_log: None,
+            container_logs: None,
+            mcp_os_log: None,
+            compose_path: None,
+            claude_session_log: Some(session_log),
+        };
+
+        build_diagnostics_zip(&zip_path, &input).unwrap();
+
+        let names = zip_entry_names(&zip_path);
+        assert!(
+            names.contains(&"claude/claude-session.log".to_string()),
+            "ZIP should contain claude session log: {names:?}"
+        );
+
+        let content = read_zip_entry(&zip_path, "claude/claude-session.log").unwrap();
+        assert!(content.contains("SESSION: started"), "content: {content}");
+        assert!(content.contains("TOOL: start"), "content: {content}");
     }
 }

@@ -148,7 +148,17 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
       }
 
       <div class="containers-section">
-        <h3>Containers</h3>
+        <div class="containers-header">
+          <h3>Containers</h3>
+          <button
+            class="log-btn"
+            data-testid="health-recreate"
+            (click)="recreateContainers()"
+            [disabled]="recreating || !project"
+          >
+            {{ recreating ? 'Recreating...' : 'Recreate' }}
+          </button>
+        </div>
         @if (report === null) {
           <div class="no-data">Not connected — unable to fetch container status.</div>
         } @else if (report.containers.length === 0) {
@@ -363,6 +373,15 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
       .indicator.gray {
         background: #555;
       }
+      .containers-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 12px;
+      }
+      .containers-header h3 {
+        margin: 0;
+      }
       .containers-section {
         background: #16213e;
         border: 1px solid #0f3460;
@@ -566,6 +585,8 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
   lastEvent: string | null = null;
   eventFading = false;
 
+  recreating = false;
+
   logContent = '';
   logLoading = false;
   logError: string | null = null;
@@ -723,6 +744,23 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
+  /** Recreates all containers for the active project (compose down + render + up). */
+  async recreateContainers(): Promise<void> {
+    if (!this.project) return;
+    this.recreating = true;
+    this.error = null;
+    this.cdr.markForCheck();
+    try {
+      await this.tauri.invoke('recreate_project_containers', { project: this.project });
+      await this.refresh();
+    } catch (err) {
+      this.error = `Recreate failed: ${err}`;
+    } finally {
+      this.recreating = false;
+      this.cdr.markForCheck();
+    }
+  }
+
   /** Retrieves container or compose logs from the Tauri backend and scrolls to the bottom. */
   async fetchLogs(): Promise<void> {
     if (this.selectedContainer === null) return;
@@ -736,6 +774,25 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
           project: this.project,
           tail: lines,
         });
+      } else if (this.selectedContainer?.endsWith('_claude')) {
+        // Fetch container logs and session logs in parallel; session logs are best-effort
+        const [containerResult, sessionResult] = await Promise.allSettled([
+          this.tauri.invoke<string>('get_container_logs', {
+            container: this.selectedContainer,
+            tail: lines,
+          }),
+          this.tauri.invoke<string>('get_claude_session_logs', {
+            container: this.selectedContainer,
+            tail: lines,
+          }),
+        ]);
+        this.logContent = containerResult.status === 'fulfilled' ? containerResult.value : '';
+        if (containerResult.status === 'rejected') {
+          throw containerResult.reason;
+        }
+        if (sessionResult.status === 'fulfilled' && sessionResult.value.trim()) {
+          this.logContent += '\n--- Claude Session Logs ---\n' + sessionResult.value;
+        }
       } else {
         this.logContent = await this.tauri.invoke<string>('get_container_logs', {
           container: this.selectedContainer,

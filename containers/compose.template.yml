@@ -35,7 +35,7 @@ services:
       resources:
         limits:
           cpus: '2.0'
-          memory: 4g
+          memory: 8g
 
   mcp-hub:
     image: ${IMAGE_MCP_HUB}
