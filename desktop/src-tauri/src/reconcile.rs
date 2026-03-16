@@ -160,9 +160,8 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         .phase
         .is_before(bundle::BundleReconcilePhase::ImagesBuilt)
     {
-        build::build_all_images_for_bundle(rt.as_ref(), &manifest.bundle_id).map_err(|e| {
-            set_bundle_error(&mut state, format!("Image rebuild failed: {e}"))
-        })?;
+        build::build_all_images_for_bundle(rt.as_ref(), &manifest.bundle_id)
+            .map_err(|e| set_bundle_error(&mut state, format!("Image rebuild failed: {e}")))?;
         state.phase = bundle::BundleReconcilePhase::ImagesBuilt;
         state.last_error = None;
         bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
@@ -192,9 +191,8 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         .phase
         .is_before(bundle::BundleReconcilePhase::ProjectsRestored)
     {
-        restore_projects(&projects, rt.as_ref()).map_err(|e| {
-            set_bundle_error(&mut state, format!("Project restore failed: {e}"))
-        })?;
+        restore_projects(&projects, rt.as_ref())
+            .map_err(|e| set_bundle_error(&mut state, format!("Project restore failed: {e}")))?;
         state.phase = bundle::BundleReconcilePhase::ProjectsRestored;
         state.pending_running_projects = projects;
         state.last_error = None;
