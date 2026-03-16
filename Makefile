@@ -207,13 +207,16 @@ endif
 # ── Native OS CLI builds (macOS: Swift, Linux/Windows: Rust — planned) ───────
 
 build-native-macos:
-	@if [ "$$(uname)" != "Darwin" ]; then echo "⬚  Skipping macOS native build (not macOS)"; exit 0; fi
-	@echo "🔨 Building macOS native CLI binaries..."
-	cd native/macos/reminders && swift build -c release
-	cd native/macos/calendar && swift build -c release
-	cd native/macos/mail && swift build -c release
-	cd native/macos/notes && swift build -c release
-	@echo "✅ macOS native CLI binaries built"
+	@if [ "$$(uname)" != "Darwin" ]; then \
+		echo "⬚  Skipping macOS native build (not macOS)"; \
+	else \
+		echo "🔨 Building macOS native CLI binaries..." && \
+		cd $(CURDIR)/native/macos/reminders && swift build -c release && \
+		cd $(CURDIR)/native/macos/calendar && swift build -c release && \
+		cd $(CURDIR)/native/macos/mail && swift build -c release && \
+		cd $(CURDIR)/native/macos/notes && swift build -c release && \
+		echo "✅ macOS native CLI binaries built"; \
+	fi
 
 build-os-cli: build-native-macos
 
@@ -389,6 +392,7 @@ _e2e-run:
 		systemctl --user stop containerd 2>/dev/null || true; \
 	fi
 	@sleep 1
+	@rm -rf /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
 	@mkdir -p /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
 	@E2E_BAK=$$HOME/.speedwave.e2e-bak; \
 	backup_dir() { \

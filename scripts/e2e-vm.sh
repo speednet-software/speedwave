@@ -533,6 +533,8 @@ pkill -f Xvfb 2>/dev/null || true
 sleep 1
 
 # E2E tests create a project with this directory — it must exist.
+# Clean first to remove stale .speedwave.json from previous runs.
+rm -rf /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
 mkdir -p /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
 
 # Ubuntu 24.04 defaults to Wayland — there may be no X server available.
@@ -815,8 +817,11 @@ if (-not (Test-Path $appExe)) {
 }
 
 # E2E tests create a project with this directory — it must exist.
+# Clean first to remove stale .speedwave.json from previous runs.
 $e2eProjectDir = "$env:TEMP\speedwave-e2e-project"
 $e2eSecondProjectDir = "$env:TEMP\speedwave-e2e-project-2"
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $e2eProjectDir
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $e2eSecondProjectDir
 New-Item -ItemType Directory -Path $e2eProjectDir -Force | Out-Null
 New-Item -ItemType Directory -Path $e2eSecondProjectDir -Force | Out-Null
 $env:E2E_PROJECT_DIR = $e2eProjectDir
@@ -1019,6 +1024,8 @@ pkill -f 'mcp-os.*index.js' 2>/dev/null || true
 sleep 1
 
 # E2E tests create a project with this directory — it must exist.
+# Clean first to remove stale .speedwave.json from previous runs.
+rm -rf /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
 mkdir -p /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
 
 # Launch the app in the background.

@@ -95,6 +95,6 @@ describe('Factory Reset', function () {
     // Poll until the restarted app binds port 4445 again.
     // This proves: factory_reset completed, app.restart() fired,
     // and the new process is listening.
-    await waitForPort(4445, 150_000);
+    await waitForPort(browser.options.port ?? 4445, 150_000);
   });
 });

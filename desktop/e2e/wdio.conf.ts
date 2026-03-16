@@ -8,10 +8,11 @@ export const config = {
   specs: [
     './specs/01-app-lifecycle.spec.ts',
     './specs/02-setup-wizard.spec.ts',
-    './specs/03-navigation.spec.ts',
-    './specs/04-settings.spec.ts',
-    './specs/05-project-management.spec.ts',
-    './specs/06-factory-reset.spec.ts',
+    './specs/03-container-health.spec.ts',
+    './specs/04-navigation.spec.ts',
+    './specs/05-settings.spec.ts',
+    './specs/06-project-management.spec.ts',
+    './specs/07-factory-reset.spec.ts',
   ],
   maxInstances: 1,
   bail: 1,
@@ -42,6 +43,7 @@ export const config = {
     { passed, error }: { passed: boolean; error?: Error },
   ) {
     if (!passed) {
+      if (error) console.error(`Test failed: ${error.message}`);
       try {
         mkdirSync(SCREENSHOT_DIR, { recursive: true });
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');

@@ -2,12 +2,16 @@
  * Project Management E2E tests.
  *
  * Verifies adding a second project via the project switcher and
- * switching between projects. Runs after setup and navigation specs
+ * switching between projects. Also verifies container health after
+ * each operation (covering both add_project and switch_project
+ * backend code paths). Runs after setup and navigation specs
  * have completed — the app is on the shell with 'e2e-test' active.
  *
  * The second project directory must exist before the test runs.
  * The e2e runner (Makefile / e2e-vm.sh) creates it.
  */
+
+import { waitForHealthy } from '../helpers/health';
 
 const SECOND_PROJECT_NAME = 'e2e-second';
 const SECOND_PROJECT_DIR = process.env.E2E_SECOND_PROJECT_DIR || '/tmp/speedwave-e2e-project-2';
@@ -109,6 +113,11 @@ describe('Project Management', function () {
       // Close dropdown
       await btn.click();
     });
+
+    it('should report healthy containers for the new project', async function () {
+      this.timeout(150_000);
+      await waitForHealthy(SECOND_PROJECT_NAME);
+    });
   });
 
   describe('Switch Project', function () {
@@ -155,6 +164,11 @@ describe('Project Management', function () {
         async () => (await activeProject.getText()).includes('e2e-test'),
         { timeout: 10_000, timeoutMsg: 'Settings page does not show e2e-test as active project' },
       );
+    });
+
+    it('should report healthy containers after switching back', async function () {
+      this.timeout(150_000);
+      await waitForHealthy('e2e-test');
     });
   });
 });
