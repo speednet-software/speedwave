@@ -31,8 +31,8 @@ pub(crate) fn should_run_cleanup(window_label: &str) -> bool {
     window_label == MAIN_WINDOW_LABEL
 }
 
-/// Shows the main window and sets the macOS activation policy to Regular
-/// so the app appears in the Dock while the window is visible.
+/// Shows the main window and restores the macOS activation policy to Regular
+/// so the app reappears in the Dock and Cmd+Tab after being hidden.
 pub(crate) fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         if let Err(e) = window.show() {
@@ -52,8 +52,8 @@ pub(crate) fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
-/// Hides the main window and sets the macOS activation policy to Accessory
-/// so the app disappears from the Dock (tray-only).
+/// Hides the main window and switches the macOS activation policy to Accessory
+/// so the app disappears from the Dock and Cmd+Tab (tray-only mode).
 pub(crate) fn hide_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         if let Err(e) = window.hide() {

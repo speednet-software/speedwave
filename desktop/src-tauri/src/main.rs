@@ -1041,18 +1041,6 @@ fn main() {
                     // visible.
                     #[cfg(not(target_os = "linux"))]
                     tray_available_setup.store(true, Ordering::Relaxed);
-
-                    // macOS: ensure Regular activation policy so the app
-                    // appears in the Dock and Cmd+Tab from the start.
-                    #[cfg(target_os = "macos")]
-                    if let Err(e) = app
-                        .handle()
-                        .set_activation_policy(tauri::ActivationPolicy::Regular)
-                    {
-                        log::error!(
-                            "tray: failed to set activation policy to Regular: {e}"
-                        );
-                    }
                 }
                 Err(e) => {
                     // Tray creation failed. Window is already visible
