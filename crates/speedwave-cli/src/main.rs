@@ -495,11 +495,17 @@ fn main() -> anyhow::Result<()> {
         Some(&*runtime),
     )?;
 
-    let manifests = plugin::list_installed_plugins().unwrap_or_default();
+    let manifests = plugin::list_installed_plugins().unwrap_or_else(|e| {
+        log::warn!("Failed to list installed plugins: {e}");
+        Vec::new()
+    });
+    let expected_paths =
+        compose::SecurityExpectedPaths::compute(&project_name, &project_dir.to_string_lossy())?;
 
     // Handle `speedwave check` subcommand
     if action == CliAction::Check {
-        let violations = SecurityCheck::run(&compose_yml, &project_name, &manifests);
+        let violations =
+            SecurityCheck::run(&compose_yml, &project_name, &manifests, &expected_paths);
         if violations.is_empty() {
             println!("speedwave check OK -- all security invariants satisfied");
             std::process::exit(0);
@@ -514,7 +520,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Mandatory security gate before container start
-    let violations = SecurityCheck::run(&compose_yml, &project_name, &manifests);
+    let violations = SecurityCheck::run(&compose_yml, &project_name, &manifests, &expected_paths);
     if !violations.is_empty() {
         eprintln!("speedwave check FAILED -- containers NOT started\n");
         for v in &violations {

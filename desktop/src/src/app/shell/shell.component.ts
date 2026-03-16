@@ -25,17 +25,21 @@ import { ProjectStateService } from '../services/project-state.service';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="app-layout">
-      @if (switching) {
-        <div class="project-switch-overlay" data-testid="project-switch-overlay">
-          <div class="project-switch-spinner"></div>
-          <p class="project-switch-text">Switching project...</p>
-        </div>
-      }
-      @if (switchError) {
-        <div class="project-switch-error-banner" data-testid="project-switch-error">
-          <span>{{ switchError }}</span>
-          <button (click)="dismissError()">Dismiss</button>
-        </div>
+      @if (projectState.status !== 'ready') {
+        @if (projectState.status === 'error') {
+          <div class="blocking-error-banner" data-testid="blocking-error">
+            <span>{{ projectState.error }}</span>
+            <div class="blocking-error-actions">
+              <button (click)="retry()">Retry</button>
+              <button (click)="dismiss()">Dismiss</button>
+            </div>
+          </div>
+        } @else {
+          <div class="blocking-overlay" data-testid="blocking-overlay">
+            <div class="blocking-spinner"></div>
+            <p class="blocking-text">{{ statusMessage }}</p>
+          </div>
+        }
       }
       <app-update-notification />
       <header class="app-header">
@@ -105,7 +109,7 @@ import { ProjectStateService } from '../services/project-state.service';
         overflow-y: auto;
         overflow-x: hidden;
       }
-      .project-switch-overlay {
+      .blocking-overlay {
         position: fixed;
         inset: 0;
         z-index: 9999;
@@ -115,7 +119,7 @@ import { ProjectStateService } from '../services/project-state.service';
         justify-content: center;
         background: rgba(26, 26, 46, 0.92);
       }
-      .project-switch-spinner {
+      .blocking-spinner {
         width: 32px;
         height: 32px;
         border: 3px solid #333;
@@ -128,13 +132,13 @@ import { ProjectStateService } from '../services/project-state.service';
           transform: rotate(360deg);
         }
       }
-      .project-switch-text {
+      .blocking-text {
         margin-top: 16px;
         font-family: monospace;
         font-size: 14px;
         color: #e0e0e0;
       }
-      .project-switch-error-banner {
+      .blocking-error-banner {
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -145,7 +149,11 @@ import { ProjectStateService } from '../services/project-state.service';
         font-size: 13px;
         font-family: monospace;
       }
-      .project-switch-error-banner button {
+      .blocking-error-actions {
+        display: flex;
+        gap: 8px;
+      }
+      .blocking-error-banner button {
         background: none;
         border: 1px solid #e94560;
         color: #e94560;
@@ -158,25 +166,44 @@ import { ProjectStateService } from '../services/project-state.service';
   ],
 })
 export class ShellComponent implements OnInit, OnDestroy {
-  switching = false;
-  switchError = '';
-  private unsubscribe: (() => void) | null = null;
-  private projectState = inject(ProjectStateService);
+  readonly projectState = inject(ProjectStateService);
   private cdr = inject(ChangeDetectorRef);
+  private unsubscribe: (() => void) | null = null;
+
+  /** Human-readable status message for the blocking overlay. */
+  get statusMessage(): string {
+    switch (this.projectState.status) {
+      case 'loading':
+        return 'Loading...';
+      case 'checking':
+        return 'Checking containers...';
+      case 'starting':
+        return 'Starting containers...';
+      case 'switching':
+        return 'Switching project...';
+      case 'rebuilding':
+        return 'Rebuilding container images...';
+      default:
+        return '';
+    }
+  }
 
   /** Bootstraps ProjectStateService and subscribes to state changes. */
   ngOnInit(): void {
     this.projectState.init();
     this.unsubscribe = this.projectState.onChange(() => {
-      this.switching = this.projectState.status === 'switching';
-      this.switchError = this.projectState.status === 'error' ? this.projectState.error : '';
       this.cdr.markForCheck();
     });
   }
 
+  /** Retries container lifecycle check. */
+  retry(): void {
+    this.projectState.ensureContainersRunning();
+  }
+
   /** Dismisses the error banner. */
-  dismissError(): void {
-    this.switchError = '';
+  async dismiss(): Promise<void> {
+    await this.projectState.dismissError();
     this.cdr.markForCheck();
   }
 

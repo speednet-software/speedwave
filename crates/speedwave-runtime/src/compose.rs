@@ -28,6 +28,13 @@ fn str_to_engine_path(path: &str) -> anyhow::Result<String> {
     to_engine_path(std::path::Path::new(path))
 }
 
+/// Resolves the tokens directory for a project. SSOT for the path formula.
+pub fn resolve_tokens_dir(home: &std::path::Path, project_name: &str) -> PathBuf {
+    home.join(consts::DATA_DIR)
+        .join("tokens")
+        .join(project_name)
+}
+
 /// Default compose template embedded at compile time from containers/compose.template.yml (SSOT).
 const COMPOSE_TEMPLATE: &str = include_str!("../../../containers/compose.template.yml");
 
@@ -43,7 +50,7 @@ pub fn render_compose(
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
     let data_dir = home.join(consts::DATA_DIR);
-    let tokens_dir = data_dir.join("tokens").join(project_name);
+    let tokens_dir = resolve_tokens_dir(&home, project_name);
     let claude_home = data_dir.join("claude-home").join(project_name);
     let resources_dir = data_dir.join("claude-resources");
     let network_name = format!("{}_{}_network", consts::COMPOSE_PREFIX, project_name);
@@ -120,6 +127,7 @@ pub fn render_compose(
     yaml = apply_plugins(
         &yaml,
         project_name,
+        project_dir,
         integrations,
         &network_name,
         &tokens_dir,
@@ -311,6 +319,7 @@ deploy:
 fn apply_plugins(
     yaml: &str,
     project_name: &str,
+    project_dir: &str,
     integrations: &ResolvedIntegrationsConfig,
     network_name: &str,
     tokens_dir: &std::path::Path,
@@ -337,8 +346,13 @@ fn apply_plugins(
 
         // MCP service generation (follows apply_llm_config pattern)
         if let Some(sid) = service_id {
-            let service_value =
-                plugin::generate_plugin_service(manifest, project_name, network_name, tokens_dir)?;
+            let service_value = plugin::generate_plugin_service(
+                manifest,
+                project_name,
+                network_name,
+                tokens_dir,
+                project_dir,
+            )?;
             // Insert into doc["services"]["mcp-<service_id>"]
             if let Some(services) = doc.get_mut("services").and_then(|v| v.as_mapping_mut()) {
                 services.insert(
@@ -833,12 +847,165 @@ fn add_claude_env_var(doc: &mut serde_yaml_ng::Value, key: &str, value: &str) {
 
 // --- SecurityCheck ---
 
+/// Expected engine paths for security validation.
+/// Single source of truth — used by both render_compose() and SecurityCheck.
+pub struct SecurityExpectedPaths {
+    project_engine_path: String,
+    tokens_engine_dir: String,
+}
+
+impl SecurityExpectedPaths {
+    /// Returns the engine-format project directory path.
+    pub fn project_engine_path(&self) -> &str {
+        &self.project_engine_path
+    }
+
+    /// Returns the engine-format tokens directory path.
+    pub fn tokens_engine_dir(&self) -> &str {
+        &self.tokens_engine_dir
+    }
+
+    pub fn compute(project_name: &str, project_dir: &str) -> anyhow::Result<Self> {
+        let home =
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+        let tokens_dir = resolve_tokens_dir(&home, project_name);
+        Ok(Self {
+            project_engine_path: to_engine_path(std::path::Path::new(project_dir))?,
+            tokens_engine_dir: to_engine_path(&tokens_dir)?,
+        })
+    }
+
+    /// Create from explicit paths (for tests in this crate and downstream crates).
+    pub fn from_raw(project_engine_path: &str, tokens_engine_dir: &str) -> Self {
+        Self {
+            project_engine_path: project_engine_path.to_string(),
+            tokens_engine_dir: tokens_engine_dir.to_string(),
+        }
+    }
+}
+
+/// Extracts (host_path, mode) for a known container target from a volume string.
+/// Matches by searching for ":<target>:" or ":<target>" at end.
+/// Returns None if the target is not found in the volume string.
+fn extract_volume_for_target(vol: &str, target: &str) -> Option<(String, Option<String>)> {
+    // Try :<target>:<mode> first (e.g., /path:/tokens:ro)
+    let with_mode = format!(":{}:", target);
+    if let Some(pos) = vol.find(&with_mode) {
+        let host = &vol[..pos];
+        let mode = &vol[pos + with_mode.len()..];
+        return Some((host.to_string(), Some(mode.to_string())));
+    }
+    // Try :<target> at end (e.g., /path:/tokens)
+    let at_end = format!(":{}", target);
+    if vol.ends_with(&at_end) {
+        let host = &vol[..vol.len() - at_end.len()];
+        return Some((host.to_string(), None));
+    }
+    None
+}
+
 pub struct SecurityCheck;
+
+/// Compile-time enumeration of every security rule enforced by [`SecurityCheck`].
+///
+/// Using an enum instead of `&'static str` guarantees that rule identifiers are
+/// unique and typo-free — a misspelled variant is a compile error, whereas a
+/// misspelled string literal would silently pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecurityRule {
+    YamlParseError,
+    CapDropAll,
+    NoNewPrivs,
+    ReadOnlyFs,
+    TmpfsNoexec,
+    NoTokensClaude,
+    NoTokensHub,
+    PortsLocalhost,
+    NoSocketClaude,
+    NoExternalLlmKeysClaude,
+    NoPortsWorkers,
+    PluginNoPrivileged,
+    PluginNoHostNetwork,
+    PluginManifestMissing,
+    PluginVolumeLongForm,
+    PluginTokenPathMismatch,
+    PluginTokenMountMode,
+    PluginWorkspacePathMismatch,
+    PluginWorkspaceMountMode,
+    PluginNoExtraVolumes,
+    PluginMissingTokensMount,
+    PluginMissingWorkspaceMount,
+    SharepointVolumeLongForm,
+    SharepointTokenPathMismatch,
+    SharepointTokenMountMode,
+    SharepointWorkspacePathMismatch,
+    SharepointWorkspaceMountMode,
+    SharepointNoExtraVolumes,
+    SharepointMissingTokensMount,
+    SharepointMissingWorkspaceMount,
+    ContainerUser,
+}
+
+impl SecurityRule {
+    /// Returns `true` for SharePoint-specific rules.
+    pub fn is_sharepoint(self) -> bool {
+        matches!(
+            self,
+            Self::SharepointVolumeLongForm
+                | Self::SharepointTokenPathMismatch
+                | Self::SharepointTokenMountMode
+                | Self::SharepointWorkspacePathMismatch
+                | Self::SharepointWorkspaceMountMode
+                | Self::SharepointNoExtraVolumes
+                | Self::SharepointMissingTokensMount
+                | Self::SharepointMissingWorkspaceMount
+        )
+    }
+}
+
+impl std::fmt::Display for SecurityRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::YamlParseError => "YAML_PARSE_ERROR",
+            Self::CapDropAll => "CAP_DROP_ALL",
+            Self::NoNewPrivs => "NO_NEW_PRIVS",
+            Self::ReadOnlyFs => "READ_ONLY_FS",
+            Self::TmpfsNoexec => "TMPFS_NOEXEC",
+            Self::NoTokensClaude => "NO_TOKENS_CLAUDE",
+            Self::NoTokensHub => "NO_TOKENS_HUB",
+            Self::PortsLocalhost => "PORTS_LOCALHOST",
+            Self::NoSocketClaude => "NO_SOCKET_CLAUDE",
+            Self::NoExternalLlmKeysClaude => "NO_EXTERNAL_LLM_KEYS_CLAUDE",
+            Self::NoPortsWorkers => "NO_PORTS_WORKERS",
+            Self::PluginNoPrivileged => "PLUGIN_NO_PRIVILEGED",
+            Self::PluginNoHostNetwork => "PLUGIN_NO_HOST_NETWORK",
+            Self::PluginManifestMissing => "PLUGIN_MANIFEST_MISSING",
+            Self::PluginVolumeLongForm => "PLUGIN_VOLUME_LONG_FORM",
+            Self::PluginTokenPathMismatch => "PLUGIN_TOKEN_PATH_MISMATCH",
+            Self::PluginTokenMountMode => "PLUGIN_TOKEN_MOUNT_MODE",
+            Self::PluginWorkspacePathMismatch => "PLUGIN_WORKSPACE_PATH_MISMATCH",
+            Self::PluginWorkspaceMountMode => "PLUGIN_WORKSPACE_MOUNT_MODE",
+            Self::PluginNoExtraVolumes => "PLUGIN_NO_EXTRA_VOLUMES",
+            Self::PluginMissingTokensMount => "PLUGIN_MISSING_TOKENS_MOUNT",
+            Self::PluginMissingWorkspaceMount => "PLUGIN_MISSING_WORKSPACE_MOUNT",
+            Self::SharepointVolumeLongForm => "SHAREPOINT_VOLUME_LONG_FORM",
+            Self::SharepointTokenPathMismatch => "SHAREPOINT_TOKEN_PATH_MISMATCH",
+            Self::SharepointTokenMountMode => "SHAREPOINT_TOKEN_MOUNT_MODE",
+            Self::SharepointWorkspacePathMismatch => "SHAREPOINT_WORKSPACE_PATH_MISMATCH",
+            Self::SharepointWorkspaceMountMode => "SHAREPOINT_WORKSPACE_MOUNT_MODE",
+            Self::SharepointNoExtraVolumes => "SHAREPOINT_NO_EXTRA_VOLUMES",
+            Self::SharepointMissingTokensMount => "SHAREPOINT_MISSING_TOKENS_MOUNT",
+            Self::SharepointMissingWorkspaceMount => "SHAREPOINT_MISSING_WORKSPACE_MOUNT",
+            Self::ContainerUser => "CONTAINER_USER",
+        };
+        f.write_str(s)
+    }
+}
 
 #[derive(Debug)]
 pub struct SecurityViolation {
     pub container: String,
-    pub rule: &'static str,
+    pub rule: SecurityRule,
     pub message: String,
     pub remediation: &'static str,
 }
@@ -865,13 +1032,14 @@ impl SecurityCheck {
         compose_yml: &str,
         _project: &str,
         plugin_manifests: &[PluginManifest],
+        expected_paths: &SecurityExpectedPaths,
     ) -> Vec<SecurityViolation> {
         let doc: serde_yaml_ng::Value = match serde_yaml_ng::from_str(compose_yml) {
             Ok(v) => v,
             Err(e) => {
                 return vec![SecurityViolation {
                     container: "*".into(),
-                    rule: "YAML_PARSE_ERROR",
+                    rule: SecurityRule::YamlParseError,
                     message: format!("Cannot parse compose YAML: {e}"),
                     remediation: "Run render_compose() again to regenerate the file.",
                 }];
@@ -896,8 +1064,9 @@ impl SecurityCheck {
             // Plugin-specific checks
             Self::check_plugin_no_privileged(&doc),
             Self::check_plugin_no_host_network(&doc),
-            Self::check_plugin_no_extra_volumes(&doc),
-            Self::check_plugin_token_mount_mode(&doc, plugin_manifests),
+            Self::check_plugin_volumes(&doc, expected_paths, plugin_manifests),
+            // Built-in SharePoint context mount validation
+            Self::check_builtin_sharepoint_volumes(&doc, expected_paths),
         ]
         .into_iter()
         .flatten()
@@ -925,7 +1094,7 @@ impl SecurityCheck {
             if !has_cap_drop_all {
                 violations.push(SecurityViolation {
                     container: name.clone(),
-                    rule: "CAP_DROP_ALL",
+                    rule: SecurityRule::CapDropAll,
                     message: "Missing cap_drop: [ALL]".into(),
                     remediation: "Add 'cap_drop: [ALL]' to the service definition.",
                 });
@@ -955,7 +1124,7 @@ impl SecurityCheck {
             if !has_no_new_privs {
                 violations.push(SecurityViolation {
                     container: name.clone(),
-                    rule: "NO_NEW_PRIVS",
+                    rule: SecurityRule::NoNewPrivs,
                     message: "Missing security_opt: [no-new-privileges:true]".into(),
                     remediation:
                         "Add 'security_opt: [no-new-privileges:true]' to the service definition.",
@@ -984,7 +1153,7 @@ impl SecurityCheck {
                 if !is_read_only {
                     violations.push(SecurityViolation {
                         container: name.clone(),
-                        rule: "READ_ONLY_FS",
+                        rule: SecurityRule::ReadOnlyFs,
                         message: "Missing read_only: true".into(),
                         remediation: "Add 'read_only: true' to the service definition.",
                     });
@@ -1022,7 +1191,7 @@ impl SecurityCheck {
                 if !has_tmpfs_noexec {
                     violations.push(SecurityViolation {
                         container: name.clone(),
-                        rule: "TMPFS_NOEXEC",
+                        rule: SecurityRule::TmpfsNoexec,
                         message: "Missing tmpfs /tmp with noexec,nosuid".into(),
                         remediation:
                             "Add 'tmpfs: [\"/tmp:noexec,nosuid\"]' to the service definition.",
@@ -1063,7 +1232,7 @@ impl SecurityCheck {
                         {
                             violations.push(SecurityViolation {
                                 container: "claude".into(),
-                                rule: "NO_TOKENS_CLAUDE",
+                                rule: SecurityRule::NoTokensClaude,
                                 message: format!(
                                     "env contains forbidden variable: {}",
                                     var_name
@@ -1108,7 +1277,7 @@ impl SecurityCheck {
                         {
                             violations.push(SecurityViolation {
                                 container: "mcp-hub".into(),
-                                rule: "NO_TOKENS_HUB",
+                                rule: SecurityRule::NoTokensHub,
                                 message: format!(
                                     "env contains forbidden variable: {}",
                                     var_name
@@ -1141,7 +1310,7 @@ impl SecurityCheck {
                         if !port_str.starts_with("127.0.0.1:") {
                             violations.push(SecurityViolation {
                                 container: name.clone(),
-                                rule: "PORTS_LOCALHOST",
+                                rule: SecurityRule::PortsLocalhost,
                                 message: format!(
                                     "Port bound to non-localhost address: {}",
                                     port_str
@@ -1157,7 +1326,7 @@ impl SecurityCheck {
                         if port.get("published").is_some() && host_ip != "127.0.0.1" {
                             violations.push(SecurityViolation {
                                 container: name.clone(),
-                                rule: "PORTS_LOCALHOST",
+                                rule: SecurityRule::PortsLocalhost,
                                 message: "Port mapping missing host_ip: 127.0.0.1 (long-form)".to_string(),
                                 remediation:
                                     "All ports must bind to 127.0.0.1 only. Add host_ip: 127.0.0.1 to the port mapping.",
@@ -1170,7 +1339,7 @@ impl SecurityCheck {
                     else if port.as_i64().is_some() || port.as_f64().is_some() {
                         violations.push(SecurityViolation {
                             container: name.clone(),
-                            rule: "PORTS_LOCALHOST",
+                            rule: SecurityRule::PortsLocalhost,
                             message: "Port specified as bare integer (binds to 0.0.0.0)".into(),
                             remediation:
                                 "All ports must bind to 127.0.0.1 only. Change to \"127.0.0.1:host:container\".",
@@ -1199,7 +1368,7 @@ impl SecurityCheck {
                             if vol_str.contains(socket) {
                                 violations.push(SecurityViolation {
                                     container: "claude".into(),
-                                    rule: "NO_SOCKET_CLAUDE",
+                                    rule: SecurityRule::NoSocketClaude,
                                     message: format!(
                                         "Volume mounts container socket: {}",
                                         vol_str
@@ -1240,7 +1409,7 @@ impl SecurityCheck {
                         {
                             violations.push(SecurityViolation {
                                 container: "claude".into(),
-                                rule: "NO_EXTERNAL_LLM_KEYS_CLAUDE",
+                                rule: SecurityRule::NoExternalLlmKeysClaude,
                                 message: format!(
                                     "env contains external LLM key: {}",
                                     var_name
@@ -1278,7 +1447,7 @@ impl SecurityCheck {
             {
                 violations.push(SecurityViolation {
                     container: name.clone(),
-                    rule: "NO_PORTS_WORKERS",
+                    rule: SecurityRule::NoPortsWorkers,
                     message: format!(
                         "{} must not expose ports to host — use Docker DNS for inter-container communication",
                         name
@@ -1309,7 +1478,7 @@ impl SecurityCheck {
             {
                 violations.push(SecurityViolation {
                     container: name,
-                    rule: "PLUGIN_NO_PRIVILEGED",
+                    rule: SecurityRule::PluginNoPrivileged,
                     message: "Plugin service must not have privileged: true".into(),
                     remediation: "Remove 'privileged: true' from the plugin service.",
                 });
@@ -1333,7 +1502,7 @@ impl SecurityCheck {
                 if mode == "host" {
                     violations.push(SecurityViolation {
                         container: name,
-                        rule: "PLUGIN_NO_HOST_NETWORK",
+                        rule: SecurityRule::PluginNoHostNetwork,
                         message: "Plugin service must not use network_mode: host".into(),
                         remediation: "Remove 'network_mode: host' from the plugin service.",
                     });
@@ -1343,44 +1512,15 @@ impl SecurityCheck {
         violations
     }
 
-    /// Plugin services may only mount /tokens (max 1 volume). No other host paths.
-    fn check_plugin_no_extra_volumes(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
-        let mut violations = Vec::new();
-        let services = match get_services(doc) {
-            Some(s) => s,
-            None => return violations,
-        };
-        for (name, service) in services {
-            if !is_plugin_service(service) {
-                continue;
-            }
-            if let Some(vols) = service.get("volumes").and_then(|v| v.as_sequence()) {
-                for vol in vols {
-                    if let Some(vol_str) = vol.as_str() {
-                        // Only /tokens mount is allowed
-                        if !vol_str.contains(":/tokens:") && !vol_str.ends_with(":/tokens") {
-                            violations.push(SecurityViolation {
-                                container: name.clone(),
-                                rule: "PLUGIN_NO_EXTRA_VOLUMES",
-                                message: format!(
-                                    "Plugin service has unauthorized volume mount: {}",
-                                    vol_str
-                                ),
-                                remediation:
-                                    "Plugin services may only mount /tokens. Remove all other volume mounts.",
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        violations
-    }
-
-    /// Plugin token mount mode in compose must match signed manifest.
-    /// If manifest says ReadOnly but compose has :rw → violation.
-    fn check_plugin_token_mount_mode(
+    /// Validates all volumes for plugin services:
+    /// - /tokens mount: correct host path per service_id, mode matches manifest
+    /// - /workspace mount: correct host path (project dir), must be :rw
+    /// - No other volumes allowed
+    /// - Long-form YAML volumes rejected
+    /// - Both mounts must be present
+    fn check_plugin_volumes(
         doc: &serde_yaml_ng::Value,
+        expected_paths: &SecurityExpectedPaths,
         manifests: &[PluginManifest],
     ) -> Vec<SecurityViolation> {
         let mut violations = Vec::new();
@@ -1392,38 +1532,66 @@ impl SecurityCheck {
             if !is_plugin_service(service) {
                 continue;
             }
-            // Find the matching manifest by compose service name
             let sid = name.strip_prefix("mcp-").unwrap_or(&name);
             let manifest = manifests
                 .iter()
                 .find(|m| m.service_id.as_deref() == Some(sid));
             let manifest = match manifest {
                 Some(m) => m,
-                None => continue, // No manifest to cross-check
+                None => {
+                    violations.push(SecurityViolation {
+                        container: name.clone(),
+                        rule: SecurityRule::PluginManifestMissing,
+                        message: format!(
+                            "Plugin service '{}' has no matching manifest — cannot validate mounts",
+                            name
+                        ),
+                        remediation: "Ensure plugin manifests are loaded before security check.",
+                    });
+                    continue;
+                }
             };
 
-            // Check volume mount mode matches manifest
-            if let Some(vols) = service.get("volumes").and_then(|v| v.as_sequence()) {
-                for vol in vols {
-                    if let Some(vol_str) = vol.as_str() {
-                        if vol_str.contains(":/tokens:") || vol_str.ends_with(":/tokens") {
-                            let is_rw_in_compose = vol_str.ends_with(":rw");
-                            let is_ro_in_manifest =
-                                matches!(manifest.token_mount, plugin::TokenMount::ReadOnly);
-                            if is_rw_in_compose && is_ro_in_manifest {
-                                violations.push(SecurityViolation {
-                                    container: name.clone(),
-                                    rule: "PLUGIN_TOKEN_MOUNT_MODE",
-                                    message: "Plugin manifest declares ReadOnly tokens but compose has :rw mount".to_string(),
-                                    remediation:
-                                        "Change the token volume mount to :ro or update the plugin manifest.",
-                                });
-                            }
-                        }
-                    }
-                }
-            }
+            let expected_token_mode = match manifest.token_mount {
+                plugin::TokenMount::ReadOnly => "ro",
+                plugin::TokenMount::ReadWrite { .. } => "rw",
+            };
+            let params = VolumeCheckParams {
+                container_name: &name,
+                expected_tokens_path: format!("{}/{}", expected_paths.tokens_engine_dir(), sid),
+                expected_workspace_path: expected_paths.project_engine_path(),
+                expected_token_mode,
+                rules: VolumeCheckRules::PLUGIN,
+            };
+            let (base_violations, _) = validate_service_volume_mounts(service, &params);
+            violations.extend(base_violations);
         }
+        violations
+    }
+
+    /// Validates volumes for built-in mcp-sharepoint service (not a plugin).
+    fn check_builtin_sharepoint_volumes(
+        doc: &serde_yaml_ng::Value,
+        expected_paths: &SecurityExpectedPaths,
+    ) -> Vec<SecurityViolation> {
+        let services = match get_services(doc) {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+
+        let (name, service) = match services.iter().find(|(n, _)| n == "mcp-sharepoint") {
+            Some(pair) => pair,
+            None => return Vec::new(), // SharePoint not in compose (disabled)
+        };
+
+        let params = VolumeCheckParams {
+            container_name: name,
+            expected_tokens_path: format!("{}/sharepoint", expected_paths.tokens_engine_dir()),
+            expected_workspace_path: expected_paths.project_engine_path(),
+            expected_token_mode: "rw",
+            rules: VolumeCheckRules::SHAREPOINT,
+        };
+        let (violations, _) = validate_service_volume_mounts(service, &params);
         violations
     }
 
@@ -1443,7 +1611,7 @@ impl SecurityCheck {
                 Some(user) => {
                     violations.push(SecurityViolation {
                         container: name.clone(),
-                        rule: "CONTAINER_USER",
+                        rule: SecurityRule::ContainerUser,
                         message: format!(
                             "user: \"{}\" does not match expected \"{}\" for this platform",
                             user, expected
@@ -1455,7 +1623,7 @@ impl SecurityCheck {
                 None => {
                     violations.push(SecurityViolation {
                         container: name.clone(),
-                        rule: "CONTAINER_USER",
+                        rule: SecurityRule::ContainerUser,
                         message: "Missing user: field — container would run as image default user"
                             .into(),
                         remediation: "Add user: \"${CONTAINER_USER}\" to the service definition.",
@@ -1465,6 +1633,197 @@ impl SecurityCheck {
         }
         violations
     }
+}
+
+/// Per-rule names and remediation strings for volume validation.
+/// Each constant preserves the exact rule names and messages used by plugin
+/// and SharePoint security checks so that existing tests and monitoring remain stable.
+struct VolumeCheckRules {
+    volume_long_form: SecurityRule,
+    volume_long_form_msg: &'static str,
+    volume_long_form_rem: &'static str,
+    token_path_mismatch: SecurityRule,
+    token_path_mismatch_rem: &'static str,
+    token_mount_mode: SecurityRule,
+    token_mount_mode_msg: &'static str,
+    token_mount_mode_rem: &'static str,
+    workspace_path_mismatch: SecurityRule,
+    workspace_mount_mode: SecurityRule,
+    workspace_mount_mode_msg: &'static str,
+    no_extra_volumes: SecurityRule,
+    no_extra_volumes_msg_prefix: &'static str,
+    no_extra_volumes_rem: &'static str,
+    missing_tokens: SecurityRule,
+    missing_tokens_msg: &'static str,
+    missing_tokens_rem: &'static str,
+    missing_workspace: SecurityRule,
+    missing_workspace_msg: &'static str,
+    missing_workspace_rem: &'static str,
+}
+
+impl VolumeCheckRules {
+    const PLUGIN: Self = Self {
+        volume_long_form: SecurityRule::PluginVolumeLongForm,
+        volume_long_form_msg: "Plugin volume uses long-form YAML mapping \
+                               — only short-form strings allowed",
+        volume_long_form_rem: "Use short-form volume strings: 'host:container:mode'.",
+        token_path_mismatch: SecurityRule::PluginTokenPathMismatch,
+        token_path_mismatch_rem: "Token mount must use the project-specific tokens directory.",
+        token_mount_mode: SecurityRule::PluginTokenMountMode,
+        token_mount_mode_msg: "Token mount mode does not match expected mode",
+        token_mount_mode_rem: "Ensure the token volume mount mode matches the expected mode.",
+        workspace_path_mismatch: SecurityRule::PluginWorkspacePathMismatch,
+        workspace_mount_mode: SecurityRule::PluginWorkspaceMountMode,
+        workspace_mount_mode_msg: "Workspace mount must be :rw",
+        no_extra_volumes: SecurityRule::PluginNoExtraVolumes,
+        no_extra_volumes_msg_prefix: "Plugin service has unauthorized volume mount:",
+        no_extra_volumes_rem: "Plugin services may only mount /tokens and /workspace.",
+        missing_tokens: SecurityRule::PluginMissingTokensMount,
+        missing_tokens_msg: "Plugin service is missing required /tokens mount",
+        missing_tokens_rem: "Plugin services must mount /tokens.",
+        missing_workspace: SecurityRule::PluginMissingWorkspaceMount,
+        missing_workspace_msg: "Plugin service is missing required /workspace mount",
+        missing_workspace_rem: "Plugin services must mount /workspace:rw.",
+    };
+
+    const SHAREPOINT: Self = Self {
+        volume_long_form: SecurityRule::SharepointVolumeLongForm,
+        volume_long_form_msg: "SharePoint volume uses long-form YAML mapping",
+        volume_long_form_rem: "Use short-form volume strings.",
+        token_path_mismatch: SecurityRule::SharepointTokenPathMismatch,
+        token_path_mismatch_rem:
+            "SharePoint token mount must use the project-specific tokens directory.",
+        token_mount_mode: SecurityRule::SharepointTokenMountMode,
+        token_mount_mode_msg: "SharePoint token mount must be :rw (OAuth refresh)",
+        token_mount_mode_rem: "SharePoint requires :rw token mount for OAuth token refresh.",
+        workspace_path_mismatch: SecurityRule::SharepointWorkspacePathMismatch,
+        workspace_mount_mode: SecurityRule::SharepointWorkspaceMountMode,
+        workspace_mount_mode_msg: "SharePoint workspace mount must be :rw",
+        no_extra_volumes: SecurityRule::SharepointNoExtraVolumes,
+        no_extra_volumes_msg_prefix: "SharePoint service has unauthorized volume mount:",
+        no_extra_volumes_rem: "SharePoint may only mount /tokens and /workspace.",
+        missing_tokens: SecurityRule::SharepointMissingTokensMount,
+        missing_tokens_msg: "SharePoint service is missing required /tokens mount",
+        missing_tokens_rem: "SharePoint must mount /tokens:rw.",
+        missing_workspace: SecurityRule::SharepointMissingWorkspaceMount,
+        missing_workspace_msg: "SharePoint service is missing required /workspace mount",
+        missing_workspace_rem: "SharePoint must mount /workspace:rw.",
+    };
+}
+
+/// Parameters for shared volume mount validation.
+struct VolumeCheckParams<'a> {
+    container_name: &'a str,
+    expected_tokens_path: String,
+    expected_workspace_path: &'a str,
+    /// Expected token mount mode: "ro" or "rw"
+    expected_token_mode: &'a str,
+    rules: VolumeCheckRules,
+}
+
+/// Validates volume mounts on a single service definition.
+///
+/// Returns the list of violations and, if a /tokens mount was found, its actual
+/// mode string (so callers like `check_plugin_volumes` can do additional
+/// manifest-specific checks).
+fn validate_service_volume_mounts(
+    service: &serde_yaml_ng::Value,
+    params: &VolumeCheckParams,
+) -> (Vec<SecurityViolation>, Option<String>) {
+    let mut violations = Vec::new();
+    let mut found_tokens = false;
+    let mut found_workspace = false;
+    let mut token_mode: Option<String> = None;
+
+    if let Some(vols) = service.get("volumes").and_then(|v| v.as_sequence()) {
+        for vol in vols {
+            let vol_str = match vol.as_str() {
+                Some(s) => s,
+                None => {
+                    violations.push(SecurityViolation {
+                        container: params.container_name.to_string(),
+                        rule: params.rules.volume_long_form,
+                        message: params.rules.volume_long_form_msg.to_string(),
+                        remediation: params.rules.volume_long_form_rem,
+                    });
+                    continue;
+                }
+            };
+
+            if let Some((host_path, mode)) = extract_volume_for_target(vol_str, "/tokens") {
+                found_tokens = true;
+                if host_path != params.expected_tokens_path {
+                    violations.push(SecurityViolation {
+                        container: params.container_name.to_string(),
+                        rule: params.rules.token_path_mismatch,
+                        message: format!(
+                            "Token host path '{}' does not match expected '{}'",
+                            host_path, params.expected_tokens_path
+                        ),
+                        remediation: params.rules.token_path_mismatch_rem,
+                    });
+                }
+                let actual = mode.as_deref().unwrap_or("ro");
+                if actual != params.expected_token_mode {
+                    violations.push(SecurityViolation {
+                        container: params.container_name.to_string(),
+                        rule: params.rules.token_mount_mode,
+                        message: params.rules.token_mount_mode_msg.to_string(),
+                        remediation: params.rules.token_mount_mode_rem,
+                    });
+                }
+                token_mode = Some(actual.to_string());
+            } else if let Some((host_path, mode)) = extract_volume_for_target(vol_str, "/workspace")
+            {
+                found_workspace = true;
+                if host_path != params.expected_workspace_path {
+                    violations.push(SecurityViolation {
+                        container: params.container_name.to_string(),
+                        rule: params.rules.workspace_path_mismatch,
+                        message: format!(
+                            "Workspace host path '{}' does not match expected '{}'",
+                            host_path, params.expected_workspace_path
+                        ),
+                        remediation: "Workspace mount must use the project directory.",
+                    });
+                }
+                if mode.as_deref() != Some("rw") {
+                    violations.push(SecurityViolation {
+                        container: params.container_name.to_string(),
+                        rule: params.rules.workspace_mount_mode,
+                        message: params.rules.workspace_mount_mode_msg.to_string(),
+                        remediation: "Change the workspace volume mount to :rw.",
+                    });
+                }
+            } else {
+                violations.push(SecurityViolation {
+                    container: params.container_name.to_string(),
+                    rule: params.rules.no_extra_volumes,
+                    message: format!("{} {}", params.rules.no_extra_volumes_msg_prefix, vol_str),
+                    remediation: params.rules.no_extra_volumes_rem,
+                });
+            }
+        }
+    }
+
+    if !found_tokens {
+        violations.push(SecurityViolation {
+            container: params.container_name.to_string(),
+            rule: params.rules.missing_tokens,
+            message: params.rules.missing_tokens_msg.to_string(),
+            remediation: params.rules.missing_tokens_rem,
+        });
+    }
+    if !found_workspace {
+        violations.push(SecurityViolation {
+            container: params.container_name.to_string(),
+            rule: params.rules.missing_workspace,
+            message: params.rules.missing_workspace_msg.to_string(),
+            remediation: params.rules.missing_workspace_rem,
+        });
+    }
+
+    (violations, token_mode)
 }
 
 /// Checks if a service has the `speedwave.plugin-service: "true"` label.
@@ -1588,7 +1947,7 @@ networks:
     #[test]
     fn test_security_check_valid_compose() {
         let yaml = valid_compose_yaml();
-        let violations = SecurityCheck::run(&yaml, "test", &[]);
+        let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
         assert!(
             violations.is_empty(),
             "Expected no violations, got: {:?}",
@@ -1614,8 +1973,10 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
-        assert!(violations.iter().any(|v| v.rule == "CAP_DROP_ALL"));
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        assert!(violations
+            .iter()
+            .any(|v| v.rule == SecurityRule::CapDropAll));
     }
 
     #[test]
@@ -1633,8 +1994,10 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
-        assert!(violations.iter().any(|v| v.rule == "NO_NEW_PRIVS"));
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        assert!(violations
+            .iter()
+            .any(|v| v.rule == SecurityRule::NoNewPrivs));
     }
 
     #[test]
@@ -1653,10 +2016,10 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
         assert!(violations
             .iter()
-            .any(|v| v.rule == "READ_ONLY_FS" && v.container == "claude"));
+            .any(|v| v.rule == SecurityRule::ReadOnlyFs && v.container == "claude"));
     }
 
     #[test]
@@ -1674,8 +2037,10 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
-        assert!(violations.iter().any(|v| v.rule == "TMPFS_NOEXEC"));
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        assert!(violations
+            .iter()
+            .any(|v| v.rule == SecurityRule::TmpfsNoexec));
     }
 
     #[test]
@@ -1696,8 +2061,10 @@ services:
       - CLAUDE_VERSION=1.0.3
       - SLACK_TOKEN=xoxb-12345
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
-        assert!(violations.iter().any(|v| v.rule == "NO_TOKENS_CLAUDE"));
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        assert!(violations
+            .iter()
+            .any(|v| v.rule == SecurityRule::NoTokensClaude));
     }
 
     #[test]
@@ -1717,8 +2084,10 @@ services:
     ports:
       - "0.0.0.0:4000:4000"
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
-        assert!(violations.iter().any(|v| v.rule == "PORTS_LOCALHOST"));
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        assert!(violations
+            .iter()
+            .any(|v| v.rule == SecurityRule::PortsLocalhost));
     }
 
     #[test]
@@ -1740,8 +2109,10 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
-        assert!(violations.iter().any(|v| v.rule == "NO_SOCKET_CLAUDE"));
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
+        assert!(violations
+            .iter()
+            .any(|v| v.rule == SecurityRule::NoSocketClaude));
     }
 
     #[test]
@@ -1762,16 +2133,19 @@ services:
       - CLAUDE_VERSION=1.0.3
       - OPENAI_API_KEY=sk-12345
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
         assert!(violations
             .iter()
-            .any(|v| v.rule == "NO_EXTERNAL_LLM_KEYS_CLAUDE"));
+            .any(|v| v.rule == SecurityRule::NoExternalLlmKeysClaude));
     }
 
     #[test]
     fn test_security_check_invalid_yaml() {
-        let violations = SecurityCheck::run("not: valid: yaml: [[[", "test", &[]);
-        assert!(violations.iter().any(|v| v.rule == "YAML_PARSE_ERROR"));
+        let violations =
+            SecurityCheck::run("not: valid: yaml: [[[", "test", &[], &test_expected_paths());
+        assert!(violations
+            .iter()
+            .any(|v| v.rule == SecurityRule::YamlParseError));
     }
 
     #[test]
@@ -1841,6 +2215,31 @@ services:
         assert!(!yaml.contains("image: speedwave-mcp-sharepoint:latest"));
         assert!(!yaml.contains("image: speedwave-mcp-redmine:latest"));
         assert!(!yaml.contains("image: speedwave-mcp-gitlab:latest"));
+    }
+
+    #[test]
+    fn test_rendered_compose_has_sharepoint_workspace_mount() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig::default(),
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &all_enabled_integrations(),
+            None,
+        )
+        .unwrap();
+        assert!(
+            yaml.contains("/home/user/projects/test:/workspace:rw"),
+            "Rendered compose must contain workspace mount for mcp-sharepoint.\nGot:\n{}",
+            yaml.lines()
+                .filter(|l| l.contains("/workspace"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 
     #[test]
@@ -1966,6 +2365,28 @@ services:
     }
 
     #[test]
+    fn test_compose_template_all_services_have_pull_policy_never() {
+        // All images are built locally — nerdctl must never attempt to pull from a
+        // remote registry. Without `pull_policy: never`, nerdctl resolves unqualified
+        // image names (e.g. `speedwave-mcp-hub:tag`) as `docker.io/library/...` and
+        // fails with "pull access denied".
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(COMPOSE_TEMPLATE).unwrap();
+        let services = doc.get("services").unwrap().as_mapping().unwrap();
+        for (name, svc) in services {
+            let name = name.as_str().unwrap();
+            let policy = svc
+                .get("pull_policy")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            assert_eq!(
+                policy, "never",
+                "service '{}' must have `pull_policy: never` (images are built locally)",
+                name
+            );
+        }
+    }
+
+    #[test]
     fn test_rendered_compose_passes_security_check() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -1980,7 +2401,12 @@ services:
             None,
         )
         .unwrap();
-        let violations = SecurityCheck::run(&yaml, "test-project", &[]);
+        let violations = SecurityCheck::run(
+            &yaml,
+            "test-project",
+            &[],
+            &SecurityExpectedPaths::compute("test-project", "/home/user/projects/test").unwrap(),
+        );
         assert!(
             violations.is_empty(),
             "Generated compose should pass security check. Violations: {:?}",
@@ -2056,9 +2482,11 @@ services:
     ports:
       - 4000
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
         assert!(
-            violations.iter().any(|v| v.rule == "PORTS_LOCALHOST"),
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PortsLocalhost),
             "Bare integer port should be rejected"
         );
     }
@@ -2082,9 +2510,11 @@ services:
         published: 4000
         protocol: tcp
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
         assert!(
-            violations.iter().any(|v| v.rule == "PORTS_LOCALHOST"),
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PortsLocalhost),
             "Long-form port without host_ip should be rejected"
         );
     }
@@ -2109,10 +2539,10 @@ services:
         host_ip: "127.0.0.1"
         protocol: tcp
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
         let port_violations: Vec<_> = violations
             .iter()
-            .filter(|v| v.rule == "PORTS_LOCALHOST")
+            .filter(|v| v.rule == SecurityRule::PortsLocalhost)
             .collect();
         assert!(
             port_violations.is_empty(),
@@ -2138,9 +2568,11 @@ services:
       - CLAUDE_VERSION=1.0.3
       - ANTHROPIC_API_KEY=sk-ant-12345
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
         assert!(
-            !violations.iter().any(|v| v.rule == "NO_TOKENS_CLAUDE"),
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::NoTokensClaude),
             "ANTHROPIC_API_KEY in claude container should be allowed"
         );
     }
@@ -2609,9 +3041,11 @@ services:
       - CLAUDE_VERSION=1.0.3
       - MCP_OS_AUTH_TOKEN=550e8400-e29b-41d4-a716-446655440000
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
         assert!(
-            violations.iter().any(|v| v.rule == "NO_TOKENS_CLAUDE"),
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::NoTokensClaude),
             "MCP_OS_AUTH_TOKEN should be FORBIDDEN in claude container"
         );
     }
@@ -2636,11 +3070,11 @@ services:
       - WORKER_SLACK_URL=http://mcp-slack:4001
       - SLACK_TOKEN=xoxb-12345
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
         assert!(
             violations
                 .iter()
-                .any(|v| v.rule == "NO_TOKENS_HUB" && v.message.contains("SLACK_TOKEN")),
+                .any(|v| v.rule == SecurityRule::NoTokensHub && v.message.contains("SLACK_TOKEN")),
             "SLACK_TOKEN in hub env should trigger NO_TOKENS_HUB violation"
         );
     }
@@ -2649,9 +3083,11 @@ services:
     fn test_security_check_hub_worker_urls_allowed() {
         // WORKER_*_URL vars in hub env should pass the security check.
         let yaml = valid_compose_yaml();
-        let violations = SecurityCheck::run(&yaml, "test", &[]);
+        let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
         assert!(
-            !violations.iter().any(|v| v.rule == "NO_TOKENS_HUB"),
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::NoTokensHub),
             "WORKER_*_URL in hub env should NOT trigger NO_TOKENS_HUB"
         );
     }
@@ -2673,9 +3109,11 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
         assert!(
-            violations.iter().any(|v| v.rule == "CONTAINER_USER"),
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::ContainerUser),
             "Should flag missing user field"
         );
     }
@@ -2695,11 +3133,11 @@ services:
       - no-new-privileges:true
 "#
         );
-        let violations = SecurityCheck::run(&yaml, "test", &[]);
+        let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
         assert!(
             violations
                 .iter()
-                .any(|v| v.rule == "CONTAINER_USER" && v.container == "evil-addon"),
+                .any(|v| v.rule == SecurityRule::ContainerUser && v.container == "evil-addon"),
             "Should flag wrong user value"
         );
     }
@@ -2720,9 +3158,11 @@ services:
 "#,
             user = container_user()
         );
-        let violations = SecurityCheck::run(&yaml, "test", &[]);
+        let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
         assert!(
-            !violations.iter().any(|v| v.rule == "CONTAINER_USER"),
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::ContainerUser),
             "Correct user should not trigger violation"
         );
     }
@@ -2979,9 +3419,11 @@ services:
       - "127.0.0.1:4000:4000"
 "#
             );
-            let violations = SecurityCheck::run(&yaml, "test", &[]);
+            let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
             assert!(
-                violations.iter().any(|v| v.rule == "NO_PORTS_WORKERS"),
+                violations
+                    .iter()
+                    .any(|v| v.rule == SecurityRule::NoPortsWorkers),
                 "{name} with ports should trigger NO_PORTS_WORKERS"
             );
         }
@@ -3001,9 +3443,11 @@ services:
     environment:
       - PORT=4001
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
         assert!(
-            !violations.iter().any(|v| v.rule == "NO_PORTS_WORKERS"),
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::NoPortsWorkers),
             "Worker without ports should pass"
         );
     }
@@ -3022,9 +3466,11 @@ services:
     ports:
       - "127.0.0.1:4010:4010"
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
         assert!(
-            !violations.iter().any(|v| v.rule == "NO_PORTS_WORKERS"),
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::NoPortsWorkers),
             "llm-proxy is allowed to expose ports"
         );
     }
@@ -3062,9 +3508,11 @@ services:
     ports:
       - "127.0.0.1:4006:4006"
 "#;
-        let violations = SecurityCheck::run(yaml, "test", &[]);
+        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
         assert!(
-            !violations.iter().any(|v| v.rule == "NO_PORTS_WORKERS"),
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::NoPortsWorkers),
             "Addon services may expose ports (they are not in consts::BUILT_IN_SERVICES)"
         );
     }
@@ -3352,7 +3800,7 @@ services:
         let integrations = ResolvedIntegrationsConfig::default(); // all false
         let yaml = valid_compose_yaml();
         let filtered = apply_integrations_filter(&yaml, &integrations).unwrap();
-        let violations = SecurityCheck::run(&filtered, "test", &[]);
+        let violations = SecurityCheck::run(&filtered, "test", &[], &test_expected_paths());
         assert!(
             violations.is_empty(),
             "All-disabled compose should pass security check. Violations: {:?}",
@@ -3498,11 +3946,11 @@ services:
 "#,
             user = container_user()
         );
-        let violations = SecurityCheck::run(&yaml, "test", &[]);
+        let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
         assert!(
             violations
                 .iter()
-                .any(|v| v.rule == "PLUGIN_NO_PRIVILEGED" && v.container == "mcp-presale"),
+                .any(|v| v.rule == SecurityRule::PluginNoPrivileged && v.container == "mcp-presale"),
             "Plugin with privileged: true should trigger PLUGIN_NO_PRIVILEGED"
         );
     }
@@ -3526,13 +3974,64 @@ services:
 "#,
             user = container_user()
         );
-        let violations = SecurityCheck::run(&yaml, "test", &[]);
+        let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
         assert!(
-            violations
-                .iter()
-                .any(|v| v.rule == "PLUGIN_NO_HOST_NETWORK" && v.container == "mcp-presale"),
+            violations.iter().any(
+                |v| v.rule == SecurityRule::PluginNoHostNetwork && v.container == "mcp-presale"
+            ),
             "Plugin with network_mode: host should trigger PLUGIN_NO_HOST_NETWORK"
         );
+    }
+
+    fn test_presale_manifest(token_mount: plugin::TokenMount) -> PluginManifest {
+        PluginManifest {
+            name: "Presale".to_string(),
+            service_id: Some("presale".to_string()),
+            slug: "presale".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(4010),
+            image_tag: None,
+            resources: vec![],
+            token_mount,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![],
+        }
+    }
+
+    /// Expected paths for plugin security tests. Token dir = /test/.speedwave/tokens/test.
+    fn test_expected_paths() -> SecurityExpectedPaths {
+        SecurityExpectedPaths::from_raw("/test/project", "/test/.speedwave/tokens/test")
+    }
+
+    /// Standard valid plugin YAML fragment with correct token + workspace mounts.
+    fn valid_plugin_yaml(token_mode: &str) -> String {
+        format!(
+            r#"
+version: "3"
+services:
+  mcp-presale:
+    image: speedwave-mcp-presale:1.0.0
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/presale:/tokens:{token_mode}
+      - /test/project:/workspace:rw
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user(),
+            token_mode = token_mode,
+        )
     }
 
     #[test]
@@ -3549,103 +4048,69 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      - /home/user/.speedwave/tokens/test/presale:/tokens:ro
+      - /test/.speedwave/tokens/test/presale:/tokens:ro
+      - /test/project:/workspace:rw
       - /etc/passwd:/etc/passwd:ro
     labels:
       speedwave.plugin-service: "true"
 "#,
             user = container_user()
         );
-        let violations = SecurityCheck::run(&yaml, "test", &[]);
+        let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
+        let violations = SecurityCheck::run(&yaml, "test", &manifests, &test_expected_paths());
         assert!(
             violations
                 .iter()
-                .any(|v| v.rule == "PLUGIN_NO_EXTRA_VOLUMES" && v.container == "mcp-presale"),
+                .any(|v| v.rule == SecurityRule::PluginNoExtraVolumes
+                    && v.container == "mcp-presale"),
             "Plugin with extra volumes should trigger PLUGIN_NO_EXTRA_VOLUMES"
         );
     }
 
     #[test]
     fn test_security_check_plugin_no_extra_volumes_clean() {
-        let yaml = format!(
-            r#"
-version: "3"
-services:
-  mcp-presale:
-    image: speedwave-mcp-presale:1.0.0
-    user: "{user}"
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    tmpfs:
-      - /tmp:noexec,nosuid,size=64m
-    volumes:
-      - /home/user/.speedwave/tokens/test/presale:/tokens:ro
-    labels:
-      speedwave.plugin-service: "true"
-"#,
-            user = container_user()
-        );
-        let violations = SecurityCheck::run(&yaml, "test", &[]);
+        let yaml = valid_plugin_yaml("ro");
+        let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
+        let violations = SecurityCheck::run(&yaml, "test", &manifests, &test_expected_paths());
         assert!(
             !violations
                 .iter()
-                .any(|v| v.rule == "PLUGIN_NO_EXTRA_VOLUMES"),
-            "Plugin with only /tokens volume should not trigger PLUGIN_NO_EXTRA_VOLUMES"
+                .any(|v| v.rule == SecurityRule::PluginNoExtraVolumes),
+            "Plugin with only /tokens + /workspace should not trigger PLUGIN_NO_EXTRA_VOLUMES"
         );
     }
 
     #[test]
     fn test_security_check_plugin_token_mount_mode_ro_violation() {
-        let yaml = format!(
-            r#"
-version: "3"
-services:
-  mcp-presale:
-    image: speedwave-mcp-presale:1.0.0
-    user: "{user}"
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    tmpfs:
-      - /tmp:noexec,nosuid,size=64m
-    volumes:
-      - /home/user/.speedwave/tokens/test/presale:/tokens:rw
-    labels:
-      speedwave.plugin-service: "true"
-"#,
-            user = container_user()
-        );
-        let manifests = vec![PluginManifest {
-            name: "Presale".to_string(),
-            service_id: Some("presale".to_string()),
-            slug: "presale".to_string(),
-            version: "1.0.0".to_string(),
-            description: "test".to_string(),
-            port: Some(4010),
-            image_tag: None,
-            resources: vec![],
-            token_mount: plugin::TokenMount::ReadOnly,
-            auth_fields: vec![],
-            settings_schema: None,
-            speedwave_compat: None,
-            extra_env: None,
-            mem_limit: None,
-            requires_integrations: vec![],
-        }];
-        let violations = SecurityCheck::run(&yaml, "test", &manifests);
+        let yaml = valid_plugin_yaml("rw");
+        let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
+        let violations = SecurityCheck::run(&yaml, "test", &manifests, &test_expected_paths());
         assert!(
             violations
                 .iter()
-                .any(|v| v.rule == "PLUGIN_TOKEN_MOUNT_MODE" && v.container == "mcp-presale"),
+                .any(|v| v.rule == SecurityRule::PluginTokenMountMode
+                    && v.container == "mcp-presale"),
             "ReadOnly manifest + :rw mount should trigger PLUGIN_TOKEN_MOUNT_MODE"
         );
     }
 
     #[test]
     fn test_security_check_plugin_token_mount_mode_rw_pass() {
+        let yaml = valid_plugin_yaml("rw");
+        let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadWrite {
+            justification: "OAuth token refresh".to_string(),
+        })];
+        let violations = SecurityCheck::run(&yaml, "test", &manifests, &test_expected_paths());
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginTokenMountMode),
+            "ReadWrite manifest + :rw mount should NOT trigger PLUGIN_TOKEN_MOUNT_MODE"
+        );
+    }
+
+    #[test]
+    fn test_security_check_plugin_workspace_path_mismatch() {
         let yaml = format!(
             r#"
 version: "3"
@@ -3660,37 +4125,133 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /home/user/.speedwave/tokens/test/presale:/tokens:rw
+      - /test/.speedwave/tokens/test/presale:/tokens:ro
+      - /etc:/workspace:rw
     labels:
       speedwave.plugin-service: "true"
 "#,
             user = container_user()
         );
-        let manifests = vec![PluginManifest {
-            name: "Presale".to_string(),
-            service_id: Some("presale".to_string()),
-            slug: "presale".to_string(),
-            version: "1.0.0".to_string(),
-            description: "test".to_string(),
-            port: Some(4010),
-            image_tag: None,
-            resources: vec![],
-            token_mount: plugin::TokenMount::ReadWrite {
-                justification: "OAuth token refresh".to_string(),
-            },
-            auth_fields: vec![],
-            settings_schema: None,
-            speedwave_compat: None,
-            extra_env: None,
-            mem_limit: None,
-            requires_integrations: vec![],
-        }];
-        let violations = SecurityCheck::run(&yaml, "test", &manifests);
+        let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
+        let violations = SecurityCheck::run(&yaml, "test", &manifests, &test_expected_paths());
         assert!(
-            !violations
+            violations
                 .iter()
-                .any(|v| v.rule == "PLUGIN_TOKEN_MOUNT_MODE"),
-            "ReadWrite manifest + :rw mount should NOT trigger PLUGIN_TOKEN_MOUNT_MODE"
+                .any(|v| v.rule == SecurityRule::PluginWorkspacePathMismatch),
+            "Wrong workspace host path should trigger PLUGIN_WORKSPACE_PATH_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn test_security_check_plugin_workspace_mount_mode_ro() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-presale:
+    image: speedwave-mcp-presale:1.0.0
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/presale:/tokens:ro
+      - /test/project:/workspace:ro
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user()
+        );
+        let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
+        let violations = SecurityCheck::run(&yaml, "test", &manifests, &test_expected_paths());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginWorkspaceMountMode),
+            "Workspace mount with :ro should trigger PLUGIN_WORKSPACE_MOUNT_MODE"
+        );
+    }
+
+    #[test]
+    fn test_security_check_plugin_token_path_mismatch() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-presale:
+    image: speedwave-mcp-presale:1.0.0
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /etc:/tokens:ro
+      - /test/project:/workspace:rw
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user()
+        );
+        let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
+        let violations = SecurityCheck::run(&yaml, "test", &manifests, &test_expected_paths());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginTokenPathMismatch),
+            "Wrong token host path should trigger PLUGIN_TOKEN_PATH_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn test_security_check_plugin_volume_long_form() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-presale:
+    image: speedwave-mcp-presale:1.0.0
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - type: bind
+        source: /test/.speedwave/tokens/test/presale
+        target: /tokens
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user()
+        );
+        let manifests = vec![test_presale_manifest(plugin::TokenMount::ReadOnly)];
+        let violations = SecurityCheck::run(&yaml, "test", &manifests, &test_expected_paths());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginVolumeLongForm),
+            "Long-form YAML volume should trigger PLUGIN_VOLUME_LONG_FORM"
+        );
+    }
+
+    #[test]
+    fn test_security_check_plugin_manifest_missing() {
+        let yaml = valid_plugin_yaml("ro");
+        // Pass empty manifests — should detect missing manifest
+        let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginManifestMissing),
+            "Plugin without matching manifest should trigger PLUGIN_MANIFEST_MISSING"
         );
     }
 
@@ -3724,6 +4285,7 @@ services:
             "test",
             "speedwave_test_network",
             &tokens_dir,
+            "/test/project",
         )
         .unwrap();
 
@@ -3741,6 +4303,43 @@ services:
         assert!(
             services.contains_key(&serde_yaml_ng::Value::String("mcp-presale".into())),
             "Enabled plugin service mcp-presale should appear in compose"
+        );
+    }
+
+    #[test]
+    fn test_plugin_service_has_pull_policy_never() {
+        let manifest = PluginManifest {
+            name: "Test".to_string(),
+            service_id: Some("test-svc".to_string()),
+            slug: "test-svc".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(4099),
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![],
+        };
+        let svc = plugin::generate_plugin_service(
+            &manifest,
+            "proj",
+            "net",
+            std::path::Path::new("/tokens/proj"),
+            "/workspace",
+        )
+        .unwrap();
+        let policy = svc
+            .get("pull_policy")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(
+            policy, "never",
+            "Plugin services must have `pull_policy: never` (images are built locally)"
         );
     }
 
@@ -3827,6 +4426,7 @@ services:
             "myproject",
             "speedwave_myproject_network",
             &tokens_dir,
+            "/test/project",
         )
         .unwrap();
 
@@ -3836,6 +4436,166 @@ services:
             yaml.contains("/home/user/.speedwave/tokens/myproject/presale:/tokens:ro"),
             "Token mount should be <tokens_dir>/<service_id>:/tokens:<mode>. Got:\n{}",
             yaml
+        );
+    }
+
+    // ── extract_volume_for_target tests ─────────────────────────────────
+
+    #[test]
+    fn test_extract_volume_for_target_with_mode() {
+        let result = extract_volume_for_target("/path/to/host:/tokens:ro", "/tokens");
+        assert_eq!(
+            result,
+            Some(("/path/to/host".to_string(), Some("ro".to_string())))
+        );
+    }
+
+    #[test]
+    fn test_extract_volume_for_target_without_mode() {
+        let result = extract_volume_for_target("/path/to/host:/tokens", "/tokens");
+        assert_eq!(result, Some(("/path/to/host".to_string(), None)));
+    }
+
+    #[test]
+    fn test_extract_volume_for_target_no_match() {
+        let result = extract_volume_for_target("/path:/other:ro", "/tokens");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_volume_for_target_workspace_mount() {
+        let result = extract_volume_for_target("/project:/workspace:rw", "/workspace");
+        assert_eq!(
+            result,
+            Some(("/project".to_string(), Some("rw".to_string())))
+        );
+    }
+
+    // ── SharePoint built-in security tests ──────────────────────────────
+
+    #[test]
+    fn test_security_check_sharepoint_correct_mounts_pass() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:rw
+      - /test/project:/workspace:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        let sp_violations: Vec<_> = violations
+            .iter()
+            .filter(|v| v.rule.is_sharepoint())
+            .collect();
+        assert!(
+            sp_violations.is_empty(),
+            "Correct SharePoint mounts should not trigger violations, got: {:?}",
+            sp_violations.iter().map(|v| &v.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_security_check_sharepoint_missing_workspace_mount() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::SharepointMissingWorkspaceMount),
+            "SharePoint without workspace mount should trigger SHAREPOINT_MISSING_WORKSPACE_MOUNT"
+        );
+    }
+
+    #[test]
+    fn test_security_check_sharepoint_workspace_path_mismatch() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:rw
+      - /wrong/path:/workspace:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::SharepointWorkspacePathMismatch),
+            "Wrong SharePoint workspace path should trigger SHAREPOINT_WORKSPACE_PATH_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn test_security_check_sharepoint_workspace_mount_mode_ro() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:rw
+      - /test/project:/workspace:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations = SecurityCheck::run(&yaml, "test", &[], &paths);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::SharepointWorkspaceMountMode),
+            "SharePoint workspace with :ro should trigger SHAREPOINT_WORKSPACE_MOUNT_MODE"
         );
     }
 
@@ -4042,6 +4802,7 @@ services:
       - no-new-privileges:true
     volumes:
       - /home/user/.speedwave/tokens/test/sharepoint:/tokens:rw
+      - /home/user/projects/test:/workspace:rw
     environment:
       - PORT=4002
     networks:
@@ -4312,7 +5073,15 @@ networks:
         );
         let result = apply_worker_auth_tokens_with_dir(&yaml, tmp.path(), &integrations).unwrap();
 
-        let violations = SecurityCheck::run(&result, "test", &[]);
+        let violations = SecurityCheck::run(
+            &result,
+            "test",
+            &[],
+            &SecurityExpectedPaths::from_raw(
+                "/home/user/projects/test",
+                "/home/user/.speedwave/tokens/test",
+            ),
+        );
         assert!(
             violations.is_empty(),
             "SecurityCheck should pass with worker auth, got: {:?}",
@@ -4442,6 +5211,96 @@ networks:
             err.contains("nonexistent-service"),
             "error should mention the missing service name, got: {}",
             err
+        );
+    }
+
+    #[test]
+    fn test_security_check_plugin_token_ro_when_manifest_rw() {
+        use crate::plugin::{PluginManifest, TokenMount};
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-test-plugin:
+    image: speedwave-mcp-test-plugin:1.0.0
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    read_only: true
+    volumes:
+      - /test/.speedwave/tokens/test/test-plugin:/tokens:ro
+      - /test/project:/workspace:rw
+    labels:
+      speedwave.plugin-service: "true"
+"#,
+            user = container_user()
+        );
+        let manifest = PluginManifest {
+            name: "Test".to_string(),
+            service_id: Some("test-plugin".to_string()),
+            slug: "test-plugin".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(5000),
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadWrite {
+                justification: "OAuth refresh".to_string(),
+            },
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![],
+        };
+        let violations = SecurityCheck::run(&yaml, "test", &[manifest], &test_expected_paths());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginTokenMountMode),
+            "should detect :ro mount when manifest declares ReadWrite. Violations: {:?}",
+            violations
+                .iter()
+                .map(|v| format!("{}", v))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_security_check_sharepoint_no_extra_volumes() {
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-sharepoint:
+    image: speedwave-mcp-sharepoint:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /test/.speedwave/tokens/test/sharepoint:/tokens:rw
+      - /test/project:/workspace:rw
+      - /etc/passwd:/etc/passwd:ro
+"#,
+            user = container_user()
+        );
+        let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::SharepointNoExtraVolumes),
+            "should detect unauthorized volume mount on SharePoint. Got: {:?}",
+            violations
+                .iter()
+                .map(|v| format!("{}", v))
+                .collect::<Vec<_>>()
         );
     }
 }

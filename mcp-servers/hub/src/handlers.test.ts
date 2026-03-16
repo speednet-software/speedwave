@@ -684,36 +684,36 @@ describe('createCodeExecutorHandlers', () => {
   });
 
   describe('long-running operation detection', () => {
-    it('should use extended timeout for sharepoint.sync() operations', async () => {
+    it('should use extended timeout for sharepoint.downloadFile() operations', async () => {
       vi.mocked(executorModule.executeCode).mockResolvedValue(
-        createMockExecuteResult({ synced: true }, 150000)
+        createMockExecuteResult({ downloaded: true }, 150000)
       );
 
       const handlers = createCodeExecutorHandlers(mockConfig);
       await handlers.handleExecuteCode({
-        code: 'await sharepoint.sync({ local_path: "/path", mode: "pull" })',
+        code: 'await sharepoint.downloadFile({ remote_path: "/doc.pdf", local_path: "/path" })',
       });
 
-      // Should use LONG_OPERATION_MS (300000) as default for sync operations
+      // Should use LONG_OPERATION_MS (300000) as default for downloadFile operations
       expect(executorModule.executeCode).toHaveBeenCalledWith({
-        code: 'await sharepoint.sync({ local_path: "/path", mode: "pull" })',
+        code: 'await sharepoint.downloadFile({ remote_path: "/doc.pdf", local_path: "/path" })',
         timeoutMs: TIMEOUTS.LONG_OPERATION_MS,
       });
     });
 
-    it('should use extended timeout for sharepoint.syncDirectory() operations', async () => {
+    it('should use extended timeout for sharepoint.uploadFile() operations', async () => {
       vi.mocked(executorModule.executeCode).mockResolvedValue(
-        createMockExecuteResult({ synced: true }, 150000)
+        createMockExecuteResult({ uploaded: true }, 150000)
       );
 
       const handlers = createCodeExecutorHandlers(mockConfig);
       await handlers.handleExecuteCode({
-        code: 'await sharepoint.syncDirectory({ local_path: "/path", mode: "push" })',
+        code: 'await sharepoint.uploadFile({ local_path: "/path", remote_path: "/dest" })',
       });
 
-      // Should use LONG_OPERATION_MS (300000) as default for syncDirectory operations
+      // Should use LONG_OPERATION_MS (300000) as default for uploadFile operations
       expect(executorModule.executeCode).toHaveBeenCalledWith({
-        code: 'await sharepoint.syncDirectory({ local_path: "/path", mode: "push" })',
+        code: 'await sharepoint.uploadFile({ local_path: "/path", remote_path: "/dest" })',
         timeoutMs: TIMEOUTS.LONG_OPERATION_MS,
       });
     });
@@ -735,54 +735,54 @@ describe('createCodeExecutorHandlers', () => {
       });
     });
 
-    it('should allow custom timeout for sync operations up to LONG_OPERATION_MS', async () => {
+    it('should allow custom timeout for file transfer operations up to LONG_OPERATION_MS', async () => {
       vi.mocked(executorModule.executeCode).mockResolvedValue(
-        createMockExecuteResult({ synced: true }, 200000)
+        createMockExecuteResult({ downloaded: true }, 200000)
       );
 
       const handlers = createCodeExecutorHandlers(mockConfig);
       await handlers.handleExecuteCode({
-        code: 'await sharepoint.sync({ local_path: "/path", mode: "pull" })',
+        code: 'await sharepoint.downloadFile({ remote_path: "/doc.pdf", local_path: "/path" })',
         timeout_ms: 250000,
       });
 
       // Should use custom timeout (250000) since it's under LONG_OPERATION_MS (600000)
       expect(executorModule.executeCode).toHaveBeenCalledWith({
-        code: 'await sharepoint.sync({ local_path: "/path", mode: "pull" })',
+        code: 'await sharepoint.downloadFile({ remote_path: "/doc.pdf", local_path: "/path" })',
         timeoutMs: 250000,
       });
     });
 
-    it('should cap sync operation timeout at LONG_OPERATION_MS', async () => {
+    it('should cap file transfer operation timeout at LONG_OPERATION_MS', async () => {
       vi.mocked(executorModule.executeCode).mockResolvedValue(
-        createMockExecuteResult({ synced: true }, 250000)
+        createMockExecuteResult({ downloaded: true }, 250000)
       );
 
       const handlers = createCodeExecutorHandlers(mockConfig);
       await handlers.handleExecuteCode({
-        code: 'await sharepoint.sync({ local_path: "/path", mode: "pull" })',
+        code: 'await sharepoint.downloadFile({ remote_path: "/doc.pdf", local_path: "/path" })',
         timeout_ms: 700000, // Try to exceed LONG_OPERATION_MS (600000)
       });
 
       // Should cap at LONG_OPERATION_MS (600000)
       expect(executorModule.executeCode).toHaveBeenCalledWith({
-        code: 'await sharepoint.sync({ local_path: "/path", mode: "pull" })',
+        code: 'await sharepoint.downloadFile({ remote_path: "/doc.pdf", local_path: "/path" })',
         timeoutMs: TIMEOUTS.LONG_OPERATION_MS,
       });
     });
 
-    it('should detect sync with different whitespace patterns', async () => {
+    it('should detect file transfer with different whitespace patterns', async () => {
       vi.mocked(executorModule.executeCode).mockResolvedValue(
-        createMockExecuteResult({ synced: true }, 150000)
+        createMockExecuteResult({ downloaded: true }, 150000)
       );
 
       const handlers = createCodeExecutorHandlers(mockConfig);
 
       // Test with various whitespace patterns (registry-based detection uses flexible regex)
       const testCases = [
-        'sharepoint.sync({ mode: "pull" })',
-        'sharepoint .sync({ mode: "pull" })',
-        'sharepoint. sync({ mode: "pull" })',
+        'sharepoint.downloadFile({ remote_path: "/doc.pdf" })',
+        'sharepoint .downloadFile({ remote_path: "/doc.pdf" })',
+        'sharepoint. downloadFile({ remote_path: "/doc.pdf" })',
       ];
 
       for (const code of testCases) {
@@ -804,10 +804,10 @@ describe('createCodeExecutorHandlers', () => {
       const handlers = createCodeExecutorHandlers(mockConfig);
 
       // Tools with timeoutClass: 'long' in their metadata should get extended timeout
-      // sharepoint.sync has timeoutClass: 'long'
-      await handlers.handleExecuteCode({ code: 'sharepoint.sync({})' });
+      // sharepoint.downloadFile has timeoutClass: 'long'
+      await handlers.handleExecuteCode({ code: 'sharepoint.downloadFile({})' });
       expect(executorModule.executeCode).toHaveBeenLastCalledWith({
-        code: 'sharepoint.sync({})',
+        code: 'sharepoint.downloadFile({})',
         timeoutMs: TIMEOUTS.LONG_OPERATION_MS,
       });
 

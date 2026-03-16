@@ -423,7 +423,7 @@ describe('tool counts per service (regression)', () => {
 
   it('sharepoint has expected number of tools', () => {
     const tools = getServiceTools('sharepoint');
-    expect(tools.length).toBe(5); // listFileIds, getFileFull, sync, syncDirectory, getCurrentUser
+    expect(tools.length).toBe(5); // listFileIds, getFileFull, downloadFile, uploadFile, getCurrentUser
   });
 
   it('os has expected number of tools', () => {

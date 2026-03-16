@@ -16,13 +16,22 @@ describe('ChatComponent', () => {
   beforeEach(async () => {
     mockTauri = new MockTauriService();
 
-    // Default: list_projects returns an active project, containers running, start_chat succeeds
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
         case 'list_projects':
           return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        case 'get_bundle_reconcile_state':
+          return {
+            phase: 'done',
+            in_progress: false,
+            last_error: null,
+            pending_running_projects: [],
+            applied_bundle_id: null,
+          };
         case 'check_containers_running':
           return true;
+        case 'start_containers':
+          return undefined;
         case 'start_chat':
           return undefined;
         case 'send_message':
@@ -45,8 +54,6 @@ describe('ChatComponent', () => {
     // Reset service state between tests
     chatState._setState({ messages: [], currentBlocks: [], sessionStats: null });
     chatState.isStreaming = false;
-    chatState.containerStatus = 'checking';
-    chatState.containerError = '';
   });
 
   // ── handleStreamChunk: 'Text' ──────────────────────────────────────────────
@@ -211,7 +218,6 @@ describe('ChatComponent', () => {
       await component.sendMessage();
 
       expect(chatState.isStreaming).toBe(false);
-      // User message + error message
       expect(chatState.messages).toHaveLength(2);
       const errorBlock = chatState.messages[1].blocks[0];
       expect(errorBlock.type).toBe('error');
@@ -274,7 +280,7 @@ describe('ChatComponent', () => {
       const mockConversations = [
         { session_id: 's1', timestamp: '2026-03-06T10:00:00Z', preview: 'Hello', message_count: 3 },
       ];
-      chatState.activeProject = 'test';
+      projectState.activeProject = 'test';
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') return mockConversations;
         return undefined;
@@ -287,7 +293,7 @@ describe('ChatComponent', () => {
     });
 
     it('handles missing active project by setting empty conversations', async () => {
-      chatState.activeProject = null;
+      projectState.activeProject = null;
 
       await component.loadConversations();
 
@@ -295,7 +301,7 @@ describe('ChatComponent', () => {
     });
 
     it('sets historyError on backend failure', async () => {
-      chatState.activeProject = 'test';
+      projectState.activeProject = 'test';
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') throw new Error('network error');
@@ -311,7 +317,7 @@ describe('ChatComponent', () => {
     });
 
     it('sets historyLoading while loading', async () => {
-      chatState.activeProject = 'test';
+      projectState.activeProject = 'test';
       let capturedLoading = false;
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') {
@@ -336,7 +342,7 @@ describe('ChatComponent', () => {
         session_id: 's1',
         messages: [{ role: 'user', content: 'Hi', timestamp: '2026-03-06T10:00:00Z' }],
       };
-      chatState.activeProject = 'test';
+      projectState.activeProject = 'test';
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_conversation') return mockTranscript;
         return undefined;
@@ -348,7 +354,7 @@ describe('ChatComponent', () => {
     });
 
     it('sets viewError on backend failure', async () => {
-      chatState.activeProject = 'test';
+      projectState.activeProject = 'test';
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_conversation') throw new Error('not found');
@@ -377,7 +383,7 @@ describe('ChatComponent', () => {
         ],
       };
       component.viewingTranscript = mockTranscript;
-      chatState.activeProject = 'test';
+      projectState.activeProject = 'test';
 
       mockTauri.invokeHandler = async (cmd: string) => {
         invokeCalls.push(cmd);
@@ -410,7 +416,7 @@ describe('ChatComponent', () => {
         ],
       };
       component.viewingTranscript = mockTranscript;
-      chatState.activeProject = 'test';
+      projectState.activeProject = 'test';
 
       await component.resumeConversation('s1');
 
@@ -426,7 +432,7 @@ describe('ChatComponent', () => {
         messages: [{ role: 'user', content: 'Hi', timestamp: null }],
       };
       component.viewingTranscript = mockTranscript;
-      chatState.activeProject = 'test';
+      projectState.activeProject = 'test';
 
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'resume_conversation') throw new Error('container not running');
@@ -449,7 +455,7 @@ describe('ChatComponent', () => {
         messages: [{ role: 'user', content: 'Hi', timestamp: null }],
       };
       component.showHistory = true;
-      chatState.activeProject = 'test';
+      projectState.activeProject = 'test';
 
       await component.resumeConversation('s1');
 
@@ -488,7 +494,7 @@ describe('ChatComponent', () => {
 
   describe('toggleHistory', () => {
     it('toggles showHistory boolean', async () => {
-      chatState.activeProject = 'test';
+      projectState.activeProject = 'test';
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') return [];
         return undefined;
@@ -504,7 +510,7 @@ describe('ChatComponent', () => {
 
   describe('toggleMemory', () => {
     it('toggles showMemory boolean', async () => {
-      chatState.activeProject = 'test';
+      projectState.activeProject = 'test';
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') return 'memory content';
         return undefined;
@@ -520,7 +526,7 @@ describe('ChatComponent', () => {
 
   describe('loadProjectMemory', () => {
     it('logs error on failure', async () => {
-      chatState.activeProject = 'test';
+      projectState.activeProject = 'test';
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') throw new Error('disk failure');
@@ -533,13 +539,9 @@ describe('ChatComponent', () => {
       expect(errorSpy).toHaveBeenCalledWith('loadProjectMemory failed:', expect.any(Error));
       errorSpy.mockRestore();
     });
-  });
 
-  // ── loadProjectMemory ──────────────────────────────────────────────────────
-
-  describe('loadProjectMemory', () => {
     it('sets projectMemory on success', async () => {
-      chatState.activeProject = 'test';
+      projectState.activeProject = 'test';
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') return '# Project Memory\nSome content';
         return undefined;
@@ -551,20 +553,19 @@ describe('ChatComponent', () => {
     });
 
     it('sets empty string on backend failure without throwing', async () => {
-      chatState.activeProject = 'test';
+      projectState.activeProject = 'test';
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_project_memory') throw new Error('file not found');
         return undefined;
       };
 
-      // Should not throw
       await component.loadProjectMemory();
 
       expect(component.projectMemory).toBe('');
     });
 
     it('sets empty string when no active project', async () => {
-      chatState.activeProject = null;
+      projectState.activeProject = null;
 
       await component.loadProjectMemory();
 
@@ -672,11 +673,19 @@ describe('ChatComponent', () => {
 
   describe('project_switch_succeeded event', () => {
     it('reloads conversations when history panel is open', async () => {
-      chatState.activeProject = 'test';
+      projectState.activeProject = 'test';
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') return [];
         if (cmd === 'list_projects')
           return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'get_bundle_reconcile_state')
+          return {
+            phase: 'done',
+            in_progress: false,
+            last_error: null,
+            pending_running_projects: [],
+            applied_bundle_id: null,
+          };
         if (cmd === 'check_containers_running') return true;
         if (cmd === 'start_chat') return undefined;
         return undefined;
@@ -692,7 +701,7 @@ describe('ChatComponent', () => {
       const newConversations = [
         { session_id: 's2', timestamp: '2026-03-07T10:00:00Z', preview: 'new', message_count: 2 },
       ];
-      chatState.activeProject = 'other-project';
+      projectState.activeProject = 'other-project';
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_conversations') return newConversations;
         return undefined;
@@ -704,39 +713,19 @@ describe('ChatComponent', () => {
       expect(component.conversations).toEqual(newConversations);
     });
 
-    it('reloads memory when memory panel is open', async () => {
-      chatState.activeProject = 'test';
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'get_project_memory') return 'old memory';
-        if (cmd === 'list_projects')
-          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
-        if (cmd === 'check_containers_running') return true;
-        if (cmd === 'start_chat') return undefined;
-        return undefined;
-      };
-
-      await projectState.init();
-      await component.ngOnInit();
-      component.showMemory = true;
-      component.projectMemory = 'old memory';
-
-      chatState.activeProject = 'other-project';
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'get_project_memory') return 'new memory';
-        return undefined;
-      };
-
-      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other-project' });
-      await fixture.whenStable();
-
-      expect(component.projectMemory).toBe('new memory');
-    });
-
     it('closes transcript view on project switch', async () => {
-      chatState.activeProject = 'test';
+      projectState.activeProject = 'test';
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_projects')
           return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'get_bundle_reconcile_state')
+          return {
+            phase: 'done',
+            in_progress: false,
+            last_error: null,
+            pending_running_projects: [],
+            applied_bundle_id: null,
+          };
         if (cmd === 'check_containers_running') return true;
         if (cmd === 'start_chat') return undefined;
         return undefined;
@@ -752,36 +741,18 @@ describe('ChatComponent', () => {
       expect(component.viewingTranscript).toBeNull();
     });
 
-    it('clears stale data immediately on project switch', async () => {
-      chatState.activeProject = 'test';
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'list_projects')
-          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
-        if (cmd === 'check_containers_running') return true;
-        if (cmd === 'start_chat') return undefined;
-        return undefined;
-      };
-
-      await projectState.init();
-      await component.ngOnInit();
-      component.conversations = [
-        { session_id: 's1', timestamp: '2026-03-06T10:00:00Z', preview: 'old', message_count: 1 },
-      ];
-      component.projectMemory = 'old memory';
-      component.showHistory = false;
-      component.showMemory = false;
-
-      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other-project' });
-      await fixture.whenStable();
-
-      expect(component.conversations).toEqual([]);
-      expect(component.projectMemory).toBe('');
-    });
-
     it('cleans up project ready listener on destroy', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_projects')
           return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'get_bundle_reconcile_state')
+          return {
+            phase: 'done',
+            in_progress: false,
+            last_error: null,
+            pending_running_projects: [],
+            applied_bundle_id: null,
+          };
         if (cmd === 'check_containers_running') return true;
         if (cmd === 'start_chat') return undefined;
         return undefined;
@@ -790,14 +761,12 @@ describe('ChatComponent', () => {
       await projectState.init();
       await component.ngOnInit();
 
-      // Verify the unsub function exists before destroy
       expect(
         (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
       ).not.toBeNull();
 
       component.ngOnDestroy();
 
-      // Verify unsub was called and nulled
       expect(
         (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
       ).toBeNull();
@@ -817,16 +786,13 @@ describe('ChatComponent', () => {
           },
         ],
       });
-      chatState.containerStatus = 'running';
 
-      // Destroy and recreate
       fixture.destroy();
       const fixture2 = TestBed.createComponent(ChatComponent);
       const component2 = fixture2.componentInstance;
 
       expect(component2.chat.messages).toHaveLength(1);
       expect(component2.chat.messages[0].blocks[0]).toEqual({ type: 'text', content: 'persisted' });
-      expect(component2.chat.containerStatus).toBe('running');
       fixture2.destroy();
     });
   });

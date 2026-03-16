@@ -49,6 +49,19 @@ The mcp-os process runs on the host (not in a container) and binds to a dynamic 
 
 This ensures the MCP Hub always routes OS integration requests to the live mcp-os instance, even after process restarts.
 
+## Reconcile Guard (Image Readiness)
+
+When Speedwave detects a bundle change (e.g. after an app update), it rebuilds container images in a background thread (`reconcile_bundle_update`). During this time, any operation that starts containers (`start_containers`, `add_project`, `recreate_project_containers`, `switch_project`) will block via `ensure_images_ready()` until images are ready.
+
+The mechanism uses a `Condvar` with tri-state `ImageReadiness` (`Ready`, `Building`, `Failed`):
+
+- **Before reconcile spawn**: state set to `Building`
+- **After images built**: state set to `Ready`, all waiters unblocked
+- **On error or panic**: state set to `Failed`, all waiters unblocked with error
+- **Scope guard**: ensures `Building→Failed` transition even if the reconcile thread panics
+
+The Desktop frontend shows a unified blocking overlay in the Shell component while containers are not ready (checking, starting, switching, rebuilding states).
+
 ## See Also
 
 - [ADR-001: Eliminate Docker Desktop](../adr/ADR-001-eliminate-docker-desktop.md)

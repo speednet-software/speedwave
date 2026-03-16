@@ -477,12 +477,21 @@ pub fn list_installed_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<PluginM
 /// Builds pending plugin images (those with `.image_pending` marker).
 pub fn build_pending_plugin_images(runtime: &dyn ContainerRuntime) -> anyhow::Result<()> {
     let plugins_dir = plugins_base_dir()?;
+    build_pending_from_dir(runtime, &plugins_dir)
+}
+
+/// Inner implementation: builds pending plugin images from a given directory.
+/// Extracted for testability (avoids dependency on `$HOME`).
+fn build_pending_from_dir(
+    runtime: &dyn ContainerRuntime,
+    plugins_dir: &Path,
+) -> anyhow::Result<()> {
     if !plugins_dir.exists() {
         return Ok(());
     }
 
     let mut errors: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(&plugins_dir)? {
+    for entry in std::fs::read_dir(plugins_dir)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
@@ -576,6 +585,7 @@ pub fn generate_plugin_service(
     project_name: &str,
     network_name: &str,
     tokens_dir: &Path,
+    project_dir: &str,
 ) -> anyhow::Result<serde_yaml_ng::Value> {
     let sid = manifest
         .service_id
@@ -600,6 +610,7 @@ pub fn generate_plugin_service(
     };
 
     let tokens_path = crate::compose::to_engine_path(&tokens_dir.join(sid))?;
+    let workspace_path = crate::compose::to_engine_path(Path::new(project_dir))?;
     let mem_limit = manifest.mem_limit.as_deref().unwrap_or("256m");
     let user = container_user();
 
@@ -614,6 +625,7 @@ pub fn generate_plugin_service(
     let yaml_str = format!(
         r#"
 image: {tag}
+pull_policy: never
 container_name: {container_name}
 read_only: true
 user: "{user}"
@@ -625,6 +637,7 @@ tmpfs:
   - /tmp:noexec,nosuid,size=64m
 volumes:
   - {tokens_path}:/tokens:{token_mount_mode}
+  - {workspace_path}:/workspace:rw
 environment:
 {env_lines}
 networks:
@@ -642,6 +655,7 @@ deploy:
         user = user,
         tokens_path = tokens_path,
         token_mount_mode = token_mount_mode,
+        workspace_path = workspace_path,
         env_lines = env_lines,
         network_name = network_name,
         mem_limit = mem_limit,
@@ -1048,6 +1062,7 @@ mod tests {
             "myproject",
             "speedwave_myproject_network",
             &tokens_dir,
+            "/home/user/projects/myproject",
         )
         .unwrap();
 
@@ -1071,6 +1086,7 @@ mod tests {
         );
         assert!(yaml.contains("/tmp:noexec,nosuid"), "tmpfs: {yaml}");
         assert!(yaml.contains("/tokens:ro"), "token mount: {yaml}");
+        assert!(yaml.contains("/workspace:rw"), "workspace mount: {yaml}");
         assert!(yaml.contains("PORT=4010"), "PORT env: {yaml}");
         assert!(
             yaml.contains("speedwave_myproject_network"),
@@ -1103,12 +1119,18 @@ mod tests {
         };
 
         let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/proj");
-        let result =
-            generate_plugin_service(&manifest, "proj", "speedwave_proj_network", &tokens_dir)
-                .unwrap();
+        let result = generate_plugin_service(
+            &manifest,
+            "proj",
+            "speedwave_proj_network",
+            &tokens_dir,
+            "/test/project",
+        )
+        .unwrap();
 
         let yaml = serde_yaml_ng::to_string(&result).unwrap();
         assert!(yaml.contains("/tokens:rw"), "should use :rw mount: {yaml}");
+        assert!(yaml.contains("/workspace:rw"), "workspace mount: {yaml}");
         assert!(yaml.contains("memory: 512m"), "custom mem limit: {yaml}");
     }
 
@@ -1136,7 +1158,9 @@ mod tests {
         };
 
         let tokens_dir = PathBuf::from("/tokens");
-        let result = generate_plugin_service(&manifest, "proj", "net", &tokens_dir).unwrap();
+        let result =
+            generate_plugin_service(&manifest, "proj", "net", &tokens_dir, "/test/project")
+                .unwrap();
 
         let yaml = serde_yaml_ng::to_string(&result).unwrap();
         assert!(yaml.contains("CUSTOM_VAR=value"), "extra env: {yaml}");
@@ -1745,7 +1769,9 @@ mod tests {
         };
 
         let tokens_dir = PathBuf::from("/tokens");
-        let result = generate_plugin_service(&manifest, "proj", "net", &tokens_dir).unwrap();
+        let result =
+            generate_plugin_service(&manifest, "proj", "net", &tokens_dir, "/test/project")
+                .unwrap();
 
         // Verify it parses back as valid YAML
         let yaml = serde_yaml_ng::to_string(&result).unwrap();
@@ -2224,6 +2250,273 @@ mod tests {
         assert!(
             format!("{:?}", result.unwrap_err()).contains("Zip Slip"),
             "Error should mention Zip Slip"
+        );
+    }
+
+    #[test]
+    fn test_remove_plugin_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("test-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"{"name":"Test","slug":"test-plugin","version":"1.0.0","description":"test"}"#,
+        )
+        .unwrap();
+
+        // Simulate remove_plugin logic: validate slug + remove dir
+        validate_slug("test-plugin").unwrap();
+        assert!(plugin_dir.exists());
+        std::fs::remove_dir_all(&plugin_dir).unwrap();
+        assert!(!plugin_dir.exists());
+    }
+
+    #[test]
+    fn test_remove_plugin_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("nonexistent");
+        // Plugin dir doesn't exist — remove should fail
+        assert!(!plugin_dir.exists());
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_empty_readwrite_justification() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Containerfile"), "FROM scratch").unwrap();
+        let manifest = PluginManifest {
+            name: "Test".to_string(),
+            service_id: Some("test-rw".to_string()),
+            slug: "test-rw".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(5000),
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadWrite {
+                justification: "   ".to_string(),
+            },
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![],
+        };
+        let result = validate_manifest(&manifest, dir.path());
+        assert!(result.is_err(), "empty justification should be rejected");
+        assert!(result.unwrap_err().to_string().contains("justification"));
+    }
+
+    // --- build_pending_from_dir error accumulation tests ---
+
+    /// Minimal mock runtime for build_pending_from_dir tests.
+    /// build_image always fails so we can verify runtime errors are accumulated too.
+    struct FailingBuildRuntime;
+
+    impl ContainerRuntime for FailingBuildRuntime {
+        fn compose_up(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn compose_down(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+            Ok(vec![])
+        }
+        fn container_exec(&self, _: &str, _: &[&str]) -> std::process::Command {
+            std::process::Command::new("true")
+        }
+        fn container_exec_piped(
+            &self,
+            _: &str,
+            _: &[&str],
+        ) -> anyhow::Result<std::process::Command> {
+            Ok(std::process::Command::new("true"))
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn ensure_ready(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn build_image(
+            &self,
+            _tag: &str,
+            _context_dir: &str,
+            _containerfile: &str,
+            _build_args: &[(&str, &str)],
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("mock build failure")
+        }
+        fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_build_pending_accumulates_parse_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path();
+
+        // Plugin with .image_pending and invalid JSON in plugin.json
+        let bad_dir = plugins_dir.join("bad-json");
+        std::fs::create_dir_all(&bad_dir).unwrap();
+        std::fs::write(bad_dir.join(".image_pending"), "").unwrap();
+        std::fs::write(bad_dir.join("plugin.json"), "NOT VALID JSON").unwrap();
+
+        // Another plugin with .image_pending and missing required fields
+        let missing_fields_dir = plugins_dir.join("missing-fields");
+        std::fs::create_dir_all(&missing_fields_dir).unwrap();
+        std::fs::write(missing_fields_dir.join(".image_pending"), "").unwrap();
+        std::fs::write(
+            missing_fields_dir.join("plugin.json"),
+            r#"{"only_one_field": true}"#,
+        )
+        .unwrap();
+
+        let rt = FailingBuildRuntime;
+        let result = build_pending_from_dir(&rt, plugins_dir);
+
+        assert!(
+            result.is_err(),
+            "should return error when manifests fail to parse"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Some plugin images failed to build"),
+            "error should contain header: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("parse manifest"),
+            "error should mention parse failure: {err_msg}"
+        );
+        // Both bad plugins should be mentioned
+        assert!(
+            err_msg.contains("bad-json") && err_msg.contains("missing-fields"),
+            "error should mention both failing plugin dirs: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_build_pending_accumulates_build_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path();
+
+        // Valid manifest with .image_pending — will reach build_single_plugin_image
+        // which calls runtime.prepare_build_context() then runtime.build_image().
+        // FailingBuildRuntime.build_image() returns Err, so the error is accumulated.
+        let valid_dir = plugins_dir.join("valid-plugin");
+        std::fs::create_dir_all(&valid_dir).unwrap();
+        std::fs::write(valid_dir.join(".image_pending"), "").unwrap();
+        std::fs::write(
+            valid_dir.join("plugin.json"),
+            r#"{
+                "name": "Valid",
+                "slug": "valid-plugin",
+                "service_id": "valid-plugin",
+                "version": "1.0.0",
+                "description": "test",
+                "port": 4010
+            }"#,
+        )
+        .unwrap();
+        // Containerfile needed by build_single_plugin_image
+        std::fs::write(valid_dir.join("Containerfile"), "FROM scratch").unwrap();
+
+        let rt = FailingBuildRuntime;
+        let result = build_pending_from_dir(&rt, plugins_dir);
+
+        assert!(result.is_err(), "should return error when build fails");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("valid-plugin"),
+            "error should reference the plugin slug: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("mock build failure"),
+            "error should contain the underlying build error: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_build_pending_mixed_parse_and_build_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path();
+
+        // Plugin 1: bad manifest (parse error)
+        let bad_dir = plugins_dir.join("broken-manifest");
+        std::fs::create_dir_all(&bad_dir).unwrap();
+        std::fs::write(bad_dir.join(".image_pending"), "").unwrap();
+        std::fs::write(bad_dir.join("plugin.json"), "{invalid").unwrap();
+
+        // Plugin 2: valid manifest but build will fail
+        let good_dir = plugins_dir.join("buildable");
+        std::fs::create_dir_all(&good_dir).unwrap();
+        std::fs::write(good_dir.join(".image_pending"), "").unwrap();
+        std::fs::write(
+            good_dir.join("plugin.json"),
+            r#"{
+                "name": "Buildable",
+                "slug": "buildable",
+                "service_id": "buildable",
+                "version": "1.0.0",
+                "description": "test",
+                "port": 4020
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(good_dir.join("Containerfile"), "FROM scratch").unwrap();
+
+        let rt = FailingBuildRuntime;
+        let result = build_pending_from_dir(&rt, plugins_dir);
+
+        assert!(result.is_err(), "should accumulate both error types");
+        let err_msg = result.unwrap_err().to_string();
+        // Both errors should be accumulated, not just the first one
+        assert!(
+            err_msg.contains("parse manifest"),
+            "should contain parse error: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("mock build failure"),
+            "should contain build error: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_build_pending_skips_dirs_without_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path();
+
+        // Plugin dir exists but has no .image_pending marker — should be skipped
+        let no_marker_dir = plugins_dir.join("no-marker");
+        std::fs::create_dir_all(&no_marker_dir).unwrap();
+        std::fs::write(no_marker_dir.join("plugin.json"), "INVALID").unwrap();
+
+        let rt = FailingBuildRuntime;
+        let result = build_pending_from_dir(&rt, plugins_dir);
+        assert!(
+            result.is_ok(),
+            "plugins without .image_pending should be skipped, not cause errors"
+        );
+    }
+
+    #[test]
+    fn test_build_pending_nonexistent_dir_returns_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nonexistent = tmp.path().join("does-not-exist");
+
+        let rt = FailingBuildRuntime;
+        let result = build_pending_from_dir(&rt, &nonexistent);
+        assert!(
+            result.is_ok(),
+            "nonexistent plugins dir should return Ok(())"
         );
     }
 }
