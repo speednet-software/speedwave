@@ -18,6 +18,7 @@ mod health;
 mod history;
 mod ide_bridge;
 mod integrations_cmd;
+mod log_file;
 mod logging_cmd;
 mod mcp_os_process;
 mod oauth_cmd;
@@ -883,17 +884,7 @@ fn main() {
 
             reconcile::reconcile_bundle_update(app.handle());
 
-            // Linux safety net: show the window immediately on startup.
-            // Tray icon support on Linux depends on libappindicator/libayatana
-            // and may be invisible even when tray_builder.build() succeeds
-            // (e.g. GNOME without AppIndicator extension). Showing the window
-            // ensures the user is never left with an invisible app. Close always
-            // exits on Linux — tray_available is never set (see below).
-            #[cfg(target_os = "linux")]
-            show_main_window(app.handle());
-
-            // Build system tray. If creation fails, fall back to visible
-            // window (see Linux safety net above).
+            // Build system tray.
             let tray_menu = tray::build_tray_menu(app.handle(), &None)?;
             let update_version_tray = update_version_setup.clone();
             let tray_icon = app
@@ -1045,34 +1036,16 @@ fn main() {
                     log::info!("tray: system tray created");
                     // Linux: do not set tray_available — build() can return Ok
                     // even when the icon is invisible (GNOME without AppIndicator
-                    // extension). Closing the window must always exit on Linux to
-                    // prevent a stuck invisible app. The tray menu (Open/Quit)
-                    // still works when the icon is visible.
+                    // extension). Closing the window must always exit on Linux.
+                    // The tray menu (Open/Quit) still works when the icon is
+                    // visible.
                     #[cfg(not(target_os = "linux"))]
                     tray_available_setup.store(true, Ordering::Relaxed);
-
-                    // macOS: switch to Accessory activation policy so the app
-                    // does not appear in the Dock or Cmd+Tab. The window starts
-                    // hidden (tauri.conf.json: visible=false) and is shown on
-                    // tray click. Only after tray succeeds — if tray fails,
-                    // Dock stays visible.
-                    #[cfg(target_os = "macos")]
-                    if let Err(e) = app
-                        .handle()
-                        .set_activation_policy(tauri::ActivationPolicy::Accessory)
-                    {
-                        log::error!(
-                            "tray: failed to set initial activation policy to Accessory: {e}"
-                        );
-                    }
                 }
                 Err(e) => {
-                    // Tray creation failed. On Linux the safety net above already
-                    // showed the window; on other platforms, show it now as fallback.
+                    // Tray creation failed. Window is already visible
+                    // (tauri.conf.json: visible=true), so no fallback needed.
                     log::error!("tray: failed to create system tray: {e}");
-                    log::warn!("tray: falling back to visible window");
-                    #[cfg(not(target_os = "linux"))]
-                    show_main_window(app.handle());
                 }
             }
 
@@ -1144,6 +1117,7 @@ fn main() {
             container_logs_cmd::get_container_logs,
             container_logs_cmd::get_compose_logs,
             container_logs_cmd::get_mcp_os_logs,
+            container_logs_cmd::get_claude_session_logs,
             // IDE Bridge
             list_available_ides,
             select_ide,

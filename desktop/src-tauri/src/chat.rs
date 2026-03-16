@@ -88,6 +88,12 @@ pub struct ControlRequest {
 
 type PendingRequests = Arc<Mutex<HashMap<String, ControlRequest>>>;
 
+/// Structured log entry returned by StreamParser for session logging.
+pub struct LogEntry {
+    pub prefix: &'static str,
+    pub message: String,
+}
+
 /// Stateful parser that tracks active content blocks across stream events.
 /// Maintains index→(tool_id, tool_name) map built from content_block_start events.
 pub struct StreamParser {
@@ -107,8 +113,11 @@ impl StreamParser {
     }
 
     /// Parse a pre-parsed JSON value. Mutates internal state for block tracking.
-    /// Returns `None` for ignored message types.
-    pub fn parse_line(&mut self, parsed: &serde_json::Value) -> Option<StreamChunk> {
+    /// Returns (chunk for frontend, optional log entry for session log).
+    pub fn parse_line(
+        &mut self,
+        parsed: &serde_json::Value,
+    ) -> (Option<StreamChunk>, Option<LogEntry>) {
         let msg_type = parsed["type"].as_str().unwrap_or("");
 
         match msg_type {
@@ -117,7 +126,7 @@ impl StreamParser {
             "result" => self.parse_result(parsed),
             // assistant — ignored (ADR-006: we stream via stream_event, finalize on result)
             // system — ignored
-            _ => None,
+            _ => (None, None),
         }
     }
 
@@ -185,12 +194,18 @@ impl StreamParser {
         })
     }
 
-    fn parse_stream_event(&mut self, event: &serde_json::Value) -> Option<StreamChunk> {
+    fn parse_stream_event(
+        &mut self,
+        event: &serde_json::Value,
+    ) -> (Option<StreamChunk>, Option<LogEntry>) {
         let event_type = event["type"].as_str().unwrap_or("");
 
         match event_type {
             "content_block_start" => {
-                let index = event["index"].as_u64()?;
+                let index = match event["index"].as_u64() {
+                    Some(i) => i,
+                    None => return (None, None),
+                };
                 let block = &event["content_block"];
                 let block_type = block["type"].as_str().unwrap_or("");
 
@@ -202,7 +217,7 @@ impl StreamParser {
                                 log::warn!(
                                     "content_block_start: tool_use block missing 'id' field"
                                 );
-                                return None;
+                                return (None, None);
                             }
                         };
                         let name = match block["name"].as_str() {
@@ -211,26 +226,36 @@ impl StreamParser {
                                 log::warn!(
                                     "content_block_start: tool_use block missing 'name' field"
                                 );
-                                return None;
+                                return (None, None);
                             }
                         };
+                        let log_entry = Some(LogEntry {
+                            prefix: "TOOL",
+                            message: format!("start: {} ({})", name, id),
+                        });
                         self.active_blocks.insert(index, (id.clone(), name.clone()));
                         // Suppress ToolStart for AskUserQuestion — it will be emitted
                         // via control_request path, not from stream events.
                         if name == ASK_USER_TOOL_NAME {
-                            None
+                            (None, log_entry)
                         } else {
-                            Some(StreamChunk::ToolStart {
-                                tool_id: id,
-                                tool_name: name,
-                            })
+                            (
+                                Some(StreamChunk::ToolStart {
+                                    tool_id: id,
+                                    tool_name: name,
+                                }),
+                                log_entry,
+                            )
                         }
                     }
-                    "thinking" => Some(StreamChunk::Thinking {
-                        content: String::new(),
-                    }),
+                    "thinking" => (
+                        Some(StreamChunk::Thinking {
+                            content: String::new(),
+                        }),
+                        None,
+                    ),
                     // "text" — text deltas will arrive via content_block_delta
-                    _ => None,
+                    _ => (None, None),
                 }
             }
 
@@ -240,21 +265,42 @@ impl StreamParser {
 
                 match delta_type {
                     "text_delta" => {
-                        let text = delta["text"].as_str()?;
-                        Some(StreamChunk::Text {
-                            content: text.to_string(),
-                        })
+                        let text = match delta["text"].as_str() {
+                            Some(t) => t,
+                            None => return (None, None),
+                        };
+                        (
+                            Some(StreamChunk::Text {
+                                content: text.to_string(),
+                            }),
+                            None,
+                        )
                     }
                     "thinking_delta" => {
-                        let thinking = delta["thinking"].as_str()?;
-                        Some(StreamChunk::Thinking {
-                            content: thinking.to_string(),
-                        })
+                        let thinking = match delta["thinking"].as_str() {
+                            Some(t) => t,
+                            None => return (None, None),
+                        };
+                        (
+                            Some(StreamChunk::Thinking {
+                                content: thinking.to_string(),
+                            }),
+                            None,
+                        )
                     }
                     "input_json_delta" => {
-                        let index = event["index"].as_u64()?;
-                        let partial = delta["partial_json"].as_str()?;
-                        let (tool_id, tool_name) = self.active_blocks.get(&index)?;
+                        let index = match event["index"].as_u64() {
+                            Some(i) => i,
+                            None => return (None, None),
+                        };
+                        let partial = match delta["partial_json"].as_str() {
+                            Some(p) => p,
+                            None => return (None, None),
+                        };
+                        let (tool_id, tool_name) = match self.active_blocks.get(&index) {
+                            Some(t) => t,
+                            None => return (None, None),
+                        };
                         // Accumulate input JSON for AskUserQuestion detection on block stop
                         self.tool_input
                             .entry(tool_id.clone())
@@ -262,43 +308,57 @@ impl StreamParser {
                             .push_str(partial);
                         // Suppress ToolInputDelta for AskUserQuestion — frontend doesn't need partial JSON
                         if tool_name == ASK_USER_TOOL_NAME {
-                            None
+                            (None, None)
                         } else {
-                            Some(StreamChunk::ToolInputDelta {
-                                tool_id: tool_id.clone(),
-                                partial_json: partial.to_string(),
-                            })
+                            (
+                                Some(StreamChunk::ToolInputDelta {
+                                    tool_id: tool_id.clone(),
+                                    partial_json: partial.to_string(),
+                                }),
+                                None,
+                            )
                         }
                     }
                     // signature_delta — integrity, not rendered
-                    _ => None,
+                    _ => (None, None),
                 }
             }
 
             "content_block_stop" => {
                 if let Some(index) = event["index"].as_u64() {
-                    if let Some((tool_id, _tool_name)) = self.active_blocks.remove(&index) {
+                    if let Some((tool_id, tool_name)) = self.active_blocks.remove(&index) {
+                        let log_entry = Some(LogEntry {
+                            prefix: "TOOL",
+                            message: format!("stop: {} ({})", tool_name, tool_id),
+                        });
                         // AskUserQuestion is handled via control_request protocol,
                         // not via stream events — just clean up accumulated input.
                         self.tool_input.remove(&tool_id);
+                        return (None, log_entry);
                     }
                 }
-                None
+                (None, None)
             }
 
             "message_stop" => {
                 self.reset();
-                None
+                (None, None)
             }
 
-            _ => None,
+            _ => (None, None),
         }
     }
 
-    fn parse_user_message(&self, parsed: &serde_json::Value) -> Option<StreamChunk> {
+    fn parse_user_message(
+        &self,
+        parsed: &serde_json::Value,
+    ) -> (Option<StreamChunk>, Option<LogEntry>) {
         let message = &parsed["message"];
         let content = &message["content"];
-        let blocks = content.as_array()?;
+        let blocks = match content.as_array() {
+            Some(b) => b,
+            None => return (None, None),
+        };
 
         for block in blocks {
             let block_type = block["type"].as_str().unwrap_or("");
@@ -307,7 +367,7 @@ impl StreamParser {
                     Some(s) if !s.is_empty() => s.to_string(),
                     _ => {
                         log::warn!("parse_user_message: tool_result block missing 'tool_use_id'");
-                        return None;
+                        return (None, None);
                     }
                 };
                 let is_error = block["is_error"].as_bool().unwrap_or(false);
@@ -330,28 +390,42 @@ impl StreamParser {
                     String::new()
                 };
 
-                return Some(StreamChunk::ToolResult {
-                    tool_id: tool_use_id,
-                    content: result_content,
-                    is_error,
+                let log_entry = Some(LogEntry {
+                    prefix: "TOOL",
+                    message: format!("result: {} error={}", tool_use_id, is_error),
                 });
+
+                return (
+                    Some(StreamChunk::ToolResult {
+                        tool_id: tool_use_id,
+                        content: result_content,
+                        is_error,
+                    }),
+                    log_entry,
+                );
             }
         }
-        None
+        (None, None)
     }
 
-    fn parse_result(&self, parsed: &serde_json::Value) -> Option<StreamChunk> {
+    fn parse_result(
+        &self,
+        parsed: &serde_json::Value,
+    ) -> (Option<StreamChunk>, Option<LogEntry>) {
         let is_error = parsed["is_error"].as_bool().unwrap_or(false);
 
         if is_error {
             let result_text = parsed["result"].as_str().unwrap_or("");
             if result_text.trim().is_empty() {
                 log::warn!("parse_result: is_error=true but result text is empty");
-                return None;
+                return (None, None);
             }
-            return Some(StreamChunk::Error {
-                content: result_text.to_string(),
-            });
+            return (
+                Some(StreamChunk::Error {
+                    content: result_text.to_string(),
+                }),
+                None,
+            );
         }
 
         let session_id = parsed["session_id"].as_str().unwrap_or("").to_string();
@@ -377,13 +451,21 @@ impl StreamParser {
             .filter(|s| !s.trim().is_empty())
             .map(String::from);
 
-        Some(StreamChunk::Result {
-            session_id,
-            cost_usd,
-            total_cost,
-            usage,
-            result_text,
-        })
+        let log_entry = Some(LogEntry {
+            prefix: "RESULT",
+            message: "turn complete".to_string(),
+        });
+
+        (
+            Some(StreamChunk::Result {
+                session_id,
+                cost_usd,
+                total_cost,
+                usage,
+                result_text,
+            }),
+            log_entry,
+        )
     }
 }
 
@@ -499,6 +581,9 @@ pub struct ChatSession {
     project_name: String,
     shared_stdin: Option<Arc<Mutex<std::process::ChildStdin>>>,
     pending_requests: PendingRequests,
+    drain_handles: Vec<std::thread::JoinHandle<()>>,
+    /// Set to `Some` only after a successful spawn — guards `stop()` log entry.
+    session_log_path: Option<std::path::PathBuf>,
 }
 
 impl ChatSession {
@@ -509,6 +594,8 @@ impl ChatSession {
             project_name: project_name.to_string(),
             shared_stdin: None,
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
+            drain_handles: Vec::new(),
+            session_log_path: None,
         }
     }
 
@@ -572,13 +659,41 @@ impl ChatSession {
         let shared_stdin = Arc::new(Mutex::new(stdin));
         self.shared_stdin = Some(shared_stdin.clone());
 
-        // Spawn stderr reader to log errors (avoids pipe buffer deadlock)
+        // Best-effort session log init — errors here do NOT kill the session
+        let session_log_path = match consts::claude_session_log_path(&self.project_name) {
+            Some(path) => {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                crate::log_file::truncate_if_oversized(&path, 2 * 1024 * 1024);
+                let mut f = crate::log_file::open_log_file(&path);
+                crate::log_file::write_log_line(&mut f, "SESSION", "started");
+                Some(path)
+            }
+            None => {
+                log::warn!("cannot determine session log path");
+                None
+            }
+        };
+        self.session_log_path = session_log_path.clone();
+
+        // Spawn stderr reader to log errors (avoids pipe buffer deadlock).
+        // Each reader thread opens its own O_APPEND handle to the session log.
+        // POSIX guarantees atomic writes below PIPE_BUF (4 KB); our lines are
+        // ~100 bytes, so interleaving cannot corrupt individual entries.
+        let stderr_log_path = session_log_path.clone();
         if let Some(stderr) = child.stderr.take() {
-            std::thread::spawn(move || {
+            let h = std::thread::spawn(move || {
+                let mut log_file = stderr_log_path
+                    .as_deref()
+                    .and_then(crate::log_file::open_log_file);
                 let reader = BufReader::new(stderr);
                 for line in reader.lines() {
                     match line {
-                        Ok(l) => log::debug!("{l}"),
+                        Ok(l) => {
+                            log::debug!("{l}");
+                            crate::log_file::write_log_line(&mut log_file, "STDERR", &l);
+                        }
                         Err(e) => {
                             log::warn!("stderr reader: I/O error: {e}");
                             break;
@@ -586,14 +701,19 @@ impl ChatSession {
                     }
                 }
             });
+            self.drain_handles.push(h);
         }
 
         let pending_requests = self.pending_requests.clone();
         let stdin_for_reader = shared_stdin;
+        let stdout_log_path = session_log_path;
 
         // Background thread: parse Claude's stream-json and emit Tauri events
-        std::thread::spawn(move || {
+        let h = std::thread::spawn(move || {
             let mut parser = StreamParser::new();
+            let mut log_file = stdout_log_path
+                .as_deref()
+                .and_then(crate::log_file::open_log_file);
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 let line = match line {
@@ -607,11 +727,23 @@ impl ChatSession {
                 // Parse JSON once — pass the Value to both control_request and stream parsers
                 let parsed = match serde_json::from_str::<serde_json::Value>(&line) {
                     Ok(v) => v,
-                    Err(_) => continue, // skip invalid JSON lines
+                    Err(_) => {
+                        crate::log_file::write_log_line(
+                            &mut log_file,
+                            "STDOUT",
+                            "[non-json stdout suppressed]",
+                        );
+                        continue;
+                    }
                 };
 
                 // 1. Check for control_request
                 if let Some(ctrl) = StreamParser::try_parse_control_request(&parsed) {
+                    crate::log_file::write_log_line(
+                        &mut log_file,
+                        "CONTROL",
+                        &format!("request: {} ({})", ctrl.tool_name, ctrl.tool_use_id),
+                    );
                     if ctrl.tool_name == ASK_USER_TOOL_NAME {
                         // Store pending request and emit to frontend
                         match pending_requests.lock() {
@@ -688,13 +820,22 @@ impl ChatSession {
                 }
 
                 // 2. Normal stream events
-                if let Some(chunk) = parser.parse_line(&parsed) {
+                let (chunk, log_entry) = parser.parse_line(&parsed);
+                if let Some(entry) = log_entry {
+                    crate::log_file::write_log_line(
+                        &mut log_file,
+                        entry.prefix,
+                        &entry.message,
+                    );
+                }
+                if let Some(chunk) = chunk {
                     if let Err(e) = app_handle.emit("chat_stream", chunk) {
                         log::warn!("failed to emit chat_stream event: {e}");
                     }
                 }
             }
         });
+        self.drain_handles.push(h);
 
         self.child = Some(child);
         Ok(())
@@ -792,6 +933,16 @@ impl ChatSession {
             child.wait().ok();
         }
         self.child = None;
+        // Join reader threads (pipes closed → readers exit promptly)
+        for handle in self.drain_handles.drain(..) {
+            handle.join().ok();
+        }
+        // Log session end ONLY if session actually started
+        if let Some(ref log_path) = self.session_log_path {
+            let mut f = crate::log_file::open_log_file(log_path);
+            crate::log_file::write_log_line(&mut f, "SESSION", "stopped");
+        }
+        self.session_log_path = None;
         if let Ok(mut map) = self.pending_requests.lock() {
             map.clear();
         }
@@ -814,9 +965,22 @@ mod tests {
     use super::*;
 
     /// Convenience: parse a JSON string and call `parser.parse_line`.
+    /// Returns only the StreamChunk (for backward-compatible test assertions).
     fn parse_line_str(parser: &mut StreamParser, line: &str) -> Option<StreamChunk> {
         let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
-        parser.parse_line(&parsed)
+        parser.parse_line(&parsed).0
+    }
+
+    /// Convenience: parse a JSON string and call `parser.parse_line`.
+    /// Returns the full tuple (chunk, log_entry) for log entry assertions.
+    fn parse_line_full(
+        parser: &mut StreamParser,
+        line: &str,
+    ) -> (Option<StreamChunk>, Option<LogEntry>) {
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(parsed) => parser.parse_line(&parsed),
+            Err(_) => (None, None),
+        }
     }
 
     /// Convenience: parse a JSON string and call `StreamParser::try_parse_control_request`.
@@ -1981,5 +2145,117 @@ mod tests {
             }
             other => panic!("expected Result, got {other:?}"),
         }
+    }
+
+    // ── LogEntry tests ──────────────────────────────────────────────
+
+    #[test]
+    fn tool_use_start_produces_log_entry() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01ABC","name":"Read","input":{}}}}"#;
+        let (chunk, log_entry) = parse_line_full(&mut parser, line);
+        assert!(chunk.is_some(), "should produce ToolStart chunk");
+        let entry = log_entry.unwrap();
+        assert_eq!(entry.prefix, "TOOL");
+        assert!(
+            entry.message.contains("start: Read (toolu_01ABC)"),
+            "message: {}",
+            entry.message
+        );
+    }
+
+    #[test]
+    fn tool_use_stop_produces_log_entry() {
+        let mut parser = StreamParser::new();
+        // Start first
+        let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01ABC","name":"Read","input":{}}}}"#;
+        parse_line_full(&mut parser, start);
+        // Stop
+        let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
+        let (chunk, log_entry) = parse_line_full(&mut parser, stop);
+        assert!(chunk.is_none(), "content_block_stop should not emit chunk");
+        let entry = log_entry.unwrap();
+        assert_eq!(entry.prefix, "TOOL");
+        assert!(
+            entry.message.contains("stop: Read (toolu_01ABC)"),
+            "message: {}",
+            entry.message
+        );
+    }
+
+    #[test]
+    fn content_block_stop_without_tool_produces_no_log_entry() {
+        let mut parser = StreamParser::new();
+        let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":99}}"#;
+        let (chunk, log_entry) = parse_line_full(&mut parser, stop);
+        assert!(chunk.is_none());
+        assert!(log_entry.is_none());
+    }
+
+    #[test]
+    fn result_produces_log_entry() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","session_id":"abc123","cost_usd":0.003,"is_error":false,"result":""}"#;
+        let (chunk, log_entry) = parse_line_full(&mut parser, line);
+        assert!(chunk.is_some(), "should produce Result chunk");
+        let entry = log_entry.unwrap();
+        assert_eq!(entry.prefix, "RESULT");
+        assert_eq!(entry.message, "turn complete");
+    }
+
+    #[test]
+    fn text_delta_produces_no_log_entry() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}}"#;
+        let (_chunk, log_entry) = parse_line_full(&mut parser, line);
+        assert!(log_entry.is_none(), "text_delta should not produce log entry");
+    }
+
+    #[test]
+    fn user_tool_result_produces_log_entry() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01ABC","content":"output","is_error":true}]}}"#;
+        let (chunk, log_entry) = parse_line_full(&mut parser, line);
+        assert!(chunk.is_some(), "should produce ToolResult chunk");
+        let entry = log_entry.unwrap();
+        assert_eq!(entry.prefix, "TOOL");
+        assert!(
+            entry.message.contains("result: toolu_01ABC error=true"),
+            "message: {}",
+            entry.message
+        );
+    }
+
+    #[test]
+    fn user_tool_result_no_error_produces_log_entry() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"ok"}]}}"#;
+        let (_chunk, log_entry) = parse_line_full(&mut parser, line);
+        let entry = log_entry.unwrap();
+        assert!(
+            entry.message.contains("result: t2 error=false"),
+            "message: {}",
+            entry.message
+        );
+    }
+
+    // ── Session guard tests ─────────────────────────────────────────
+
+    #[test]
+    fn chat_session_new_has_no_session_log_path() {
+        let session = ChatSession::new("test-project");
+        assert!(session.session_log_path.is_none());
+        assert!(session.drain_handles.is_empty());
+    }
+
+    #[test]
+    fn chat_session_stop_on_new_does_not_create_log_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp
+            .path()
+            .join(".speedwave/logs/default/claude-session.log");
+        let mut session = ChatSession::new("default");
+        session.stop().unwrap();
+        assert!(!log_path.exists(), "stop() on fresh session should not create log file");
     }
 }

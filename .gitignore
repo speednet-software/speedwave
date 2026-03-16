@@ -58,6 +58,18 @@ desktop/src-tauri/THIRD-PARTY-LICENSES/
 # Bundled Node.js binary (downloaded by `make download-nodejs`)
 desktop/src-tauri/nodejs/
 
+# Bundled nerdctl-full (downloaded by `make download-nerdctl-full`, Linux .deb only)
+desktop/src-tauri/nerdctl-full/
+
+# Bundled WSL2 resources (downloaded by `make download-wsl-resources`, Windows only)
+desktop/src-tauri/wsl/
+
+# Bundled macOS native CLI helpers (compiled by `make build-native-macos`)
+desktop/src-tauri/calendar-cli
+desktop/src-tauri/mail-cli
+desktop/src-tauri/notes-cli
+desktop/src-tauri/reminders-cli
+
 # Bundled container build context and mcp-os (copied before Tauri build)
 desktop/src-tauri/build-context/
 desktop/src-tauri/mcp-os/

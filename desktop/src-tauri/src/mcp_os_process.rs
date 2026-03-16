@@ -69,11 +69,7 @@ impl McpOsProcess {
         kill_stale_by_pid_file(&pid_path);
 
         // Truncate log file if it exceeds 2 MB to prevent unbounded growth
-        if let Ok(meta) = std::fs::metadata(&log_path) {
-            if meta.len() > 2 * 1024 * 1024 {
-                let _ = std::fs::write(&log_path, "");
-            }
-        }
+        crate::log_file::truncate_if_oversized(&log_path, 2 * 1024 * 1024);
 
         // Write token file with restrictive permissions
         write_restricted_file(&token_path, &token)?;
@@ -391,13 +387,13 @@ fn drain_and_read_port(
     // Drain stderr — mcp-os writes warnings here via console.error/console.warn
     if let Some(stderr) = child.stderr.take() {
         let h = std::thread::spawn(move || {
-            let mut log_file = open_log_file(&log_path_stderr);
+            let mut log_file = crate::log_file::open_log_file(&log_path_stderr);
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines() {
                 match line {
                     Ok(line) => {
                         log::warn!("mcp-os stderr: {line}");
-                        write_log_line(&mut log_file, "STDERR", &line);
+                        crate::log_file::write_log_line(&mut log_file, "STDERR", &line);
                     }
                     Err(_) => break,
                 }
@@ -411,7 +407,7 @@ fn drain_and_read_port(
     let (tx, rx) = std::sync::mpsc::channel();
     let log_path_stdout = log_path.to_path_buf();
     let h = std::thread::spawn(move || {
-        let mut log_file = open_log_file(&log_path_stdout);
+        let mut log_file = crate::log_file::open_log_file(&log_path_stdout);
         let reader = std::io::BufReader::new(stdout);
         let mut port_sent = false;
         for line in reader.lines() {
@@ -425,7 +421,7 @@ fn drain_and_read_port(
                                         anyhow::anyhow!("port {port} out of u16 range")
                                     }));
                                 port_sent = true;
-                                write_log_line(&mut log_file, "STDOUT", &line);
+                                crate::log_file::write_log_line(&mut log_file, "STDOUT", &line);
                                 continue;
                             }
                         }
@@ -433,7 +429,7 @@ fn drain_and_read_port(
                     // After port is found, keep draining stdout so the pipe
                     // never fills up and the child never gets SIGPIPE.
                     log::debug!("mcp-os: {line}");
-                    write_log_line(&mut log_file, "STDOUT", &line);
+                    crate::log_file::write_log_line(&mut log_file, "STDOUT", &line);
                 }
                 Err(_) => break,
             }
@@ -449,30 +445,6 @@ fn drain_and_read_port(
     match rx.recv_timeout(PORT_READ_TIMEOUT) {
         Ok(result) => result.map(|port| (port, handles)),
         Err(_) => anyhow::bail!("timed out waiting for mcp-os port announcement"),
-    }
-}
-
-/// Open log file for appending with chmod 600 on Unix.
-fn open_log_file(path: &Path) -> Option<std::fs::File> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.append(true).create(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    opts.open(path).ok()
-}
-
-/// Write a timestamped line to the log file. Errors are silently ignored.
-fn write_log_line(file: &mut Option<std::fs::File>, prefix: &str, line: &str) {
-    use std::io::Write;
-    if let Some(ref mut f) = file {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let _ = writeln!(f, "[{secs}] {prefix}: {line}");
     }
 }
 

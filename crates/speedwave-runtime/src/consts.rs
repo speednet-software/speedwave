@@ -9,6 +9,7 @@ pub const MCP_OS_AUTH_TOKEN_FILE: &str = "mcp-os-auth-token";
 pub const MCP_OS_PORT_FILE: &str = "mcp-os-port";
 pub const MCP_OS_PID_FILE: &str = "mcp-os-pid";
 pub const MCP_OS_LOG_FILE: &str = "mcp-os.log";
+pub const CLAUDE_SESSION_LOG_FILE: &str = "claude-session.log";
 pub const CLAUDE_BINARY: &str = "/usr/local/bin/claude";
 
 /// PATH set inside containers for the `speedwave` user.
@@ -391,6 +392,21 @@ pub fn find_mcp_service(config_key: &str) -> Option<&'static McpServiceDescripto
     TOGGLEABLE_MCP_SERVICES
         .iter()
         .find(|s| s.config_key == config_key)
+}
+
+/// Build the per-project Claude session log path using an injected home directory.
+/// Testable variant — does not depend on `dirs::home_dir()`.
+pub fn claude_session_log_path_in(home: &std::path::Path, project: &str) -> std::path::PathBuf {
+    home.join(DATA_DIR)
+        .join("logs")
+        .join(project)
+        .join(CLAUDE_SESSION_LOG_FILE)
+}
+
+/// Build the per-project Claude session log path.
+/// Returns `None` when `dirs::home_dir()` is unavailable.
+pub fn claude_session_log_path(project: &str) -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|home| claude_session_log_path_in(&home, project))
 }
 
 /// Built-in services defined in containers/compose.template.yml.
@@ -823,6 +839,34 @@ mod tests {
              Did you add a service to one but not the other?",
             TOGGLEABLE_OS_SERVICES.len(),
             os_field_count
+        );
+    }
+
+    #[test]
+    fn test_claude_session_log_file_is_non_empty() {
+        assert!(
+            !CLAUDE_SESSION_LOG_FILE.is_empty(),
+            "CLAUDE_SESSION_LOG_FILE must not be empty"
+        );
+    }
+
+    #[test]
+    fn test_claude_session_log_path_in_builds_correct_path() {
+        let home = std::path::Path::new("/fake/home");
+        let path = claude_session_log_path_in(home, "myproject");
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/fake/home/.speedwave/logs/myproject/claude-session.log")
+        );
+    }
+
+    #[test]
+    fn test_claude_session_log_path_in_different_project() {
+        let home = std::path::Path::new("/home/user");
+        let path = claude_session_log_path_in(home, "proj.v1");
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/home/user/.speedwave/logs/proj.v1/claude-session.log")
         );
     }
 }
