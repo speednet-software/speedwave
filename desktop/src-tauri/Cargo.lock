@@ -4563,7 +4563,7 @@ dependencies = [
  "ed25519-dalek",
  "fs2",
  "log",
- "rand 0.8.5",
+ "rand 0.9.2",
  "regex",
  "serde",
  "serde_json",
