@@ -347,6 +347,32 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
     Ok(())
 }
 
+/// Checks that a plugin port doesn't collide with built-in services or other plugins.
+fn validate_plugin_port(port: u16, slug: &str, existing: &[PluginManifest]) -> anyhow::Result<()> {
+    let builtin_count = consts::TOGGLEABLE_MCP_SERVICES.len() as u16;
+    let builtin_end = consts::PORT_BASE + builtin_count;
+    if (consts::PORT_BASE..=builtin_end).contains(&port) {
+        anyhow::bail!(
+            "Port {} is reserved for built-in services (range {}-{})",
+            port,
+            consts::PORT_BASE,
+            builtin_end
+        );
+    }
+    for existing_manifest in existing {
+        if let Some(existing_port) = existing_manifest.port {
+            if existing_port == port && existing_manifest.slug != slug {
+                anyhow::bail!(
+                    "Port {} is already claimed by plugin '{}'",
+                    port,
+                    existing_manifest.slug
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Install a plugin from a ZIP file into `~/.speedwave/plugins/<slug>/`.
 /// Verifies signature, validates manifest, and creates `.image_pending` marker
 /// for deferred image build.
@@ -395,28 +421,7 @@ pub fn install_plugin(
         }
     }
     if let Some(new_port) = manifest.port {
-        // Check against built-in port range (hub=4000, workers=4001-4004)
-        let builtin_count = consts::TOGGLEABLE_MCP_SERVICES.len() as u16;
-        let builtin_end = consts::PORT_BASE + builtin_count;
-        if (consts::PORT_BASE..=builtin_end).contains(&new_port) {
-            anyhow::bail!(
-                "Port {} is reserved for built-in services (range {}-{})",
-                new_port,
-                consts::PORT_BASE,
-                builtin_end
-            );
-        }
-        for existing_manifest in &existing {
-            if let Some(existing_port) = existing_manifest.port {
-                if existing_port == new_port && existing_manifest.slug != manifest.slug {
-                    anyhow::bail!(
-                        "Port {} is already claimed by plugin '{}'",
-                        new_port,
-                        existing_manifest.slug
-                    );
-                }
-            }
-        }
+        validate_plugin_port(new_port, &manifest.slug, &existing)?;
     }
 
     // Move to final location
@@ -2137,21 +2142,29 @@ mod tests {
 
     #[test]
     fn test_install_rejects_builtin_port_range() {
-        // Port 4000 is hub, 4001-4004 are built-in workers
-        let builtin_count = consts::TOGGLEABLE_MCP_SERVICES.len() as u16;
-        let builtin_end = consts::PORT_BASE + builtin_count;
-        for port in consts::PORT_BASE..=builtin_end {
-            assert!(
-                (consts::PORT_BASE..=builtin_end).contains(&port),
-                "Port {port} should be in the reserved range"
-            );
-        }
-        // Port just above the range should be allowed
+        let no_existing: Vec<PluginManifest> = vec![];
+
+        // Hub port (4000) should be rejected
+        let err = validate_plugin_port(consts::PORT_BASE, "test", &no_existing)
+            .unwrap_err()
+            .to_string();
         assert!(
-            !(consts::PORT_BASE..=builtin_end).contains(&(builtin_end + 1)),
-            "Port {} should NOT be reserved",
-            builtin_end + 1
+            err.contains("reserved"),
+            "PORT_BASE should be reserved, got: {err}"
         );
+
+        // Last built-in worker port should be rejected
+        let builtin_end = consts::PORT_BASE + consts::TOGGLEABLE_MCP_SERVICES.len() as u16;
+        let err = validate_plugin_port(builtin_end, "test", &no_existing)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("reserved"),
+            "builtin_end should be reserved, got: {err}"
+        );
+
+        // First port above the range should be accepted
+        assert!(validate_plugin_port(builtin_end + 1, "test", &no_existing).is_ok());
     }
 
     #[test]
