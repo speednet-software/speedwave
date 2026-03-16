@@ -7,7 +7,7 @@
 # - Blast radius containment: compromise of this worker only exposes GitLab
 
 # Build stage
-FROM node:24-alpine AS builder
+FROM node:25-alpine AS builder
 
 WORKDIR /build
 
@@ -36,7 +36,7 @@ RUN cd gitlab && npm run build
 RUN cd gitlab && npm prune --omit=dev
 
 # Production stage
-FROM node:24-alpine
+FROM node:25-alpine
 
 # curl for healthcheck
 RUN apk add --no-cache curl
