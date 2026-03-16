@@ -168,8 +168,8 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
             })
             .filter(|p| p.exists());
 
-        let claude_session_log = speedwave_runtime::consts::claude_session_log_path(&project)
-            .filter(|p| p.exists());
+        let claude_session_log =
+            speedwave_runtime::consts::claude_session_log_path(&project).filter(|p| p.exists());
 
         let input = DiagnosticsInput {
             log_dir,

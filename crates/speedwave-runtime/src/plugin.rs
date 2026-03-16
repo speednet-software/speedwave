@@ -66,8 +66,6 @@ pub struct PluginManifest {
     pub auth_fields: Vec<AuthFieldDef>,
     #[serde(default)]
     pub settings_schema: Option<serde_json::Value>,
-    /// Reserved for future semver enforcement. Parsed from manifest but not
-    /// currently validated — will be enforced once the versioning scheme is stable.
     #[serde(default)]
     pub speedwave_compat: Option<String>,
     #[serde(default)]
@@ -315,8 +313,15 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
     }
 
     // Validate extra_env keys/values contain no newlines or null bytes (YAML injection defense)
+    const RESERVED_ENV_KEYS: &[&str] = &["PORT"];
     if let Some(ref env) = manifest.extra_env {
         for (k, v) in env {
+            if RESERVED_ENV_KEYS.contains(&k.as_str()) {
+                anyhow::bail!(
+                    "extra_env key '{}' is reserved and injected automatically by Speedwave",
+                    k
+                );
+            }
             if k.contains('\n')
                 || k.contains('\r')
                 || k.contains('\0')
@@ -390,6 +395,17 @@ pub fn install_plugin(
         }
     }
     if let Some(new_port) = manifest.port {
+        // Check against built-in port range (hub=4000, workers=4001-4004)
+        let builtin_count = consts::TOGGLEABLE_MCP_SERVICES.len() as u16;
+        let builtin_end = consts::PORT_BASE + builtin_count;
+        if (consts::PORT_BASE..=builtin_end).contains(&new_port) {
+            anyhow::bail!(
+                "Port {} is reserved for built-in services (range {}-{})",
+                new_port,
+                consts::PORT_BASE,
+                builtin_end
+            );
+        }
         for existing_manifest in &existing {
             if let Some(existing_port) = existing_manifest.port {
                 if existing_port == new_port && existing_manifest.slug != manifest.slug {
@@ -2061,6 +2077,35 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_manifest_rejects_reserved_extra_env_key() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-reserved".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: Some(HashMap::from([("PORT".to_string(), "9999".to_string())])),
+            mem_limit: None,
+            requires_integrations: vec![],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("reserved"),
+            "should mention reserved key, got: {err}"
+        );
+    }
+
+    #[test]
     fn test_install_rejects_duplicate_port() {
         // Port uniqueness is checked in install_plugin against existing plugins.
         // We test the logic by simulating the check.
@@ -2088,6 +2133,25 @@ mod tests {
             .iter()
             .any(|m| m.port == Some(new_port) && m.slug != new_slug);
         assert!(conflict, "Duplicate port should be detected");
+    }
+
+    #[test]
+    fn test_install_rejects_builtin_port_range() {
+        // Port 4000 is hub, 4001-4004 are built-in workers
+        let builtin_count = consts::TOGGLEABLE_MCP_SERVICES.len() as u16;
+        let builtin_end = consts::PORT_BASE + builtin_count;
+        for port in consts::PORT_BASE..=builtin_end {
+            assert!(
+                (consts::PORT_BASE..=builtin_end).contains(&port),
+                "Port {port} should be in the reserved range"
+            );
+        }
+        // Port just above the range should be allowed
+        assert!(
+            !(consts::PORT_BASE..=builtin_end).contains(&(builtin_end + 1)),
+            "Port {} should NOT be reserved",
+            builtin_end + 1
+        );
     }
 
     #[test]
