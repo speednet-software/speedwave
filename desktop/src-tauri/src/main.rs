@@ -18,6 +18,7 @@ mod health;
 mod history;
 mod ide_bridge;
 mod integrations_cmd;
+mod log_file;
 mod logging_cmd;
 mod mcp_os_process;
 mod oauth_cmd;
@@ -1144,6 +1145,7 @@ fn main() {
             container_logs_cmd::get_container_logs,
             container_logs_cmd::get_compose_logs,
             container_logs_cmd::get_mcp_os_logs,
+            container_logs_cmd::get_claude_session_logs,
             // IDE Bridge
             list_available_ides,
             select_ide,

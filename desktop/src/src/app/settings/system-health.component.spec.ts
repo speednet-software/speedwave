@@ -297,8 +297,8 @@ describe('SystemHealthComponent', () => {
   });
 
   describe('fetchLogs() single container', () => {
-    it('invokes get_container_logs for a specific container', async () => {
-      component.selectedContainer = 'speedwave_test_claude';
+    it('invokes get_container_logs for a non-claude container', async () => {
+      component.selectedContainer = 'speedwave_test_mcp_hub';
       component.showAllLogs = false;
       component.tailLines = 200;
       mockTauri.invokeHandler = async () => 'log line 1\nlog line 2';
@@ -306,7 +306,7 @@ describe('SystemHealthComponent', () => {
       await component.fetchLogs();
 
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      component.selectedContainer = 'speedwave_test_claude';
+      component.selectedContainer = 'speedwave_test_mcp_hub';
       component.showAllLogs = false;
       component.tailLines = 200;
       mockTauri.invokeHandler = async () => 'log line 1\nlog line 2';
@@ -314,7 +314,7 @@ describe('SystemHealthComponent', () => {
       await component.fetchLogs();
 
       expect(invokeSpy).toHaveBeenCalledWith('get_container_logs', {
-        container: 'speedwave_test_claude',
+        container: 'speedwave_test_mcp_hub',
         tail: 200,
       });
       expect(component.logContent).toBe('log line 1\nlog line 2');
@@ -389,6 +389,75 @@ describe('SystemHealthComponent', () => {
     });
   });
 
+  describe('fetchLogs() claude container appends session logs', () => {
+    it('fetches container logs and appends session logs for _claude container', async () => {
+      component.selectedContainer = 'speedwave_test_claude';
+      component.showAllLogs = false;
+      component.tailLines = 200;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_container_logs') return 'container output';
+        if (cmd === 'get_claude_session_logs') return '[123] SESSION: started';
+        return '';
+      };
+
+      await component.fetchLogs();
+
+      expect(component.logContent).toContain('container output');
+      expect(component.logContent).toContain('--- Claude Session Logs ---');
+      expect(component.logContent).toContain('[123] SESSION: started');
+      expect(component.logLoading).toBe(false);
+    });
+
+    it('shows only container logs when session logs fail', async () => {
+      component.selectedContainer = 'speedwave_test_claude';
+      component.showAllLogs = false;
+      component.tailLines = 200;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_container_logs') return 'container output';
+        if (cmd === 'get_claude_session_logs') throw new Error('unavailable');
+        return '';
+      };
+
+      await component.fetchLogs();
+
+      expect(component.logContent).toBe('container output');
+      expect(component.logError).toBeNull();
+    });
+
+    it('does not append session logs separator when session logs are empty', async () => {
+      component.selectedContainer = 'speedwave_test_claude';
+      component.showAllLogs = false;
+      component.tailLines = 200;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_container_logs') return 'container output';
+        if (cmd === 'get_claude_session_logs') return '  ';
+        return '';
+      };
+
+      await component.fetchLogs();
+
+      expect(component.logContent).toBe('container output');
+      expect(component.logContent).not.toContain('--- Claude Session Logs ---');
+    });
+
+    it('does not fetch session logs for non-claude containers', async () => {
+      component.selectedContainer = 'speedwave_test_mcp_hub';
+      component.showAllLogs = false;
+      component.tailLines = 200;
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      mockTauri.invokeHandler = async () => 'hub logs';
+
+      await component.fetchLogs();
+
+      expect(invokeSpy).toHaveBeenCalledWith('get_container_logs', {
+        container: 'speedwave_test_mcp_hub',
+        tail: 200,
+      });
+      expect(invokeSpy).not.toHaveBeenCalledWith('get_claude_session_logs', expect.anything());
+      expect(component.logContent).toBe('hub logs');
+    });
+  });
+
   describe('fetchLogs() error', () => {
     it('sets logError and clears logContent on failure', async () => {
       component.selectedContainer = 'speedwave_test_claude';
@@ -414,6 +483,51 @@ describe('SystemHealthComponent', () => {
 
       expect(invokeSpy).not.toHaveBeenCalled();
       expect(component.logLoading).toBe(false);
+    });
+  });
+
+  describe('recreateContainers()', () => {
+    it('invokes recreate_project_containers and refreshes', async () => {
+      component.project = 'my-project';
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'recreate_project_containers') return undefined;
+        if (cmd === 'get_health') return makeHealthReport();
+        if (cmd === 'get_bridge_status') return null;
+        return undefined;
+      };
+
+      await component.recreateContainers();
+
+      expect(invokeSpy).toHaveBeenCalledWith('recreate_project_containers', {
+        project: 'my-project',
+      });
+      expect(component.recreating).toBe(false);
+      expect(component.error).toBeNull();
+    });
+
+    it('sets error on failure', async () => {
+      component.project = 'my-project';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'recreate_project_containers') throw new Error('recreate failed');
+        if (cmd === 'get_health') return makeHealthReport();
+        if (cmd === 'get_bridge_status') return null;
+        return undefined;
+      };
+
+      await component.recreateContainers();
+
+      expect(component.error).toContain('Recreate failed');
+      expect(component.recreating).toBe(false);
+    });
+
+    it('does nothing when project is null', async () => {
+      component.project = null;
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await component.recreateContainers();
+
+      expect(invokeSpy).not.toHaveBeenCalledWith('recreate_project_containers', expect.anything());
     });
   });
 

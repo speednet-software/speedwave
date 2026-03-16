@@ -64,6 +64,12 @@ desktop/src-tauri/nerdctl-full/
 # Bundled WSL2 resources (downloaded by `make download-wsl-resources`, Windows only)
 desktop/src-tauri/wsl/
 
+# Bundled macOS native CLI helpers (compiled by `make build-native-macos`)
+desktop/src-tauri/calendar-cli
+desktop/src-tauri/mail-cli
+desktop/src-tauri/notes-cli
+desktop/src-tauri/reminders-cli
+
 # Bundled container build context and mcp-os (copied before Tauri build)
 desktop/src-tauri/build-context/
 desktop/src-tauri/mcp-os/
