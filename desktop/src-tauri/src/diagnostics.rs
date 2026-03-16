@@ -85,7 +85,7 @@ pub(crate) fn build_diagnostics_zip(
         }
     }
 
-    // 4b. Claude session log
+    // 5. Claude session log
     if let Some(ref path) = input.claude_session_log {
         if path.exists() {
             if let Ok(content) = std::fs::read_to_string(path) {
@@ -96,7 +96,7 @@ pub(crate) fn build_diagnostics_zip(
         }
     }
 
-    // 5. compose.yml
+    // 6. compose.yml
     if let Some(ref compose_path) = input.compose_path {
         if compose_path.exists() {
             if let Ok(content) = std::fs::read_to_string(compose_path) {
@@ -107,7 +107,7 @@ pub(crate) fn build_diagnostics_zip(
         }
     }
 
-    // 6. System info (no sanitization needed)
+    // 7. System info (no sanitization needed)
     let sys_info = format!(
         "os: {}\narch: {}\nversion: {}\n",
         std::env::consts::OS,

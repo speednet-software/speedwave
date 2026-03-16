@@ -31,13 +31,20 @@ pub fn write_log_line(file: &mut Option<std::fs::File>, prefix: &str, line: &str
     }
 }
 
-/// Truncate a log file to empty if it exceeds `max_bytes`.
+/// Rotate a log file if it exceeds `max_bytes` by keeping the last half.
+/// This preserves the most recent entries which are most useful for debugging.
 pub fn truncate_if_oversized(path: &Path, max_bytes: u64) {
-    if let Ok(meta) = std::fs::metadata(path) {
-        if meta.len() > max_bytes {
-            let _ = std::fs::write(path, "");
-        }
-    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) if c.len() as u64 > max_bytes => c,
+        _ => return,
+    };
+    // Keep the last half, aligned to a line boundary
+    let keep_from = content.len() / 2;
+    let tail = match content[keep_from..].find('\n') {
+        Some(pos) => &content[keep_from + pos + 1..],
+        None => &content[keep_from..],
+    };
+    let _ = std::fs::write(path, tail);
 }
 
 // ---------------------------------------------------------------------------
@@ -108,19 +115,31 @@ mod tests {
     }
 
     #[test]
-    fn truncate_if_oversized_truncates_large_file() {
+    fn truncate_if_oversized_keeps_tail() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("big.log");
-        // Write 3000 bytes
-        std::fs::write(&path, "x".repeat(3000)).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 3000);
+        // Write lines totaling >2000 bytes
+        let mut content = String::new();
+        for i in 0..100 {
+            content.push_str(&format!("[{i}] line number {i} with some padding text\n"));
+        }
+        assert!(content.len() > 2000);
+        std::fs::write(&path, &content).unwrap();
 
         truncate_if_oversized(&path, 2000);
 
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().len(),
-            0,
-            "should be truncated to empty"
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            result.len() < content.len(),
+            "file should be smaller after rotation"
+        );
+        assert!(
+            result.contains("[99]"),
+            "should keep the most recent entries: {result}"
+        );
+        assert!(
+            !result.contains("[0] "),
+            "should have dropped the oldest entries"
         );
     }
 

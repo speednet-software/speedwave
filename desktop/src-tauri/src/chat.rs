@@ -681,7 +681,10 @@ impl ChatSession {
         };
         self.session_log_path = session_log_path.clone();
 
-        // Spawn stderr reader to log errors (avoids pipe buffer deadlock)
+        // Spawn stderr reader to log errors (avoids pipe buffer deadlock).
+        // Each reader thread opens its own O_APPEND handle to the session log.
+        // POSIX guarantees atomic writes below PIPE_BUF (4 KB); our lines are
+        // ~100 bytes, so interleaving cannot corrupt individual entries.
         let stderr_log_path = session_log_path.clone();
         if let Some(stderr) = child.stderr.take() {
             let h = std::thread::spawn(move || {
@@ -743,7 +746,7 @@ impl ChatSession {
                     crate::log_file::write_log_line(
                         &mut log_file,
                         "CONTROL",
-                        &format!("tool={}", ctrl.tool_name),
+                        &format!("request: {} ({})", ctrl.tool_name, ctrl.tool_use_id),
                     );
                     if ctrl.tool_name == ASK_USER_TOOL_NAME {
                         // Store pending request and emit to frontend
