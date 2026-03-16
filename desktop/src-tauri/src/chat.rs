@@ -453,11 +453,7 @@ impl StreamParser {
 
         let log_entry = Some(LogEntry {
             prefix: "RESULT",
-            message: format!(
-                "session_id={} cost={}",
-                session_id,
-                cost_usd.map_or("none".to_string(), |c| c.to_string())
-            ),
+            message: "turn complete".to_string(),
         });
 
         (
@@ -2204,16 +2200,7 @@ mod tests {
         assert!(chunk.is_some(), "should produce Result chunk");
         let entry = log_entry.unwrap();
         assert_eq!(entry.prefix, "RESULT");
-        assert!(
-            entry.message.contains("session_id=abc123"),
-            "message: {}",
-            entry.message
-        );
-        assert!(
-            entry.message.contains("cost=0.003"),
-            "message: {}",
-            entry.message
-        );
+        assert_eq!(entry.message, "turn complete");
     }
 
     #[test]
