@@ -775,6 +775,8 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
           tail: lines,
         });
       } else if (this.selectedContainer?.endsWith('_claude')) {
+        // Naming convention: compose template names the Claude container
+        // `{COMPOSE_PREFIX}_{project}_claude`, so `_claude` suffix is stable.
         // Fetch container logs and session logs in parallel; session logs are best-effort
         const [containerResult, sessionResult] = await Promise.allSettled([
           this.tauri.invoke<string>('get_container_logs', {
