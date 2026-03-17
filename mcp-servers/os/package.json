@@ -35,7 +35,7 @@
     "@types/express": "^5.0.0",
     "@types/node": "^24.0.0",
     "@vitest/coverage-v8": "^4.0.16",
-    "eslint": "^9.16.0",
+    "eslint": "^10.0.3",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-jsdoc": "^62.8.0",
     "eslint-plugin-prettier": "^5.1.0",
