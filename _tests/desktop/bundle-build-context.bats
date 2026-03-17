@@ -69,10 +69,11 @@ teardown() {
     [ -d "$DEST/mcp-os/shared/node_modules/express" ]
 }
 
-@test "bundle script creates @speedwave/mcp-shared symlink in mcp-os/os" {
+@test "bundle script creates @speedwave/mcp-shared directory in mcp-os/os" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
-    [ -L "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared" ]
+    [ -d "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared" ]
+    [ ! -L "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared" ]
     [ -d "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared/dist" ]
 }
 
@@ -181,5 +182,6 @@ teardown() {
     [ -d "$DEST/mcp-os/shared/dist" ]
     [ -f "$DEST/mcp-os/shared/package.json" ]
     [ -d "$DEST/mcp-os/shared/node_modules/express" ]
-    [ -L "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared" ]
+    [ -d "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared" ]
+    [ ! -L "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared" ]
 }

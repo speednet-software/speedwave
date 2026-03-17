@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use speedwave_runtime::{build, compose, config, consts, project, runtime};
+use speedwave_runtime::{build, bundle, compose, config, consts, project, runtime};
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
@@ -1123,6 +1123,17 @@ pub fn build_images() -> anyhow::Result<()> {
         }
         Err(e) => return Err(e),
     }
+
+    // Record that the current bundle's images are now built so that
+    // reconcile_bundle_update (on next startup) sees bundle_changed=false
+    // and skips the unnecessary rebuild.
+    let manifest = bundle::load_current_bundle_manifest()?;
+    let mut bundle_state = bundle::load_bundle_state();
+    bundle_state.applied_bundle_id = Some(manifest.bundle_id);
+    bundle_state.phase = bundle::BundleReconcilePhase::Done;
+    bundle_state.pending_running_projects.clear();
+    bundle_state.last_error = None;
+    bundle::save_bundle_state(&bundle_state)?;
 
     let mut state = SetupState::load();
     state.images_built = true;
@@ -3610,6 +3621,53 @@ networks:
         assert!(
             build_images_fn.contains("build::build_all_images(rt.as_ref())?"),
             "build_images() must retry build_all_images after engine restart"
+        );
+    }
+
+    /// Structural test: verifies that `build_images()` persists `BundleState`
+    /// (with `applied_bundle_id`) after a successful image build. Without this,
+    /// `reconcile_bundle_update` sees `bundle_changed=true` on the next startup
+    /// and triggers a phantom rebuild.
+    #[test]
+    fn build_images_writes_bundle_state_after_success() {
+        let source = include_str!("setup_wizard.rs");
+        let build_images_fn = source
+            .find("pub fn build_images()")
+            .and_then(|pos| {
+                let rest = &source[pos..];
+                let brace = rest.find('{')?;
+                let rest = &rest[brace..];
+                let mut depth = 0;
+                let mut end = 0;
+                for (i, ch) in rest.char_indices() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = i;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if end > 0 {
+                    Some(&rest[..end])
+                } else {
+                    None
+                }
+            })
+            .expect("build_images() function body should exist");
+
+        assert!(
+            build_images_fn.contains("bundle::save_bundle_state"),
+            "build_images() must persist BundleState (applied_bundle_id) after building images \
+             so that reconcile_bundle_update sees bundle_changed=false on next startup"
+        );
+        assert!(
+            build_images_fn.contains("bundle::load_current_bundle_manifest"),
+            "build_images() must load the current manifest to get bundle_id for BundleState"
         );
     }
 }
