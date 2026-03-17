@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterModule } from '@angular/router';
 import { ShellComponent } from './shell.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
-import { MockTauriService } from '../testing/mock-tauri.service';
+import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 
 describe('ShellComponent', () => {
   let component: ShellComponent;
@@ -17,6 +17,9 @@ describe('ShellComponent', () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'list_projects')
         return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+      if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
+      if (cmd === 'check_containers_running') return true;
+      if (cmd === 'start_containers') return undefined;
       return undefined;
     };
 
@@ -64,67 +67,105 @@ describe('ShellComponent', () => {
     expect(el).toBeTruthy();
   });
 
-  it('does not show project-switch-overlay by default', () => {
-    expect(fixture.nativeElement.querySelector('.project-switch-overlay')).toBeNull();
+  it('shows loading overlay by default', () => {
+    const overlay = fixture.nativeElement.querySelector('.blocking-overlay');
+    expect(overlay).not.toBeNull();
+    expect(overlay.textContent).toContain('Loading...');
   });
 
-  it('shows project-switch-overlay when switching is true', () => {
-    component.switching = true;
+  it('shows blocking-overlay with switching message on project switch', async () => {
+    await component.ngOnInit();
+    mockTauri.dispatchEvent('project_switch_started', { project: 'new' });
     component['cdr'].markForCheck();
     fixture.detectChanges();
-    const overlay = fixture.nativeElement.querySelector('.project-switch-overlay');
+
+    const overlay = fixture.nativeElement.querySelector('.blocking-overlay');
     expect(overlay).not.toBeNull();
     expect(overlay.textContent).toContain('Switching project...');
   });
 
-  it('hides project-switch-overlay when switching becomes false', () => {
-    component.switching = true;
+  it('shows rebuilding overlay when reconcile in progress', async () => {
+    await component.ngOnInit();
+    await fixture.whenStable();
+    // Force rebuilding status
+    projectState.status = 'rebuilding';
     component['cdr'].markForCheck();
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('.project-switch-overlay')).not.toBeNull();
 
-    component.switching = false;
-    component['cdr'].markForCheck();
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('.project-switch-overlay')).toBeNull();
+    const overlay = fixture.nativeElement.querySelector('.blocking-overlay');
+    expect(overlay).not.toBeNull();
+    expect(overlay.textContent).toContain('Rebuilding container images...');
   });
 
-  it('shows error banner when projectState has error status', async () => {
-    await component.ngOnInit(); // calls projectState.init() internally
+  it('shows checking overlay when containers checking', async () => {
+    await component.ngOnInit();
+    projectState.status = 'checking';
+    component['cdr'].markForCheck();
+    fixture.detectChanges();
+
+    const overlay = fixture.nativeElement.querySelector('.blocking-overlay');
+    expect(overlay).not.toBeNull();
+    expect(overlay.textContent).toContain('Checking containers...');
+  });
+
+  it('shows starting overlay when containers starting', async () => {
+    await component.ngOnInit();
+    projectState.status = 'starting';
+    component['cdr'].markForCheck();
+    fixture.detectChanges();
+
+    const overlay = fixture.nativeElement.querySelector('.blocking-overlay');
+    expect(overlay).not.toBeNull();
+    expect(overlay.textContent).toContain('Starting containers...');
+  });
+
+  it('shows error banner with retry on failure', async () => {
+    await component.ngOnInit();
     mockTauri.dispatchEvent('project_switch_failed', { project: null, error: 'Switch failed' });
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
-    const banner = fixture.nativeElement.querySelector('.project-switch-error-banner');
+    const banner = fixture.nativeElement.querySelector('.blocking-error-banner');
     expect(banner).not.toBeNull();
     expect(banner.textContent).toContain('Switch failed');
+    expect(banner.querySelector('button')).not.toBeNull();
   });
 
-  it('dismisses error banner', async () => {
-    await component.ngOnInit(); // calls projectState.init() internally
-    mockTauri.dispatchEvent('project_switch_failed', { project: null, error: 'Switch failed' });
+  it('hides overlay when ready', async () => {
+    await component.ngOnInit();
+    await fixture.whenStable();
+    projectState.status = 'ready';
     component['cdr'].markForCheck();
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('.project-switch-error-banner')).not.toBeNull();
 
-    component.dismissError();
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('.project-switch-error-banner')).toBeNull();
+    expect(fixture.nativeElement.querySelector('.blocking-overlay')).toBeNull();
+    expect(fixture.nativeElement.querySelector('.blocking-error-banner')).toBeNull();
   });
 
   it('cleans up subscription on destroy', async () => {
-    // ngOnInit was already called by fixture.detectChanges() in beforeEach,
-    // but projectState.init() is async. Wait for it to settle.
     await projectState.init();
     await fixture.whenStable();
 
-    // Verify the unsub function exists before destroy
     expect((component as unknown as { unsubscribe: unknown })['unsubscribe']).not.toBeNull();
 
     component.ngOnDestroy();
 
-    // After destroy, dispatching events should not update the component
     mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
-    expect(component.switching).toBe(false);
+    // After destroy, component should not update (no crash)
+    expect(component).toBeTruthy();
+  });
+
+  it('dismiss calls projectState.dismissError', async () => {
+    const spy = vi.spyOn(projectState, 'dismissError').mockResolvedValue();
+    await component.dismiss();
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('retry calls ensureContainersRunning', async () => {
+    const spy = vi.spyOn(projectState, 'ensureContainersRunning').mockResolvedValue();
+    component.retry();
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
   });
 });

@@ -47,3 +47,12 @@ export class MockTauriService {
     return false;
   }
 }
+
+/** Shared mock for `get_bundle_reconcile_state` — reuse in spec files instead of duplicating. */
+export const MOCK_BUNDLE_RECONCILE_DONE = {
+  phase: 'done',
+  in_progress: false,
+  last_error: null,
+  pending_running_projects: [],
+  applied_bundle_id: null,
+};

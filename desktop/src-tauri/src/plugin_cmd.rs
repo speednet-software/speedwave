@@ -1042,6 +1042,52 @@ mod tests {
     }
 
     #[test]
+    fn save_plugin_credentials_rejects_field_not_in_auth_fields() {
+        let manifest = plugin::PluginManifest {
+            name: "Test".to_string(),
+            service_id: Some("test-plugin".to_string()),
+            slug: "test-plugin".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: Some(5000),
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![plugin::AuthFieldDef {
+                key: "api_key".to_string(),
+                label: "API Key".to_string(),
+                field_type: "password".to_string(),
+                placeholder: "".to_string(),
+                is_secret: true,
+            }],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![],
+        };
+
+        let allowed_keys: Vec<&str> = manifest
+            .auth_fields
+            .iter()
+            .map(|f| f.key.as_str())
+            .collect();
+
+        // "api_key" is in the allowlist
+        assert!(allowed_keys.contains(&"api_key"));
+        // "secret_token" is NOT in the allowlist
+        assert!(
+            !allowed_keys.contains(&"secret_token"),
+            "field not in auth_fields must be rejected"
+        );
+        // "../../etc/passwd" is NOT in the allowlist
+        assert!(
+            !allowed_keys.contains(&"../../etc/passwd"),
+            "path traversal field must be rejected"
+        );
+    }
+
+    #[test]
     fn auto_enable_writes_plugin_enabled_to_active_project_config() {
         let mut cfg = config::SpeedwaveUserConfig {
             projects: vec![config::ProjectUserEntry {

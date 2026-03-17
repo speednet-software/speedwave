@@ -42,8 +42,8 @@ export function createMockBridges(): AllBridges {
     sharepoint: {
       listFileIds: vi.fn(),
       getFileFull: vi.fn(),
-      sync: vi.fn(),
-      syncDirectory: vi.fn(),
+      downloadFile: vi.fn(),
+      uploadFile: vi.fn(),
       getCurrentUser: vi.fn(),
     },
     redmine: {

@@ -8,7 +8,7 @@ The following security principles are inherited from Speedwave v1 and are **non-
 
 - **Claude container isolation** — no tokens, no container socket, per-platform container user (UID 1000 on macOS/Windows, UID 0 in Linux rootless user namespace — see [ADR-026](../adr/ADR-026-linux-rootless-container-user.md))
 - **OWASP container hardening** — `cap_drop: ALL`, `no-new-privileges`, `read_only` filesystem, `tmpfs: /tmp:noexec,nosuid`
-- **Token isolation** — each MCP worker mounts **only its own** service credentials at `/tokens` read-only. A compromised worker exposes only that service
+- **Token isolation** — each MCP worker mounts **only its own** service credentials at `/tokens` read-only. A compromised worker exposes only that service. All MCP workers also mount the project directory at `/workspace:rw` for file operations.
 - **Hub has zero tokens** — compromise of the hub exposes nothing
 - **Kernel-level isolation** — Lima VM (macOS) / WSL2 (Windows) provides an additional isolation layer on top of container isolation
 - **Resource limits** — CPU + memory caps per container
@@ -78,6 +78,19 @@ point (`getWorkerUrl()`) before any `fetch()` call:
 - **Redirect blocking**: All `fetch()` calls use `redirect: 'error'`
 
 Invalid URLs are treated as unconfigured services (fail-closed).
+
+## SecurityCheck — Workspace Mount Validation
+
+`SecurityCheck::run()` validates the `/workspace:rw` mount for both plugin services and built-in SharePoint:
+
+- **Host path** must match `{project_dir}` (via `SecurityExpectedPaths`)
+- **Mode** must be `:rw`
+- **Presence** — both `/tokens` and `/workspace` mounts are required
+- **Long-form volumes** (YAML mappings) are rejected — only short-form strings allowed
+
+`SecurityExpectedPaths` is computed once and shared between `render_compose()` and `SecurityCheck::run()` to prevent path drift.
+
+Because the full project directory is now mounted, the `path-validator.ts` denylist blocks MCP workers from accessing sensitive paths within the workspace: `.git/`, `.env`, and `.speedwave/`. This provides defense-in-depth — even if an MCP worker is compromised, it cannot exfiltrate repository history, environment secrets, or Speedwave configuration.
 
 ## See Also
 

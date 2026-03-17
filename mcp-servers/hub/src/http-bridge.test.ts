@@ -568,8 +568,8 @@ describe('http-bridge', () => {
 
       expect(bridge).toHaveProperty('listFileIds');
       expect(bridge).toHaveProperty('getFileFull');
-      expect(bridge).toHaveProperty('sync');
-      expect(bridge).toHaveProperty('syncDirectory');
+      expect(bridge).toHaveProperty('downloadFile');
+      expect(bridge).toHaveProperty('uploadFile');
       expect(bridge).toHaveProperty('getCurrentUser');
       expect(Object.keys(bridge).length).toBe(5);
     });

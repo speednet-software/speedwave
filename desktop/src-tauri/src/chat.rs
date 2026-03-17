@@ -408,10 +408,7 @@ impl StreamParser {
         (None, None)
     }
 
-    fn parse_result(
-        &self,
-        parsed: &serde_json::Value,
-    ) -> (Option<StreamChunk>, Option<LogEntry>) {
+    fn parse_result(&self, parsed: &serde_json::Value) -> (Option<StreamChunk>, Option<LogEntry>) {
         let is_error = parsed["is_error"].as_bool().unwrap_or(false);
 
         if is_error {
@@ -822,11 +819,7 @@ impl ChatSession {
                 // 2. Normal stream events
                 let (chunk, log_entry) = parser.parse_line(&parsed);
                 if let Some(entry) = log_entry {
-                    crate::log_file::write_log_line(
-                        &mut log_file,
-                        entry.prefix,
-                        &entry.message,
-                    );
+                    crate::log_file::write_log_line(&mut log_file, entry.prefix, &entry.message);
                 }
                 if let Some(chunk) = chunk {
                     if let Err(e) = app_handle.emit("chat_stream", chunk) {
@@ -2208,7 +2201,10 @@ mod tests {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}}"#;
         let (_chunk, log_entry) = parse_line_full(&mut parser, line);
-        assert!(log_entry.is_none(), "text_delta should not produce log entry");
+        assert!(
+            log_entry.is_none(),
+            "text_delta should not produce log entry"
+        );
     }
 
     #[test]
@@ -2256,6 +2252,9 @@ mod tests {
             .join(".speedwave/logs/default/claude-session.log");
         let mut session = ChatSession::new("default");
         session.stop().unwrap();
-        assert!(!log_path.exists(), "stop() on fresh session should not create log file");
+        assert!(
+            !log_path.exists(),
+            "stop() on fresh session should not create log file"
+        );
     }
 }

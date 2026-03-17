@@ -4,12 +4,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import {
-  splitPath,
-  validateNotProtectedFile,
-  parseGraphErrorMessage,
-  PROTECTED_FILES,
-} from './path-utils.js';
+import { splitPath, parseGraphErrorMessage } from './path-utils.js';
 
 describe('path-utils', () => {
   describe('splitPath', () => {
@@ -65,65 +60,6 @@ describe('path-utils', () => {
     it('handles multiple trailing slashes', () => {
       // splitPath preserves intermediate empty segments
       expect(splitPath('a/b///')).toEqual({ parentDir: 'a/b//', name: '' });
-    });
-  });
-
-  describe('validateNotProtectedFile', () => {
-    it('throws for .sync-state.json in upload operation', () => {
-      expect(() => validateNotProtectedFile('folder/.sync-state.json', 'upload')).toThrow(
-        'Cannot upload .sync-state.json to SharePoint (internal metadata)'
-      );
-    });
-
-    it('throws for .sync-state.json in delete operation', () => {
-      expect(() => validateNotProtectedFile('.sync-state.json', 'delete')).toThrow(
-        'Cannot delete .sync-state.json to SharePoint (internal metadata)'
-      );
-    });
-
-    it('throws for .sync-state.json in download operation', () => {
-      expect(() => validateNotProtectedFile('.sync-state.json', 'download')).toThrow(
-        'Cannot download .sync-state.json to SharePoint (internal metadata)'
-      );
-    });
-
-    it('throws for .sync-state.json in nested path', () => {
-      expect(() => validateNotProtectedFile('a/b/c/.sync-state.json', 'upload')).toThrow(
-        'Cannot upload .sync-state.json to SharePoint (internal metadata)'
-      );
-    });
-
-    it('allows normal files for upload', () => {
-      expect(() => validateNotProtectedFile('folder/data.json', 'upload')).not.toThrow();
-    });
-
-    it('allows normal files for download', () => {
-      expect(() => validateNotProtectedFile('folder/data.json', 'download')).not.toThrow();
-    });
-
-    it('allows normal files for delete', () => {
-      expect(() => validateNotProtectedFile('folder/data.json', 'delete')).not.toThrow();
-    });
-
-    it('allows files with similar names', () => {
-      expect(() => validateNotProtectedFile('sync-state.json', 'upload')).not.toThrow();
-      expect(() => validateNotProtectedFile('.sync-state.json.bak', 'upload')).not.toThrow();
-      expect(() => validateNotProtectedFile('my.sync-state.json', 'upload')).not.toThrow();
-    });
-
-    it('handles root level protected file', () => {
-      expect(() => validateNotProtectedFile('.sync-state.json', 'upload')).toThrow(
-        'Cannot upload .sync-state.json to SharePoint (internal metadata)'
-      );
-    });
-
-    it('handles empty path gracefully', () => {
-      expect(() => validateNotProtectedFile('', 'upload')).not.toThrow();
-    });
-
-    it('handles path with trailing slash', () => {
-      // This would extract empty string as filename
-      expect(() => validateNotProtectedFile('folder/', 'upload')).not.toThrow();
     });
   });
 
@@ -197,20 +133,6 @@ describe('path-utils', () => {
       const response = new Response(JSON.stringify({ error: { message: undefined } }));
       const result = await parseGraphErrorMessage(response, 'undefined fallback');
       expect(result).toBe('undefined fallback');
-    });
-  });
-
-  describe('PROTECTED_FILES', () => {
-    it('includes .sync-state.json', () => {
-      expect(PROTECTED_FILES).toContain('.sync-state.json');
-    });
-
-    it('is an array', () => {
-      expect(Array.isArray(PROTECTED_FILES)).toBe(true);
-    });
-
-    it('has at least one entry', () => {
-      expect(PROTECTED_FILES.length).toBeGreaterThan(0);
     });
   });
 });
