@@ -123,14 +123,87 @@
 
 /* ── Prose layer for rendered markdown (innerHTML) ── */
 @layer components {
+  /* Collapse margins at container edges */
   .prose-sw :first-child { margin-top: 0; }
   .prose-sw :last-child  { margin-bottom: 0; }
-  .prose-sw p            { margin: 8px 0; }
+
+  /* Headings */
+  .prose-sw h1 { font-size: 1.75em; font-weight: 700; color: var(--color-sw-text); margin: 24px 0 12px; }
+  .prose-sw h2 { font-size: 1.5em;  font-weight: 700; color: var(--color-sw-text); margin: 20px 0 10px; }
+  .prose-sw h3 { font-size: 1.25em; font-weight: 600; color: var(--color-sw-text); margin: 16px 0 8px; }
+  .prose-sw h4 { font-size: 1.1em;  font-weight: 600; color: var(--color-sw-text); margin: 14px 0 6px; }
+  .prose-sw h5 { font-size: 1em;    font-weight: 600; color: var(--color-sw-text); margin: 12px 0 4px; }
+  .prose-sw h6 { font-size: 0.9em;  font-weight: 600; color: var(--color-sw-text-dim); margin: 12px 0 4px; }
+
+  /* Paragraphs */
+  .prose-sw p { color: var(--color-sw-text); line-height: 1.6; margin: 8px 0; }
+
+  /* Lists */
   .prose-sw ul,
-  .prose-sw ol           { margin: 8px 0; padding-left: 20px; }
-  .prose-sw pre          { background: var(--color-sw-bg-abyss); padding: 12px; border-radius: 4px; overflow-x: auto; margin: 8px 0; }
-  .prose-sw code         { background: var(--color-sw-bg-abyss); padding: 2px 6px; border-radius: 3px; font-size: 13px; }
-  .prose-sw pre code     { background: none; padding: 0; }
+  .prose-sw ol { margin: 8px 0; padding-left: 24px; color: var(--color-sw-text); }
+  .prose-sw ul { list-style-type: disc; }
+  .prose-sw ol { list-style-type: decimal; }
+  .prose-sw li { margin: 4px 0; line-height: 1.6; }
+  .prose-sw li::marker { color: var(--color-sw-text-muted); }
+
+  /* Code blocks */
+  .prose-sw pre {
+    background: var(--color-sw-bg-abyss);
+    border: 1px solid var(--color-sw-border);
+    border-radius: 6px;
+    padding: 12px 16px;
+    overflow-x: auto;
+    margin: 12px 0;
+    line-height: 1.5;
+  }
+
+  /* Inline code */
+  .prose-sw code {
+    background: var(--color-sw-bg-abyss);
+    color: var(--color-sw-code-lime);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.9em;
+  }
+
+  /* Reset inline styles inside code blocks */
+  .prose-sw pre code {
+    background: none;
+    color: inherit;
+    padding: 0;
+    border-radius: 0;
+    font-size: inherit;
+  }
+
+  /* Blockquotes */
+  .prose-sw blockquote {
+    border-left: 3px solid var(--color-sw-accent);
+    padding-left: 16px;
+    margin: 12px 0;
+    font-style: italic;
+    color: var(--color-sw-text-muted);
+  }
+
+  /* Links */
+  .prose-sw a { color: var(--color-sw-accent); text-decoration: none; }
+  .prose-sw a:hover { text-decoration: underline; }
+
+  /* Tables */
+  .prose-sw table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  .prose-sw th,
+  .prose-sw td { border: 1px solid var(--color-sw-border); padding: 8px 12px; text-align: left; }
+  .prose-sw th { background: var(--color-sw-bg-abyss); color: var(--color-sw-text); font-weight: 600; }
+  .prose-sw td { color: var(--color-sw-text-dim); }
+
+  /* Horizontal rule */
+  .prose-sw hr { border: none; border-top: 1px solid var(--color-sw-border); margin: 16px 0; }
+
+  /* Emphasis */
+  .prose-sw strong { color: var(--color-sw-text); font-weight: 700; }
+  .prose-sw em { font-style: italic; }
+
+  /* Images */
+  .prose-sw img { max-width: 100%; border-radius: 6px; margin: 12px 0; }
 }
 
 /* ── Scrollbar (not supported by Tailwind) ── */
