@@ -123,7 +123,7 @@ export interface SavePluginCredentialsEvent {
                 <button
                   type="button"
                   class="btn-cancel px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
-                  data-testid="btn-cancel"
+                  [attr.data-testid]="'plugin-delete-creds-' + plugin.slug"
                   (click)="deleteCredentials.emit(plugin)"
                 >
                   Remove Credentials
@@ -165,7 +165,7 @@ export interface SavePluginCredentialsEvent {
               <button
                 type="button"
                 class="btn-remove px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
-                data-testid="btn-remove"
+                [attr.data-testid]="'plugin-remove-' + plugin.slug"
                 (click)="confirmingRemove = true"
               >
                 Uninstall Plugin

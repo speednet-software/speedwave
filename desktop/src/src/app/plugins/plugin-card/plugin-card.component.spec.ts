@@ -215,7 +215,9 @@ describe('PluginCardComponent', () => {
       component.expanded = true;
       fixture.detectChanges();
       const spy = vi.spyOn(component.removePlugin, 'emit');
-      const removeBtn = fixture.nativeElement.querySelector('[data-testid="btn-remove"]');
+      const removeBtn = fixture.nativeElement.querySelector(
+        '[data-testid="plugin-remove-presale"]'
+      );
       removeBtn.click();
       fixture.detectChanges();
       expect(spy).not.toHaveBeenCalled();
@@ -256,7 +258,9 @@ describe('PluginCardComponent', () => {
     component.expanded = true;
     fixture.detectChanges();
     const spy = vi.spyOn(component.deleteCredentials, 'emit');
-    const removeBtn = fixture.nativeElement.querySelector('[data-testid="btn-cancel"]');
+    const removeBtn = fixture.nativeElement.querySelector(
+      '[data-testid="plugin-delete-creds-presale"]'
+    );
     removeBtn.click();
     expect(spy).toHaveBeenCalledWith(component.plugin);
   });

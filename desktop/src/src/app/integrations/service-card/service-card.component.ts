@@ -232,7 +232,7 @@ export interface SaveCredentialsEvent {
               <button
                 type="button"
                 class="btn-cancel px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
-                data-testid="btn-cancel"
+                [attr.data-testid]="'integrations-remove-' + svc.service"
                 (click)="deleteCredentials.emit(svc)"
               >
                 Remove Credentials

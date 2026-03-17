@@ -267,7 +267,9 @@ describe('ServiceCardComponent', () => {
     component.expanded = true;
     fixture.detectChanges();
     const spy = vi.spyOn(component.deleteCredentials, 'emit');
-    const removeBtn = fixture.nativeElement.querySelector('[data-testid="btn-cancel"]');
+    const removeBtn = fixture.nativeElement.querySelector(
+      '[data-testid="integrations-remove-gitlab"]'
+    );
     removeBtn.click();
     expect(spy).toHaveBeenCalledWith(component.svc);
   });
