@@ -17,51 +17,74 @@ export interface SaveCredentialsEvent {
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div class="card" [attr.data-testid]="'integrations-service-' + svc.service">
-      <div class="card-header">
-        <button class="card-header-btn" type="button" (click)="toggleExpand.emit(svc.service)">
-          <span class="service-name">{{ svc.display_name }}</span>
+    <div
+      class="bg-sw-bg-dark border border-sw-border rounded-lg mb-3 overflow-hidden"
+      [attr.data-testid]="'integrations-service-' + svc.service"
+    >
+      <div class="flex justify-between items-center px-5 py-4">
+        <button
+          class="card-header-btn flex items-center gap-3 flex-1 cursor-pointer bg-transparent border-none text-inherit font-inherit text-left p-0"
+          type="button"
+          (click)="toggleExpand.emit(svc.service)"
+        >
+          <span class="service-name font-semibold text-base">{{ svc.display_name }}</span>
           <span
-            class="badge"
+            class="badge text-[11px] px-2 py-0.5 rounded font-medium"
             [class.configured]="svc.configured"
             [class.not-configured]="!svc.configured"
+            [ngClass]="
+              svc.configured
+                ? 'bg-sw-success-dark text-sw-success-text'
+                : 'bg-sw-error-badge text-sw-error-text'
+            "
           >
             {{ svc.configured ? 'Configured' : 'Not Configured' }}
           </span>
         </button>
-        <div class="card-actions">
+        <div class="card-actions flex items-center gap-3">
           <label
-            class="toggle"
+            class="toggle relative inline-block w-[44px] h-[24px]"
             [class.disabled]="!svc.configured"
+            [ngClass]="!svc.configured ? 'opacity-40 cursor-not-allowed' : ''"
             [title]="svc.configured ? '' : 'Configure credentials to enable'"
           >
             <input
               type="checkbox"
+              class="peer sr-only"
               [checked]="svc.enabled"
               [disabled]="!svc.configured"
               (change)="onToggle($event)"
               [attr.data-testid]="'integrations-toggle-' + svc.service"
+              [ngClass]="!svc.configured ? 'cursor-not-allowed' : ''"
             />
-            <span class="slider"></span>
+            <span
+              class="slider absolute inset-0 bg-sw-slider rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-sw-accent before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
+            ></span>
           </label>
         </div>
       </div>
-      <p class="card-description">{{ svc.description }}</p>
+      <p class="card-description px-5 pb-3 text-sw-text-faint text-[13px] m-0">
+        {{ svc.description }}
+      </p>
 
       @if (expanded) {
-        <div class="card-body">
+        <div class="card-body px-5 pb-5 border-t border-sw-border">
           <form (submit)="onSave($event)">
             @for (field of svc.auth_fields; track field.key) {
               @if (!field.oauth_flow) {
-                <div class="form-group">
-                  <label [for]="svc.service + '-' + field.key">{{ field.label }}</label>
+                <div class="my-4">
+                  <label
+                    class="block mb-1.5 text-[13px] text-sw-text-dim"
+                    [for]="svc.service + '-' + field.key"
+                    >{{ field.label }}</label
+                  >
                   <input
                     [id]="svc.service + '-' + field.key"
                     [type]="field.field_type === 'password' ? 'password' : 'text'"
                     [placeholder]="field.placeholder"
                     [value]="getFieldValue(field.key)"
                     (input)="onFieldInput(field.key, $event)"
-                    class="form-input"
+                    class="form-input w-full px-3 py-2.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-sm font-mono box-border focus:border-sw-accent focus:outline-none"
                     required
                   />
                 </div>
@@ -69,60 +92,85 @@ export interface SaveCredentialsEvent {
             }
 
             @if (hasOAuthFields()) {
-              <div class="oauth-section">
+              <div class="oauth-section my-4 p-4 bg-sw-bg-darkest border border-sw-border rounded">
                 @if (!deviceCodeInfo && oauthStatus !== 'polling' && oauthStatus !== 'starting') {
-                  <button type="button" class="btn-oauth" (click)="onStartOAuth()">
+                  <button
+                    type="button"
+                    class="btn-oauth px-5 py-2 bg-transparent text-sw-accent border border-sw-accent rounded text-sm font-mono cursor-pointer transition-all duration-200 hover:bg-sw-accent hover:text-sw-bg-darkest"
+                    (click)="onStartOAuth()"
+                  >
                     Sign in with Microsoft
                   </button>
                 }
                 @if (oauthStatus === 'starting') {
-                  <p class="polling-status">Connecting to Microsoft...</p>
-                  <button type="button" class="btn-cancel-oauth" (click)="cancelOAuth.emit()">
+                  <p class="polling-status text-sw-text-dim text-[13px] my-2">
+                    Connecting to Microsoft...
+                  </p>
+                  <button
+                    type="button"
+                    class="btn-cancel-oauth px-4 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer mt-2"
+                    (click)="cancelOAuth.emit()"
+                  >
                     Cancel
                   </button>
                 }
                 @if (deviceCodeInfo) {
                   <p>Enter this code:</p>
-                  <div class="user-code">{{ deviceCodeInfo.user_code }}</div>
-                  <div class="verification-url-row">
+                  <div
+                    class="user-code text-[28px] font-mono font-bold tracking-[4px] text-sw-accent my-3 text-center"
+                  >
+                    {{ deviceCodeInfo.user_code }}
+                  </div>
+                  <div class="verification-url-row flex items-center gap-2.5 my-2 flex-wrap">
                     <button
                       type="button"
-                      class="btn-link"
+                      class="btn-link px-4 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer inline-block shrink-0"
                       (click)="openVerificationUrl.emit(deviceCodeInfo.verification_uri)"
                     >
                       Open Microsoft Sign-in
                     </button>
-                    <span class="verification-url">{{ deviceCodeInfo.verification_uri }}</span>
+                    <span
+                      class="verification-url text-xs font-mono text-sw-text-dim select-all break-all"
+                      >{{ deviceCodeInfo.verification_uri }}</span
+                    >
                   </div>
                   @if (oauthStatus === 'polling') {
-                    <p class="polling-status">Waiting for sign-in...</p>
+                    <p class="polling-status text-sw-text-dim text-[13px] my-2">
+                      Waiting for sign-in...
+                    </p>
                   }
-                  <button type="button" class="btn-cancel-oauth" (click)="cancelOAuth.emit()">
+                  <button
+                    type="button"
+                    class="btn-cancel-oauth px-4 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer mt-2"
+                    (click)="cancelOAuth.emit()"
+                  >
                     Cancel
                   </button>
                 }
                 @if (oauthStatus === 'success') {
-                  <p class="oauth-success">Authentication successful</p>
+                  <p class="oauth-success text-sw-success-text text-sm">
+                    Authentication successful
+                  </p>
                 }
                 @if (oauthStatus === 'error' || oauthStatus === 'expired') {
-                  <p class="oauth-error">{{ oauthStatusMessage }}</p>
+                  <p class="oauth-error text-sw-error-text text-sm">{{ oauthStatusMessage }}</p>
                 }
               </div>
             }
 
             @if (svc.service === 'redmine') {
-              <div class="mappings-section">
-                <h4>ID Mappings</h4>
+              <div class="mappings-section mt-4">
+                <h4 class="text-sw-text-dim text-[13px] mb-2">ID Mappings</h4>
                 @for (entry of getMappingEntries(); track entry.key) {
-                  <div class="mapping-row">
+                  <div class="mapping-row flex gap-2 mb-2 items-center">
                     <input
-                      class="mapping-key"
+                      class="mapping-key flex-[2] p-2 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-[13px] font-mono"
                       [value]="entry.key"
                       (input)="onUpdateMappingKey(entry.key, $event)"
                       placeholder="Key"
                     />
                     <input
-                      class="mapping-value"
+                      class="mapping-value flex-1 p-2 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-[13px] font-mono"
                       type="number"
                       [value]="entry.value"
                       (input)="onUpdateMappingValue(entry.key, $event)"
@@ -130,30 +178,34 @@ export interface SaveCredentialsEvent {
                     />
                     <button
                       type="button"
-                      class="remove-mapping-btn"
+                      class="remove-mapping-btn px-2.5 py-1.5 text-xs bg-transparent text-sw-error-text border border-sw-error-text rounded cursor-pointer font-mono"
                       (click)="onRemoveMapping(entry.key)"
                     >
                       x
                     </button>
                   </div>
                 }
-                <button type="button" class="add-mapping-btn" (click)="onAddMapping()">
+                <button
+                  type="button"
+                  class="add-mapping-btn bg-transparent text-sw-accent border border-dashed border-sw-accent px-3 py-1.5 rounded cursor-pointer text-xs font-mono"
+                  (click)="onAddMapping()"
+                >
                   + Add Mapping
                 </button>
               </div>
             }
 
-            <div class="form-actions">
+            <div class="form-actions flex gap-3 mt-4">
               <button
                 type="submit"
-                class="btn-save"
+                class="btn-save px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:not-disabled:bg-sw-accent hover:not-disabled:text-sw-bg-darkest"
                 [attr.data-testid]="'integrations-save-' + svc.service"
               >
                 Save
               </button>
               <button
                 type="button"
-                class="btn-cancel"
+                class="btn-cancel px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
                 [attr.data-testid]="'integrations-remove-' + svc.service"
                 (click)="deleteCredentials.emit(svc)"
               >
@@ -165,7 +217,6 @@ export interface SaveCredentialsEvent {
       }
     </div>
   `,
-  styleUrl: './service-card.component.css',
 })
 export class ServiceCardComponent {
   @Input({ required: true }) svc!: IntegrationStatusEntry;
