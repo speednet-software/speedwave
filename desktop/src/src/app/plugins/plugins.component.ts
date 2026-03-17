@@ -25,21 +25,29 @@ import { open } from '@tauri-apps/plugin-dialog';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (needsRestart) {
-      <div class="restart-banner" data-testid="plugins-restart-banner">
-        <div class="restart-info">
+      <div
+        class="bg-sw-accent text-white px-5 py-3 rounded-lg flex justify-between items-center mb-5"
+        data-testid="plugins-restart-banner"
+      >
+        <div class="flex flex-col gap-1">
           <span>Changes require container restart to take effect</span>
           @if (restarting) {
-            <span class="restart-hint">This may take a minute while containers are recreated</span>
+            <span class="text-[11px] opacity-80"
+              >This may take a minute while containers are recreated</span
+            >
           }
         </div>
         <button
-          class="restart-btn"
+          class="bg-white text-sw-accent border-none px-4 py-2 rounded font-semibold font-mono text-[13px] flex items-center gap-2 whitespace-nowrap cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
           data-testid="plugins-restart"
           (click)="restartContainers()"
           [disabled]="restarting"
         >
           @if (restarting) {
-            <span class="restart-spinner"></span> Restarting...
+            <span
+              class="inline-block w-3 h-3 border-2 border-sw-accent/30 border-t-sw-accent rounded-full animate-sw-spin"
+            ></span>
+            Restarting...
           } @else {
             Restart Now
           }
@@ -47,34 +55,49 @@ import { open } from '@tauri-apps/plugin-dialog';
       </div>
     }
 
-    <div class="plugins-page">
-      <h1>Plugins</h1>
+    <div>
+      <h1 class="text-xl text-sw-accent m-0 mb-6">Plugins</h1>
 
       @if (error) {
-        <div class="error-banner" data-testid="plugins-error">{{ error }}</div>
+        <div
+          class="mb-4 px-3 py-2 bg-sw-error-bg border border-sw-accent rounded text-sw-accent text-[13px]"
+          data-testid="plugins-error"
+        >
+          {{ error }}
+        </div>
       }
       @if (success) {
-        <div class="success-banner" data-testid="plugins-success">{{ success }}</div>
+        <div
+          class="mb-4 px-3 py-2 bg-sw-success-dark border border-sw-success-text rounded text-sw-success-text text-[13px]"
+          data-testid="plugins-success"
+        >
+          {{ success }}
+        </div>
       }
 
-      <div class="install-section">
+      <div class="mb-6">
         <button
-          class="install-btn"
+          class="px-5 py-2 bg-transparent text-sw-accent border border-dashed border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-darkest disabled:opacity-60 disabled:cursor-not-allowed"
           data-testid="plugins-install"
           (click)="installPlugin()"
           [disabled]="installing"
         >
           @if (installing) {
-            <span class="install-spinner"></span> Installing...
+            <span
+              class="inline-block w-3 h-3 border-2 border-sw-accent/30 border-t-sw-accent rounded-full animate-sw-spin"
+            ></span>
+            Installing...
           } @else {
             + Install Plugin
           }
         </button>
       </div>
 
-      <section class="section" data-testid="plugins-list">
+      <section class="mb-6" data-testid="plugins-list">
         @if (plugins.length === 0) {
-          <p class="empty-state">No plugins installed. Click "Install Plugin" to add one.</p>
+          <p class="empty-state text-sw-text-dim text-[13px] py-5 text-center">
+            No plugins installed. Click "Install Plugin" to add one.
+          </p>
         }
         @for (plugin of plugins; track plugin.slug) {
           <app-plugin-card
@@ -91,7 +114,9 @@ import { open } from '@tauri-apps/plugin-dialog';
       </section>
     </div>
   `,
-  styleUrl: './plugins.component.css',
+  styles: [
+    ':host { display: block; background: var(--color-sw-bg-darkest); min-height: 100vh; padding: 24px; color: var(--color-sw-text); }',
+  ],
 })
 export class PluginsComponent implements OnInit, OnDestroy {
   plugins: PluginStatusEntry[] = [];

@@ -17,44 +17,70 @@ import { DetectedIde } from '../../models/health';
   imports: [CommonModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <section class="section" data-testid="integrations-ide-bridge">
-      <h2>IDE Bridge</h2>
+    <section class="mb-6" data-testid="integrations-ide-bridge">
+      <h2 class="text-[15px] text-sw-text m-0 mb-3">IDE Bridge</h2>
       @if (lastEvent) {
-        <div class="event-banner" [class.fading]="eventFading">
+        <div
+          class="mb-4 px-3 py-2 bg-sw-bg-navy border border-sw-border rounded font-mono text-xs text-sw-text-muted transition-opacity duration-1000 ease-out"
+          [class.opacity-0]="eventFading"
+          data-testid="event-banner"
+        >
           {{ lastEvent }}
         </div>
       }
-      <div class="card ide-card">
-        <div class="card-header no-expand">
-          <div class="card-title">
-            <span class="service-name">Available IDEs</span>
+      <div class="bg-sw-bg-dark border border-sw-border rounded-lg mb-3 overflow-hidden">
+        <div class="flex justify-between items-center px-5 py-4 cursor-default">
+          <div class="flex items-center gap-3">
+            <span class="font-semibold text-base">Available IDEs</span>
           </div>
         </div>
-        <div class="ide-card-body">
+        <div class="px-5 pb-4">
           @if (availableIdes.length === 0) {
-            <div class="no-data">
+            <div class="text-sw-text-dim text-[13px] py-2" data-testid="no-data">
               No IDE detected — open Cursor or VS Code with the Claude Code extension.
             </div>
           } @else {
-            <div class="ide-list">
+            <div class="flex flex-col gap-2">
               @for (ide of availableIdes; track ide.ide_name + ':' + ide.port) {
                 <div
-                  class="ide-row"
-                  [class.selected]="
+                  class="flex items-center gap-2.5 px-3 py-2 bg-sw-bg-darkest rounded"
+                  [style.border-left-width]="
+                    selectedIde?.ide_name === ide.ide_name && selectedIde?.port === ide.port
+                      ? '3px'
+                      : ''
+                  "
+                  [class.border-sw-success]="
                     selectedIde?.ide_name === ide.ide_name && selectedIde?.port === ide.port
                   "
+                  data-testid="ide-row"
                 >
-                  <span class="ide-row-name">{{ ide.ide_name }}</span>
+                  <span
+                    class="flex-1 font-mono text-[13px] text-sw-text"
+                    data-testid="ide-row-name"
+                    >{{ ide.ide_name }}</span
+                  >
                   @if (ide.port !== null) {
-                    <span class="port-badge">:{{ ide.port }}</span>
+                    <span class="font-mono text-xs text-sw-success">:{{ ide.port }}</span>
                   }
                   <button
-                    class="connect-btn"
-                    [class.active]="
+                    class="px-3 py-1 bg-sw-border text-sw-text border border-sw-border rounded text-xs font-mono cursor-pointer transition-colors duration-200 hover:enabled:bg-sw-bg-navy disabled:opacity-40 disabled:cursor-not-allowed"
+                    [class.!bg-sw-btn-active]="
                       selectedIde?.ide_name === ide.ide_name && selectedIde?.port === ide.port
+                    "
+                    [class.!border-sw-success]="
+                      selectedIde?.ide_name === ide.ide_name && selectedIde?.port === ide.port
+                    "
+                    [class.!text-sw-success]="
+                      selectedIde?.ide_name === ide.ide_name && selectedIde?.port === ide.port
+                    "
+                    [attr.data-active]="
+                      selectedIde?.ide_name === ide.ide_name && selectedIde?.port === ide.port
+                        ? 'true'
+                        : null
                     "
                     [disabled]="ideConnecting"
                     (click)="connectIde(ide)"
+                    data-testid="connect-btn"
                   >
                     {{
                       selectedIde?.ide_name === ide.ide_name && selectedIde?.port === ide.port
@@ -67,13 +93,17 @@ import { DetectedIde } from '../../models/health';
             </div>
           }
           @if (ideError) {
-            <div class="error-banner">{{ ideError }}</div>
+            <div
+              class="mt-4 px-3 py-2 bg-sw-error/10 border border-sw-error rounded text-sw-error text-[13px]"
+              data-testid="error-banner"
+            >
+              {{ ideError }}
+            </div>
           }
         </div>
       </div>
     </section>
   `,
-  styleUrl: './ide-bridge.component.css',
 })
 export class IdeBridgeComponent implements OnInit, OnDestroy {
   /** IDEs detected by the IDE Bridge scanner. */

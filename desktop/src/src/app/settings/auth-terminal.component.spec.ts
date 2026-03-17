@@ -68,7 +68,9 @@ describe('AuthTerminalComponent', () => {
     component.openTerminal();
     await vi.advanceTimersByTimeAsync(0);
     fixture.detectChanges();
-    const banner = (fixture.nativeElement as HTMLElement).querySelector('.error-banner');
+    const banner = (fixture.nativeElement as HTMLElement).querySelector(
+      '[data-testid="auth-error"]'
+    );
     expect(banner).toBeTruthy();
     expect(banner!.textContent).toContain('CLI not found');
   });
@@ -76,7 +78,9 @@ describe('AuthTerminalComponent', () => {
   it('does not render error banner when error is empty', () => {
     component.error = '';
     fixture.detectChanges();
-    const banner = (fixture.nativeElement as HTMLElement).querySelector('.error-banner');
+    const banner = (fixture.nativeElement as HTMLElement).querySelector(
+      '[data-testid="auth-error"]'
+    );
     expect(banner).toBeNull();
   });
 

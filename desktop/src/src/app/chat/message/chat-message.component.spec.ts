@@ -36,7 +36,7 @@ describe('ChatMessageComponent', () => {
 
     const el = fixture.nativeElement as HTMLElement;
     expect(el.textContent).toContain('Something failed');
-    expect(el.querySelector('.error-block')).not.toBeNull();
+    expect(el.querySelector('[data-testid="error-block"]')).not.toBeNull();
   });
 
   it('renders thinking block collapsed', () => {
@@ -46,7 +46,7 @@ describe('ChatMessageComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('.thinking-content')).toBeNull();
+    expect(el.querySelector('[data-testid="thinking-content"]')).toBeNull();
     expect(el.textContent).toContain('Thinking...');
   });
 
@@ -68,7 +68,7 @@ describe('ChatMessageComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('.tool-name')?.textContent).toBe('Read');
+    expect(el.querySelector('[data-testid="tool-name"]')?.textContent).toBe('Read');
   });
 
   it('renders multiple blocks in order', () => {
@@ -87,13 +87,13 @@ describe('ChatMessageComponent', () => {
     expect(el.textContent).toContain('Thinking...');
   });
 
-  it('applies user class for user role', () => {
+  it('applies user styling for user role', () => {
     component.blocks = [{ type: 'text', content: 'hi' }];
     component.role = 'user';
     fixture.detectChanges();
 
-    const msg = fixture.nativeElement.querySelector('.chat-message');
-    expect(msg?.classList.contains('user')).toBe(true);
+    const msg = fixture.nativeElement.querySelector('[data-testid="chat-message"]');
+    expect(msg?.getAttribute('data-role')).toBe('user');
   });
 
   it('shows streaming cursor when streaming', () => {
@@ -102,7 +102,7 @@ describe('ChatMessageComponent', () => {
     component.streaming = true;
     fixture.detectChanges();
 
-    const cursor = fixture.nativeElement.querySelector('.cursor');
+    const cursor = fixture.nativeElement.querySelector('[data-testid="cursor"]');
     expect(cursor).not.toBeNull();
   });
 
@@ -112,7 +112,7 @@ describe('ChatMessageComponent', () => {
     component.streaming = false;
     fixture.detectChanges();
 
-    const cursor = fixture.nativeElement.querySelector('.cursor');
+    const cursor = fixture.nativeElement.querySelector('[data-testid="cursor"]');
     expect(cursor).toBeNull();
   });
 
@@ -139,7 +139,7 @@ describe('ChatMessageComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('.ask-user-block')).not.toBeNull();
+    expect(el.querySelector('[data-testid="ask-user-block"]')).not.toBeNull();
     expect(el.textContent).toContain('Pick a fruit');
   });
 

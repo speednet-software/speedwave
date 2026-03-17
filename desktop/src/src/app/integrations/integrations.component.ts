@@ -28,21 +28,29 @@ import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (needsRestart) {
-      <div class="restart-banner" data-testid="integrations-restart-banner">
-        <div class="restart-info">
+      <div
+        class="bg-sw-accent text-white px-5 py-3 rounded-lg flex justify-between items-center mb-5"
+        data-testid="integrations-restart-banner"
+      >
+        <div class="flex flex-col gap-1">
           <span>Changes require container restart to take effect</span>
           @if (restarting) {
-            <span class="restart-hint">This may take a minute while containers are recreated</span>
+            <span class="text-[11px] opacity-80"
+              >This may take a minute while containers are recreated</span
+            >
           }
         </div>
         <button
-          class="restart-btn"
+          class="bg-white text-sw-accent border-none px-4 py-2 rounded cursor-pointer font-semibold font-mono text-[13px] flex items-center gap-2 whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
           data-testid="integrations-restart"
           (click)="restartContainers()"
           [disabled]="restarting"
         >
           @if (restarting) {
-            <span class="restart-spinner"></span> Restarting...
+            <span
+              class="inline-block w-3 h-3 border-2 border-sw-accent/30 border-t-sw-accent rounded-full animate-sw-spin"
+            ></span>
+            Restarting...
           } @else {
             Restart Now
           }
@@ -50,17 +58,22 @@ import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
       </div>
     }
 
-    <div class="integrations-page">
-      <h1>Integrations</h1>
+    <div>
+      <h1 class="text-xl text-sw-accent m-0 mb-6">Integrations</h1>
 
       @if (error) {
-        <div class="error-banner" data-testid="integrations-error">{{ error }}</div>
+        <div
+          class="mb-4 px-3 py-2 bg-sw-error-bg border border-sw-accent rounded text-sw-accent text-[13px]"
+          data-testid="integrations-error"
+        >
+          {{ error }}
+        </div>
       }
 
       <app-ide-bridge />
 
-      <section class="section" data-testid="integrations-services">
-        <h2>Services</h2>
+      <section class="mb-6" data-testid="integrations-services">
+        <h2 class="text-[15px] text-sw-text m-0 mb-3">Services</h2>
         @for (svc of services; track svc.service) {
           <app-service-card
             [svc]="svc"
@@ -80,33 +93,38 @@ import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
       </section>
 
       @if (osIntegrations.length > 0) {
-        <section class="section" data-testid="integrations-os">
-          <h2>OS Integrations</h2>
+        <section class="mb-6" data-testid="integrations-os">
+          <h2 class="text-[15px] text-sw-text m-0 mb-3">OS Integrations</h2>
           @for (os of osIntegrations; track os.service) {
-            <div class="card os-card">
-              <div class="card-header no-expand">
-                <div class="card-title">
-                  <span class="service-name">{{ os.display_name }}</span>
+            <div class="bg-sw-bg-dark border border-sw-border rounded-lg mb-3 overflow-hidden">
+              <div class="flex justify-between items-center px-5 py-4 cursor-default">
+                <div class="flex items-center gap-3">
+                  <span class="font-semibold text-base">{{ os.display_name }}</span>
                 </div>
-                <div class="card-actions">
-                  <label class="toggle">
+                <div class="flex items-center gap-3">
+                  <label class="toggle relative inline-block w-[44px] h-[24px]">
                     <input
                       type="checkbox"
+                      class="peer sr-only"
                       [checked]="os.enabled"
                       (change)="toggleOsService(os, $event)"
                     />
-                    <span class="slider"></span>
+                    <span
+                      class="slider absolute inset-0 bg-sw-slider rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-sw-accent before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
+                    ></span>
                   </label>
                 </div>
               </div>
-              <p class="card-description">{{ os.description }}</p>
+              <p class="px-5 pb-3 text-sw-text-faint text-[13px] m-0">{{ os.description }}</p>
             </div>
           }
         </section>
       }
     </div>
   `,
-  styleUrl: './integrations.component.css',
+  styles: [
+    ':host { display: block; background: #1a1a2e; min-height: 100vh; padding: 24px; color: #e0e0e0; }',
+  ],
 })
 export class IntegrationsComponent implements OnInit, OnDestroy {
   private static readonly HIDDEN_SERVICES = new Set(['slack']);
