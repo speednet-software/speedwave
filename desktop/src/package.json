@@ -50,7 +50,7 @@
     "eslint-config-prettier": "^10",
     "eslint-plugin-jsdoc": "^62.8.0",
     "eslint-plugin-prettier": "^5",
-    "jsdom": "^28.1.0",
+    "jsdom": "^29.0.0",
     "postcss": "^8.5.8",
     "prettier": "^3",
     "tailwindcss": "^4.2.1",
