@@ -29,30 +29,35 @@ import { ProjectList } from '../models/update';
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div class="settings-container">
-      <h1>Settings</h1>
+    <div class="max-w-[700px] mx-auto mt-8 px-6">
+      <h1 class="text-xl text-sw-accent m-0 mb-6">Settings</h1>
 
       @if (error) {
-        <div class="error-banner" data-testid="settings-error">{{ error }}</div>
+        <div
+          class="mb-4 px-3 py-2 bg-sw-error-bg border border-sw-error rounded text-sw-error text-[13px]"
+          data-testid="settings-error"
+        >
+          {{ error }}
+        </div>
       }
 
       <!-- Active project info -->
-      <section class="section">
-        <h2>Project</h2>
-        <div class="info-card">
-          <div class="info-row">
-            <span class="info-label">Active project</span>
-            <span class="info-value" data-testid="settings-active-project">{{
+      <section class="mb-6">
+        <h2 class="text-[15px] text-sw-text m-0 mb-3">Project</h2>
+        <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-4">
+          <div class="flex justify-between items-center py-2">
+            <span class="text-[13px] text-sw-text-muted">Active project</span>
+            <span class="text-[13px] text-sw-text" data-testid="settings-active-project">{{
               activeProject || 'None'
             }}</span>
           </div>
-          <div class="info-row">
-            <span class="info-label">Directory</span>
-            <span class="info-value mono">{{ projectDir || '—' }}</span>
+          <div class="flex justify-between items-center py-2 border-t border-sw-border">
+            <span class="text-[13px] text-sw-text-muted">Directory</span>
+            <span class="text-[13px] font-mono text-sw-text-dim">{{ projectDir || '—' }}</span>
           </div>
-          <div class="info-row">
-            <span class="info-label">Data directory</span>
-            <span class="info-value mono">~/.speedwave/</span>
+          <div class="flex justify-between items-center py-2 border-t border-sw-border">
+            <span class="text-[13px] text-sw-text-muted">Data directory</span>
+            <span class="text-[13px] font-mono text-sw-text-dim">~/.speedwave/</span>
           </div>
         </div>
       </section>
@@ -69,8 +74,8 @@ import { ProjectList } from '../models/update';
 
       <!-- System Health -->
       @if (activeProject) {
-        <section class="section">
-          <h2>System Health</h2>
+        <section class="mb-6">
+          <h2 class="text-[15px] text-sw-text m-0 mb-3">System Health</h2>
           <app-system-health [project]="activeProject" />
         </section>
       }
@@ -84,64 +89,6 @@ import { ProjectList } from '../models/update';
       />
     </div>
   `,
-  styles: [
-    `
-      .settings-container {
-        max-width: 700px;
-        margin: 32px auto;
-        padding: 24px;
-      }
-      h1 {
-        font-size: 20px;
-        color: #e94560;
-        margin: 0 0 24px 0;
-      }
-      h2 {
-        font-size: 15px;
-        color: #e0e0e0;
-        margin: 0 0 12px 0;
-      }
-      .error-banner {
-        margin-bottom: 16px;
-        padding: 8px 12px;
-        background: #3d0000;
-        border: 1px solid #e94560;
-        border-radius: 4px;
-        color: #e94560;
-        font-size: 13px;
-      }
-      .section {
-        margin-bottom: 24px;
-      }
-      .info-card {
-        background: #16213e;
-        border: 1px solid #0f3460;
-        border-radius: 8px;
-        padding: 16px;
-      }
-      .info-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 8px 0;
-      }
-      .info-row + .info-row {
-        border-top: 1px solid #0f3460;
-      }
-      .info-label {
-        font-size: 13px;
-        color: #888;
-      }
-      .info-value {
-        font-size: 13px;
-        color: #e0e0e0;
-      }
-      .info-value.mono {
-        font-family: monospace;
-        color: #aaa;
-      }
-    `,
-  ],
 })
 export class SettingsComponent implements OnInit, OnDestroy {
   activeProject: string | null = null;
