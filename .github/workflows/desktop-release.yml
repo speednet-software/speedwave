@@ -134,7 +134,7 @@ jobs:
             libssl-dev
 
       - name: Setup Node.js
-        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238  # v6.2.0
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
         with:
           node-version: 24
           cache: npm
@@ -150,7 +150,7 @@ jobs:
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Rust cache
-        uses: swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5  # v2.8.2
+        uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           workspaces: "./desktop/src-tauri -> target"
 
@@ -295,7 +295,7 @@ jobs:
       # When releaseId is set, tauri-action uploads artifacts to the existing
       # release and ignores tagName/releaseName/releaseDraft. When releaseId is
       # empty (manual dispatch), tauri-action creates/finds the release by tag.
-      - uses: tauri-apps/tauri-action@73fb865345c54760d875b94642314f8c0c894afa  # v0.6.1
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5  # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -352,7 +352,7 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Rust cache
-        uses: swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5  # v2.8.2
+        uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           shared-key: cli-${{ matrix.target }}
 
