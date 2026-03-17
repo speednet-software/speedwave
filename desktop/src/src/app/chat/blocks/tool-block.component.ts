@@ -167,7 +167,8 @@ import { ToolNormalizerService } from '../../services/tool-normalizer.service';
             <div
               data-testid="tool-result"
               class="mt-2 border-t border-sw-border pt-2"
-              [class.tool-result-error]="tool.result_is_error"
+              [attr.data-error]="tool.result_is_error ? 'true' : null"
+              [class.text-sw-error-light]="tool.result_is_error"
             >
               <div
                 data-testid="result-label"

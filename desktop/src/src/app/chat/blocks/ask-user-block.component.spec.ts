@@ -135,7 +135,7 @@ describe('AskUserBlockComponent', () => {
     const input = el.querySelector('[data-testid="ask-input"]') as HTMLInputElement;
     input.value = 'My freeform answer';
 
-    const sendBtn = el.querySelector('[data-testid="ask-submit-btn"]') as HTMLButtonElement;
+    const sendBtn = el.querySelector('[data-testid="ask-send-btn"]') as HTMLButtonElement;
     expect(sendBtn).not.toBeNull();
     sendBtn.click();
     fixture.detectChanges();
@@ -153,7 +153,7 @@ describe('AskUserBlockComponent', () => {
     const input = el.querySelector('[data-testid="ask-input"]') as HTMLInputElement;
     input.value = '   ';
 
-    const sendBtn = el.querySelector('[data-testid="ask-submit-btn"]') as HTMLButtonElement;
+    const sendBtn = el.querySelector('[data-testid="ask-send-btn"]') as HTMLButtonElement;
     sendBtn.click();
     fixture.detectChanges();
 

@@ -219,7 +219,7 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
               <div
                 class="flex items-center gap-2.5 px-3 py-2 bg-sw-bg-darkest rounded cursor-pointer transition-colors duration-150 hover:bg-sw-error-event"
                 [class.bg-sw-error-event]="selectedContainer === container.name"
-                [class.border-l-3]="selectedContainer === container.name"
+                [style.border-left-width]="selectedContainer === container.name ? '3px' : ''"
                 [class.border-l-sw-accent]="selectedContainer === container.name"
                 (click)="selectContainer(container.name)"
                 (keydown.enter)="selectContainer(container.name)"

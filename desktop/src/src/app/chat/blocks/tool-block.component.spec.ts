@@ -119,7 +119,7 @@ describe('ToolBlockComponent', () => {
 
     const el = fixture.nativeElement as HTMLElement;
     const result = el.querySelector('[data-testid="tool-result"]');
-    expect(result?.classList.contains('tool-result-error')).toBe(true);
+    expect(result?.getAttribute('data-error')).toBe('true');
   });
 
   it('hides body when collapsed via toggleCollapsed', () => {

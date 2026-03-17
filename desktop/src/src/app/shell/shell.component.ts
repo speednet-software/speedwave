@@ -53,7 +53,7 @@ import { ProjectStateService } from '../services/project-state.service';
             data-testid="blocking-overlay"
           >
             <div
-              class="w-8 h-8 border-3 border-sw-border-dark border-t-sw-accent rounded-full animate-sw-spin"
+              class="w-8 h-8 border-[3px] border-sw-border-dark border-t-sw-accent rounded-full animate-sw-spin"
             ></div>
             <p class="mt-4 font-mono text-sm text-sw-text">{{ statusMessage }}</p>
           </div>

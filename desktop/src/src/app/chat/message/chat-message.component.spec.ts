@@ -93,7 +93,7 @@ describe('ChatMessageComponent', () => {
     fixture.detectChanges();
 
     const msg = fixture.nativeElement.querySelector('[data-testid="chat-message"]');
-    expect(msg?.classList.contains('self-end')).toBe(true);
+    expect(msg?.getAttribute('data-role')).toBe('user');
   });
 
   it('shows streaming cursor when streaming', () => {

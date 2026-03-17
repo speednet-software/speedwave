@@ -22,6 +22,7 @@ import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
   template: `
     <div
       data-testid="chat-message"
+      [attr.data-role]="role"
       class="max-w-[85%] px-4 py-3 rounded-lg leading-relaxed break-words"
       [class]="
         role === 'user'

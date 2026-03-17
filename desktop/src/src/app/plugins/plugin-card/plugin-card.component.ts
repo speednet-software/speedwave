@@ -22,7 +22,7 @@ export interface SavePluginCredentialsEvent {
     >
       <div class="card-header flex justify-between items-center px-5 py-4">
         <button
-          class="card-header-btn flex items-center gap-3 flex-1 cursor-pointer bg-none border-none text-inherit font-inherit text-left p-0"
+          class="card-header-btn flex items-center gap-3 flex-1 cursor-pointer bg-transparent border-none text-inherit font-inherit text-left p-0"
           type="button"
           (click)="toggleExpand.emit(plugin.slug)"
         >

@@ -44,8 +44,10 @@ import { DetectedIde } from '../../models/health';
               @for (ide of availableIdes; track ide.ide_name + ':' + ide.port) {
                 <div
                   class="flex items-center gap-2.5 px-3 py-2 bg-sw-bg-darkest rounded"
-                  [class.border-l-3]="
+                  [style.border-left-width]="
                     selectedIde?.ide_name === ide.ide_name && selectedIde?.port === ide.port
+                      ? '3px'
+                      : ''
                   "
                   [class.border-sw-success]="
                     selectedIde?.ide_name === ide.ide_name && selectedIde?.port === ide.port
@@ -70,6 +72,11 @@ import { DetectedIde } from '../../models/health';
                     "
                     [class.!text-sw-success]="
                       selectedIde?.ide_name === ide.ide_name && selectedIde?.port === ide.port
+                    "
+                    [attr.data-active]="
+                      selectedIde?.ide_name === ide.ide_name && selectedIde?.port === ide.port
+                        ? 'true'
+                        : null
                     "
                     [disabled]="ideConnecting"
                     (click)="connectIde(ide)"

@@ -175,7 +175,7 @@ describe('IdeBridgeComponent', () => {
     fixture.detectChanges();
     const btn = fixture.nativeElement.querySelector('[data-testid="connect-btn"]');
     expect(btn.textContent.trim()).toBe('Connected');
-    expect(btn.classList.contains('!bg-sw-btn-active')).toBe(true);
+    expect(btn.getAttribute('data-active')).toBe('true');
   });
 
   it('displays ideError when present', async () => {

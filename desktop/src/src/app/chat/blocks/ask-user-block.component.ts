@@ -48,7 +48,7 @@ import type { AskUserQuestionBlock } from '../../models/chat';
           </div>
           <div class="flex items-center gap-2 flex-wrap">
             <button
-              data-testid="ask-submit-btn"
+              data-testid="ask-confirm-btn"
               class="bg-sw-purple text-white border-none rounded px-4 py-1.5 cursor-pointer text-[13px] hover:bg-sw-purple-dark disabled:opacity-50 disabled:cursor-not-allowed"
               [disabled]="pendingSelection.length === 0"
               (click)="submit()"
@@ -65,7 +65,7 @@ import type { AskUserQuestionBlock } from '../../models/chat';
                 #freeformInput
               />
               <button
-                data-testid="ask-submit-btn"
+                data-testid="ask-send-btn"
                 class="bg-sw-purple text-white border-none rounded px-4 py-1.5 cursor-pointer text-[13px] hover:bg-sw-purple-dark"
                 (click)="submitFreeformFromInput(freeformInput)"
               >
@@ -83,7 +83,7 @@ import type { AskUserQuestionBlock } from '../../models/chat';
               #freeformInput
             />
             <button
-              data-testid="ask-submit-btn"
+              data-testid="ask-send-btn"
               class="bg-sw-purple text-white border-none rounded px-4 py-1.5 cursor-pointer text-[13px] hover:bg-sw-purple-dark"
               (click)="submitFreeformFromInput(freeformInput)"
             >

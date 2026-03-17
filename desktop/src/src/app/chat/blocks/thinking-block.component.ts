@@ -7,7 +7,7 @@ import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block my-2' },
   template: `
-    <div class="bg-sw-thinking-bg border-l-3 border-sw-purple px-3 py-2 rounded">
+    <div class="bg-sw-thinking-bg border-l-[3px] border-sw-purple px-3 py-2 rounded">
       <div
         data-testid="thinking-toggle"
         class="cursor-pointer text-sw-purple text-xs select-none"
