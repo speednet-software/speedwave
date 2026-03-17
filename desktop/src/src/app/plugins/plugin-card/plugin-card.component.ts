@@ -22,22 +22,18 @@ export interface SavePluginCredentialsEvent {
     >
       <div class="flex justify-between items-center px-5 py-4">
         <button
-          class="card-header-btn flex items-center gap-3 flex-1 cursor-pointer bg-transparent border-none text-inherit font-inherit text-left p-0"
+          class="flex items-center gap-3 flex-1 cursor-pointer bg-transparent border-none text-inherit font-inherit text-left p-0"
           type="button"
           data-testid="card-header-btn"
           (click)="toggleExpand.emit(plugin.slug)"
         >
-          <span class="service-name font-semibold text-base" data-testid="service-name">{{
-            plugin.name
-          }}</span>
-          <span
-            class="version-badge text-[11px] text-sw-text-dim font-mono"
-            data-testid="version-badge"
+          <span class="font-semibold text-base" data-testid="service-name">{{ plugin.name }}</span>
+          <span class="text-[11px] text-sw-text-dim font-mono" data-testid="version-badge"
             >v{{ plugin.version }}</span
           >
           @if (plugin.auth_fields.length > 0) {
             <span
-              class="badge text-[11px] px-2 py-0.5 rounded font-medium"
+              class="text-[11px] px-2 py-0.5 rounded font-medium"
               data-testid="badge"
               [attr.data-status]="plugin.configured ? 'configured' : 'not-configured'"
               [ngClass]="
@@ -60,7 +56,7 @@ export interface SavePluginCredentialsEvent {
             Open
           </button>
           <label
-            class="toggle relative inline-block w-[44px] h-[24px]"
+            class="relative inline-block w-[44px] h-[24px]"
             data-testid="toggle"
             [ngClass]="!plugin.configured ? 'opacity-40 cursor-not-allowed' : ''"
             [title]="plugin.configured ? '' : 'Configure credentials to enable'"
@@ -85,7 +81,7 @@ export interface SavePluginCredentialsEvent {
       </p>
 
       @if (expanded) {
-        <div class="card-body px-5 pb-5 border-t border-sw-border" data-testid="card-body">
+        <div class="px-5 pb-5 border-t border-sw-border" data-testid="card-body">
           @if (plugin.auth_fields.length > 0) {
             <form (submit)="onSave($event)">
               @for (field of plugin.auth_fields; track field.key) {
@@ -136,7 +132,7 @@ export interface SavePluginCredentialsEvent {
           <div class="flex gap-3 mt-4">
             @if (confirmingRemove) {
               <span
-                class="confirm-prompt text-sw-error-text text-[13px] font-semibold"
+                class="text-sw-error-text text-[13px] font-semibold"
                 data-testid="confirm-prompt"
                 >Are you sure?</span
               >

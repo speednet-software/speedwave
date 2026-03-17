@@ -95,7 +95,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 
       <section class="mb-6" data-testid="plugins-list">
         @if (plugins.length === 0) {
-          <p class="empty-state text-sw-text-dim text-[13px] py-5 text-center">
+          <p class="text-sw-text-dim text-[13px] py-5 text-center" data-testid="empty-state">
             No plugins installed. Click "Install Plugin" to add one.
           </p>
         }

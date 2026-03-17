@@ -264,7 +264,7 @@ describe('PluginDetailComponent', () => {
     const { component, fixture } = setup();
     await initAndDetect(component, fixture);
 
-    const desc = fixture.nativeElement.querySelector('.plugin-description');
+    const desc = fixture.nativeElement.querySelector('[data-testid="plugin-description"]');
     expect(desc).not.toBeNull();
     expect(desc.textContent).toContain('CRM integration for presale');
   });
@@ -290,11 +290,11 @@ describe('PluginDetailComponent', () => {
     const { component, fixture } = setup();
     await initAndDetect(component, fixture);
 
-    const versionBadge = fixture.nativeElement.querySelector('.version-badge');
+    const versionBadge = fixture.nativeElement.querySelector('[data-testid="version-badge"]');
     expect(versionBadge).not.toBeNull();
     expect(versionBadge.textContent).toContain('v1.2.0');
 
-    const configuredBadge = fixture.nativeElement.querySelector('.badge.configured');
+    const configuredBadge = fixture.nativeElement.querySelector('[data-testid="configured-badge"]');
     expect(configuredBadge).not.toBeNull();
   });
 
@@ -377,7 +377,9 @@ describe('PluginDetailComponent', () => {
       '[data-testid="integration-requirements"]'
     );
     expect(requirements).toBeNull();
-    const placeholder = fixture.nativeElement.querySelector('.dashboard-placeholder');
+    const placeholder = fixture.nativeElement.querySelector(
+      '[data-testid="dashboard-placeholder"]'
+    );
     expect(placeholder).not.toBeNull();
   });
 

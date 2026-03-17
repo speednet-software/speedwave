@@ -50,14 +50,15 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
       @if (!plugin) {
         <p class="text-sw-text-dim text-[13px]" data-testid="plugin-not-found">Plugin not found.</p>
       } @else {
-        <div class="detail-header flex items-center gap-3 mb-6">
+        <div class="flex items-center gap-3 mb-6">
           <h1 class="text-xl text-sw-accent m-0">{{ plugin.name }}</h1>
-          <span class="version-badge text-[11px] text-sw-text-dim font-mono"
+          <span class="text-[11px] text-sw-text-dim font-mono" data-testid="version-badge"
             >v{{ plugin.version }}</span
           >
           @if (plugin.configured) {
             <span
-              class="badge configured text-[11px] px-2 py-0.5 rounded font-medium bg-sw-success-dark text-sw-success-text"
+              class="text-[11px] px-2 py-0.5 rounded font-medium bg-sw-success-dark text-sw-success-text"
+              data-testid="configured-badge"
               >Configured</span
             >
           }
@@ -85,7 +86,7 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
         <div class="min-h-[200px]">
           @if (activeTab === 'dashboard') {
             <div data-testid="dashboard-content">
-              <p class="plugin-description text-sw-text-muted text-[13px] m-0 mb-4">
+              <p class="text-sw-text-muted text-[13px] m-0 mb-4" data-testid="plugin-description">
                 {{ plugin.description }}
               </p>
 
@@ -124,7 +125,10 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
               }
 
               @if (plugin.requires_integrations.length === 0) {
-                <p class="dashboard-placeholder text-sw-text-ghost text-[13px] italic">
+                <p
+                  class="text-sw-text-ghost text-[13px] italic"
+                  data-testid="dashboard-placeholder"
+                >
                   Plugin dashboard content will appear here.
                 </p>
               }

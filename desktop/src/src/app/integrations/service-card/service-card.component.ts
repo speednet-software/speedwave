@@ -23,16 +23,16 @@ export interface SaveCredentialsEvent {
     >
       <div class="flex justify-between items-center px-5 py-4">
         <button
-          class="card-header-btn flex items-center gap-3 flex-1 cursor-pointer bg-transparent border-none text-inherit font-inherit text-left p-0"
+          class="flex items-center gap-3 flex-1 cursor-pointer bg-transparent border-none text-inherit font-inherit text-left p-0"
           type="button"
           data-testid="card-header-btn"
           (click)="toggleExpand.emit(svc.service)"
         >
-          <span class="service-name font-semibold text-base" data-testid="service-name">{{
+          <span class="font-semibold text-base" data-testid="service-name">{{
             svc.display_name
           }}</span>
           <span
-            class="badge text-[11px] px-2 py-0.5 rounded font-medium"
+            class="text-[11px] px-2 py-0.5 rounded font-medium"
             data-testid="badge"
             [attr.data-status]="svc.configured ? 'configured' : 'not-configured'"
             [ngClass]="
@@ -46,7 +46,7 @@ export interface SaveCredentialsEvent {
         </button>
         <div class="flex items-center gap-3">
           <label
-            class="toggle relative inline-block w-[44px] h-[24px]"
+            class="relative inline-block w-[44px] h-[24px]"
             data-testid="toggle"
             [attr.data-disabled]="!svc.configured"
             [ngClass]="!svc.configured ? 'opacity-40 cursor-not-allowed' : ''"
@@ -72,7 +72,7 @@ export interface SaveCredentialsEvent {
       </p>
 
       @if (expanded) {
-        <div class="card-body px-5 pb-5 border-t border-sw-border" data-testid="card-body">
+        <div class="px-5 pb-5 border-t border-sw-border" data-testid="card-body">
           <form (submit)="onSave($event)">
             @for (field of svc.auth_fields; track field.key) {
               @if (!field.oauth_flow) {
@@ -98,7 +98,7 @@ export interface SaveCredentialsEvent {
 
             @if (hasOAuthFields()) {
               <div
-                class="oauth-section my-4 p-4 bg-sw-bg-darkest border border-sw-border rounded"
+                class="my-4 p-4 bg-sw-bg-darkest border border-sw-border rounded"
                 data-testid="oauth-section"
               >
                 @if (!deviceCodeInfo && oauthStatus !== 'polling' && oauthStatus !== 'starting') {
@@ -111,15 +111,12 @@ export interface SaveCredentialsEvent {
                   </button>
                 }
                 @if (oauthStatus === 'starting') {
-                  <p
-                    class="polling-status text-sw-text-dim text-[13px] my-2"
-                    data-testid="polling-status"
-                  >
+                  <p class="text-sw-text-dim text-[13px] my-2" data-testid="polling-status">
                     Connecting to Microsoft...
                   </p>
                   <button
                     type="button"
-                    class="btn-cancel-oauth px-4 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer mt-2"
+                    class="px-4 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer mt-2"
                     data-testid="btn-cancel-oauth"
                     (click)="cancelOAuth.emit()"
                   >
@@ -129,37 +126,34 @@ export interface SaveCredentialsEvent {
                 @if (deviceCodeInfo) {
                   <p>Enter this code:</p>
                   <div
-                    class="user-code text-[28px] font-mono font-bold tracking-[4px] text-sw-accent my-3 text-center"
+                    class="text-[28px] font-mono font-bold tracking-[4px] text-sw-accent my-3 text-center"
                     data-testid="user-code"
                   >
                     {{ deviceCodeInfo.user_code }}
                   </div>
-                  <div class="verification-url-row flex items-center gap-2.5 my-2 flex-wrap">
+                  <div class="flex items-center gap-2.5 my-2 flex-wrap">
                     <button
                       type="button"
-                      class="btn-link px-4 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer inline-block shrink-0"
+                      class="px-4 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer inline-block shrink-0"
                       data-testid="btn-link"
                       (click)="openVerificationUrl.emit(deviceCodeInfo.verification_uri)"
                     >
                       Open Microsoft Sign-in
                     </button>
                     <span
-                      class="verification-url text-xs font-mono text-sw-text-dim select-all break-all"
+                      class="text-xs font-mono text-sw-text-dim select-all break-all"
                       data-testid="verification-url"
                       >{{ deviceCodeInfo.verification_uri }}</span
                     >
                   </div>
                   @if (oauthStatus === 'polling') {
-                    <p
-                      class="polling-status text-sw-text-dim text-[13px] my-2"
-                      data-testid="polling-status"
-                    >
+                    <p class="text-sw-text-dim text-[13px] my-2" data-testid="polling-status">
                       Waiting for sign-in...
                     </p>
                   }
                   <button
                     type="button"
-                    class="btn-cancel-oauth px-4 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer mt-2"
+                    class="px-4 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer mt-2"
                     data-testid="btn-cancel-oauth"
                     (click)="cancelOAuth.emit()"
                   >
@@ -167,12 +161,12 @@ export interface SaveCredentialsEvent {
                   </button>
                 }
                 @if (oauthStatus === 'success') {
-                  <p class="oauth-success text-sw-success-text text-sm" data-testid="oauth-success">
+                  <p class="text-sw-success-text text-sm" data-testid="oauth-success">
                     Authentication successful
                   </p>
                 }
                 @if (oauthStatus === 'error' || oauthStatus === 'expired') {
-                  <p class="oauth-error text-sw-error-text text-sm" data-testid="oauth-error">
+                  <p class="text-sw-error-text text-sm" data-testid="oauth-error">
                     {{ oauthStatusMessage }}
                   </p>
                 }
@@ -180,7 +174,7 @@ export interface SaveCredentialsEvent {
             }
 
             @if (svc.service === 'redmine') {
-              <div class="mappings-section mt-4" data-testid="mappings-section">
+              <div class="mt-4" data-testid="mappings-section">
                 <h4 class="text-sw-text-dim text-[13px] mb-2">ID Mappings</h4>
                 @for (entry of getMappingEntries(); track entry.key) {
                   <div class="flex gap-2 mb-2 items-center">

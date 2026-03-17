@@ -102,7 +102,7 @@ import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
                   <span class="font-semibold text-base">{{ os.display_name }}</span>
                 </div>
                 <div class="flex items-center gap-3">
-                  <label class="toggle relative inline-block w-[44px] h-[24px]">
+                  <label class="relative inline-block w-[44px] h-[24px]">
                     <input
                       type="checkbox"
                       class="peer sr-only"
@@ -110,7 +110,7 @@ import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
                       (change)="toggleOsService(os, $event)"
                     />
                     <span
-                      class="slider absolute inset-0 bg-sw-slider rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-sw-accent before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
+                      class="absolute inset-0 bg-sw-slider rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-sw-accent before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
                     ></span>
                   </label>
                 </div>

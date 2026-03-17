@@ -11,7 +11,7 @@ import { JsonSchema } from '../../models/plugin';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (!schema) {
-      <p class="no-settings text-sw-text-dim text-[13px]">
+      <p class="text-sw-text-dim text-[13px]" data-testid="no-settings">
         No configurable settings for this plugin.
       </p>
     } @else {
@@ -22,7 +22,7 @@ import { JsonSchema } from '../../models/plugin';
               key
             }}</label>
             @if (schema.properties[key].description) {
-              <span class="field-hint block text-[11px] text-sw-text-ghost mb-1.5">{{
+              <span class="block text-[11px] text-sw-text-ghost mb-1.5" data-testid="field-hint">{{
                 schema.properties[key].description
               }}</span>
             }
