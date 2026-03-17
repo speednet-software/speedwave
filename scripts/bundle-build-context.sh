@@ -60,6 +60,8 @@ cp "$REPO_ROOT/mcp-servers/shared/package.json" "$DEST/mcp-os/shared/"
 cp "$REPO_ROOT/mcp-servers/package-lock.json" "$DEST/mcp-os/shared/"
 (cd "$DEST/mcp-os/shared" && npm ci --omit=dev --ignore-scripts)
 
-# Link @speedwave/mcp-shared so Node.js resolves it from os/dist/index.js
+# Copy @speedwave/mcp-shared so Node.js resolves it from os/dist/index.js.
+# Uses cp -r instead of ln -s because Tauri's resource bundler does not
+# reliably preserve symlinks in .dmg/.deb/NSIS packages.
 mkdir -p "$DEST/mcp-os/os/node_modules/@speedwave"
-ln -s ../../../shared "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared"
+cp -r "$DEST/mcp-os/shared" "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared"

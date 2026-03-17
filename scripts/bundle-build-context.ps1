@@ -53,11 +53,10 @@ Push-Location "$dest\mcp-os\shared"
 npm ci --omit=dev --ignore-scripts
 Pop-Location
 
-# Link @speedwave/mcp-shared so Node.js resolves it from os/dist/index.js.
-# Windows junctions require an absolute target path (unlike Unix symlinks which
-# use a relative ../../../shared). This works correctly but means the junction
-# breaks if the bundle tree is relocated after creation.
+# Copy @speedwave/mcp-shared so Node.js resolves it from os/dist/index.js.
+# Uses Copy-Item instead of Junction because Tauri's resource bundler does not
+# reliably preserve junctions/symlinks in NSIS packages.
 New-Item -ItemType Directory -Path "$dest\mcp-os\os\node_modules\@speedwave" -Force | Out-Null
-New-Item -ItemType Junction -Path "$dest\mcp-os\os\node_modules\@speedwave\mcp-shared" -Target (Resolve-Path "$dest\mcp-os\shared").Path | Out-Null
+Copy-Item -Recurse "$dest\mcp-os\shared" "$dest\mcp-os\os\node_modules\@speedwave\mcp-shared"
 
 Write-Host "Build context bundled into $dest"
