@@ -3,20 +3,11 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { UpdateNotificationComponent } from './update-notification.component';
 import { TauriService } from '../services/tauri.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
-import type { BundleReconcileStatus } from '../models/update';
 
 describe('UpdateNotificationComponent', () => {
   let component: UpdateNotificationComponent;
   let fixture: ComponentFixture<UpdateNotificationComponent>;
   let mockTauri: MockTauriService;
-
-  const defaultBundleStatus: BundleReconcileStatus = {
-    phase: 'done',
-    in_progress: false,
-    last_error: null,
-    pending_running_projects: [],
-    applied_bundle_id: null,
-  };
 
   beforeEach(async () => {
     mockTauri = new MockTauriService();
@@ -25,8 +16,6 @@ describe('UpdateNotificationComponent', () => {
       switch (cmd) {
         case 'get_platform':
           return 'macos';
-        case 'get_bundle_reconcile_state':
-          return defaultBundleStatus;
         case 'check_for_update':
           return null;
         case 'list_projects':
@@ -126,60 +115,6 @@ describe('UpdateNotificationComponent', () => {
     });
   });
 
-  describe('bundle reconcile status', () => {
-    it('updates bundle status from backend events', () => {
-      const payload: BundleReconcileStatus = {
-        phase: 'images_built',
-        in_progress: true,
-        last_error: null,
-        pending_running_projects: ['alpha'],
-        applied_bundle_id: 'prev-bundle',
-      };
-
-      mockTauri.dispatchEvent('bundle_reconcile_status', payload);
-
-      expect(component.bundleStatus).toEqual(payload);
-      expect(component.showBundleBanner).toBe(true);
-      expect(component.bundleStatusMessage).toBe('Rebuilding containers');
-    });
-
-    it('calls retry_bundle_reconcile and clears the previous error', async () => {
-      component.bundleStatus = {
-        phase: 'images_built',
-        in_progress: false,
-        last_error: 'Image rebuild failed',
-        pending_running_projects: ['alpha'],
-        applied_bundle_id: 'prev-bundle',
-      };
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
-
-      await component.retryBundleReconcile();
-
-      expect(invokeSpy).toHaveBeenCalledWith('retry_bundle_reconcile');
-      expect(component.bundleStatus?.last_error).toBeNull();
-      expect(component.bundleStatus?.in_progress).toBe(true);
-    });
-
-    it('stores the retry error when retry_bundle_reconcile fails', async () => {
-      component.bundleStatus = {
-        phase: 'pending',
-        in_progress: false,
-        last_error: 'Previous failure',
-        pending_running_projects: [],
-        applied_bundle_id: null,
-      };
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'retry_bundle_reconcile') throw new Error('retry failed');
-        return defaultBundleStatus;
-      };
-
-      await component.retryBundleReconcile();
-
-      expect(component.bundleStatus?.last_error).toBe('retry failed');
-      expect(component.bundleStatus?.in_progress).toBe(false);
-    });
-  });
-
   describe('isLinux', () => {
     it('defaults to false', () => {
       expect(component.isLinux).toBe(false);
@@ -191,8 +126,6 @@ describe('UpdateNotificationComponent', () => {
         switch (cmd) {
           case 'get_platform':
             return 'linux';
-          case 'get_bundle_reconcile_state':
-            return defaultBundleStatus;
           case 'check_for_update':
             return null;
           case 'list_projects':
@@ -232,6 +165,60 @@ describe('UpdateNotificationComponent', () => {
         throw new Error('not in Tauri');
       };
       await expect(component.openReleasesPage()).resolves.toBeUndefined();
+    });
+  });
+
+  describe('isLinux', () => {
+    it('defaults to false', () => {
+      expect(component.isLinux).toBe(false);
+    });
+
+    it('is set to true when platform is linux', async () => {
+      const linuxMock = new MockTauriService();
+      linuxMock.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'get_platform':
+            return 'linux';
+          case 'check_for_update':
+            return null;
+          case 'list_projects':
+            return { projects: [], active_project: null };
+          case 'check_containers_running':
+            return false;
+          default:
+            return undefined;
+        }
+      };
+
+      await TestBed.resetTestingModule();
+      await TestBed.configureTestingModule({
+        imports: [UpdateNotificationComponent],
+        providers: [{ provide: TauriService, useValue: linuxMock }],
+      }).compileComponents();
+
+      const linuxFixture = TestBed.createComponent(UpdateNotificationComponent);
+      const linuxComponent = linuxFixture.componentInstance;
+      // Wait for setupListeners to complete
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(linuxComponent.isLinux).toBe(true);
+    });
+  });
+
+  describe('openReleasesPage()', () => {
+    it('invokes open_url with GitHub Releases URL', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      mockTauri.invokeHandler = async () => undefined;
+      await component.openReleasesPage();
+      expect(invokeSpy).toHaveBeenCalledWith('open_url', {
+        url: 'https://github.com/speednet-software/speedwave/releases',
+      });
+    });
+
+    it('does not throw when invoke fails', async () => {
+      mockTauri.invokeHandler = async () => {
+        throw new Error('not in Tauri');
+      };
+      await expect(component.openReleasesPage()).resolves.not.toThrow();
     });
   });
 });

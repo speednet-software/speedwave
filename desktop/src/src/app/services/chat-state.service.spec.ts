@@ -3,7 +3,7 @@ import { TestBed } from '@angular/core/testing';
 import { ChatStateService } from './chat-state.service';
 import { ProjectStateService } from './project-state.service';
 import { TauriService } from './tauri.service';
-import { MockTauriService } from '../testing/mock-tauri.service';
+import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import type { StreamChunk } from '../models/chat';
 
 describe('ChatStateService', () => {
@@ -17,8 +17,12 @@ describe('ChatStateService', () => {
       switch (cmd) {
         case 'list_projects':
           return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        case 'get_bundle_reconcile_state':
+          return MOCK_BUNDLE_RECONCILE_DONE;
         case 'check_containers_running':
           return true;
+        case 'start_containers':
+          return undefined;
         case 'start_chat':
           return undefined;
         case 'send_message':
@@ -37,13 +41,32 @@ describe('ChatStateService', () => {
     // Reset state between tests
     service._setState({ messages: [], currentBlocks: [], sessionStats: null });
     service.isStreaming = false;
-    service.containerStatus = 'checking';
-    service.containerError = '';
   });
 
   describe('init', () => {
-    it('only runs checkContainers once', async () => {
+    it('surfaces startChatSession error to projectState', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_chat') throw new Error('chat backend crashed');
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
+        if (cmd === 'check_containers_running') return true;
+        return undefined;
+      };
+
+      await service.init();
+      expect(projectState.status).toBe('error');
+      expect(projectState.error).toContain('Failed to start chat session');
+    });
+
+    it('only runs init once', async () => {
       const spy = vi.spyOn(mockTauri, 'invoke');
+      // First init — projectState is not ready so chat may wait
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
       await service.init();
       const firstCallCount = spy.mock.calls.filter((c) => c[0] === 'start_chat').length;
 
@@ -56,104 +79,26 @@ describe('ChatStateService', () => {
   });
 
   describe('setupStreamListener error handling', () => {
+    it('surfaces stream listener error to projectState when running in Tauri', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      mockTauri.isRunningInTauri = () => true;
+      mockTauri.listen = async () => {
+        throw new Error('WebSocket unavailable');
+      };
+
+      await service.init();
+      expect(projectState.status).toBe('error');
+      expect(projectState.error).toContain('Failed to set up stream listener');
+    });
+
     it('ignores listen failure when not running inside Tauri', async () => {
       mockTauri.listen = async () => {
         throw new Error('Tauri not available');
       };
 
+      // Should not throw
       await service.init();
-
-      expect(service.containerStatus).not.toBe('error');
-    });
-
-    it('sets error status when listen fails inside Tauri', async () => {
-      const failingMock = new MockTauriService();
-      // Simulate Tauri runtime presence via the shared method
-      failingMock.isRunningInTauri = () => true;
-      failingMock.listen = async () => {
-        throw new Error('IPC failure');
-      };
-      failingMock.invokeHandler = async (cmd: string) => {
-        switch (cmd) {
-          case 'list_projects':
-            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
-          case 'check_containers_running':
-            return true;
-          case 'start_chat':
-            return undefined;
-          default:
-            return undefined;
-        }
-      };
-
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-      // Create a fresh injector so setupStreamListener runs again
-      await TestBed.resetTestingModule();
-      TestBed.configureTestingModule({
-        providers: [ChatStateService, { provide: TauriService, useValue: failingMock }],
-      });
-      const freshService = TestBed.inject(ChatStateService);
-      await freshService.init();
-
-      expect(errorSpy).toHaveBeenCalledWith('Failed to set up stream listener:', expect.any(Error));
-
-      errorSpy.mockRestore();
-    });
-  });
-
-  describe('checkContainers', () => {
-    it('sets containerStatus to running on success', async () => {
-      await service.checkContainers();
-
-      expect(service.containerStatus).toBe('running');
-      expect(service.containerError).toBe('');
-    });
-
-    it('sets activeProject from list_projects result', async () => {
-      await service.checkContainers();
-
-      expect(service.activeProject).toBe('test');
-    });
-
-    it('sets activeProject to null when no active project', async () => {
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'list_projects') return { projects: [], active_project: null };
-        return undefined;
-      };
-
-      await service.checkContainers();
-
-      expect(service.activeProject).toBeNull();
-    });
-
-    it('sets error when no active project', async () => {
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'list_projects') return { projects: [], active_project: null };
-        return undefined;
-      };
-
-      await service.checkContainers();
-
-      expect(service.containerStatus).toBe('error');
-      expect(service.containerError).toContain('No active project');
-    });
-
-    it('starts containers when not running', async () => {
-      const calls: string[] = [];
-      mockTauri.invokeHandler = async (cmd: string) => {
-        calls.push(cmd);
-        if (cmd === 'list_projects') {
-          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
-        }
-        if (cmd === 'check_containers_running') return false;
-        return undefined;
-      };
-
-      await service.checkContainers();
-
-      expect(calls).toContain('start_containers');
-      expect(service.containerStatus).toBe('running');
+      expect(service).toBeTruthy();
     });
   });
 
@@ -378,7 +323,6 @@ describe('ChatStateService', () => {
         data: { tool_id: 't1', tool_name: 'Bash' },
       });
 
-      // Send four separate fragments that together form valid JSON
       service.handleStreamChunk({
         chunk_type: 'ToolInputDelta',
         data: { tool_id: 't1', partial_json: '{"com' },
@@ -401,7 +345,6 @@ describe('ChatStateService', () => {
       expect(block.type).toBe('tool_use');
       if (block.type === 'tool_use') {
         expect(block.tool.input_json).toBe('{"command":"ls -la"}');
-        // Verify the assembled JSON is actually parseable
         const parsed = JSON.parse(block.tool.input_json);
         expect(parsed).toEqual({ command: 'ls -la' });
       }
@@ -529,8 +472,6 @@ describe('ChatStateService', () => {
     });
 
     it('Text deltas followed by Result with result_text skips duplicate', () => {
-      // Claude Code always copies the full response into `result`.
-      // When text was already streamed, result_text is redundant and must be skipped.
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Streamed text.' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
@@ -572,7 +513,6 @@ describe('ChatStateService', () => {
     });
 
     it('full streaming sequence produces correct state', () => {
-      // Simulate a full turn: text -> thinking -> tool -> tool_result -> text -> result
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Let me ' } });
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'read that.' } });
       service.handleStreamChunk({ chunk_type: 'Thinking', data: { content: '' } });
@@ -600,7 +540,7 @@ describe('ChatStateService', () => {
 
       expect(service.messages).toHaveLength(1);
       const blocks = service.messages[0].blocks;
-      expect(blocks).toHaveLength(4); // text, thinking, tool_use, text
+      expect(blocks).toHaveLength(4);
       expect(blocks[0].type).toBe('text');
       expect(blocks[1].type).toBe('thinking');
       expect(blocks[2].type).toBe('tool_use');
@@ -609,8 +549,8 @@ describe('ChatStateService', () => {
     });
   });
 
-  describe('project switching/settled events via ProjectStateService', () => {
-    it('project_switch_started clears state and shows overlay', async () => {
+  describe('project switching clears state via ProjectStateService', () => {
+    it('project_switch_started clears chat state', async () => {
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
       await service.init();
@@ -625,57 +565,6 @@ describe('ChatStateService', () => {
       expect(service.messages).toEqual([]);
       expect(service.isStreaming).toBe(false);
       expect(service.sessionStats).toBeNull();
-      expect(service.containerStatus).toBe('switching');
-    });
-
-    it('project_switch_succeeded sets running and syncs activeProject', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
-      await service.init();
-
-      // First trigger switching, then succeeded
-      mockTauri.dispatchEvent('project_switch_started', { project: 'other-project' });
-      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other-project' });
-      await new Promise((r) => setTimeout(r, 10));
-
-      expect(service.containerStatus).toBe('running');
-      expect(service.activeProject).toBe('other-project');
-    });
-
-    it('project_switch_failed with rollback project sets running with error', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
-      await service.init();
-
-      mockTauri.dispatchEvent('project_switch_started', { project: 'fail-project' });
-      mockTauri.dispatchEvent('project_switch_failed', {
-        project: 'test',
-        error: 'chat failed',
-      });
-      await new Promise((r) => setTimeout(r, 10));
-
-      // Rolled back to 'test' — container is considered running for the old project
-      expect(service.containerStatus).toBe('running');
-      expect(service.containerError).toContain('chat failed');
-      expect(service.activeProject).toBe('test');
-    });
-
-    it('project_switch_failed without rollback project sets error', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
-      await service.init();
-
-      mockTauri.dispatchEvent('project_switch_started', { project: 'fail-project' });
-      mockTauri.dispatchEvent('project_switch_failed', {
-        project: null,
-        error: 'chat failed',
-      });
-      await new Promise((r) => setTimeout(r, 10));
-
-      // No rollback project — error state
-      expect(service.containerStatus).toBe('error');
-      expect(service.containerError).toContain('chat failed');
-      expect(service.activeProject).toBeNull();
     });
   });
 
@@ -840,10 +729,8 @@ describe('ChatStateService', () => {
 
       await service.answerQuestion('toolu_ask1', ['a']);
 
-      // isStreaming must be reset so the user is not stuck
       expect(service.isStreaming).toBe(false);
 
-      // The question block should be reverted to unanswered so the user can retry
       const askBlock = service.currentBlocks.find(
         (b) => b.type === 'ask_user' && b.question.tool_id === 'toolu_ask1'
       );
@@ -861,13 +748,10 @@ describe('ChatStateService', () => {
     });
 
     it('answerQuestion with stale tool_use_id does not throw and calls backend', async () => {
-      // No AskUserQuestion block exists for this tool_use_id — simulates a stale session mismatch
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       await service.answerQuestion('toolu_nonexistent', ['yes']);
 
-      // The block-marking map finds no match, so currentBlocks stays empty — no crash
       expect(service.currentBlocks).toHaveLength(0);
-      // Backend is still called — it decides how to handle the stale ID
       expect(invokeSpy).toHaveBeenCalledWith('answer_question', {
         toolUseId: 'toolu_nonexistent',
         answer: 'yes',

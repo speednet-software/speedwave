@@ -70,8 +70,8 @@ export const TOOL_POLICIES: Readonly<Record<string, Readonly<Record<string, Tool
     sharepoint: Object.freeze({
       listFileIds: { category: 'read', deferLoading: false },
       getFileFull: { category: 'read', deferLoading: true, timeoutMs: TIMEOUTS.LONG_OPERATION_MS },
-      sync: { category: 'write', deferLoading: true, timeoutClass: 'long' },
-      syncDirectory: { category: 'write', deferLoading: true, timeoutClass: 'long' },
+      downloadFile: { category: 'write', deferLoading: true, timeoutClass: 'long' },
+      uploadFile: { category: 'write', deferLoading: true, timeoutClass: 'long' },
       getCurrentUser: { category: 'read', deferLoading: true },
     } satisfies Record<string, ToolPolicy>),
 

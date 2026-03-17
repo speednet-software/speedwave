@@ -43,9 +43,9 @@ export class ChatComponent implements OnInit, OnDestroy {
   viewError = '';
 
   readonly chat = inject(ChatStateService);
+  readonly projectState = inject(ProjectStateService);
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
-  private projectState = inject(ProjectStateService);
   private unsubChange: (() => void) | null = null;
   private unsubProjectReady: (() => void) | null = null;
 
@@ -77,11 +77,6 @@ export class ChatComponent implements OnInit, OnDestroy {
         await this.loadProjectMemory();
       }
     });
-  }
-
-  /** Retries the container health check. */
-  retry(): void {
-    this.chat.checkContainers();
   }
 
   /** Sends the current input text as a user message and invokes the backend. */
@@ -139,7 +134,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.historyError = '';
     this.cdr.markForCheck();
     try {
-      const project = this.chat.activeProject;
+      const project = this.projectState.activeProject;
       if (!project) {
         this.conversations = [];
         return;
@@ -164,7 +159,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   async viewConversation(sessionId: string): Promise<void> {
     this.viewError = '';
     try {
-      const project = this.chat.activeProject;
+      const project = this.projectState.activeProject;
       if (!project) return;
       this.viewingTranscript = await this.tauri.invoke<ConversationTranscript>('get_conversation', {
         project,
@@ -191,7 +186,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     }));
 
     try {
-      const project = this.chat.activeProject;
+      const project = this.projectState.activeProject;
       if (project) {
         await this.tauri.invoke('resume_conversation', { project, sessionId });
       }
@@ -246,7 +241,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   /** Loads the project memory (CLAUDE.md contents) from the backend. */
   async loadProjectMemory(): Promise<void> {
     try {
-      const project = this.chat.activeProject;
+      const project = this.projectState.activeProject;
       if (!project) {
         this.projectMemory = '';
         return;

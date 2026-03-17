@@ -70,6 +70,7 @@ Plugins live in a **separate repository** (`speedwave-plugins`, sibling to this 
 | **Compose injection**              | `crates/speedwave-runtime/src/compose.rs` → `apply_plugins()`, `generate_plugin_service()`             | Plugin `Containerfile`, `port`, `extra_env`, `mem_limit`, `token_mount` |
 | **Hub env var convention**         | `compose.rs` → `WORKER_<SLUG_UPPER>_URL` injection into hub                                            | Hub discovers plugin workers by this env var                            |
 | **Token mount path**               | `compose.rs` → mounts `~/.speedwave/tokens/<project>/<service_id>/` as `/tokens`                       | Plugin reads credentials from `/tokens/<key>`                           |
+| **Workspace mount path**           | `compose.rs` → mounts `{project_dir}` as `/workspace:rw`                                               | Plugin reads/writes files at `/workspace/`                              |
 | **Claude-resources directory**     | `entrypoint.sh` → symlinks `claude-resources/{skills,commands,agents,hooks}`                           | Plugin ships `claude-resources/` with skills/commands                   |
 | **`SPEEDWAVE_PLUGINS` env var**    | `compose.rs` → comma-separated enabled slugs in claude container                                       | `entrypoint.sh` iterates this list                                      |
 | **Settings schema (JSON Schema)**  | `plugin.rs` → `settings_schema` field, `plugin_cmd.rs` → `plugin_save_settings`/`plugin_load_settings` | Plugin defines `settings_schema` in manifest                            |
@@ -98,7 +99,7 @@ All plugins are toggled per-project via `integrations.plugins.<key>.enabled`, wh
 - **Install:** `speedwave plugin install <path.zip>` → verify Ed25519 → validate manifest → extract to `~/.speedwave/plugins/<slug>/` → build image
 - **Configure:** user fills `auth_fields` credentials → stored at `~/.speedwave/tokens/<project>/<service_id>/<key>` (perm `0o600`)
 - **Enable/disable:** per-project toggle in config (`integrations.plugins.<slug>.enabled`)
-- **Compose:** `apply_plugins()` generates plugin service in compose, injects `WORKER_<PLUGIN>_URL` into hub, mounts claude-resources
+- **Compose:** `apply_plugins()` generates plugin service in compose, injects `WORKER_<PLUGIN>_URL` into hub, mounts `/workspace:rw` and claude-resources
 - **Hub discovery:** MCP Hub reads `ENABLED_SERVICES`, fetches tools from plugin workers via HTTP
 - **Uninstall:** `plugin::remove_plugin()` removes `~/.speedwave/plugins/<slug>/`; Desktop `remove_plugin` command additionally cleans tokens and config entries
 
@@ -122,7 +123,7 @@ All plugins are toggled per-project via `integrations.plugins.<key>.enabled`, wh
 - **NEVER use `#[allow(dead_code)]`** — dead code must be removed, not silenced. If a field/method is only used in tests, gate it behind `#[cfg(test)]`. If a struct field is required by serde but not read, prefix it with `_` and add `#[serde(rename = "original_name")]`.
 - **NEVER use `#[allow(...)]` to suppress lint warnings** — fix the underlying issue instead. No `#[allow(missing_docs)]`, no `#[allow(clippy::unwrap_used)]`, no blanket `#![allow(...)]` at crate level. The only exception is `#[allow(clippy::unwrap_used, clippy::expect_used)]` on `#[cfg(test)] mod tests` blocks, where panicking on test failure is intentional.
 - **Every code change must include tests** in the same commit
-- **SharePoint `:rw` mount** — only exception to the `:ro` token mount rule (OAuth refresh, ADR-009)
+- **SharePoint `:rw` token mount** — only exception to the `:ro` token mount rule (OAuth refresh, ADR-009). All MCP workers also mount `/workspace:rw` for file access
 - **Linux rootless:** container runs as UID 0 in user namespace (ADR-026)
 - **Documentation is a delivery requirement** — same as tests. New feature -> update guide. Decision -> write ADR.
 

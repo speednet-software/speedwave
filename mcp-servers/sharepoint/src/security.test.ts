@@ -5,6 +5,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SharePointClient, SharePointConfig } from './client.js';
+import { PathValidator } from './path-validator.js';
 
 // Test configuration
 const mockConfig: SharePointConfig = {
@@ -422,90 +423,50 @@ describe('Security: validateLocalPath', () => {
 
   describe('Whitelist Enforcement', () => {
     it('should reject path outside allowed directory', async () => {
-      await expect(
-        client.syncDirectory({
-          localPath: '/etc/passwd',
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
+      await expect(client.uploadFile('docs/test.txt', '/etc/passwd')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
     });
 
     it('should reject home directory', async () => {
-      await expect(
-        client.syncDirectory({
-          localPath: '/home/speedwave',
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
+      await expect(client.uploadFile('docs/test.txt', '/home/speedwave')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
     });
 
     it('should reject parent of allowed directory', async () => {
-      await expect(
-        client.syncDirectory({
-          localPath: '/home/speedwave/.claude',
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
+      await expect(client.uploadFile('docs/test.txt', '/home/speedwave/.claude')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
     });
 
     it('should reject root directory', async () => {
-      await expect(
-        client.syncDirectory({
-          localPath: '/',
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
+      await expect(client.uploadFile('docs/test.txt', '/')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
     });
 
     it('should reject /tmp directory', async () => {
-      await expect(
-        client.syncDirectory({
-          localPath: '/tmp',
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
+      await expect(client.uploadFile('docs/test.txt', '/tmp')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
     });
 
     it('should reject /var directory', async () => {
-      await expect(
-        client.syncDirectory({
-          localPath: '/var/log',
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
+      await expect(client.uploadFile('docs/test.txt', '/var/log')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
     });
 
     it('should reject another user home directory', async () => {
-      await expect(
-        client.syncDirectory({
-          localPath: '/home/otheruser',
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
+      await expect(client.uploadFile('docs/test.txt', '/home/otheruser')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
     });
 
     it('should reject Windows paths', async () => {
-      await expect(
-        client.syncDirectory({
-          localPath: 'C:\\Users\\speedwave',
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
+      await expect(client.uploadFile('docs/test.txt', 'C:\\Users\\speedwave')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
     });
   });
@@ -516,49 +477,29 @@ describe('Security: validateLocalPath', () => {
 
   describe('Path Traversal in Local Paths', () => {
     it('should reject relative path with traversal escaping whitelist', async () => {
-      await expect(
-        client.syncDirectory({
-          localPath: '/home/speedwave/.claude/context/../../..',
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
+      await expect(client.uploadFile('docs/test.txt', '/workspace/../../..')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
     });
 
     it('should reject symlink-like traversal attempt', async () => {
       await expect(
-        client.syncDirectory({
-          localPath: '/home/speedwave/.claude/context/../../../etc/passwd',
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
-      );
+        client.uploadFile('docs/test.txt', '/workspace/../../../etc/passwd')
+      ).rejects.toThrow('Invalid local_path: must be under /workspace');
     });
 
     it('should reject path with embedded ../ after resolution', async () => {
       // After path.resolve(), this should normalize and fail validation
       await expect(
-        client.syncDirectory({
-          localPath: '/home/speedwave/.claude/context/folder/../../..',
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
-      );
+        client.uploadFile('docs/test.txt', '/workspace/folder/../../..')
+      ).rejects.toThrow('Invalid local_path: must be under /workspace');
     });
 
     it('should reject relative path starting with ../', async () => {
       // Relative paths should resolve based on current working directory
       // and should fail if they escape the whitelist
-      await expect(
-        client.syncDirectory({
-          localPath: '../../../etc/passwd',
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
+      await expect(client.uploadFile('docs/test.txt', '../../../etc/passwd')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
     });
   });
@@ -569,82 +510,45 @@ describe('Security: validateLocalPath', () => {
 
   describe('Edge Cases for Local Paths', () => {
     it('should reject empty string path', async () => {
-      await expect(
-        client.syncDirectory({
-          localPath: '',
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
+      await expect(client.uploadFile('docs/test.txt', '')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
     });
 
     it('should reject null path', async () => {
-      await expect(
-        client.syncDirectory({
-          localPath: null as unknown as string,
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
+      await expect(client.uploadFile('docs/test.txt', null as unknown as string)).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
     });
 
     it('should reject undefined path', async () => {
       await expect(
-        client.syncDirectory({
-          localPath: undefined as unknown as string,
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
-      );
+        client.uploadFile('docs/test.txt', undefined as unknown as string)
+      ).rejects.toThrow('Invalid local_path: must be under /workspace');
     });
 
     it('should reject non-string path (number)', async () => {
-      await expect(
-        client.syncDirectory({
-          localPath: 123 as unknown as string,
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
+      await expect(client.uploadFile('docs/test.txt', 123 as unknown as string)).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
     });
 
     it('should reject non-string path (object)', async () => {
       await expect(
-        client.syncDirectory({
-          localPath: { path: '/home/speedwave/.claude/context' } as unknown as string,
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
-      );
+        client.uploadFile('docs/test.txt', { path: '/workspace' } as unknown as string)
+      ).rejects.toThrow('Invalid local_path: must be under /workspace');
     });
 
     it('should reject path with trailing /..', async () => {
-      await expect(
-        client.syncDirectory({
-          localPath: '/home/speedwave/.claude/context/..',
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
+      await expect(client.uploadFile('docs/test.txt', '/workspace/..')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
     });
 
     it('should reject path with embedded /../ after normalization', async () => {
-      // path.resolve() normalizes /home/speedwave/.claude/context/../context to /home/speedwave/.claude/context
-      // So this actually passes validation. Let's test a path that escapes after normalization
       await expect(
-        client.syncDirectory({
-          localPath: '/home/speedwave/.claude/../other',
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
-      );
+        client.uploadFile('docs/test.txt', '/home/speedwave/.claude/../other')
+      ).rejects.toThrow('Invalid local_path: must be under /workspace');
     });
   });
 
@@ -657,79 +561,43 @@ describe('Security: validateLocalPath', () => {
       // Mock fs operations for successful scenarios
       global.fetch = vi.fn().mockResolvedValue({
         ok: true,
-        json: async () => ({ value: [] }),
+        json: async () => ({ eTag: 'test-etag', size: 100 }),
       });
 
       vi.mock('fs/promises');
       const mockFs = await import('fs/promises');
+      vi.mocked(mockFs.default.readFile).mockResolvedValue(Buffer.from('test'));
       vi.mocked(mockFs.default.mkdir).mockResolvedValue(undefined);
-      vi.mocked(mockFs.default.readdir).mockResolvedValue([]);
     });
 
     it('should accept exact whitelist path', async () => {
-      const validPath = '/home/speedwave/.claude/context';
-      await expect(
-        client.syncDirectory({
-          localPath: validPath,
-          mode: 'pull',
-          dryRun: true,
-        })
-      ).resolves.toBeDefined();
+      const validPath = '/workspace';
+      await expect(client.uploadFile('docs/test.txt', validPath)).resolves.toBeDefined();
     });
 
     it('should accept subdirectory of whitelist', async () => {
-      const validPath = '/home/speedwave/.claude/context/projects';
-      await expect(
-        client.syncDirectory({
-          localPath: validPath,
-          mode: 'pull',
-          dryRun: true,
-        })
-      ).resolves.toBeDefined();
+      const validPath = '/workspace/projects';
+      await expect(client.uploadFile('docs/test.txt', validPath)).resolves.toBeDefined();
     });
 
     it('should accept nested subdirectory of whitelist', async () => {
-      const validPath = '/home/speedwave/.claude/context/projects/my-project';
-      await expect(
-        client.syncDirectory({
-          localPath: validPath,
-          mode: 'pull',
-          dryRun: true,
-        })
-      ).resolves.toBeDefined();
+      const validPath = '/workspace/projects/my-project';
+      await expect(client.uploadFile('docs/test.txt', validPath)).resolves.toBeDefined();
     });
 
     it('should accept deeply nested subdirectory', async () => {
-      const validPath = '/home/speedwave/.claude/context/a/b/c/d/e/f';
-      await expect(
-        client.syncDirectory({
-          localPath: validPath,
-          mode: 'pull',
-          dryRun: true,
-        })
-      ).resolves.toBeDefined();
+      const validPath = '/workspace/a/b/c/d/e/f';
+      await expect(client.uploadFile('docs/test.txt', validPath)).resolves.toBeDefined();
     });
 
     it('should accept path with spaces in subdirectory', async () => {
-      const validPath = '/home/speedwave/.claude/context/My Projects/Project 1';
-      await expect(
-        client.syncDirectory({
-          localPath: validPath,
-          mode: 'pull',
-          dryRun: true,
-        })
-      ).resolves.toBeDefined();
+      const validPath = '/workspace/My Projects/Project 1';
+      await expect(client.uploadFile('docs/test.txt', validPath)).resolves.toBeDefined();
     });
 
     it('should accept path with special characters in subdirectory', async () => {
-      const validPath = '/home/speedwave/.claude/context/project-name_v2.0';
-      await expect(
-        client.syncDirectory({
-          localPath: validPath,
-          mode: 'pull',
-          dryRun: true,
-        })
-      ).resolves.toBeDefined();
+      const validPath = '/workspace/project-name_v2.0';
+      await expect(client.uploadFile('docs/test.txt', validPath)).resolves.toBeDefined();
     });
   });
 
@@ -739,66 +607,50 @@ describe('Security: validateLocalPath', () => {
 
   describe('Similarity Attacks', () => {
     it('should normalize path with extra leading slash', async () => {
-      // path.resolve() normalizes //home/speedwave/.claude/context to /home/speedwave/.claude/context
+      // path.resolve() normalizes //workspace to /workspace
       // So this actually passes validation after normalization
-      await expect(
-        client.syncDirectory({
-          localPath: '//home/speedwave/.claude/context',
-          mode: 'pull',
-          dryRun: true,
-        })
-      ).resolves.toBeDefined();
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ eTag: 'test-etag', size: 100 }),
+      });
+      vi.mock('fs/promises');
+      const mockFs = await import('fs/promises');
+      vi.mocked(mockFs.default.readFile).mockResolvedValue(Buffer.from('test'));
+
+      await expect(client.uploadFile('docs/test.txt', '//workspace')).resolves.toBeDefined();
     });
 
-    it('should reject path with trailing slash removed from whitelist', async () => {
-      // This should still work as it normalizes, but testing edge case
-      const validPath = '/home/speedwave/.claude/context/';
-      await expect(
-        client.syncDirectory({
-          localPath: validPath,
-          mode: 'pull',
-          dryRun: true,
-        })
-      ).resolves.toBeDefined();
+    it('should accept path with trailing slash removed from whitelist', async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ eTag: 'test-etag', size: 100 }),
+      });
+      vi.mock('fs/promises');
+      const mockFs = await import('fs/promises');
+      vi.mocked(mockFs.default.readFile).mockResolvedValue(Buffer.from('test'));
+
+      const validPath = '/workspace/';
+      await expect(client.uploadFile('docs/test.txt', validPath)).resolves.toBeDefined();
     });
 
-    it('should reject path that looks similar but is not a subdirectory (context2)', async () => {
-      // SECURITY FIX: /home/speedwave/.claude/context2 is NOT a subdirectory of context
-      // The validation now correctly rejects paths that only share a string prefix
-      // but are not actual subdirectories (context2, context-backup, contextual, etc.)
-      await expect(
-        client.syncDirectory({
-          localPath: '/home/speedwave/.claude/context2',
-          mode: 'pull',
-          dryRun: true,
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
+    it('should reject path that looks similar but is not a subdirectory (workspace2)', async () => {
+      // SECURITY FIX: /workspace2 is NOT a subdirectory of /workspace
+      await expect(client.uploadFile('docs/test.txt', '/workspace2')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
     });
 
     it('should reject completely different path', async () => {
-      // A path that clearly doesn't start with the whitelist
       await expect(
-        client.syncDirectory({
-          localPath: '/home/speedwave/.claude/other',
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
-      );
+        client.uploadFile('docs/test.txt', '/home/speedwave/.claude/other')
+      ).rejects.toThrow('Invalid local_path: must be under /workspace');
     });
 
     it('should reject path with unicode lookalike characters', async () => {
       // Using Cyrillic 'а' instead of Latin 'a'
       await expect(
-        client.syncDirectory({
-          localPath: '/home/speedwave/.clаude/context',
-          mode: 'pull',
-        })
-      ).rejects.toThrow(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
-      );
+        client.uploadFile('docs/test.txt', '/home/speedwave/.clаude/context')
+      ).rejects.toThrow('Invalid local_path: must be under /workspace');
     });
   });
 
@@ -871,12 +723,7 @@ describe('Security: validateLocalPath', () => {
     it('should log security warning when local path is outside allowed directory', async () => {
       const warnSpy = vi.spyOn(console, 'warn');
 
-      await expect(
-        client.syncDirectory({
-          localPath: '/etc/passwd',
-          mode: 'pull',
-        })
-      ).rejects.toThrow();
+      await expect(client.uploadFile('docs/test.txt', '/etc/passwd')).rejects.toThrow();
 
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('Security: Local path validation blocked potential attack'),
@@ -912,30 +759,10 @@ describe('Security: validateLocalPath', () => {
 });
 
 //═══════════════════════════════════════════════════════════════════════════════
-// Sync State File Protection
+// Denylist Tests
 //═══════════════════════════════════════════════════════════════════════════════
 
-describe('Security: .sync-state.json protection', () => {
-  it('should be excluded from SYNC_STATE_FILENAME constant', async () => {
-    const { SYNC_STATE_FILENAME } = await import('./sync-state.js');
-    expect(SYNC_STATE_FILENAME).toBe('.sync-state.json');
-  });
-
-  it('should not be synced to SharePoint (excluded from file listing)', async () => {
-    // This is tested via sync-engine.test.ts listLocalFilesRecursive tests
-    // The .sync-state.json file is filtered out by SYNC_STATE_FILENAME constant check
-    const { SYNC_STATE_FILENAME } = await import('./sync-state.js');
-    expect(SYNC_STATE_FILENAME).toBeDefined();
-    expect(typeof SYNC_STATE_FILENAME).toBe('string');
-    expect(SYNC_STATE_FILENAME.startsWith('.')).toBe(true); // Hidden file
-  });
-});
-
-//═══════════════════════════════════════════════════════════════════════════════
-// Defense-in-Depth: .sync-state.json Protection in Client API
-//═══════════════════════════════════════════════════════════════════════════════
-
-describe('Security: .sync-state.json defense-in-depth', () => {
+describe('Security: denylist enforcement', () => {
   let client: SharePointClient;
 
   beforeEach(() => {
@@ -948,106 +775,144 @@ describe('Security: .sync-state.json defense-in-depth', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
-  describe('uploadFile() blocks .sync-state.json', () => {
-    it('should reject direct upload of .sync-state.json', async () => {
-      await expect(client.uploadFile('.sync-state.json', '/context/test.txt')).rejects.toThrow(
-        'Cannot upload .sync-state.json to SharePoint (internal metadata)'
+  describe('.git directory protection', () => {
+    it('should block /workspace/.git/config', async () => {
+      await expect(client.uploadFile('docs/config', '/workspace/.git/config')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
     });
 
-    it('should reject upload of .sync-state.json in subdirectory', async () => {
-      await expect(
-        client.uploadFile('subdir/.sync-state.json', '/context/test.txt')
-      ).rejects.toThrow('Cannot upload .sync-state.json to SharePoint (internal metadata)');
+    it('should block /workspace/.git (exact)', async () => {
+      await expect(client.uploadFile('docs/git', '/workspace/.git')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
+      );
     });
 
-    it('should reject upload of .sync-state.json in nested path', async () => {
-      await expect(
-        client.uploadFile('a/b/c/.sync-state.json', '/context/test.txt')
-      ).rejects.toThrow('Cannot upload .sync-state.json to SharePoint (internal metadata)');
-    });
-
-    it('should allow upload of files with similar names', async () => {
-      // Mock successful upload
+    it('should allow /workspace/.gitignore (not a prefix match)', async () => {
+      // .gitignore starts with .git but is not .git/ or .git itself
       global.fetch = vi.fn().mockResolvedValue({
         ok: true,
-        json: async () => ({ eTag: 'test-etag' }),
+        json: async () => ({ eTag: 'test-etag', size: 100 }),
       });
-
-      // These should NOT be blocked
-      await expect(
-        client.uploadFile('sync-state.json', '/context/sync-state.json')
-      ).resolves.toBeDefined();
+      vi.mock('fs/promises');
+      const mockFs = await import('fs/promises');
+      vi.mocked(mockFs.default.readFile).mockResolvedValue(Buffer.from('test'));
 
       await expect(
-        client.uploadFile('.sync-state.json.bak', '/context/.sync-state.json.bak')
+        client.uploadFile('docs/.gitignore', '/workspace/.gitignore')
       ).resolves.toBeDefined();
     });
-  });
 
-  describe('downloadFileStream() blocks .sync-state.json', () => {
-    it('should reject direct download of .sync-state.json', async () => {
-      await expect(
-        client.downloadFileStream('.sync-state.json', '/context/test.txt')
-      ).rejects.toThrow('Cannot download .sync-state.json to SharePoint (internal metadata)');
-    });
-
-    it('should reject download of .sync-state.json in subdirectory', async () => {
-      await expect(
-        client.downloadFileStream('subdir/.sync-state.json', '/context/test.txt')
-      ).rejects.toThrow('Cannot download .sync-state.json to SharePoint (internal metadata)');
-    });
-
-    it('should reject download of .sync-state.json in nested path', async () => {
-      await expect(
-        client.downloadFileStream('a/b/c/.sync-state.json', '/context/test.txt')
-      ).rejects.toThrow('Cannot download .sync-state.json to SharePoint (internal metadata)');
-    });
-  });
-
-  describe('deleteRemoteFile() blocks .sync-state.json', () => {
-    it('should reject direct deletion of .sync-state.json', async () => {
-      await expect(client.deleteRemoteFile('.sync-state.json')).rejects.toThrow(
-        'Cannot delete .sync-state.json to SharePoint (internal metadata)'
-      );
-    });
-
-    it('should reject deletion of .sync-state.json in subdirectory', async () => {
-      await expect(client.deleteRemoteFile('subdir/.sync-state.json')).rejects.toThrow(
-        'Cannot delete .sync-state.json to SharePoint (internal metadata)'
-      );
-    });
-
-    it('should reject deletion of .sync-state.json in nested path', async () => {
-      await expect(client.deleteRemoteFile('a/b/c/.sync-state.json')).rejects.toThrow(
-        'Cannot delete .sync-state.json to SharePoint (internal metadata)'
-      );
-    });
-
-    it('should allow deletion of files with similar names', async () => {
-      // Mock successful delete
+    it('should allow /workspace/.github/workflows/ci.yml', async () => {
       global.fetch = vi.fn().mockResolvedValue({
         ok: true,
-        json: async () => ({}),
+        json: async () => ({ eTag: 'test-etag', size: 100 }),
       });
+      vi.mock('fs/promises');
+      const mockFs = await import('fs/promises');
+      vi.mocked(mockFs.default.readFile).mockResolvedValue(Buffer.from('test'));
 
-      // These should NOT be blocked
-      await expect(client.deleteRemoteFile('sync-state.json')).resolves.toBeUndefined();
-      await expect(client.deleteRemoteFile('.sync-state.json.bak')).resolves.toBeUndefined();
+      await expect(
+        client.uploadFile('docs/ci.yml', '/workspace/.github/workflows/ci.yml')
+      ).resolves.toBeDefined();
     });
   });
 
-  describe('ensureParentFolders() validates path', () => {
-    it('should reject path with traversal in ensureParentFolders', async () => {
-      await expect(client.ensureParentFolders('../../../etc/passwd')).rejects.toThrow(
-        'Invalid path in ensureParentFolders (security check failed)'
+  describe('.env file protection', () => {
+    it('should block /workspace/.env (exact match)', async () => {
+      await expect(client.uploadFile('docs/.env', '/workspace/.env')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
     });
 
-    it('should reject path with encoded traversal', async () => {
-      await expect(client.ensureParentFolders('%2e%2e%2f%2e%2e%2fetc')).rejects.toThrow(
-        'Invalid path in ensureParentFolders (security check failed)'
+    it('should allow /workspace/.envrc (not exact match)', async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ eTag: 'test-etag', size: 100 }),
+      });
+      vi.mock('fs/promises');
+      const mockFs = await import('fs/promises');
+      vi.mocked(mockFs.default.readFile).mockResolvedValue(Buffer.from('test'));
+
+      await expect(client.uploadFile('docs/.envrc', '/workspace/.envrc')).resolves.toBeDefined();
+    });
+
+    it('should allow /workspace/.env.example (not exact match)', async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ eTag: 'test-etag', size: 100 }),
+      });
+      vi.mock('fs/promises');
+      const mockFs = await import('fs/promises');
+      vi.mocked(mockFs.default.readFile).mockResolvedValue(Buffer.from('test'));
+
+      await expect(
+        client.uploadFile('docs/.env.example', '/workspace/.env.example')
+      ).resolves.toBeDefined();
+    });
+  });
+
+  describe('.speedwave directory protection', () => {
+    it('should block /workspace/.speedwave/config.json', async () => {
+      await expect(
+        client.uploadFile('docs/config.json', '/workspace/.speedwave/config.json')
+      ).rejects.toThrow('Invalid local_path: must be under /workspace');
+    });
+
+    it('should block /workspace/.speedwave (exact)', async () => {
+      await expect(client.uploadFile('docs/speedwave', '/workspace/.speedwave')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
       );
+    });
+
+    it('should block /workspace/.speedwave/tokens/sharepoint/access_token', async () => {
+      await expect(
+        client.uploadFile('docs/token', '/workspace/.speedwave/tokens/sharepoint/access_token')
+      ).rejects.toThrow('Invalid local_path: must be under /workspace');
+    });
+  });
+
+  describe('downloadFile denylist enforcement', () => {
+    it('should block downloading to /workspace/.git/config', async () => {
+      await expect(client.downloadFile('docs/config', '/workspace/.git/config')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
+      );
+    });
+
+    it('should block downloading to /workspace/.env', async () => {
+      await expect(client.downloadFile('docs/.env', '/workspace/.env')).rejects.toThrow(
+        'Invalid local_path: must be under /workspace'
+      );
+    });
+
+    it('should block downloading to /workspace/.speedwave/config.json', async () => {
+      await expect(
+        client.downloadFile('docs/config.json', '/workspace/.speedwave/config.json')
+      ).rejects.toThrow('Invalid local_path: must be under /workspace');
+    });
+  });
+
+  describe('expanded denylist entries', () => {
+    let validator: PathValidator;
+
+    beforeEach(() => {
+      validator = new PathValidator();
+    });
+
+    it('blocks .ssh directory access', () => {
+      expect(validator.validateLocalPath('/workspace/.ssh/id_rsa')).toBe(false);
+    });
+
+    it('blocks .npmrc file access', () => {
+      expect(validator.validateLocalPath('/workspace/.npmrc')).toBe(false);
+    });
+
+    it('blocks .docker directory access', () => {
+      expect(validator.validateLocalPath('/workspace/.docker/config.json')).toBe(false);
+    });
+
+    it('blocks .kube directory access', () => {
+      expect(validator.validateLocalPath('/workspace/.kube/config')).toBe(false);
     });
   });
 });

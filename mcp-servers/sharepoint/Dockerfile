@@ -53,8 +53,9 @@ COPY --from=builder /build/sharepoint/package*.json ./
 COPY --from=builder /build/sharepoint/dist ./dist
 COPY --from=builder /build/sharepoint/node_modules ./node_modules
 
-# Create tokens and context directories
-RUN mkdir -p /tokens /context && chown -R node:node /tokens /context /app /app/../shared
+# Create tokens directory (needed for healthcheck before mount).
+# /workspace is bind-mounted from host — not created here (fail-fast).
+RUN mkdir -p /tokens && chown -R node:node /tokens /app /app/../shared
 
 # Security: non-root user
 USER node
@@ -67,7 +68,6 @@ EXPOSE 3002
 
 ENV PORT=3002 \
     TOKENS_DIR=/tokens \
-    CONTEXT_DIR=/context \
     NODE_ENV=production
 
 CMD ["node", "dist/index.js"]

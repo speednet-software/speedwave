@@ -11,6 +11,18 @@ use crate::reconcile::{SharedIdeBridge, SharedMcpOs};
 use crate::setup_wizard;
 use crate::types::{check_project, LlmConfigResponse};
 
+/// Maximum time to wait for container images to become ready before failing.
+/// The Angular frontend shows a "Rebuilding container images..." overlay while
+/// Tauri commands block on this timeout via `wait_for_images_ready()`.
+/// If this value changes, update the UX expectations in project-state.service.ts.
+const RECONCILE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Blocks until container images are ready (reconcile complete) or timeout.
+/// Called before any operation that starts containers.
+pub(crate) fn ensure_images_ready() -> Result<(), String> {
+    crate::reconcile::wait_for_images_ready(RECONCILE_WAIT_TIMEOUT)
+}
+
 // ---------------------------------------------------------------------------
 // Project switch transaction helpers
 // ---------------------------------------------------------------------------
@@ -137,8 +149,15 @@ pub(crate) fn render_and_save_compose(
     )
     .map_err(|e| e.to_string())?;
 
-    let manifests = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_default();
-    let violations = speedwave_runtime::compose::SecurityCheck::run(&yaml, project, &manifests);
+    let manifests = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_else(|e| {
+        log::warn!("Failed to list installed plugins: {e}");
+        Vec::new()
+    });
+    let expected_paths =
+        speedwave_runtime::compose::SecurityExpectedPaths::compute(project, &project_dir)
+            .map_err(|e| e.to_string())?;
+    let violations =
+        speedwave_runtime::compose::SecurityCheck::run(&yaml, project, &manifests, &expected_paths);
     if !violations.is_empty() {
         return Err(format!(
             "Security check failed:\n{}",
@@ -288,10 +307,16 @@ pub async fn add_project(
         serde_json::json!({ "project": name }),
     );
 
-    // Container transaction: ensure_ready → stop previous → start new
+    // Container transaction: wait for images → stop previous → start new
     let prev_clone = previous.clone();
     let new_clone = name.clone();
     let switch_result = tokio::task::spawn_blocking(move || {
+        if let Err(e) = ensure_images_ready() {
+            return SwitchResult::Failed {
+                error: e,
+                cleanup_error: None,
+            };
+        }
         let rt = speedwave_runtime::runtime::detect_runtime();
         switch_project_core(&prev_clone, &new_clone, &*rt, &|proj, _rt| {
             // start_containers calls ensure_ready internally (noop — VM already up)
@@ -363,6 +388,7 @@ pub async fn start_containers(
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
 
     tokio::task::spawn_blocking(move || {
+        ensure_images_ready()?;
         check_project(&project)?;
         log::info!("start_containers: project={project}");
         setup_wizard::start_containers(&project).map_err(|e| {
@@ -421,6 +447,7 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
 #[tauri::command]
 pub async fn recreate_project_containers(project: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
+        ensure_images_ready()?;
         check_project(&project)?;
         log::info!("recreate_project_containers: project={project}");
         let rt = speedwave_runtime::runtime::detect_runtime();
@@ -1233,5 +1260,12 @@ mod tests {
         // No previous → no down, only up(new)
         assert!(rt.down_calls().is_empty());
         assert_eq!(rt.up_calls(), vec!["new"]);
+    }
+
+    #[test]
+    fn ensure_images_ready_passes_through_when_ready() {
+        // IMAGES_READY defaults to Ready — ensure_images_ready should return Ok
+        let result = ensure_images_ready();
+        assert!(result.is_ok());
     }
 }

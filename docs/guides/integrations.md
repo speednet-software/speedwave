@@ -24,6 +24,18 @@ The MCP Hub (`speedwave_<project>_mcp_hub`, port 4000) is the **only** MCP serve
 
 The Hub has **zero tokens** — it acts as a router. Each worker container mounts only its own service credentials.
 
+## Workspace Mount
+
+MCP service containers (both built-in SharePoint and plugins) mount the project directory as `/workspace:rw`:
+
+```
+{project_dir}:/workspace:rw
+```
+
+This allows MCP workers and Claude to share files through identical paths — `/workspace/...` is valid for both. No path translation needed and no separate context directory is required.
+
+The path validator blocks access to sensitive paths within the workspace: `.git/`, `.env`, and `.speedwave/`. These entries are enforced by a denylist in `path-validator.ts`, ensuring that MCP workers cannot read or write protected files even though the full project directory is mounted.
+
 ## Adding New Integrations
 
 Speedwave supports extending integrations via the plugin system:
@@ -34,6 +46,8 @@ Speedwave supports extending integrations via the plugin system:
 - Plugin services get injected `WORKER_<PLUGIN>_URL` in the hub environment
 
 See [ADR-015](../adr/ADR-015-plugin-system.md) for the plugin system design.
+
+When a bundle update triggers image rebuilds, container restart operations (including plugin containers) automatically wait for builds to complete before proceeding.
 
 Plugins that declare `requires_integrations` (e.g. `["sharepoint"]`) display the required integration status on the plugin dashboard. The Desktop UI indicates whether required integrations are configured, linking to the Integrations tab when they are not.
 

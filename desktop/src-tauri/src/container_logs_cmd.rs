@@ -303,7 +303,10 @@ mod tests {
     fn parse_project_dotted_name_passes_check_project() {
         let project = parse_claude_project("speedwave_proj.v1_claude").unwrap();
         let result = crate::types::check_project(&project);
-        assert!(result.is_ok(), "proj.v1 should pass check_project: {result:?}");
+        assert!(
+            result.is_ok(),
+            "proj.v1 should pass check_project: {result:?}"
+        );
     }
 
     // -- read_tail_sanitized --

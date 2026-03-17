@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { ProjectStateService } from './project-state.service';
 import { TauriService } from './tauri.service';
-import { MockTauriService } from '../testing/mock-tauri.service';
+import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 
 describe('ProjectStateService', () => {
   let service: ProjectStateService;
@@ -14,6 +14,12 @@ describe('ProjectStateService', () => {
       switch (cmd) {
         case 'list_projects':
           return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        case 'get_bundle_reconcile_state':
+          return MOCK_BUNDLE_RECONCILE_DONE;
+        case 'check_containers_running':
+          return true;
+        case 'start_containers':
+          return undefined;
         default:
           return undefined;
       }
@@ -61,6 +67,159 @@ describe('ProjectStateService', () => {
       // Listeners should still work
       mockTauri.dispatchEvent('project_switch_started', { project: 'new' });
       expect(service.status).toBe('switching');
+    });
+  });
+
+  describe('ensureContainersRunning', () => {
+    it('sets checking then ready when containers already running', async () => {
+      await service.init();
+      const statuses: string[] = [];
+      service.onChange(() => statuses.push(service.status));
+
+      await service.ensureContainersRunning();
+
+      expect(statuses).toContain('checking');
+      expect(service.status).toBe('ready');
+    });
+
+    it('sets checking then starting then ready when containers not running', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return false;
+          case 'start_containers':
+            return undefined;
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+      service.status = 'ready' as const;
+
+      const statuses: string[] = [];
+      service.onChange(() => statuses.push(service.status));
+
+      await service.ensureContainersRunning();
+
+      expect(statuses).toContain('checking');
+      expect(statuses).toContain('starting');
+      expect(service.status).toBe('ready');
+    });
+
+    it('sets error on failure', async () => {
+      await service.init();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'check_containers_running') throw new Error('connection refused');
+        return undefined;
+      };
+
+      await service.ensureContainersRunning();
+
+      expect(service.status).toBe('error');
+      expect(service.error).toContain('connection refused');
+    });
+
+    it('sets error when no active project', async () => {
+      service.activeProject = null;
+
+      await service.ensureContainersRunning();
+
+      expect(service.status).toBe('error');
+      expect(service.error).toContain('No active project');
+    });
+  });
+
+  describe('reconcile status', () => {
+    it('sets rebuilding when reconcile in_progress', async () => {
+      await service.init();
+      service.status = 'ready';
+
+      mockTauri.dispatchEvent('bundle_reconcile_status', {
+        phase: 'images_built',
+        in_progress: true,
+        last_error: null,
+        pending_running_projects: [],
+        applied_bundle_id: null,
+      });
+
+      expect(service.status).toBe('rebuilding');
+    });
+
+    it('sets error when reconcile has last_error', async () => {
+      await service.init();
+      service.status = 'ready';
+
+      mockTauri.dispatchEvent('bundle_reconcile_status', {
+        phase: 'images_built',
+        in_progress: false,
+        last_error: 'Image rebuild failed',
+        pending_running_projects: [],
+        applied_bundle_id: null,
+      });
+
+      expect(service.status).toBe('error');
+      expect(service.error).toBe('Image rebuild failed');
+    });
+
+    it('triggers ensureContainersRunning when reconcile completes from rebuilding', async () => {
+      await service.init();
+      service.status = 'rebuilding';
+
+      const spy = vi.spyOn(service, 'ensureContainersRunning').mockResolvedValue();
+
+      mockTauri.dispatchEvent('bundle_reconcile_status', {
+        phase: 'done',
+        in_progress: false,
+        last_error: null,
+        pending_running_projects: [],
+        applied_bundle_id: 'new-bundle',
+      });
+
+      expect(spy).toHaveBeenCalled();
+      spy.mockRestore();
+    });
+
+    it('ignores reconcile events during switching', async () => {
+      await service.init();
+      mockTauri.dispatchEvent('project_switch_started', { project: 'new' });
+      expect(service.status).toBe('switching');
+
+      mockTauri.dispatchEvent('bundle_reconcile_status', {
+        phase: 'images_built',
+        in_progress: true,
+        last_error: null,
+        pending_running_projects: [],
+        applied_bundle_id: null,
+      });
+
+      expect(service.status).toBe('switching');
+    });
+
+    it('starts in rebuilding when init sees in_progress reconcile', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return {
+              phase: 'pending',
+              in_progress: true,
+              last_error: null,
+              pending_running_projects: [],
+              applied_bundle_id: null,
+            };
+          default:
+            return undefined;
+        }
+      };
+
+      await service.init();
+
+      expect(service.status).toBe('rebuilding');
     });
   });
 
@@ -187,6 +346,75 @@ describe('ProjectStateService', () => {
         error: 'fail',
       });
       expect(cb).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('dismissError', () => {
+    it('sets ready when containers are running', async () => {
+      service.status = 'error';
+      service.error = 'some error';
+      await service.dismissError();
+      expect(service.status).toBe('ready');
+      expect(service.error).toBe('');
+    });
+
+    it('updates error when containers are not running', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'check_containers_running') return false;
+        return undefined;
+      };
+      service.status = 'error';
+      service.error = 'old error';
+      service.activeProject = 'test';
+      await service.dismissError();
+      expect(service.error).toContain('Containers are not running');
+    });
+
+    it('dismisses on check failure', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'check_containers_running') throw new Error('timeout');
+        return undefined;
+      };
+      service.status = 'error';
+      service.error = 'some error';
+      await service.dismissError();
+      expect(service.status).toBe('ready');
+      expect(service.error).toBe('');
+    });
+  });
+
+  describe('ensureContainersRunning error handling', () => {
+    it('catches errors from ensureContainersRunning after reconcile done', async () => {
+      await service.init();
+      service.status = 'rebuilding';
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'check_containers_running') throw new Error('check failed');
+        return undefined;
+      };
+
+      mockTauri.dispatchEvent('bundle_reconcile_status', {
+        phase: 'done',
+        in_progress: false,
+        last_error: null,
+        pending_running_projects: [],
+        applied_bundle_id: 'new-bundle',
+      });
+
+      // Wait for the async error handling
+      await new Promise((r) => setTimeout(r, 20));
+      expect(service.status).toBe('error');
+      expect(service.error).toContain('check failed');
+    });
+
+    it('clears error when retrying', async () => {
+      service.activeProject = 'test';
+      service.error = 'previous error';
+      const statuses: string[] = [];
+      service.onChange(() => statuses.push(service.status));
+      await service.ensureContainersRunning();
+      expect(service.error).toBe('');
+      expect(statuses[0]).toBe('checking');
     });
   });
 

@@ -26,8 +26,7 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@speedwave/mcp-shared": "file:../shared",
-    "async-mutex": "^0.5.0",
-    "minimatch": "^10.2.2"
+    "async-mutex": "^0.5.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.16.0",

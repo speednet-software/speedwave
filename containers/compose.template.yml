@@ -5,6 +5,7 @@
 services:
   claude:
     image: ${IMAGE_CLAUDE}
+    pull_policy: never
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_claude
     read_only: true
     user: "${CONTAINER_USER}"
@@ -39,6 +40,7 @@ services:
 
   mcp-hub:
     image: ${IMAGE_MCP_HUB}
+    pull_policy: never
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_hub
     read_only: true
     user: "${CONTAINER_USER}"
@@ -64,6 +66,7 @@ services:
 
   mcp-slack:
     image: ${IMAGE_MCP_SLACK}
+    pull_policy: never
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_slack
     read_only: true
     user: "${CONTAINER_USER}"
@@ -87,6 +90,7 @@ services:
 
   mcp-sharepoint:
     image: ${IMAGE_MCP_SHAREPOINT}
+    pull_policy: never
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_sharepoint
     read_only: true
     user: "${CONTAINER_USER}"
@@ -100,6 +104,7 @@ services:
       # :rw required — SharePoint OAuth tokens expire and token-manager.ts
       # writes refreshed access_token / refresh_token back to /tokens/
       - ${TOKENS_DIR}/sharepoint:/tokens:rw
+      - ${PROJECT_DIR}:/workspace:rw
     environment:
       - PORT=${PORT_SHAREPOINT}
     networks:
@@ -112,6 +117,7 @@ services:
 
   mcp-redmine:
     image: ${IMAGE_MCP_REDMINE}
+    pull_policy: never
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_redmine
     read_only: true
     user: "${CONTAINER_USER}"
@@ -135,6 +141,7 @@ services:
 
   mcp-gitlab:
     image: ${IMAGE_MCP_GITLAB}
+    pull_policy: never
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_gitlab
     read_only: true
     user: "${CONTAINER_USER}"
