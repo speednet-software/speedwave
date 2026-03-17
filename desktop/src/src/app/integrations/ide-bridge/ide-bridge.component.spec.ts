@@ -127,7 +127,7 @@ describe('IdeBridgeComponent', () => {
     await component.ngOnInit();
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
-    const noData = fixture.nativeElement.querySelector('.no-data');
+    const noData = fixture.nativeElement.querySelector('[data-testid="no-data"]');
     expect(noData).not.toBeNull();
     expect(noData.textContent).toContain('No IDE detected');
   });
@@ -150,10 +150,12 @@ describe('IdeBridgeComponent', () => {
     await new Promise((r) => setTimeout(r, 0));
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
-    const rows = fixture.nativeElement.querySelectorAll('.ide-row');
+    const rows = fixture.nativeElement.querySelectorAll('[data-testid="ide-row"]');
     expect(rows.length).toBe(2);
-    expect(rows[0].querySelector('.ide-row-name').textContent.trim()).toBe('VS Code');
-    expect(rows[1].querySelector('.ide-row-name').textContent.trim()).toBe('Cursor');
+    expect(rows[0].querySelector('[data-testid="ide-row-name"]').textContent.trim()).toBe(
+      'VS Code'
+    );
+    expect(rows[1].querySelector('[data-testid="ide-row-name"]').textContent.trim()).toBe('Cursor');
   });
 
   it('shows connected button for selected IDE', async () => {
@@ -171,9 +173,9 @@ describe('IdeBridgeComponent', () => {
     await new Promise((r) => setTimeout(r, 0));
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
-    const btn = fixture.nativeElement.querySelector('.connect-btn');
+    const btn = fixture.nativeElement.querySelector('[data-testid="connect-btn"]');
     expect(btn.textContent.trim()).toBe('Connected');
-    expect(btn.classList.contains('active')).toBe(true);
+    expect(btn.getAttribute('data-active')).toBe('true');
   });
 
   it('displays ideError when present', async () => {
@@ -181,7 +183,7 @@ describe('IdeBridgeComponent', () => {
     component.ideError = 'Some error';
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
-    const errorBanner = fixture.nativeElement.querySelector('.error-banner');
+    const errorBanner = fixture.nativeElement.querySelector('[data-testid="error-banner"]');
     expect(errorBanner).not.toBeNull();
     expect(errorBanner.textContent).toContain('Some error');
   });

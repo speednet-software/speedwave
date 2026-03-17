@@ -16,8 +16,11 @@ import { ProjectList, UpdateInfo } from '../models/update';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (showUpdateBanner) {
-      <div class="update-banner" data-testid="update-banner">
-        <span class="update-text">
+      <div
+        class="flex items-center justify-between px-4 py-1.5 bg-sw-bg-navy border-b border-sw-accent text-[13px] font-mono"
+        data-testid="update-banner"
+      >
+        <span class="text-sw-text">
           Speedwave v{{ updateInfo!.version }} is ready
           @if (installing) {
             — updating...
@@ -27,107 +30,61 @@ import { ProjectList, UpdateInfo } from '../models/update';
             — update and restart now
           }
         </span>
-        <div class="update-actions">
+        <div class="flex items-center gap-2">
           @if (error) {
-            <span class="update-error" data-testid="update-error">{{ error }}</span>
+            <span class="text-sw-accent text-xs" data-testid="update-error">{{ error }}</span>
           }
           @if (isLinux) {
-            <button class="btn-restart" (click)="openReleasesPage()">
+            <button
+              class="px-3 py-0.5 bg-sw-accent text-sw-bg-darkest border-none rounded text-xs font-mono cursor-pointer transition-opacity duration-200 hover:not-disabled:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
+              (click)="openReleasesPage()"
+            >
               Download v{{ updateInfo!.version }}
             </button>
           } @else {
             @if (!confirmUpdate) {
-              <button class="btn-restart" (click)="confirmUpdate = true" [disabled]="installing">
+              <button
+                class="px-3 py-0.5 bg-sw-accent text-sw-bg-darkest border-none rounded text-xs font-mono cursor-pointer transition-opacity duration-200 hover:not-disabled:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
+                (click)="confirmUpdate = true"
+                [disabled]="installing"
+              >
                 Update now
               </button>
             } @else {
-              <button class="btn-restart" (click)="installAndRestart()" [disabled]="installing">
+              <button
+                class="px-3 py-0.5 bg-sw-accent text-sw-bg-darkest border-none rounded text-xs font-mono cursor-pointer transition-opacity duration-200 hover:not-disabled:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
+                (click)="installAndRestart()"
+                [disabled]="installing"
+              >
                 {{ installing ? 'Updating...' : 'Confirm Update' }}
               </button>
-              <button class="btn-later" (click)="confirmUpdate = false" [disabled]="installing">
+              <button
+                class="px-3 py-0.5 bg-transparent text-sw-text-muted border border-sw-slider rounded text-xs font-mono cursor-pointer transition-colors duration-200 hover:not-disabled:text-sw-text hover:not-disabled:border-sw-text-muted disabled:opacity-40 disabled:cursor-not-allowed"
+                (click)="confirmUpdate = false"
+                [disabled]="installing"
+              >
                 Cancel
               </button>
             }
           }
           @if (!confirmUpdate || isLinux) {
             @if (containersRunning && !isLinux) {
-              <span class="containers-warning">Running containers will be interrupted</span>
+              <span class="text-sw-warning text-xs">Running containers will be interrupted</span>
             }
             @if (!updateInfo!.is_critical) {
-              <button class="btn-later" (click)="dismiss()" [disabled]="installing">Later</button>
+              <button
+                class="px-3 py-0.5 bg-transparent text-sw-text-muted border border-sw-slider rounded text-xs font-mono cursor-pointer transition-colors duration-200 hover:not-disabled:text-sw-text hover:not-disabled:border-sw-text-muted disabled:opacity-40 disabled:cursor-not-allowed"
+                (click)="dismiss()"
+                [disabled]="installing"
+              >
+                Later
+              </button>
             }
           }
         </div>
       </div>
     }
   `,
-  styles: [
-    `
-      .update-banner {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 6px 16px;
-        background: #0f3460;
-        border-bottom: 1px solid #e94560;
-        font-size: 13px;
-        font-family: monospace;
-      }
-      .update-text {
-        color: #e0e0e0;
-      }
-      .update-actions {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-      .update-error {
-        color: #e94560;
-        font-size: 12px;
-      }
-      .containers-warning {
-        color: #f59e0b;
-        font-size: 12px;
-      }
-      .btn-restart {
-        padding: 3px 12px;
-        background: #e94560;
-        color: #1a1a2e;
-        border: none;
-        border-radius: 4px;
-        font-size: 12px;
-        font-family: monospace;
-        cursor: pointer;
-        transition: opacity 0.2s;
-      }
-      .btn-restart:hover:not(:disabled) {
-        opacity: 0.85;
-      }
-      .btn-restart:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-      }
-      .btn-later {
-        padding: 3px 12px;
-        background: transparent;
-        color: #888;
-        border: 1px solid #555;
-        border-radius: 4px;
-        font-size: 12px;
-        font-family: monospace;
-        cursor: pointer;
-        transition: color 0.2s;
-      }
-      .btn-later:hover:not(:disabled) {
-        color: #e0e0e0;
-        border-color: #888;
-      }
-      .btn-later:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-      }
-    `,
-  ],
 })
 export class UpdateNotificationComponent implements OnDestroy {
   updateInfo: UpdateInfo | null = null;

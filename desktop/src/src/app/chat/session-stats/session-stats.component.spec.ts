@@ -20,7 +20,7 @@ describe('SessionStatsComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('.session-stats')).toBeNull();
+    expect(el.querySelector('[data-testid="session-stats"]')).toBeNull();
   });
 
   it('renders cost and total', () => {

@@ -21,39 +21,60 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
   imports: [CommonModule, PluginSettingsFormComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div class="detail-page">
-      <button class="back-link" (click)="goBack()" data-testid="back-link">
+    <div>
+      <button
+        class="bg-none border-none text-sw-accent text-[13px] font-mono cursor-pointer p-0 mb-5 inline-block hover:underline"
+        (click)="goBack()"
+        data-testid="back-link"
+      >
         &larr; Back to Plugins
       </button>
 
       @if (error) {
-        <div class="error-banner" data-testid="detail-error">{{ error }}</div>
+        <div
+          class="mb-4 px-3 py-2 bg-sw-error-bg border border-sw-accent rounded text-sw-accent text-[13px]"
+          data-testid="detail-error"
+        >
+          {{ error }}
+        </div>
       }
       @if (success) {
-        <div class="success-banner" data-testid="detail-success">{{ success }}</div>
+        <div
+          class="mb-4 px-3 py-2 bg-sw-success-dark border border-sw-success-text rounded text-sw-success-text text-[13px]"
+          data-testid="detail-success"
+        >
+          {{ success }}
+        </div>
       }
 
       @if (!plugin) {
-        <p class="not-found" data-testid="plugin-not-found">Plugin not found.</p>
+        <p class="text-sw-text-dim text-[13px]" data-testid="plugin-not-found">Plugin not found.</p>
       } @else {
-        <div class="detail-header">
-          <h1>{{ plugin.name }}</h1>
-          <span class="version-badge">v{{ plugin.version }}</span>
+        <div class="detail-header flex items-center gap-3 mb-6">
+          <h1 class="text-xl text-sw-accent m-0">{{ plugin.name }}</h1>
+          <span class="version-badge text-[11px] text-sw-text-dim font-mono"
+            >v{{ plugin.version }}</span
+          >
           @if (plugin.configured) {
-            <span class="badge configured">Configured</span>
+            <span
+              class="badge configured text-[11px] px-2 py-0.5 rounded font-medium bg-sw-success-dark text-sw-success-text"
+              >Configured</span
+            >
           }
         </div>
 
-        <div class="tab-bar" data-testid="tab-bar">
+        <div class="flex border-b border-sw-border mb-6" data-testid="tab-bar">
           <button
-            [class.active]="activeTab === 'dashboard'"
+            class="bg-none border-none border-b-2 border-b-transparent text-sw-text-dim text-sm font-mono px-5 py-2 cursor-pointer transition-all duration-200 hover:text-sw-text"
+            [ngClass]="activeTab === 'dashboard' ? 'text-sw-accent! border-b-sw-accent!' : ''"
             (click)="activeTab = 'dashboard'"
             data-testid="tab-dashboard"
           >
             Dashboard
           </button>
           <button
-            [class.active]="activeTab === 'settings'"
+            class="bg-none border-none border-b-2 border-b-transparent text-sw-text-dim text-sm font-mono px-5 py-2 cursor-pointer transition-all duration-200 hover:text-sw-text"
+            [ngClass]="activeTab === 'settings' ? 'text-sw-accent! border-b-sw-accent!' : ''"
             (click)="activeTab = 'settings'"
             data-testid="tab-settings"
           >
@@ -61,33 +82,38 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
           </button>
         </div>
 
-        <div class="tab-content">
+        <div class="min-h-[200px]">
           @if (activeTab === 'dashboard') {
             <div data-testid="dashboard-content">
-              <p class="plugin-description">{{ plugin.description }}</p>
+              <p class="plugin-description text-sw-text-muted text-[13px] m-0 mb-4">
+                {{ plugin.description }}
+              </p>
 
               @if (plugin.requires_integrations.length > 0) {
-                <div class="integration-requirements" data-testid="integration-requirements">
-                  <h3>Required Integrations</h3>
+                <div class="mt-4" data-testid="integration-requirements">
+                  <h3 class="text-sm text-sw-text-subtle m-0 mb-3">Required Integrations</h3>
                   @for (integration of plugin.requires_integrations; track integration) {
                     <div
-                      class="integration-status"
-                      [class.connected]="integrationStatuses.get(integration)"
-                      [class.not-configured]="!integrationStatuses.get(integration)"
+                      class="px-3.5 py-2.5 rounded-md text-[13px] mb-2"
+                      [ngClass]="
+                        integrationStatuses.get(integration)
+                          ? 'bg-sw-success-dark text-sw-success-text border border-[#2d6a4f]'
+                          : 'bg-sw-error-bg text-sw-accent border border-sw-accent'
+                      "
                       [attr.data-testid]="'integration-status-' + integration"
                     >
                       @if (integrationStatuses.get(integration)) {
-                        <span class="check-icon">&#10003;</span>
+                        <span class="mr-1.5 font-bold">&#10003;</span>
                         {{ integration | titlecase }} — Connected
                       } @else {
-                        <span class="warning-icon">&#9888;</span>
+                        <span class="mr-1.5">&#9888;</span>
                         {{ integration | titlecase }} — Not configured
                       }
                     </div>
                   }
                   @if (missingIntegrations.length > 0) {
                     <button
-                      class="btn-go-integrations"
+                      class="mt-3 bg-sw-accent text-white border-none rounded px-5 py-2 text-[13px] font-mono cursor-pointer transition-colors duration-200 hover:bg-sw-accent-hover"
                       (click)="goToIntegrations()"
                       data-testid="btn-go-integrations"
                     >
@@ -98,7 +124,9 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
               }
 
               @if (plugin.requires_integrations.length === 0) {
-                <p class="dashboard-placeholder">Plugin dashboard content will appear here.</p>
+                <p class="dashboard-placeholder text-sw-text-ghost text-[13px] italic">
+                  Plugin dashboard content will appear here.
+                </p>
               }
             </div>
           }
@@ -116,7 +144,9 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
       }
     </div>
   `,
-  styleUrl: './plugin-detail.component.css',
+  styles: [
+    ':host { display: block; background: var(--color-sw-bg-darkest); min-height: 100vh; padding: 24px; color: var(--color-sw-text); }',
+  ],
 })
 export class PluginDetailComponent implements OnInit, OnDestroy {
   plugin: PluginStatusEntry | null = null;
