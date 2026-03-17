@@ -16,77 +16,102 @@ export interface SavePluginCredentialsEvent {
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div class="card" [attr.data-testid]="'plugin-card-' + plugin.slug">
-      <div class="card-header">
-        <button class="card-header-btn" type="button" (click)="toggleExpand.emit(plugin.slug)">
-          <span class="service-name">{{ plugin.name }}</span>
-          <span class="version-badge">v{{ plugin.version }}</span>
+    <div
+      class="bg-sw-bg-navy border border-sw-border rounded-lg mb-3 overflow-hidden"
+      [attr.data-testid]="'plugin-card-' + plugin.slug"
+    >
+      <div class="card-header flex justify-between items-center px-5 py-4">
+        <button
+          class="card-header-btn flex items-center gap-3 flex-1 cursor-pointer bg-none border-none text-inherit font-inherit text-left p-0"
+          type="button"
+          (click)="toggleExpand.emit(plugin.slug)"
+        >
+          <span class="service-name font-semibold text-base">{{ plugin.name }}</span>
+          <span class="version-badge text-[11px] text-sw-text-dim font-mono"
+            >v{{ plugin.version }}</span
+          >
           @if (plugin.auth_fields.length > 0) {
             <span
-              class="badge"
+              class="badge text-[11px] px-2 py-0.5 rounded font-medium"
               [class.configured]="plugin.configured"
               [class.not-configured]="!plugin.configured"
+              [ngClass]="
+                plugin.configured
+                  ? 'bg-sw-success-dark text-sw-success-text'
+                  : 'bg-sw-error-badge text-sw-error-text'
+              "
             >
               {{ plugin.configured ? 'Configured' : 'Not Configured' }}
             </span>
           }
         </button>
-        <div class="card-actions">
+        <div class="card-actions flex items-center gap-3">
           <button
             type="button"
-            class="btn-open"
+            class="px-3 py-1 bg-transparent text-sw-accent border border-sw-accent rounded text-xs font-mono cursor-pointer transition-all duration-200 hover:bg-sw-accent hover:text-sw-bg-darkest"
             [attr.data-testid]="'plugin-open-' + plugin.slug"
             (click)="openPlugin.emit(plugin.slug); $event.stopPropagation()"
           >
             Open
           </button>
           <label
-            class="toggle"
+            class="toggle relative inline-block w-[44px] h-[24px]"
             [class.disabled]="!plugin.configured"
+            [ngClass]="!plugin.configured ? 'opacity-40 cursor-not-allowed' : ''"
             [title]="plugin.configured ? '' : 'Configure credentials to enable'"
           >
             <input
               type="checkbox"
+              class="peer sr-only"
               [checked]="plugin.enabled"
               [disabled]="!plugin.configured"
               (change)="onToggle($event)"
               [attr.data-testid]="'plugin-toggle-' + plugin.slug"
+              [ngClass]="!plugin.configured ? 'cursor-not-allowed' : ''"
             />
-            <span class="slider"></span>
+            <span
+              class="slider absolute inset-0 bg-sw-slider rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-sw-accent before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
+            ></span>
           </label>
         </div>
       </div>
-      <p class="card-description">{{ plugin.description }}</p>
+      <p class="card-description px-5 pb-3 text-sw-text-muted text-[13px] m-0">
+        {{ plugin.description }}
+      </p>
 
       @if (expanded) {
-        <div class="card-body">
+        <div class="card-body px-5 pb-5 border-t border-sw-border">
           @if (plugin.auth_fields.length > 0) {
             <form (submit)="onSave($event)">
               @for (field of plugin.auth_fields; track field.key) {
-                <div class="form-group">
-                  <label [for]="plugin.slug + '-' + field.key">{{ field.label }}</label>
+                <div class="form-group my-4">
+                  <label
+                    class="block mb-1.5 text-[13px] text-sw-text-muted"
+                    [for]="plugin.slug + '-' + field.key"
+                    >{{ field.label }}</label
+                  >
                   <input
                     [id]="plugin.slug + '-' + field.key"
                     [type]="field.field_type === 'password' ? 'password' : 'text'"
                     [placeholder]="field.placeholder"
                     [value]="getFieldValue(field.key)"
                     (input)="onFieldInput(field.key, $event)"
-                    class="form-input"
+                    class="form-input w-full px-3 py-2.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-sm font-mono box-border focus:border-sw-accent focus:outline-none"
                   />
                 </div>
               }
 
-              <div class="form-actions">
+              <div class="flex gap-3 mt-4">
                 <button
                   type="submit"
-                  class="btn-save"
+                  class="btn-save px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-darkest"
                   [attr.data-testid]="'plugin-save-' + plugin.slug"
                 >
                   Save
                 </button>
                 <button
                   type="button"
-                  class="btn-cancel"
+                  class="btn-cancel px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
                   [attr.data-testid]="'plugin-delete-creds-' + plugin.slug"
                   (click)="deleteCredentials.emit(plugin)"
                 >
@@ -97,15 +122,19 @@ export interface SavePluginCredentialsEvent {
           }
 
           @if (plugin.token_mount.startsWith('rw')) {
-            <p class="token-mount-info">Token mount: {{ plugin.token_mount }}</p>
+            <p class="text-[11px] text-sw-text-dim mt-2 font-mono">
+              Token mount: {{ plugin.token_mount }}
+            </p>
           }
 
-          <div class="form-actions">
+          <div class="flex gap-3 mt-4">
             @if (confirmingRemove) {
-              <span class="confirm-prompt">Are you sure?</span>
+              <span class="confirm-prompt text-sw-error-text text-[13px] font-semibold"
+                >Are you sure?</span
+              >
               <button
                 type="button"
-                class="btn-remove"
+                class="btn-remove px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
                 [attr.data-testid]="'plugin-remove-confirm-' + plugin.slug"
                 (click)="onConfirmRemove()"
               >
@@ -113,7 +142,7 @@ export interface SavePluginCredentialsEvent {
               </button>
               <button
                 type="button"
-                class="btn-cancel"
+                class="btn-cancel px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
                 [attr.data-testid]="'plugin-remove-cancel-' + plugin.slug"
                 (click)="confirmingRemove = false"
               >
@@ -122,7 +151,7 @@ export interface SavePluginCredentialsEvent {
             } @else {
               <button
                 type="button"
-                class="btn-remove"
+                class="btn-remove px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
                 [attr.data-testid]="'plugin-remove-' + plugin.slug"
                 (click)="confirmingRemove = true"
               >
@@ -134,7 +163,6 @@ export interface SavePluginCredentialsEvent {
       }
     </div>
   `,
-  styleUrl: './plugin-card.component.css',
 })
 export class PluginCardComponent {
   @Input({ required: true }) plugin!: PluginStatusEntry;
