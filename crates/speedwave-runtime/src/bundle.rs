@@ -513,23 +513,12 @@ mod tests {
         )
         .unwrap();
 
-        // Symlink for module resolution (or real dir — both work for Node.js)
-        #[cfg(unix)]
-        {
-            std::fs::create_dir_all(root.join("mcp-os/os/node_modules/@speedwave")).unwrap();
-            std::os::unix::fs::symlink(
-                root.join("mcp-os/shared"),
-                root.join("mcp-os/os/node_modules/@speedwave/mcp-shared"),
-            )
-            .unwrap();
-        }
-        #[cfg(not(unix))]
-        {
-            // On Windows tests, just create a real directory with content
-            let target = root.join("mcp-os/os/node_modules/@speedwave/mcp-shared/dist");
-            std::fs::create_dir_all(&target).unwrap();
-            std::fs::write(target.join("index.js"), "export {};").unwrap();
-        }
+        // Real directory copy (matches production bundle-build-context.sh behavior)
+        let mcp_shared_dest = root.join("mcp-os/os/node_modules/@speedwave/mcp-shared");
+        std::fs::create_dir_all(mcp_shared_dest.join("dist")).unwrap();
+        std::fs::write(mcp_shared_dest.join("dist/index.js"), "export {};").unwrap();
+        std::fs::write(mcp_shared_dest.join("package.json"), "{}").unwrap();
+        std::fs::write(mcp_shared_dest.join("package-lock.json"), "{}").unwrap();
     }
 
     #[cfg(unix)]
@@ -745,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_bundled_runtime_assets_rejects_missing_mcp_shared_link() {
+    fn validate_bundled_runtime_assets_rejects_missing_mcp_shared_dir() {
         let temp = tempfile::tempdir().unwrap();
         write_common_bundled_assets(temp.path());
         write_platform_bundled_assets(temp.path(), "macos");

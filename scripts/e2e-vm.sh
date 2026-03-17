@@ -24,6 +24,25 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=e2e-common.sh
 source "${SCRIPT_DIR}/e2e-common.sh"
 
+# SSOT: exclude list for repo transfers to remote E2E machines.
+# All 3 transfer functions (linux_rsync_to, macos_rsync_to, windows_rsync_to)
+# reference this array. Each remote machine downloads its own platform assets.
+E2E_RSYNC_EXCLUDES=(
+    node_modules target dist .e2e-artifacts .git build-context
+    .angular .build
+    'desktop/src-tauri/lima'
+    'desktop/src-tauri/nerdctl-full'
+    'desktop/src-tauri/nodejs'
+    'desktop/src-tauri/wsl'
+    'desktop/src-tauri/cli'
+    'desktop/src-tauri/mcp-os'
+    'desktop/src-tauri/THIRD-PARTY-LICENSES'
+    'desktop/src-tauri/calendar-cli'
+    'desktop/src-tauri/mail-cli'
+    'desktop/src-tauri/notes-cli'
+    'desktop/src-tauri/reminders-cli'
+)
+
 # Override SSH opts with keepalive for long-running test sessions.
 LINUX_SSH_OPTS="$SSH_OPTS_BASE -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
 WINDOWS_SSH_OPTS="$SSH_OPTS_BASE -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -p $WINDOWS_SSH_PORT"
@@ -78,10 +97,11 @@ ensure_provisioned_macos() {
 # Copy files to the Linux machine via rsync-over-ssh.
 linux_rsync_to() {
     local src="$1" dst="$2"
+    local -a exclude_args=()
+    for e in "${E2E_RSYNC_EXCLUDES[@]}"; do exclude_args+=(--exclude "$e"); done
     # shellcheck disable=SC2086
     rsync -az -e "ssh $LINUX_SSH_OPTS" --delete \
-        --exclude node_modules --exclude target --exclude dist \
-        --exclude .e2e-artifacts --exclude .git --exclude build-context \
+        "${exclude_args[@]}" \
         "$src" "${LINUX_HOST}:${dst}"
 }
 
@@ -200,7 +220,10 @@ windows_rsync_to() {
     local src="$1" dst="$2"
     # --no-mac-metadata and --exclude='._*' prevent macOS resource forks (._file)
     # from being included — these cause "not valid UTF-8" errors in Tauri builds.
-    local -a tar_excludes=(--exclude=node_modules --exclude=target --exclude=dist --exclude=.e2e-artifacts --exclude=.git '--exclude=._*' --exclude=.angular --exclude=.build --exclude=build-context)
+    local -a tar_excludes=()
+    for e in "${E2E_RSYNC_EXCLUDES[@]}"; do tar_excludes+=("--exclude=$e"); done
+    # Windows-specific extras (macOS resource forks)
+    tar_excludes+=('--exclude=._*')
     local -a tar_flags=(--no-mac-metadata)
     # Ensure the WSL distro is running before proceeding — wsl.exe may need
     # time to restart after a --unregister of another distro shut down the VM.
@@ -359,10 +382,11 @@ CLEAN
 # Copy files to the macOS machine via rsync-over-ssh.
 macos_rsync_to() {
     local src="$1" dst="$2"
+    local -a exclude_args=()
+    for e in "${E2E_RSYNC_EXCLUDES[@]}"; do exclude_args+=(--exclude "$e"); done
     # shellcheck disable=SC2086
     rsync -az -e "ssh $MACOS_SSH_OPTS" --delete \
-        --exclude node_modules --exclude target --exclude dist \
-        --exclude .e2e-artifacts --exclude .git --exclude build-context \
+        "${exclude_args[@]}" \
         "$src" "${MACOS_HOST}:${dst}"
 }
 
