@@ -63,7 +63,7 @@ describe('CSP nonce bridging', () => {
       imports: [AppComponent, RouterModule.forRoot([])],
     }).compileComponents();
 
-    const nonce = TestBed.inject(CSP_NONCE, { optional: true } as never);
+    const nonce = TestBed.inject(CSP_NONCE, null);
     expect(nonce).toBeNull();
   });
 });
