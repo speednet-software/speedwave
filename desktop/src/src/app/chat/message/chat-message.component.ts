@@ -18,8 +18,18 @@ import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
     AskUserBlockComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block' },
   template: `
-    <div class="chat-message" [class]="role" [class.streaming]="streaming">
+    <div
+      data-testid="chat-message"
+      class="max-w-[85%] px-4 py-3 rounded-lg leading-relaxed break-words"
+      [class]="
+        role === 'user'
+          ? 'self-end bg-sw-bg-navy text-sw-text'
+          : 'self-start bg-sw-bg-dark text-sw-text border border-sw-border'
+      "
+      [class.!border-sw-accent]="streaming"
+    >
       @for (block of blocks; track $index) {
         @switch (block.type) {
           @case ('text') {
@@ -43,45 +53,9 @@ import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
         }
       }
       @if (streaming) {
-        <span class="cursor">&#x2588;</span>
+        <span data-testid="cursor" class="inline-block animate-blink text-sw-accent">&#x2588;</span>
       }
     </div>
-  `,
-  styles: `
-    :host {
-      display: block;
-    }
-    .chat-message {
-      max-width: 85%;
-      padding: 12px 16px;
-      border-radius: 8px;
-      line-height: 1.5;
-      word-wrap: break-word;
-    }
-    .chat-message.user {
-      align-self: flex-end;
-      background: #0f3460;
-      color: #e0e0e0;
-    }
-    .chat-message.assistant {
-      align-self: flex-start;
-      background: #16213e;
-      color: #e0e0e0;
-      border: 1px solid #0f3460;
-    }
-    .chat-message.streaming {
-      border-color: #e94560;
-    }
-    .cursor {
-      display: inline-block;
-      animation: blink 1s step-end infinite;
-      color: #e94560;
-    }
-    @keyframes blink {
-      50% {
-        opacity: 0;
-      }
-    }
   `,
 })
 export class ChatMessageComponent {

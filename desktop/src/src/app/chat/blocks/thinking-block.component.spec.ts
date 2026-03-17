@@ -20,7 +20,7 @@ describe('ThinkingBlockComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    const thinkingContent = el.querySelector('.thinking-content');
+    const thinkingContent = el.querySelector('[data-testid="thinking-content"]');
     expect(thinkingContent).toBeNull();
     expect(el.textContent).toContain('Thinking...');
   });
@@ -31,7 +31,7 @@ describe('ThinkingBlockComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    const thinkingContent = el.querySelector('.thinking-content');
+    const thinkingContent = el.querySelector('[data-testid="thinking-content"]');
     expect(thinkingContent?.textContent).toBe('I should check the file');
   });
 
@@ -40,12 +40,14 @@ describe('ThinkingBlockComponent', () => {
     component.collapsed = true;
     fixture.detectChanges();
 
-    const toggle = fixture.nativeElement.querySelector('.thinking-toggle') as HTMLElement;
+    const toggle = fixture.nativeElement.querySelector(
+      '[data-testid="thinking-toggle"]'
+    ) as HTMLElement;
     toggle.click();
     fixture.detectChanges();
 
     expect(component.collapsed).toBe(false);
-    const thinkingContent = fixture.nativeElement.querySelector('.thinking-content');
+    const thinkingContent = fixture.nativeElement.querySelector('[data-testid="thinking-content"]');
     expect(thinkingContent?.textContent).toBe('thinking content');
   });
 });

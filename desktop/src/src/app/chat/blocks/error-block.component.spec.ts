@@ -27,7 +27,7 @@ describe('ErrorBlockComponent', () => {
     component.content = 'Error';
     fixture.detectChanges();
 
-    const errorBlock = fixture.nativeElement.querySelector('.error-block');
+    const errorBlock = fixture.nativeElement.querySelector('[data-testid="error-block"]');
     expect(errorBlock).not.toBeNull();
   });
 });

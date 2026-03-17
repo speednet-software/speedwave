@@ -60,7 +60,7 @@ describe('ToolBlockComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('.tool-name')?.textContent).toBe('Read');
+    expect(el.querySelector('[data-testid="tool-name"]')?.textContent).toBe('Read');
   });
 
   it('shows file path for Read tool', () => {
@@ -68,7 +68,7 @@ describe('ToolBlockComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('.file-path')?.textContent).toBe('/src/main.rs');
+    expect(el.querySelector('[data-testid="file-path"]')?.textContent).toBe('/src/main.rs');
   });
 
   it('shows command for Bash tool', () => {
@@ -79,7 +79,7 @@ describe('ToolBlockComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('.terminal-output')?.textContent).toContain('ls -la');
+    expect(el.querySelector('[data-testid="terminal-output"]')?.textContent).toContain('ls -la');
   });
 
   it('shows diff for Edit tool', () => {
@@ -90,8 +90,8 @@ describe('ToolBlockComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    const adds = el.querySelectorAll('.diff-add');
-    const removes = el.querySelectorAll('.diff-remove');
+    const adds = el.querySelectorAll('[data-testid="diff-add"]');
+    const removes = el.querySelectorAll('[data-testid="diff-remove"]');
     expect(adds.length).toBeGreaterThan(0);
     expect(removes.length).toBeGreaterThan(0);
   });
@@ -104,7 +104,9 @@ describe('ToolBlockComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('.result-content')?.textContent).toBe('file contents here');
+    expect(el.querySelector('[data-testid="result-content"]')?.textContent).toBe(
+      'file contents here'
+    );
   });
 
   it('shows error result with error styling', () => {
@@ -116,7 +118,8 @@ describe('ToolBlockComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('.tool-result-error')).not.toBeNull();
+    const result = el.querySelector('[data-testid="tool-result"]');
+    expect(result?.classList.contains('tool-result-error')).toBe(true);
   });
 
   it('hides body when collapsed via toggleCollapsed', () => {
@@ -124,20 +127,24 @@ describe('ToolBlockComponent', () => {
     fixture.detectChanges();
 
     // Initially not collapsed
-    expect((fixture.nativeElement as HTMLElement).querySelector('.tool-body')).not.toBeNull();
+    expect(
+      (fixture.nativeElement as HTMLElement).querySelector('[data-testid="tool-body"]')
+    ).not.toBeNull();
 
     // Toggle collapsed — component calls markForCheck internally
     component.toggleCollapsed();
     fixture.detectChanges();
 
-    expect((fixture.nativeElement as HTMLElement).querySelector('.tool-body')).toBeNull();
+    expect(
+      (fixture.nativeElement as HTMLElement).querySelector('[data-testid="tool-body"]')
+    ).toBeNull();
   });
 
   it('shows status icon', () => {
     component.tool = makeTool({ status: 'running' });
     fixture.detectChanges();
 
-    const status = fixture.nativeElement.querySelector('.tool-status-running');
+    const status = fixture.nativeElement.querySelector('[data-testid="tool-status"]');
     expect(status).not.toBeNull();
   });
 
@@ -145,7 +152,7 @@ describe('ToolBlockComponent', () => {
     component.tool = makeTool();
     fixture.detectChanges();
 
-    const summary = fixture.nativeElement.querySelector('.tool-summary');
+    const summary = fixture.nativeElement.querySelector('[data-testid="tool-summary"]');
     expect(summary?.textContent).toContain('/src/main.rs');
   });
 
@@ -157,7 +164,9 @@ describe('ToolBlockComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('.code-block')?.textContent).toContain('{"custom":"data"}');
+    expect(el.querySelector('[data-testid="code-block"]')?.textContent).toContain(
+      '{"custom":"data"}'
+    );
   });
 
   describe('toggleCollapsed', () => {

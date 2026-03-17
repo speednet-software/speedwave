@@ -6,174 +6,93 @@ import type { AskUserQuestionBlock } from '../../models/chat';
   selector: 'app-ask-user-block',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block my-2' },
   template: `
-    <div class="ask-user-block">
+    <div
+      data-testid="ask-user-block"
+      class="bg-sw-purple-bg border border-sw-purple rounded-md p-3"
+    >
       @if (question.header) {
-        <div class="ask-header">{{ question.header }}</div>
+        <div data-testid="ask-header" class="font-bold text-sw-purple-light text-[13px] mb-1">
+          {{ question.header }}
+        </div>
       }
-      <div class="ask-question">{{ question.question }}</div>
+      <div data-testid="ask-question" class="text-sw-text text-sm mb-2">
+        {{ question.question }}
+      </div>
       @if (question.answered) {
-        <div class="ask-answered">
+        <div data-testid="ask-answered" class="flex flex-wrap gap-1.5">
           @for (val of question.selected_values; track val) {
-            <span class="selected-option">{{ val }}</span>
+            <span
+              data-testid="selected-option"
+              class="bg-sw-purple text-white px-2.5 py-1 rounded text-[13px]"
+              >{{ val }}</span
+            >
           }
         </div>
       } @else {
         @if (question.options.length > 0) {
-          <div class="ask-options">
+          <div class="flex flex-wrap gap-2 mb-2">
             @for (option of question.options; track option.value) {
               <button
-                class="ask-option-btn"
-                [class.selected]="isSelected(option.value)"
+                data-testid="ask-option-btn"
+                class="bg-sw-bg-navy text-sw-text border border-sw-btn-ask-border rounded px-3 py-1.5 cursor-pointer text-[13px] transition-[background,border-color] duration-150 hover:bg-sw-btn-ask hover:border-sw-purple"
+                [class.!bg-sw-purple]="isSelected(option.value)"
+                [class.!border-sw-purple-light]="isSelected(option.value)"
+                [class.!text-white]="isSelected(option.value)"
                 (click)="toggleOption(option.value)"
               >
                 {{ option.label }}
               </button>
             }
           </div>
-          <div class="ask-actions">
+          <div class="flex items-center gap-2 flex-wrap">
             <button
-              class="ask-submit-btn"
+              data-testid="ask-submit-btn"
+              class="bg-sw-purple text-white border-none rounded px-4 py-1.5 cursor-pointer text-[13px] hover:bg-sw-purple-dark disabled:opacity-50 disabled:cursor-not-allowed"
               [disabled]="pendingSelection.length === 0"
               (click)="submit()"
             >
               Confirm
             </button>
-            <span class="ask-or">or</span>
-            <div class="ask-freeform">
+            <span data-testid="ask-or" class="text-sw-code-gray text-xs">or</span>
+            <div class="flex gap-2 flex-1 min-w-[150px]">
               <input
-                class="ask-input"
+                data-testid="ask-input"
+                class="flex-1 bg-sw-bg-abyss text-sw-text border border-sw-btn-ask-border rounded px-2.5 py-1.5 text-[13px] outline-none focus:border-sw-purple"
                 placeholder="Type your own answer..."
                 (keydown.enter)="submitFreeform($event)"
                 #freeformInput
               />
-              <button class="ask-submit-btn" (click)="submitFreeformFromInput(freeformInput)">
+              <button
+                data-testid="ask-submit-btn"
+                class="bg-sw-purple text-white border-none rounded px-4 py-1.5 cursor-pointer text-[13px] hover:bg-sw-purple-dark"
+                (click)="submitFreeformFromInput(freeformInput)"
+              >
                 Send
               </button>
             </div>
           </div>
         } @else {
-          <div class="ask-freeform">
+          <div class="flex gap-2 flex-1 min-w-[150px]">
             <input
-              class="ask-input"
+              data-testid="ask-input"
+              class="flex-1 bg-sw-bg-abyss text-sw-text border border-sw-btn-ask-border rounded px-2.5 py-1.5 text-[13px] outline-none focus:border-sw-purple"
               placeholder="Type your answer..."
               (keydown.enter)="submitFreeform($event)"
               #freeformInput
             />
-            <button class="ask-submit-btn" (click)="submitFreeformFromInput(freeformInput)">
+            <button
+              data-testid="ask-submit-btn"
+              class="bg-sw-purple text-white border-none rounded px-4 py-1.5 cursor-pointer text-[13px] hover:bg-sw-purple-dark"
+              (click)="submitFreeformFromInput(freeformInput)"
+            >
               Send
             </button>
           </div>
         }
       }
     </div>
-  `,
-  styles: `
-    :host {
-      display: block;
-      margin: 8px 0;
-    }
-    .ask-user-block {
-      background: #1a1a3e;
-      border: 1px solid #7c3aed;
-      border-radius: 6px;
-      padding: 12px;
-    }
-    .ask-header {
-      font-weight: bold;
-      color: #a78bfa;
-      font-size: 13px;
-      margin-bottom: 4px;
-    }
-    .ask-question {
-      color: #e0e0e0;
-      font-size: 14px;
-      margin-bottom: 8px;
-    }
-    .ask-options {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-bottom: 8px;
-    }
-    .ask-option-btn {
-      background: #0f3460;
-      color: #e0e0e0;
-      border: 1px solid #1e3a6e;
-      border-radius: 4px;
-      padding: 6px 12px;
-      cursor: pointer;
-      font-size: 13px;
-      transition:
-        background 0.15s,
-        border-color 0.15s;
-    }
-    .ask-option-btn:hover {
-      background: #163d70;
-      border-color: #7c3aed;
-    }
-    .ask-option-btn.selected {
-      background: #7c3aed;
-      border-color: #a78bfa;
-      color: #fff;
-    }
-    .ask-submit-btn {
-      background: #7c3aed;
-      color: #fff;
-      border: none;
-      border-radius: 4px;
-      padding: 6px 16px;
-      cursor: pointer;
-      font-size: 13px;
-    }
-    .ask-submit-btn:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-    .ask-submit-btn:hover:not(:disabled) {
-      background: #6d28d9;
-    }
-    .ask-answered {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-    }
-    .selected-option {
-      background: #7c3aed;
-      color: #fff;
-      padding: 4px 10px;
-      border-radius: 4px;
-      font-size: 13px;
-    }
-    .ask-actions {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .ask-or {
-      color: #6b7280;
-      font-size: 12px;
-    }
-    .ask-freeform {
-      display: flex;
-      gap: 8px;
-      flex: 1;
-      min-width: 150px;
-    }
-    .ask-input {
-      flex: 1;
-      background: #0d1b2a;
-      color: #e0e0e0;
-      border: 1px solid #1e3a6e;
-      border-radius: 4px;
-      padding: 6px 10px;
-      font-size: 13px;
-      outline: none;
-    }
-    .ask-input:focus {
-      border-color: #7c3aed;
-    }
   `,
 })
 export class AskUserBlockComponent {

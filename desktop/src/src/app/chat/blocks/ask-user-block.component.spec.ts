@@ -36,10 +36,10 @@ describe('AskUserBlockComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('.ask-header')?.textContent).toContain('Fruits');
-    expect(el.querySelector('.ask-question')?.textContent).toContain('Pick a fruit');
+    expect(el.querySelector('[data-testid="ask-header"]')?.textContent).toContain('Fruits');
+    expect(el.querySelector('[data-testid="ask-question"]')?.textContent).toContain('Pick a fruit');
 
-    const buttons = el.querySelectorAll('.ask-option-btn');
+    const buttons = el.querySelectorAll('[data-testid="ask-option-btn"]');
     expect(buttons.length).toBe(2);
     expect(buttons[0].textContent).toContain('Apple');
     expect(buttons[1].textContent).toContain('Banana');
@@ -93,9 +93,9 @@ describe('AskUserBlockComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('.ask-answered')).toBeTruthy();
-    expect(el.querySelector('.selected-option')?.textContent).toContain('apple');
-    expect(el.querySelectorAll('.ask-option-btn').length).toBe(0);
+    expect(el.querySelector('[data-testid="ask-answered"]')).toBeTruthy();
+    expect(el.querySelector('[data-testid="selected-option"]')?.textContent).toContain('apple');
+    expect(el.querySelectorAll('[data-testid="ask-option-btn"]').length).toBe(0);
   });
 
   it('does not allow toggling when already answered', () => {
@@ -111,8 +111,8 @@ describe('AskUserBlockComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('.ask-input')).toBeTruthy();
-    expect(el.querySelectorAll('.ask-option-btn').length).toBe(0);
+    expect(el.querySelector('[data-testid="ask-input"]')).toBeTruthy();
+    expect(el.querySelectorAll('[data-testid="ask-option-btn"]').length).toBe(0);
   });
 
   it('shows both options and freeform input when options present', () => {
@@ -120,9 +120,9 @@ describe('AskUserBlockComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelectorAll('.ask-option-btn').length).toBe(2);
-    expect(el.querySelector('.ask-input')).toBeTruthy();
-    expect(el.querySelector('.ask-or')).toBeTruthy();
+    expect(el.querySelectorAll('[data-testid="ask-option-btn"]').length).toBe(2);
+    expect(el.querySelector('[data-testid="ask-input"]')).toBeTruthy();
+    expect(el.querySelector('[data-testid="ask-or"]')).toBeTruthy();
   });
 
   it('emits freeform answer via Send button click (submitFreeformFromInput)', () => {
@@ -132,10 +132,10 @@ describe('AskUserBlockComponent', () => {
     component.answered.subscribe(spy);
 
     const el = fixture.nativeElement as HTMLElement;
-    const input = el.querySelector('.ask-input') as HTMLInputElement;
+    const input = el.querySelector('[data-testid="ask-input"]') as HTMLInputElement;
     input.value = 'My freeform answer';
 
-    const sendBtn = el.querySelector('.ask-submit-btn') as HTMLButtonElement;
+    const sendBtn = el.querySelector('[data-testid="ask-submit-btn"]') as HTMLButtonElement;
     expect(sendBtn).not.toBeNull();
     sendBtn.click();
     fixture.detectChanges();
@@ -150,10 +150,10 @@ describe('AskUserBlockComponent', () => {
     component.answered.subscribe(spy);
 
     const el = fixture.nativeElement as HTMLElement;
-    const input = el.querySelector('.ask-input') as HTMLInputElement;
+    const input = el.querySelector('[data-testid="ask-input"]') as HTMLInputElement;
     input.value = '   ';
 
-    const sendBtn = el.querySelector('.ask-submit-btn') as HTMLButtonElement;
+    const sendBtn = el.querySelector('[data-testid="ask-submit-btn"]') as HTMLButtonElement;
     sendBtn.click();
     fixture.detectChanges();
 
@@ -167,7 +167,7 @@ describe('AskUserBlockComponent', () => {
     component.answered.subscribe(spy);
 
     const el = fixture.nativeElement as HTMLElement;
-    const input = el.querySelector('.ask-input') as HTMLInputElement;
+    const input = el.querySelector('[data-testid="ask-input"]') as HTMLInputElement;
     input.value = 'Custom answer';
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
     component.submitFreeform({ target: input } as unknown as Event);

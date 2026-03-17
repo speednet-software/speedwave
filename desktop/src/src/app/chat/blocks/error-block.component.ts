@@ -5,20 +5,13 @@ import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
   selector: 'app-error-block',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  template: `<div class="error-block">{{ content }}</div>`,
-  styles: `
-    :host {
-      display: block;
-      margin: 8px 0;
-    }
-    .error-block {
-      background: rgba(239, 68, 68, 0.1);
-      border-left: 3px solid #ef4444;
-      padding: 8px 12px;
-      color: #fca5a5;
-      border-radius: 4px;
-    }
-  `,
+  host: { class: 'block my-2' },
+  template: `<div
+    data-testid="error-block"
+    class="bg-[rgba(239,68,68,0.1)] border-l-3 border-sw-error px-3 py-2 text-sw-code-red rounded"
+  >
+    {{ content }}
+  </div>`,
 })
 export class ErrorBlockComponent {
   @Input({ required: true }) content!: string;
