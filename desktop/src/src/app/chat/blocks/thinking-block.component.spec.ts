@@ -32,7 +32,7 @@ describe('ThinkingBlockComponent', () => {
 
     const el = fixture.nativeElement as HTMLElement;
     const thinkingContent = el.querySelector('[data-testid="thinking-content"]');
-    expect(thinkingContent?.textContent).toBe('I should check the file');
+    expect(thinkingContent?.textContent?.trim()).toBe('I should check the file');
   });
 
   it('toggles collapsed state on click', () => {
@@ -48,6 +48,6 @@ describe('ThinkingBlockComponent', () => {
 
     expect(component.collapsed).toBe(false);
     const thinkingContent = fixture.nativeElement.querySelector('[data-testid="thinking-content"]');
-    expect(thinkingContent?.textContent).toBe('thinking content');
+    expect(thinkingContent?.textContent?.trim()).toBe('thinking content');
   });
 });

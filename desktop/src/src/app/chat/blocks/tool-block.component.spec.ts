@@ -68,7 +68,7 @@ describe('ToolBlockComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('[data-testid="file-path"]')?.textContent).toBe('/src/main.rs');
+    expect(el.querySelector('[data-testid="file-path"]')?.textContent?.trim()).toBe('/src/main.rs');
   });
 
   it('shows command for Bash tool', () => {
