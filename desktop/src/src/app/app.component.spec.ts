@@ -42,27 +42,28 @@ describe('CSP nonce bridging', () => {
     styleEl?.remove();
   });
 
-  it('should provide CSP_NONCE when a <style> tag has a nonce', async () => {
+  it('should provide CSP_NONCE when boot-overlay style has a nonce', async () => {
     styleEl = document.createElement('style');
+    styleEl.id = 'boot-overlay-style';
     styleEl.setAttribute('nonce', 'tauri-test-nonce-123');
     document.head.prepend(styleEl);
 
+    const nonce = document.getElementById('boot-overlay-style')?.nonce || '';
+
     await TestBed.configureTestingModule({
       imports: [AppComponent, RouterModule.forRoot([])],
-      providers: [{ provide: CSP_NONCE, useValue: document.querySelector('style')?.nonce || '' }],
+      providers: [{ provide: CSP_NONCE, useValue: nonce }],
     }).compileComponents();
 
-    const nonce = TestBed.inject(CSP_NONCE);
-    expect(nonce).toBe('tauri-test-nonce-123');
+    expect(TestBed.inject(CSP_NONCE)).toBe('tauri-test-nonce-123');
   });
 
-  it('should not provide CSP_NONCE when no <style> tag has a nonce', async () => {
+  it('should not provide CSP_NONCE when boot-overlay style is absent', async () => {
     await TestBed.configureTestingModule({
       imports: [AppComponent, RouterModule.forRoot([])],
-      providers: [{ provide: CSP_NONCE, useValue: document.querySelector('style')?.nonce || '' }],
     }).compileComponents();
 
-    const nonce = TestBed.inject(CSP_NONCE);
-    expect(nonce).toBe('');
+    const nonce = TestBed.inject(CSP_NONCE, { optional: true } as never);
+    expect(nonce).toBeNull();
   });
 });

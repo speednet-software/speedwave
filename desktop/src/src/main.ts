@@ -9,7 +9,7 @@ import { GlobalErrorHandler } from './app/error-handler';
  * Read the nonce Tauri injected into the boot-overlay <style> tag in index.html.
  *  Passing it to CSP_NONCE lets Angular add the same nonce to all component <style> tags.
  */
-const tauriNonce = document.querySelector('style')?.nonce || '';
+const tauriNonce = document.getElementById('boot-overlay-style')?.nonce || '';
 
 bootstrapApplication(AppComponent, {
   providers: [
