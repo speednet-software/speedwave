@@ -1,55 +1,137 @@
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
+@import "tailwindcss";
+
+/* ── Speedwave custom theme ── */
+@theme {
+  /* Background palette */
+  --color-sw-bg-darkest: #1a1a2e;
+  --color-sw-bg-darker: #12122a;
+  --color-sw-bg-dark: #16213e;
+  --color-sw-bg-navy: #0f3460;
+  --color-sw-bg-deep: #0a0a1a;
+  --color-sw-bg-abyss: #0d1b2a;
+  --color-sw-bg-panel: #0a1628;
+  --color-sw-bg-input: #0d0d0d;
+
+  /* Accent & brand */
+  --color-sw-accent: #e94560;
+  --color-sw-accent-hover: #c23152;
+  --color-sw-accent-dark: #d13550;
+  --color-sw-teal: #4ecdc4;
+
+  /* Text */
+  --color-sw-text: #e0e0e0;
+  --color-sw-text-muted: #888888;
+  --color-sw-text-dim: #aaaaaa;
+  --color-sw-text-faint: #999999;
+  --color-sw-text-ghost: #666666;
+  --color-sw-text-silver: #c0c0c0;
+  --color-sw-text-lavender: #a0a0c0;
+  --color-sw-text-code: #aaaacc;
+  --color-sw-text-subtle: #cccccc;
+
+  /* UI chrome */
+  --color-sw-border: #0f3460;
+  --color-sw-border-dark: #333333;
+  --color-sw-slider: #555555;
+
+  /* Success */
+  --color-sw-success: #2ecc71;
+  --color-sw-success-dark: #1b4332;
+  --color-sw-success-text: #95d5b2;
+  --color-sw-success-light: #34d399;
+
+  /* Error */
+  --color-sw-error: #e94560;
+  --color-sw-error-bg: #3d0000;
+  --color-sw-error-deep: #5a0000;
+  --color-sw-error-text: #e09090;
+  --color-sw-error-light: #f87171;
+  --color-sw-error-badge: #3d2c2c;
+  --color-sw-error-event: #222244;
+
+  /* Warning */
+  --color-sw-warning: #fbbf24;
+
+  /* Purple (thinking/ask blocks) */
+  --color-sw-purple: #7c3aed;
+  --color-sw-purple-light: #a78bfa;
+  --color-sw-purple-dark: #6d28d9;
+  --color-sw-purple-bg: #1a1a3e;
+
+  /* Code syntax / terminal */
+  --color-sw-code-lime: #a3e635;
+  --color-sw-code-blue: #93c5fd;
+  --color-sw-code-green: #86efac;
+  --color-sw-code-red: #fca5a5;
+  --color-sw-code-gray: #6b7280;
+
+  /* Interactive states */
+  --color-sw-btn-hover: #1a4a7a;
+  --color-sw-btn-active: #1a5c3a;
+  --color-sw-btn-ask: #163d70;
+  --color-sw-btn-ask-border: #1e3a6e;
+  --color-sw-thinking-bg: #1e1e3a;
+  --color-sw-event-bg: #1a2840;
+
+  /* Font stack */
+  --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', monospace;
+
+  /* Animations */
+  --animate-sw-spin: sw-spin 0.8s linear infinite;
+  --animate-blink: blink 1s step-end infinite;
+
+  @keyframes sw-spin {
+    to { transform: rotate(360deg); }
+  }
+  @keyframes blink {
+    50% { opacity: 0; }
+  }
 }
 
-html, body {
-  height: 100%;
-  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', monospace;
-  font-size: 14px;
-  background: #1a1a2e;
-  color: #e0e0e0;
-  -webkit-font-smoothing: antialiased;
+/* ── Base styles ── */
+@layer base {
+  html, body {
+    height: 100%;
+    font-family: var(--font-mono);
+    font-size: 14px;
+    background: var(--color-sw-bg-darkest);
+    color: var(--color-sw-text);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a {
+    color: var(--color-sw-accent);
+    text-decoration: none;
+  }
+  a:hover {
+    text-decoration: underline;
+  }
+
+  button {
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  textarea {
+    font-family: inherit;
+  }
+
+  code, pre {
+    font-family: var(--font-mono);
+  }
 }
 
+/* ── Scrollbar (not supported by Tailwind) ── */
 ::-webkit-scrollbar {
   width: 8px;
 }
-
 ::-webkit-scrollbar-track {
-  background: #16213e;
+  background: var(--color-sw-bg-dark);
 }
-
 ::-webkit-scrollbar-thumb {
-  background: #0f3460;
+  background: var(--color-sw-border);
   border-radius: 4px;
 }
-
 ::-webkit-scrollbar-thumb:hover {
-  background: #e94560;
-}
-
-a {
-  color: #e94560;
-  text-decoration: none;
-}
-
-a:hover {
-  text-decoration: underline;
-}
-
-button {
-  font-family: inherit;
-  cursor: pointer;
-}
-
-textarea {
-  font-family: inherit;
-}
-
-code, pre {
-  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', monospace;
+  background: var(--color-sw-accent);
 }
