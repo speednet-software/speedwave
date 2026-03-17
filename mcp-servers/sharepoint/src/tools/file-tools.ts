@@ -2,23 +2,20 @@
  * File Tools - Tools for SharePoint file operations
  */
 
-import * as fs from 'fs/promises';
-import { Tool, ToolDefinition, ts } from '@speedwave/mcp-shared';
+import { Tool, ToolDefinition } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
 import { SharePointClient } from '../client.js';
-import { handleSyncDirectory } from './sync-tools.js';
-import { PathValidator } from '../path-validator.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Parameter Normalization (accept both snake_case and camelCase)
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Normalize sync parameters to accept both snake_case and camelCase
+ * Normalize upload parameters to accept both snake_case and camelCase
  * Hub executor sends snake_case, but our handlers expect camelCase
  * @param params - Tool parameters
  */
-function normalizeSyncParams(params: Record<string, unknown>): {
+function normalizeUploadParams(params: Record<string, unknown>): {
   localPath: string;
   sharepointPath: string;
   expectedEtag?: string;
@@ -31,6 +28,20 @@ function normalizeSyncParams(params: Record<string, unknown>): {
     expectedEtag: (params.expectedEtag ?? params.expected_etag) as string | undefined,
     createOnly: (params.createOnly ?? params.create_only) as boolean | undefined,
     overwrite: params.overwrite as boolean | undefined,
+  };
+}
+
+/**
+ * Normalize download parameters to accept both snake_case and camelCase
+ * @param params - Tool parameters
+ */
+function normalizeDownloadParams(params: Record<string, unknown>): {
+  sharepointPath: string;
+  localPath: string;
+} {
+  return {
+    sharepointPath: (params.sharepointPath ?? params.sharepoint_path) as string,
+    localPath: (params.localPath ?? params.local_path) as string,
   };
 }
 
@@ -125,121 +136,101 @@ const getFileFullTool: Tool = {
   ],
 };
 
-const syncTool: Tool = {
-  name: 'sync',
-  description:
-    'Sync content with SharePoint. File mode (default): uploads single file with ETag CAS. Directory mode (when mode is provided): two-way sync like OneDrive.',
+const downloadFileTool: Tool = {
+  name: 'downloadFile',
+  description: 'Download a file from SharePoint to a local path.',
   inputSchema: {
     type: 'object',
     properties: {
-      // Common params (accept both snake_case and camelCase)
-      localPath: { type: 'string', description: 'Local path (file or directory)' },
-      local_path: { type: 'string', description: 'Local path (alias for localPath)' },
-      sharepointPath: { type: 'string', description: 'Destination path in SharePoint' },
-      sharepoint_path: {
+      sharepointPath: { type: 'string', description: 'Source path in SharePoint (relative)' },
+      sharepoint_path: { type: 'string', description: 'Source path (alias for sharepointPath)' },
+      localPath: {
         type: 'string',
-        description: 'Destination path (alias for sharepointPath)',
+        description: 'Destination local path (must be under /workspace)',
       },
-      // File mode params
-      expectedEtag: { type: 'string', description: 'Expected ETag for CAS (file mode)' },
-      expected_etag: { type: 'string', description: 'Expected ETag (alias)' },
-      createOnly: { type: 'boolean', description: "Only create if doesn't exist (file mode)" },
-      create_only: { type: 'boolean', description: 'Create only (alias)' },
-      overwrite: { type: 'boolean', description: 'Overwrite without ETag check (file mode)' },
-      // Directory mode params (providing mode triggers directory sync)
-      mode: {
-        type: 'string',
-        enum: ['two_way', 'pull', 'push'],
-        description: 'Sync mode (triggers directory sync)',
-      },
-      delete: {
-        type: 'boolean',
-        description: 'Propagate deletions (directory mode, default: true)',
-      },
-      ignorePatterns: {
-        type: 'array',
-        items: { type: 'string' },
-        description: 'Glob patterns to ignore',
-      },
-      ignore_patterns: {
-        type: 'array',
-        items: { type: 'string' },
-        description: 'Ignore patterns (alias)',
-      },
-      dryRun: { type: 'boolean', description: 'Preview only (directory mode)' },
-      dry_run: { type: 'boolean', description: 'Dry run (alias)' },
+      local_path: { type: 'string', description: 'Destination local path (alias for localPath)' },
     },
-    // Note: required validation moved to handler after normalization
-    // to support both snake_case and camelCase
   },
   category: 'write',
-  keywords: ['sharepoint', 'sync', 'upload', 'download', 'file', 'onedrive'],
-  example: `// Directory sync (with mode):
-await sharepoint.sync({ local_path: "/home/speedwave/.claude/context", mode: "pull" });
-
-// File sync (without mode):
-await sharepoint.sync({ local_path: "/path/to/file.json", sharepoint_path: "context/file.json" });`,
+  keywords: ['sharepoint', 'download', 'file', 'get', 'fetch'],
+  example:
+    'await sharepoint.downloadFile({ sharepoint_path: "docs/report.pdf", local_path: "/workspace/report.pdf" })',
   outputSchema: {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      synced_files: { type: 'number', description: 'Number of files synced' },
-      conflicts: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            path: { type: 'string' },
-            reason: { type: 'string' },
-          },
-        },
-      },
       error: { type: 'string' },
     },
     required: ['success'],
   },
   inputExamples: [
     {
-      description: 'Upload single file (FILE MODE - no mode param)',
+      description: 'Download a document to local workspace',
       input: {
-        local_path: '/home/speedwave/.claude/context/opportunities/acme/state.json',
-        sharepoint_path: 'context/opportunities/acme/state.json',
+        sharepoint_path: 'documents/report.pdf',
+        local_path: '/workspace/report.pdf',
+      },
+    },
+  ],
+};
+
+const uploadFileTool: Tool = {
+  name: 'uploadFile',
+  description:
+    'Upload a local file to SharePoint. Supports ETag-based Compare-And-Swap for conflict detection.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      localPath: { type: 'string', description: 'Source local path (must be under /workspace)' },
+      local_path: { type: 'string', description: 'Source local path (alias for localPath)' },
+      sharepointPath: { type: 'string', description: 'Destination path in SharePoint (relative)' },
+      sharepoint_path: {
+        type: 'string',
+        description: 'Destination path (alias for sharepointPath)',
+      },
+      expectedEtag: { type: 'string', description: 'Expected ETag for CAS (If-Match header)' },
+      expected_etag: { type: 'string', description: 'Expected ETag (alias)' },
+      createOnly: { type: 'boolean', description: "Only create if doesn't exist" },
+      create_only: { type: 'boolean', description: 'Create only (alias)' },
+      overwrite: { type: 'boolean', description: 'Overwrite without ETag check' },
+    },
+  },
+  category: 'write',
+  keywords: ['sharepoint', 'upload', 'file', 'put', 'write', 'sync'],
+  example:
+    'await sharepoint.uploadFile({ local_path: "/workspace/report.pdf", sharepoint_path: "docs/report.pdf" })',
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      etag: { type: 'string', description: 'New ETag after upload' },
+      size: { type: 'number', description: 'File size in bytes' },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Upload a file',
+      input: {
+        local_path: '/workspace/report.pdf',
+        sharepoint_path: 'documents/report.pdf',
       },
     },
     {
-      description: 'Upload file only if not exists (FILE MODE)',
+      description: 'Upload only if not exists',
       input: {
-        local_path: '/home/speedwave/.claude/context/opportunities/acme/state.json',
-        sharepoint_path: 'context/opportunities/acme/state.json',
+        local_path: '/workspace/new-file.json',
+        sharepoint_path: 'context/new-file.json',
         create_only: true,
       },
     },
     {
-      description: 'Upload file with ETag conflict check (FILE MODE)',
+      description: 'Upload with ETag conflict check',
       input: {
-        local_path: '/home/speedwave/.claude/context/opportunities/acme/state.json',
-        sharepoint_path: 'context/opportunities/acme/state.json',
+        local_path: '/workspace/state.json',
+        sharepoint_path: 'context/state.json',
         expected_etag: '"abc123"',
-      },
-    },
-    {
-      description: 'Pull from SharePoint (DIRECTORY MODE)',
-      input: { local_path: '/home/speedwave/.claude/context', mode: 'pull' },
-    },
-    {
-      description: 'Two-way sync (DIRECTORY MODE)',
-      input: { local_path: '/home/speedwave/.claude/context', mode: 'two_way' },
-    },
-    {
-      description: 'Push to SharePoint (DIRECTORY MODE)',
-      input: { local_path: '/home/speedwave/.claude/context', mode: 'push' },
-    },
-    {
-      description: 'Dry run to preview changes (DIRECTORY MODE)',
-      input: {
-        local_path: '/home/speedwave/.claude/context',
-        mode: 'two_way',
-        dry_run: true,
       },
     },
   ],
@@ -300,65 +291,58 @@ export async function handleGetFileFull(
 }
 
 /**
- * Handle file sync (single file or directory based on params)
+ * Handle file download from SharePoint to local path
  * @param client - SharePoint client instance
  * @param params - Tool parameters
  */
-export async function handleSync(
+export async function handleDownloadFile(
   client: SharePointClient,
   params: Record<string, unknown>
 ): Promise<ToolResult> {
   try {
-    // Check if 'mode' is provided - this indicates directory sync mode
-    // This allows sharepoint.sync({ local_path: "...", mode: "two_way" }) to work
-    // as documented in hub's sync tool
-    if (params.mode !== undefined) {
-      // Get localPath for path type check
-      const localPath = (params.localPath ?? params.local_path) as string | undefined;
+    const normalized = normalizeDownloadParams(params);
 
-      if (localPath) {
-        // Check if the path is a file (not a directory)
-        // This prevents the common error of passing a file path with mode
-        // Translate Claude container path to MCP container path for fs.stat
-        const pathValidator = new PathValidator();
-        const translatedPath = pathValidator.translatePath(localPath);
-
-        try {
-          const stat = await fs.stat(translatedPath);
-          if (stat.isFile()) {
-            return {
-              success: false,
-              error: {
-                code: 'INVALID_PARAM',
-                message:
-                  `Cannot use 'mode' parameter with a file path. ` +
-                  `Use syncDirectory with a directory path instead, or remove 'mode' for single file sync. ` +
-                  `Path: ${localPath}`,
-              },
-            };
-          }
-        } catch (error) {
-          // ENOENT (not found) is expected - let syncDirectory handle missing paths
-          // Other errors (EACCES, EIO, etc.) should be logged for debugging
-          const isNotFound =
-            error instanceof Error && (error as NodeJS.ErrnoException).code === 'ENOENT';
-
-          if (!isNotFound) {
-            console.warn(
-              `${ts()} [handleSync] fs.stat warning for ${translatedPath}: ${error instanceof Error ? error.message : String(error)}`
-            );
-          }
-        }
-      }
-
-      // Route to directory sync handler
-      return handleSyncDirectory(client, params);
+    if (!normalized.sharepointPath) {
+      return {
+        success: false,
+        error: {
+          code: 'MISSING_PARAM',
+          message: 'sharepointPath (or sharepoint_path) is required',
+        },
+      };
+    }
+    if (!normalized.localPath) {
+      return {
+        success: false,
+        error: {
+          code: 'MISSING_PARAM',
+          message: 'localPath (or local_path) is required',
+        },
+      };
     }
 
-    // Normalize params to accept both snake_case and camelCase
-    const normalized = normalizeSyncParams(params);
+    await client.downloadFile(normalized.sharepointPath, normalized.localPath);
+    return { success: true, data: { downloaded: normalized.localPath } };
+  } catch (error) {
+    return {
+      success: false,
+      error: { code: 'DOWNLOAD_FAILED', message: SharePointClient.formatError(error) },
+    };
+  }
+}
 
-    // Validate required fields after normalization
+/**
+ * Handle file upload from local path to SharePoint
+ * @param client - SharePoint client instance
+ * @param params - Tool parameters
+ */
+export async function handleUploadFile(
+  client: SharePointClient,
+  params: Record<string, unknown>
+): Promise<ToolResult> {
+  try {
+    const normalized = normalizeUploadParams(params);
+
     if (!normalized.localPath) {
       return {
         success: false,
@@ -378,12 +362,17 @@ export async function handleSync(
       };
     }
 
-    const result = await client.syncFile(normalized);
+    const result = await client.uploadFile(normalized.sharepointPath, normalized.localPath, {
+      expectedEtag: normalized.expectedEtag,
+      createOnly: normalized.createOnly,
+      overwrite: normalized.overwrite,
+    });
+
     return { success: true, data: result };
   } catch (error) {
     return {
       success: false,
-      error: { code: 'SYNC_FAILED', message: SharePointClient.formatError(error) },
+      error: { code: 'UPLOAD_FAILED', message: SharePointClient.formatError(error) },
     };
   }
 }
@@ -421,6 +410,7 @@ export function createFileTools(client: SharePointClient | null): ToolDefinition
       tool: getFileFullTool,
       handler: withValidation<{ file_id: string }>(withClient(handleGetFileFull)),
     },
-    { tool: syncTool, handler: withValidation(withClient(handleSync)) },
+    { tool: downloadFileTool, handler: withValidation(withClient(handleDownloadFile)) },
+    { tool: uploadFileTool, handler: withValidation(withClient(handleUploadFile)) },
   ];
 }

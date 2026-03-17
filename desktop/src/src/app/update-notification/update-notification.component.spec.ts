@@ -3,20 +3,11 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { UpdateNotificationComponent } from './update-notification.component';
 import { TauriService } from '../services/tauri.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
-import type { BundleReconcileStatus } from '../models/update';
 
 describe('UpdateNotificationComponent', () => {
   let component: UpdateNotificationComponent;
   let fixture: ComponentFixture<UpdateNotificationComponent>;
   let mockTauri: MockTauriService;
-
-  const defaultBundleStatus: BundleReconcileStatus = {
-    phase: 'done',
-    in_progress: false,
-    last_error: null,
-    pending_running_projects: [],
-    applied_bundle_id: null,
-  };
 
   beforeEach(async () => {
     mockTauri = new MockTauriService();
@@ -25,8 +16,6 @@ describe('UpdateNotificationComponent', () => {
       switch (cmd) {
         case 'get_platform':
           return 'macos';
-        case 'get_bundle_reconcile_state':
-          return defaultBundleStatus;
         case 'check_for_update':
           return null;
         case 'list_projects':
@@ -126,60 +115,6 @@ describe('UpdateNotificationComponent', () => {
     });
   });
 
-  describe('bundle reconcile status', () => {
-    it('updates bundle status from backend events', () => {
-      const payload: BundleReconcileStatus = {
-        phase: 'images_built',
-        in_progress: true,
-        last_error: null,
-        pending_running_projects: ['alpha'],
-        applied_bundle_id: 'prev-bundle',
-      };
-
-      mockTauri.dispatchEvent('bundle_reconcile_status', payload);
-
-      expect(component.bundleStatus).toEqual(payload);
-      expect(component.showBundleBanner).toBe(true);
-      expect(component.bundleStatusMessage).toBe('Rebuilding containers');
-    });
-
-    it('calls retry_bundle_reconcile and clears the previous error', async () => {
-      component.bundleStatus = {
-        phase: 'images_built',
-        in_progress: false,
-        last_error: 'Image rebuild failed',
-        pending_running_projects: ['alpha'],
-        applied_bundle_id: 'prev-bundle',
-      };
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
-
-      await component.retryBundleReconcile();
-
-      expect(invokeSpy).toHaveBeenCalledWith('retry_bundle_reconcile');
-      expect(component.bundleStatus?.last_error).toBeNull();
-      expect(component.bundleStatus?.in_progress).toBe(true);
-    });
-
-    it('stores the retry error when retry_bundle_reconcile fails', async () => {
-      component.bundleStatus = {
-        phase: 'pending',
-        in_progress: false,
-        last_error: 'Previous failure',
-        pending_running_projects: [],
-        applied_bundle_id: null,
-      };
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'retry_bundle_reconcile') throw new Error('retry failed');
-        return defaultBundleStatus;
-      };
-
-      await component.retryBundleReconcile();
-
-      expect(component.bundleStatus?.last_error).toBe('retry failed');
-      expect(component.bundleStatus?.in_progress).toBe(false);
-    });
-  });
-
   describe('isLinux', () => {
     it('defaults to false', () => {
       expect(component.isLinux).toBe(false);
@@ -191,8 +126,6 @@ describe('UpdateNotificationComponent', () => {
         switch (cmd) {
           case 'get_platform':
             return 'linux';
-          case 'get_bundle_reconcile_state':
-            return defaultBundleStatus;
           case 'check_for_update':
             return null;
           case 'list_projects':

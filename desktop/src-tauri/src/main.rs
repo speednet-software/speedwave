@@ -233,10 +233,16 @@ async fn switch_project(
         serde_json::json!({ "project": name }),
     );
 
-    // Container transaction: ensure_ready → stop previous → recreate new
+    // Container transaction: wait for images → stop previous → recreate new
     let prev_clone = previous.clone();
     let new_clone = name.clone();
     let switch_result = tokio::task::spawn_blocking(move || {
+        if let Err(e) = containers_cmd::ensure_images_ready() {
+            return SwitchResult::Failed {
+                error: e,
+                cleanup_error: None,
+            };
+        }
         let rt = speedwave_runtime::runtime::detect_runtime();
         switch_project_core(&prev_clone, &new_clone, &*rt, &|proj, rt| {
             check_project(proj)?;

@@ -1,4 +1,4 @@
-@if (chat.containerStatus === 'running') {
+@if (projectState.status === 'ready') {
   <div class="chat-layout">
     @if (showHistory) {
       <aside class="history-sidebar">
@@ -134,22 +134,5 @@
         </div>
       }
     </div>
-  </div>
-} @else {
-  <div class="status-overlay" data-testid="chat-status-overlay">
-    @if (chat.containerStatus === 'checking') {
-      <div class="status-spinner"></div>
-      <p class="status-text">Checking containers...</p>
-    }
-    @if (chat.containerStatus === 'starting') {
-      <div class="status-spinner"></div>
-      <p class="status-text">Starting containers...</p>
-    }
-    @if (chat.containerStatus === 'error') {
-      <div class="status-icon-error">!</div>
-      <p class="status-text">Failed to start containers</p>
-      <p class="status-error">{{ chat.containerError }}</p>
-      <button class="retry-button" data-testid="chat-retry" (click)="retry()">Retry</button>
-    }
   </div>
 }

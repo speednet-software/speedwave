@@ -293,11 +293,8 @@ mod tests {
 
     #[test]
     fn install_failure_message_with_clear_state_error() {
-        let msg = build_install_failure_message(
-            "install failed".into(),
-            None,
-            Some("state boom".into()),
-        );
+        let msg =
+            build_install_failure_message("install failed".into(), None, Some("state boom".into()));
         assert!(msg.starts_with("install failed"));
         assert!(msg.contains("Failed to clear pending bundle update state: state boom."));
     }

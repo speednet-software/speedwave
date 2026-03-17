@@ -1155,8 +1155,12 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         Some(rt.as_ref()),
     )?;
 
-    let manifests = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_default();
-    let violations = compose::SecurityCheck::run(&yaml, project, &manifests);
+    let manifests = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_else(|e| {
+        log::warn!("Failed to list installed plugins: {e}");
+        Vec::new()
+    });
+    let expected_paths = compose::SecurityExpectedPaths::compute(project, project_dir)?;
+    let violations = compose::SecurityCheck::run(&yaml, project, &manifests, &expected_paths);
     if !violations.is_empty() {
         anyhow::bail!(
             "Security check failed:\n{}",
@@ -3441,9 +3445,15 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let violations = compose::SecurityCheck::run(yaml, "test", &[]);
+        let expected_paths = compose::SecurityExpectedPaths::from_raw(
+            "/test/project",
+            "/test/.speedwave/tokens/test",
+        );
+        let violations = compose::SecurityCheck::run(yaml, "test", &[], &expected_paths);
         assert!(
-            violations.iter().any(|v| v.rule == "CAP_DROP_ALL"),
+            violations
+                .iter()
+                .any(|v| v.rule == compose::SecurityRule::CapDropAll),
             "Expected CAP_DROP_ALL violation for compose YAML missing cap_drop"
         );
 
@@ -3488,7 +3498,11 @@ services:
 "#;
 
         // SecurityCheck should find violations
-        let violations = compose::SecurityCheck::run(yaml, "test-ordering", &[]);
+        let expected_paths = compose::SecurityExpectedPaths::from_raw(
+            "/test/project",
+            "/test/.speedwave/tokens/test",
+        );
+        let violations = compose::SecurityCheck::run(yaml, "test-ordering", &[], &expected_paths);
         assert!(!violations.is_empty(), "Should detect violations");
 
         // Simulate the correct ordering: check first, bail before save
@@ -3523,7 +3537,11 @@ networks:
   speedwave_test_network:
     driver: bridge
 "#;
-        let violations = compose::SecurityCheck::run(yaml, "test", &[]);
+        let expected_paths = compose::SecurityExpectedPaths::from_raw(
+            "/test/project",
+            "/test/.speedwave/tokens/test",
+        );
+        let violations = compose::SecurityCheck::run(yaml, "test", &[], &expected_paths);
         assert!(
             violations.is_empty(),
             "Expected no violations for valid compose YAML, got: {:?}",

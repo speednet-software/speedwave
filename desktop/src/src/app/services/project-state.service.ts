@@ -1,14 +1,22 @@
 import { Injectable, inject } from '@angular/core';
 import { TauriService } from './tauri.service';
-import type { ProjectList } from '../models/update';
+import type { BundleReconcileStatus, ProjectList } from '../models/update';
 
-/** Lifecycle status of the project switch operation. */
-export type ProjectStatus = 'loading' | 'ready' | 'switching' | 'error';
+/** Lifecycle status of the project + container lifecycle. */
+export type ProjectStatus =
+  | 'loading'
+  | 'checking'
+  | 'starting'
+  | 'rebuilding'
+  | 'ready'
+  | 'switching'
+  | 'error';
 
 /**
- * SSOT for project lifecycle state. All project switching and adding
- * goes through this service — components subscribe to state changes
- * instead of listening to Tauri events directly.
+ * SSOT for project lifecycle state. All project switching, adding,
+ * container lifecycle, and reconcile status goes through this service.
+ * Components subscribe to state changes instead of listening to Tauri
+ * events directly.
  */
 @Injectable({ providedIn: 'root' })
 export class ProjectStateService {
@@ -76,11 +84,76 @@ export class ProjectStateService {
     try {
       const result = await this.tauri.invoke<ProjectList>('list_projects');
       this.activeProject = result.active_project;
-      this.status = 'ready';
-      this.notifyChange();
+
+      // Check reconcile state before checking containers
+      const bundleStatus = await this.tauri.invoke<BundleReconcileStatus>(
+        'get_bundle_reconcile_state'
+      );
+      if (bundleStatus.in_progress) {
+        this.status = 'rebuilding';
+        this.notifyChange();
+      } else {
+        await this.ensureContainersRunning();
+      }
     } catch {
       // Outside Tauri — stay 'loading', listeners still ready
     }
+  }
+
+  /** Checks if containers are running for the active project, starts them if not. */
+  async ensureContainersRunning(): Promise<void> {
+    if (!this.activeProject) {
+      this.status = 'error';
+      this.error = 'No active project selected.';
+      this.notifyChange();
+      return;
+    }
+    this.error = '';
+    this.status = 'checking';
+    this.notifyChange();
+    try {
+      const running = await this.tauri.invoke<boolean>('check_containers_running', {
+        project: this.activeProject,
+      });
+      if (!running) {
+        this.status = 'starting';
+        this.notifyChange();
+        // Backend ensure_images_ready() blocks up to 600s (RECONCILE_WAIT_TIMEOUT in containers_cmd.rs).
+        // The 'starting' overlay stays visible for the duration.
+        await this.tauri.invoke('start_containers', { project: this.activeProject });
+      }
+      this.status = 'ready';
+    } catch (err) {
+      this.status = 'error';
+      this.error = String(err);
+    }
+    this.notifyChange();
+    if (this.status === 'ready') {
+      this.notifyReady();
+      this.notifySettled();
+    } else if (this.status === 'error') {
+      this.notifyFailed(this.error);
+      this.notifySettled();
+    }
+  }
+
+  /** Dismisses the error banner, checking containers first. */
+  async dismissError(): Promise<void> {
+    try {
+      const running = await this.tauri.invoke<boolean>('check_containers_running', {
+        project: this.activeProject,
+      });
+      if (running) {
+        this.status = 'ready';
+        this.error = '';
+      } else {
+        this.error = 'Containers are not running. Click Retry to start them.';
+      }
+    } catch {
+      this.status = 'ready';
+      this.error = '';
+    }
+    this.notifyChange();
   }
 
   /**
@@ -131,6 +204,32 @@ export class ProjectStateService {
           this.notifySettled();
         }
       );
+
+      await this.tauri.listen<BundleReconcileStatus>('bundle_reconcile_status', (event) => {
+        // Ignore reconcile events during active operations — backend
+        // ensure_images_ready() already blocks those operations.
+        if (
+          this.status === 'switching' ||
+          this.status === 'starting' ||
+          this.status === 'checking'
+        ) {
+          return;
+        }
+        if (event.payload.in_progress) {
+          this.status = 'rebuilding';
+          this.error = '';
+          this.notifyChange();
+        } else if (event.payload.last_error) {
+          this.status = 'error';
+          this.error = event.payload.last_error;
+          this.notifyChange();
+        } else {
+          // Reconcile done — if we were rebuilding, check containers
+          if (this.status === 'rebuilding') {
+            this.ensureContainersRunning();
+          }
+        }
+      });
     } catch {
       // Outside Tauri — listeners not available
     }
