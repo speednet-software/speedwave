@@ -20,17 +20,25 @@ import type { ProjectEntry, ProjectList } from '../models/update';
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div class="switcher">
-      <button class="current-project" data-testid="project-switcher-btn" (click)="toggleDropdown()">
+    <div class="relative">
+      <button
+        class="bg-sw-bg-navy text-sw-text border border-sw-bg-navy rounded px-3 py-1 text-[13px] font-mono hover:bg-sw-btn-hover"
+        data-testid="project-switcher-btn"
+        (click)="toggleDropdown()"
+      >
         {{ activeProject || 'No project' }}
-        <span class="arrow">&#x25BE;</span>
+        <span class="ml-1.5">&#x25BE;</span>
       </button>
       @if (isOpen) {
-        <div class="dropdown" data-testid="project-switcher-dropdown">
+        <div
+          class="absolute top-full right-0 mt-1 bg-sw-bg-dark border border-sw-bg-navy rounded min-w-[220px] z-100"
+          data-testid="project-switcher-dropdown"
+        >
           @for (project of projects; track project.name) {
             <button
-              class="project-item"
-              [class.active]="project.name === activeProject"
+              class="block w-full text-left bg-transparent border-none text-sw-text px-3 py-2 text-[13px] font-mono hover:bg-sw-bg-navy"
+              [class.text-sw-accent]="project.name === activeProject"
+              [class.font-bold]="project.name === activeProject"
               [attr.data-testid]="'project-switcher-item-' + project.name"
               (click)="switchProject(project.name)"
             >
@@ -38,12 +46,12 @@ import type { ProjectEntry, ProjectList } from '../models/update';
             </button>
           }
           @if (projects.length === 0 && !showAddForm) {
-            <div class="no-projects">No projects configured</div>
+            <div class="px-3 py-2 text-sw-text-muted text-[13px]">No projects configured</div>
           }
-          <hr class="separator" />
+          <hr class="border-none border-t border-sw-bg-navy my-1" />
           @if (!showAddForm) {
             <button
-              class="project-item add-btn"
+              class="block w-full text-left bg-transparent border-none text-sw-teal px-3 py-2 text-[13px] font-mono hover:bg-sw-bg-navy"
               data-testid="add-project-btn"
               (click)="showAddForm = true"
             >
@@ -51,25 +59,27 @@ import type { ProjectEntry, ProjectList } from '../models/update';
             </button>
           }
           @if (showAddForm) {
-            <div class="add-form" data-testid="add-project-form">
+            <div class="px-3 py-2" data-testid="add-project-form">
               <input
-                class="add-input"
+                class="block w-full box-border bg-sw-bg-panel text-sw-text border border-sw-bg-navy rounded px-2 py-1.5 text-xs font-mono mb-1.5"
                 placeholder="Project name"
                 data-testid="add-project-name"
                 [(ngModel)]="newProjectName"
               />
               <input
-                class="add-input"
+                class="block w-full box-border bg-sw-bg-panel text-sw-text border border-sw-bg-navy rounded px-2 py-1.5 text-xs font-mono mb-1.5"
                 placeholder="Absolute path"
                 data-testid="add-project-dir"
                 [(ngModel)]="newProjectDir"
               />
               @if (addError) {
-                <div class="add-error" data-testid="add-project-error">{{ addError }}</div>
+                <div class="text-sw-accent text-xs mb-1.5" data-testid="add-project-error">
+                  {{ addError }}
+                </div>
               }
-              <div class="add-actions">
+              <div class="flex gap-1.5">
                 <button
-                  class="action-btn create-btn"
+                  class="flex-1 px-2 py-1 border-none rounded text-xs font-mono cursor-pointer bg-sw-teal text-sw-bg-panel disabled:opacity-50"
                   data-testid="add-project-create"
                   [disabled]="addBusy"
                   (click)="addProject()"
@@ -77,7 +87,7 @@ import type { ProjectEntry, ProjectList } from '../models/update';
                   Create
                 </button>
                 <button
-                  class="action-btn cancel-btn"
+                  class="flex-1 px-2 py-1 border-none rounded text-xs font-mono cursor-pointer bg-sw-border-dark text-sw-text disabled:opacity-50"
                   data-testid="add-project-cancel"
                   [disabled]="addBusy"
                   (click)="cancelAdd()"
@@ -91,118 +101,6 @@ import type { ProjectEntry, ProjectList } from '../models/update';
       }
     </div>
   `,
-  styles: [
-    `
-      .switcher {
-        position: relative;
-      }
-      .current-project {
-        background: #0f3460;
-        color: #e0e0e0;
-        border: 1px solid #0f3460;
-        border-radius: 4px;
-        padding: 4px 12px;
-        font-size: 13px;
-        font-family: monospace;
-      }
-      .current-project:hover {
-        background: #1a4a7a;
-      }
-      .arrow {
-        margin-left: 6px;
-      }
-      .dropdown {
-        position: absolute;
-        top: 100%;
-        right: 0;
-        margin-top: 4px;
-        background: #16213e;
-        border: 1px solid #0f3460;
-        border-radius: 4px;
-        min-width: 220px;
-        z-index: 100;
-      }
-      .project-item {
-        display: block;
-        width: 100%;
-        text-align: left;
-        background: none;
-        border: none;
-        color: #e0e0e0;
-        padding: 8px 12px;
-        font-size: 13px;
-        font-family: monospace;
-      }
-      .project-item:hover {
-        background: #0f3460;
-      }
-      .project-item.active {
-        color: #e94560;
-        font-weight: bold;
-      }
-      .add-btn {
-        color: #4ecdc4;
-      }
-      .no-projects {
-        padding: 8px 12px;
-        color: #888;
-        font-size: 13px;
-      }
-      .separator {
-        border: none;
-        border-top: 1px solid #0f3460;
-        margin: 4px 0;
-      }
-      .add-form {
-        padding: 8px 12px;
-      }
-      .add-input {
-        display: block;
-        width: 100%;
-        box-sizing: border-box;
-        background: #0a1628;
-        color: #e0e0e0;
-        border: 1px solid #0f3460;
-        border-radius: 4px;
-        padding: 6px 8px;
-        font-size: 12px;
-        font-family: monospace;
-        margin-bottom: 6px;
-      }
-      .add-error {
-        color: #e94560;
-        font-size: 12px;
-        margin-bottom: 6px;
-      }
-      .add-actions {
-        display: flex;
-        gap: 6px;
-      }
-      .action-btn {
-        flex: 1;
-        padding: 4px 8px;
-        border: none;
-        border-radius: 4px;
-        font-size: 12px;
-        font-family: monospace;
-        cursor: pointer;
-      }
-      .create-btn {
-        background: #4ecdc4;
-        color: #0a1628;
-      }
-      .create-btn:disabled {
-        opacity: 0.5;
-      }
-      .cancel-btn {
-        background: #333;
-        color: #e0e0e0;
-      }
-      .cancel-btn:disabled {
-        opacity: 0.5;
-      }
-    `,
-  ],
 })
 export class ProjectSwitcherComponent implements OnInit, OnDestroy {
   projects: ProjectEntry[] = [];
