@@ -304,7 +304,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const healthRoute = routes.find((layer: any) => layer.route?.path === '/health');
 
         expect(healthRoute).toBeDefined();
@@ -329,7 +329,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const healthRoute = routes.find((layer: any) => layer.route?.path === '/health');
 
         await healthRoute.route.stack[0].handle(req, res);
@@ -355,7 +355,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const healthRoute = routes.find((layer: any) => layer.route?.path === '/health');
 
         await healthRoute.route.stack[0].handle(req, res);
@@ -376,7 +376,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const healthRoute = routes.find((layer: any) => layer.route?.path === '/health');
 
         await healthRoute.route.stack[0].handle(req, res);
@@ -402,7 +402,7 @@ describe('server', () => {
         const req = createMockRequest({});
         const res = createMockResponse();
 
-        const routes = (server.app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (server.app as any).router.stack.filter((layer: any) => layer.route);
         const healthRoute = routes.find((layer: any) => layer.route?.path === '/health');
 
         await healthRoute.route.stack[0].handle(req, res);
@@ -426,7 +426,7 @@ describe('server', () => {
         const req = createMockRequest({});
         const res = createMockResponse();
 
-        const routes = (server.app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (server.app as any).router.stack.filter((layer: any) => layer.route);
         const healthRoute = routes.find((layer: any) => layer.route?.path === '/health');
 
         await healthRoute.route.stack[0].handle(req, res);
@@ -452,7 +452,7 @@ describe('server', () => {
         const req = createMockRequest({});
         const res = createMockResponse();
 
-        const routes = (server.app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (server.app as any).router.stack.filter((layer: any) => layer.route);
         const healthRoute = routes.find((layer: any) => layer.route?.path === '/health');
 
         await healthRoute.route.stack[0].handle(req, res);
@@ -491,7 +491,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const mcpRoute = routes.find((layer: any) => layer.route?.path === '/');
 
         await mcpRoute.route.stack[0].handle(req, res);
@@ -521,7 +521,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const mcpRoute = routes.find((layer: any) => layer.route?.path === '/');
 
         await mcpRoute.route.stack[0].handle(req, res);
@@ -556,7 +556,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const mcpRoute = routes.find((layer: any) => layer.route?.path === '/');
 
         await mcpRoute.route.stack[0].handle(req, res);
@@ -594,7 +594,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const mcpRoute = routes.find((layer: any) => layer.route?.path === '/');
 
         await mcpRoute.route.stack[0].handle(req, res);
@@ -624,7 +624,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const mcpRoute = routes.find((layer: any) => layer.route?.path === '/');
 
         await mcpRoute.route.stack[0].handle(req, res);
@@ -654,7 +654,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const mcpRoute = routes.find((layer: any) => layer.route?.path === '/');
 
         await mcpRoute.route.stack[0].handle(req, res);
@@ -684,7 +684,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const mcpRoute = routes.find((layer: any) => layer.route?.path === '/');
 
         await mcpRoute.route.stack[0].handle(req, res);
@@ -714,7 +714,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const mcpRoute = routes.find((layer: any) => layer.route?.path === '/');
 
         await mcpRoute.route.stack[0].handle(req, res);
@@ -745,7 +745,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const mcpRoute = routes.find((layer: any) => layer.route?.path === '/');
 
         await mcpRoute.route.stack[0].handle(req, res);
@@ -772,7 +772,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const mcpRoute = routes.find((layer: any) => layer.route?.path === '/');
 
         await mcpRoute.route.stack[0].handle(req, res);
@@ -803,7 +803,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const mcpRoute = routes.find((layer: any) => layer.route?.path === '/');
 
         await mcpRoute.route.stack[0].handle(req, res);
@@ -834,7 +834,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const mcpRoute = routes.find((layer: any) => layer.route?.path === '/');
 
         await mcpRoute.route.stack[0].handle(req, res);
@@ -865,7 +865,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const mcpRoute = routes.find((layer: any) => layer.route?.path === '/');
 
         await mcpRoute.route.stack[0].handle(req, res);
@@ -885,7 +885,7 @@ describe('server', () => {
           version: '1.0.0',
           port: 3000,
         });
-        const middleware = (server.app as any)._router.stack;
+        const middleware = (server.app as any).router.stack;
         const corsLayer = middleware.find(
           (layer: any) => layer.name === 'corsMiddleware' || layer.name === 'cors'
         );
@@ -900,7 +900,7 @@ describe('server', () => {
         });
 
         const app = server.app;
-        const middleware = (app as any)._router.stack;
+        const middleware = (app as any).router.stack;
 
         const jsonParserLayer = middleware.find((layer: any) => layer.name === 'jsonParser');
 
@@ -1032,7 +1032,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const mcpRoute = routes.find((layer: any) => layer.route?.path === '/');
 
         await mcpRoute.route.stack[0].handle(req, res);
@@ -1051,7 +1051,7 @@ describe('server', () => {
         const res = createMockResponse();
 
         const app = server.app;
-        const routes = (app as any)._router.stack.filter((layer: any) => layer.route);
+        const routes = (app as any).router.stack.filter((layer: any) => layer.route);
         const mcpRoute = routes.find((layer: any) => layer.route?.path === '/');
 
         await mcpRoute.route.stack[0].handle(req, res);
@@ -1069,7 +1069,7 @@ describe('server', () => {
           auth: { token: 'secret-123' },
         });
 
-        const layers = (server.app as any)._router.stack;
+        const layers = (server.app as any).router.stack;
         const authLayer = layers.find((layer: any) => layer.name === 'bearerAuth');
 
         expect(authLayer).toBeDefined();
@@ -1083,7 +1083,7 @@ describe('server', () => {
           auth: { token: 'secret-123' },
         });
 
-        const layers = (server.app as any)._router.stack;
+        const layers = (server.app as any).router.stack;
         const authIndex = layers.findIndex((layer: any) => layer.name === 'bearerAuth');
         const routeIndices = layers
           .map((layer: any, i: number) => (layer.route ? i : -1))
@@ -1103,7 +1103,7 @@ describe('server', () => {
           auth: { token: 'secret-123' },
         });
 
-        const layers = (server.app as any)._router.stack;
+        const layers = (server.app as any).router.stack;
         const authLayer = layers.find((layer: any) => layer.name === 'bearerAuth');
 
         const req = createMockRequest({}, {});
@@ -1125,7 +1125,7 @@ describe('server', () => {
           auth: { token: 'secret-123' },
         });
 
-        const layers = (server.app as any)._router.stack;
+        const layers = (server.app as any).router.stack;
         const authLayer = layers.find((layer: any) => layer.name === 'bearerAuth');
 
         const req = createMockRequest({}, {});
@@ -1147,7 +1147,7 @@ describe('server', () => {
           auth: { token: 'secret-123' },
         });
 
-        const layers = (server.app as any)._router.stack;
+        const layers = (server.app as any).router.stack;
         const authLayer = layers.find((layer: any) => layer.name === 'bearerAuth');
 
         const req = createMockRequest({}, {});
@@ -1199,7 +1199,7 @@ describe('server', () => {
           auth: { token: 'secret-123', publicPaths: ['/health', '/status'] },
         });
 
-        const layers = (server.app as any)._router.stack;
+        const layers = (server.app as any).router.stack;
         const authLayer = layers.find((layer: any) => layer.name === 'bearerAuth');
 
         const req = createMockRequest({}, {});
@@ -1221,7 +1221,7 @@ describe('server', () => {
           auth: { token: 'secret-123', publicPaths: [] },
         });
 
-        const layers = (server.app as any)._router.stack;
+        const layers = (server.app as any).router.stack;
         const authLayer = layers.find((layer: any) => layer.name === 'bearerAuth');
 
         const req = createMockRequest({}, {});
@@ -1243,7 +1243,7 @@ describe('server', () => {
           auth: { token: 'correct-secret' },
         });
 
-        const layers = (server.app as any)._router.stack;
+        const layers = (server.app as any).router.stack;
         const authLayer = layers.find((layer: any) => layer.name === 'bearerAuth');
 
         const req = createMockRequest({}, { authorization: 'Bearer correct-secret' });
@@ -1265,7 +1265,7 @@ describe('server', () => {
           auth: { token: 'correct-secret' },
         });
 
-        const layers = (server.app as any)._router.stack;
+        const layers = (server.app as any).router.stack;
         const authLayer = layers.find((layer: any) => layer.name === 'bearerAuth');
 
         const req = createMockRequest({}, { authorization: 'Bearer wrong-secret' });
@@ -1447,7 +1447,7 @@ describe('server', () => {
         rateLimit: { maxRequests: 5, windowMs: 60_000 },
       });
 
-      const layers = (server.app as any)._router.stack;
+      const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
       expect(rlLayer).toBeDefined();
     });
@@ -1459,7 +1459,7 @@ describe('server', () => {
         port: 3000,
       });
 
-      const layers = (server.app as any)._router.stack;
+      const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
       expect(rlLayer).toBeUndefined();
     });
@@ -1472,7 +1472,7 @@ describe('server', () => {
         rateLimit: { maxRequests: 3, windowMs: 60_000 },
       });
 
-      const layers = (server.app as any)._router.stack;
+      const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
 
       const req = createMockRequest({}, {});
@@ -1494,7 +1494,7 @@ describe('server', () => {
         rateLimit: { maxRequests: 2, windowMs: 60_000 },
       });
 
-      const layers = (server.app as any)._router.stack;
+      const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
 
       const makeReq = () => {
@@ -1531,7 +1531,7 @@ describe('server', () => {
         rateLimit: { maxRequests: 1, windowMs: 60_000 },
       });
 
-      const layers = (server.app as any)._router.stack;
+      const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
 
       const makeReq = () => {
@@ -1562,7 +1562,7 @@ describe('server', () => {
         rateLimit: { maxRequests: 1, windowMs: 60_000 },
       });
 
-      const layers = (server.app as any)._router.stack;
+      const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
 
       const makeReq = () => {
@@ -1592,7 +1592,7 @@ describe('server', () => {
         rateLimit: { maxRequests: 1, windowMs: 60_000 },
       });
 
-      const layers = (server.app as any)._router.stack;
+      const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
 
       // Exhaust the limit
@@ -1620,7 +1620,7 @@ describe('server', () => {
         rateLimit: {},
       });
 
-      const layers = (server.app as any)._router.stack;
+      const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
       expect(rlLayer).toBeDefined();
     });
@@ -1649,7 +1649,7 @@ describe('server', () => {
         rateLimit: { maxRequests: 1, windowMs: 60_000 },
       });
 
-      const layers = (server.app as any)._router.stack;
+      const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
 
       const req = createMockRequest({}, {});
@@ -1677,7 +1677,7 @@ describe('server', () => {
         rateLimit: { maxRequests: 1, windowMs: 60_000 },
       });
 
-      const layers = (server.app as any)._router.stack;
+      const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
 
       const req = createMockRequest({}, {});
@@ -1707,7 +1707,7 @@ describe('server', () => {
         rateLimit: { maxRequests: 1, windowMs: 60_000 },
       });
 
-      const layers = (server.app as any)._router.stack;
+      const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
 
       // Exhaust the limit
@@ -1736,7 +1736,7 @@ describe('server', () => {
         rateLimit: { maxRequests: 1, windowMs: 60_000 },
       });
 
-      const layers = (server.app as any)._router.stack;
+      const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
 
       // Exhaust the limit
@@ -1766,7 +1766,7 @@ describe('server', () => {
         rateLimit: { maxRequests: 1, windowMs: 1_000 },
       });
 
-      const layers = (server.app as any)._router.stack;
+      const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
 
       const makeReq = () => {
