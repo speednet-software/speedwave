@@ -121,6 +121,18 @@
   }
 }
 
+/* ── Prose layer for rendered markdown (innerHTML) ── */
+@layer components {
+  .prose-sw :first-child { margin-top: 0; }
+  .prose-sw :last-child  { margin-bottom: 0; }
+  .prose-sw p            { margin: 8px 0; }
+  .prose-sw ul,
+  .prose-sw ol           { margin: 8px 0; padding-left: 20px; }
+  .prose-sw pre          { background: var(--color-sw-bg-abyss); padding: 12px; border-radius: 4px; overflow-x: auto; margin: 8px 0; }
+  .prose-sw code         { background: var(--color-sw-bg-abyss); padding: 2px 6px; border-radius: 3px; font-size: 13px; }
+  .prose-sw pre code     { background: none; padding: 0; }
+}
+
 /* ── Scrollbar (not supported by Tailwind) ── */
 ::-webkit-scrollbar {
   width: 8px;
