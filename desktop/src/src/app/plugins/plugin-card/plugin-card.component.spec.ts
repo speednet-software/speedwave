@@ -133,6 +133,13 @@ describe('PluginCardComponent', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="card-body"]')).not.toBeNull();
   });
 
+  it('should render auth field inputs with data-testid when expanded', () => {
+    component.expanded = true;
+    fixture.detectChanges();
+    const inputs = fixture.nativeElement.querySelectorAll('[data-testid="auth-field-input"]');
+    expect(inputs.length).toBe(2);
+  });
+
   it('should emit openPlugin when Open button is clicked', () => {
     fixture.detectChanges();
     const spy = vi.spyOn(component.openPlugin, 'emit');
