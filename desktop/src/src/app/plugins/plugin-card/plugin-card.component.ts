@@ -102,6 +102,7 @@ export interface SavePluginCredentialsEvent {
                     [value]="getFieldValue(field.key)"
                     (input)="onFieldInput(field.key, $event)"
                     class="w-full px-3 py-2.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-sm font-mono box-border focus:border-sw-accent focus:outline-none"
+                    data-testid="auth-field-input"
                   />
                 </div>
               }
