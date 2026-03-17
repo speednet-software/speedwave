@@ -24,15 +24,22 @@ export interface SavePluginCredentialsEvent {
         <button
           class="card-header-btn flex items-center gap-3 flex-1 cursor-pointer bg-transparent border-none text-inherit font-inherit text-left p-0"
           type="button"
+          data-testid="card-header-btn"
           (click)="toggleExpand.emit(plugin.slug)"
         >
-          <span class="service-name font-semibold text-base">{{ plugin.name }}</span>
-          <span class="version-badge text-[11px] text-sw-text-dim font-mono"
+          <span class="service-name font-semibold text-base" data-testid="service-name">{{
+            plugin.name
+          }}</span>
+          <span
+            class="version-badge text-[11px] text-sw-text-dim font-mono"
+            data-testid="version-badge"
             >v{{ plugin.version }}</span
           >
           @if (plugin.auth_fields.length > 0) {
             <span
               class="badge text-[11px] px-2 py-0.5 rounded font-medium"
+              data-testid="badge"
+              [attr.data-status]="plugin.configured ? 'configured' : 'not-configured'"
               [class.configured]="plugin.configured"
               [class.not-configured]="!plugin.configured"
               [ngClass]="
@@ -56,6 +63,7 @@ export interface SavePluginCredentialsEvent {
           </button>
           <label
             class="toggle relative inline-block w-[44px] h-[24px]"
+            data-testid="toggle"
             [class.disabled]="!plugin.configured"
             [ngClass]="!plugin.configured ? 'opacity-40 cursor-not-allowed' : ''"
             [title]="plugin.configured ? '' : 'Configure credentials to enable'"
@@ -75,12 +83,15 @@ export interface SavePluginCredentialsEvent {
           </label>
         </div>
       </div>
-      <p class="card-description px-5 pb-3 text-sw-text-muted text-[13px] m-0">
+      <p
+        class="card-description px-5 pb-3 text-sw-text-muted text-[13px] m-0"
+        data-testid="card-description"
+      >
         {{ plugin.description }}
       </p>
 
       @if (expanded) {
-        <div class="card-body px-5 pb-5 border-t border-sw-border">
+        <div class="card-body px-5 pb-5 border-t border-sw-border" data-testid="card-body">
           @if (plugin.auth_fields.length > 0) {
             <form (submit)="onSave($event)">
               @for (field of plugin.auth_fields; track field.key) {
@@ -112,7 +123,7 @@ export interface SavePluginCredentialsEvent {
                 <button
                   type="button"
                   class="btn-cancel px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
-                  [attr.data-testid]="'plugin-delete-creds-' + plugin.slug"
+                  data-testid="btn-cancel"
                   (click)="deleteCredentials.emit(plugin)"
                 >
                   Remove Credentials
@@ -129,7 +140,9 @@ export interface SavePluginCredentialsEvent {
 
           <div class="flex gap-3 mt-4">
             @if (confirmingRemove) {
-              <span class="confirm-prompt text-sw-error-text text-[13px] font-semibold"
+              <span
+                class="confirm-prompt text-sw-error-text text-[13px] font-semibold"
+                data-testid="confirm-prompt"
                 >Are you sure?</span
               >
               <button
@@ -152,7 +165,7 @@ export interface SavePluginCredentialsEvent {
               <button
                 type="button"
                 class="btn-remove px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
-                [attr.data-testid]="'plugin-remove-' + plugin.slug"
+                data-testid="btn-remove"
                 (click)="confirmingRemove = true"
               >
                 Uninstall Plugin

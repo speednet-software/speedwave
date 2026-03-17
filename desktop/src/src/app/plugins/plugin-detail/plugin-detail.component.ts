@@ -23,7 +23,7 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
   template: `
     <div>
       <button
-        class="bg-none border-none text-sw-accent text-[13px] font-mono cursor-pointer p-0 mb-5 inline-block hover:underline"
+        class="bg-transparent border-none text-sw-accent text-[13px] font-mono cursor-pointer p-0 mb-5 inline-block hover:underline"
         (click)="goBack()"
         data-testid="back-link"
       >
@@ -65,7 +65,7 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
 
         <div class="flex border-b border-sw-border mb-6" data-testid="tab-bar">
           <button
-            class="bg-none border-none border-b-2 border-b-transparent text-sw-text-dim text-sm font-mono px-5 py-2 cursor-pointer transition-all duration-200 hover:text-sw-text"
+            class="bg-transparent border-none border-b-2 border-b-transparent text-sw-text-dim text-sm font-mono px-5 py-2 cursor-pointer transition-all duration-200 hover:text-sw-text"
             [ngClass]="activeTab === 'dashboard' ? 'text-sw-accent! border-b-sw-accent!' : ''"
             (click)="activeTab = 'dashboard'"
             data-testid="tab-dashboard"
@@ -73,7 +73,7 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
             Dashboard
           </button>
           <button
-            class="bg-none border-none border-b-2 border-b-transparent text-sw-text-dim text-sm font-mono px-5 py-2 cursor-pointer transition-all duration-200 hover:text-sw-text"
+            class="bg-transparent border-none border-b-2 border-b-transparent text-sw-text-dim text-sm font-mono px-5 py-2 cursor-pointer transition-all duration-200 hover:text-sw-text"
             [ngClass]="activeTab === 'settings' ? 'text-sw-accent! border-b-sw-accent!' : ''"
             (click)="activeTab = 'settings'"
             data-testid="tab-settings"

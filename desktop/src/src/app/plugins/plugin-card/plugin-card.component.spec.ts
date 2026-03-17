@@ -74,36 +74,38 @@ describe('PluginCardComponent', () => {
   it('should render plugin name, version, and description', () => {
     fixture.detectChanges();
     const el = fixture.nativeElement;
-    expect(el.querySelector('.service-name').textContent).toContain('Presale CRM');
-    expect(el.querySelector('.version-badge').textContent).toContain('v1.2.0');
-    expect(el.querySelector('.card-description').textContent).toContain('CRM integration');
+    expect(el.querySelector('[data-testid="service-name"]').textContent).toContain('Presale CRM');
+    expect(el.querySelector('[data-testid="version-badge"]').textContent).toContain('v1.2.0');
+    expect(el.querySelector('[data-testid="card-description"]').textContent).toContain(
+      'CRM integration'
+    );
   });
 
   it('should show configured badge for MCP plugin when configured', () => {
     fixture.detectChanges();
-    const badge = fixture.nativeElement.querySelector('.badge');
+    const badge = fixture.nativeElement.querySelector('[data-testid="badge"]');
     expect(badge.textContent.trim()).toBe('Configured');
-    expect(badge.classList.contains('configured')).toBe(true);
+    expect(badge.getAttribute('data-status')).toBe('configured');
   });
 
   it('should show not-configured badge for MCP plugin when not configured', () => {
     component.plugin = { ...makeMcpPlugin(), configured: false };
     fixture.detectChanges();
-    const badge = fixture.nativeElement.querySelector('.badge');
+    const badge = fixture.nativeElement.querySelector('[data-testid="badge"]');
     expect(badge.textContent.trim()).toBe('Not Configured');
-    expect(badge.classList.contains('not-configured')).toBe(true);
+    expect(badge.getAttribute('data-status')).toBe('not-configured');
   });
 
   it('should not show badge for plugin without auth_fields', () => {
     component.plugin = makeResourcePlugin();
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('.badge')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="badge"]')).toBeNull();
   });
 
   it('should show toggle for all plugins regardless of service_id', () => {
     component.plugin = makeResourcePlugin();
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('.toggle')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="toggle"]')).not.toBeNull();
   });
 
   it('should disable toggle when not configured', () => {
@@ -122,13 +124,13 @@ describe('PluginCardComponent', () => {
   it('should not show card-body when not expanded', () => {
     component.expanded = false;
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('.card-body')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="card-body"]')).toBeNull();
   });
 
   it('should show card-body when expanded', () => {
     component.expanded = true;
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('.card-body')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="card-body"]')).not.toBeNull();
   });
 
   it('should emit openPlugin when Open button is clicked', () => {
@@ -143,7 +145,7 @@ describe('PluginCardComponent', () => {
   it('should emit toggleExpand when header button is clicked', () => {
     fixture.detectChanges();
     const spy = vi.spyOn(component.toggleExpand, 'emit');
-    fixture.nativeElement.querySelector('.card-header-btn').click();
+    fixture.nativeElement.querySelector('[data-testid="card-header-btn"]').click();
     expect(spy).toHaveBeenCalledWith('presale');
   });
 
@@ -213,13 +215,13 @@ describe('PluginCardComponent', () => {
       component.expanded = true;
       fixture.detectChanges();
       const spy = vi.spyOn(component.removePlugin, 'emit');
-      const removeBtn = fixture.nativeElement.querySelector('.btn-remove');
+      const removeBtn = fixture.nativeElement.querySelector('[data-testid="btn-remove"]');
       removeBtn.click();
       fixture.detectChanges();
       expect(spy).not.toHaveBeenCalled();
-      expect(fixture.nativeElement.querySelector('.confirm-prompt').textContent).toContain(
-        'Are you sure?'
-      );
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="confirm-prompt"]').textContent
+      ).toContain('Are you sure?');
     });
 
     it('emits removePlugin on confirm', () => {
@@ -254,7 +256,7 @@ describe('PluginCardComponent', () => {
     component.expanded = true;
     fixture.detectChanges();
     const spy = vi.spyOn(component.deleteCredentials, 'emit');
-    const removeBtn = fixture.nativeElement.querySelector('.btn-cancel');
+    const removeBtn = fixture.nativeElement.querySelector('[data-testid="btn-cancel"]');
     removeBtn.click();
     expect(spy).toHaveBeenCalledWith(component.plugin);
   });

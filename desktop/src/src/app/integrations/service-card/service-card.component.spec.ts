@@ -130,58 +130,60 @@ describe('ServiceCardComponent', () => {
   it('should render service name and description', () => {
     fixture.detectChanges();
     const el = fixture.nativeElement;
-    expect(el.querySelector('.service-name').textContent).toContain('GitLab');
-    expect(el.querySelector('.card-description').textContent).toContain('Code hosting');
+    expect(el.querySelector('[data-testid="service-name"]').textContent).toContain('GitLab');
+    expect(el.querySelector('[data-testid="card-description"]').textContent).toContain(
+      'Code hosting'
+    );
   });
 
   it('should show configured badge when configured', () => {
     fixture.detectChanges();
-    const badge = fixture.nativeElement.querySelector('.badge');
+    const badge = fixture.nativeElement.querySelector('[data-testid="badge"]');
     expect(badge.textContent.trim()).toBe('Configured');
-    expect(badge.classList.contains('configured')).toBe(true);
+    expect(badge.getAttribute('data-status')).toBe('configured');
   });
 
   it('should show not-configured badge when not configured', () => {
     component.svc = makeRedmineSvc();
     fixture.detectChanges();
-    const badge = fixture.nativeElement.querySelector('.badge');
+    const badge = fixture.nativeElement.querySelector('[data-testid="badge"]');
     expect(badge.textContent.trim()).toBe('Not Configured');
-    expect(badge.classList.contains('not-configured')).toBe(true);
+    expect(badge.getAttribute('data-status')).toBe('not-configured');
   });
 
   it('should disable toggle when service is not configured', () => {
     component.svc = makeRedmineSvc();
     fixture.detectChanges();
     const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
-    const toggle = fixture.nativeElement.querySelector('.toggle');
+    const toggle = fixture.nativeElement.querySelector('[data-testid="toggle"]');
     expect(checkbox.disabled).toBe(true);
-    expect(toggle.classList.contains('disabled')).toBe(true);
+    expect(toggle.getAttribute('data-disabled')).toBe('true');
   });
 
   it('should enable toggle when service is configured', () => {
     fixture.detectChanges();
     const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
-    const toggle = fixture.nativeElement.querySelector('.toggle');
+    const toggle = fixture.nativeElement.querySelector('[data-testid="toggle"]');
     expect(checkbox.disabled).toBe(false);
-    expect(toggle.classList.contains('disabled')).toBe(false);
+    expect(toggle.getAttribute('data-disabled')).toBe('false');
   });
 
   it('should not show card-body when not expanded', () => {
     component.expanded = false;
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('.card-body')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="card-body"]')).toBeNull();
   });
 
   it('should show card-body when expanded', () => {
     component.expanded = true;
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('.card-body')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="card-body"]')).not.toBeNull();
   });
 
   it('should emit toggleExpand when header button is clicked', () => {
     fixture.detectChanges();
     const spy = vi.spyOn(component.toggleExpand, 'emit');
-    fixture.nativeElement.querySelector('.card-header-btn').click();
+    fixture.nativeElement.querySelector('[data-testid="card-header-btn"]').click();
     expect(spy).toHaveBeenCalledWith('gitlab');
   });
 
@@ -265,7 +267,7 @@ describe('ServiceCardComponent', () => {
     component.expanded = true;
     fixture.detectChanges();
     const spy = vi.spyOn(component.deleteCredentials, 'emit');
-    const removeBtn = fixture.nativeElement.querySelector('.btn-cancel');
+    const removeBtn = fixture.nativeElement.querySelector('[data-testid="btn-cancel"]');
     removeBtn.click();
     expect(spy).toHaveBeenCalledWith(component.svc);
   });
@@ -321,13 +323,15 @@ describe('ServiceCardComponent', () => {
       component.svc = makeRedmineSvc();
       component.expanded = true;
       fixture.detectChanges();
-      expect(fixture.nativeElement.querySelector('.mappings-section')).not.toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="mappings-section"]')
+      ).not.toBeNull();
     });
 
     it('does not show mappings section for non-redmine services', () => {
       component.expanded = true;
       fixture.detectChanges();
-      expect(fixture.nativeElement.querySelector('.mappings-section')).toBeNull();
+      expect(fixture.nativeElement.querySelector('[data-testid="mappings-section"]')).toBeNull();
     });
   });
 
@@ -375,21 +379,21 @@ describe('ServiceCardComponent', () => {
       component.svc = makeSharepointSvc();
       component.expanded = true;
       fixture.detectChanges();
-      expect(fixture.nativeElement.querySelector('.oauth-section')).not.toBeNull();
+      expect(fixture.nativeElement.querySelector('[data-testid="oauth-section"]')).not.toBeNull();
     });
 
     it('does not show oauth section for non-oauth services', () => {
       component.svc = makeGitlabSvc();
       component.expanded = true;
       fixture.detectChanges();
-      expect(fixture.nativeElement.querySelector('.oauth-section')).toBeNull();
+      expect(fixture.nativeElement.querySelector('[data-testid="oauth-section"]')).toBeNull();
     });
 
     it('does not show oauth section for redmine', () => {
       component.svc = makeRedmineSvc();
       component.expanded = true;
       fixture.detectChanges();
-      expect(fixture.nativeElement.querySelector('.oauth-section')).toBeNull();
+      expect(fixture.nativeElement.querySelector('[data-testid="oauth-section"]')).toBeNull();
     });
   });
 
@@ -437,7 +441,7 @@ describe('ServiceCardComponent', () => {
       component.oauthStatus = 'starting';
       fixture.detectChanges();
       const spy = vi.spyOn(component.cancelOAuth, 'emit');
-      const cancelBtn = fixture.nativeElement.querySelector('.btn-cancel-oauth');
+      const cancelBtn = fixture.nativeElement.querySelector('[data-testid="btn-cancel-oauth"]');
       cancelBtn.click();
       expect(spy).toHaveBeenCalledTimes(1);
     });
@@ -456,7 +460,7 @@ describe('ServiceCardComponent', () => {
       component.oauthStatus = 'polling';
       fixture.detectChanges();
       const spy = vi.spyOn(component.openVerificationUrl, 'emit');
-      const link = fixture.nativeElement.querySelector('.btn-link');
+      const link = fixture.nativeElement.querySelector('[data-testid="btn-link"]');
       link.click();
       expect(spy).toHaveBeenCalledWith('https://microsoft.com/devicelogin');
     });
@@ -474,7 +478,7 @@ describe('ServiceCardComponent', () => {
       };
       component.oauthStatus = 'polling';
       fixture.detectChanges();
-      const urlEl = fixture.nativeElement.querySelector('.verification-url');
+      const urlEl = fixture.nativeElement.querySelector('[data-testid="verification-url"]');
       expect(urlEl).not.toBeNull();
       expect(urlEl.textContent).toContain('https://microsoft.com/devicelogin');
     });
@@ -492,7 +496,7 @@ describe('ServiceCardComponent', () => {
       };
       component.oauthStatus = 'polling';
       fixture.detectChanges();
-      const codeEl = fixture.nativeElement.querySelector('.user-code');
+      const codeEl = fixture.nativeElement.querySelector('[data-testid="user-code"]');
       expect(codeEl).not.toBeNull();
       expect(codeEl.textContent).toContain('XYZW9876');
     });
@@ -508,7 +512,7 @@ describe('ServiceCardComponent', () => {
       };
       component.oauthStatus = 'polling';
       fixture.detectChanges();
-      expect(fixture.nativeElement.querySelector('.polling-status')).not.toBeNull();
+      expect(fixture.nativeElement.querySelector('[data-testid="polling-status"]')).not.toBeNull();
     });
   });
 
@@ -518,7 +522,7 @@ describe('ServiceCardComponent', () => {
       component.expanded = true;
       component.oauthStatus = 'success';
       fixture.detectChanges();
-      const el = fixture.nativeElement.querySelector('.oauth-success');
+      const el = fixture.nativeElement.querySelector('[data-testid="oauth-success"]');
       expect(el).not.toBeNull();
       expect(el.textContent).toContain('Authentication successful');
     });
@@ -529,7 +533,7 @@ describe('ServiceCardComponent', () => {
       component.oauthStatus = 'error';
       component.oauthStatusMessage = 'Something went wrong';
       fixture.detectChanges();
-      const el = fixture.nativeElement.querySelector('.oauth-error');
+      const el = fixture.nativeElement.querySelector('[data-testid="oauth-error"]');
       expect(el).not.toBeNull();
       expect(el.textContent).toContain('Something went wrong');
     });
@@ -540,7 +544,7 @@ describe('ServiceCardComponent', () => {
       component.oauthStatus = 'expired';
       component.oauthStatusMessage = 'Code expired';
       fixture.detectChanges();
-      const el = fixture.nativeElement.querySelector('.oauth-error');
+      const el = fixture.nativeElement.querySelector('[data-testid="oauth-error"]');
       expect(el).not.toBeNull();
       expect(el.textContent).toContain('Code expired');
     });
