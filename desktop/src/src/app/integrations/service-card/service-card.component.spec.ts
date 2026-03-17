@@ -370,7 +370,7 @@ describe('ServiceCardComponent', () => {
       component.svc = makeSharepointSvc();
       component.expanded = true;
       fixture.detectChanges();
-      const inputs = fixture.nativeElement.querySelectorAll('.form-input');
+      const inputs = fixture.nativeElement.querySelectorAll('[data-testid="auth-field-input"]');
       expect(inputs.length).toBe(4); // client_id, tenant_id, site_id, base_path
       for (const input of inputs) {
         expect(input.required).toBe(true);

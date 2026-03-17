@@ -20,7 +20,7 @@ export interface SavePluginCredentialsEvent {
       class="bg-sw-bg-navy border border-sw-border rounded-lg mb-3 overflow-hidden"
       [attr.data-testid]="'plugin-card-' + plugin.slug"
     >
-      <div class="card-header flex justify-between items-center px-5 py-4">
+      <div class="flex justify-between items-center px-5 py-4">
         <button
           class="card-header-btn flex items-center gap-3 flex-1 cursor-pointer bg-transparent border-none text-inherit font-inherit text-left p-0"
           type="button"
@@ -40,8 +40,6 @@ export interface SavePluginCredentialsEvent {
               class="badge text-[11px] px-2 py-0.5 rounded font-medium"
               data-testid="badge"
               [attr.data-status]="plugin.configured ? 'configured' : 'not-configured'"
-              [class.configured]="plugin.configured"
-              [class.not-configured]="!plugin.configured"
               [ngClass]="
                 plugin.configured
                   ? 'bg-sw-success-dark text-sw-success-text'
@@ -52,7 +50,7 @@ export interface SavePluginCredentialsEvent {
             </span>
           }
         </button>
-        <div class="card-actions flex items-center gap-3">
+        <div class="flex items-center gap-3">
           <button
             type="button"
             class="px-3 py-1 bg-transparent text-sw-accent border border-sw-accent rounded text-xs font-mono cursor-pointer transition-all duration-200 hover:bg-sw-accent hover:text-sw-bg-darkest"
@@ -64,7 +62,6 @@ export interface SavePluginCredentialsEvent {
           <label
             class="toggle relative inline-block w-[44px] h-[24px]"
             data-testid="toggle"
-            [class.disabled]="!plugin.configured"
             [ngClass]="!plugin.configured ? 'opacity-40 cursor-not-allowed' : ''"
             [title]="plugin.configured ? '' : 'Configure credentials to enable'"
           >
@@ -78,15 +75,12 @@ export interface SavePluginCredentialsEvent {
               [ngClass]="!plugin.configured ? 'cursor-not-allowed' : ''"
             />
             <span
-              class="slider absolute inset-0 bg-sw-slider rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-sw-accent before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
+              class="absolute inset-0 bg-sw-slider rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-sw-accent before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
             ></span>
           </label>
         </div>
       </div>
-      <p
-        class="card-description px-5 pb-3 text-sw-text-muted text-[13px] m-0"
-        data-testid="card-description"
-      >
+      <p class="px-5 pb-3 text-sw-text-muted text-[13px] m-0" data-testid="card-description">
         {{ plugin.description }}
       </p>
 
@@ -95,7 +89,7 @@ export interface SavePluginCredentialsEvent {
           @if (plugin.auth_fields.length > 0) {
             <form (submit)="onSave($event)">
               @for (field of plugin.auth_fields; track field.key) {
-                <div class="form-group my-4">
+                <div class="my-4">
                   <label
                     class="block mb-1.5 text-[13px] text-sw-text-muted"
                     [for]="plugin.slug + '-' + field.key"
@@ -107,7 +101,7 @@ export interface SavePluginCredentialsEvent {
                     [placeholder]="field.placeholder"
                     [value]="getFieldValue(field.key)"
                     (input)="onFieldInput(field.key, $event)"
-                    class="form-input w-full px-3 py-2.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-sm font-mono box-border focus:border-sw-accent focus:outline-none"
+                    class="w-full px-3 py-2.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-sm font-mono box-border focus:border-sw-accent focus:outline-none"
                   />
                 </div>
               }
@@ -115,7 +109,7 @@ export interface SavePluginCredentialsEvent {
               <div class="flex gap-3 mt-4">
                 <button
                   type="submit"
-                  class="btn-save px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-darkest"
+                  class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-darkest"
                   [attr.data-testid]="'plugin-save-' + plugin.slug"
                 >
                   Save

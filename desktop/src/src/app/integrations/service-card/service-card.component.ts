@@ -35,8 +35,6 @@ export interface SaveCredentialsEvent {
             class="badge text-[11px] px-2 py-0.5 rounded font-medium"
             data-testid="badge"
             [attr.data-status]="svc.configured ? 'configured' : 'not-configured'"
-            [class.configured]="svc.configured"
-            [class.not-configured]="!svc.configured"
             [ngClass]="
               svc.configured
                 ? 'bg-sw-success-dark text-sw-success-text'
@@ -46,12 +44,11 @@ export interface SaveCredentialsEvent {
             {{ svc.configured ? 'Configured' : 'Not Configured' }}
           </span>
         </button>
-        <div class="card-actions flex items-center gap-3">
+        <div class="flex items-center gap-3">
           <label
             class="toggle relative inline-block w-[44px] h-[24px]"
             data-testid="toggle"
             [attr.data-disabled]="!svc.configured"
-            [class.disabled]="!svc.configured"
             [ngClass]="!svc.configured ? 'opacity-40 cursor-not-allowed' : ''"
             [title]="svc.configured ? '' : 'Configure credentials to enable'"
           >
@@ -65,15 +62,12 @@ export interface SaveCredentialsEvent {
               [ngClass]="!svc.configured ? 'cursor-not-allowed' : ''"
             />
             <span
-              class="slider absolute inset-0 bg-sw-slider rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-sw-accent before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
+              class="absolute inset-0 bg-sw-slider rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-sw-accent before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
             ></span>
           </label>
         </div>
       </div>
-      <p
-        class="card-description px-5 pb-3 text-sw-text-faint text-[13px] m-0"
-        data-testid="card-description"
-      >
+      <p class="px-5 pb-3 text-sw-text-faint text-[13px] m-0" data-testid="card-description">
         {{ svc.description }}
       </p>
 
@@ -94,7 +88,8 @@ export interface SaveCredentialsEvent {
                     [placeholder]="field.placeholder"
                     [value]="getFieldValue(field.key)"
                     (input)="onFieldInput(field.key, $event)"
-                    class="form-input w-full px-3 py-2.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-sm font-mono box-border focus:border-sw-accent focus:outline-none"
+                    class="w-full px-3 py-2.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-sm font-mono box-border focus:border-sw-accent focus:outline-none"
+                    data-testid="auth-field-input"
                     required
                   />
                 </div>
@@ -109,7 +104,7 @@ export interface SaveCredentialsEvent {
                 @if (!deviceCodeInfo && oauthStatus !== 'polling' && oauthStatus !== 'starting') {
                   <button
                     type="button"
-                    class="btn-oauth px-5 py-2 bg-transparent text-sw-accent border border-sw-accent rounded text-sm font-mono cursor-pointer transition-all duration-200 hover:bg-sw-accent hover:text-sw-bg-darkest"
+                    class="px-5 py-2 bg-transparent text-sw-accent border border-sw-accent rounded text-sm font-mono cursor-pointer transition-all duration-200 hover:bg-sw-accent hover:text-sw-bg-darkest"
                     (click)="onStartOAuth()"
                   >
                     Sign in with Microsoft
@@ -188,15 +183,15 @@ export interface SaveCredentialsEvent {
               <div class="mappings-section mt-4" data-testid="mappings-section">
                 <h4 class="text-sw-text-dim text-[13px] mb-2">ID Mappings</h4>
                 @for (entry of getMappingEntries(); track entry.key) {
-                  <div class="mapping-row flex gap-2 mb-2 items-center">
+                  <div class="flex gap-2 mb-2 items-center">
                     <input
-                      class="mapping-key flex-[2] p-2 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-[13px] font-mono"
+                      class="flex-[2] p-2 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-[13px] font-mono"
                       [value]="entry.key"
                       (input)="onUpdateMappingKey(entry.key, $event)"
                       placeholder="Key"
                     />
                     <input
-                      class="mapping-value flex-1 p-2 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-[13px] font-mono"
+                      class="flex-1 p-2 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-[13px] font-mono"
                       type="number"
                       [value]="entry.value"
                       (input)="onUpdateMappingValue(entry.key, $event)"
@@ -221,10 +216,10 @@ export interface SaveCredentialsEvent {
               </div>
             }
 
-            <div class="form-actions flex gap-3 mt-4">
+            <div class="flex gap-3 mt-4">
               <button
                 type="submit"
-                class="btn-save px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:not-disabled:bg-sw-accent hover:not-disabled:text-sw-bg-darkest"
+                class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-darkest"
                 [attr.data-testid]="'integrations-save-' + svc.service"
               >
                 Save

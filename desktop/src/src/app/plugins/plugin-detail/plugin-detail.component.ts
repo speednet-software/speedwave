@@ -97,7 +97,7 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
                       class="px-3.5 py-2.5 rounded-md text-[13px] mb-2"
                       [ngClass]="
                         integrationStatuses.get(integration)
-                          ? 'bg-sw-success-dark text-sw-success-text border border-[#2d6a4f]'
+                          ? 'bg-sw-success-dark text-sw-success-text border border-sw-success-border'
                           : 'bg-sw-error-bg text-sw-accent border border-sw-accent'
                       "
                       [attr.data-testid]="'integration-status-' + integration"
@@ -144,9 +144,7 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
       }
     </div>
   `,
-  styles: [
-    ':host { display: block; background: var(--color-sw-bg-darkest); min-height: 100vh; padding: 24px; color: var(--color-sw-text); }',
-  ],
+  host: { class: 'block bg-sw-bg-darkest min-h-screen p-6 text-sw-text' },
 })
 export class PluginDetailComponent implements OnInit, OnDestroy {
   plugin: PluginStatusEntry | null = null;
