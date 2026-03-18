@@ -73,7 +73,7 @@ describe('Navigation', function () {
   it('should show project switcher with e2e-test project', async function () {
     this.timeout(15_000);
     const switcher = await $('[data-testid="project-switcher-btn"]');
-    await switcher.waitForExist({ timeout: 5_000 });
+    await switcher.waitForExist({ timeout: 5_000, timeoutMsg: 'Project switcher button not found — expected e2e-test project to be active' });
     const text = await switcher.getText();
     expect(text).toContain('e2e-test');
   });

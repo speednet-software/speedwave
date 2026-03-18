@@ -18,7 +18,7 @@ describe('Settings', function () {
     await nav.click();
 
     const project = await $('[data-testid="settings-active-project"]');
-    await project.waitForExist({ timeout: 10_000 });
+    await project.waitForExist({ timeout: 10_000, timeoutMsg: 'Settings active project did not appear after navigation' });
   });
 
   it('should display the active project name', async function () {
@@ -44,7 +44,7 @@ describe('Settings', function () {
     await resetBtn.click();
 
     const confirm = await $('[data-testid="settings-confirm-reset"]');
-    await confirm.waitForExist({ timeout: 3_000 });
+    await confirm.waitForExist({ timeout: 3_000, timeoutMsg: 'Confirm reset dialog did not appear after clicking reset button' });
     expect(await confirm.isDisplayed()).toBe(true);
     expect((await confirm.getText()).trim()).toBe('Confirm Reset');
 
