@@ -171,16 +171,7 @@
   background: #e94560;
   color: #1a1a2e;
 }
-.btn-cancel {
-  padding: 6px 20px;
-  background: transparent;
-  color: #e09090;
-  border: 1px solid #e09090;
-  border-radius: 4px;
-  font-size: 13px;
-  font-family: monospace;
-  cursor: pointer;
-}
+.btn-cancel,
 .btn-remove {
   padding: 6px 20px;
   background: transparent;

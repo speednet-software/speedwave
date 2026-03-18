@@ -55,7 +55,6 @@ describe('Settings', function () {
 
     // Confirm dialog should disappear
     await confirm.waitForExist({ timeout: 3_000, reverse: true });
-    expect(await $('[data-testid="settings-confirm-reset"]').isExisting()).toBe(false);
   });
 
   it('should display check for updates button', async function () {
