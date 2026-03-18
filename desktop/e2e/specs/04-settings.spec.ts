@@ -54,7 +54,7 @@ describe('Settings', function () {
     await cancel.click();
 
     // Confirm dialog should disappear
-    await confirm.waitForExist({ timeout: 3_000, reverse: true });
+    await confirm.waitForExist({ timeout: 3_000, reverse: true, timeoutMsg: 'Confirm reset dialog did not disappear after clicking cancel' });
   });
 
   it('should display check for updates button', async function () {

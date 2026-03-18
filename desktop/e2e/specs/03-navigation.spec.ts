@@ -56,7 +56,7 @@ describe('Navigation', function () {
     await integrations.click();
 
     const section = await $('[data-testid="integrations-services"]');
-    await section.waitForExist({ timeout: 10_000 });
+    await section.waitForExist({ timeout: 10_000, timeoutMsg: 'Integrations services section did not appear after clicking Integrations link' });
     expect(await section.isDisplayed()).toBe(true);
   });
 
@@ -66,7 +66,7 @@ describe('Navigation', function () {
     await settings.click();
 
     const activeProject = await $('[data-testid="settings-active-project"]');
-    await activeProject.waitForExist({ timeout: 10_000 });
+    await activeProject.waitForExist({ timeout: 10_000, timeoutMsg: 'Settings active project did not appear after clicking Settings link' });
     expect(await activeProject.isDisplayed()).toBe(true);
   });
 
