@@ -69,6 +69,52 @@ teardown() {
     [ -d "$DEST/mcp-os/shared/node_modules/express" ]
 }
 
+@test "bundle script creates @speedwave/mcp-shared directory in mcp-os/os" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -d "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared" ]
+    [ ! -L "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared" ]
+    [ -d "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared/dist" ]
+}
+
+@test "mcp-os bundle: full import chain resolves (spawn and check)" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    # Spawn mcp-os with PORT=0 and a token. If imports fail,
+    # node exits immediately with ERR_MODULE_NOT_FOUND (exit 1).
+    # On success, it prints {"port":N} and keeps running — we kill it.
+    local script="$DEST/mcp-os/os/dist/index.js"
+    local tmpout
+    tmpout="$(mktemp)"
+    PORT=0 MCP_OS_AUTH_TOKEN=test-token node "$script" > "$tmpout" 2>&1 &
+    local pid=$!
+    # Wait up to 5s for either port announcement or process exit
+    local i=0
+    while [ $i -lt 50 ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            # Process exited — check if it was ERR_MODULE_NOT_FOUND
+            wait "$pid" || true
+            echo "mcp-os exited early. Output:"
+            cat "$tmpout"
+            rm -f "$tmpout"
+            return 1
+        fi
+        if grep -q '"port"' "$tmpout" 2>/dev/null; then
+            # Success — port announced, imports resolved
+            kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+            rm -f "$tmpout"
+            return 0
+        fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+    echo "Timeout waiting for port. Output:"
+    cat "$tmpout"
+    rm -f "$tmpout"
+    return 1
+}
+
 @test "bundle script copies hub Containerfile" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -136,4 +182,6 @@ teardown() {
     [ -d "$DEST/mcp-os/shared/dist" ]
     [ -f "$DEST/mcp-os/shared/package.json" ]
     [ -d "$DEST/mcp-os/shared/node_modules/express" ]
+    [ -d "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared" ]
+    [ ! -L "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared" ]
 }

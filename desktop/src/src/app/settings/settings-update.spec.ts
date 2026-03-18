@@ -77,20 +77,21 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
   });
 
   describe('installUpdate()', () => {
-    it('calls install_update with expectedVersion and restart_app with force', async () => {
+    it('calls install_update_and_reconcile with expectedVersion', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
       component.updateAvailableVersion = '2.0.0';
       component.updateResult = 'available';
       await component.installUpdate();
-      expect(invokeSpy).toHaveBeenCalledWith('install_update', { expectedVersion: '2.0.0' });
-      expect(invokeSpy).toHaveBeenCalledWith('restart_app', { force: true });
+      expect(invokeSpy).toHaveBeenCalledWith('install_update_and_reconcile', {
+        expectedVersion: '2.0.0',
+      });
     });
 
     it('sets updateInstalling to true during install', async () => {
       let resolveFn!: () => void;
       mockTauri.invokeHandler = (cmd: string) =>
         new Promise<void>((resolve) => {
-          if (cmd === 'install_update') resolveFn = resolve;
+          if (cmd === 'install_update_and_reconcile') resolveFn = resolve;
           else resolve();
         });
       component.updateAvailableVersion = '2.0.0';
@@ -103,7 +104,7 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
 
     it('sets updateInstallError on failure', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'install_update') throw new Error('download failed');
+        if (cmd === 'install_update_and_reconcile') throw new Error('download failed');
         return undefined;
       };
       component.updateAvailableVersion = '2.0.0';
@@ -116,13 +117,13 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       component.updateAvailableVersion = '';
       await component.installUpdate();
-      expect(invokeSpy).not.toHaveBeenCalledWith('install_update', expect.anything());
+      expect(invokeSpy).not.toHaveBeenCalledWith('install_update_and_reconcile', expect.anything());
     });
 
-    it('does not call restart_app if install_update fails', async () => {
+    it('does not invoke a restart command if install_update_and_reconcile fails', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'install_update') throw new Error('network error');
+        if (cmd === 'install_update_and_reconcile') throw new Error('network error');
         return undefined;
       };
       component.updateAvailableVersion = '2.0.0';

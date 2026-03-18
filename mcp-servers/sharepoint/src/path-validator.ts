@@ -4,8 +4,22 @@
  */
 
 import path from 'path';
-import { minimatch } from 'minimatch';
 import { ts } from '@speedwave/mcp-shared';
+
+/**
+ * Paths that are denied within /workspace to protect sensitive project files.
+ * Each entry is matched as a prefix: the path must equal the entry or start with entry + '/'.
+ * Exception: '/workspace/.env' is an exact match only (blocks .env but allows .envrc).
+ */
+const DENYLIST: string[] = [
+  '/workspace/.git',
+  '/workspace/.env',
+  '/workspace/.speedwave',
+  '/workspace/.ssh',
+  '/workspace/.npmrc',
+  '/workspace/.docker',
+  '/workspace/.kube',
+];
 
 /**
  * Validates paths for security to prevent path traversal attacks and unauthorized access
@@ -98,29 +112,10 @@ export class PathValidator {
   }
 
   /**
-   * Translate Claude container path to SharePoint MCP container path
-   * Claude uses: /home/speedwave/.claude/context
-   * SharePoint MCP has it mounted at: /context
-   * @param {string} localPath - Path from Claude container
-   * @returns {string} Translated path for SharePoint MCP container
-   */
-  translatePath(localPath: string): string {
-    const claudePrefix = '/home/speedwave/.claude/context';
-    const mcpMount = '/context';
-
-    if (localPath.startsWith(claudePrefix)) {
-      return localPath.replace(claudePrefix, mcpMount);
-    }
-    // Already using container path
-    if (localPath.startsWith(mcpMount)) {
-      return localPath;
-    }
-    return localPath;
-  }
-
-  /**
-   * Validate local path for security
-   * Accepts paths within /home/speedwave/.claude/context (Claude) or /context (MCP mount)
+   * Validate local path for security.
+   * Accepts paths within /workspace only (wide mount).
+   * Rejects paths targeting sensitive locations via denylist (.git, .env, .speedwave).
+   * Claude and MCP workers share the same mount, so no path translation needed.
    * @param {string} localPath - Local path to validate
    * @returns {boolean} True if path is safe, false otherwise
    */
@@ -137,23 +132,45 @@ export class PathValidator {
     // Resolve to absolute path and normalize
     const resolved = path.resolve(localPath);
 
-    // Whitelist: /home/speedwave/.claude/context (Claude) OR /context (MCP mount)
-    const allowedPrefixes = ['/home/speedwave/.claude/context', '/context'];
+    const allowedPrefix = '/workspace';
 
-    // Must start with one of allowed prefixes (exact match or as directory prefix)
-    // Using prefix + '/' to prevent paths like /contextXXX matching /context
-    const isAllowed = allowedPrefixes.some(
-      (prefix) => resolved === prefix || resolved.startsWith(prefix + '/')
-    );
+    // Must start with allowed prefix (exact match or as directory prefix)
+    const isAllowed = resolved === allowedPrefix || resolved.startsWith(allowedPrefix + '/');
     if (!isAllowed) {
       console.warn(`${ts()} 🔒 Security: Local path validation blocked potential attack:`, {
         attemptedPath: localPath,
         resolvedPath: resolved,
         attackType: 'path_outside_allowed_directory',
-        reason: `Path must be within ${allowedPrefixes.join(' or ')}`,
-        allowedPrefixes,
+        reason: `Path must be within ${allowedPrefix}`,
       });
       return false;
+    }
+
+    // Check denylist: protect sensitive directories/files within /workspace
+    for (const denied of DENYLIST) {
+      if (denied === '/workspace/.env') {
+        // Exact match only: blocks /workspace/.env but allows /workspace/.envrc
+        if (resolved === denied) {
+          console.warn(`${ts()} 🔒 Security: Local path validation blocked denied path:`, {
+            attemptedPath: localPath,
+            resolvedPath: resolved,
+            attackType: 'denied_path',
+            reason: `Path is on the denylist: ${denied}`,
+          });
+          return false;
+        }
+      } else {
+        // Prefix match: blocks the directory and everything inside it
+        if (resolved === denied || resolved.startsWith(denied + '/')) {
+          console.warn(`${ts()} 🔒 Security: Local path validation blocked denied path:`, {
+            attemptedPath: localPath,
+            resolvedPath: resolved,
+            attackType: 'denied_path',
+            reason: `Path is on the denylist: ${denied}`,
+          });
+          return false;
+        }
+      }
     }
 
     // Additional security: check for path traversal in resolved path
@@ -168,45 +185,5 @@ export class PathValidator {
     }
 
     return true;
-  }
-
-  /**
-   * Check if a file path should be ignored based on glob patterns
-   * Uses minimatch for full glob support including ** (recursive) patterns
-   * Also supports simple directory names (e.g., 'node_modules') which match all files under them
-   * @param {string} filePath - Relative file path to check
-   * @param {string[]} patterns - Array of glob patterns to match against
-   * @returns {boolean} True if file should be ignored, false otherwise
-   */
-  shouldIgnoreFile(filePath: string, patterns: string[]): boolean {
-    if (!patterns || patterns.length === 0) {
-      return false;
-    }
-
-    // Normalize path separators to forward slashes
-    const normalizedPath = filePath.replace(/\\/g, '/');
-
-    for (const pattern of patterns) {
-      const normalizedPattern = pattern.replace(/\\/g, '/');
-
-      // Use minimatch for proper glob matching including ** support
-      if (minimatch(normalizedPath, normalizedPattern, { dot: true, matchBase: true })) {
-        return true;
-      }
-
-      // For simple patterns without glob characters, also match as directory prefix
-      // This allows 'node_modules' to match 'node_modules/express/index.js'
-      if (!normalizedPattern.includes('*') && !normalizedPattern.includes('?')) {
-        // Check if path starts with pattern as a directory
-        if (
-          normalizedPath === normalizedPattern ||
-          normalizedPath.startsWith(normalizedPattern + '/')
-        ) {
-          return true;
-        }
-      }
-    }
-
-    return false;
   }
 }

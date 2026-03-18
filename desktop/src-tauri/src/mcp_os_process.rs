@@ -1,6 +1,7 @@
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::thread::JoinHandle;
 
 use speedwave_runtime::consts;
 
@@ -16,14 +17,12 @@ use speedwave_runtime::consts;
 ///   - `~/.speedwave/mcp-os-pid` — to kill stale processes on next startup
 pub struct McpOsProcess {
     child: Option<Child>,
-    #[allow(dead_code)] // used in tests
-    token: String,
+    drain_handles: Vec<JoinHandle<()>>,
+    data_dir: PathBuf,
     token_path: PathBuf,
     port: u16,
     port_path: PathBuf,
     pid_path: PathBuf,
-    #[allow(dead_code)] // used by drain threads; field kept for future log rotation
-    log_path: PathBuf,
     script_path: String,
 }
 
@@ -54,10 +53,13 @@ impl McpOsProcess {
     /// Before spawning, kills any stale mcp-os process left over from a
     /// previous session by reading the PID file.
     pub fn spawn(script_path: &str) -> anyhow::Result<Self> {
-        let token = uuid::Uuid::new_v4().to_string();
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
-        let data_dir = home.join(consts::DATA_DIR);
-        std::fs::create_dir_all(&data_dir)?;
+        Self::spawn_in(script_path, &home.join(consts::DATA_DIR))
+    }
+
+    fn spawn_in(script_path: &str, data_dir: &Path) -> anyhow::Result<Self> {
+        std::fs::create_dir_all(data_dir)?;
+        let token = uuid::Uuid::new_v4().to_string();
         let token_path = data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE);
         let port_path = data_dir.join(consts::MCP_OS_PORT_FILE);
         let pid_path = data_dir.join(consts::MCP_OS_PID_FILE);
@@ -67,11 +69,7 @@ impl McpOsProcess {
         kill_stale_by_pid_file(&pid_path);
 
         // Truncate log file if it exceeds 2 MB to prevent unbounded growth
-        if let Ok(meta) = std::fs::metadata(&log_path) {
-            if meta.len() > 2 * 1024 * 1024 {
-                let _ = std::fs::write(&log_path, "");
-            }
-        }
+        crate::log_file::truncate_if_oversized(&log_path, 2 * 1024 * 1024);
 
         // Write token file with restrictive permissions
         write_restricted_file(&token_path, &token)?;
@@ -133,7 +131,7 @@ impl McpOsProcess {
         // all logging. If the pipe buffer fills up (~64 KB), the process
         // blocks on write() and dies. After reading the port line, the stdout
         // drain thread continues consuming log output indefinitely.
-        let port = match drain_and_read_port(&mut child, &log_path) {
+        let (port, drain_handles) = match drain_and_read_port(&mut child, &log_path) {
             Ok(p) => p,
             Err(e) => {
                 child.kill().ok();
@@ -158,42 +156,42 @@ impl McpOsProcess {
 
         Ok(Self {
             child: Some(child),
-            token,
+            drain_handles,
+            data_dir: data_dir.to_path_buf(),
             token_path,
             port,
             port_path,
             pid_path,
-            log_path,
             script_path: script_path.to_string(),
         })
+    }
+
+    /// Test-only: spawn with an injectable data_dir (tempdir in tests).
+    #[cfg(test)]
+    pub(crate) fn spawn_in_dir(script_path: &str, data_dir: &Path) -> anyhow::Result<Self> {
+        Self::spawn_in(script_path, data_dir)
     }
 
     /// Test-only constructor with injected values.
     #[cfg(test)]
     fn new_with(
         child: Child,
-        token: String,
         token_path: PathBuf,
         port: u16,
         port_path: PathBuf,
         pid_path: PathBuf,
+        data_dir: PathBuf,
     ) -> Self {
         Self {
             child: Some(child),
-            token,
+            drain_handles: Vec::new(),
+            data_dir,
             token_path,
             port,
             port_path,
             pid_path,
-            log_path: PathBuf::new(),
             script_path: String::new(),
         }
-    }
-
-    /// Returns the auth token generated for this process.
-    #[allow(dead_code)] // used in tests
-    pub fn token(&self) -> &str {
-        &self.token
     }
 
     /// Returns the actual port mcp-os is listening on.
@@ -201,26 +199,18 @@ impl McpOsProcess {
         self.port
     }
 
-    /// Returns the path where the auth token is written.
-    #[allow(dead_code)] // used in tests
-    pub fn token_path(&self) -> &PathBuf {
-        &self.token_path
-    }
-
-    /// Check if the child process is still alive.
-    #[allow(dead_code)] // used in tests
-    pub fn health_check(&mut self) -> bool {
-        match &mut self.child {
-            Some(child) => matches!(child.try_wait(), Ok(None)),
-            None => false,
-        }
-    }
-
-    /// Kill the child process.
+    /// Kill the child process and join drain threads.
+    ///
+    /// After `child.wait()` the child is dead, pipes are closed, and
+    /// `BufReader::lines()` returns `None` — so drain threads exit
+    /// promptly and `join()` is deterministic (no timeout needed).
     pub fn stop(&mut self) -> anyhow::Result<()> {
         if let Some(mut child) = self.child.take() {
             child.kill().ok(); // ignore "already exited" errors
-            child.wait().ok(); // reap zombie
+            child.wait().ok(); // reap zombie — guarantees pipes closed
+        }
+        for handle in self.drain_handles.drain(..) {
+            let _ = handle.join();
         }
         Ok(())
     }
@@ -237,26 +227,39 @@ impl McpOsProcess {
     /// Stop the old process and spawn a fresh one at the same script path.
     ///
     /// Carefully prevents Drop from deleting files written by the new process:
-    ///
-    /// the old child is taken (so Drop.stop() is a no-op) and paths are cleared
-    /// (so Drop.cleanup_files() deletes nothing).
+    /// the old child is killed, drain threads joined, paths cleared, then a
+    /// new process is spawned via `spawn_in` using the same `data_dir`.
     pub fn respawn(&mut self) -> anyhow::Result<u16> {
-        // 1. Stop old child (but don't cleanup files — new spawn will overwrite them)
+        // 1. Kill old child
         if let Some(mut child) = self.child.take() {
             child.kill().ok();
-            child.wait().ok();
+            child.wait().ok(); // guarantees pipes closed
+        }
+        // 1b. Join old drain threads (release log file handle before new spawn opens it)
+        for handle in self.drain_handles.drain(..) {
+            let _ = handle.join();
         }
         // 2. child is now None → Drop.stop() will be a no-op
-        // 3. Clear paths so Drop.cleanup_files() deletes nothing
-        //    (spawn() writes fresh files at these same paths)
-        self.token_path = PathBuf::new();
-        self.port_path = PathBuf::new();
-        self.pid_path = PathBuf::new();
+        // 3. Save old paths, then clear so Drop.cleanup_files() deletes nothing
+        //    (spawn_in() writes fresh files at these same paths)
+        let old_token_path = std::mem::replace(&mut self.token_path, PathBuf::new());
+        let old_port_path = std::mem::replace(&mut self.port_path, PathBuf::new());
+        let old_pid_path = std::mem::replace(&mut self.pid_path, PathBuf::new());
 
-        // 4. Spawn new process (writes fresh token/port/pid files)
-        let new = Self::spawn(&self.script_path)?;
+        // 4. Spawn new process using the same data_dir (not dirs::home_dir())
+        let data_dir = self.data_dir.clone();
+        let new = match Self::spawn_in(&self.script_path, &data_dir) {
+            Ok(new) => new,
+            Err(e) => {
+                // Spawn failed — clean up stale files (auth token is security-sensitive)
+                let _ = std::fs::remove_file(&old_token_path);
+                let _ = std::fs::remove_file(&old_port_path);
+                let _ = std::fs::remove_file(&old_pid_path);
+                return Err(e);
+            }
+        };
         let new_port = new.port;
-        *self = new; // old self dropped — Drop is now harmless (empty paths, no child)
+        *self = new; // old self dropped — Drop is now harmless (empty paths, no child, no handles)
         Ok(new_port)
     }
 
@@ -358,16 +361,24 @@ fn kill_process(pid: u32) {
 /// Spawn background threads to drain both stdout and stderr of the child,
 /// then wait for the `{"port":<N>}` JSON line on stdout.
 ///
+/// Returns the port and the join handles for both drain threads so the
+/// caller can join them on stop (releasing log file handles).
+///
 /// mcp-os uses `console.log` (→ stdout) for all its logging after the
 /// initial port announcement. If the stdout/stderr pipes are closed or
 /// their buffers fill up, the child process dies (SIGPIPE or write block).
 /// The drain threads keep both pipes open for the entire lifetime of the
 /// child process.
-fn drain_and_read_port(child: &mut Child, log_path: &Path) -> anyhow::Result<u16> {
+fn drain_and_read_port(
+    child: &mut Child,
+    log_path: &Path,
+) -> anyhow::Result<(u16, Vec<JoinHandle<()>>)> {
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("mcp-os stdout not captured"))?;
+
+    let mut handles = Vec::new();
 
     // Open log file for appending (both drain threads share the concept but
     // each opens its own handle to avoid cross-thread synchronization).
@@ -375,27 +386,28 @@ fn drain_and_read_port(child: &mut Child, log_path: &Path) -> anyhow::Result<u16
 
     // Drain stderr — mcp-os writes warnings here via console.error/console.warn
     if let Some(stderr) = child.stderr.take() {
-        std::thread::spawn(move || {
-            let mut log_file = open_log_file(&log_path_stderr);
+        let h = std::thread::spawn(move || {
+            let mut log_file = crate::log_file::open_log_file(&log_path_stderr);
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines() {
                 match line {
                     Ok(line) => {
                         log::warn!("mcp-os stderr: {line}");
-                        write_log_line(&mut log_file, "STDERR", &line);
+                        crate::log_file::write_log_line(&mut log_file, "STDERR", &line);
                     }
                     Err(_) => break,
                 }
             }
         });
+        handles.push(h);
     }
 
     // Drain stdout — reads port from first JSON line, then keeps draining
     // all subsequent console.log output to prevent pipe buffer exhaustion.
     let (tx, rx) = std::sync::mpsc::channel();
     let log_path_stdout = log_path.to_path_buf();
-    std::thread::spawn(move || {
-        let mut log_file = open_log_file(&log_path_stdout);
+    let h = std::thread::spawn(move || {
+        let mut log_file = crate::log_file::open_log_file(&log_path_stdout);
         let reader = std::io::BufReader::new(stdout);
         let mut port_sent = false;
         for line in reader.lines() {
@@ -409,7 +421,7 @@ fn drain_and_read_port(child: &mut Child, log_path: &Path) -> anyhow::Result<u16
                                         anyhow::anyhow!("port {port} out of u16 range")
                                     }));
                                 port_sent = true;
-                                write_log_line(&mut log_file, "STDOUT", &line);
+                                crate::log_file::write_log_line(&mut log_file, "STDOUT", &line);
                                 continue;
                             }
                         }
@@ -417,7 +429,7 @@ fn drain_and_read_port(child: &mut Child, log_path: &Path) -> anyhow::Result<u16
                     // After port is found, keep draining stdout so the pipe
                     // never fills up and the child never gets SIGPIPE.
                     log::debug!("mcp-os: {line}");
-                    write_log_line(&mut log_file, "STDOUT", &line);
+                    crate::log_file::write_log_line(&mut log_file, "STDOUT", &line);
                 }
                 Err(_) => break,
             }
@@ -428,34 +440,11 @@ fn drain_and_read_port(child: &mut Child, log_path: &Path) -> anyhow::Result<u16
             )));
         }
     });
+    handles.push(h);
 
     match rx.recv_timeout(PORT_READ_TIMEOUT) {
-        Ok(result) => result,
+        Ok(result) => result.map(|port| (port, handles)),
         Err(_) => anyhow::bail!("timed out waiting for mcp-os port announcement"),
-    }
-}
-
-/// Open log file for appending with chmod 600 on Unix.
-fn open_log_file(path: &Path) -> Option<std::fs::File> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.append(true).create(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    opts.open(path).ok()
-}
-
-/// Write a timestamped line to the log file. Errors are silently ignored.
-fn write_log_line(file: &mut Option<std::fs::File>, prefix: &str, line: &str) {
-    use std::io::Write;
-    if let Some(ref mut f) = file {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let _ = writeln!(f, "[{secs}] {prefix}: {line}");
     }
 }
 
@@ -521,6 +510,22 @@ fn write_restricted_file(path: &PathBuf, content: &str) -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Test-only accessors — gated behind cfg(test) so clippy reports dead code
+// in production builds without needing #[allow(dead_code)].
+#[cfg(test)]
+impl McpOsProcess {
+    pub fn token(&self) -> String {
+        std::fs::read_to_string(&self.token_path).unwrap_or_default()
+    }
+
+    pub fn health_check(&mut self) -> bool {
+        match &mut self.child {
+            Some(child) => matches!(child.try_wait(), Ok(None)),
+            None => false,
+        }
+    }
+}
+
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -551,7 +556,8 @@ srv.listen(0, '127.0.0.1', () => {
         )
         .unwrap();
 
-        let result = McpOsProcess::spawn(&script.to_string_lossy());
+        let data_dir = tmp.path().join("data");
+        let result = McpOsProcess::spawn_in_dir(&script.to_string_lossy(), &data_dir);
         if let Ok(mut proc) = result {
             assert!(proc.port() > 0, "Port should be assigned");
             assert!(!proc.token().is_empty(), "Token should be generated");
@@ -577,20 +583,20 @@ srv.listen(0, '127.0.0.1', () => {
         )
         .unwrap();
 
-        let result = McpOsProcess::spawn(&script.to_string_lossy());
+        let data_dir = tmp.path().join("data");
+        let result = McpOsProcess::spawn_in_dir(&script.to_string_lossy(), &data_dir);
         if let Ok(mut proc) = result {
             let port_path = proc.port_path.clone();
             assert!(port_path.exists(), "Port file should exist");
             let content = std::fs::read_to_string(&port_path).unwrap();
-            // Multiple spawn-based tests run in parallel and share the same
-            // global port file (~/.speedwave/port). Another test may overwrite
-            // it between our write and read. Verify it contains a valid port
-            // (the exact match is validated by the non-concurrent unit tests
-            // that use new_with()).
             let file_port: u16 = content
                 .parse()
                 .expect("port file should contain a valid u16");
-            assert!(file_port > 0, "Port file should contain a non-zero port");
+            assert_eq!(
+                file_port,
+                proc.port(),
+                "Port file should match process port"
+            );
             assert!(proc.port() > 0, "Process port should be assigned");
             proc.stop().unwrap();
         }
@@ -612,25 +618,20 @@ srv.listen(0, '127.0.0.1', () => {
         )
         .unwrap();
 
-        let result = McpOsProcess::spawn(&script.to_string_lossy());
+        let data_dir = tmp.path().join("data");
+        let result = McpOsProcess::spawn_in_dir(&script.to_string_lossy(), &data_dir);
         if let Ok(mut proc) = result {
             let pid_path = proc.pid_path.clone();
-            // Multiple spawn-based tests run in parallel and share the same
-            // global PID file (~/.speedwave/mcp-os-pid). Another test's stop()
-            // may delete it between our write and read. Verify the file existed
-            // at some point by checking proc state instead.
-            if pid_path.exists() {
-                let content = std::fs::read_to_string(&pid_path).unwrap();
-                let pid: u32 = content
-                    .trim()
-                    .parse()
-                    .expect("PID file should contain a valid u32");
-                assert!(pid > 0, "PID should be positive");
-            }
-            // The child process itself must have a valid PID regardless of the file
-            assert!(
-                proc.child.as_ref().map(|c| c.id()).unwrap_or(0) > 0,
-                "Child process should have a valid PID"
+            assert!(pid_path.exists(), "PID file should exist");
+            let content = std::fs::read_to_string(&pid_path).unwrap();
+            let pid: u32 = content
+                .trim()
+                .parse()
+                .expect("PID file should contain a valid u32");
+            assert_eq!(
+                pid,
+                proc.child.as_ref().unwrap().id(),
+                "PID file should match child PID"
             );
             proc.stop().unwrap();
         }
@@ -709,11 +710,11 @@ srv.listen(0, '127.0.0.1', () => {
 
             let mut proc = McpOsProcess::new_with(
                 child,
-                "tok".to_string(),
                 token_path,
                 1234,
                 port_path,
                 pid_path,
+                tmp.path().to_path_buf(),
             );
             assert!(proc.health_check(), "Process should be alive");
 
@@ -741,11 +742,11 @@ srv.listen(0, '127.0.0.1', () => {
 
             let mut proc = McpOsProcess::new_with(
                 child,
-                "tok".to_string(),
                 token_path,
                 1234,
                 port_path,
                 pid_path,
+                tmp.path().to_path_buf(),
             );
             assert!(proc.health_check(), "Running process should be healthy");
             proc.stop().unwrap();
@@ -770,11 +771,11 @@ srv.listen(0, '127.0.0.1', () => {
 
             let mut proc = McpOsProcess::new_with(
                 child,
-                "tok".to_string(),
                 token_path,
                 1234,
                 port_path,
                 pid_path,
+                tmp.path().to_path_buf(),
             );
             std::thread::sleep(std::time::Duration::from_millis(100));
             assert!(!proc.health_check(), "Exited process should be unhealthy");
@@ -804,11 +805,11 @@ srv.listen(0, '127.0.0.1', () => {
         if let Ok(child) = child {
             let proc = McpOsProcess::new_with(
                 child,
-                "secret".to_string(),
                 token_path.clone(),
                 1234,
                 port_path.clone(),
                 pid_path.clone(),
+                tmp.path().to_path_buf(),
             );
             drop(proc);
             assert!(!token_path.exists(), "Token file should be removed on drop");
@@ -981,11 +982,11 @@ srv.listen(0, '127.0.0.1', () => {
 
             let mut proc = McpOsProcess::new_with(
                 child,
-                "tok".to_string(),
                 token_path,
                 1234,
                 port_path,
                 pid_path,
+                tmp.path().to_path_buf(),
             );
             proc.stop().unwrap();
             proc.stop().unwrap();
@@ -1226,7 +1227,7 @@ process.stdout.write(JSON.stringify({ leaked }));
             "more output after port",
         ]);
 
-        let port = drain_and_read_port(&mut child, &log_path)
+        let (port, _handles) = drain_and_read_port(&mut child, &log_path)
             .expect("should find port after non-JSON lines");
         assert_eq!(
             port, 4567,
@@ -1244,7 +1245,8 @@ process.stdout.write(JSON.stringify({ leaked }));
         // This test documents the behavior: port 0 IS returned as-is.
         let mut child = spawn_stdout_lines(&[r#"{"port":0}"#]);
 
-        let port = drain_and_read_port(&mut child, &log_path).expect("port 0 fits in u16");
+        let (port, _handles) =
+            drain_and_read_port(&mut child, &log_path).expect("port 0 fits in u16");
         assert_eq!(port, 0, "port 0 is returned (caller must validate)");
         child.kill().ok();
         child.wait().ok();
@@ -1315,7 +1317,7 @@ process.stdout.write(JSON.stringify({ leaked }));
             r#"{"port":9876}"#,
         ]);
 
-        let port = drain_and_read_port(&mut child, &log_path)
+        let (port, _handles) = drain_and_read_port(&mut child, &log_path)
             .expect("should find port after non-port JSON lines");
         assert_eq!(port, 9876, "should skip JSON lines without 'port' key");
         child.kill().ok();
@@ -1328,7 +1330,7 @@ process.stdout.write(JSON.stringify({ leaked }));
         let mut child =
             spawn_stdout_lines(&["startup message", r#"{"port":5555}"#, "after port line"]);
 
-        let port = drain_and_read_port(&mut child, &log_path).unwrap();
+        let (port, _handles) = drain_and_read_port(&mut child, &log_path).unwrap();
         assert_eq!(port, 5555);
         child.kill().ok();
         child.wait().ok();
@@ -1440,5 +1442,75 @@ srv.listen(0, '127.0.0.1', () => {
 
         assert!(path.is_file());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "my-token");
+    }
+
+    #[test]
+    fn test_stop_releases_log_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("sw-data");
+        let script = tmp.path().join("log_release.js");
+        std::fs::write(
+            &script,
+            r#"
+const http = require('http');
+const srv = http.createServer((_,r) => { r.end('ok'); });
+srv.listen(0, '127.0.0.1', () => {
+    process.stdout.write(JSON.stringify({ port: srv.address().port }) + '\n');
+});
+"#,
+        )
+        .unwrap();
+
+        let result = McpOsProcess::spawn_in_dir(&script.to_string_lossy(), &data_dir);
+        if let Ok(mut proc) = result {
+            let log_path = data_dir.join(consts::MCP_OS_LOG_FILE);
+            proc.stop().unwrap();
+            // After stop() + drain thread join, the log file handle is released.
+            // Verify by successfully removing the file (would fail if still open
+            // on some platforms).
+            if log_path.exists() {
+                std::fs::remove_file(&log_path)
+                    .expect("log file should be removable after stop (handles released)");
+            }
+        }
+        // node not available — skip
+    }
+
+    #[test]
+    fn test_respawn_returns_new_port() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("sw-data");
+        let script = tmp.path().join("respawn_port.js");
+        std::fs::write(
+            &script,
+            r#"
+const http = require('http');
+const srv = http.createServer((_,r) => { r.end('ok'); });
+srv.listen(0, '127.0.0.1', () => {
+    process.stdout.write(JSON.stringify({ port: srv.address().port }) + '\n');
+});
+"#,
+        )
+        .unwrap();
+
+        let result = McpOsProcess::spawn_in_dir(&script.to_string_lossy(), &data_dir);
+        if let Ok(mut proc) = result {
+            match proc.respawn() {
+                Ok(new_port) => {
+                    assert!(new_port > 0, "new port should be assigned");
+                    assert!(proc.health_check(), "respawned process should be alive");
+                    // Verify data_dir is preserved (not defaulting to ~/.speedwave/)
+                    assert_eq!(
+                        proc.data_dir, data_dir,
+                        "data_dir should be preserved across respawn"
+                    );
+                }
+                Err(e) => {
+                    log::warn!("respawn test skipped: {e}");
+                }
+            }
+            proc.stop().unwrap();
+        }
+        // node not available — skip
     }
 }

@@ -12,18 +12,7 @@ import { Mutex } from 'async-mutex';
 import { loadToken, TIMEOUTS, ts } from '@speedwave/mcp-shared';
 import { TokenManager } from './token-manager.js';
 import { PathValidator } from './path-validator.js';
-import {
-  SyncEngine,
-  FileOperationExecutor,
-  SyncFileEntry,
-  SyncOperation,
-  SyncPlan,
-  DirectorySyncResult,
-  SyncMode,
-  buildSyncStateFromResults,
-} from './sync-engine.js';
-import { SyncStateStore } from './sync-state.js';
-import { splitPath, validateNotProtectedFile } from './path-utils.js';
+import { splitPath } from './path-utils.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Types
@@ -112,30 +101,6 @@ export interface DriveItemMetadata {
   eTag?: string;
 }
 
-/**
- * Parameters for syncDirectory method
- * @interface SyncDirectoryParams
- */
-export interface SyncDirectoryParams {
-  /** Local directory path (must be in allowed locations) */
-  localPath: string;
-  /** SharePoint directory path (relative to basePath) */
-  sharepointPath?: string;
-  /** Sync mode: two_way, pull, or push */
-  mode: SyncMode;
-  /** Whether to propagate deletions (default: false - safe mode) */
-  delete?: boolean;
-  /** Glob patterns to ignore */
-  ignorePatterns?: string[];
-  /** Dry run - compute plan only, don't execute */
-  dryRun?: boolean;
-  /** Include full plan.operations and executed arrays in response. Default: false (slim mode to save tokens). Note: dryRun=true always returns full plan regardless of this setting. Errors, conflicts, and summary are always included. */
-  verbose?: boolean;
-}
-
-// Re-export types from sync-engine for convenience
-export type { SyncMode, SyncFileEntry, SyncOperation, SyncPlan, DirectorySyncResult };
-
 //═══════════════════════════════════════════════════════════════════════════════
 // Client Class
 //═══════════════════════════════════════════════════════════════════════════════
@@ -158,15 +123,14 @@ function debugLog(message: string, data?: unknown): void {
 
 /**
  * SharePoint/Microsoft Graph API client with automatic token refresh and error handling
- * Acts as a facade coordinating TokenManager, PathValidator, and SyncEngine modules
+ * Acts as a facade coordinating TokenManager and PathValidator modules
  * @class SharePointClient
  */
-export class SharePointClient implements FileOperationExecutor {
+export class SharePointClient {
   private config: SharePointConfig;
   private tokensDir: string;
   private tokenManager: TokenManager;
   private pathValidator: PathValidator;
-  private syncEngine: SyncEngine;
   private refreshMutex: Mutex;
 
   /**
@@ -187,8 +151,6 @@ export class SharePointClient implements FileOperationExecutor {
 
     this.pathValidator = new PathValidator();
     this.refreshMutex = new Mutex();
-
-    this.syncEngine = new SyncEngine(this.pathValidator, this, config.basePath);
   }
 
   /**
@@ -451,7 +413,7 @@ export class SharePointClient implements FileOperationExecutor {
 
       if (!response.ok) {
         // 404 means folder doesn't exist yet - return empty list with exists: false
-        // This allows syncDirectory to push to new folders while listFileIds can detect non-existence
+        // This allows push operations to create new folders while listFileIds can detect non-existence
         if (response.status === 404) {
           return { files: [], exists: false };
         }
@@ -541,60 +503,48 @@ export class SharePointClient implements FileOperationExecutor {
   }
 
   /**
-   * Sync file (file mode with ETag CAS)
-   * Uploads local file to SharePoint with optional Compare-And-Swap using ETags
-   * @param {Object} params - Sync parameters
-   * @param {string} params.localPath - Local file path to upload
-   * @param {string} params.sharepointPath - Destination path in SharePoint (relative)
-   * @param {string} [params.expectedEtag] - Expected ETag for CAS (If-Match header)
-   * @param {boolean} [params.createOnly] - Only create if file doesn't exist (If-None-Match: *)
-   * @param {boolean} [params.overwrite] - Overwrite existing file without ETag check
-   * @returns {Promise<{success: boolean, etag?: string, size?: number}>} Upload result with new ETag
-   * @throws {Error} If path is invalid, file doesn't exist, or upload fails
+   * Upload file from local path to SharePoint with optional Compare-And-Swap (CAS)
+   * @param {string} sharepointPath - SharePoint path (relative to basePath)
+   * @param {string} localPath - Local file path (must be within /workspace)
+   * @param {Object} [options] - Upload options
+   * @param {string} [options.expectedEtag] - Expected ETag for CAS (If-Match header)
+   * @param {boolean} [options.createOnly] - Only create if file doesn't exist (If-None-Match: *)
+   * @param {boolean} [options.overwrite] - Overwrite existing file without ETag check
+   * @returns {Promise<{ etag?: string; size?: number }>} Result with new etag from SharePoint
+   * @throws {Error} If local path is outside allowed directories or upload fails
    */
-  async syncFile(params: {
-    localPath: string;
-    sharepointPath: string;
-    expectedEtag?: string;
-    createOnly?: boolean;
-    overwrite?: boolean;
-  }): Promise<{ success: boolean; etag?: string; size?: number }> {
-    const { localPath, sharepointPath, expectedEtag, createOnly, overwrite } = params;
-
+  async uploadFile(
+    sharepointPath: string,
+    localPath: string,
+    options?: { expectedEtag?: string; createOnly?: boolean; overwrite?: boolean }
+  ): Promise<{ etag?: string; size?: number }> {
+    // Security: validate sharepoint path for defense-in-depth
     if (!this.pathValidator.validatePath(sharepointPath)) {
       throw new Error('Invalid sharepoint_path (security check failed)');
     }
 
     // Security: validate local path to prevent exfiltration of sensitive files
     if (!this.pathValidator.validateLocalPath(localPath)) {
-      throw new Error(
-        'Invalid local_path: must be /home/speedwave/.claude/context or /context subdirectory'
-      );
+      throw new Error('Invalid local_path: must be under /workspace');
     }
 
-    // Translate Claude container path to MCP container path
-    const translatedLocalPath = this.pathValidator.translatePath(localPath);
-
-    // Read local file
-    const buffer = await fs.readFile(translatedLocalPath);
+    const buffer = await fs.readFile(localPath);
     const fullPath = `${this.config.basePath}/${sharepointPath}`;
-
-    // Ensure parent folders exist
     await this.ensureParentFolders(fullPath);
 
-    // Upload with CAS headers
     const uploadUrl = `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root:/${this.encodeGraphPath(fullPath)}:/content`;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/octet-stream',
     };
 
-    // overwrite: skip ETag check and force overwrite
-    // expectedEtag: only set If-Match if not in overwrite mode
-    // createOnly: only create if file doesn't exist
+    // CAS headers
+    const expectedEtag = options?.expectedEtag;
+    const createOnly = options?.createOnly;
+    const overwrite = options?.overwrite;
+
     if (overwrite) {
       // Overwrite mode: no conditional headers, always replace
-      // Note: we don't set any If-Match or If-None-Match headers
     } else if (expectedEtag) {
       headers['If-Match'] = expectedEtag;
     }
@@ -614,16 +564,68 @@ export class SharePointClient implements FileOperationExecutor {
       throw new Error(errorData.error?.message || 'Upload failed');
     }
 
-    const data = (await response.json()) as {
-      eTag?: string;
-      size?: number;
-    };
+    // Parse response to get new etag and size
+    const data = (await response.json()) as { eTag?: string; size?: number };
+    return { etag: data.eTag, size: data.size };
+  }
 
-    return {
-      success: true,
-      etag: data.eTag,
-      size: data.size,
-    };
+  /**
+   * Download file from SharePoint to local path using streaming
+   * @param {string} sharepointPath - SharePoint path (relative to basePath)
+   * @param {string} localPath - Local destination path (must be within /workspace)
+   * @returns {Promise<void>}
+   * @throws {Error} If local path is outside allowed directories or download fails
+   */
+  async downloadFile(sharepointPath: string, localPath: string): Promise<void> {
+    // Validate local path for security
+    if (!this.pathValidator.validateLocalPath(localPath)) {
+      throw new Error('Invalid local_path: must be under /workspace');
+    }
+
+    // Security: validate sharepoint path for defense-in-depth
+    if (!this.pathValidator.validatePath(sharepointPath)) {
+      throw new Error('Invalid sharepoint_path (security check failed)');
+    }
+
+    // Get file metadata with download URL
+    const fullPath = sharepointPath
+      ? `${this.config.basePath}/${sharepointPath}`
+      : this.config.basePath;
+
+    const metadataUrl = `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root:/${this.encodeGraphPath(fullPath)}`;
+    const metadataResponse = await this.callGraphAPI(metadataUrl);
+
+    if (!metadataResponse.ok) {
+      const errorData = (await metadataResponse.json()) as { error?: { message?: string } };
+      throw new Error(errorData.error?.message || 'Failed to get file metadata for download');
+    }
+
+    const metadata = (await metadataResponse.json()) as DriveItemMetadata;
+    const downloadUrl = metadata['@microsoft.graph.downloadUrl'];
+
+    if (!downloadUrl) {
+      throw new Error('No download URL available for file');
+    }
+
+    // Ensure parent directory exists
+    const parentDir = path.dirname(localPath);
+    await fs.mkdir(parentDir, { recursive: true });
+
+    // Download file using streaming
+    const downloadResponse = await fetch(downloadUrl);
+
+    if (!downloadResponse.ok) {
+      throw new Error(`Download failed with status ${downloadResponse.status}`);
+    }
+
+    if (!downloadResponse.body) {
+      throw new Error('No response body for download');
+    }
+
+    // Stream to file
+    const fileStream = createWriteStream(localPath);
+    const readable = Readable.fromWeb(downloadResponse.body as import('stream/web').ReadableStream);
+    await pipeline(readable, fileStream);
   }
 
   /**
@@ -744,458 +746,6 @@ export class SharePointClient implements FileOperationExecutor {
         }
       }
     }
-  }
-
-  //═════════════════════════════════════════════════════════════════════════════
-  // FileOperationExecutor Implementation (for SyncEngine)
-  //═════════════════════════════════════════════════════════════════════════════
-
-  /**
-   * Upload file from local path to SharePoint (FileOperationExecutor interface)
-   * @param {string} sharepointPath - SharePoint path (relative to basePath)
-   * @param {string} localPath - Local file path (must be within allowed directories)
-   * @returns {Promise<{ etag?: string }>} Result with new etag from SharePoint
-   * @throws {Error} If local path is outside allowed directories
-   */
-  async uploadFile(sharepointPath: string, localPath: string): Promise<{ etag?: string }> {
-    // Security: validate sharepoint path for defense-in-depth
-    // Note: SyncEngine already validates before calling, but defense-in-depth requires validation here too
-    if (!this.pathValidator.validatePath(sharepointPath)) {
-      throw new Error('Invalid sharepoint_path (security check failed)');
-    }
-
-    // Security: block .sync-state.json upload (internal metadata that should never be on SharePoint)
-    validateNotProtectedFile(sharepointPath, 'upload');
-
-    // Security: validate local path to prevent exfiltration of sensitive files
-    if (!this.pathValidator.validateLocalPath(localPath)) {
-      throw new Error(
-        'Invalid local_path: must be /home/speedwave/.claude/context or /context subdirectory'
-      );
-    }
-
-    const buffer = await fs.readFile(localPath);
-    const fullPath = `${this.config.basePath}/${sharepointPath}`;
-    await this.ensureParentFolders(fullPath);
-
-    const uploadUrl = `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root:/${this.encodeGraphPath(fullPath)}:/content`;
-    const response = await this.callGraphAPI(uploadUrl, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: buffer,
-    });
-
-    if (!response.ok) {
-      const errorData = (await response.json()) as { error?: { message?: string } };
-      throw new Error(errorData.error?.message || 'Upload failed');
-    }
-
-    // Parse response to get new etag
-    const data = (await response.json()) as { eTag?: string };
-    return { etag: data.eTag };
-  }
-
-  /**
-   * Download file from SharePoint using streaming (FileOperationExecutor interface)
-   * @param {string} sharepointPath - SharePoint path (relative to basePath)
-   * @param {string} localPath - Local destination path
-   * @returns {Promise<void>}
-   */
-  async downloadFile(sharepointPath: string, localPath: string): Promise<void> {
-    return this.downloadFileStream(sharepointPath, localPath);
-  }
-
-  /**
-   * Download file from SharePoint using streaming (backward compatibility alias)
-   * @param {string} sharepointPath - SharePoint path (relative to basePath)
-   * @param {string} localPath - Local destination path
-   * @returns {Promise<void>}
-   */
-  async downloadFileStream(sharepointPath: string, localPath: string): Promise<void> {
-    // Security: block downloading .sync-state.json (internal metadata that should never be on SharePoint)
-    validateNotProtectedFile(sharepointPath, 'download');
-
-    // Validate local path for security
-    if (!this.pathValidator.validateLocalPath(localPath)) {
-      throw new Error(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
-      );
-    }
-
-    // Get file metadata with download URL
-    const fullPath = sharepointPath
-      ? `${this.config.basePath}/${sharepointPath}`
-      : this.config.basePath;
-
-    const metadataUrl = `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root:/${this.encodeGraphPath(fullPath)}`;
-    const metadataResponse = await this.callGraphAPI(metadataUrl);
-
-    if (!metadataResponse.ok) {
-      const errorData = (await metadataResponse.json()) as { error?: { message?: string } };
-      throw new Error(errorData.error?.message || 'Failed to get file metadata for download');
-    }
-
-    const metadata = (await metadataResponse.json()) as DriveItemMetadata;
-    const downloadUrl = metadata['@microsoft.graph.downloadUrl'];
-
-    if (!downloadUrl) {
-      throw new Error('No download URL available for file');
-    }
-
-    // Ensure parent directory exists
-    const parentDir = path.dirname(localPath);
-    await fs.mkdir(parentDir, { recursive: true });
-
-    // Download file using streaming
-    const downloadResponse = await fetch(downloadUrl);
-
-    if (!downloadResponse.ok) {
-      throw new Error(`Download failed with status ${downloadResponse.status}`);
-    }
-
-    if (!downloadResponse.body) {
-      throw new Error('No response body for download');
-    }
-
-    // Stream to file
-    const fileStream = createWriteStream(localPath);
-    const readable = Readable.fromWeb(downloadResponse.body as import('stream/web').ReadableStream);
-    await pipeline(readable, fileStream);
-  }
-
-  /**
-   * Delete file from SharePoint (FileOperationExecutor interface)
-   * @param {string} sharepointPath - SharePoint path (relative to basePath)
-   * @returns {Promise<void>}
-   */
-  async deleteRemoteFile(sharepointPath: string): Promise<void> {
-    if (!this.pathValidator.validatePath(sharepointPath)) {
-      throw new Error('Invalid sharepoint_path (security check failed)');
-    }
-
-    // Security: block deleting .sync-state.json (internal metadata that should never be on SharePoint)
-    validateNotProtectedFile(sharepointPath, 'delete');
-
-    const fullPath = `${this.config.basePath}/${sharepointPath}`;
-    const deleteUrl = `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root:/${this.encodeGraphPath(fullPath)}`;
-
-    const response = await this.callGraphAPI(deleteUrl, {
-      method: 'DELETE',
-    });
-
-    if (!response.ok && response.status !== 404) {
-      const errorData = (await response.json()) as { error?: { message?: string } };
-      throw new Error(errorData.error?.message || 'Failed to delete file');
-    }
-  }
-
-  //═════════════════════════════════════════════════════════════════════════════
-  // Directory Sync Methods (delegated to SyncEngine)
-  //═════════════════════════════════════════════════════════════════════════════
-
-  /**
-   * List files recursively from SharePoint
-   * @param {string} sharepointPath - SharePoint path (relative to basePath)
-   * @param {Object} [options] - Listing options
-   * @param {boolean} [options.includeEmptyFolders] - Include empty folders in the result (default: false)
-   * @returns {Promise<SyncFileEntry[]>} Array of file entries
-   */
-  async listFilesRecursive(
-    sharepointPath: string = '',
-    options?: { includeEmptyFolders?: boolean }
-  ): Promise<SyncFileEntry[]> {
-    const files: SyncFileEntry[] = [];
-    const includeEmptyFolders = options?.includeEmptyFolders ?? false;
-
-    const processDirectory = async (relativePath: string): Promise<void> => {
-      const result = await this.listFiles({ path: relativePath });
-
-      for (const item of result.files) {
-        if (item.isFolder) {
-          // Track count before processing to detect empty folders
-          const countBefore = files.length;
-
-          // Recursively process subdirectory
-          await processDirectory(item.path);
-
-          const countAfter = files.length;
-
-          // Check if folder is empty (no files added during recursive processing)
-          if (includeEmptyFolders && countAfter === countBefore) {
-            files.push({
-              path: item.path,
-              size: 0,
-              lastModified: item.lastModified || new Date().toISOString(),
-              etag: 'folder', // Special marker for empty folders
-              isFolder: true,
-            });
-          }
-        } else {
-          files.push({
-            path: item.path,
-            size: item.size || 0,
-            lastModified: item.lastModified || new Date().toISOString(),
-            etag: item.eTag || item.id, // Use actual eTag from API, fallback to ID
-            isFolder: false,
-          });
-        }
-      }
-    };
-
-    await processDirectory(sharepointPath);
-    return files;
-  }
-
-  /**
-   * Synchronize a local directory with SharePoint
-   * @param {SyncDirectoryParams} params - Sync parameters
-   * @returns {Promise<DirectorySyncResult>} Sync result
-   */
-  async syncDirectory(params: SyncDirectoryParams): Promise<DirectorySyncResult> {
-    const {
-      localPath: rawLocalPath,
-      sharepointPath: inputSharepointPath,
-      mode,
-      delete: deleteParam,
-      ignorePatterns = [],
-      dryRun = false,
-      verbose = false,
-    } = params;
-
-    // For two_way mode, delete defaults to true (OneDrive-like behavior)
-    // For pull/push modes, delete defaults to false (safe mode)
-    const deleteEnabled = deleteParam ?? mode === 'two_way';
-
-    // Validate that localPath is a string before normalization
-    if (typeof rawLocalPath !== 'string') {
-      throw new Error(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
-      );
-    }
-
-    // Normalize local path to handle edge cases like //home/... or trailing slashes
-    const inputLocalPath = path.normalize(rawLocalPath);
-
-    // Validate local path
-    if (!this.pathValidator.validateLocalPath(inputLocalPath)) {
-      throw new Error(
-        'Invalid local_path: must be /home/speedwave/.claude/context or subdirectory'
-      );
-    }
-
-    // Translate Claude container path to MCP container path
-    // Claude uses: /home/speedwave/.claude/context
-    // MCP container has it mounted at: /context
-    const localPath = this.pathValidator.translatePath(inputLocalPath);
-    debugLog(`🔄 Path translation: ${inputLocalPath} → ${localPath}`);
-
-    // Auto-calculate sharepointPath from localPath if not provided
-    // This ensures symmetry: /context/opportunities/MASŁO → context/opportunities/MASŁO
-    let sharepointPath = inputSharepointPath;
-    if (!sharepointPath) {
-      // Normalize localPath using path.resolve to handle edge cases like double slashes
-      const normalizedLocalPath = path.resolve(localPath);
-      // For /context or /context/subfolder → context or context/subfolder
-      sharepointPath = normalizedLocalPath.startsWith('/')
-        ? normalizedLocalPath.slice(1)
-        : normalizedLocalPath;
-      debugLog(`📍 Auto-calculated sharepointPath from localPath: ${sharepointPath}`);
-    }
-
-    // Security: sharepointPath must be 'context' or start with 'context/'
-    // This prevents syncing files outside the context directory (e.g., CLAUDE.md, project.json, teams/)
-    if (sharepointPath !== 'context' && !sharepointPath.startsWith('context/')) {
-      throw new Error(
-        'Invalid sharepoint_path: must be "context" or start with "context/" for security. ' +
-          'Files like CLAUDE.md and project.json are synced by speedwave sync bash script, not MCP.'
-      );
-    }
-
-    // Ensure local directory exists
-    await fs.mkdir(localPath, { recursive: true });
-
-    // List files from both sources (include empty folders for proper sync)
-    debugLog(`📂 Listing local files in ${localPath}...`);
-    let localFiles = await this.syncEngine.listLocalFilesRecursive(localPath, localPath, {
-      includeEmptyFolders: true,
-    });
-    debugLog(`   Found ${localFiles.length} local files/folders`);
-
-    debugLog(`☁️  Listing SharePoint files in ${sharepointPath || 'root'}...`);
-    let remoteFiles = await this.listFilesRecursive(sharepointPath, { includeEmptyFolders: true });
-
-    // Normalize remote file paths: strip sharepointPath prefix so paths are relative to sync root
-    // e.g., when sharepointPath='context', paths like 'context/file.txt' become 'file.txt'
-    if (sharepointPath) {
-      const prefixToStrip = sharepointPath + '/';
-      remoteFiles = remoteFiles.map((file) => ({
-        ...file,
-        path: file.path.startsWith(prefixToStrip)
-          ? file.path.slice(prefixToStrip.length)
-          : file.path === sharepointPath
-            ? ''
-            : file.path,
-      }));
-    }
-    debugLog(`   Found ${remoteFiles.length} remote files`);
-
-    // Apply user-specified ignore patterns to filter files
-    if (ignorePatterns.length > 0) {
-      debugLog(`🚫 Applying ${ignorePatterns.length} ignore patterns...`);
-      const localFilesBeforeFilter = localFiles.length;
-      const remoteFilesBeforeFilter = remoteFiles.length;
-
-      localFiles = localFiles.filter(
-        (file) => !this.pathValidator.shouldIgnoreFile(file.path, ignorePatterns)
-      );
-      remoteFiles = remoteFiles.filter(
-        (file) => !this.pathValidator.shouldIgnoreFile(file.path, ignorePatterns)
-      );
-
-      const localFilesIgnored = localFilesBeforeFilter - localFiles.length;
-      const remoteFilesIgnored = remoteFilesBeforeFilter - remoteFiles.length;
-
-      debugLog(
-        `   Filtered: ${localFilesIgnored} local files, ${remoteFilesIgnored} remote files ignored`
-      );
-    }
-
-    // Load previous sync state for OneDrive-like deletion tracking
-    const stateStore = new SyncStateStore(localPath);
-    const previousState = await stateStore.load();
-    if (previousState) {
-      debugLog(`📁 Loaded previous sync state (${Object.keys(previousState.files).length} files)`);
-    }
-
-    // Compute sync plan using SyncEngine with state
-    debugLog(`📋 Computing sync plan (mode: ${mode}, delete: ${deleteEnabled})...`);
-    const plan = this.syncEngine.computeSyncPlanWithState(
-      localFiles,
-      remoteFiles,
-      previousState,
-      mode,
-      deleteEnabled
-    );
-    debugLog(`   Plan: ${plan.summary.toUpload} uploads, ${plan.summary.toDownload} downloads`);
-    debugLog(
-      `         ${plan.summary.toDeleteLocal} local deletes, ${plan.summary.toDeleteRemote} remote deletes`
-    );
-    debugLog(`         ${plan.summary.conflicts} conflicts, ${plan.summary.skipped} unchanged`);
-
-    // Initialize result
-    const result: DirectorySyncResult = {
-      success: true,
-      plan,
-      executed: [],
-      conflicts: [],
-      errors: [],
-      summary: {
-        uploaded: 0,
-        downloaded: 0,
-        deletedLocal: 0,
-        deletedRemote: 0,
-        conflicts: 0,
-        failed: 0,
-      },
-    };
-
-    // If dry run, return plan without executing
-    if (dryRun) {
-      debugLog('🔍 Dry run - no changes made');
-      return result;
-    }
-
-    // Execute operations in batches of 50
-    const BATCH_SIZE = 50;
-    const operations = plan.operations.filter((op) => op.action !== 'skip');
-
-    for (let i = 0; i < operations.length; i += BATCH_SIZE) {
-      const batch = operations.slice(i, i + BATCH_SIZE);
-      debugLog(
-        `⚙️  Processing batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(operations.length / BATCH_SIZE)}...`
-      );
-
-      // Execute batch operations (could be parallelized but keeping sequential for safety)
-      for (const operation of batch) {
-        try {
-          const execResult = await this.syncEngine.executeSyncOperation(
-            operation,
-            localPath,
-            sharepointPath
-          );
-          // Store resultEtag from upload for state tracking
-          if (execResult.etag) {
-            operation.resultEtag = execResult.etag;
-          }
-          result.executed.push(operation);
-
-          // Log individual operation with reason
-          const reason = operation.reason ? ` (${operation.reason})` : '';
-          switch (operation.action) {
-            case 'upload':
-              debugLog(`   ⬆️  Upload: ${operation.path}${reason}`);
-              result.summary.uploaded++;
-              break;
-            case 'download':
-              debugLog(`   ⬇️  Download: ${operation.path}${reason}`);
-              result.summary.downloaded++;
-              break;
-            case 'delete_local':
-              debugLog(`   🗑️  Delete local: ${operation.path}${reason}`);
-              result.summary.deletedLocal++;
-              break;
-            case 'delete_remote':
-              debugLog(`   🗑️  Delete remote: ${operation.path}${reason}`);
-              result.summary.deletedRemote++;
-              break;
-            case 'conflict':
-              debugLog(`   ⚠️  Conflict: ${operation.path}${reason}`);
-              result.summary.conflicts++;
-              result.conflicts.push(operation.path);
-              break;
-          }
-        } catch (error) {
-          result.errors.push({
-            path: operation.path,
-            error: error instanceof Error ? error.message : String(error),
-          });
-          result.summary.failed++;
-          result.success = false;
-        }
-      }
-    }
-
-    debugLog(
-      `✅ Sync complete: ${result.summary.uploaded} uploaded, ${result.summary.downloaded} downloaded`
-    );
-    if (result.errors.length > 0) {
-      debugLog(`⚠️  ${result.errors.length} errors occurred`);
-    }
-
-    // Save new sync state after successful sync (or partial success)
-    if (result.success || result.executed.length > 0) {
-      const newState = buildSyncStateFromResults(
-        localFiles,
-        remoteFiles,
-        result.executed,
-        sharepointPath
-      );
-      await stateStore.save(newState);
-      debugLog(`💾 Saved sync state (${Object.keys(newState.files).length} files)`);
-    }
-
-    // Slim response mode (default) - exclude large arrays to save tokens (~97% reduction)
-    // Full plan.operations[] and executed[] are only needed for debugging
-    // Exception: dryRun mode always returns full plan.operations (that's the whole point of dry run)
-    if (!verbose && !dryRun) {
-      return {
-        ...result,
-        plan: { ...result.plan, operations: [] },
-        executed: [],
-      };
-    }
-
-    return result;
   }
 }
 

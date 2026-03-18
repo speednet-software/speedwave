@@ -45,18 +45,12 @@ export class ChatStateService {
     return this._sessionStats;
   }
 
-  containerStatus: 'checking' | 'starting' | 'switching' | 'running' | 'error' = 'checking';
-  containerError = '';
-  /** The currently active project name, set during checkContainers. */
-  activeProject: string | null = null;
-
   private unlisten: UnlistenFn | null = null;
   private listenerReady = false;
   private initialized = false;
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private unsubProjectChange: (() => void) | null = null;
-  private unsubProjectSettled: (() => void) | null = null;
 
   /**
    * Test-only setter for private backing fields.
@@ -96,7 +90,7 @@ export class ChatStateService {
     }
   }
 
-  /** Ensures the stream listener and container check run exactly once. */
+  /** Ensures the stream listener runs exactly once. Waits for project ready before starting chat. */
   async init(): Promise<void> {
     if (!this.listenerReady) {
       this.listenerReady = true;
@@ -105,41 +99,31 @@ export class ChatStateService {
     }
     if (!this.initialized) {
       this.initialized = true;
-      await this.checkContainers();
+      // Wait for containers to be ready before starting chat session.
+      // ProjectStateService guarantees containers are running when status='ready'.
+      if (this.projectState.status === 'ready') {
+        await this.startChatSession();
+      } else {
+        const unsub = this.projectState.onProjectReady(async () => {
+          unsub();
+          await this.startChatSession();
+        });
+      }
     }
   }
 
-  /** Verifies that project containers are running and starts them if needed. */
-  async checkContainers(): Promise<void> {
-    this.containerStatus = 'checking';
-    this.containerError = '';
-    this.notifyChange();
-
-    try {
-      const result = await this.tauri.invoke<ProjectList>('list_projects');
-      const project = result.active_project;
-      this.activeProject = project;
-      if (!project) {
-        this.containerStatus = 'error';
-        this.containerError = 'No active project selected. Please select a project first.';
+  private async startChatSession(): Promise<void> {
+    const project = this.projectState.activeProject;
+    if (project) {
+      try {
+        await this.tauri.invoke('start_chat', { project });
+      } catch (err) {
+        console.error('Failed to start chat session:', err);
+        this.projectState.status = 'error';
+        this.projectState.error = `Failed to start chat session: ${err}`;
         this.notifyChange();
-        return;
       }
-
-      const running = await this.tauri.invoke<boolean>('check_containers_running', { project });
-      if (!running) {
-        this.containerStatus = 'starting';
-        this.notifyChange();
-        await this.tauri.invoke('start_containers', { project });
-      }
-
-      await this.tauri.invoke('start_chat', { project });
-      this.containerStatus = 'running';
-    } catch (err) {
-      this.containerStatus = 'error';
-      this.containerError = String(err);
     }
-    this.notifyChange();
   }
 
   /**
@@ -367,7 +351,6 @@ export class ChatStateService {
   /**
    * Subscribes to ProjectStateService for project switching lifecycle.
    * On switching: clears chat state immediately (cross-project leak prevention).
-   * On settled: syncs local state with backend reality (chat already started by backend).
    */
   private setupProjectStateListeners(): void {
     this.unsubProjectChange = this.projectState.onChange(() => {
@@ -376,18 +359,8 @@ export class ChatStateService {
         this._currentBlocks = [];
         this.isStreaming = false;
         this._sessionStats = null;
-        this.containerStatus = 'switching';
-        this.containerError = '';
         this.notifyChange();
       }
-    });
-
-    this.unsubProjectSettled = this.projectState.onProjectSettled(() => {
-      const project = this.projectState.activeProject;
-      this.activeProject = project;
-      this.containerStatus = project ? 'running' : 'error';
-      this.containerError = this.projectState.error;
-      this.notifyChange();
     });
   }
 
@@ -400,9 +373,8 @@ export class ChatStateService {
     } catch (err) {
       if (this.tauri.isRunningInTauri()) {
         console.error('Failed to set up stream listener:', err);
-        this.containerStatus = 'error';
-        this.containerError = `Stream listener failed: ${err}`;
-        this.notifyChange();
+        this.projectState.status = 'error';
+        this.projectState.error = `Failed to set up stream listener: ${err}`;
       }
     }
   }

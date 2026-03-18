@@ -24,6 +24,25 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=e2e-common.sh
 source "${SCRIPT_DIR}/e2e-common.sh"
 
+# SSOT: exclude list for repo transfers to remote E2E machines.
+# All 3 transfer functions (linux_rsync_to, macos_rsync_to, windows_rsync_to)
+# reference this array. Each remote machine downloads its own platform assets.
+E2E_RSYNC_EXCLUDES=(
+    node_modules target dist .e2e-artifacts .git build-context
+    .angular .build
+    'desktop/src-tauri/lima'
+    'desktop/src-tauri/nerdctl-full'
+    'desktop/src-tauri/nodejs'
+    'desktop/src-tauri/wsl'
+    'desktop/src-tauri/cli'
+    'desktop/src-tauri/mcp-os'
+    'desktop/src-tauri/THIRD-PARTY-LICENSES'
+    'desktop/src-tauri/calendar-cli'
+    'desktop/src-tauri/mail-cli'
+    'desktop/src-tauri/notes-cli'
+    'desktop/src-tauri/reminders-cli'
+)
+
 # Override SSH opts with keepalive for long-running test sessions.
 LINUX_SSH_OPTS="$SSH_OPTS_BASE -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
 WINDOWS_SSH_OPTS="$SSH_OPTS_BASE -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -p $WINDOWS_SSH_PORT"
@@ -78,10 +97,11 @@ ensure_provisioned_macos() {
 # Copy files to the Linux machine via rsync-over-ssh.
 linux_rsync_to() {
     local src="$1" dst="$2"
+    local -a exclude_args=()
+    for e in "${E2E_RSYNC_EXCLUDES[@]}"; do exclude_args+=(--exclude "$e"); done
     # shellcheck disable=SC2086
     rsync -az -e "ssh $LINUX_SSH_OPTS" --delete \
-        --exclude node_modules --exclude target --exclude dist \
-        --exclude .e2e-artifacts --exclude .git --exclude build-context \
+        "${exclude_args[@]}" \
         "$src" "${LINUX_HOST}:${dst}"
 }
 
@@ -118,7 +138,7 @@ if [ -x "$NERDCTL" ]; then
         | xargs -r "$NERDCTL" rm -f 2>/dev/null || true
 fi
 # Remove installed .deb if present
-sudo dpkg --remove speedwave-desktop 2>/dev/null || true
+sudo dpkg --remove speedwave 2>/dev/null || sudo dpkg --remove speedwave-desktop 2>/dev/null || true
 sudo apt-get autoremove -y 2>/dev/null || true
 # Stop rootless containerd (installed as systemd --user service by setup wizard)
 systemctl --user stop containerd 2>/dev/null || true
@@ -126,6 +146,11 @@ systemctl --user disable containerd 2>/dev/null || true
 # Remove containerd user service file and state
 rm -f ~/.config/systemd/user/containerd.service 2>/dev/null || true
 systemctl --user daemon-reload 2>/dev/null || true
+# Kill rootlesskit process tree (containerd runs inside rootlesskit in rootless mode).
+# Without this, stale containerd processes hold locks on snapshot directories,
+# causing "failed to rename: file exists" errors in the next test run.
+pkill -9 -f 'rootlesskit.*containerd' 2>/dev/null || true
+sleep 1
 # Remove containerd rootless data (images, snapshots, state)
 rm -rf ~/.local/share/containerd ~/.local/share/buildkit ~/.local/share/nerdctl 2>/dev/null || true
 rm -rf /run/user/$(id -u)/containerd-rootless 2>/dev/null || true
@@ -195,7 +220,10 @@ windows_rsync_to() {
     local src="$1" dst="$2"
     # --no-mac-metadata and --exclude='._*' prevent macOS resource forks (._file)
     # from being included — these cause "not valid UTF-8" errors in Tauri builds.
-    local -a tar_excludes=(--exclude=node_modules --exclude=target --exclude=dist --exclude=.e2e-artifacts --exclude=.git '--exclude=._*' --exclude=.angular --exclude=.build --exclude=build-context)
+    local -a tar_excludes=()
+    for e in "${E2E_RSYNC_EXCLUDES[@]}"; do tar_excludes+=("--exclude=$e"); done
+    # Windows-specific extras (macOS resource forks)
+    tar_excludes+=('--exclude=._*')
     local -a tar_flags=(--no-mac-metadata)
     # Ensure the WSL distro is running before proceeding — wsl.exe may need
     # time to restart after a --unregister of another distro shut down the VM.
@@ -354,10 +382,11 @@ CLEAN
 # Copy files to the macOS machine via rsync-over-ssh.
 macos_rsync_to() {
     local src="$1" dst="$2"
+    local -a exclude_args=()
+    for e in "${E2E_RSYNC_EXCLUDES[@]}"; do exclude_args+=(--exclude "$e"); done
     # shellcheck disable=SC2086
     rsync -az -e "ssh $MACOS_SSH_OPTS" --delete \
-        --exclude node_modules --exclude target --exclude dist \
-        --exclude .e2e-artifacts --exclude .git --exclude build-context \
+        "${exclude_args[@]}" \
         "$src" "${MACOS_HOST}:${dst}"
 }
 
@@ -427,6 +456,11 @@ run_linux() {
 set -euo pipefail
 cd /tmp/speedwave-e2e
 export PATH="$HOME/.cargo/bin:$PATH"
+# Limit cargo parallelism to half the CPU cores to avoid freezing the GUI desktop.
+# Full parallelism (22 threads on this machine) starves X11/Wayland compositor.
+TOTAL_CPUS=$(nproc 2>/dev/null || echo 8)
+export CARGO_BUILD_JOBS=$(( TOTAL_CPUS / 2 > 1 ? TOTAL_CPUS / 2 : 2 ))
+echo "── Using CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS (of $TOTAL_CPUS cores)"
 
 npm ci
 cd mcp-servers && npm ci && cd ..
@@ -523,7 +557,9 @@ pkill -f Xvfb 2>/dev/null || true
 sleep 1
 
 # E2E tests create a project with this directory — it must exist.
-mkdir -p /tmp/speedwave-e2e-project
+# Clean first to remove stale .speedwave.json from previous runs.
+rm -rf /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
+mkdir -p /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
 
 # Ubuntu 24.04 defaults to Wayland — there may be no X server available.
 # Xvfb provides a virtual X11 framebuffer — no real display or Wayland needed.
@@ -550,6 +586,7 @@ for i in $(seq 1 15); do
 done
 
 export E2E_PROJECT_DIR=/tmp/speedwave-e2e-project
+export E2E_SECOND_PROJECT_DIR=/tmp/speedwave-e2e-project-2
 cd /tmp/speedwave-e2e && node_modules/.bin/wdio run wdio.conf.ts
 E2E_EXIT=$?
 
@@ -804,9 +841,15 @@ if (-not (Test-Path $appExe)) {
 }
 
 # E2E tests create a project with this directory — it must exist.
+# Clean first to remove stale .speedwave.json from previous runs.
 $e2eProjectDir = "$env:TEMP\speedwave-e2e-project"
+$e2eSecondProjectDir = "$env:TEMP\speedwave-e2e-project-2"
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $e2eProjectDir
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $e2eSecondProjectDir
 New-Item -ItemType Directory -Path $e2eProjectDir -Force | Out-Null
+New-Item -ItemType Directory -Path $e2eSecondProjectDir -Force | Out-Null
 $env:E2E_PROJECT_DIR = $e2eProjectDir
+$env:E2E_SECOND_PROJECT_DIR = $e2eSecondProjectDir
 
 Write-Host "── Launching $appExe in interactive session..."
 # SSH runs in session 0 (services) which has no desktop.
@@ -1005,7 +1048,9 @@ pkill -f 'mcp-os.*index.js' 2>/dev/null || true
 sleep 1
 
 # E2E tests create a project with this directory — it must exist.
-mkdir -p /tmp/speedwave-e2e-project
+# Clean first to remove stale .speedwave.json from previous runs.
+rm -rf /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
+mkdir -p /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
 
 # Launch the app in the background.
 # macOS requires a GUI session — SSH must connect to a user with an active
@@ -1033,6 +1078,7 @@ for i in $(seq 1 30); do
 done
 
 export E2E_PROJECT_DIR=/tmp/speedwave-e2e-project
+export E2E_SECOND_PROJECT_DIR=/tmp/speedwave-e2e-project-2
 cd /tmp/speedwave-e2e && node_modules/.bin/wdio run wdio.conf.ts
 E2E_EXIT=$?
 

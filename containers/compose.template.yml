@@ -4,7 +4,8 @@
 
 services:
   claude:
-    image: speedwave-claude:latest
+    image: ${IMAGE_CLAUDE}
+    pull_policy: never
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_claude
     read_only: true
     user: "${CONTAINER_USER}"
@@ -35,10 +36,11 @@ services:
       resources:
         limits:
           cpus: '2.0'
-          memory: 4g
+          memory: 8g
 
   mcp-hub:
-    image: speedwave-mcp-hub:latest
+    image: ${IMAGE_MCP_HUB}
+    pull_policy: never
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_hub
     read_only: true
     user: "${CONTAINER_USER}"
@@ -63,7 +65,8 @@ services:
           memory: 512m
 
   mcp-slack:
-    image: speedwave-mcp-slack:latest
+    image: ${IMAGE_MCP_SLACK}
+    pull_policy: never
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_slack
     read_only: true
     user: "${CONTAINER_USER}"
@@ -86,7 +89,8 @@ services:
           memory: 256m
 
   mcp-sharepoint:
-    image: speedwave-mcp-sharepoint:latest
+    image: ${IMAGE_MCP_SHAREPOINT}
+    pull_policy: never
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_sharepoint
     read_only: true
     user: "${CONTAINER_USER}"
@@ -100,6 +104,7 @@ services:
       # :rw required — SharePoint OAuth tokens expire and token-manager.ts
       # writes refreshed access_token / refresh_token back to /tokens/
       - ${TOKENS_DIR}/sharepoint:/tokens:rw
+      - ${PROJECT_DIR}:/workspace:rw
     environment:
       - PORT=${PORT_SHAREPOINT}
     networks:
@@ -111,7 +116,8 @@ services:
           memory: 256m
 
   mcp-redmine:
-    image: speedwave-mcp-redmine:latest
+    image: ${IMAGE_MCP_REDMINE}
+    pull_policy: never
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_redmine
     read_only: true
     user: "${CONTAINER_USER}"
@@ -134,7 +140,8 @@ services:
           memory: 256m
 
   mcp-gitlab:
-    image: speedwave-mcp-gitlab:latest
+    image: ${IMAGE_MCP_GITLAB}
+    pull_policy: never
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_gitlab
     read_only: true
     user: "${CONTAINER_USER}"

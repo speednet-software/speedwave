@@ -13,16 +13,26 @@ import { ToolNormalizerService } from '../../services/tool-normalizer.service';
   selector: 'app-tool-block',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block my-2' },
   template: `
-    <div class="tool-block">
+    <div class="bg-sw-bg-dark border border-sw-border rounded-md">
       <div
-        class="tool-header"
+        class="flex items-center px-3 py-2 cursor-pointer gap-2"
         role="button"
         tabindex="0"
         (click)="toggleCollapsed()"
         (keydown.enter)="toggleCollapsed()"
       >
-        <span class="tool-status" [class]="'tool-status-' + tool.status">
+        <span
+          data-testid="tool-status"
+          [class]="
+            tool.status === 'running'
+              ? 'text-sw-warning'
+              : tool.status === 'done'
+                ? 'text-sw-success-light'
+                : 'text-sw-error-light'
+          "
+        >
           @switch (tool.status) {
             @case ('running') {
               &#x25CB;
@@ -35,33 +45,61 @@ import { ToolNormalizerService } from '../../services/tool-normalizer.service';
             }
           }
         </span>
-        <span class="tool-name">{{ tool.tool_name }}</span>
-        <span class="tool-summary">{{ headerSummary }}</span>
+        <span data-testid="tool-name" class="font-bold text-sw-accent text-[13px]">{{
+          tool.tool_name
+        }}</span>
+        <span
+          data-testid="tool-summary"
+          class="text-sw-text-muted text-xs overflow-hidden text-ellipsis whitespace-nowrap flex-1"
+          >{{ headerSummary }}</span
+        >
       </div>
       @if (!isCollapsed()) {
-        <div class="tool-body">
+        <div data-testid="tool-body" class="px-3 pb-3">
           @switch (normalized.kind) {
             @case ('bash') {
-              <div class="terminal-output">
-                <pre>$ {{ asBash(normalized).command }}</pre>
+              <div
+                data-testid="terminal-output"
+                class="bg-sw-bg-input text-sw-code-lime font-mono p-3 rounded overflow-x-auto"
+              >
+                <pre class="m-0 bg-transparent p-0">$ {{ asBash(normalized).command }}</pre>
               </div>
             }
             @case ('read') {
-              <div class="file-path">{{ asRead(normalized).file_path }}</div>
+              <div data-testid="file-path" class="text-sw-code-blue text-xs mb-1 font-mono">
+                {{ asRead(normalized).file_path }}
+              </div>
             }
             @case ('write') {
-              <div class="file-path">{{ asWrite(normalized).file_path }}</div>
-              <pre class="code-block">{{ asWrite(normalized).content }}</pre>
+              <div data-testid="file-path" class="text-sw-code-blue text-xs mb-1 font-mono">
+                {{ asWrite(normalized).file_path }}
+              </div>
+              <pre
+                data-testid="code-block"
+                class="bg-sw-bg-abyss text-sw-text p-3 rounded overflow-x-auto text-[13px] my-1"
+                >{{ asWrite(normalized).content }}</pre
+              >
             }
             @case ('edit') {
-              <div class="file-path">{{ asEdit(normalized).file_path }}</div>
-              <div class="diff-block">
+              <div data-testid="file-path" class="text-sw-code-blue text-xs mb-1 font-mono">
+                {{ asEdit(normalized).file_path }}
+              </div>
+              <div
+                class="bg-sw-bg-abyss p-3 rounded overflow-x-auto text-[13px] my-1 font-mono whitespace-pre-wrap"
+              >
                 @for (
                   line of diffLines(asEdit(normalized).old_string, asEdit(normalized).new_string);
                   track $index
                 ) {
                   <div
                     [class]="
+                      line.startsWith('+')
+                        ? 'bg-[rgba(34,197,94,0.15)] text-sw-code-green'
+                        : line.startsWith('-')
+                          ? 'bg-[rgba(239,68,68,0.15)] text-sw-code-red'
+                          : 'text-sw-text'
+                    "
+                    [attr.data-testid]="
                       line.startsWith('+')
                         ? 'diff-add'
                         : line.startsWith('-')
@@ -75,29 +113,41 @@ import { ToolNormalizerService } from '../../services/tool-normalizer.service';
               </div>
             }
             @case ('glob') {
-              <div class="tool-detail">
-                Pattern: <code>{{ asGlob(normalized).pattern }}</code>
+              <div class="text-sw-text-lavender text-[13px]">
+                Pattern:
+                <code class="bg-sw-bg-abyss px-1.5 py-0.5 rounded-sm">{{
+                  asGlob(normalized).pattern
+                }}</code>
               </div>
             }
             @case ('grep') {
-              <div class="tool-detail">
-                Pattern: <code>{{ asGrep(normalized).pattern }}</code>
+              <div class="text-sw-text-lavender text-[13px]">
+                Pattern:
+                <code class="bg-sw-bg-abyss px-1.5 py-0.5 rounded-sm">{{
+                  asGrep(normalized).pattern
+                }}</code>
               </div>
             }
             @case ('web_search') {
-              <div class="tool-detail">Query: {{ asWebSearch(normalized).query }}</div>
+              <div class="text-sw-text-lavender text-[13px]">
+                Query: {{ asWebSearch(normalized).query }}
+              </div>
             }
             @case ('web_fetch') {
-              <div class="tool-detail">URL: {{ asWebFetch(normalized).url }}</div>
+              <div class="text-sw-text-lavender text-[13px]">
+                URL: {{ asWebFetch(normalized).url }}
+              </div>
             }
             @case ('agent') {
-              <div class="tool-detail">{{ asAgent(normalized).description }}</div>
+              <div class="text-sw-text-lavender text-[13px]">
+                {{ asAgent(normalized).description }}
+              </div>
             }
             @case ('todo_write') {
-              <div class="todo-list">
+              <div class="flex flex-col gap-1">
                 @for (todo of asTodoWrite(normalized).todos; track todo.id) {
-                  <div class="todo-item">
-                    <span class="todo-status">{{
+                  <div class="text-sw-text text-[13px]">
+                    <span class="font-mono mr-1">{{
                       todo.status === 'completed' ? '[x]' : '[ ]'
                     }}</span>
                     {{ todo.title }}
@@ -106,157 +156,40 @@ import { ToolNormalizerService } from '../../services/tool-normalizer.service';
               </div>
             }
             @default {
-              <pre class="code-block">{{ asGeneric(normalized).raw_json }}</pre>
+              <pre
+                data-testid="code-block"
+                class="bg-sw-bg-abyss text-sw-text p-3 rounded overflow-x-auto text-[13px] my-1"
+                >{{ asGeneric(normalized).raw_json }}</pre
+              >
             }
           }
           @if (tool.status !== 'running') {
-            <div class="tool-result" [class.tool-result-error]="tool.result_is_error">
-              <div class="result-label">{{ tool.result_is_error ? 'Error' : 'Result' }}</div>
-              <pre class="result-content">{{ tool.result }}</pre>
+            <div
+              data-testid="tool-result"
+              class="mt-2 border-t border-sw-border pt-2"
+              [attr.data-error]="tool.result_is_error ? 'true' : null"
+              [class.text-sw-error-light]="tool.result_is_error"
+            >
+              <div
+                data-testid="result-label"
+                [class]="
+                  tool.result_is_error
+                    ? 'text-sw-error-light text-[11px] uppercase mb-1'
+                    : 'text-sw-code-gray text-[11px] uppercase mb-1'
+                "
+              >
+                {{ tool.result_is_error ? 'Error' : 'Result' }}
+              </div>
+              <pre
+                data-testid="result-content"
+                class="bg-sw-bg-abyss text-sw-text p-2 rounded overflow-x-auto text-xs max-h-[300px] overflow-y-auto m-0"
+                >{{ tool.result }}</pre
+              >
             </div>
           }
         </div>
       }
     </div>
-  `,
-  styles: `
-    :host {
-      display: block;
-      margin: 8px 0;
-    }
-    .tool-block {
-      background: #16213e;
-      border: 1px solid #0f3460;
-      border-radius: 6px;
-    }
-    .tool-header {
-      display: flex;
-      align-items: center;
-      padding: 8px 12px;
-      cursor: pointer;
-      gap: 8px;
-    }
-    .tool-name {
-      font-weight: bold;
-      color: #e94560;
-      font-size: 13px;
-    }
-    .tool-summary {
-      color: #888;
-      font-size: 12px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      flex: 1;
-    }
-    .tool-status-running {
-      color: #fbbf24;
-    }
-    .tool-status-done {
-      color: #34d399;
-    }
-    .tool-status-error {
-      color: #f87171;
-    }
-    .tool-body {
-      padding: 0 12px 12px;
-    }
-    .file-path {
-      color: #93c5fd;
-      font-size: 12px;
-      margin-bottom: 4px;
-      font-family: monospace;
-    }
-    .code-block {
-      background: #0d1b2a;
-      color: #e0e0e0;
-      padding: 12px;
-      border-radius: 4px;
-      overflow-x: auto;
-      font-size: 13px;
-      margin: 4px 0;
-    }
-    .diff-block {
-      background: #0d1b2a;
-      padding: 12px;
-      border-radius: 4px;
-      overflow-x: auto;
-      font-size: 13px;
-      margin: 4px 0;
-      font-family: monospace;
-      white-space: pre-wrap;
-    }
-    .diff-add {
-      background: rgba(34, 197, 94, 0.15);
-      color: #86efac;
-    }
-    .diff-remove {
-      background: rgba(239, 68, 68, 0.15);
-      color: #fca5a5;
-    }
-    .diff-ctx {
-      color: #e0e0e0;
-    }
-    .terminal-output {
-      background: #0d0d0d;
-      color: #a3e635;
-      font-family: monospace;
-      padding: 12px;
-      border-radius: 4px;
-      overflow-x: auto;
-    }
-    .terminal-output pre {
-      margin: 0;
-      background: none;
-      padding: 0;
-    }
-    .tool-detail {
-      color: #a0a0c0;
-      font-size: 13px;
-    }
-    .tool-detail code {
-      background: #0d1b2a;
-      padding: 2px 6px;
-      border-radius: 3px;
-    }
-    .todo-list {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
-    .todo-item {
-      color: #e0e0e0;
-      font-size: 13px;
-    }
-    .todo-status {
-      font-family: monospace;
-      margin-right: 4px;
-    }
-    .tool-result {
-      margin-top: 8px;
-      border-top: 1px solid #0f3460;
-      padding-top: 8px;
-    }
-    .tool-result-error .result-label {
-      color: #f87171;
-    }
-    .result-label {
-      color: #6b7280;
-      font-size: 11px;
-      text-transform: uppercase;
-      margin-bottom: 4px;
-    }
-    .result-content {
-      background: #0d1b2a;
-      color: #e0e0e0;
-      padding: 8px;
-      border-radius: 4px;
-      overflow-x: auto;
-      font-size: 12px;
-      max-height: 300px;
-      overflow-y: auto;
-      margin: 0;
-    }
   `,
 })
 export class ToolBlockComponent {

@@ -18,7 +18,7 @@
  *
  * Security Model:
  * ✅ AsyncFunction sandbox (restricted globals, no eval/require)
- * ✅ Execution timeout (2 min standard, 5 min for long operations like sync)
+ * ✅ Execution timeout (2 min standard, 5 min for long operations like file transfers)
  * ✅ PII tokenization (sensitive data never reaches model)
  * ✅ Docker network isolation (no exposed ports)
  * ✅ Rate limiting (100 req/min per session)
@@ -148,7 +148,7 @@ Available globals:
 - redmine: listIssueIds, getIssueFull, searchIssueIds, createIssue, updateIssue, ...
 - gitlab: listProjectIds, getProjectFull, listMrIds, getMrFull, listPipelineIds, getPipelineFull, ...
 - slack: listChannelIds, getChannelMessages, sendChannel
-- sharepoint: listFileIds, getFileFull, sync
+- sharepoint: listFileIds, getFileFull, downloadFile, uploadFile
 - os: listReminders, createReminder, listEvents, createEvent, listEmails, sendEmail, listNotes, createNote, ...
 - batch(promises): Parallel execution with partial failure support
   ⚠️ Returns { results: T[], errors: [{index, error}] } - ALWAYS destructure!
@@ -182,7 +182,7 @@ return { total: results.length, failed: errors.length };
         },
         timeout_ms: {
           type: 'number',
-          description: `Execution timeout in milliseconds (default: ${TIMEOUTS.EXECUTION_MS}ms, max: ${TIMEOUTS.EXECUTION_MS}ms). For long operations (sharepoint.sync) timeout auto-extends to ${TIMEOUTS.LONG_OPERATION_MS}ms.`,
+          description: `Execution timeout in milliseconds (default: ${TIMEOUTS.EXECUTION_MS}ms, max: ${TIMEOUTS.EXECUTION_MS}ms). For long operations (sharepoint.downloadFile, sharepoint.uploadFile) timeout auto-extends to ${TIMEOUTS.LONG_OPERATION_MS}ms.`,
         },
       },
       required: ['code'],

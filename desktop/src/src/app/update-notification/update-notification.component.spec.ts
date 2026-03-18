@@ -14,6 +14,8 @@ describe('UpdateNotificationComponent', () => {
 
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
+        case 'get_platform':
+          return 'macos';
         case 'check_for_update':
           return null;
         case 'list_projects':
@@ -32,6 +34,7 @@ describe('UpdateNotificationComponent', () => {
 
     fixture = TestBed.createComponent(UpdateNotificationComponent);
     component = fixture.componentInstance;
+    await fixture.whenStable();
   });
 
   it('creates the component', () => {
@@ -45,10 +48,10 @@ describe('UpdateNotificationComponent', () => {
       expect(component.dismissed).toBe(true);
     });
 
-    it('resets confirmRestart to false', () => {
-      component.confirmRestart = true;
+    it('resets confirmUpdate to false', () => {
+      component.confirmUpdate = true;
       component.dismiss();
-      expect(component.confirmRestart).toBe(false);
+      expect(component.confirmUpdate).toBe(false);
     });
   });
 
@@ -59,7 +62,7 @@ describe('UpdateNotificationComponent', () => {
       let resolveFn!: () => void;
       mockTauri.invokeHandler = (cmd: string) =>
         new Promise<void>((resolve) => {
-          if (cmd === 'install_update') {
+          if (cmd === 'install_update_and_reconcile') {
             resolveFn = resolve;
           } else {
             resolve();
@@ -70,12 +73,13 @@ describe('UpdateNotificationComponent', () => {
       expect(component.installing).toBe(true);
       resolveFn();
       await promise;
-      expect(invokeSpy).toHaveBeenCalledWith('install_update', {
+      expect(invokeSpy).toHaveBeenCalledWith('install_update_and_reconcile', {
         expectedVersion: '1.0.0',
       });
+      expect(component.installing).toBe(false);
     });
 
-    it('clears error and sets installing before invoking', async () => {
+    it('clears error before invoking the update flow', async () => {
       component.updateInfo = { version: '1.0.0', body: null, date: null, is_critical: false };
       component.error = 'previous error';
       mockTauri.invokeHandler = async () => undefined;
@@ -85,10 +89,11 @@ describe('UpdateNotificationComponent', () => {
       expect(component.error).toBe('');
     });
 
-    it('sets error and resets installing on failure', async () => {
+    it('sets error and resets confirmUpdate on failure', async () => {
       component.updateInfo = { version: '1.0.0', body: null, date: null, is_critical: false };
+      component.confirmUpdate = true;
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'install_update') throw new Error('install failed');
+        if (cmd === 'install_update_and_reconcile') throw new Error('install failed');
         return null;
       };
 
@@ -96,57 +101,17 @@ describe('UpdateNotificationComponent', () => {
 
       expect(component.installing).toBe(false);
       expect(component.error).toBe('install failed');
-      expect(component.confirmRestart).toBe(false);
+      expect(component.confirmUpdate).toBe(false);
     });
 
-    it('passes expectedVersion to install_update', async () => {
+    it('passes expectedVersion to install_update_and_reconcile', async () => {
       component.updateInfo = { version: '1.2.3', body: null, date: null, is_critical: false };
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       mockTauri.invokeHandler = async () => undefined;
       await component.installAndRestart();
-      expect(invokeSpy).toHaveBeenCalledWith('install_update', { expectedVersion: '1.2.3' });
-    });
-
-    it('passes expectedVersion for critical update', async () => {
-      component.updateInfo = { version: '2.0.0', body: null, date: null, is_critical: true };
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      mockTauri.invokeHandler = async () => undefined;
-      await component.installAndRestart();
-      expect(invokeSpy).toHaveBeenCalledWith('install_update', { expectedVersion: '2.0.0' });
-    });
-  });
-
-  describe('restartApp()', () => {
-    it('calls restart_app with force false', async () => {
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      mockTauri.invokeHandler = async () => undefined;
-      await component.restartApp();
-      expect(invokeSpy).toHaveBeenCalledWith('restart_app', { force: false });
-    });
-
-    it('clears previous error before invoking', async () => {
-      component.error = 'old error';
-      mockTauri.invokeHandler = async () => undefined;
-      await component.restartApp();
-      expect(component.error).toBe('');
-    });
-
-    it('sets error and resets confirmRestart on failure', async () => {
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'restart_app') throw new Error('containers running');
-        return undefined;
-      };
-
-      await component.restartApp();
-
-      expect(component.error).toBe('containers running');
-      expect(component.confirmRestart).toBe(false);
-    });
-  });
-
-  describe('confirmRestart flow', () => {
-    it('starts with confirmRestart false', () => {
-      expect(component.confirmRestart).toBe(false);
+      expect(invokeSpy).toHaveBeenCalledWith('install_update_and_reconcile', {
+        expectedVersion: '1.2.3',
+      });
     });
   });
 
@@ -180,8 +145,7 @@ describe('UpdateNotificationComponent', () => {
 
       const linuxFixture = TestBed.createComponent(UpdateNotificationComponent);
       const linuxComponent = linuxFixture.componentInstance;
-      // Wait for setupListeners to complete
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await linuxFixture.whenStable();
       expect(linuxComponent.isLinux).toBe(true);
     });
   });
@@ -200,7 +164,7 @@ describe('UpdateNotificationComponent', () => {
       mockTauri.invokeHandler = async () => {
         throw new Error('not in Tauri');
       };
-      await expect(component.openReleasesPage()).resolves.not.toThrow();
+      await expect(component.openReleasesPage()).resolves.toBeUndefined();
     });
   });
 });

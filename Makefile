@@ -26,7 +26,7 @@ LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
 
 .PHONY: all build test check clean dev install-deps setup-dev install-hooks \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
-        build-native-macos build-os-cli \
+        build-native-macos build-os-cli bundle-native-assets verify-bundled-assets \
         test-rust test-cli test-desktop test-angular test-mcp test-os test-e2e test-entrypoint test-desktop-build \
         test-e2e-desktop _e2e-macos _e2e-linux _e2e-windows test-e2e-all setup-e2e-vms \
         check-clippy check-desktop-clippy check-angular check-mcp check-fmt \
@@ -188,31 +188,54 @@ build-cli:
 build-desktop:
 	cd desktop/src-tauri && cargo build
 
-build-tauri: build-cli build-angular build-mcp download-nodejs
+build-tauri: build-cli build-angular build-mcp build-os-cli download-nodejs
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) download-lima; fi
 	@if [ "$$(uname)" = "Linux" ]; then $(MAKE) download-nerdctl-full; fi
+	@if [ "$(OS)" = "Windows_NT" ]; then $(MAKE) download-wsl-resources; fi
 	@scripts/bundle-build-context.sh
+	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
 	mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
 else
 	cp target/debug/speedwave desktop/src-tauri/cli/speedwave
 endif
+	@$(MAKE) verify-bundled-assets
 	cd desktop/src-tauri && cargo tauri build
 	@echo "\n✅ Tauri production bundle built"
 
 # ── Native OS CLI builds (macOS: Swift, Linux/Windows: Rust — planned) ───────
 
 build-native-macos:
-	@if [ "$$(uname)" != "Darwin" ]; then echo "⬚  Skipping macOS native build (not macOS)"; exit 0; fi
-	@echo "🔨 Building macOS native CLI binaries..."
-	cd native/macos/reminders && swift build -c release
-	cd native/macos/calendar && swift build -c release
-	cd native/macos/mail && swift build -c release
-	cd native/macos/notes && swift build -c release
-	@echo "✅ macOS native CLI binaries built"
+	@if [ "$$(uname)" != "Darwin" ]; then \
+		echo "⬚  Skipping macOS native build (not macOS)"; \
+	else \
+		echo "🔨 Building macOS native CLI binaries..." && \
+		cd $(CURDIR)/native/macos/reminders && swift build -c release && \
+		cd $(CURDIR)/native/macos/calendar && swift build -c release && \
+		cd $(CURDIR)/native/macos/mail && swift build -c release && \
+		cd $(CURDIR)/native/macos/notes && swift build -c release && \
+		echo "✅ macOS native CLI binaries built"; \
+	fi
 
 build-os-cli: build-native-macos
+
+bundle-native-assets:
+	@scripts/bundle-native-assets.sh
+
+verify-bundled-assets:
+ifeq ($(OS),Windows_NT)
+	@scripts/verify-bundled-assets.sh windows
+else
+	@if [ "$$(uname)" = "Darwin" ]; then \
+		scripts/verify-bundled-assets.sh macos; \
+	elif [ "$$(uname)" = "Linux" ]; then \
+		scripts/verify-bundled-assets.sh linux; \
+	else \
+		echo "Unsupported host for bundled asset verification"; \
+		exit 1; \
+	fi
+endif
 
 # ── MCP servers ──────────────────────────────────────────────────────────────
 
@@ -235,17 +258,21 @@ test-cli:
 	@cargo test -p speedwave-cli
 	@echo "✅ CLI tests passed"
 
-test-desktop: build-cli build-angular build-mcp
+test-desktop: build-cli build-angular build-mcp build-os-cli
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -f desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
 	@if [ "$$(uname)" = "Linux" ] && [ ! -d desktop/src-tauri/nerdctl-full ]; then $(MAKE) download-nerdctl-full; fi
-	@if [ ! -f desktop/src-tauri/nodejs/bin/node ] && [ ! -f desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
+	@if [ "$(OS)" = "Windows_NT" ] && [ ! -f desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then $(MAKE) download-wsl-resources; fi
+	@if [ ! -s desktop/src-tauri/nodejs/bin/node ] && [ ! -s desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
 	@scripts/bundle-build-context.sh
+	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
 	@mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	@cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
 else
 	@cp target/debug/speedwave desktop/src-tauri/cli/speedwave
+	@chmod +x desktop/src-tauri/cli/speedwave
 endif
+	@$(MAKE) verify-bundled-assets
 	cd desktop/src-tauri && cargo test
 	@echo "✅ Desktop tests passed"
 
@@ -311,6 +338,7 @@ test-desktop-build: build-angular build-mcp
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
 	bats _tests/desktop/desktop-build.bats
 	bats _tests/desktop/bundle-build-context.bats
+	bats _tests/desktop/verify-bundled-assets.bats
 	@echo "✅ Desktop build tests passed"
 
 # ── Desktop E2E tests ────────────────────────────────────────────────────────
@@ -319,15 +347,18 @@ test-desktop-build: build-angular build-mcp
 
 # Build only: download deps, compile CLI + MCP + Tauri binary. No test run.
 # Used by e2e-vm.sh (build as root, test as desktop user with display access).
-test-e2e-desktop-build: build-cli build-mcp
+test-e2e-desktop-build: build-cli build-mcp build-os-cli
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -f desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
 	@if [ "$$(uname)" = "Linux" ] && [ ! -d desktop/src-tauri/nerdctl-full ]; then $(MAKE) download-nerdctl-full; fi
+	@if [ "$(OS)" = "Windows_NT" ] && [ ! -f desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then $(MAKE) download-wsl-resources; fi
 	@if [ ! -f desktop/src-tauri/nodejs/bin/node ] && [ ! -f desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
 	@scripts/bundle-build-context.sh
+	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
 	@mkdir -p desktop/src-tauri/cli
 	@cargo build -p speedwave-cli --release
 	@cp target/release/speedwave desktop/src-tauri/cli/speedwave 2>/dev/null || \
 	  cp target/release/speedwave.exe desktop/src-tauri/cli/speedwave.exe 2>/dev/null || true
+	@$(MAKE) verify-bundled-assets
 	@echo "── Building release binary with bundle (e2e feature = WebDriver on :4445)..."
 	cd desktop/src-tauri && cargo tauri build --features e2e $(if $(TAURI_SIGNING_PRIVATE_KEY),,--no-sign)
 	@echo "── Installing E2E deps..."
@@ -361,7 +392,8 @@ _e2e-run:
 		systemctl --user stop containerd 2>/dev/null || true; \
 	fi
 	@sleep 1
-	@mkdir -p /tmp/speedwave-e2e-project
+	@rm -rf /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
+	@mkdir -p /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
 	@E2E_BAK=$$HOME/.speedwave.e2e-bak; \
 	backup_dir() { \
 		if [ -d "$$1" ]; then rm -rf "$$2"; mv "$$1" "$$2"; fi; \
@@ -405,7 +437,7 @@ _e2e-run:
 	$(E2E_BINARY) & APP_PID=$$!; \
 	trap "kill $$APP_PID 2>/dev/null; restore_state" EXIT; \
 	for i in $$(seq 1 30); do curl -sf http://127.0.0.1:4445/status >/dev/null 2>&1 && break; sleep 1; done; \
-	cd desktop/e2e && E2E_PROJECT_DIR=/tmp/speedwave-e2e-project npx wdio run wdio.conf.ts; \
+	cd desktop/e2e && E2E_PROJECT_DIR=/tmp/speedwave-e2e-project E2E_SECOND_PROJECT_DIR=/tmp/speedwave-e2e-project-2 npx wdio run wdio.conf.ts; \
 	E2E_EXIT=$$?; \
 	kill $$APP_PID 2>/dev/null; \
 	restore_state; \
@@ -437,10 +469,9 @@ check-clippy:
 	@echo "✅ Clippy: 0 warnings"
 
 check-desktop-clippy: build-angular build-mcp
-	@if [ "$$(uname)" = "Darwin" ] && [ ! -f desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
-	@if [ "$$(uname)" = "Linux" ] && [ ! -d desktop/src-tauri/nerdctl-full ]; then $(MAKE) download-nerdctl-full; fi
 	@scripts/bundle-build-context.sh
-	cd desktop/src-tauri && cargo clippy -- -D warnings
+	@scripts/create-desktop-stubs.sh
+	cd desktop/src-tauri && SPEEDWAVE_ALLOW_BUNDLE_STUBS=1 cargo clippy -- -D warnings
 	@echo "✅ Desktop clippy: 0 warnings"
 
 check-mcp:
@@ -653,16 +684,21 @@ clean-wsl-resources:
 
 # ── Development ──────────────────────────────────────────────────────────────
 
-dev: build-cli build-native-macos build-mcp
+dev: build-cli build-os-cli build-mcp download-nodejs
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
+	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) download-lima; fi
+	@if [ "$$(uname)" = "Linux" ]; then $(MAKE) download-nerdctl-full; fi
+	@if [ "$(OS)" = "Windows_NT" ]; then $(MAKE) download-wsl-resources; fi
 	@echo "Preparing build context..."
 	@scripts/bundle-build-context.sh
+	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
 	mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
 else
 	cp target/debug/speedwave desktop/src-tauri/cli/speedwave
 endif
+	@$(MAKE) verify-bundled-assets
 	cd desktop/src-tauri && SPEEDWAVE_ALLOW_UNSIGNED=1 cargo tauri dev
 
 # ── Quick status ─────────────────────────────────────────────────────────────

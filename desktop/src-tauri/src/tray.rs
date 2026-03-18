@@ -18,9 +18,13 @@ pub(crate) fn build_tray_menu(
         .item(&check_update);
 
     if let Some(version) = update_version {
-        let install_update =
-            MenuItemBuilder::with_id("install_update", format!("Install Update v{version}"))
-                .build(app)?;
+        #[cfg(target_os = "linux")]
+        let update_label = format!("Download Update v{version}");
+
+        #[cfg(not(target_os = "linux"))]
+        let update_label = format!("Install Update v{version}");
+
+        let install_update = MenuItemBuilder::with_id("install_update", update_label).build(app)?;
         builder = builder.item(&install_update);
     }
 

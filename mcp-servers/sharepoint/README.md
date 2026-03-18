@@ -8,7 +8,7 @@ This worker provides SharePoint integration for Speedwave's MCP architecture:
 
 - **Port**: 3002 (internal Docker network)
 - **Transport**: Streamable HTTP (MCP 2025-03-26)
-- **Tools**: `list_files`, `sync`, `get_current_user`
+- **Tools**: `listFileIds`, `getFileFull`, `downloadFile`, `uploadFile`, `get_current_user`
 - **Security**: Token isolation, origin validation, rate limiting
 
 ## Architecture
@@ -37,19 +37,19 @@ mcp-hub (port 4000)
 
 ## Tools
 
-### 1. `list_files`
+### 1. `listFileIds`
 
-List files and folders in SharePoint context directory.
+List file IDs and names in a SharePoint folder.
 
 **Parameters**:
 
-- `path` (string, optional): Relative path within context directory
+- `path` (string, optional): Folder path (default: `/`)
 
 **Example**:
 
 ```json
 {
-  "name": "list_files",
+  "name": "listFileIds",
   "arguments": {
     "path": "Documents/Project"
   }
@@ -62,25 +62,76 @@ List files and folders in SharePoint context directory.
 {
   "files": [
     {
+      "id": "abc123",
       "name": "requirements.md",
-      "path": "Documents/Project/requirements.md",
-      "size": 4096,
-      "lastModified": "2025-01-15T10:30:00Z",
-      "isFolder": false,
-      "webUrl": "https://..."
+      "isFolder": false
     }
-  ]
+  ],
+  "count": 1,
+  "exists": true
 }
 ```
 
-### 2. `sync`
+### 2. `getFileFull`
 
-Upload/sync a local file to SharePoint with optional ETag Compare-And-Swap.
+Get complete file metadata by ID.
 
 **Parameters**:
 
-- `localPath` (string, required): Local file path to upload
-- `sharepointPath` (string, required): Destination path in SharePoint
+- `file_id` (string, required): File ID
+
+**Example**:
+
+```json
+{
+  "name": "getFileFull",
+  "arguments": {
+    "file_id": "abc123"
+  }
+}
+```
+
+**Response**:
+
+```json
+{
+  "id": "abc123",
+  "name": "requirements.md",
+  "size": 4096,
+  "content": "...",
+  "metadata": {}
+}
+```
+
+### 3. `downloadFile`
+
+Download a file from SharePoint to a local path.
+
+**Parameters**:
+
+- `sharepointPath` (string, required): Source path in SharePoint (relative to base path)
+- `localPath` (string, required): Local destination path (must be under `/workspace`)
+
+**Example**:
+
+```json
+{
+  "name": "downloadFile",
+  "arguments": {
+    "sharepointPath": "docs/plan.md",
+    "localPath": "/workspace/docs/plan.md"
+  }
+}
+```
+
+### 4. `uploadFile`
+
+Upload a local file to SharePoint with optional ETag Compare-And-Swap.
+
+**Parameters**:
+
+- `localPath` (string, required): Local file path to upload (must be under `/workspace`)
+- `sharepointPath` (string, required): Destination path in SharePoint (relative to base path)
 - `expectedEtag` (string, optional): Expected ETag for CAS
 - `createOnly` (boolean, optional): Only create if doesn't exist
 - `overwrite` (boolean, optional): Overwrite without ETag check
@@ -89,10 +140,10 @@ Upload/sync a local file to SharePoint with optional ETag Compare-And-Swap.
 
 ```json
 {
-  "name": "sync",
+  "name": "uploadFile",
   "arguments": {
     "localPath": "/workspace/docs/plan.md",
-    "sharepointPath": "Documents/plan.md",
+    "sharepointPath": "docs/plan.md",
     "createOnly": true
   }
 }
@@ -108,7 +159,7 @@ Upload/sync a local file to SharePoint with optional ETag Compare-And-Swap.
 }
 ```
 
-### 3. `get_current_user`
+### 5. `get_current_user`
 
 Get information about the authenticated SharePoint user.
 
@@ -204,8 +255,8 @@ Expected:
 {
   "status": "ok",
   "service": "mcp-sharepoint",
-  "version": "0.55.0",
-  "tools": ["list_files", "sync", "get_current_user"]
+  "version": "0.1.0",
+  "tools": ["listFileIds", "getFileFull", "downloadFile", "uploadFile", "get_current_user"]
 }
 ```
 

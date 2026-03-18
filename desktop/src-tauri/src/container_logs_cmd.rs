@@ -2,13 +2,9 @@
 
 use crate::types::check_project;
 
-#[tauri::command]
-pub(crate) async fn get_container_logs(
-    container: String,
-    tail: Option<u32>,
-) -> Result<String, String> {
-    // Only allow alphanumeric, underscore, hyphen, dot in container names
-    // and must start with the Speedwave prefix
+/// Validate that a container name starts with the Speedwave compose prefix
+/// and contains only safe characters (alphanumeric, underscore, hyphen, dot).
+fn validate_container_name(container: &str) -> Result<(), String> {
     if !container.starts_with(&format!("{}_", speedwave_runtime::consts::COMPOSE_PREFIX)) {
         return Err(format!(
             "Invalid container name: must start with '{}_'",
@@ -21,6 +17,46 @@ pub(crate) async fn get_container_logs(
     {
         return Err("Invalid container name: contains illegal characters".to_string());
     }
+    Ok(())
+}
+
+/// Parse the project name from a Claude container name.
+/// Expected format: `{COMPOSE_PREFIX}_{project}_claude`.
+fn parse_claude_project(container: &str) -> Result<String, String> {
+    let prefix = format!("{}_", speedwave_runtime::consts::COMPOSE_PREFIX);
+    let without_prefix = container
+        .strip_prefix(&prefix)
+        .ok_or_else(|| "Not a claude container".to_string())?;
+    let project = without_prefix
+        .strip_suffix("_claude")
+        .ok_or_else(|| "Not a claude container".to_string())?;
+    if project.is_empty() {
+        return Err("Not a claude container".to_string());
+    }
+    Ok(project.to_string())
+}
+
+/// Read a log file, take the last `tail` lines, and sanitize secrets.
+/// Returns an empty string if the file does not exist.
+fn read_tail_sanitized(path: &std::path::Path, tail: usize) -> Result<String, String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(e) => return Err(format!("Failed to read log file: {e}")),
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(tail);
+    Ok(speedwave_runtime::log_sanitizer::sanitize(
+        &lines[start..].join("\n"),
+    ))
+}
+
+#[tauri::command]
+pub(crate) async fn get_container_logs(
+    container: String,
+    tail: Option<u32>,
+) -> Result<String, String> {
+    validate_container_name(&container)?;
     let tail = tail.unwrap_or(200).min(10_000);
     tokio::task::spawn_blocking(move || {
         let rt = speedwave_runtime::runtime::detect_runtime();
@@ -59,17 +95,30 @@ pub(crate) async fn get_mcp_os_logs(tail: Option<u32>) -> Result<String, String>
         let log_path = home
             .join(speedwave_runtime::consts::DATA_DIR)
             .join(speedwave_runtime::consts::MCP_OS_LOG_FILE);
-        if !log_path.exists() {
-            return Ok("No mcp-os logs available.".to_string());
-        }
-        let content = std::fs::read_to_string(&log_path)
-            .map_err(|e| format!("Failed to read mcp-os log: {e}"))?;
         let tail = tail.unwrap_or(200).min(10_000) as usize;
-        let lines: Vec<&str> = content.lines().collect();
-        let start = lines.len().saturating_sub(tail);
-        Ok(speedwave_runtime::log_sanitizer::sanitize(
-            &lines[start..].join("\n"),
-        ))
+        read_tail_sanitized(&log_path, tail)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn get_claude_session_logs(
+    container: String,
+    tail: Option<u32>,
+) -> Result<String, String> {
+    validate_container_name(&container)?;
+    let project = parse_claude_project(&container)?;
+    check_project(&project)?;
+
+    let tail = tail.unwrap_or(200).min(10_000) as usize;
+
+    tokio::task::spawn_blocking(move || {
+        let log_path = match speedwave_runtime::consts::claude_session_log_path(&project) {
+            Some(p) => p,
+            None => return Ok(String::new()),
+        };
+        read_tail_sanitized(&log_path, tail)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -82,34 +131,29 @@ pub(crate) async fn get_mcp_os_logs(tail: Option<u32>) -> Result<String, String>
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    // -- Container name validation (get_container_logs logic) --
+    use super::*;
+
+    // -- Container name validation --
 
     #[test]
-    fn container_name_requires_compose_prefix() {
-        let prefix = speedwave_runtime::consts::COMPOSE_PREFIX;
-        let valid = format!("{}_acme_claude", prefix);
-        assert!(valid.starts_with(&format!("{}_", prefix)));
-
-        // Without prefix
-        assert!(!"random_container".starts_with(&format!("{}_", prefix)));
+    fn validate_container_name_accepts_valid() {
+        assert!(validate_container_name("speedwave_acme_claude").is_ok());
+        assert!(validate_container_name("speedwave_proj.v1_mcp-hub").is_ok());
     }
 
     #[test]
-    fn container_name_rejects_shell_characters() {
-        let name = "speedwave_acme;rm -rf /";
-        let has_invalid = !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.');
-        assert!(has_invalid, "semicolons should be rejected");
+    fn validate_container_name_rejects_missing_prefix() {
+        assert!(validate_container_name("random_container").is_err());
     }
 
     #[test]
-    fn container_name_rejects_path_traversal() {
-        let name = "speedwave_../etc/passwd";
-        let has_invalid = !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.');
-        assert!(has_invalid, "slashes should be rejected");
+    fn validate_container_name_rejects_shell_characters() {
+        assert!(validate_container_name("speedwave_acme;rm -rf /").is_err());
+    }
+
+    #[test]
+    fn validate_container_name_rejects_path_traversal() {
+        assert!(validate_container_name("speedwave_../etc/passwd").is_err());
     }
 
     // -- Log sanitization tests (get_container_logs / get_compose_logs) --
@@ -216,5 +260,93 @@ mod tests {
             sanitized, raw,
             "Plain log lines without secrets should pass through unchanged"
         );
+    }
+
+    // -- Claude session logs: project parsing from container name --
+
+    #[test]
+    fn parse_project_from_claude_container() {
+        let project = parse_claude_project("speedwave_myproject_claude").unwrap();
+        assert_eq!(project, "myproject");
+    }
+
+    #[test]
+    fn parse_project_from_dotted_container_name() {
+        let project = parse_claude_project("speedwave_proj.v1_claude").unwrap();
+        assert_eq!(project, "proj.v1");
+    }
+
+    #[test]
+    fn parse_project_rejects_non_claude_container() {
+        let result = parse_claude_project("speedwave_myproject_mcp-hub");
+        assert!(result.is_err(), "non-claude container should be rejected");
+    }
+
+    #[test]
+    fn parse_project_rejects_missing_prefix() {
+        let result = parse_claude_project("other_myproject_claude");
+        assert!(result.is_err(), "missing prefix should be rejected");
+    }
+
+    #[test]
+    fn parse_project_validates_extracted_project() {
+        // Container with ".." in project name → check_project rejects it
+        let project = parse_claude_project("speedwave_.._claude").unwrap();
+        let result = crate::types::check_project(&project);
+        assert!(
+            result.is_err(),
+            "path traversal project should be rejected by check_project"
+        );
+    }
+
+    #[test]
+    fn parse_project_dotted_name_passes_check_project() {
+        let project = parse_claude_project("speedwave_proj.v1_claude").unwrap();
+        let result = crate::types::check_project(&project);
+        assert!(
+            result.is_ok(),
+            "proj.v1 should pass check_project: {result:?}"
+        );
+    }
+
+    // -- read_tail_sanitized --
+
+    #[test]
+    fn read_tail_sanitized_returns_empty_for_missing_file() {
+        let path = std::path::Path::new("/tmp/nonexistent-speedwave-test/claude-session.log");
+        let result = read_tail_sanitized(path, 200).unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn read_tail_sanitized_reads_and_sanitizes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_content =
+            "[100] SESSION: started\n[101] STDERR: Bearer sk-ant-secret-key-abc\n[102] SESSION: stopped\n";
+        let log_path = tmp.path().join("claude-session.log");
+        std::fs::write(&log_path, log_content).unwrap();
+
+        let result = read_tail_sanitized(&log_path, 200).unwrap();
+
+        assert!(
+            result.contains("SESSION: started"),
+            "should contain session markers: {result}"
+        );
+        assert!(
+            !result.contains("sk-ant-secret-key-abc"),
+            "should redact bearer tokens: {result}"
+        );
+    }
+
+    #[test]
+    fn read_tail_sanitized_respects_tail_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("test.log");
+        std::fs::write(&log_path, "line1\nline2\nline3\nline4\nline5\n").unwrap();
+
+        let result = read_tail_sanitized(&log_path, 2).unwrap();
+        assert!(!result.contains("line3"), "should only have last 2 lines");
+        assert!(result.contains("line4"), "result: {result}");
+        assert!(result.contains("line5"), "result: {result}");
     }
 }

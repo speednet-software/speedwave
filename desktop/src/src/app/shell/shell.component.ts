@@ -24,159 +24,125 @@ import { ProjectStateService } from '../services/project-state.service';
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div class="app-layout">
-      @if (switching) {
-        <div class="project-switch-overlay" data-testid="project-switch-overlay">
-          <div class="project-switch-spinner"></div>
-          <p class="project-switch-text">Switching project...</p>
-        </div>
-      }
-      @if (switchError) {
-        <div class="project-switch-error-banner" data-testid="project-switch-error">
-          <span>{{ switchError }}</span>
-          <button (click)="dismissError()">Dismiss</button>
-        </div>
+    <div class="flex flex-col h-screen bg-sw-bg-darkest text-sw-text">
+      @if (projectState.status !== 'ready') {
+        @if (projectState.status === 'error') {
+          <div
+            class="flex items-center justify-between px-4 py-2 bg-[#3d0000] border-b border-sw-accent text-sw-accent text-[13px] font-mono"
+            data-testid="blocking-error"
+          >
+            <span>{{ projectState.error }}</span>
+            <div class="flex gap-2">
+              <button
+                class="bg-transparent border border-sw-accent text-sw-accent px-2.5 py-0.5 rounded text-xs cursor-pointer"
+                (click)="retry()"
+              >
+                Retry
+              </button>
+              <button
+                class="bg-transparent border border-sw-accent text-sw-accent px-2.5 py-0.5 rounded text-xs cursor-pointer"
+                (click)="dismiss()"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        } @else {
+          <div
+            class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-sw-bg-darkest/[0.92]"
+            data-testid="blocking-overlay"
+          >
+            <div
+              class="w-8 h-8 border-[3px] border-sw-border-dark border-t-sw-accent rounded-full animate-sw-spin"
+            ></div>
+            <p class="mt-4 font-mono text-sm text-sw-text">{{ statusMessage }}</p>
+          </div>
+        }
       }
       <app-update-notification />
-      <header class="app-header">
-        <span class="app-title" data-testid="shell-title">Speedwave</span>
-        <nav class="app-nav">
-          <a routerLink="/chat" routerLinkActive="active" data-testid="nav-chat">Chat</a>
-          <a routerLink="/integrations" routerLinkActive="active" data-testid="nav-integrations"
+      <header
+        class="flex items-center justify-between px-4 py-2 bg-sw-bg-dark border-b border-sw-border"
+      >
+        <span class="font-mono text-[16px] font-bold text-sw-accent" data-testid="shell-title"
+          >Speedwave</span
+        >
+        <nav class="flex gap-4" data-testid="app-nav">
+          <a
+            routerLink="/chat"
+            routerLinkActive="!text-sw-accent font-bold"
+            class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
+            data-testid="nav-chat"
+            >Chat</a
+          >
+          <a
+            routerLink="/integrations"
+            routerLinkActive="!text-sw-accent font-bold"
+            class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
+            data-testid="nav-integrations"
             >Integrations</a
           >
-          <a routerLink="/plugins" routerLinkActive="active" data-testid="nav-plugins">Plugins</a>
-          <a routerLink="/settings" routerLinkActive="active" data-testid="nav-settings"
+          <a
+            routerLink="/plugins"
+            routerLinkActive="!text-sw-accent font-bold"
+            class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
+            data-testid="nav-plugins"
+            >Plugins</a
+          >
+          <a
+            routerLink="/settings"
+            routerLinkActive="!text-sw-accent font-bold"
+            class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
+            data-testid="nav-settings"
             >Settings</a
           >
         </nav>
         <app-project-switcher />
       </header>
-      <main class="app-main">
+      <main class="flex-1 overflow-y-auto overflow-x-hidden">
         <router-outlet />
       </main>
     </div>
   `,
-  styles: [
-    `
-      .app-layout {
-        display: flex;
-        flex-direction: column;
-        height: 100vh;
-        background: #1a1a2e;
-        color: #e0e0e0;
-      }
-      .app-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 8px 16px;
-        background: #16213e;
-        border-bottom: 1px solid #0f3460;
-      }
-      .app-title {
-        font-family: monospace;
-        font-size: 16px;
-        font-weight: bold;
-        color: #e94560;
-      }
-      .app-nav {
-        display: flex;
-        gap: 16px;
-      }
-      .app-nav a {
-        color: #888;
-        text-decoration: none;
-        font-size: 13px;
-        font-family: monospace;
-        padding: 4px 8px;
-        border-radius: 4px;
-        transition: color 0.2s;
-      }
-      .app-nav a:hover {
-        color: #e0e0e0;
-      }
-      .app-nav a.active {
-        color: #e94560;
-        font-weight: bold;
-      }
-      .app-main {
-        flex: 1;
-        overflow-y: auto;
-        overflow-x: hidden;
-      }
-      .project-switch-overlay {
-        position: fixed;
-        inset: 0;
-        z-index: 9999;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        background: rgba(26, 26, 46, 0.92);
-      }
-      .project-switch-spinner {
-        width: 32px;
-        height: 32px;
-        border: 3px solid #333;
-        border-top-color: #e94560;
-        border-radius: 50%;
-        animation: shell-spin 0.8s linear infinite;
-      }
-      @keyframes shell-spin {
-        to {
-          transform: rotate(360deg);
-        }
-      }
-      .project-switch-text {
-        margin-top: 16px;
-        font-family: monospace;
-        font-size: 14px;
-        color: #e0e0e0;
-      }
-      .project-switch-error-banner {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 8px 16px;
-        background: #3d0000;
-        border-bottom: 1px solid #e94560;
-        color: #e94560;
-        font-size: 13px;
-        font-family: monospace;
-      }
-      .project-switch-error-banner button {
-        background: none;
-        border: 1px solid #e94560;
-        color: #e94560;
-        padding: 2px 10px;
-        border-radius: 4px;
-        font-size: 12px;
-        cursor: pointer;
-      }
-    `,
-  ],
 })
 export class ShellComponent implements OnInit, OnDestroy {
-  switching = false;
-  switchError = '';
-  private unsubscribe: (() => void) | null = null;
-  private projectState = inject(ProjectStateService);
+  readonly projectState = inject(ProjectStateService);
   private cdr = inject(ChangeDetectorRef);
+  private unsubscribe: (() => void) | null = null;
+
+  /** Human-readable status message for the blocking overlay. */
+  get statusMessage(): string {
+    switch (this.projectState.status) {
+      case 'loading':
+        return 'Loading...';
+      case 'checking':
+        return 'Checking containers...';
+      case 'starting':
+        return 'Starting containers...';
+      case 'switching':
+        return 'Switching project...';
+      case 'rebuilding':
+        return 'Rebuilding container images...';
+      default:
+        return '';
+    }
+  }
 
   /** Bootstraps ProjectStateService and subscribes to state changes. */
   ngOnInit(): void {
     this.projectState.init();
     this.unsubscribe = this.projectState.onChange(() => {
-      this.switching = this.projectState.status === 'switching';
-      this.switchError = this.projectState.status === 'error' ? this.projectState.error : '';
       this.cdr.markForCheck();
     });
   }
 
+  /** Retries container lifecycle check. */
+  retry(): void {
+    this.projectState.ensureContainersRunning();
+  }
+
   /** Dismisses the error banner. */
-  dismissError(): void {
-    this.switchError = '';
+  async dismiss(): Promise<void> {
+    await this.projectState.dismissError();
     this.cdr.markForCheck();
   }
 

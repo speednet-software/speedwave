@@ -14,6 +14,8 @@ use std::path::PathBuf;
 pub struct UpdateSnapshot {
     pub project: String,
     pub compose_yml: String,
+    #[serde(default)]
+    pub plugin_manifests: Vec<crate::plugin::PluginManifest>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -62,9 +64,14 @@ pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     }
 
+    let plugin_manifests = crate::plugin::list_installed_plugins().unwrap_or_else(|e| {
+        log::warn!("Failed to list installed plugins for snapshot: {e}");
+        Vec::new()
+    });
     let snapshot = UpdateSnapshot {
         project: project.to_string(),
         compose_yml,
+        plugin_manifests,
     };
 
     let path = snapshot_path(project)?;
@@ -116,7 +123,12 @@ pub fn update_containers(
         compose::render_compose(project, &project_dir, &resolved, &integrations, None)?;
 
     // 3. Mandatory security gate — BEFORE saving anything
-    let violations = SecurityCheck::run(&compose_yml, project, &[]);
+    let manifests = crate::plugin::list_installed_plugins().unwrap_or_else(|e| {
+        log::warn!("Failed to list installed plugins for security check: {e}");
+        Vec::new()
+    });
+    let expected_paths = compose::SecurityExpectedPaths::compute(project, &project_dir)?;
+    let violations = SecurityCheck::run(&compose_yml, project, &manifests, &expected_paths);
     if !violations.is_empty() {
         let msgs: Vec<String> = violations
             .iter()
@@ -187,8 +199,17 @@ pub fn rollback_containers(runtime: &dyn ContainerRuntime, project: &str) -> any
 
     let snapshot = load_snapshot(project)?;
 
-    // Security check on the snapshot compose.yml before applying
-    let violations = SecurityCheck::run(&snapshot.compose_yml, project, &[]);
+    // Security check on the snapshot compose.yml before applying.
+    // Use manifests from the snapshot (live state may differ post-uninstall).
+    let user_config = config::load_user_config()?;
+    let project_dir = user_config.require_project(project)?.dir.clone();
+    let expected_paths = compose::SecurityExpectedPaths::compute(project, &project_dir)?;
+    let violations = SecurityCheck::run(
+        &snapshot.compose_yml,
+        project,
+        &snapshot.plugin_manifests,
+        &expected_paths,
+    );
     if !violations.is_empty() {
         let msgs: Vec<String> = violations
             .iter()
@@ -238,6 +259,7 @@ mod tests {
         let snapshot = UpdateSnapshot {
             project: project.to_string(),
             compose_yml: compose_content.to_string(),
+            plugin_manifests: vec![],
         };
 
         let json = serde_json::to_string_pretty(&snapshot).unwrap();
@@ -435,6 +457,29 @@ mod tests {
              must appear before compose_down (at byte offset {down_pos}) in \
              update_containers — building first ensures a failed build leaves \
              running containers untouched",
+        );
+    }
+
+    #[test]
+    fn test_rollback_with_empty_plugin_manifests_is_valid() {
+        // Old snapshots may have empty plugin_manifests. Security check
+        // should still pass if compose YAML has no plugin services.
+        let snapshot = UpdateSnapshot {
+            project: "test".to_string(),
+            compose_yml: "version: '3'\nservices: {}\n".to_string(),
+            plugin_manifests: vec![],
+        };
+        assert!(snapshot.plugin_manifests.is_empty());
+        // With no services in compose YAML, security check passes trivially
+        let violations = compose::SecurityCheck::run(
+            &snapshot.compose_yml,
+            "test",
+            &snapshot.plugin_manifests,
+            &compose::SecurityExpectedPaths::from_raw("/test", "/test/tokens"),
+        );
+        assert!(
+            violations.is_empty(),
+            "empty compose with empty manifests should produce no violations"
         );
     }
 

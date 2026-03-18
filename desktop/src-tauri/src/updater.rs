@@ -147,6 +147,34 @@ pub async fn check_for_update(app: &AppHandle) -> Result<Option<UpdateInfo>, Str
     }
 }
 
+pub async fn verify_update_installable(
+    #[cfg(not(target_os = "linux"))] app: &AppHandle,
+    #[cfg(target_os = "linux")] _app: &AppHandle,
+    expected_version: &str,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        Err(format!(
+            "Auto-update is not available for .deb packages. \
+             Download v{expected_version} from GitHub Releases: \
+             https://github.com/speednet-software/speedwave/releases"
+        ))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let update = check_for_update(app).await?;
+        let update = update.ok_or("No update available")?;
+        if update.version != expected_version {
+            return Err(format!(
+                "Version mismatch: expected {} but server returned {}. Please check for updates again.",
+                expected_version, update.version
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub async fn install_update(app: &AppHandle, expected_version: String) -> Result<(), String> {
     let updater = build_updater(app)?;
     let update = updater.check().await.map_err(|e| e.to_string())?;

@@ -19,16 +19,18 @@ import { TauriService } from '../../services/tauri.service';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <!-- Logging -->
-    <section class="section">
-      <h2>Logging</h2>
-      <div class="info-card">
-        <div class="form-row">
-          <label class="form-label" for="log-level">Log level</label>
+    <section class="mb-6">
+      <h2 class="text-[15px] text-sw-text m-0 mb-3">Logging</h2>
+      <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-4">
+        <div class="flex justify-between items-center py-2">
+          <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="log-level"
+            >Log level</label
+          >
           <select
             id="log-level"
             [ngModel]="logLevel"
             (ngModelChange)="setLogLevel($event)"
-            class="form-select"
+            class="flex-1 max-w-[340px] px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
             data-testid="settings-log-level"
           >
             <option value="error">Error</option>
@@ -38,13 +40,13 @@ import { TauriService } from '../../services/tauri.service';
             <option value="trace">Trace</option>
           </select>
         </div>
-        <p class="note">
+        <p class="text-[11px] text-sw-text-faint mt-2 mb-0">
           Higher levels (Debug, Trace) produce more output. Verbose library logs (hyper, reqwest)
           are always clamped to Warn.
         </p>
-        <div class="form-actions">
+        <div class="flex items-center gap-3 pt-3 pb-1">
           <button
-            class="btn-save"
+            class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-abyss disabled:opacity-40 disabled:cursor-not-allowed"
             data-testid="settings-export-diagnostics"
             (click)="exportDiagnostics()"
             [disabled]="diagnosticsExporting || !activeProject"
@@ -52,10 +54,10 @@ import { TauriService } from '../../services/tauri.service';
             {{ diagnosticsExporting ? 'Exporting...' : 'Export Diagnostics' }}
           </button>
           @if (diagnosticsPath) {
-            <span class="save-feedback">{{ diagnosticsPath }}</span>
+            <span class="text-sw-success text-[13px]">{{ diagnosticsPath }}</span>
           }
         </div>
-        <p class="note">
+        <p class="text-[11px] text-sw-text-faint mt-2 mb-0">
           Collects app logs, container logs, and system info into a sanitized ZIP (no tokens or
           secrets).
         </p>
@@ -63,20 +65,22 @@ import { TauriService } from '../../services/tauri.service';
     </section>
 
     <!-- Danger zone -->
-    <section class="section danger-zone">
-      <h2>Danger Zone</h2>
-      <div class="danger-card">
-        <div class="danger-info">
-          <h3>Factory Reset</h3>
-          <p>
-            Stops all containers, destroys the VM (macOS), and resets setup state. Tokens in
-            ~/.speedwave/tokens/ are preserved. After reset the Setup Wizard will run again.
+    <section class="mb-6">
+      <h2 class="text-[15px] text-sw-error m-0 mb-3">Danger Zone</h2>
+      <div
+        class="bg-sw-bg-dark border border-sw-error rounded-lg p-4 flex justify-between items-center gap-4"
+      >
+        <div class="flex-1">
+          <h3 class="text-sm text-sw-text m-0 mb-1">Factory Reset</h3>
+          <p class="text-xs text-sw-text-muted m-0 leading-relaxed">
+            Stops all containers, destroys the VM (macOS), and removes all Speedwave data including
+            tokens and plugins. The application will restart and the Setup Wizard will run again.
           </p>
         </div>
-        <div class="danger-actions">
+        <div class="shrink-0">
           @if (!confirmReset) {
             <button
-              class="btn-danger"
+              class="px-4 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 whitespace-nowrap hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-abyss disabled:opacity-40 disabled:cursor-not-allowed"
               data-testid="settings-reset-btn"
               (click)="confirmReset = true"
               [disabled]="resetting"
@@ -84,9 +88,9 @@ import { TauriService } from '../../services/tauri.service';
               Reset
             </button>
           } @else {
-            <div class="confirm-actions">
+            <div class="flex gap-2">
               <button
-                class="btn-danger"
+                class="px-4 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 whitespace-nowrap hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-abyss disabled:opacity-40 disabled:cursor-not-allowed"
                 data-testid="settings-confirm-reset"
                 (click)="resetEnvironment()"
                 [disabled]="resetting"
@@ -94,7 +98,7 @@ import { TauriService } from '../../services/tauri.service';
                 {{ resetting ? 'Resetting...' : 'Confirm Reset' }}
               </button>
               <button
-                class="btn-cancel"
+                class="px-4 py-1.5 bg-transparent text-sw-text-muted border border-sw-text-faint rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:text-sw-text hover:enabled:border-sw-text-muted disabled:opacity-40 disabled:cursor-not-allowed"
                 data-testid="settings-cancel-reset"
                 (click)="confirmReset = false"
                 [disabled]="resetting"
@@ -107,160 +111,6 @@ import { TauriService } from '../../services/tauri.service';
       </div>
     </section>
   `,
-  styles: [
-    `
-      .section {
-        margin-bottom: 24px;
-      }
-      h2 {
-        font-size: 15px;
-        color: #e0e0e0;
-        margin: 0 0 12px 0;
-      }
-      .info-card {
-        background: #16213e;
-        border: 1px solid #0f3460;
-        border-radius: 8px;
-        padding: 16px;
-      }
-      .form-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 8px 0;
-      }
-      .form-row + .form-row {
-        border-top: 1px solid #0f3460;
-      }
-      .form-label {
-        font-size: 13px;
-        color: #888;
-        min-width: 120px;
-      }
-      .form-select {
-        flex: 1;
-        max-width: 340px;
-        padding: 6px 10px;
-        background: #1a1a2e;
-        border: 1px solid #0f3460;
-        border-radius: 4px;
-        color: #e0e0e0;
-        font-size: 13px;
-        font-family: monospace;
-      }
-      .form-select:focus {
-        outline: none;
-        border-color: #e94560;
-      }
-      .form-actions {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 12px 0 4px 0;
-      }
-      .btn-save {
-        padding: 6px 20px;
-        background: transparent;
-        color: #e94560;
-        border: 1px solid #e94560;
-        border-radius: 4px;
-        font-size: 13px;
-        font-family: monospace;
-        cursor: pointer;
-        transition: all 0.2s;
-      }
-      .btn-save:hover:not(:disabled) {
-        background: #e94560;
-        color: #1a1a2e;
-      }
-      .btn-save:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-      }
-      .save-feedback {
-        color: #4caf50;
-        font-size: 13px;
-      }
-      .note {
-        font-size: 11px;
-        color: #666;
-        margin: 8px 0 0 0;
-      }
-      .danger-zone h2 {
-        color: #e94560;
-      }
-      .danger-card {
-        background: #16213e;
-        border: 1px solid #e94560;
-        border-radius: 8px;
-        padding: 16px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 16px;
-      }
-      .danger-info {
-        flex: 1;
-      }
-      .danger-info h3 {
-        font-size: 14px;
-        color: #e0e0e0;
-        margin: 0 0 4px 0;
-      }
-      .danger-info p {
-        font-size: 12px;
-        color: #888;
-        margin: 0;
-        line-height: 1.5;
-      }
-      .danger-actions {
-        flex-shrink: 0;
-      }
-      .confirm-actions {
-        display: flex;
-        gap: 8px;
-      }
-      .btn-danger {
-        padding: 6px 16px;
-        background: transparent;
-        color: #e94560;
-        border: 1px solid #e94560;
-        border-radius: 4px;
-        font-size: 13px;
-        font-family: monospace;
-        cursor: pointer;
-        transition: all 0.2s;
-        white-space: nowrap;
-      }
-      .btn-danger:hover:not(:disabled) {
-        background: #e94560;
-        color: #1a1a2e;
-      }
-      .btn-danger:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-      }
-      .btn-cancel {
-        padding: 6px 16px;
-        background: transparent;
-        color: #888;
-        border: 1px solid #555;
-        border-radius: 4px;
-        font-size: 13px;
-        font-family: monospace;
-        cursor: pointer;
-        transition: all 0.2s;
-      }
-      .btn-cancel:hover:not(:disabled) {
-        color: #e0e0e0;
-        border-color: #888;
-      }
-      .btn-cancel:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-      }
-    `,
-  ],
 })
 export class AdvancedSectionComponent {
   @Input() activeProject: string | null = null;
@@ -308,11 +158,17 @@ export class AdvancedSectionComponent {
     this.cdr.markForCheck();
   }
 
-  /** Performs a factory reset, destroying containers and VM. */
+  /**
+   * Performs a factory reset, destroying containers and VM.
+   * The backend calls app.restart() and never returns a response,
+   * so the lines after invoke() are unreachable in practice —
+   * they exist only as a safety net if restart behaviour changes.
+   */
   async resetEnvironment(): Promise<void> {
     this.resetting = true;
     try {
       await this.tauri.invoke('factory_reset');
+      // app.restart() fires before Tauri can return — this line is unreachable
       this.resetCompleted.emit();
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));

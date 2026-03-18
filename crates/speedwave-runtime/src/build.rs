@@ -1,10 +1,10 @@
-use crate::runtime::ContainerRuntime;
+use crate::{bundle, runtime::ContainerRuntime};
 use std::path::PathBuf;
 
 /// A container image definition used by `build_all_images`.
 pub struct ImageDef {
-    /// Docker/OCI tag, e.g. `"speedwave-claude:latest"`.
-    pub tag: &'static str,
+    /// Docker/OCI repository name, e.g. `"speedwave-claude"`.
+    pub name: &'static str,
     /// Context directory relative to the build root (as resolved by `resolve_build_root()`).
     pub context_dir: &'static str,
     /// Containerfile path relative to the build root.
@@ -19,58 +19,84 @@ pub struct ImageDef {
 /// Build args for the Claude container — passes the pinned version to Containerfile.claude.
 const CLAUDE_BUILD_ARGS: &[(&str, &str)] = &[("CLAUDE_VERSION", crate::defaults::CLAUDE_VERSION)];
 
+pub const IMAGE_CLAUDE: &str = "speedwave-claude";
+pub const IMAGE_MCP_HUB: &str = "speedwave-mcp-hub";
+pub const IMAGE_MCP_SLACK: &str = "speedwave-mcp-slack";
+pub const IMAGE_MCP_SHAREPOINT: &str = "speedwave-mcp-sharepoint";
+pub const IMAGE_MCP_REDMINE: &str = "speedwave-mcp-redmine";
+pub const IMAGE_MCP_GITLAB: &str = "speedwave-mcp-gitlab";
+
 pub const IMAGES: &[ImageDef] = &[
     ImageDef {
-        tag: "speedwave-claude:latest",
+        name: IMAGE_CLAUDE,
         context_dir: "containers",
         containerfile: "containers/Containerfile.claude",
         build_args: CLAUDE_BUILD_ARGS,
     },
     ImageDef {
-        tag: "speedwave-mcp-hub:latest",
+        name: IMAGE_MCP_HUB,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/hub/Containerfile",
         build_args: &[],
     },
     ImageDef {
-        tag: "speedwave-mcp-slack:latest",
+        name: IMAGE_MCP_SLACK,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/slack/Dockerfile",
         build_args: &[],
     },
     ImageDef {
-        tag: "speedwave-mcp-sharepoint:latest",
+        name: IMAGE_MCP_SHAREPOINT,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/sharepoint/Dockerfile",
         build_args: &[],
     },
     ImageDef {
-        tag: "speedwave-mcp-redmine:latest",
+        name: IMAGE_MCP_REDMINE,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/redmine/Dockerfile",
         build_args: &[],
     },
     ImageDef {
-        tag: "speedwave-mcp-gitlab:latest",
+        name: IMAGE_MCP_GITLAB,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/gitlab/Dockerfile",
         build_args: &[],
     },
 ];
 
+pub fn image_ref(name: &str, bundle_id: &str) -> String {
+    format!("{name}:{bundle_id}")
+}
+
 /// Resolves the root directory containing container build context (`containers/`, `mcp-servers/`).
 ///
 /// Resolution order:
 /// 1. `SPEEDWAVE_RESOURCES_DIR` env var → `<dir>/build-context/` (production — Tauri sets this)
-/// 2. `~/.speedwave/resources-dir` marker file → `<dir>/build-context/` (CLI reads Desktop's marker)
-/// 3. `CARGO_MANIFEST_DIR` parent chain (baked at compile time — works only in dev or when
-///    source tree still exists at the compile-time path)
+/// 2. `CARGO_MANIFEST_DIR` parent chain (baked at compile time — dev source tree)
+/// 3. `~/.speedwave/resources-dir` marker file → `<dir>/build-context/` (CLI reads Desktop's marker)
+///
+/// Step 2 before 3 ensures `make dev` uses local sources instead of a stale
+/// bundle path written by the installed app — same rationale as
+/// `resolve_mcp_os_script_inner`.
 pub fn resolve_build_root() -> anyhow::Result<PathBuf> {
     resolve_build_root_with_home(dirs::home_dir())
 }
 
-/// Internal implementation that accepts an explicit home directory for testability.
+/// Accepts an explicit home directory for testability (existing pattern).
 fn resolve_build_root_with_home(home: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    let dev_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf());
+    resolve_build_root_inner(home, dev_root)
+}
+
+/// Core resolution logic, separated for testability (`dev_root` can be overridden).
+fn resolve_build_root_inner(
+    home: Option<PathBuf>,
+    dev_root: Option<PathBuf>,
+) -> anyhow::Result<PathBuf> {
     // 1. SPEEDWAVE_RESOURCES_DIR/build-context/ (production — Tauri sets this)
     if let Ok(res) = std::env::var(crate::consts::BUNDLE_RESOURCES_ENV) {
         let bundled = PathBuf::from(&res).join("build-context");
@@ -84,21 +110,18 @@ fn resolve_build_root_with_home(home: Option<PathBuf>) -> anyhow::Result<PathBuf
         );
     }
 
-    // 2. ~/.speedwave/resources-dir marker (written by Desktop app, read by CLI)
-    if let Some(ref home) = home {
-        if let Some(root) = resolve_from_marker(home) {
-            return Ok(root);
+    // 2. Dev source tree — prefer local sources over marker so `make dev`
+    //    picks up code changes instead of a stale installed bundle.
+    if let Some(ref root) = dev_root {
+        if root.join("containers").exists() {
+            return Ok(root.clone());
         }
     }
 
-    // 3. CARGO_MANIFEST_DIR parent chain (baked at compile time — dev only)
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf());
-    if let Some(ref root) = dev {
-        if root.join("containers").exists() {
-            return Ok(root.clone());
+    // 3. ~/.speedwave/resources-dir marker (written by Desktop app, read by CLI)
+    if let Some(ref home) = home {
+        if let Some(root) = resolve_from_marker(home) {
+            return Ok(root);
         }
     }
 
@@ -246,6 +269,59 @@ fn write_resources_marker_to(
     Ok(())
 }
 
+/// Containerd overlayfs snapshotter corruption that survived a prune attempt.
+///
+/// Returned by `build_all_images` when:
+/// 1. First build fails with a snapshotter error (e.g. "failed to rename: file exists")
+/// 2. `system_prune` + retry also fails
+///
+/// The `Display` impl includes platform-specific restart commands so callers
+/// can interpolate `{e}` directly without adding their own diagnostic hints.
+#[derive(Debug)]
+pub struct SnapshotterRecoveryFailed {
+    pub inner: anyhow::Error,
+}
+
+impl std::fmt::Display for SnapshotterRecoveryFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Containerd snapshotter corrupted. Prune did not help (second build: {inner}).\n\
+             Fix: {hint}",
+            inner = self.inner,
+            hint = platform_restart_hint(),
+        )
+    }
+}
+
+impl std::error::Error for SnapshotterRecoveryFailed {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.inner.as_ref())
+    }
+}
+
+fn platform_restart_hint() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        "systemctl --user restart containerd && systemctl --user restart buildkit"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "limactl shell speedwave -- sudo systemctl restart containerd && \
+         limactl shell speedwave -- sudo systemctl restart buildkit; \
+         limactl shell speedwave -- sudo buildctl debug workers"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "wsl.exe -d Speedwave -- systemctl restart containerd && \
+         wsl.exe -d Speedwave -- systemctl restart buildkit"
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        "restart containerd and buildkit manually"
+    }
+}
+
 /// Rebuilds all container images from their Containerfiles.
 ///
 /// Calls `runtime.prepare_build_context()` to translate the host build-root into
@@ -254,24 +330,40 @@ fn write_resources_marker_to(
 ///
 /// If the build fails with a containerd overlayfs snapshotter error
 /// ("failed to rename: file exists"), automatically prunes dangling images and
-/// build cache, then retries once. This is a known containerd bug
-/// (containerd#11719, nerdctl#3420).
+/// build cache, then retries once. If the retry also fails, returns
+/// `SnapshotterRecoveryFailed` so callers can decide whether to restart the
+/// container engine (safe during setup) or propagate with diagnostics
+/// (when containers are running).
+///
+/// This is a known containerd bug (containerd#11719, nerdctl#3420).
 ///
 /// Returns the number of images successfully built.
 pub fn build_all_images(runtime: &dyn ContainerRuntime) -> anyhow::Result<u32> {
+    let manifest = bundle::load_current_bundle_manifest()?;
+    build_all_images_for_bundle(runtime, &manifest.bundle_id)
+}
+
+pub fn build_all_images_for_bundle(
+    runtime: &dyn ContainerRuntime,
+    bundle_id: &str,
+) -> anyhow::Result<u32> {
     let root = resolve_build_root()?;
     let vm_root = runtime.prepare_build_context(&root)?;
     let needs_cleanup = vm_root != root;
 
-    let result = try_build_all(runtime, &vm_root).or_else(|e| {
-        if is_snapshotter_error(&e) {
-            log::warn!("build failed with containerd snapshotter error, pruning and retrying: {e}");
+    let result = try_build_all(runtime, &vm_root, bundle_id).or_else(|first_err| {
+        if is_snapshotter_error(&first_err) {
+            log::warn!(
+                "build failed with containerd snapshotter error, pruning and retrying: {first_err}"
+            );
             if let Err(prune_err) = runtime.system_prune() {
                 log::warn!("system prune failed: {prune_err}");
             }
-            try_build_all(runtime, &vm_root)
+            try_build_all(runtime, &vm_root, bundle_id).map_err(|second_err| {
+                anyhow::Error::new(SnapshotterRecoveryFailed { inner: second_err })
+            })
         } else {
-            Err(e)
+            Err(first_err)
         }
     });
 
@@ -286,7 +378,11 @@ pub fn build_all_images(runtime: &dyn ContainerRuntime) -> anyhow::Result<u32> {
 }
 
 /// Builds all images in sequence. Extracted so the retry logic in `build_all_images` can re-call it.
-fn try_build_all(runtime: &dyn ContainerRuntime, vm_root: &std::path::Path) -> anyhow::Result<u32> {
+fn try_build_all(
+    runtime: &dyn ContainerRuntime,
+    vm_root: &std::path::Path,
+    bundle_id: &str,
+) -> anyhow::Result<u32> {
     let total = IMAGES.len();
     let mut built = 0u32;
     log::info!(
@@ -296,11 +392,12 @@ fn try_build_all(runtime: &dyn ContainerRuntime, vm_root: &std::path::Path) -> a
     let root_str = vm_root.to_string_lossy();
     let root_str = root_str.trim_end_matches('/');
     for (i, img) in IMAGES.iter().enumerate() {
+        let tag = image_ref(img.name, bundle_id);
         log::info!(
             "build_all_images: [{}/{}] building {} (context={}, file={})",
             i + 1,
             total,
-            img.tag,
+            tag,
             img.context_dir,
             img.containerfile
         );
@@ -310,14 +407,9 @@ fn try_build_all(runtime: &dyn ContainerRuntime, vm_root: &std::path::Path) -> a
         // on Windows, replacing the base entirely instead of appending.
         let abs_context = format!("{}/{}", root_str, img.context_dir);
         let abs_containerfile = format!("{}/{}", root_str, img.containerfile);
-        runtime.build_image(img.tag, &abs_context, &abs_containerfile, img.build_args)?;
+        runtime.build_image(&tag, &abs_context, &abs_containerfile, img.build_args)?;
         built += 1;
-        log::info!(
-            "build_all_images: [{}/{}] {} built OK",
-            i + 1,
-            total,
-            img.tag
-        );
+        log::info!("build_all_images: [{}/{}] {} built OK", i + 1, total, tag);
     }
     log::info!("build_all_images: all {total} images built successfully");
     Ok(built)
@@ -358,12 +450,12 @@ mod tests {
     }
 
     #[test]
-    fn test_images_tags_are_latest() {
+    fn test_image_names_are_unversioned() {
         for img in IMAGES {
             assert!(
-                img.tag.ends_with(":latest"),
-                "image tag '{}' should end with :latest",
-                img.tag
+                !img.name.contains(':'),
+                "image name '{}' should not contain a tag suffix",
+                img.name
             );
         }
     }
@@ -376,7 +468,7 @@ mod tests {
             assert!(
                 path.exists(),
                 "Containerfile for '{}' not found at {}",
-                img.tag,
+                img.name,
                 path.display()
             );
         }
@@ -390,9 +482,61 @@ mod tests {
             assert!(
                 path.is_dir(),
                 "context dir for '{}' not found at {}",
-                img.tag,
+                img.name,
                 path.display()
             );
+        }
+    }
+
+    /// Verifies that shell scripts COPY'd into Containerfile.claude have their
+    /// shebang interpreter (`bash`) explicitly installed via `apt-get install`.
+    ///
+    /// node:24-bookworm-slim does NOT include bash — only dash (/bin/sh).
+    /// If a COPY'd script uses `#!/bin/bash` but the Containerfile doesn't
+    /// `apt-get install bash`, the build fails with "not found" at runtime.
+    #[test]
+    fn test_containerfile_claude_installs_bash_for_copied_scripts() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+        let root = resolve_build_root_with_home(None).unwrap();
+        let containerfile = std::fs::read_to_string(root.join("containers/Containerfile.claude"))
+            .expect("Containerfile.claude should be readable");
+
+        // Collect all COPY'd .sh scripts
+        let copied_scripts: Vec<&str> = containerfile
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                trimmed.starts_with("COPY") && trimmed.contains(".sh")
+            })
+            .collect();
+        assert!(
+            !copied_scripts.is_empty(),
+            "Containerfile.claude should COPY at least one .sh script"
+        );
+
+        // Read each script and check its shebang
+        for line in &copied_scripts {
+            // Extract source filename from COPY line (e.g. "COPY --chmod=755 install-claude.sh ...")
+            let src = line
+                .split_whitespace()
+                .find(|s| s.ends_with(".sh"))
+                .unwrap_or_else(|| panic!("cannot parse .sh source from COPY line: {line}"));
+
+            let script_path = root.join("containers").join(src);
+            let content = std::fs::read_to_string(&script_path)
+                .unwrap_or_else(|_| panic!("cannot read COPY'd script: {}", script_path.display()));
+
+            if let Some(shebang) = content.lines().next() {
+                if shebang.contains("bash") {
+                    assert!(
+                        containerfile.contains("apt-get install") && containerfile.contains("bash"),
+                        "Script {} uses #!/bin/bash but Containerfile.claude does not \
+                         `apt-get install bash`. node:24-bookworm-slim has only dash.",
+                        src
+                    );
+                }
+            }
         }
     }
 
@@ -431,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_build_root_env_wins_over_marker() {
+    fn test_resolve_build_root_env_wins_over_dev_and_marker() {
         let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
 
@@ -443,9 +587,11 @@ mod tests {
             env_resources.to_string_lossy().as_ref(),
         );
 
-        // Set up competing marker path
+        // Set up competing dev and marker paths
         let fake_home = tmp.path().join("home");
+        let fake_dev = tmp.path().join("dev-root");
         let marker_resources = tmp.path().join("marker-resources");
+        std::fs::create_dir_all(fake_dev.join("containers")).unwrap();
         std::fs::create_dir_all(marker_resources.join("build-context").join("containers")).unwrap();
         let marker_dir = fake_home.join(crate::consts::DATA_DIR);
         std::fs::create_dir_all(&marker_dir).unwrap();
@@ -455,7 +601,7 @@ mod tests {
         )
         .unwrap();
 
-        let root = resolve_build_root_with_home(Some(fake_home)).unwrap();
+        let root = resolve_build_root_inner(Some(fake_home), Some(fake_dev)).unwrap();
         assert_eq!(root, env_resources.join("build-context"));
         std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
     }
@@ -560,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_build_root_with_home_uses_marker() {
+    fn test_resolve_build_root_marker_used_when_no_dev() {
         let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
         std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
 
@@ -578,40 +724,65 @@ mod tests {
         )
         .unwrap();
 
-        let root = resolve_build_root_with_home(Some(fake_home)).unwrap();
+        let root = resolve_build_root_inner(Some(fake_home), None).unwrap();
         assert_eq!(root, fake_resources.join("build-context"));
     }
 
     #[test]
-    fn test_resolve_build_root_marker_priority_over_dev() {
+    fn test_resolve_build_root_dev_priority_over_marker() {
         let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
         std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
 
         let tmp = tempfile::tempdir().unwrap();
         let fake_home = tmp.path().join("home");
-        let fake_resources = tmp.path().join("fake-resources");
+        let fake_marker = tmp.path().join("marker-resources");
+        let fake_dev = tmp.path().join("dev-root");
 
-        std::fs::create_dir_all(fake_resources.join("build-context").join("containers")).unwrap();
+        // Both marker and dev have valid build-context
+        std::fs::create_dir_all(fake_marker.join("build-context").join("containers")).unwrap();
+        std::fs::create_dir_all(fake_dev.join("containers")).unwrap();
 
         let marker_dir = fake_home.join(crate::consts::DATA_DIR);
         std::fs::create_dir_all(&marker_dir).unwrap();
         std::fs::write(
             marker_dir.join(crate::consts::RESOURCES_MARKER),
-            fake_resources.to_string_lossy().as_bytes(),
+            fake_marker.to_string_lossy().as_bytes(),
         )
         .unwrap();
 
-        let root = resolve_build_root_with_home(Some(fake_home)).unwrap();
-        assert_ne!(
+        let root = resolve_build_root_inner(Some(fake_home), Some(fake_dev.clone())).unwrap();
+        assert_eq!(root, fake_dev, "dev source tree should win over marker");
+    }
+
+    #[test]
+    fn test_resolve_build_root_marker_fallback_when_dev_missing_containers() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let fake_marker = tmp.path().join("marker-resources");
+        let fake_dev = tmp.path().join("dev-root");
+
+        // Dev exists but has no containers/ dir
+        std::fs::create_dir_all(&fake_dev).unwrap();
+        // Marker has valid build-context
+        std::fs::create_dir_all(fake_marker.join("build-context").join("containers")).unwrap();
+
+        let marker_dir = fake_home.join(crate::consts::DATA_DIR);
+        std::fs::create_dir_all(&marker_dir).unwrap();
+        std::fs::write(
+            marker_dir.join(crate::consts::RESOURCES_MARKER),
+            fake_marker.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+
+        let root = resolve_build_root_inner(Some(fake_home), Some(fake_dev)).unwrap();
+        assert_eq!(
             root,
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .to_path_buf()
+            fake_marker.join("build-context"),
+            "should fall back to marker when dev has no containers/"
         );
-        assert_eq!(root, fake_resources.join("build-context"));
     }
 
     #[test]
@@ -907,7 +1078,8 @@ mod tests {
 
         // build_all_images resolves the real build root, then calls prepare_build_context.
         // Since our mock overrides prepare_build_context, the translated path should be used.
-        let result = build_all_images(&rt);
+        let bundle_id = "test-bundle";
+        let result = build_all_images_for_bundle(&rt, bundle_id);
         assert!(result.is_ok());
 
         assert!(
@@ -919,7 +1091,7 @@ mod tests {
         assert_eq!(calls.len(), IMAGES.len());
 
         for (call, img) in calls.iter().zip(IMAGES.iter()) {
-            assert_eq!(call.tag, img.tag);
+            assert_eq!(call.tag, image_ref(img.name, bundle_id));
             assert!(
                 call.context_dir
                     .starts_with(&translated.to_string_lossy().to_string()),
@@ -949,7 +1121,7 @@ mod tests {
     fn test_claude_image_has_build_args() {
         let claude_img = IMAGES
             .iter()
-            .find(|img| img.tag.contains("claude"))
+            .find(|img| img.name.contains("claude"))
             .unwrap();
         assert_eq!(claude_img.build_args.len(), 1);
         assert_eq!(claude_img.build_args[0].0, "CLAUDE_VERSION");
@@ -958,11 +1130,11 @@ mod tests {
 
     #[test]
     fn test_non_claude_images_have_no_build_args() {
-        for img in IMAGES.iter().filter(|img| !img.tag.contains("claude")) {
+        for img in IMAGES.iter().filter(|img| !img.name.contains("claude")) {
             assert!(
                 img.build_args.is_empty(),
                 "non-claude image '{}' should have empty build_args",
-                img.tag
+                img.name
             );
         }
     }
@@ -1077,12 +1249,12 @@ mod tests {
             fail_on,
         };
 
-        let result = try_build_all(&rt, &rt.build_root.clone()).or_else(|e| {
+        let result = try_build_all(&rt, &rt.build_root.clone(), "test-bundle").or_else(|e| {
             if is_snapshotter_error(&e) {
                 if let Err(prune_err) = rt.system_prune() {
                     log::warn!("system prune failed: {prune_err}");
                 }
-                try_build_all(&rt, &rt.build_root.clone())
+                try_build_all(&rt, &rt.build_root.clone(), "test-bundle")
             } else {
                 Err(e)
             }
@@ -1125,12 +1297,12 @@ mod tests {
             fail_on,
         };
 
-        let result = try_build_all(&rt, &rt.build_root.clone()).or_else(|e| {
+        let result = try_build_all(&rt, &rt.build_root.clone(), "test-bundle").or_else(|e| {
             if is_snapshotter_error(&e) {
                 if let Err(prune_err) = rt.system_prune() {
                     log::warn!("system prune failed: {prune_err}");
                 }
-                try_build_all(&rt, &rt.build_root.clone())
+                try_build_all(&rt, &rt.build_root.clone(), "test-bundle")
             } else {
                 Err(e)
             }
@@ -1222,12 +1394,12 @@ mod tests {
             fail_on,
         };
 
-        let result = try_build_all(&rt, &rt.build_root.clone()).or_else(|e| {
+        let result = try_build_all(&rt, &rt.build_root.clone(), "test-bundle").or_else(|e| {
             if is_snapshotter_error(&e) {
                 if let Err(prune_err) = rt.system_prune() {
                     log::warn!("system prune failed: {prune_err}");
                 }
-                try_build_all(&rt, &rt.build_root.clone())
+                try_build_all(&rt, &rt.build_root.clone(), "test-bundle")
             } else {
                 Err(e)
             }
@@ -1245,5 +1417,104 @@ mod tests {
         let recorded = calls.lock().unwrap();
         let prune_count = recorded.iter().filter(|c| *c == "system_prune").count();
         assert_eq!(prune_count, 1, "system_prune should be called once");
+    }
+
+    #[test]
+    fn test_snapshotter_recovery_failed_downcast() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let image_count = IMAGES.len() as u32;
+
+        // First attempt: fail on call 3 with snapshotter error
+        // Retry: fail on call (3 + image_count) with a different error
+        let mut fail_on = std::collections::HashMap::new();
+        fail_on.insert(
+            3,
+            "apply layer error for \"docker.io/library/img:latest\"".to_string(),
+        );
+        fail_on.insert(3 + image_count, "still broken after prune".to_string());
+
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = RetryMockRuntime {
+            build_root,
+            calls: Arc::clone(&calls),
+            build_call_counter: Arc::clone(&counter),
+            fail_on,
+        };
+
+        let result = build_all_images_for_bundle(&rt, "test-bundle");
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert!(
+            err.downcast_ref::<SnapshotterRecoveryFailed>().is_some(),
+            "should return SnapshotterRecoveryFailed, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_snapshotter_recovery_failed_source_preserves_chain() {
+        let inner = anyhow::anyhow!("still broken");
+        let recovery = SnapshotterRecoveryFailed { inner };
+        let source = std::error::Error::source(&recovery);
+        assert!(source.is_some(), "source() should return the inner error");
+        assert!(
+            source.unwrap().to_string().contains("still broken"),
+            "source should preserve the inner error message"
+        );
+    }
+
+    #[test]
+    fn test_snapshotter_recovery_failed_display_contains_hint() {
+        let inner = anyhow::anyhow!("build failed again");
+        let recovery = SnapshotterRecoveryFailed { inner };
+        let display = recovery.to_string();
+        assert!(
+            display.contains("Containerd snapshotter corrupted"),
+            "Display should describe root cause, got: {display}"
+        );
+        assert!(
+            display.contains("Prune did not help"),
+            "Display should mention prune failure, got: {display}"
+        );
+        assert!(
+            display.contains("build failed again"),
+            "Display should contain inner error, got: {display}"
+        );
+        assert!(
+            display.contains("Fix:"),
+            "Display should contain platform-specific fix hint, got: {display}"
+        );
+    }
+
+    #[test]
+    fn test_build_all_images_non_snapshotter_error_not_wrapped() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        // Fail on 2nd call with a non-snapshotter error
+        let mut fail_on = std::collections::HashMap::new();
+        fail_on.insert(2, "network timeout".to_string());
+
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = RetryMockRuntime {
+            build_root,
+            calls: Arc::clone(&calls),
+            build_call_counter: Arc::clone(&counter),
+            fail_on,
+        };
+
+        let result = build_all_images_for_bundle(&rt, "test-bundle");
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert!(
+            err.downcast_ref::<SnapshotterRecoveryFailed>().is_none(),
+            "non-snapshotter error should NOT be wrapped as SnapshotterRecoveryFailed"
+        );
+        assert!(
+            err.to_string().contains("network timeout"),
+            "original error should propagate unchanged"
+        );
     }
 }

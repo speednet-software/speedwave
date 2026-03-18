@@ -70,9 +70,9 @@ describe('hub-tool-policy', () => {
       }
     });
 
-    it('sharepoint sync tools have timeoutClass: long', () => {
-      expect(TOOL_POLICIES['sharepoint']['sync'].timeoutClass).toBe('long');
-      expect(TOOL_POLICIES['sharepoint']['syncDirectory'].timeoutClass).toBe('long');
+    it('sharepoint file transfer tools have timeoutClass: long', () => {
+      expect(TOOL_POLICIES['sharepoint']['downloadFile'].timeoutClass).toBe('long');
+      expect(TOOL_POLICIES['sharepoint']['uploadFile'].timeoutClass).toBe('long');
     });
 
     it('sharepoint getFileFull has LONG_OPERATION_MS timeout', () => {

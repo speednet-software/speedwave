@@ -2,14 +2,451 @@
 
 use crate::ide_bridge;
 use crate::mcp_os_process;
-use speedwave_runtime::config;
-use std::sync::{Arc, Mutex};
+use crate::types::BundleReconcileStatus;
+use speedwave_runtime::{build, bundle, config};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+use tauri::Emitter;
 
 /// Shared handle for the IDE Bridge instance.
 pub(crate) type SharedIdeBridge = Arc<Mutex<Option<ide_bridge::IdeBridge>>>;
 
+/// Shared handle for the mcp-os process.
+pub(crate) type SharedMcpOs = Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>;
+
 /// Shared handle for the background auto-update check task.
 pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>;
+
+/// Reconcile phase: nothing running.
+const RECONCILE_IDLE: u8 = 0;
+/// Reconcile phase: background thread is checking whether a rebuild is needed.
+const RECONCILE_CHECKING: u8 = 1;
+/// Reconcile phase: actively rebuilding container images.
+const RECONCILE_REBUILDING: u8 = 2;
+
+static BUNDLE_RECONCILE_PHASE: AtomicU8 = AtomicU8::new(RECONCILE_IDLE);
+
+/// Tri-state tracking whether container images are ready for use.
+#[derive(Clone, Debug)]
+enum ImageReadiness {
+    Ready,
+    Building,
+    Failed(String),
+}
+
+static IMAGES_READY: std::sync::LazyLock<(Mutex<ImageReadiness>, Condvar)> =
+    std::sync::LazyLock::new(|| (Mutex::new(ImageReadiness::Ready), Condvar::new()));
+
+/// Blocks the calling thread until container images are ready (or timeout).
+///
+/// - `Ready` → returns `Ok(())` immediately
+/// - `Building` → waits on Condvar until signaled, then re-checks
+/// - `Failed(msg)` → returns `Err(msg)` immediately
+pub(crate) fn wait_for_images_ready(timeout: Duration) -> Result<(), String> {
+    let (lock, cvar) = &*IMAGES_READY;
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match &*state {
+            ImageReadiness::Ready => return Ok(()),
+            ImageReadiness::Failed(msg) => return Err(msg.clone()),
+            ImageReadiness::Building => {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err("Timed out waiting for container images to build".to_string());
+                }
+                let result = cvar
+                    .wait_timeout(state, remaining)
+                    .unwrap_or_else(|e| e.into_inner());
+                state = result.0;
+                if result.1.timed_out() {
+                    // Re-check after timeout: the state may have changed between the
+                    // wait returning and this check. Treating ambiguous state as success
+                    // avoids blocking startup when the builder thread is merely slow.
+                    match &*state {
+                        ImageReadiness::Ready => return Ok(()),
+                        ImageReadiness::Failed(msg) => return Err(msg.clone()),
+                        ImageReadiness::Building => {
+                            return Err(
+                                "Timed out waiting for container images to build".to_string()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Transitions IMAGES_READY to the given state and wakes all waiters.
+fn set_image_readiness(state: ImageReadiness) {
+    let (lock, cvar) = &*IMAGES_READY;
+    let mut readiness = lock.lock().unwrap_or_else(|e| e.into_inner());
+    *readiness = state;
+    cvar.notify_all();
+}
+
+/// Scope guard that ensures `IMAGES_READY` is signaled even if the reconcile
+/// thread panics. If state is still `Building` on drop, transitions to `Failed`.
+struct ImageReadinessGuard;
+
+impl Drop for ImageReadinessGuard {
+    fn drop(&mut self) {
+        // Scope guard: if this thread exits without explicitly signaling Ready or Failed,
+        // the guard transitions Building->Failed and wakes all waiters. This covers
+        // early returns and panics not caught by catch_unwind.
+        let (lock, cvar) = &*IMAGES_READY;
+        let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(&*state, ImageReadiness::Building) {
+            *state = ImageReadiness::Failed("reconcile thread exited unexpectedly".to_string());
+            cvar.notify_all();
+        }
+        drop(state);
+        BUNDLE_RECONCILE_PHASE.store(RECONCILE_IDLE, Ordering::Relaxed);
+    }
+}
+
+fn phase_name(phase: bundle::BundleReconcilePhase) -> String {
+    serde_json::to_value(phase)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "pending".to_string())
+}
+
+pub(crate) fn current_bundle_status() -> BundleReconcileStatus {
+    let state = bundle::load_bundle_state();
+    let current_bundle_id = bundle::load_current_bundle_manifest()
+        .ok()
+        .map(|manifest| manifest.bundle_id);
+    let bundle_changed = current_bundle_id
+        .as_deref()
+        .map(|current| state.applied_bundle_id.as_deref() != Some(current))
+        .unwrap_or(false);
+
+    let phase_val = BUNDLE_RECONCILE_PHASE.load(Ordering::Relaxed);
+    BundleReconcileStatus {
+        phase: phase_name(state.phase),
+        in_progress: phase_val == RECONCILE_REBUILDING
+            || (bundle_changed && state.last_error.is_none()),
+        last_error: if bundle_changed {
+            state.last_error.clone()
+        } else {
+            None
+        },
+        pending_running_projects: if bundle_changed {
+            state.pending_running_projects.clone()
+        } else {
+            Vec::new()
+        },
+        applied_bundle_id: state.applied_bundle_id.clone(),
+    }
+}
+
+fn emit_bundle_status(app_handle: &tauri::AppHandle) {
+    let _ = app_handle.emit("bundle_reconcile_status", current_bundle_status());
+}
+
+pub(crate) fn list_running_projects(
+    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    user_config: &config::SpeedwaveUserConfig,
+) -> Result<Vec<String>, String> {
+    let mut running = Vec::new();
+    for project in &user_config.projects {
+        let containers = rt
+            .compose_ps(&project.name)
+            .map_err(|e| format!("compose_ps failed for '{}': {}", project.name, e))?;
+        if !containers.is_empty() {
+            running.push(project.name.clone());
+        }
+    }
+    Ok(running)
+}
+
+pub(crate) fn restore_projects(
+    projects: &[String],
+    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+) -> Result<(), String> {
+    for project in projects {
+        let _ = rt.compose_down(project);
+        crate::containers_cmd::render_and_save_compose(project, rt)?;
+        rt.compose_up_recreate(project)
+            .map_err(|e| format!("compose_up_recreate failed for '{}': {}", project, e))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn stop_projects(
+    projects: &[String],
+    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+) -> Result<(), String> {
+    for project in projects {
+        rt.compose_down(project)
+            .map_err(|e| format!("compose_down failed for '{}': {}", project, e))?;
+    }
+    Ok(())
+}
+
+fn set_bundle_error(state: &mut bundle::BundleState, message: String) -> String {
+    state.last_error = Some(message.clone());
+    if let Err(e) = bundle::save_bundle_state(state) {
+        log::warn!("Failed to save bundle error state: {e}");
+    }
+    message
+}
+
+fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    log::info!("reconcile_bundle: loading current bundle manifest");
+    let manifest = bundle::load_current_bundle_manifest().map_err(|e| {
+        let msg = format!("Failed to load bundle manifest: {e}");
+        log::error!("reconcile_bundle: {msg}");
+        msg
+    })?;
+
+    let mut state = bundle::load_bundle_state();
+    let bundle_changed = state.applied_bundle_id.as_deref() != Some(manifest.bundle_id.as_str());
+
+    log::info!(
+        "reconcile_bundle: current={} applied={} changed={}",
+        manifest.bundle_id,
+        state.applied_bundle_id.as_deref().unwrap_or("(none)"),
+        bundle_changed,
+    );
+
+    if !bundle_changed {
+        if state.phase != bundle::BundleReconcilePhase::Done
+            || state.last_error.is_some()
+            || !state.pending_running_projects.is_empty()
+        {
+            log::info!("reconcile_bundle: bundle matches but state dirty, cleaning up");
+            state.phase = bundle::BundleReconcilePhase::Done;
+            state.last_error = None;
+            state.pending_running_projects.clear();
+            bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
+        }
+        log::info!("reconcile_bundle: no changes needed, setting Ready");
+        set_image_readiness(ImageReadiness::Ready);
+        emit_bundle_status(app_handle);
+        return Ok(());
+    }
+
+    log::info!(
+        "reconcile_bundle: bundle changed, starting reconcile (phase={:?})",
+        state.phase,
+    );
+
+    // New bundle = full reconciliation from scratch. Reset phase so all
+    // is_before() gates evaluate to true and every step executes.
+    if state.phase != bundle::BundleReconcilePhase::Pending {
+        log::info!("reconcile_bundle: resetting phase to Pending for new bundle");
+        state.phase = bundle::BundleReconcilePhase::Pending;
+        bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
+    }
+
+    // Now that we know images need rebuilding, signal Building so that
+    // start_containers/switch_project callers block until done.
+    BUNDLE_RECONCILE_PHASE.store(RECONCILE_REBUILDING, Ordering::Relaxed);
+    set_image_readiness(ImageReadiness::Building);
+    emit_bundle_status(app_handle);
+
+    let rt = speedwave_runtime::runtime::detect_runtime();
+    if !rt.is_available() {
+        return Err(set_bundle_error(
+            &mut state,
+            "Runtime not available while applying the new bundle".to_string(),
+        ));
+    }
+    rt.ensure_ready().map_err(|e| {
+        set_bundle_error(
+            &mut state,
+            format!("Runtime is not ready while applying the new bundle: {e}"),
+        )
+    })?;
+
+    let build_root = build::resolve_build_root().map_err(|e| {
+        let msg = format!("Failed to resolve build root: {e}");
+        log::error!("reconcile_bundle: {msg}");
+        msg
+    })?;
+    log::info!("reconcile_bundle: build_root={}", build_root.display());
+
+    if state
+        .phase
+        .is_before(bundle::BundleReconcilePhase::ResourcesSynced)
+    {
+        log::info!("reconcile_bundle: syncing claude-resources");
+        bundle::sync_claude_resources(&build_root).map_err(|e| {
+            set_bundle_error(&mut state, format!("Claude resources sync failed: {e}"))
+        })?;
+        state.phase = bundle::BundleReconcilePhase::ResourcesSynced;
+        state.last_error = None;
+        bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
+        log::info!("reconcile_bundle: resources synced");
+        emit_bundle_status(app_handle);
+    }
+
+    if state
+        .phase
+        .is_before(bundle::BundleReconcilePhase::ImagesBuilt)
+    {
+        log::info!(
+            "reconcile_bundle: building images for bundle {}",
+            manifest.bundle_id,
+        );
+        // build.rs handles: build → fail → prune → retry → SnapshotterRecoveryFailed.
+        // Here we escalate: restart engine → retry build. Safe because we are in the
+        // pre-restore phase — no containers are running yet (see ContainerRuntime
+        // trait docs for restart_container_engine).
+        match build::build_all_images_for_bundle(rt.as_ref(), &manifest.bundle_id) {
+            Ok(_) => {}
+            Err(e)
+                if e.downcast_ref::<build::SnapshotterRecoveryFailed>()
+                    .is_some() =>
+            {
+                log::warn!("reconcile_bundle: snapshotter recovery failed, restarting engine");
+                rt.restart_container_engine().map_err(|re| {
+                    let msg = format!("Engine restart failed: {re}");
+                    log::error!("reconcile_bundle: {msg}");
+                    set_bundle_error(&mut state, msg)
+                })?;
+                build::build_all_images_for_bundle(rt.as_ref(), &manifest.bundle_id).map_err(
+                    |e| {
+                        let msg = format!("Image rebuild failed after engine restart: {e}");
+                        log::error!("reconcile_bundle: {msg}");
+                        set_bundle_error(&mut state, msg)
+                    },
+                )?;
+            }
+            Err(e) => {
+                let msg = format!("Image rebuild failed: {e}");
+                log::error!("reconcile_bundle: {msg}");
+                return Err(set_bundle_error(&mut state, msg));
+            }
+        }
+        state.phase = bundle::BundleReconcilePhase::ImagesBuilt;
+        state.last_error = None;
+        bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
+        set_image_readiness(ImageReadiness::Ready);
+        log::info!("reconcile_bundle: all images built, waiters unblocked");
+        emit_bundle_status(app_handle);
+
+        // After heavy image builds, containerd may be degraded (especially Linux
+        // rootless). Re-check readiness before querying running containers.
+        rt.ensure_ready().map_err(|e| {
+            let msg = format!("Runtime not ready after image build: {e}");
+            log::error!("reconcile_bundle: {msg}");
+            set_bundle_error(&mut state, msg)
+        })?;
+    }
+
+    let user_config = match config::load_user_config() {
+        Ok(config) => config,
+        Err(e) => {
+            log::warn!(
+                "reconcile_bundle: failed to load user config, using pending list only: {e}"
+            );
+            config::SpeedwaveUserConfig::default()
+        }
+    };
+    let mut projects = state.pending_running_projects.clone();
+    let running_projects = list_running_projects(rt.as_ref(), &user_config)?;
+    for project in running_projects {
+        if !projects.contains(&project) {
+            projects.push(project);
+        }
+    }
+    projects.sort();
+    projects.dedup();
+    log::info!("reconcile_bundle: projects to restore: {:?}", projects,);
+
+    if state
+        .phase
+        .is_before(bundle::BundleReconcilePhase::ProjectsRestored)
+    {
+        log::info!("reconcile_bundle: restoring {} project(s)", projects.len());
+        restore_projects(&projects, rt.as_ref()).map_err(|e| {
+            let msg = format!("Project restore failed: {e}");
+            log::error!("reconcile_bundle: {msg}");
+            set_bundle_error(&mut state, msg)
+        })?;
+        state.phase = bundle::BundleReconcilePhase::ProjectsRestored;
+        state.pending_running_projects = projects;
+        state.last_error = None;
+        bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
+        log::info!("reconcile_bundle: projects restored");
+        emit_bundle_status(app_handle);
+    }
+
+    state.applied_bundle_id = Some(manifest.bundle_id.clone());
+    state.phase = bundle::BundleReconcilePhase::Done;
+    state.pending_running_projects.clear();
+    state.last_error = None;
+    bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
+    emit_bundle_status(app_handle);
+
+    log::info!("reconcile_bundle: complete, applied={}", manifest.bundle_id,);
+    Ok(())
+}
+
+pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) {
+    if BUNDLE_RECONCILE_PHASE
+        .compare_exchange(
+            RECONCILE_IDLE,
+            RECONCILE_CHECKING,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        log::debug!("reconcile_bundle: already running, skipping");
+        emit_bundle_status(app_handle);
+        return;
+    }
+
+    log::info!("reconcile_bundle: starting");
+
+    // NOTE: we do NOT set ImageReadiness::Building here or emit status yet.
+    // The inner function sets Building only after confirming bundle_changed==true,
+    // so the frontend never shows "Rebuilding..." when nothing needs rebuilding.
+
+    let handle = app_handle.clone();
+    std::thread::spawn(move || {
+        // Scope guard: if this thread exits without explicitly signaling Ready or Failed,
+        // the guard transitions Building->Failed and wakes all waiters. This covers
+        // early returns and panics not caught by catch_unwind.
+        let _guard = ImageReadinessGuard;
+
+        // catch_unwind so panics produce a specific error message and explicit
+        // Failed signaling, rather than relying solely on the scope guard's
+        // generic failure transition.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reconcile_bundle_update_inner(&handle)
+        }));
+
+        match result {
+            Ok(Ok(())) => {
+                log::info!("reconcile_bundle: thread finished successfully");
+            }
+            Ok(Err(e)) => {
+                log::error!("reconcile_bundle: failed: {e}");
+                set_image_readiness(ImageReadiness::Failed(e));
+            }
+            Err(panic_info) => {
+                let msg = panic_info
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| panic_info.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown panic");
+                log::error!("reconcile_bundle: panicked: {msg}");
+                set_image_readiness(ImageReadiness::Failed(format!("reconcile panicked: {msg}")));
+            }
+        }
+
+        BUNDLE_RECONCILE_PHASE.store(RECONCILE_IDLE, Ordering::Relaxed);
+        emit_bundle_status(&handle);
+    });
+}
 
 /// After mcp-os starts on a new dynamic port, check if running containers have
 /// a stale WORKER_OS_URL in their compose.yml. If so, regenerate compose and
@@ -116,6 +553,12 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
             return;
         }
 
+        // Wait for images to be ready before starting containers
+        if let Err(e) = crate::containers_cmd::ensure_images_ready() {
+            log::error!("reconcile_compose_port: images not ready: {e}");
+            return;
+        }
+
         // Start containers with the new compose
         if let Err(e) = rt.compose_up_recreate(&project) {
             log::error!("reconcile_compose_port: compose_up_recreate failed: {e}");
@@ -154,7 +597,7 @@ fn stop_all_containers(
 /// mcp-os process, and aborts the background auto-update check.
 pub(crate) fn run_exit_cleanup(
     ide_bridge: &SharedIdeBridge,
-    mcp_os: &Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>,
+    mcp_os: &SharedMcpOs,
     auto_check: &SharedAutoCheckHandle,
 ) {
     // Stop watchdog before killing mcp-os to prevent respawn during shutdown
@@ -270,6 +713,29 @@ pub(crate) fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std:
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    struct HomeGuard {
+        original_home: Option<std::ffi::OsString>,
+    }
+
+    impl HomeGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let original_home = std::env::var_os("HOME");
+            std::env::set_var("HOME", path);
+            Self { original_home }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            if let Some(home) = &self.original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
 
     mod stop_all_containers_tests {
         use super::stop_all_containers;
@@ -397,6 +863,216 @@ mod tests {
                 vec!["alpha", "beta", "gamma"],
                 "all projects should be attempted even when one fails"
             );
+        }
+    }
+
+    mod bundle_status_tests {
+        use super::*;
+
+        #[test]
+        #[serial]
+        fn current_bundle_status_marks_bundle_change_as_in_progress() {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = HomeGuard::set(temp.path());
+            let manifest = bundle::load_current_bundle_manifest().unwrap();
+
+            bundle::save_bundle_state(&bundle::BundleState {
+                applied_bundle_id: Some("older-bundle".to_string()),
+                phase: bundle::BundleReconcilePhase::Pending,
+                pending_running_projects: vec!["alpha".to_string()],
+                last_error: None,
+            })
+            .unwrap();
+
+            let status = current_bundle_status();
+            assert!(status.in_progress);
+            assert_eq!(status.phase, "pending");
+            assert_eq!(status.pending_running_projects, vec!["alpha"]);
+            assert_eq!(status.applied_bundle_id, Some("older-bundle".to_string()));
+            assert_ne!(status.applied_bundle_id, Some(manifest.bundle_id));
+        }
+
+        #[test]
+        #[serial]
+        fn current_bundle_status_hides_stale_error_when_bundle_already_applied() {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = HomeGuard::set(temp.path());
+            let manifest = bundle::load_current_bundle_manifest().unwrap();
+
+            bundle::save_bundle_state(&bundle::BundleState {
+                applied_bundle_id: Some(manifest.bundle_id),
+                phase: bundle::BundleReconcilePhase::ImagesBuilt,
+                pending_running_projects: vec!["alpha".to_string()],
+                last_error: Some("stale error".to_string()),
+            })
+            .unwrap();
+
+            let status = current_bundle_status();
+            assert!(!status.in_progress);
+            assert!(status.last_error.is_none());
+            assert!(status.pending_running_projects.is_empty());
+        }
+
+        #[test]
+        #[serial]
+        fn checking_phase_is_not_reported_as_in_progress() {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = HomeGuard::set(temp.path());
+            let manifest = bundle::load_current_bundle_manifest().unwrap();
+
+            // Bundle already applied → no disk-level change
+            bundle::save_bundle_state(&bundle::BundleState {
+                applied_bundle_id: Some(manifest.bundle_id),
+                phase: bundle::BundleReconcilePhase::Done,
+                pending_running_projects: Vec::new(),
+                last_error: None,
+            })
+            .unwrap();
+
+            // Simulate the CHECKING phase (thread spawned, not yet confirmed rebuild)
+            BUNDLE_RECONCILE_PHASE.store(RECONCILE_CHECKING, Ordering::Relaxed);
+
+            let status = current_bundle_status();
+            assert!(
+                !status.in_progress,
+                "CHECKING phase must not show as in_progress"
+            );
+
+            // Cleanup
+            BUNDLE_RECONCILE_PHASE.store(RECONCILE_IDLE, Ordering::Relaxed);
+        }
+
+        #[test]
+        #[serial]
+        fn rebuilding_phase_is_reported_as_in_progress() {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = HomeGuard::set(temp.path());
+            let manifest = bundle::load_current_bundle_manifest().unwrap();
+
+            // Bundle already applied → no disk-level change
+            bundle::save_bundle_state(&bundle::BundleState {
+                applied_bundle_id: Some(manifest.bundle_id),
+                phase: bundle::BundleReconcilePhase::Done,
+                pending_running_projects: Vec::new(),
+                last_error: None,
+            })
+            .unwrap();
+
+            // Simulate the REBUILDING phase
+            BUNDLE_RECONCILE_PHASE.store(RECONCILE_REBUILDING, Ordering::Relaxed);
+
+            let status = current_bundle_status();
+            assert!(
+                status.in_progress,
+                "REBUILDING phase must show as in_progress"
+            );
+
+            // Cleanup
+            BUNDLE_RECONCILE_PHASE.store(RECONCILE_IDLE, Ordering::Relaxed);
+        }
+
+        #[test]
+        #[serial]
+        fn current_bundle_status_surfaces_reconcile_error_for_new_bundle() {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = HomeGuard::set(temp.path());
+
+            bundle::save_bundle_state(&bundle::BundleState {
+                applied_bundle_id: Some("older-bundle".to_string()),
+                phase: bundle::BundleReconcilePhase::ImagesBuilt,
+                pending_running_projects: vec!["alpha".to_string(), "beta".to_string()],
+                last_error: Some("Image rebuild failed".to_string()),
+            })
+            .unwrap();
+
+            let status = current_bundle_status();
+            assert!(!status.in_progress);
+            assert_eq!(status.phase, "images_built");
+            assert_eq!(status.last_error.as_deref(), Some("Image rebuild failed"));
+            assert_eq!(
+                status.pending_running_projects,
+                vec!["alpha".to_string(), "beta".to_string()]
+            );
+        }
+
+        #[test]
+        #[serial]
+        fn missing_applied_bundle_id_is_reported_as_in_progress() {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = HomeGuard::set(temp.path());
+
+            // Simulate fresh install: no bundle-state.json → applied_bundle_id is None
+            // (default BundleState). This should be in_progress because bundle_changed=true.
+            let status = current_bundle_status();
+            assert!(
+                status.in_progress,
+                "missing applied_bundle_id (fresh install) must report in_progress"
+            );
+            assert!(status.applied_bundle_id.is_none());
+        }
+    }
+
+    mod wait_for_images_ready_tests {
+        use super::*;
+        use std::time::Duration;
+
+        /// Helper: reset IMAGES_READY to a known state before each test.
+        fn set_readiness(val: ImageReadiness) {
+            let (lock, cvar) = &*IMAGES_READY;
+            let mut state = lock.lock().unwrap();
+            *state = val;
+            cvar.notify_all();
+        }
+
+        #[test]
+        #[serial]
+        fn returns_immediately_when_no_reconcile() {
+            set_readiness(ImageReadiness::Ready);
+            let result = wait_for_images_ready(Duration::from_secs(1));
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        #[serial]
+        fn blocks_until_signaled() {
+            set_readiness(ImageReadiness::Building);
+
+            let handle = std::thread::spawn(|| wait_for_images_ready(Duration::from_secs(5)));
+
+            // Give the waiter time to block
+            std::thread::sleep(Duration::from_millis(50));
+
+            // Signal Ready
+            set_readiness(ImageReadiness::Ready);
+
+            let result = handle.join().unwrap();
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        #[serial]
+        fn returns_error_on_timeout() {
+            set_readiness(ImageReadiness::Building);
+
+            let result = wait_for_images_ready(Duration::from_millis(50));
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("Timed out"));
+
+            // Cleanup
+            set_readiness(ImageReadiness::Ready);
+        }
+
+        #[test]
+        #[serial]
+        fn returns_error_when_reconcile_fails() {
+            set_readiness(ImageReadiness::Failed("Image rebuild failed".to_string()));
+
+            let result = wait_for_images_ready(Duration::from_secs(1));
+            assert!(result.is_err());
+            assert_eq!(result.unwrap_err(), "Image rebuild failed");
+
+            // Cleanup
+            set_readiness(ImageReadiness::Ready);
         }
     }
 
@@ -607,5 +1283,55 @@ mod tests {
             let result = resolve_resources_dir(&exe_parent);
             assert_eq!(result, Some(exe_parent));
         }
+    }
+
+    #[test]
+    fn reconcile_bundle_update_gated_behind_setup_started() {
+        let source = include_str!("main.rs");
+        // Find text after `setup_wizard::link_cli()` up to the closing brace of the
+        // enclosing `if setup_started` block. `reconcile_bundle_update` must appear
+        // in that window — i.e. inside the same guard block, not after it.
+        let after_link_cli = source
+            .split_once("setup_wizard::link_cli()")
+            .expect("main.rs must contain setup_wizard::link_cli()")
+            .1;
+        // The `if setup_started` block is indented with 12 spaces; its closing
+        // brace sits on a line that is exactly "            }\n".
+        let closing = "\n            }\n";
+        let until_close = after_link_cli
+            .split_once(closing)
+            .expect("should find closing brace of if setup_started block")
+            .0;
+        assert!(
+            until_close.contains("reconcile_bundle_update"),
+            "reconcile_bundle_update must be inside the if setup_started block with link_cli"
+        );
+    }
+
+    #[test]
+    fn reconcile_inner_has_snapshotter_recovery_and_ensure_ready_after_build() {
+        let source = include_str!("reconcile.rs");
+        let inner_fn = source
+            .split("fn reconcile_bundle_update_inner(")
+            .nth(1)
+            .expect("reconcile_bundle_update_inner function should exist");
+        assert!(
+            inner_fn.contains("SnapshotterRecoveryFailed"),
+            "reconcile must handle SnapshotterRecoveryFailed"
+        );
+        assert!(
+            inner_fn.contains("restart_container_engine"),
+            "reconcile must call restart_container_engine on snapshotter failure"
+        );
+        // ensure_ready must appear inside the ImagesBuilt phase block,
+        // after set_image_readiness(Ready) and before the block closes.
+        let images_built_block = inner_fn
+            .split("is_before(bundle::BundleReconcilePhase::ImagesBuilt)")
+            .nth(1)
+            .expect("ImagesBuilt phase guard should exist");
+        assert!(
+            images_built_block.contains("ensure_ready"),
+            "reconcile must call ensure_ready inside the ImagesBuilt phase block"
+        );
     }
 }

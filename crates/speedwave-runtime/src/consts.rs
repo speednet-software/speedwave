@@ -9,6 +9,7 @@ pub const MCP_OS_AUTH_TOKEN_FILE: &str = "mcp-os-auth-token";
 pub const MCP_OS_PORT_FILE: &str = "mcp-os-port";
 pub const MCP_OS_PID_FILE: &str = "mcp-os-pid";
 pub const MCP_OS_LOG_FILE: &str = "mcp-os.log";
+pub const CLAUDE_SESSION_LOG_FILE: &str = "claude-session.log";
 pub const CLAUDE_BINARY: &str = "/usr/local/bin/claude";
 
 /// PATH set inside containers for the `speedwave` user.
@@ -110,6 +111,16 @@ pub const WSL_SERVICE_START_DELAY_SECS: u64 = 3;
 /// wait per service: 10 × 3s = 30s. Needed because cold-boot WSL may take
 /// longer than a single retry to bring up containerd/buildkitd.
 pub const WSL_SERVICE_CHECK_MAX_RETRIES: u32 = 10;
+
+/// Delay in seconds after restarting containerd/buildkitd before checking readiness.
+/// Gives systemd time to bring up the service after a `systemctl restart`.
+pub const CONTAINERD_RESTART_READY_DELAY_SECS: u64 = 5;
+
+/// Maximum number of readiness retries after restarting containerd/buildkitd.
+/// Each retry waits `CONTAINERD_RESTART_READY_DELAY_SECS` seconds. Worst-case wait
+/// per phase: 6 × 5s = 30s. NerdctlRuntime runs two phases (systemd is-active then
+/// nerdctl info), so Linux rootless worst-case is 60s. Lima/WSL2 are single-phase (30s).
+pub const CONTAINERD_RESTART_READY_MAX_RETRIES: u32 = 6;
 
 /// Descriptor for a single auth/credential field of an MCP service.
 pub struct McpAuthFieldDescriptor {
@@ -381,6 +392,21 @@ pub fn find_mcp_service(config_key: &str) -> Option<&'static McpServiceDescripto
     TOGGLEABLE_MCP_SERVICES
         .iter()
         .find(|s| s.config_key == config_key)
+}
+
+/// Build the per-project Claude session log path using an injected home directory.
+/// Testable variant — does not depend on `dirs::home_dir()`.
+pub fn claude_session_log_path_in(home: &std::path::Path, project: &str) -> std::path::PathBuf {
+    home.join(DATA_DIR)
+        .join("logs")
+        .join(project)
+        .join(CLAUDE_SESSION_LOG_FILE)
+}
+
+/// Build the per-project Claude session log path.
+/// Returns `None` when `dirs::home_dir()` is unavailable.
+pub fn claude_session_log_path(project: &str) -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|home| claude_session_log_path_in(&home, project))
 }
 
 /// Built-in services defined in containers/compose.template.yml.
@@ -813,6 +839,34 @@ mod tests {
              Did you add a service to one but not the other?",
             TOGGLEABLE_OS_SERVICES.len(),
             os_field_count
+        );
+    }
+
+    #[test]
+    fn test_claude_session_log_file_is_non_empty() {
+        assert!(
+            !CLAUDE_SESSION_LOG_FILE.is_empty(),
+            "CLAUDE_SESSION_LOG_FILE must not be empty"
+        );
+    }
+
+    #[test]
+    fn test_claude_session_log_path_in_builds_correct_path() {
+        let home = std::path::Path::new("/fake/home");
+        let path = claude_session_log_path_in(home, "myproject");
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/fake/home/.speedwave/logs/myproject/claude-session.log")
+        );
+    }
+
+    #[test]
+    fn test_claude_session_log_path_in_different_project() {
+        let home = std::path::Path::new("/home/user");
+        let path = claude_session_log_path_in(home, "proj.v1");
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/home/user/.speedwave/logs/proj.v1/claude-session.log")
         );
     }
 }

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Complete MCP SharePoint worker implementation with 1,308 lines of TypeScript code.
+Complete MCP SharePoint worker implementation with 1,767 lines of TypeScript code.
 
 ## Directory Structure
 
@@ -21,10 +21,10 @@ sharepoint/
     │                         #   - Tool registration
     │                         #   - Streamable HTTP
     │
-    ├── client.ts             # SharePoint Graph API client (353 LOC)
+    ├── client.ts             # SharePoint Graph API client (812 LOC)
     │                         #   - OAuth token refresh
     │                         #   - Path validation
-    │                         #   - Tools: listFiles, syncFile, getCurrentUser
+    │                         #   - Tools: listFiles, uploadFile, downloadFile, getCurrentUser
     │                         #   - Token persistence
     │
     └── mcp/
@@ -42,7 +42,7 @@ sharepoint/
 
 #### package.json
 
-- **Version**: 0.55.0
+- **Version**: 0.1.0
 - **Dependencies**: express, cors
 - **DevDependencies**: @types/node, @types/express, @types/cors, typescript
 - **Scripts**: build, watch, start, dev
@@ -72,9 +72,9 @@ Main Express server with:
 - Origin validation (CVE-SPEED-001 fix)
 - Health endpoint (`GET /health`)
 - MCP endpoint (`POST /` with Streamable HTTP)
-- Tool registration (list_files, sync, get_current_user)
+- Tool registration (listFileIds, getFileFull, downloadFile, uploadFile, get_current_user)
 
-#### src/client.ts (353 LOC)
+#### src/client.ts (812 LOC)
 
 SharePoint/Graph API client with:
 
@@ -83,7 +83,8 @@ SharePoint/Graph API client with:
 - Graph API calls with retry logic
 - Tools:
   - `listFiles(params)` - List files/folders
-  - `syncFile(params)` - Upload with ETag CAS
+  - `uploadFile(params)` - Upload to SharePoint
+  - `downloadFile(params)` - Download from SharePoint
   - `getCurrentUser()` - User info
 - Token persistence to `/tokens/`
 
@@ -156,19 +157,31 @@ Required tokens in `/tokens/`:
 
 ## Tools
 
-### 1. list_files
+### 1. listFileIds
 
 - **Parameters**: `path` (optional)
-- **Returns**: Array of SharePointFile objects
+- **Returns**: Array of `{ id, name, isFolder }` objects
 - **Security**: Path traversal protection
 
-### 2. sync
+### 2. getFileFull
 
-- **Parameters**: `localPath`, `sharepointPath`, `expectedEtag` (optional), `createOnly` (optional), `overwrite` (optional)
+- **Parameters**: `file_id` (required)
+- **Returns**: File metadata object (id, name, size, content, metadata)
+
+### 3. downloadFile
+
+- **Parameters**: `sharepointPath` (required), `localPath` (required)
+- **Returns**: void (writes file to local path)
+- **Security**: Local path must be under `/workspace`
+
+### 4. uploadFile
+
+- **Parameters**: `localPath` (required), `sharepointPath` (required), `expectedEtag` (optional), `createOnly` (optional), `overwrite` (optional)
 - **Returns**: `{ success, etag, size }`
 - **Features**: ETag Compare-And-Swap, automatic folder creation
+- **Security**: Local path must be under `/workspace`
 
-### 3. get_current_user
+### 5. get_current_user
 
 - **Parameters**: None
 - **Returns**: User object (displayName, email, userPrincipalName, id)
@@ -204,14 +217,14 @@ Required tokens in `/tokens/`:
 | File                | LOC       | Purpose                     |
 | ------------------- | --------- | --------------------------- |
 | src/index.ts        | 200       | Main server                 |
-| src/client.ts       | 353       | Graph API client            |
+| src/client.ts       | 812       | Graph API client            |
 | src/mcp/types.ts    | 153       | Protocol types              |
 | src/mcp/jsonrpc.ts  | 191       | Message handler             |
 | src/mcp/security.ts | 174       | Security functions          |
 | src/mcp/session.ts  | 86        | Session management          |
 | src/mcp/sse.ts      | 94        | Streamable HTTP             |
 | src/mcp/index.ts    | 10        | Exports                     |
-| **Total**           | **1,308** | **Complete implementation** |
+| **Total**           | **1,767** | **Complete implementation** |
 
 ## Testing
 
@@ -248,8 +261,8 @@ Expected:
 {
   "status": "ok",
   "service": "mcp-sharepoint",
-  "version": "0.55.0",
-  "tools": ["list_files", "sync", "get_current_user"]
+  "version": "0.1.0",
+  "tools": ["listFileIds", "getFileFull", "downloadFile", "uploadFile", "get_current_user"]
 }
 ```
 

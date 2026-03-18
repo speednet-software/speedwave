@@ -7,8 +7,21 @@
 use speedwave_runtime::config;
 use speedwave_runtime::runtime::ContainerRuntime;
 
+use crate::reconcile::{SharedIdeBridge, SharedMcpOs};
 use crate::setup_wizard;
 use crate::types::{check_project, LlmConfigResponse};
+
+/// Maximum time to wait for container images to become ready before failing.
+/// The Angular frontend shows a "Rebuilding container images..." overlay while
+/// Tauri commands block on this timeout via `wait_for_images_ready()`.
+/// If this value changes, update the UX expectations in project-state.service.ts.
+const RECONCILE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Blocks until container images are ready (reconcile complete) or timeout.
+/// Called before any operation that starts containers.
+pub(crate) fn ensure_images_ready() -> Result<(), String> {
+    crate::reconcile::wait_for_images_ready(RECONCILE_WAIT_TIMEOUT)
+}
 
 // ---------------------------------------------------------------------------
 // Project switch transaction helpers
@@ -136,8 +149,15 @@ pub(crate) fn render_and_save_compose(
     )
     .map_err(|e| e.to_string())?;
 
-    let manifests = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_default();
-    let violations = speedwave_runtime::compose::SecurityCheck::run(&yaml, project, &manifests);
+    let manifests = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_else(|e| {
+        log::warn!("Failed to list installed plugins: {e}");
+        Vec::new()
+    });
+    let expected_paths =
+        speedwave_runtime::compose::SecurityExpectedPaths::compute(project, &project_dir)
+            .map_err(|e| e.to_string())?;
+    let violations =
+        speedwave_runtime::compose::SecurityCheck::run(&yaml, project, &manifests, &expected_paths);
     if !violations.is_empty() {
         return Err(format!(
             "Security check failed:\n{}",
@@ -253,7 +273,12 @@ pub async fn add_project(
     dir: String,
     app: tauri::AppHandle,
     chat_state: tauri::State<'_, crate::chat::SharedChatSession>,
+    mcp_os: tauri::State<'_, SharedMcpOs>,
+    ide_bridge: tauri::State<'_, SharedIdeBridge>,
 ) -> Result<(), String> {
+    // Start subsystems on-demand (e.g. after factory reset / fresh install)
+    crate::ensure_mcp_os_running(&mcp_os, &app);
+    crate::ensure_ide_bridge_running(&ide_bridge, &app);
     // Capture previous active project BEFORE runtime sets new one
     let previous = config::with_config_lock(|| {
         let cfg = config::load_user_config()?;
@@ -282,10 +307,16 @@ pub async fn add_project(
         serde_json::json!({ "project": name }),
     );
 
-    // Container transaction: ensure_ready → stop previous → start new
+    // Container transaction: wait for images → stop previous → start new
     let prev_clone = previous.clone();
     let new_clone = name.clone();
     let switch_result = tokio::task::spawn_blocking(move || {
+        if let Err(e) = ensure_images_ready() {
+            return SwitchResult::Failed {
+                error: e,
+                cleanup_error: None,
+            };
+        }
         let rt = speedwave_runtime::runtime::detect_runtime();
         switch_project_core(&prev_clone, &new_clone, &*rt, &|proj, _rt| {
             // start_containers calls ensure_ready internally (noop — VM already up)
@@ -346,8 +377,18 @@ pub async fn build_images() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn start_containers(project: String) -> Result<(), String> {
+pub async fn start_containers(
+    project: String,
+    app: tauri::AppHandle,
+    mcp_os: tauri::State<'_, SharedMcpOs>,
+    ide_bridge: tauri::State<'_, SharedIdeBridge>,
+) -> Result<(), String> {
+    // Start subsystems on-demand (e.g. after factory reset / fresh install)
+    crate::ensure_mcp_os_running(&mcp_os, &app);
+    crate::ensure_ide_bridge_running(&ide_bridge, &app);
+
     tokio::task::spawn_blocking(move || {
+        ensure_images_ready()?;
         check_project(&project)?;
         log::info!("start_containers: project={project}");
         setup_wizard::start_containers(&project).map_err(|e| {
@@ -406,6 +447,7 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
 #[tauri::command]
 pub async fn recreate_project_containers(project: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
+        ensure_images_ready()?;
         check_project(&project)?;
         log::info!("recreate_project_containers: project={project}");
         let rt = speedwave_runtime::runtime::detect_runtime();
@@ -433,16 +475,53 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn factory_reset() -> Result<(), String> {
-    tokio::task::spawn_blocking(|| {
-        log::info!("factory_reset: starting");
+pub async fn factory_reset(
+    app: tauri::AppHandle,
+    ide_bridge: tauri::State<'_, SharedIdeBridge>,
+    mcp_os: tauri::State<'_, SharedMcpOs>,
+) -> Result<(), String> {
+    // 1. Stop mcp-os watchdog
+    crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    // 2. Stop IDE Bridge
+    if let Ok(mut guard) = ide_bridge.lock() {
+        if let Some(mut bridge) = guard.take() {
+            if let Err(e) = bridge.stop() {
+                log::warn!("factory_reset: IDE Bridge stop: {e}");
+            }
+        }
+    }
+
+    // 3. Stop mcp-os (kill child, join drain threads → log file handles released)
+    //    Explicit stop + cleanup_files before drop; wipe_data_dir will remove
+    //    everything anyway, but this keeps behaviour consistent with run_exit_cleanup.
+    if let Ok(mut guard) = mcp_os.lock() {
+        if let Some(mut proc) = guard.take() {
+            if let Err(e) = proc.stop() {
+                log::warn!("factory_reset: mcp-os stop: {e}");
+            }
+            proc.cleanup_files();
+        }
+    }
+
+    // 4. Wipe (compose_down, VM delete, CLI removal, remove_dir_all)
+    let result = tokio::task::spawn_blocking(|| {
+        log::info!("factory_reset: starting wipe");
         setup_wizard::factory_reset().map_err(|e| {
             log::error!("factory_reset: error: {e}");
             e.to_string()
         })
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    // 5. Always restart:
+    //    Success → clean start, wizard shows (data dir gone).
+    //    Failure → recover subsystems (data dir may partially exist).
+    if let Err(ref e) = result {
+        log::error!("factory_reset: wipe failed ({e}), restarting to recover");
+    }
+    app.restart();
 }
 
 #[tauri::command]
@@ -1181,5 +1260,12 @@ mod tests {
         // No previous → no down, only up(new)
         assert!(rt.down_calls().is_empty());
         assert_eq!(rt.up_calls(), vec!["new"]);
+    }
+
+    #[test]
+    fn ensure_images_ready_passes_through_when_ready() {
+        // IMAGES_READY defaults to Ready — ensure_images_ready should return Ok
+        let result = ensure_images_ready();
+        assert!(result.is_ok());
     }
 }

@@ -26,350 +26,163 @@ interface SetupStep {
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div class="wizard-container" data-testid="setup-wizard">
-      <div class="wizard-header">
-        <h1>Speedwave Setup</h1>
-        <p class="subtitle">Prepare your development environment</p>
-      </div>
-
-      <!-- Phase: Welcome — user must click to start -->
-      @if (phase === 'welcome') {
-        <div class="wizard-body">
-          <p>Speedwave needs a lightweight virtual machine (Lima) to run containers securely.</p>
-          <ul class="features">
-            <li>VM with containerd + nerdctl (docker compose compatible)</li>
-            <li>4 CPU, 8 GB RAM, 30 GB disk</li>
-            <li>macOS: Apple Virtualization.framework (native performance)</li>
-          </ul>
-          <button class="btn btn-primary" data-testid="setup-start-btn" (click)="startSetup()">
-            Start Setup
-          </button>
-        </div>
-      }
-
-      <!-- Phase: Progress — steps running -->
-      @if (phase === 'progress' || phase === 'project') {
-        <div class="steps">
-          @for (step of steps; track step.title; let i = $index) {
-            <div class="step" [class]="step.status">
-              <div class="step-icon">
-                @if (step.status === 'done') {
-                  <span class="icon-check">&#10003;</span>
-                } @else if (step.status === 'active') {
-                  <span class="spinner"></span>
-                } @else if (step.status === 'error') {
-                  <span class="icon-error">&#10007;</span>
-                } @else {
-                  <span class="icon-pending">&bull;</span>
-                }
-              </div>
-              <div class="step-content">
-                <div class="step-title">{{ step.title }}</div>
-                <div class="step-desc">{{ step.description }}</div>
-                @if (step.detail && (step.status === 'active' || step.status === 'error')) {
-                  <div class="step-detail">{{ step.detail }}</div>
-                }
-              </div>
-            </div>
-          }
+    <div
+      class="flex items-center justify-center min-h-screen bg-sw-bg-darkest"
+      data-testid="setup-wizard"
+    >
+      <div class="max-w-[600px] mx-auto p-6">
+        <div class="text-center mb-8">
+          <h1 class="text-2xl text-sw-accent m-0">Speedwave Setup</h1>
+          <p class="text-sw-text-muted text-sm mt-1">Prepare your development environment</p>
         </div>
 
-        <!-- Active step panel -->
-        <div class="step-panel">
-          <!-- Project creation form (step 3) -->
-          @if (phase === 'project') {
-            <div class="form-group">
-              <label
-                >Project name
-                <input
-                  type="text"
-                  [(ngModel)]="projectName"
-                  placeholder="acme-corp"
-                  data-testid="setup-project-name"
-                />
-              </label>
-            </div>
-            <div class="form-group">
-              <label
-                >Project directory
-                <input
-                  type="text"
-                  [(ngModel)]="projectDir"
-                  placeholder="/Users/you/projects/acme-corp"
-                  data-testid="setup-project-dir"
-                />
-              </label>
-            </div>
+        <!-- Phase: Welcome — user must click to start -->
+        @if (phase === 'welcome') {
+          <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-6">
+            <p class="text-sw-text-dim leading-relaxed mb-4">
+              Speedwave needs a lightweight virtual machine (Lima) to run containers securely.
+            </p>
+            <ul class="list-none p-0 mb-6">
+              <li class="py-1.5 text-sw-text-faint text-sm">
+                <span class="text-sw-accent mr-1">&#9656;</span>VM with containerd + nerdctl (docker
+                compose compatible)
+              </li>
+              <li class="py-1.5 text-sw-text-faint text-sm">
+                <span class="text-sw-accent mr-1">&#9656;</span>4 CPU, 8 GB RAM, 30 GB disk
+              </li>
+              <li class="py-1.5 text-sw-text-faint text-sm">
+                <span class="text-sw-accent mr-1">&#9656;</span>macOS: Apple
+                Virtualization.framework (native performance)
+              </li>
+            </ul>
             <button
-              class="btn btn-primary"
-              data-testid="setup-create-project-btn"
-              (click)="createProject()"
-              [disabled]="busy || !projectName || !projectDir"
+              class="px-6 py-2.5 rounded text-sm font-semibold font-mono border-none cursor-pointer transition-colors bg-sw-accent text-white hover:bg-sw-accent-hover"
+              data-testid="setup-start-btn"
+              (click)="startSetup()"
             >
-              {{ busy ? 'Creating...' : 'Create Project' }}
+              Start Setup
             </button>
-          }
+          </div>
+        }
 
-          <!-- Error state -->
-          @if (error) {
-            <div class="error-banner" data-testid="setup-error">{{ error }}</div>
-            <div class="retry-actions">
-              <button
-                class="btn btn-primary"
-                data-testid="setup-retry-btn"
-                (click)="retryCurrentStep()"
+        <!-- Phase: Progress — steps running -->
+        @if (phase === 'progress' || phase === 'project') {
+          <div class="flex flex-col gap-1 mb-6">
+            @for (step of steps; track step.title; let i = $index) {
+              <div
+                class="flex items-start gap-3 px-3 py-2.5 rounded"
+                [class.bg-sw-bg-dark]="step.status === 'active'"
+                [class.opacity-40]="step.status === 'pending'"
+                [class.opacity-70]="step.status === 'done'"
+                data-testid="setup-step"
               >
-                Retry
-              </button>
-              <button
-                class="btn btn-secondary"
-                data-testid="setup-back-btn"
-                (click)="backToWelcome()"
-              >
-                Back to Start
-              </button>
-            </div>
-          }
-        </div>
-      }
+                <div class="size-[22px] flex items-center justify-center text-sm shrink-0 mt-px">
+                  @if (step.status === 'done') {
+                    <span class="text-sw-success font-bold">&#10003;</span>
+                  } @else if (step.status === 'active') {
+                    <span
+                      class="inline-block size-3.5 border-2 border-sw-bg-navy border-t-sw-accent rounded-full animate-sw-spin"
+                    ></span>
+                  } @else if (step.status === 'error') {
+                    <span class="text-sw-error font-bold">&#10007;</span>
+                  } @else {
+                    <span class="text-sw-slider text-lg">&bull;</span>
+                  }
+                </div>
+                <div class="flex-1">
+                  <div class="font-semibold text-sm text-sw-text">{{ step.title }}</div>
+                  <div class="text-xs text-sw-text-ghost">{{ step.description }}</div>
+                  @if (step.detail && (step.status === 'active' || step.status === 'error')) {
+                    <div
+                      class="text-xs mt-0.5 font-mono"
+                      [class.text-sw-text-faint]="step.status === 'active'"
+                      [class.text-sw-error]="step.status === 'error'"
+                    >
+                      {{ step.detail }}
+                    </div>
+                  }
+                </div>
+              </div>
+            }
+          </div>
 
-      <!-- Phase: Complete -->
-      @if (phase === 'complete') {
-        <div class="wizard-body success-body">
-          <p class="success-text" data-testid="setup-success">
-            Setup complete! Redirecting to settings...
-          </p>
-        </div>
-      }
+          <!-- Active step panel -->
+          <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-5">
+            <!-- Project creation form (step 3) -->
+            @if (phase === 'project') {
+              <div class="mb-3">
+                <label class="block mb-1 text-[13px] text-sw-text-dim"
+                  >Project name
+                  <input
+                    type="text"
+                    [(ngModel)]="projectName"
+                    placeholder="acme-corp"
+                    data-testid="setup-project-name"
+                    class="w-full px-3 py-2 bg-sw-bg-darkest border border-sw-border rounded text-sw-text font-mono text-sm box-border focus:outline-none focus:border-sw-accent"
+                  />
+                </label>
+              </div>
+              <div class="mb-3">
+                <label class="block mb-1 text-[13px] text-sw-text-dim"
+                  >Project directory
+                  <input
+                    type="text"
+                    [(ngModel)]="projectDir"
+                    placeholder="/Users/you/projects/acme-corp"
+                    data-testid="setup-project-dir"
+                    class="w-full px-3 py-2 bg-sw-bg-darkest border border-sw-border rounded text-sw-text font-mono text-sm box-border focus:outline-none focus:border-sw-accent"
+                  />
+                </label>
+              </div>
+              <button
+                class="px-6 py-2.5 rounded text-sm font-semibold font-mono border-none cursor-pointer transition-colors bg-sw-accent text-white hover:bg-sw-accent-hover disabled:opacity-40 disabled:cursor-not-allowed"
+                data-testid="setup-create-project-btn"
+                (click)="createProject()"
+                [disabled]="busy || !projectName || !projectDir"
+              >
+                {{ busy ? 'Creating...' : 'Create Project' }}
+              </button>
+            }
+
+            <!-- Error state -->
+            @if (error) {
+              <div
+                class="mb-3 px-3 py-2 bg-sw-error-bg border border-sw-error rounded text-sw-error text-[13px] break-words"
+                data-testid="setup-error"
+              >
+                {{ error }}
+              </div>
+              <div class="flex gap-3">
+                <button
+                  class="px-6 py-2.5 rounded text-sm font-semibold font-mono border-none cursor-pointer transition-colors bg-sw-accent text-white hover:bg-sw-accent-hover"
+                  data-testid="setup-retry-btn"
+                  (click)="retryCurrentStep()"
+                >
+                  Retry
+                </button>
+                <button
+                  class="px-6 py-2.5 rounded text-sm font-semibold font-mono cursor-pointer transition-colors bg-transparent text-sw-text-muted border border-sw-slider hover:text-sw-text hover:border-sw-text-muted"
+                  data-testid="setup-back-btn"
+                  (click)="backToWelcome()"
+                >
+                  Back to Start
+                </button>
+              </div>
+            }
+          </div>
+        }
+
+        <!-- Phase: Complete -->
+        @if (phase === 'complete') {
+          <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-6 text-center">
+            <p class="text-sw-success font-bold text-base" data-testid="setup-success">
+              Setup complete! Redirecting to settings...
+            </p>
+          </div>
+        }
+      </div>
     </div>
   `,
-  styles: [
-    `
-      :host {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        min-height: 100vh;
-        background: #1a1a2e;
-      }
-      .wizard-container {
-        max-width: 600px;
-        margin: 0 auto;
-        padding: 24px;
-      }
-      .wizard-header {
-        text-align: center;
-        margin-bottom: 32px;
-      }
-      .wizard-header h1 {
-        font-size: 24px;
-        color: #e94560;
-        margin: 0;
-      }
-      .subtitle {
-        color: #888;
-        font-size: 14px;
-        margin-top: 4px;
-      }
-      .wizard-body {
-        background: #16213e;
-        border: 1px solid #0f3460;
-        border-radius: 8px;
-        padding: 24px;
-      }
-      .wizard-body p {
-        color: #bbb;
-        line-height: 1.6;
-        margin-bottom: 16px;
-      }
-      .features {
-        list-style: none;
-        padding: 0;
-        margin: 0 0 24px 0;
-      }
-      .features li {
-        padding: 6px 0;
-        color: #999;
-        font-size: 14px;
-      }
-      .features li::before {
-        content: '\\25B8  ';
-        color: #e94560;
-      }
-
-      /* Buttons */
-      .btn {
-        padding: 10px 24px;
-        border-radius: 4px;
-        font-size: 14px;
-        font-weight: 600;
-        font-family: monospace;
-        border: none;
-        cursor: pointer;
-        transition: background 0.2s;
-      }
-      .btn:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-      }
-      .btn-primary {
-        background: #e94560;
-        color: #fff;
-      }
-      .btn-primary:hover:not(:disabled) {
-        background: #c23152;
-      }
-      .btn-secondary {
-        background: transparent;
-        color: #888;
-        border: 1px solid #555;
-      }
-      .btn-secondary:hover:not(:disabled) {
-        color: #e0e0e0;
-        border-color: #888;
-      }
-
-      /* Steps list */
-      .steps {
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-        margin-bottom: 24px;
-      }
-      .step {
-        display: flex;
-        align-items: flex-start;
-        gap: 12px;
-        padding: 10px 12px;
-        border-radius: 4px;
-      }
-      .step.active {
-        background: #16213e;
-      }
-      .step.pending {
-        opacity: 0.4;
-      }
-      .step.done {
-        opacity: 0.7;
-      }
-      .step.error {
-        opacity: 1;
-      }
-
-      .step-icon {
-        width: 22px;
-        height: 22px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 14px;
-        flex-shrink: 0;
-        margin-top: 1px;
-      }
-      .icon-check {
-        color: #2ecc71;
-        font-weight: bold;
-      }
-      .icon-error {
-        color: #e94560;
-        font-weight: bold;
-      }
-      .icon-pending {
-        color: #555;
-        font-size: 18px;
-      }
-      .spinner {
-        display: inline-block;
-        width: 14px;
-        height: 14px;
-        border: 2px solid #0f3460;
-        border-top-color: #e94560;
-        border-radius: 50%;
-        animation: spin 0.8s linear infinite;
-      }
-      @keyframes spin {
-        to {
-          transform: rotate(360deg);
-        }
-      }
-
-      .step-content {
-        flex: 1;
-      }
-      .step-title {
-        font-weight: 600;
-        font-size: 14px;
-        color: #e0e0e0;
-      }
-      .step-desc {
-        font-size: 12px;
-        color: #666;
-      }
-      .step-detail {
-        font-size: 12px;
-        color: #999;
-        margin-top: 2px;
-        font-family: monospace;
-      }
-      .step.error .step-detail {
-        color: #e94560;
-      }
-
-      /* Active step panel */
-      .step-panel {
-        background: #16213e;
-        border: 1px solid #0f3460;
-        border-radius: 8px;
-        padding: 20px;
-      }
-      .form-group {
-        margin-bottom: 12px;
-      }
-      .form-group label {
-        display: block;
-        margin-bottom: 4px;
-        font-size: 13px;
-        color: #aaa;
-      }
-      .form-group input {
-        width: 100%;
-        padding: 8px 12px;
-        background: #1a1a2e;
-        border: 1px solid #0f3460;
-        border-radius: 4px;
-        color: #e0e0e0;
-        font-family: monospace;
-        font-size: 14px;
-        box-sizing: border-box;
-      }
-      .form-group input:focus {
-        outline: none;
-        border-color: #e94560;
-      }
-      .error-banner {
-        margin-bottom: 12px;
-        padding: 8px 12px;
-        background: #3d0000;
-        border: 1px solid #e94560;
-        border-radius: 4px;
-        color: #e94560;
-        font-size: 13px;
-        word-break: break-word;
-      }
-      .retry-actions {
-        display: flex;
-        gap: 12px;
-      }
-      .success-body {
-        text-align: center;
-      }
-      .success-text {
-        color: #2ecc71;
-        font-weight: bold;
-        font-size: 16px;
-      }
-    `,
-  ],
 })
 export class SetupWizardComponent {
   phase: 'welcome' | 'progress' | 'project' | 'complete' = 'welcome';

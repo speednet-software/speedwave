@@ -95,8 +95,8 @@ describe('tool-registry', () => {
   describe('getLongTimeoutTools', () => {
     it('should return tools with timeoutClass long', () => {
       const longTools = getLongTimeoutTools();
-      expect(longTools).toContainEqual({ service: 'sharepoint', method: 'sync' });
-      expect(longTools).toContainEqual({ service: 'sharepoint', method: 'syncDirectory' });
+      expect(longTools).toContainEqual({ service: 'sharepoint', method: 'downloadFile' });
+      expect(longTools).toContainEqual({ service: 'sharepoint', method: 'uploadFile' });
     });
 
     it('should not include standard timeout tools', () => {
@@ -109,12 +109,12 @@ describe('tool-registry', () => {
   });
 
   describe('getRequiredTimeoutClass', () => {
-    it('should detect sharepoint.sync as long', () => {
-      expect(getRequiredTimeoutClass('await sharepoint.sync()')).toBe('long');
+    it('should detect sharepoint.downloadFile as long', () => {
+      expect(getRequiredTimeoutClass('await sharepoint.downloadFile()')).toBe('long');
     });
 
-    it('should detect sharepoint.syncDirectory as long', () => {
-      expect(getRequiredTimeoutClass('await sharepoint.syncDirectory({ path: "/test" })')).toBe(
+    it('should detect sharepoint.uploadFile as long', () => {
+      expect(getRequiredTimeoutClass('await sharepoint.uploadFile({ path: "/test" })')).toBe(
         'long'
       );
     });
@@ -130,20 +130,20 @@ describe('tool-registry', () => {
     it('should handle code with multiple tool calls', () => {
       const code = `
         const issues = await redmine.listIssueIds();
-        await sharepoint.sync({ local_path: "/test" });
+        await sharepoint.downloadFile({ remote_path: "/test" });
         return issues;
       `;
       expect(getRequiredTimeoutClass(code)).toBe('long');
     });
 
     it('should handle whitespace variations', () => {
-      expect(getRequiredTimeoutClass('sharepoint . sync()')).toBe('long');
+      expect(getRequiredTimeoutClass('sharepoint . downloadFile()')).toBe('long');
     });
   });
 
   describe('getExecutionTimeout', () => {
     it('should return LONG_OPERATION_MS for code with long-timeout tools', () => {
-      const result = getExecutionTimeout('await sharepoint.sync()', TIMEOUTS.EXECUTION_MS);
+      const result = getExecutionTimeout('await sharepoint.downloadFile()', TIMEOUTS.EXECUTION_MS);
       expect(result.timeoutMs).toBe(TIMEOUTS.LONG_OPERATION_MS);
       expect(result.timeoutClass).toBe('long');
     });
@@ -364,7 +364,8 @@ describe('tool-registry', () => {
       const sharepointMethods = getServiceMethods('sharepoint');
       expect(sharepointMethods).toContain('listFileIds');
       expect(sharepointMethods).toContain('getFileFull');
-      expect(sharepointMethods).toContain('sync');
+      expect(sharepointMethods).toContain('downloadFile');
+      expect(sharepointMethods).toContain('uploadFile');
       expect(sharepointMethods).toContain('getCurrentUser');
     });
   });

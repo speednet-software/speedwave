@@ -11,21 +11,20 @@
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { createToolDefinitions } from './tools/index.js';
-import { handleListFileIds, handleGetFileFull, handleSync } from './tools/file-tools.js';
-import { handleSyncDirectory } from './tools/sync-tools.js';
+import {
+  handleListFileIds,
+  handleGetFileFull,
+  handleDownloadFile,
+  handleUploadFile,
+} from './tools/file-tools.js';
 import { handleGetCurrentUser } from './tools/user-tools.js';
 import type { SharePointClient } from './client.js';
-
-// Mock fs/promises for handleSync file-vs-directory detection
-vi.mock('fs/promises', () => ({
-  stat: vi.fn(),
-}));
 
 type MockClient = {
   listFiles: Mock;
   getFileMetadata: Mock;
-  syncFile: Mock;
-  syncDirectory: Mock;
+  uploadFile: Mock;
+  downloadFile: Mock;
   getCurrentUser: Mock;
   getHealthStatus: Mock;
   formatError: Mock;
@@ -35,8 +34,8 @@ function createMockClient(): MockClient {
   return {
     listFiles: vi.fn(),
     getFileMetadata: vi.fn(),
-    syncFile: vi.fn(),
-    syncDirectory: vi.fn(),
+    uploadFile: vi.fn(),
+    downloadFile: vi.fn(),
     getCurrentUser: vi.fn(),
     getHealthStatus: vi.fn().mockReturnValue({ tokenSaveError: null }),
     formatError: vi.fn((error: unknown) => {
@@ -80,8 +79,8 @@ describe('SharePoint handler integration', () => {
       const names = tools.map((t) => t.tool.name);
       expect(names).toContain('listFileIds');
       expect(names).toContain('getFileFull');
-      expect(names).toContain('sync');
-      expect(names).toContain('syncDirectory');
+      expect(names).toContain('downloadFile');
+      expect(names).toContain('uploadFile');
       expect(names).toContain('getCurrentUser');
       expect(tools.length).toBe(5);
     });
@@ -133,13 +132,13 @@ describe('SharePoint handler integration', () => {
       expect(parsed.code).toBe('NOT_CONFIGURED');
     });
 
-    it('sync returns NOT_CONFIGURED error', async () => {
+    it('downloadFile returns NOT_CONFIGURED error', async () => {
       const tools = createToolDefinitions(null);
-      const syncTool = tools.find((t) => t.tool.name === 'sync')!;
+      const downloadTool = tools.find((t) => t.tool.name === 'downloadFile')!;
 
-      const result = await syncTool.handler({
-        localPath: '/tmp/test.txt',
+      const result = await downloadTool.handler({
         sharepointPath: 'docs/test.txt',
+        localPath: '/workspace/test.txt',
       });
       const parsed = JSON.parse(result.content[0].text as string);
 
@@ -147,13 +146,13 @@ describe('SharePoint handler integration', () => {
       expect(parsed.code).toBe('NOT_CONFIGURED');
     });
 
-    it('syncDirectory returns NOT_CONFIGURED error', async () => {
+    it('uploadFile returns NOT_CONFIGURED error', async () => {
       const tools = createToolDefinitions(null);
-      const syncDirTool = tools.find((t) => t.tool.name === 'syncDirectory')!;
+      const uploadTool = tools.find((t) => t.tool.name === 'uploadFile')!;
 
-      const result = await syncDirTool.handler({
-        localPath: '/tmp/sync',
-        mode: 'two_way',
+      const result = await uploadTool.handler({
+        localPath: '/workspace/test.txt',
+        sharepointPath: 'docs/test.txt',
       });
       const parsed = JSON.parse(result.content[0].text as string);
 
@@ -200,17 +199,17 @@ describe('SharePoint handler integration', () => {
       expect(result.error?.code).toBe('GET_FAILED');
     });
 
-    it('handleSync returns error on 403 Forbidden', async () => {
+    it('handleUploadFile returns error on 403 Forbidden', async () => {
       const client = createMockClient();
-      client.syncFile.mockRejectedValue(new Error('403 Forbidden'));
+      client.uploadFile.mockRejectedValue(new Error('403 Forbidden'));
 
-      const result = await handleSync(client as unknown as SharePointClient, {
-        localPath: '/tmp/test.txt',
+      const result = await handleUploadFile(client as unknown as SharePointClient, {
+        localPath: '/workspace/test.txt',
         sharepointPath: 'docs/test.txt',
       });
 
       expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('SYNC_FAILED');
+      expect(result.error?.code).toBe('UPLOAD_FAILED');
     });
 
     it('handleGetCurrentUser returns error on token refresh failure', async () => {
@@ -223,17 +222,17 @@ describe('SharePoint handler integration', () => {
       expect(result.error?.code).toBe('USER_FAILED');
     });
 
-    it('handleSyncDirectory returns error on 401', async () => {
+    it('handleDownloadFile returns error on 401', async () => {
       const client = createMockClient();
-      client.syncDirectory.mockRejectedValue(new Error('401 Unauthorized'));
+      client.downloadFile.mockRejectedValue(new Error('401 Unauthorized'));
 
-      const result = await handleSyncDirectory(client as unknown as SharePointClient, {
-        localPath: '/tmp/sync',
-        mode: 'two_way',
+      const result = await handleDownloadFile(client as unknown as SharePointClient, {
+        sharepointPath: 'docs/file.txt',
+        localPath: '/workspace/file.txt',
       });
 
       expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('SYNC_DIR_FAILED');
+      expect(result.error?.code).toBe('DOWNLOAD_FAILED');
     });
   });
 
@@ -242,32 +241,32 @@ describe('SharePoint handler integration', () => {
   //=============================================================================
 
   describe('path traversal rejection at handler level', () => {
-    it('handleSync rejects path with ../ traversal', async () => {
+    it('handleUploadFile rejects path with ../ traversal', async () => {
       const client = createMockClient();
-      client.syncFile.mockRejectedValue(new Error('Invalid path (security check failed)'));
+      client.uploadFile.mockRejectedValue(new Error('Invalid path (security check failed)'));
 
-      const result = await handleSync(client as unknown as SharePointClient, {
-        localPath: '/tmp/test.txt',
+      const result = await handleUploadFile(client as unknown as SharePointClient, {
+        localPath: '/workspace/test.txt',
         sharepointPath: '../../../etc/passwd',
       });
 
       expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('SYNC_FAILED');
+      expect(result.error?.code).toBe('UPLOAD_FAILED');
     });
 
-    it('handleSync rejects URL-encoded traversal', async () => {
+    it('handleUploadFile rejects URL-encoded traversal', async () => {
       const client = createMockClient();
-      client.syncFile.mockRejectedValue(
+      client.uploadFile.mockRejectedValue(
         new Error('Invalid path (security check failed - traversal)')
       );
 
-      const result = await handleSync(client as unknown as SharePointClient, {
-        localPath: '/tmp/test.txt',
+      const result = await handleUploadFile(client as unknown as SharePointClient, {
+        localPath: '/workspace/test.txt',
         sharepointPath: '%2e%2e%2f%2e%2e%2fetc%2fpasswd',
       });
 
       expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('SYNC_FAILED');
+      expect(result.error?.code).toBe('UPLOAD_FAILED');
     });
 
     it('handleListFileIds rejects traversal path', async () => {
@@ -337,14 +336,14 @@ describe('SharePoint handler integration', () => {
   });
 
   //=============================================================================
-  // handleSync parameter validation
+  // handleUploadFile parameter validation
   //=============================================================================
 
-  describe('handleSync parameter validation', () => {
+  describe('handleUploadFile parameter validation', () => {
     it('returns MISSING_PARAM when localPath is missing', async () => {
       const client = createMockClient();
 
-      const result = await handleSync(client as unknown as SharePointClient, {
+      const result = await handleUploadFile(client as unknown as SharePointClient, {
         sharepointPath: 'docs/test.txt',
       });
 
@@ -356,8 +355,8 @@ describe('SharePoint handler integration', () => {
     it('returns MISSING_PARAM when sharepointPath is missing', async () => {
       const client = createMockClient();
 
-      const result = await handleSync(client as unknown as SharePointClient, {
-        localPath: '/tmp/test.txt',
+      const result = await handleUploadFile(client as unknown as SharePointClient, {
+        localPath: '/workspace/test.txt',
       });
 
       expect(result.success).toBe(false);
@@ -367,53 +366,63 @@ describe('SharePoint handler integration', () => {
 
     it('accepts snake_case parameter aliases', async () => {
       const client = createMockClient();
-      client.syncFile.mockResolvedValue({ success: true, etag: 'abc', size: 100 });
+      client.uploadFile.mockResolvedValue({ etag: 'abc', size: 100 });
 
-      const result = await handleSync(client as unknown as SharePointClient, {
-        local_path: '/tmp/test.txt',
+      const result = await handleUploadFile(client as unknown as SharePointClient, {
+        local_path: '/workspace/test.txt',
         sharepoint_path: 'docs/test.txt',
       });
 
       expect(result.success).toBe(true);
-      expect(client.syncFile).toHaveBeenCalledWith(
-        expect.objectContaining({
-          localPath: '/tmp/test.txt',
-          sharepointPath: 'docs/test.txt',
-        })
+      expect(client.uploadFile).toHaveBeenCalledWith(
+        'docs/test.txt',
+        '/workspace/test.txt',
+        expect.any(Object)
       );
     });
 
     it('prefers camelCase over snake_case when both provided', async () => {
       const client = createMockClient();
-      client.syncFile.mockResolvedValue({ success: true, etag: 'abc', size: 100 });
+      client.uploadFile.mockResolvedValue({ etag: 'abc', size: 100 });
 
-      const result = await handleSync(client as unknown as SharePointClient, {
-        localPath: '/tmp/camel.txt',
-        local_path: '/tmp/snake.txt',
+      const result = await handleUploadFile(client as unknown as SharePointClient, {
+        localPath: '/workspace/camel.txt',
+        local_path: '/workspace/snake.txt',
         sharepointPath: 'docs/camel.txt',
         sharepoint_path: 'docs/snake.txt',
       });
 
       expect(result.success).toBe(true);
-      expect(client.syncFile).toHaveBeenCalledWith(
-        expect.objectContaining({
-          localPath: '/tmp/camel.txt',
-          sharepointPath: 'docs/camel.txt',
-        })
+      expect(client.uploadFile).toHaveBeenCalledWith(
+        'docs/camel.txt',
+        '/workspace/camel.txt',
+        expect.any(Object)
       );
     });
   });
 
   //=============================================================================
-  // handleSyncDirectory parameter validation
+  // handleDownloadFile parameter validation
   //=============================================================================
 
-  describe('handleSyncDirectory parameter validation', () => {
+  describe('handleDownloadFile parameter validation', () => {
+    it('returns MISSING_PARAM when sharepointPath is missing', async () => {
+      const client = createMockClient();
+
+      const result = await handleDownloadFile(client as unknown as SharePointClient, {
+        localPath: '/workspace/test.txt',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_PARAM');
+      expect(result.error?.message).toContain('sharepointPath');
+    });
+
     it('returns MISSING_PARAM when localPath is missing', async () => {
       const client = createMockClient();
 
-      const result = await handleSyncDirectory(client as unknown as SharePointClient, {
-        mode: 'two_way',
+      const result = await handleDownloadFile(client as unknown as SharePointClient, {
+        sharepointPath: 'docs/test.txt',
       });
 
       expect(result.success).toBe(false);
@@ -421,31 +430,17 @@ describe('SharePoint handler integration', () => {
       expect(result.error?.message).toContain('localPath');
     });
 
-    it('returns MISSING_PARAM when mode is missing', async () => {
-      const client = createMockClient();
-
-      const result = await handleSyncDirectory(client as unknown as SharePointClient, {
-        localPath: '/tmp/sync',
-      });
-
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('MISSING_PARAM');
-      expect(result.error?.message).toContain('mode');
-    });
-
     it('accepts snake_case local_path alias', async () => {
       const client = createMockClient();
-      client.syncDirectory.mockResolvedValue({ success: true, summary: {} });
+      client.downloadFile.mockResolvedValue(undefined);
 
-      const result = await handleSyncDirectory(client as unknown as SharePointClient, {
-        local_path: '/tmp/sync',
-        mode: 'pull',
+      const result = await handleDownloadFile(client as unknown as SharePointClient, {
+        sharepoint_path: 'docs/file.txt',
+        local_path: '/workspace/file.txt',
       });
 
       expect(result.success).toBe(true);
-      expect(client.syncDirectory).toHaveBeenCalledWith(
-        expect.objectContaining({ localPath: '/tmp/sync', mode: 'pull' })
-      );
+      expect(client.downloadFile).toHaveBeenCalledWith('docs/file.txt', '/workspace/file.txt');
     });
   });
 
@@ -476,30 +471,30 @@ describe('SharePoint handler integration', () => {
       expect(result.error?.code).toBe('GET_FAILED');
     });
 
-    it('handleSync returns error on HTTP 429', async () => {
+    it('handleUploadFile returns error on HTTP 429', async () => {
       const client = createMockClient();
-      client.syncFile.mockRejectedValue(new Error('429 Too Many Requests'));
+      client.uploadFile.mockRejectedValue(new Error('429 Too Many Requests'));
 
-      const result = await handleSync(client as unknown as SharePointClient, {
-        localPath: '/tmp/test.txt',
+      const result = await handleUploadFile(client as unknown as SharePointClient, {
+        localPath: '/workspace/test.txt',
         sharepointPath: 'docs/test.txt',
       });
 
       expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('SYNC_FAILED');
+      expect(result.error?.code).toBe('UPLOAD_FAILED');
     });
 
-    it('handleSyncDirectory returns error on HTTP 429', async () => {
+    it('handleDownloadFile returns error on HTTP 429', async () => {
       const client = createMockClient();
-      client.syncDirectory.mockRejectedValue(new Error('429 Too Many Requests'));
+      client.downloadFile.mockRejectedValue(new Error('429 Too Many Requests'));
 
-      const result = await handleSyncDirectory(client as unknown as SharePointClient, {
-        localPath: '/tmp/sync',
-        mode: 'push',
+      const result = await handleDownloadFile(client as unknown as SharePointClient, {
+        sharepointPath: 'docs/file.txt',
+        localPath: '/workspace/file.txt',
       });
 
       expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('SYNC_DIR_FAILED');
+      expect(result.error?.code).toBe('DOWNLOAD_FAILED');
     });
 
     it('handleGetCurrentUser returns error on HTTP 429', async () => {
@@ -540,17 +535,17 @@ describe('SharePoint handler integration', () => {
       expect(result.error?.code).toBe('GET_FAILED');
     });
 
-    it('handleSync handles DNS resolution failure', async () => {
+    it('handleUploadFile handles DNS resolution failure', async () => {
       const client = createMockClient();
-      client.syncFile.mockRejectedValue(new Error('getaddrinfo ENOTFOUND graph.microsoft.com'));
+      client.uploadFile.mockRejectedValue(new Error('getaddrinfo ENOTFOUND graph.microsoft.com'));
 
-      const result = await handleSync(client as unknown as SharePointClient, {
-        localPath: '/tmp/test.txt',
+      const result = await handleUploadFile(client as unknown as SharePointClient, {
+        localPath: '/workspace/test.txt',
         sharepointPath: 'docs/test.txt',
       });
 
       expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('SYNC_FAILED');
+      expect(result.error?.code).toBe('UPLOAD_FAILED');
     });
 
     it('handleGetCurrentUser handles service unavailable', async () => {

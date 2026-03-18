@@ -52,7 +52,7 @@ describe('PluginSettingsFormComponent', () => {
   it('should show "no settings" message when schema is null', () => {
     component.schema = null;
     fixture.detectChanges();
-    const msg = fixture.nativeElement.querySelector('.no-settings');
+    const msg = fixture.nativeElement.querySelector('[data-testid="no-settings"]');
     expect(msg).not.toBeNull();
     expect(msg.textContent).toContain('No configurable settings');
   });
@@ -122,7 +122,7 @@ describe('PluginSettingsFormComponent', () => {
   it('should display field descriptions as hints', () => {
     component.schema = makeSchema();
     fixture.detectChanges();
-    const hints = fixture.nativeElement.querySelectorAll('.field-hint');
+    const hints = fixture.nativeElement.querySelectorAll('[data-testid="field-hint"]');
     expect(hints.length).toBeGreaterThan(0);
     const hintTexts = Array.from(hints).map((h: unknown) => (h as HTMLElement).textContent);
     expect(hintTexts).toContain('Default currency for reports');

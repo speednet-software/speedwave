@@ -22,11 +22,11 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div class="health-container">
-      <div class="health-header">
-        <h2>System Health</h2>
+    <div class="max-w-[700px] mx-auto p-0" data-testid="health-container">
+      <div class="flex items-center justify-between mb-6">
+        <h2 class="text-lg text-sw-accent m-0">System Health</h2>
         <button
-          class="refresh-btn"
+          class="px-4 py-1.5 bg-sw-bg-navy text-sw-text border border-sw-border rounded text-[13px] font-mono cursor-pointer transition-colors duration-200 hover:enabled:bg-sw-btn-hover disabled:opacity-40 disabled:cursor-not-allowed"
           data-testid="health-refresh"
           (click)="refresh()"
           [disabled]="loading"
@@ -36,21 +36,34 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
       </div>
 
       @if (error) {
-        <div class="error-banner">{{ error }}</div>
+        <div
+          class="mb-4 px-3 py-2 bg-sw-error-bg border border-sw-accent rounded text-sw-accent text-[13px]"
+          data-testid="error-banner"
+        >
+          {{ error }}
+        </div>
       }
 
-      <div class="status-grid">
-        <div class="status-card">
-          <div class="card-header">
+      <div class="grid grid-cols-4 gap-3 mb-6" data-testid="status-grid">
+        <div
+          class="bg-sw-bg-dark border border-sw-border rounded-lg p-4"
+          data-testid="status-card-overall"
+        >
+          <div class="flex items-center gap-2 mb-2">
             <span
-              class="indicator"
-              [class.green]="report?.overall_healthy"
-              [class.red]="report !== null && !report.overall_healthy"
-              [class.gray]="report === null"
+              class="inline-block w-2.5 h-2.5 rounded-full shrink-0"
+              [class]="
+                report?.overall_healthy
+                  ? 'bg-sw-success shadow-[0_0_6px_rgba(46,204,113,0.4)]'
+                  : report !== null && !report.overall_healthy
+                    ? 'bg-sw-accent shadow-[0_0_6px_rgba(233,69,96,0.4)]'
+                    : 'bg-sw-slider'
+              "
+              data-testid="indicator-overall"
             ></span>
-            <span class="card-title">Overall Status</span>
+            <span class="text-xs text-sw-text-muted uppercase tracking-wide">Overall Status</span>
           </div>
-          <div class="card-value">
+          <div class="text-sm font-semibold text-sw-text">
             @if (report === null) {
               Not connected
             } @else if (report.overall_healthy) {
@@ -61,17 +74,25 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
           </div>
         </div>
 
-        <div class="status-card">
-          <div class="card-header">
+        <div
+          class="bg-sw-bg-dark border border-sw-border rounded-lg p-4"
+          data-testid="status-card-vm"
+        >
+          <div class="flex items-center gap-2 mb-2">
             <span
-              class="indicator"
-              [class.green]="report?.vm?.running"
-              [class.red]="report !== null && !report.vm.running"
-              [class.gray]="report === null"
+              class="inline-block w-2.5 h-2.5 rounded-full shrink-0"
+              [class]="
+                report?.vm?.running
+                  ? 'bg-sw-success shadow-[0_0_6px_rgba(46,204,113,0.4)]'
+                  : report !== null && !report.vm.running
+                    ? 'bg-sw-accent shadow-[0_0_6px_rgba(233,69,96,0.4)]'
+                    : 'bg-sw-slider'
+              "
+              data-testid="indicator-vm"
             ></span>
-            <span class="card-title">VM</span>
+            <span class="text-xs text-sw-text-muted uppercase tracking-wide">VM</span>
           </div>
-          <div class="card-value">
+          <div class="text-sm font-semibold text-sw-text">
             @if (report === null) {
               Not connected
             } @else if (report.vm.running) {
@@ -82,17 +103,25 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
           </div>
         </div>
 
-        <div class="status-card">
-          <div class="card-header">
+        <div
+          class="bg-sw-bg-dark border border-sw-border rounded-lg p-4"
+          data-testid="status-card-mcp-os"
+        >
+          <div class="flex items-center gap-2 mb-2">
             <span
-              class="indicator"
-              [class.green]="report?.mcp_os?.running"
-              [class.red]="report !== null && !report.mcp_os.running"
-              [class.gray]="report === null"
+              class="inline-block w-2.5 h-2.5 rounded-full shrink-0"
+              [class]="
+                report?.mcp_os?.running
+                  ? 'bg-sw-success shadow-[0_0_6px_rgba(46,204,113,0.4)]'
+                  : report !== null && !report.mcp_os.running
+                    ? 'bg-sw-accent shadow-[0_0_6px_rgba(233,69,96,0.4)]'
+                    : 'bg-sw-slider'
+              "
+              data-testid="indicator-mcp-os"
             ></span>
-            <span class="card-title">mcp-os</span>
+            <span class="text-xs text-sw-text-muted uppercase tracking-wide">mcp-os</span>
           </div>
-          <div class="card-value">
+          <div class="text-sm font-semibold text-sw-text">
             @if (report === null) {
               Not connected
             } @else if (report.mcp_os.running) {
@@ -103,34 +132,44 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
           </div>
         </div>
 
-        <div class="status-card">
-          <div class="card-header">
+        <div
+          class="bg-sw-bg-dark border border-sw-border rounded-lg p-4"
+          data-testid="status-card-ide-bridge"
+        >
+          <div class="flex items-center gap-2 mb-2">
             <span
-              class="indicator"
-              [class.green]="bridgeStatus !== null"
-              [class.red]="report !== null && bridgeStatus === null"
-              [class.gray]="report === null"
+              class="inline-block w-2.5 h-2.5 rounded-full shrink-0"
+              [class]="
+                bridgeStatus !== null
+                  ? 'bg-sw-success shadow-[0_0_6px_rgba(46,204,113,0.4)]'
+                  : report !== null && bridgeStatus === null
+                    ? 'bg-sw-accent shadow-[0_0_6px_rgba(233,69,96,0.4)]'
+                    : 'bg-sw-slider'
+              "
+              data-testid="indicator-ide-bridge"
             ></span>
-            <span class="card-title">IDE Bridge</span>
+            <span class="text-xs text-sw-text-muted uppercase tracking-wide">IDE Bridge</span>
           </div>
-          <div class="card-value">
+          <div class="text-sm font-semibold text-sw-text">
             @if (report === null) {
               Not connected
             } @else if (bridgeStatus) {
-              <span class="port-badge">:{{ bridgeStatus.port }}</span>
+              <span class="font-mono text-xs text-sw-success">:{{ bridgeStatus.port }}</span>
               @if (bridgeStatus.upstream_ide) {
-                <span class="upstream-arrow">&rarr;</span>
-                <span class="ide-name">{{ bridgeStatus.upstream_ide }}</span>
-                <span class="port-badge">:{{ bridgeStatus.upstream_port }}</span>
+                <span class="text-sw-success mx-1 text-[13px]">&rarr;</span>
+                <span class="text-[13px] text-sw-text">{{ bridgeStatus.upstream_ide }}</span>
+                <span class="font-mono text-xs text-sw-success"
+                  >:{{ bridgeStatus.upstream_port }}</span
+                >
               } @else {
-                <span class="stub-mode">(stub mode)</span>
+                <span class="text-sw-text-muted text-xs ml-1">(stub mode)</span>
               }
             } @else if (report.ide_bridge.running) {
               @for (ide of report.ide_bridge.detected_ides; track ide.ide_name + ':' + ide.port) {
-                <div class="ide-entry">
-                  <span class="ide-name">{{ ide.ide_name }}</span>
+                <div class="flex items-baseline gap-1 leading-relaxed">
+                  <span class="text-[13px] text-sw-text">{{ ide.ide_name }}</span>
                   @if (ide.port !== null) {
-                    <span class="port-badge">:{{ ide.port }}</span>
+                    <span class="font-mono text-xs text-sw-success">:{{ ide.port }}</span>
                   }
                 </div>
               }
@@ -142,38 +181,74 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
       </div>
 
       @if (lastEvent) {
-        <div class="event-banner" [class.fading]="eventFading">
+        <div
+          class="mb-4 px-3 py-2 bg-sw-event-bg border border-sw-border rounded text-sw-text-code font-mono text-xs transition-opacity duration-1000 ease-out"
+          [class.opacity-0]="eventFading"
+          data-testid="event-banner"
+        >
           {{ lastEvent }}
         </div>
       }
 
-      <div class="containers-section">
-        <h3>Containers</h3>
+      <div
+        class="bg-sw-bg-dark border border-sw-border rounded-lg p-4 mb-4"
+        data-testid="containers-section"
+      >
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-[15px] text-sw-text m-0">Containers</h3>
+          <button
+            class="px-3 py-1 bg-sw-bg-navy text-sw-text border border-sw-border rounded text-xs font-mono cursor-pointer transition-colors duration-200 hover:enabled:bg-sw-btn-hover disabled:opacity-40 disabled:cursor-not-allowed"
+            data-testid="health-recreate"
+            (click)="recreateContainers()"
+            [disabled]="recreating || !project"
+          >
+            {{ recreating ? 'Recreating...' : 'Recreate' }}
+          </button>
+        </div>
         @if (report === null) {
-          <div class="no-data">Not connected — unable to fetch container status.</div>
+          <div class="text-sw-text-muted text-[13px] py-2" data-testid="no-data">
+            Not connected — unable to fetch container status.
+          </div>
         } @else if (report.containers.length === 0) {
-          <div class="no-data">No containers running for this project.</div>
+          <div class="text-sw-text-muted text-[13px] py-2" data-testid="no-data">
+            No containers running for this project.
+          </div>
         } @else {
-          <div class="container-list">
+          <div class="flex flex-col gap-2" data-testid="container-list">
             @for (container of report.containers; track container.name) {
               <div
-                class="container-row clickable"
-                [class.selected]="selectedContainer === container.name"
+                class="flex items-center gap-2.5 px-3 py-2 bg-sw-bg-darkest rounded cursor-pointer transition-colors duration-150 hover:bg-sw-error-event"
+                [class.bg-sw-error-event]="selectedContainer === container.name"
+                [style.border-left-width]="selectedContainer === container.name ? '3px' : ''"
+                [class.border-l-sw-accent]="selectedContainer === container.name"
                 (click)="selectContainer(container.name)"
                 (keydown.enter)="selectContainer(container.name)"
                 tabindex="0"
                 role="button"
+                data-testid="container-row"
               >
                 <span
-                  class="indicator"
-                  [class.green]="container.healthy"
-                  [class.red]="!container.healthy"
+                  class="inline-block w-2.5 h-2.5 rounded-full shrink-0"
+                  [class]="
+                    container.healthy
+                      ? 'bg-sw-success shadow-[0_0_6px_rgba(46,204,113,0.4)]'
+                      : 'bg-sw-accent shadow-[0_0_6px_rgba(233,69,96,0.4)]'
+                  "
+                  data-testid="indicator-container"
                 ></span>
-                <span class="container-name">{{ container.name }}</span>
                 <span
-                  class="container-status"
-                  [class.healthy]="container.healthy"
-                  [class.unhealthy]="!container.healthy"
+                  class="flex-1 font-mono text-[13px] text-sw-text"
+                  data-testid="container-name"
+                  >{{ container.name }}</span
+                >
+                <span
+                  class="text-xs font-mono px-2 py-0.5 rounded-sm"
+                  [class]="
+                    container.healthy
+                      ? 'text-sw-success bg-sw-success/10'
+                      : 'text-sw-accent bg-sw-accent/10'
+                  "
+                  data-testid="container-status"
                 >
                   {{ container.status }}
                 </span>
@@ -184,22 +259,26 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
       </div>
 
       @if (selectedContainer !== null) {
-        <div class="log-section">
-          <div class="log-header">
-            <h3>Logs</h3>
-            <div class="log-controls">
-              <label class="lines-label">
+        <div
+          class="bg-sw-bg-dark border border-sw-border rounded-lg p-4 mb-4"
+          data-testid="log-section"
+        >
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-[15px] text-sw-text m-0">Logs</h3>
+            <div class="flex items-center gap-2">
+              <label class="text-xs text-sw-text-muted flex items-center gap-1">
                 Lines:
                 <input
                   type="number"
-                  class="lines-input"
+                  class="w-[60px] px-1.5 py-0.5 bg-sw-bg-darkest border border-sw-border rounded-sm text-sw-text font-mono text-xs"
                   [(ngModel)]="tailLines"
                   min="1"
                   max="10000"
+                  data-testid="lines-input"
                 />
               </label>
               <button
-                class="log-btn"
+                class="px-3 py-1 bg-sw-bg-navy text-sw-text border border-sw-border rounded text-xs font-mono cursor-pointer transition-colors duration-200 hover:enabled:bg-sw-btn-hover disabled:opacity-40 disabled:cursor-not-allowed"
                 data-testid="health-logs-refresh"
                 (click)="fetchLogs()"
                 [disabled]="logLoading"
@@ -207,7 +286,7 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
                 {{ logLoading ? 'Loading...' : 'Refresh' }}
               </button>
               <button
-                class="log-btn close-btn"
+                class="px-3 py-1 bg-sw-error-bg text-sw-text border border-sw-accent rounded text-xs font-mono cursor-pointer transition-colors duration-200 hover:bg-sw-error-deep"
                 data-testid="health-logs-close"
                 (click)="closeLogs()"
               >
@@ -216,16 +295,28 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
             </div>
           </div>
 
-          <div class="log-tabs">
-            <button class="log-tab" [class.active]="showAllLogs" (click)="selectAllLogs()">
+          <div class="flex gap-1 mb-3 flex-wrap" data-testid="log-tabs">
+            <button
+              class="px-3 py-1 bg-sw-bg-darkest border border-sw-border rounded-xl text-[11px] font-mono cursor-pointer transition-colors duration-150 hover:text-sw-text"
+              [class]="
+                showAllLogs ? 'bg-sw-accent text-white border-sw-accent' : 'text-sw-text-muted'
+              "
+              (click)="selectAllLogs()"
+              data-testid="log-tab-all"
+            >
               All
             </button>
             @if (report !== null) {
               @for (container of report.containers; track container.name) {
                 <button
-                  class="log-tab"
-                  [class.active]="selectedContainer === container.name"
+                  class="px-3 py-1 bg-sw-bg-darkest border border-sw-border rounded-xl text-[11px] font-mono cursor-pointer transition-colors duration-150 hover:text-sw-text"
+                  [class]="
+                    selectedContainer === container.name
+                      ? 'bg-sw-accent text-white border-sw-accent'
+                      : 'text-sw-text-muted'
+                  "
                   (click)="selectContainer(container.name)"
+                  data-testid="log-tab"
                 >
                   {{ container.name }}
                 </button>
@@ -234,14 +325,24 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
           </div>
 
           @if (logError) {
-            <div class="error-banner">{{ logError }}</div>
+            <div
+              class="mb-4 px-3 py-2 bg-sw-error-bg border border-sw-accent rounded text-sw-accent text-[13px]"
+              data-testid="log-error-banner"
+            >
+              {{ logError }}
+            </div>
           }
 
-          <pre class="log-output" #logOutput>{{ logContent }}</pre>
+          <pre
+            class="bg-sw-bg-deep border border-sw-border rounded p-3 m-0 max-h-[400px] overflow-auto font-mono text-xs leading-snug text-sw-text-silver whitespace-pre-wrap break-words"
+            data-testid="log-output"
+            #logOutput
+            >{{ logContent }}</pre
+          >
         </div>
       }
 
-      <div class="last-updated">
+      <div class="text-center text-sw-slider text-xs" data-testid="last-updated">
         @if (lastUpdated) {
           Last updated: {{ lastUpdated | date: 'HH:mm:ss' }}
         } @else {
@@ -250,308 +351,6 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
       </div>
     </div>
   `,
-  styles: [
-    `
-      .health-container {
-        max-width: 700px;
-        margin: 0 auto;
-        padding: 0;
-      }
-      .health-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-bottom: 24px;
-      }
-      h2 {
-        font-size: 18px;
-        color: #e94560;
-        margin: 0;
-      }
-      h3 {
-        font-size: 15px;
-        color: #e0e0e0;
-        margin: 0 0 12px 0;
-      }
-      .refresh-btn {
-        padding: 6px 16px;
-        background: #0f3460;
-        color: #e0e0e0;
-        border: 1px solid #0f3460;
-        border-radius: 4px;
-        font-size: 13px;
-        font-family: monospace;
-        cursor: pointer;
-        transition: background 0.2s;
-      }
-      .refresh-btn:hover:not(:disabled) {
-        background: #1a4a7a;
-      }
-      .refresh-btn:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-      }
-      .error-banner {
-        margin-bottom: 16px;
-        padding: 8px 12px;
-        background: #3d0000;
-        border: 1px solid #e94560;
-        border-radius: 4px;
-        color: #e94560;
-        font-size: 13px;
-      }
-      .status-grid {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 12px;
-        margin-bottom: 24px;
-      }
-      .ide-entry {
-        display: flex;
-        align-items: baseline;
-        gap: 4px;
-        line-height: 1.6;
-      }
-      .ide-name {
-        font-size: 13px;
-        color: #e0e0e0;
-      }
-      .port-badge {
-        font-family: monospace;
-        font-size: 12px;
-        color: #2ecc71;
-      }
-      .status-card {
-        background: #16213e;
-        border: 1px solid #0f3460;
-        border-radius: 8px;
-        padding: 16px;
-      }
-      .card-header {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        margin-bottom: 8px;
-      }
-      .card-title {
-        font-size: 12px;
-        color: #888;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-      }
-      .card-value {
-        font-size: 14px;
-        font-weight: 600;
-        color: #e0e0e0;
-      }
-      .indicator {
-        display: inline-block;
-        width: 10px;
-        height: 10px;
-        border-radius: 50%;
-        background: #555;
-        flex-shrink: 0;
-      }
-      .indicator.green {
-        background: #2ecc71;
-        box-shadow: 0 0 6px rgba(46, 204, 113, 0.4);
-      }
-      .indicator.red {
-        background: #e94560;
-        box-shadow: 0 0 6px rgba(233, 69, 96, 0.4);
-      }
-      .indicator.gray {
-        background: #555;
-      }
-      .containers-section {
-        background: #16213e;
-        border: 1px solid #0f3460;
-        border-radius: 8px;
-        padding: 16px;
-        margin-bottom: 16px;
-      }
-      .container-list {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-      }
-      .container-row {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        padding: 8px 12px;
-        background: #1a1a2e;
-        border-radius: 4px;
-      }
-      .container-row.clickable {
-        cursor: pointer;
-        transition: background 0.15s;
-      }
-      .container-row.clickable:hover {
-        background: #222244;
-      }
-      .container-row.selected {
-        background: #222244;
-        border-left: 3px solid #e94560;
-      }
-      .container-name {
-        flex: 1;
-        font-family: monospace;
-        font-size: 13px;
-        color: #e0e0e0;
-      }
-      .container-status {
-        font-size: 12px;
-        font-family: monospace;
-        padding: 2px 8px;
-        border-radius: 3px;
-      }
-      .container-status.healthy {
-        color: #2ecc71;
-        background: rgba(46, 204, 113, 0.1);
-      }
-      .container-status.unhealthy {
-        color: #e94560;
-        background: rgba(233, 69, 96, 0.1);
-      }
-      .no-data {
-        color: #888;
-        font-size: 13px;
-        padding: 8px 0;
-      }
-      .log-section {
-        background: #16213e;
-        border: 1px solid #0f3460;
-        border-radius: 8px;
-        padding: 16px;
-        margin-bottom: 16px;
-      }
-      .log-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-bottom: 12px;
-      }
-      .log-controls {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-      .lines-label {
-        font-size: 12px;
-        color: #888;
-        display: flex;
-        align-items: center;
-        gap: 4px;
-      }
-      .lines-input {
-        width: 60px;
-        padding: 3px 6px;
-        background: #1a1a2e;
-        border: 1px solid #0f3460;
-        border-radius: 3px;
-        color: #e0e0e0;
-        font-family: monospace;
-        font-size: 12px;
-      }
-      .log-btn {
-        padding: 4px 12px;
-        background: #0f3460;
-        color: #e0e0e0;
-        border: 1px solid #0f3460;
-        border-radius: 4px;
-        font-size: 12px;
-        font-family: monospace;
-        cursor: pointer;
-        transition: background 0.2s;
-      }
-      .log-btn:hover:not(:disabled) {
-        background: #1a4a7a;
-      }
-      .log-btn:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-      }
-      .close-btn {
-        background: #3d0000;
-        border-color: #e94560;
-      }
-      .close-btn:hover {
-        background: #5a0000;
-      }
-      .log-tabs {
-        display: flex;
-        gap: 4px;
-        margin-bottom: 12px;
-        flex-wrap: wrap;
-      }
-      .log-tab {
-        padding: 4px 12px;
-        background: #1a1a2e;
-        color: #888;
-        border: 1px solid #0f3460;
-        border-radius: 12px;
-        font-size: 11px;
-        font-family: monospace;
-        cursor: pointer;
-        transition:
-          background 0.15s,
-          color 0.15s;
-      }
-      .log-tab:hover {
-        color: #e0e0e0;
-      }
-      .log-tab.active {
-        background: #e94560;
-        color: #fff;
-        border-color: #e94560;
-      }
-      .log-output {
-        background: #0d0d1a;
-        border: 1px solid #0f3460;
-        border-radius: 4px;
-        padding: 12px;
-        margin: 0;
-        max-height: 400px;
-        overflow: auto;
-        font-family: monospace;
-        font-size: 12px;
-        line-height: 1.4;
-        color: #c0c0c0;
-        white-space: pre-wrap;
-        overflow-wrap: break-word;
-      }
-      .last-updated {
-        text-align: center;
-        color: #555;
-        font-size: 12px;
-      }
-      .upstream-arrow {
-        color: #2ecc71;
-        margin: 0 4px;
-        font-size: 13px;
-      }
-      .stub-mode {
-        color: #888;
-        font-size: 12px;
-        margin-left: 4px;
-      }
-      .event-banner {
-        margin-bottom: 16px;
-        padding: 8px 12px;
-        background: #1a2840;
-        border: 1px solid #0f3460;
-        border-radius: 4px;
-        color: #aac;
-        font-family: monospace;
-        font-size: 12px;
-        transition: opacity 1s ease-out;
-      }
-      .event-banner.fading {
-        opacity: 0;
-      }
-    `,
-  ],
 })
 export class SystemHealthComponent implements OnInit, OnDestroy {
   @Input() project: string | null = null;
@@ -565,6 +364,8 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
   selectedIde: { ide_name: string; port: number } | null = null;
   lastEvent: string | null = null;
   eventFading = false;
+
+  recreating = false;
 
   logContent = '';
   logLoading = false;
@@ -723,6 +524,23 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
+  /** Recreates all containers for the active project (compose down + render + up). */
+  async recreateContainers(): Promise<void> {
+    if (!this.project) return;
+    this.recreating = true;
+    this.error = null;
+    this.cdr.markForCheck();
+    try {
+      await this.tauri.invoke('recreate_project_containers', { project: this.project });
+      await this.refresh();
+    } catch (err) {
+      this.error = `Recreate failed: ${err}`;
+    } finally {
+      this.recreating = false;
+      this.cdr.markForCheck();
+    }
+  }
+
   /** Retrieves container or compose logs from the Tauri backend and scrolls to the bottom. */
   async fetchLogs(): Promise<void> {
     if (this.selectedContainer === null) return;
@@ -736,6 +554,27 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
           project: this.project,
           tail: lines,
         });
+      } else if (this.selectedContainer?.endsWith('_claude')) {
+        // Naming convention: compose template names the Claude container
+        // `{COMPOSE_PREFIX}_{project}_claude`, so `_claude` suffix is stable.
+        // Fetch container logs and session logs in parallel; session logs are best-effort
+        const [containerResult, sessionResult] = await Promise.allSettled([
+          this.tauri.invoke<string>('get_container_logs', {
+            container: this.selectedContainer,
+            tail: lines,
+          }),
+          this.tauri.invoke<string>('get_claude_session_logs', {
+            container: this.selectedContainer,
+            tail: lines,
+          }),
+        ]);
+        this.logContent = containerResult.status === 'fulfilled' ? containerResult.value : '';
+        if (containerResult.status === 'rejected') {
+          throw containerResult.reason;
+        }
+        if (sessionResult.status === 'fulfilled' && sessionResult.value.trim()) {
+          this.logContent += '\n--- Claude Session Logs ---\n' + sessionResult.value;
+        }
       } else {
         this.logContent = await this.tauri.invoke<string>('get_container_logs', {
           container: this.selectedContainer,
