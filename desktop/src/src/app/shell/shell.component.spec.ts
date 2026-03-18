@@ -39,14 +39,14 @@ describe('ShellComponent', () => {
   });
 
   it('should render nav with Chat, Integrations, Plugins, Settings', () => {
-    const nav = fixture.nativeElement.querySelector('.app-nav');
+    const nav = fixture.nativeElement.querySelector('[data-testid="app-nav"]');
     const links = Array.from(nav.querySelectorAll('a')) as HTMLAnchorElement[];
     const labels = links.map((a) => a.textContent?.trim());
     expect(labels).toEqual(['Chat', 'Integrations', 'Plugins', 'Settings']);
   });
 
   it('should NOT render a Setup link', () => {
-    const nav = fixture.nativeElement.querySelector('.app-nav');
+    const nav = fixture.nativeElement.querySelector('[data-testid="app-nav"]');
     const links = Array.from(nav.querySelectorAll('a')) as HTMLAnchorElement[];
     const labels = links.map((a) => a.textContent?.trim());
     expect(labels).not.toContain('Setup');
@@ -68,7 +68,7 @@ describe('ShellComponent', () => {
   });
 
   it('shows loading overlay by default', () => {
-    const overlay = fixture.nativeElement.querySelector('.blocking-overlay');
+    const overlay = fixture.nativeElement.querySelector('[data-testid="blocking-overlay"]');
     expect(overlay).not.toBeNull();
     expect(overlay.textContent).toContain('Loading...');
   });
@@ -79,7 +79,7 @@ describe('ShellComponent', () => {
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
-    const overlay = fixture.nativeElement.querySelector('.blocking-overlay');
+    const overlay = fixture.nativeElement.querySelector('[data-testid="blocking-overlay"]');
     expect(overlay).not.toBeNull();
     expect(overlay.textContent).toContain('Switching project...');
   });
@@ -92,7 +92,7 @@ describe('ShellComponent', () => {
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
-    const overlay = fixture.nativeElement.querySelector('.blocking-overlay');
+    const overlay = fixture.nativeElement.querySelector('[data-testid="blocking-overlay"]');
     expect(overlay).not.toBeNull();
     expect(overlay.textContent).toContain('Rebuilding container images...');
   });
@@ -103,7 +103,7 @@ describe('ShellComponent', () => {
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
-    const overlay = fixture.nativeElement.querySelector('.blocking-overlay');
+    const overlay = fixture.nativeElement.querySelector('[data-testid="blocking-overlay"]');
     expect(overlay).not.toBeNull();
     expect(overlay.textContent).toContain('Checking containers...');
   });
@@ -114,7 +114,7 @@ describe('ShellComponent', () => {
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
-    const overlay = fixture.nativeElement.querySelector('.blocking-overlay');
+    const overlay = fixture.nativeElement.querySelector('[data-testid="blocking-overlay"]');
     expect(overlay).not.toBeNull();
     expect(overlay.textContent).toContain('Starting containers...');
   });
@@ -125,7 +125,7 @@ describe('ShellComponent', () => {
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
-    const banner = fixture.nativeElement.querySelector('.blocking-error-banner');
+    const banner = fixture.nativeElement.querySelector('[data-testid="blocking-error"]');
     expect(banner).not.toBeNull();
     expect(banner.textContent).toContain('Switch failed');
     expect(banner.querySelector('button')).not.toBeNull();
@@ -138,8 +138,8 @@ describe('ShellComponent', () => {
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
-    expect(fixture.nativeElement.querySelector('.blocking-overlay')).toBeNull();
-    expect(fixture.nativeElement.querySelector('.blocking-error-banner')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="blocking-overlay"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="blocking-error"]')).toBeNull();
   });
 
   it('cleans up subscription on destroy', async () => {

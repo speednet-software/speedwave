@@ -1,55 +1,68 @@
 @if (projectState.status === 'ready') {
-  <div class="chat-layout">
+  <div class="flex flex-row h-full bg-sw-bg-darkest">
     @if (showHistory) {
-      <aside class="history-sidebar">
+      <aside
+        class="w-[280px] min-w-[280px] bg-sw-bg-darker border-r border-sw-border flex flex-col overflow-hidden"
+      >
         <button
-          class="new-chat-btn"
+          class="m-3 px-4 py-2.5 border border-sw-border rounded-md bg-sw-bg-dark text-sw-text text-sm font-semibold cursor-pointer transition-colors hover:bg-sw-bg-navy"
           data-testid="chat-new-conversation"
           (click)="newConversation()"
         >
           + New Conversation
         </button>
         @if (historyError) {
-          <div class="sidebar-error" data-testid="chat-history-error">{{ historyError }}</div>
+          <div
+            class="px-3 py-2 mx-3 my-2 bg-sw-error-bg border border-sw-error rounded text-sw-error text-xs"
+            data-testid="chat-history-error"
+          >
+            {{ historyError }}
+          </div>
         }
         @if (historyLoading) {
-          <div class="sidebar-loading">Loading...</div>
+          <div class="p-4 text-sw-text-muted text-[13px] text-center">Loading...</div>
         } @else {
-          <div class="conv-list">
+          <div class="flex-1 overflow-y-auto px-2 pb-2">
             @for (conv of conversations; track conv.session_id) {
               <div
-                class="conv-item"
-                [class.active]="viewingTranscript?.session_id === conv.session_id"
+                class="px-3 py-2.5 rounded-md cursor-pointer transition-colors mb-0.5 hover:bg-sw-bg-dark"
+                [class.bg-sw-bg-navy]="viewingTranscript?.session_id === conv.session_id"
                 (click)="viewConversation(conv.session_id)"
               >
-                <div class="conv-preview">{{ conv.preview }}</div>
-                <div class="conv-meta">
-                  <span class="conv-time">{{ conv.timestamp }}</span>
-                  <span class="conv-count">{{ conv.message_count }} msgs</span>
+                <div
+                  class="text-sw-text text-[13px] leading-[1.4] whitespace-nowrap overflow-hidden text-ellipsis"
+                >
+                  {{ conv.preview }}
+                </div>
+                <div class="flex justify-between mt-1 text-[11px] text-sw-text-muted">
+                  <span>{{ conv.timestamp }}</span>
+                  <span>{{ conv.message_count }} msgs</span>
                 </div>
               </div>
             } @empty {
-              <div class="sidebar-empty">No conversations yet</div>
+              <div class="p-4 text-sw-text-muted text-[13px] text-center">No conversations yet</div>
             }
           </div>
         }
       </aside>
     }
 
-    <div class="chat-main">
-      <div class="chat-toolbar">
+    <div class="flex flex-col flex-1 min-w-0 relative">
+      <div class="flex gap-1 px-3 py-1.5 bg-sw-bg-dark border-b border-sw-border">
         <button
-          class="toolbar-btn"
+          class="px-3 py-1 border border-transparent rounded text-sw-text-dim text-xs cursor-pointer transition-all hover:text-sw-text hover:bg-sw-bg-darkest"
           data-testid="chat-history-toggle"
-          [class.active]="showHistory"
+          [class.!text-sw-accent]="showHistory"
+          [class.!border-sw-accent]="showHistory"
           (click)="toggleHistory()"
         >
           History
         </button>
         <button
-          class="toolbar-btn"
+          class="px-3 py-1 border border-transparent rounded text-sw-text-dim text-xs cursor-pointer transition-all hover:text-sw-text hover:bg-sw-bg-darkest"
           data-testid="chat-memory-toggle"
-          [class.active]="showMemory"
+          [class.!text-sw-accent]="showMemory"
+          [class.!border-sw-accent]="showMemory"
           (click)="toggleMemory()"
         >
           Memory
@@ -57,26 +70,43 @@
       </div>
 
       @if (viewError) {
-        <div class="view-error" data-testid="chat-view-error">{{ viewError }}</div>
+        <div
+          class="px-3 py-2 mx-3 my-2 bg-sw-error-bg border border-sw-error rounded text-sw-error text-xs"
+          data-testid="chat-view-error"
+        >
+          {{ viewError }}
+        </div>
       }
       @if (viewingTranscript) {
-        <div class="messages" data-testid="chat-messages" #messageList>
+        <div
+          class="flex-1 overflow-y-auto p-4 flex flex-col gap-3"
+          data-testid="chat-messages"
+          #messageList
+        >
           @for (msg of viewingTranscript.messages; track $index) {
-            <div class="message" [class]="msg.role">
-              <div class="content" [innerHTML]="renderMarkdown(msg.content)"></div>
+            <div
+              class="max-w-[85%] px-4 py-3 rounded-lg leading-normal break-words"
+              [class.self-end]="msg.role === 'user'"
+              [class.bg-sw-bg-navy]="msg.role === 'user'"
+              [class.self-start]="msg.role === 'assistant'"
+              [class.bg-sw-bg-dark]="msg.role === 'assistant'"
+              [class.border]="msg.role === 'assistant'"
+              [class.border-sw-border]="msg.role === 'assistant'"
+            >
+              <div class="prose-sw text-sw-text" [innerHTML]="renderMarkdown(msg.content)"></div>
             </div>
           }
         </div>
-        <div class="transcript-actions">
+        <div class="flex gap-2 px-4 py-3 bg-sw-bg-dark border-t border-sw-border justify-end">
           <button
-            class="action-btn secondary"
+            class="px-5 py-2 border-none rounded-md text-sm font-semibold cursor-pointer transition-colors bg-sw-bg-navy text-sw-text hover:bg-[#1a1a4e]"
             data-testid="chat-transcript-back"
             (click)="closeTranscript()"
           >
             Back
           </button>
           <button
-            class="action-btn primary"
+            class="px-5 py-2 border-none rounded-md text-sm font-semibold cursor-pointer transition-colors bg-sw-accent text-white hover:bg-sw-accent-hover"
             data-testid="chat-transcript-resume"
             (click)="resumeConversation(viewingTranscript.session_id)"
           >
@@ -84,7 +114,11 @@
           </button>
         </div>
       } @else {
-        <div class="messages" data-testid="chat-messages" #messageList>
+        <div
+          class="flex-1 overflow-y-auto p-4 flex flex-col gap-3"
+          data-testid="chat-messages"
+          #messageList
+        >
           @for (msg of chat.messages; track msg.timestamp) {
             <app-chat-message
               [blocks]="msg.blocks"
@@ -102,9 +136,10 @@
           }
         </div>
         <app-session-stats [stats]="chat.sessionStats" />
-        <div class="input-area">
+        <div class="flex gap-2 px-4 py-3 bg-sw-bg-dark border-t border-sw-border">
           <textarea
             data-testid="chat-input"
+            class="flex-1 resize-none border border-sw-border rounded-md bg-sw-bg-darkest text-sw-text px-3 py-2.5 text-sm leading-[1.4] min-h-[40px] max-h-[200px] outline-none transition-colors focus:border-sw-accent disabled:opacity-50 disabled:cursor-not-allowed"
             [(ngModel)]="inputText"
             (keydown.enter)="onEnter($any($event))"
             placeholder="Message Claude..."
@@ -114,6 +149,7 @@
           </textarea>
           <button
             data-testid="chat-send"
+            class="px-5 py-2 border-none rounded-md bg-sw-accent text-white text-sm font-semibold transition-colors hover:enabled:bg-sw-accent-hover disabled:opacity-40 disabled:cursor-not-allowed"
             (click)="sendMessage()"
             [disabled]="!inputText.trim() || chat.isStreaming"
           >
@@ -123,14 +159,25 @@
       }
 
       @if (showMemory) {
-        <div class="memory-panel">
-          <div class="memory-header">
+        <div
+          class="absolute top-[40px] right-0 bottom-0 w-[320px] bg-sw-bg-darker border-l border-sw-border flex flex-col z-10"
+        >
+          <div
+            class="flex justify-between items-center px-4 py-3 border-b border-sw-border text-sw-text font-semibold text-sm"
+          >
             <span>Project Memory</span>
-            <button class="memory-close" data-testid="chat-memory-close" (click)="toggleMemory()">
+            <button
+              class="bg-transparent border-none text-sw-text-muted text-sm cursor-pointer px-1.5 py-0.5 hover:text-sw-text"
+              data-testid="chat-memory-close"
+              (click)="toggleMemory()"
+            >
               X
             </button>
           </div>
-          <div class="memory-content" [innerHTML]="renderMarkdown(projectMemory)"></div>
+          <div
+            class="prose-sw flex-1 overflow-y-auto p-4 text-sw-text text-[13px] leading-relaxed"
+            [innerHTML]="renderMarkdown(projectMemory)"
+          ></div>
         </div>
       }
     </div>

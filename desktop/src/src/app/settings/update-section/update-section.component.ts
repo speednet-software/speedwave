@@ -21,33 +21,38 @@ import { UpdateInfo, UpdateSettings } from '../../models/update';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <!-- Updates -->
-    <section class="section">
-      <h2>Updates</h2>
-      <div class="info-card">
-        <div class="info-row">
-          <span class="info-label">Current version</span>
-          <span class="info-value mono">{{ currentVersion || '—' }}</span>
+    <section class="mb-6">
+      <h2 class="text-[15px] text-sw-text m-0 mb-3">Updates</h2>
+      <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-4">
+        <div class="flex justify-between items-center py-2">
+          <span class="text-[13px] text-sw-text-muted">Current version</span>
+          <span class="text-[13px] font-mono text-sw-text-dim">{{ currentVersion || '—' }}</span>
         </div>
-        <div class="form-row">
-          <span class="form-label">Auto-check</span>
-          <label class="toggle" for="update-auto-check">
+        <div class="flex justify-between items-center py-2 border-t border-sw-border">
+          <span class="text-[13px] text-sw-text-muted min-w-[120px]">Auto-check</span>
+          <label class="flex items-center gap-2 cursor-pointer" for="update-auto-check">
             <input
               id="update-auto-check"
               type="checkbox"
               [checked]="updateAutoCheck"
               (change)="toggleAutoCheck()"
+              class="accent-sw-accent w-4 h-4 cursor-pointer"
             />
-            <span class="toggle-label">{{ updateAutoCheck ? 'On' : 'Off' }}</span>
+            <span class="text-[13px] text-sw-text font-mono">{{
+              updateAutoCheck ? 'On' : 'Off'
+            }}</span>
           </label>
         </div>
         @if (updateAutoCheck) {
-          <div class="form-row">
-            <label class="form-label" for="check-frequency">Frequency</label>
+          <div class="flex justify-between items-center py-2 border-t border-sw-border">
+            <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="check-frequency"
+              >Frequency</label
+            >
             <select
               id="check-frequency"
               [ngModel]="updateIntervalHours"
               (ngModelChange)="setCheckInterval($event)"
-              class="form-select"
+              class="flex-1 max-w-[340px] px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
             >
               <option [ngValue]="12">Every 12 hours</option>
               <option [ngValue]="24">Every 24 hours</option>
@@ -55,9 +60,9 @@ import { UpdateInfo, UpdateSettings } from '../../models/update';
             </select>
           </div>
         }
-        <div class="form-actions">
+        <div class="flex items-center gap-3 pt-3 pb-1">
           <button
-            class="btn-save"
+            class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-abyss disabled:opacity-40 disabled:cursor-not-allowed"
             data-testid="settings-check-update"
             (click)="checkForUpdate()"
             [disabled]="updateChecking || updateInstalling"
@@ -65,13 +70,15 @@ import { UpdateInfo, UpdateSettings } from '../../models/update';
             {{ updateChecking ? 'Checking...' : 'Check now' }}
           </button>
           @if (updateResult === 'up-to-date') {
-            <span class="save-feedback">Up to date</span>
+            <span class="text-sw-success text-[13px]">Up to date</span>
           }
           @if (updateResult === 'available') {
-            <span class="update-available">v{{ updateAvailableVersion }} available</span>
+            <span class="text-sw-accent text-[13px] font-bold"
+              >v{{ updateAvailableVersion }} available</span
+            >
             @if (isLinux) {
               <button
-                class="btn-restart"
+                class="px-4 py-1.5 bg-sw-accent text-sw-bg-abyss border-none rounded text-[13px] font-mono cursor-pointer transition-opacity duration-200 hover:enabled:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
                 data-testid="settings-download-update"
                 (click)="openReleasesPage()"
               >
@@ -79,7 +86,7 @@ import { UpdateInfo, UpdateSettings } from '../../models/update';
               </button>
             } @else {
               <button
-                class="btn-restart"
+                class="px-4 py-1.5 bg-sw-accent text-sw-bg-abyss border-none rounded text-[13px] font-mono cursor-pointer transition-opacity duration-200 hover:enabled:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
                 data-testid="settings-install-update"
                 (click)="installUpdate()"
                 [disabled]="updateInstalling"
@@ -90,181 +97,15 @@ import { UpdateInfo, UpdateSettings } from '../../models/update';
           }
         </div>
         @if (updateInstallError) {
-          <p class="error-banner" style="margin-top: 8px">{{ updateInstallError }}</p>
+          <p
+            class="mt-2 mb-4 px-3 py-2 bg-sw-error-bg border border-sw-error rounded text-sw-error text-[13px]"
+          >
+            {{ updateInstallError }}
+          </p>
         }
       </div>
     </section>
   `,
-  styles: [
-    `
-      .section {
-        margin-bottom: 24px;
-      }
-      h2 {
-        font-size: 15px;
-        color: #e0e0e0;
-        margin: 0 0 12px 0;
-      }
-      .info-card {
-        background: #16213e;
-        border: 1px solid #0f3460;
-        border-radius: 8px;
-        padding: 16px;
-      }
-      .info-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 8px 0;
-      }
-      .info-row + .info-row {
-        border-top: 1px solid #0f3460;
-      }
-      .info-label {
-        font-size: 13px;
-        color: #888;
-      }
-      .info-value {
-        font-size: 13px;
-        color: #e0e0e0;
-      }
-      .info-value.mono {
-        font-family: monospace;
-        color: #aaa;
-      }
-      .error-banner {
-        margin-bottom: 16px;
-        padding: 8px 12px;
-        background: #3d0000;
-        border: 1px solid #e94560;
-        border-radius: 4px;
-        color: #e94560;
-        font-size: 13px;
-      }
-      .form-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 8px 0;
-      }
-      .form-row + .form-row {
-        border-top: 1px solid #0f3460;
-      }
-      .form-label {
-        font-size: 13px;
-        color: #888;
-        min-width: 120px;
-      }
-      .form-select {
-        flex: 1;
-        max-width: 340px;
-        padding: 6px 10px;
-        background: #1a1a2e;
-        border: 1px solid #0f3460;
-        border-radius: 4px;
-        color: #e0e0e0;
-        font-size: 13px;
-        font-family: monospace;
-      }
-      .form-select:focus {
-        outline: none;
-        border-color: #e94560;
-      }
-      .form-actions {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 12px 0 4px 0;
-      }
-      .btn-save {
-        padding: 6px 20px;
-        background: transparent;
-        color: #e94560;
-        border: 1px solid #e94560;
-        border-radius: 4px;
-        font-size: 13px;
-        font-family: monospace;
-        cursor: pointer;
-        transition: all 0.2s;
-      }
-      .btn-save:hover:not(:disabled) {
-        background: #e94560;
-        color: #1a1a2e;
-      }
-      .btn-save:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-      }
-      .btn-cancel {
-        padding: 6px 16px;
-        background: transparent;
-        color: #888;
-        border: 1px solid #555;
-        border-radius: 4px;
-        font-size: 13px;
-        font-family: monospace;
-        cursor: pointer;
-        transition: all 0.2s;
-      }
-      .btn-cancel:hover:not(:disabled) {
-        color: #e0e0e0;
-        border-color: #888;
-      }
-      .btn-cancel:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-      }
-      .save-feedback {
-        color: #4caf50;
-        font-size: 13px;
-      }
-      .note {
-        font-size: 11px;
-        color: #666;
-        margin: 8px 0 0 0;
-      }
-      .toggle {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        cursor: pointer;
-      }
-      .toggle input[type='checkbox'] {
-        accent-color: #e94560;
-        width: 16px;
-        height: 16px;
-        cursor: pointer;
-      }
-      .toggle-label {
-        font-size: 13px;
-        color: #e0e0e0;
-        font-family: monospace;
-      }
-      .update-available {
-        color: #e94560;
-        font-size: 13px;
-        font-weight: bold;
-      }
-      .btn-restart {
-        padding: 6px 16px;
-        background: #e94560;
-        color: #1a1a2e;
-        border: none;
-        border-radius: 4px;
-        font-size: 13px;
-        font-family: monospace;
-        cursor: pointer;
-        transition: opacity 0.2s;
-      }
-      .btn-restart:hover:not(:disabled) {
-        opacity: 0.85;
-      }
-      .btn-restart:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-      }
-    `,
-  ],
 })
 export class UpdateSectionComponent implements OnInit {
   @Input() activeProject: string | null = null;

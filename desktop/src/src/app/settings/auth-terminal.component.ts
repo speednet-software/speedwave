@@ -21,13 +21,13 @@ import { TauriService } from '../services/tauri.service';
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div class="oauth-card">
-      <p class="instructions">
+    <div class="bg-sw-bg-darkest border border-sw-border rounded-lg p-4 mt-3">
+      <p class="text-[13px] text-sw-text m-0 mb-3 leading-relaxed">
         Open Claude Code in a terminal, then type <code>/login</code> to authenticate:
       </p>
-      <div class="actions">
+      <div class="flex gap-2 mb-3">
         <button
-          class="btn-primary"
+          class="px-4 py-1.5 bg-sw-accent text-sw-bg-abyss border-none rounded text-[13px] font-mono font-bold cursor-pointer transition-colors duration-200 hover:bg-sw-accent-hover"
           data-testid="auth-open-terminal"
           tabindex="0"
           (click)="openTerminal()"
@@ -37,111 +37,24 @@ import { TauriService } from '../services/tauri.service';
         </button>
       </div>
       @if (error) {
-        <div class="error-banner" data-testid="auth-error">{{ error }}</div>
+        <div
+          class="bg-sw-error-bg border border-sw-error rounded px-3 py-2 mb-3 text-sw-error-text text-[13px] leading-snug"
+          data-testid="auth-error"
+        >
+          {{ error }}
+        </div>
       }
-      <p class="hint">This page updates automatically when authentication completes.</p>
-      <div class="status-row">
-        <span class="spinner"></span>
+      <p class="text-xs text-sw-text-faint m-0 mb-3 leading-relaxed">
+        This page updates automatically when authentication completes.
+      </p>
+      <div class="flex items-center gap-2 text-[13px] text-sw-text-muted">
+        <span
+          class="w-3.5 h-3.5 border-2 border-sw-border border-t-sw-accent rounded-full animate-sw-spin shrink-0"
+        ></span>
         <span>Waiting for authentication...</span>
       </div>
     </div>
   `,
-  styles: [
-    `
-      .oauth-card {
-        background: #0a0a1a;
-        border: 1px solid #0f3460;
-        border-radius: 8px;
-        padding: 16px;
-        margin-top: 12px;
-      }
-      .instructions {
-        font-size: 13px;
-        color: #e0e0e0;
-        margin: 0 0 12px 0;
-        line-height: 1.5;
-      }
-      .actions {
-        display: flex;
-        gap: 8px;
-        margin-bottom: 12px;
-      }
-      .btn-primary {
-        padding: 6px 16px;
-        background: #e94560;
-        color: #1a1a2e;
-        border: none;
-        border-radius: 4px;
-        font-size: 13px;
-        font-family: monospace;
-        font-weight: bold;
-        cursor: pointer;
-        transition: background 0.2s;
-      }
-      .btn-primary:hover {
-        background: #ff6b81;
-      }
-      .cmd {
-        color: #e94560;
-        font-size: 14px;
-        font-family: monospace;
-        font-weight: bold;
-      }
-      .btn-copy {
-        padding: 4px 12px;
-        background: transparent;
-        color: #e0e0e0;
-        border: 1px solid #0f3460;
-        border-radius: 4px;
-        font-size: 12px;
-        font-family: monospace;
-        cursor: pointer;
-        transition: all 0.2s;
-        white-space: nowrap;
-      }
-      .btn-copy:hover {
-        border-color: #e94560;
-        color: #e94560;
-      }
-      .hint {
-        font-size: 12px;
-        color: #666;
-        margin: 0 0 12px 0;
-        line-height: 1.5;
-      }
-      .status-row {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        font-size: 13px;
-        color: #888;
-      }
-      .spinner {
-        width: 14px;
-        height: 14px;
-        border: 2px solid #0f3460;
-        border-top-color: #e94560;
-        border-radius: 50%;
-        animation: spin 0.8s linear infinite;
-        flex-shrink: 0;
-      }
-      @keyframes spin {
-        to {
-          transform: rotate(360deg);
-        }
-      }
-      .error-banner {
-        background: rgba(233, 69, 96, 0.15);
-        border: 1px solid #e94560;
-        border-radius: 4px;
-        padding: 8px 12px;
-        margin-bottom: 12px;
-        color: #ff6b81;
-        font-size: 13px;
-        line-height: 1.4;
-      }
-    `,
-  ],
 })
 export class AuthTerminalComponent implements OnInit, OnDestroy {
   /** Project name for auth status polling. */

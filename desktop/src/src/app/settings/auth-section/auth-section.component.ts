@@ -27,12 +27,16 @@ interface AuthStatusResponse {
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (llmProvider === 'anthropic') {
-      <section class="section">
-        <h2>Authentication</h2>
-        <div class="info-card">
-          <div class="info-row">
-            <span class="info-label">Status</span>
-            <span class="info-value" [class.status-ok]="apiKeyConfigured || oauthAuthenticated">
+      <section class="mb-6">
+        <h2 class="text-[15px] text-sw-text m-0 mb-3">Authentication</h2>
+        <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-4">
+          <div class="flex justify-between items-center py-2">
+            <span class="text-[13px] text-sw-text-muted">Status</span>
+            <span
+              class="text-[13px]"
+              data-testid="auth-status-value"
+              [class]="apiKeyConfigured || oauthAuthenticated ? 'text-sw-success' : 'text-sw-text'"
+            >
               {{
                 apiKeyConfigured
                   ? 'API Key configured'
@@ -42,12 +46,14 @@ interface AuthStatusResponse {
               }}
             </span>
           </div>
-          <div class="form-row">
-            <label class="form-label" for="auth-method">Method</label>
+          <div class="flex justify-between items-center py-2 border-t border-sw-border">
+            <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="auth-method"
+              >Method</label
+            >
             <select
               id="auth-method"
               [(ngModel)]="authMethod"
-              class="form-select"
+              class="flex-1 max-w-[340px] px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
               data-testid="settings-auth-method"
             >
               <option value="api_key">API Key</option>
@@ -55,20 +61,22 @@ interface AuthStatusResponse {
             </select>
           </div>
           @if (authMethod === 'api_key') {
-            <div class="form-row">
-              <label class="form-label" for="api-key-input">API Key</label>
+            <div class="flex justify-between items-center py-2 border-t border-sw-border">
+              <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="api-key-input"
+                >API Key</label
+              >
               <input
                 id="api-key-input"
                 type="password"
                 [(ngModel)]="apiKeyInput"
                 placeholder="sk-ant-..."
-                class="form-input"
+                class="flex-1 max-w-[340px] px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
                 data-testid="settings-api-key"
               />
             </div>
-            <div class="form-actions">
+            <div class="flex items-center gap-3 pt-3 pb-1">
               <button
-                class="btn-save"
+                class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-abyss disabled:opacity-40 disabled:cursor-not-allowed"
                 data-testid="settings-api-key-save"
                 (click)="saveApiKey()"
                 [disabled]="apiKeySaving || !apiKeyInput"
@@ -76,7 +84,7 @@ interface AuthStatusResponse {
                 {{ apiKeySaving ? 'Saving...' : 'Save Key' }}
               </button>
               <button
-                class="btn-cancel"
+                class="px-4 py-1.5 bg-transparent text-sw-text-muted border border-sw-text-faint rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:text-sw-text hover:enabled:border-sw-text-muted disabled:opacity-40 disabled:cursor-not-allowed"
                 data-testid="settings-api-key-remove"
                 (click)="deleteApiKey()"
                 [disabled]="!apiKeyConfigured"
@@ -84,10 +92,12 @@ interface AuthStatusResponse {
                 Remove Key
               </button>
               @if (apiKeySaved) {
-                <span class="save-feedback">Saved!</span>
+                <span class="text-sw-success text-[13px]">Saved!</span>
               }
             </div>
-            <p class="note">Restart containers after saving for changes to take effect.</p>
+            <p class="text-[11px] text-sw-text-faint mt-2 mb-0" data-testid="auth-note">
+              Restart containers after saving for changes to take effect.
+            </p>
           }
           @if (authMethod === 'oauth' && activeProject) {
             <app-auth-terminal [project]="activeProject" (done)="onOAuthDone($event)" />
@@ -96,144 +106,26 @@ interface AuthStatusResponse {
       </section>
     }
     @if (llmProvider === 'ollama') {
-      <section class="section">
-        <h2>Authentication</h2>
-        <div class="info-card">
-          <p class="note">No authentication needed for Ollama.</p>
+      <section class="mb-6">
+        <h2 class="text-[15px] text-sw-text m-0 mb-3">Authentication</h2>
+        <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-4">
+          <p class="text-[11px] text-sw-text-faint mt-2 mb-0" data-testid="auth-note">
+            No authentication needed for Ollama.
+          </p>
         </div>
       </section>
     }
     @if (llmProvider === 'external') {
-      <section class="section">
-        <h2>Authentication</h2>
-        <div class="info-card">
-          <p class="note">Uses API key env var from LLM Provider settings above.</p>
+      <section class="mb-6">
+        <h2 class="text-[15px] text-sw-text m-0 mb-3">Authentication</h2>
+        <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-4">
+          <p class="text-[11px] text-sw-text-faint mt-2 mb-0" data-testid="auth-note">
+            Uses API key env var from LLM Provider settings above.
+          </p>
         </div>
       </section>
     }
   `,
-  styles: [
-    `
-      .section {
-        margin-bottom: 24px;
-      }
-      h2 {
-        font-size: 15px;
-        color: #e0e0e0;
-        margin: 0 0 12px 0;
-      }
-      .info-card {
-        background: #16213e;
-        border: 1px solid #0f3460;
-        border-radius: 8px;
-        padding: 16px;
-      }
-      .info-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 8px 0;
-      }
-      .info-row + .info-row {
-        border-top: 1px solid #0f3460;
-      }
-      .info-label {
-        font-size: 13px;
-        color: #888;
-      }
-      .info-value {
-        font-size: 13px;
-        color: #e0e0e0;
-      }
-      .status-ok {
-        color: #4caf50;
-      }
-      .form-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 8px 0;
-      }
-      .form-row + .form-row {
-        border-top: 1px solid #0f3460;
-      }
-      .form-label {
-        font-size: 13px;
-        color: #888;
-        min-width: 120px;
-      }
-      .form-select,
-      .form-input {
-        flex: 1;
-        max-width: 340px;
-        padding: 6px 10px;
-        background: #1a1a2e;
-        border: 1px solid #0f3460;
-        border-radius: 4px;
-        color: #e0e0e0;
-        font-size: 13px;
-        font-family: monospace;
-      }
-      .form-select:focus,
-      .form-input:focus {
-        outline: none;
-        border-color: #e94560;
-      }
-      .form-actions {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 12px 0 4px 0;
-      }
-      .btn-save {
-        padding: 6px 20px;
-        background: transparent;
-        color: #e94560;
-        border: 1px solid #e94560;
-        border-radius: 4px;
-        font-size: 13px;
-        font-family: monospace;
-        cursor: pointer;
-        transition: all 0.2s;
-      }
-      .btn-save:hover:not(:disabled) {
-        background: #e94560;
-        color: #1a1a2e;
-      }
-      .btn-save:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-      }
-      .btn-cancel {
-        padding: 6px 16px;
-        background: transparent;
-        color: #888;
-        border: 1px solid #555;
-        border-radius: 4px;
-        font-size: 13px;
-        font-family: monospace;
-        cursor: pointer;
-        transition: all 0.2s;
-      }
-      .btn-cancel:hover:not(:disabled) {
-        color: #e0e0e0;
-        border-color: #888;
-      }
-      .btn-cancel:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-      }
-      .save-feedback {
-        color: #4caf50;
-        font-size: 13px;
-      }
-      .note {
-        font-size: 11px;
-        color: #666;
-        margin: 8px 0 0 0;
-      }
-    `,
-  ],
 })
 export class AuthSectionComponent implements OnChanges {
   @Input() activeProject: string | null = null;

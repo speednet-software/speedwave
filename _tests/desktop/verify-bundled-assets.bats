@@ -34,8 +34,9 @@ populate_common() {
     write_file "$ROOT/mcp-os/shared/package.json"
     write_file "$ROOT/mcp-os/shared/package-lock.json"
     write_file "$ROOT/mcp-os/shared/node_modules/express/index.js"
-    mkdir -p "$ROOT/mcp-os/os/node_modules/@speedwave"
-    ln -s ../../../shared "$ROOT/mcp-os/os/node_modules/@speedwave/mcp-shared"
+    mkdir -p "$ROOT/mcp-os/os/node_modules/@speedwave/mcp-shared/dist"
+    write_file "$ROOT/mcp-os/os/node_modules/@speedwave/mcp-shared/dist/index.js" "export {};"
+    write_file "$ROOT/mcp-os/os/node_modules/@speedwave/mcp-shared/package.json" "{}"
 }
 
 populate_macos() {

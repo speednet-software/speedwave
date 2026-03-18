@@ -8,12 +8,30 @@
 
 describe('Navigation', function () {
   before(async function () {
-    this.timeout(30_000);
+    this.timeout(65_000);
+    // Wait for shell title (always in DOM once shell component mounts)
     const shellTitle = await $('[data-testid="shell-title"]');
     await shellTitle.waitForExist({
       timeout: 15_000,
       timeoutMsg: 'Shell not found — spec 02 (setup wizard) must complete successfully before navigation tests can run',
     });
+    // Fail fast if project is in error state — gives a clear message instead
+    // of letting every navigation test individually time out.
+    const errorBanner = await $('[data-testid="blocking-error"]');
+    if (await errorBanner.isExisting()) {
+      const msg = await errorBanner.$('span').getText();
+      throw new Error(`Project is in error state — cannot test navigation: ${msg}`);
+    }
+    // If blocking overlay is visible, wait for it to disappear (status → ready).
+    // After spec 03 (container-health) passes, this should resolve quickly.
+    const overlay = await $('[data-testid="blocking-overlay"]');
+    if (await overlay.isExisting()) {
+      await overlay.waitForExist({
+        timeout: 45_000,
+        reverse: true,
+        timeoutMsg: 'Blocking overlay still visible — projectState did not reach ready',
+      });
+    }
   });
 
   it('should display Speedwave title in the shell header', async function () {
@@ -42,12 +60,11 @@ describe('Navigation', function () {
     this.timeout(30_000);
     const chat = await $('[data-testid="nav-chat"]');
     await chat.click();
-    await browser.waitUntil(
-      async () =>
-        (await $('[data-testid="chat-messages"]').isExisting()) ||
-        (await $('[data-testid="chat-status-overlay"]').isExisting()),
-      { timeout: 20_000, timeoutMsg: 'Chat view did not render (neither messages nor status overlay found)' },
-    );
+    const messages = await $('[data-testid="chat-messages"]');
+    await messages.waitForExist({
+      timeout: 20_000,
+      timeoutMsg: 'Chat messages container did not render',
+    });
   });
 
   it('should navigate to Integrations when clicking Integrations link', async function () {

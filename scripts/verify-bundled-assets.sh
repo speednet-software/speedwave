@@ -54,7 +54,8 @@ require_non_empty_dir "$root/mcp-os/shared/dist"
 require_file "$root/mcp-os/shared/package.json"
 require_file "$root/mcp-os/shared/package-lock.json"
 require_non_empty_dir "$root/mcp-os/shared/node_modules"
-[[ -d "$root/mcp-os/os/node_modules/@speedwave/mcp-shared" ]] || fail "Missing mcp-shared link/dir: $root/mcp-os/os/node_modules/@speedwave/mcp-shared"
+[[ -d "$root/mcp-os/os/node_modules/@speedwave/mcp-shared" ]] || fail "Missing mcp-shared dir: $root/mcp-os/os/node_modules/@speedwave/mcp-shared"
+[[ ! -L "$root/mcp-os/os/node_modules/@speedwave/mcp-shared" ]] || fail "mcp-shared must be a real directory, not a symlink: $root/mcp-os/os/node_modules/@speedwave/mcp-shared"
 
 case "$platform" in
   macos)

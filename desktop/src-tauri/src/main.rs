@@ -886,9 +886,8 @@ fn main() {
                 if let Err(e) = setup_wizard::link_cli() {
                     log::warn!("CLI re-link on startup failed: {e}");
                 }
+                reconcile::reconcile_bundle_update(app.handle());
             }
-
-            reconcile::reconcile_bundle_update(app.handle());
 
             // Build system tray.
             let tray_menu = tray::build_tray_menu(app.handle(), &None)?;
