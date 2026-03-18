@@ -23,7 +23,7 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
   template: `
     <div>
       <button
-        class="bg-none border-none text-sw-accent text-[13px] font-mono cursor-pointer p-0 mb-5 inline-block hover:underline"
+        class="bg-transparent border-none text-sw-accent text-[13px] font-mono cursor-pointer p-0 mb-5 inline-block hover:underline"
         (click)="goBack()"
         data-testid="back-link"
       >
@@ -50,14 +50,15 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
       @if (!plugin) {
         <p class="text-sw-text-dim text-[13px]" data-testid="plugin-not-found">Plugin not found.</p>
       } @else {
-        <div class="detail-header flex items-center gap-3 mb-6">
+        <div class="flex items-center gap-3 mb-6">
           <h1 class="text-xl text-sw-accent m-0">{{ plugin.name }}</h1>
-          <span class="version-badge text-[11px] text-sw-text-dim font-mono"
+          <span class="text-[11px] text-sw-text-dim font-mono" data-testid="version-badge"
             >v{{ plugin.version }}</span
           >
           @if (plugin.configured) {
             <span
-              class="badge configured text-[11px] px-2 py-0.5 rounded font-medium bg-sw-success-dark text-sw-success-text"
+              class="text-[11px] px-2 py-0.5 rounded font-medium bg-sw-success-dark text-sw-success-text"
+              data-testid="configured-badge"
               >Configured</span
             >
           }
@@ -65,7 +66,7 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
 
         <div class="flex border-b border-sw-border mb-6" data-testid="tab-bar">
           <button
-            class="bg-none border-none border-b-2 border-b-transparent text-sw-text-dim text-sm font-mono px-5 py-2 cursor-pointer transition-all duration-200 hover:text-sw-text"
+            class="bg-transparent border-none border-b-2 border-b-transparent text-sw-text-dim text-sm font-mono px-5 py-2 cursor-pointer transition-all duration-200 hover:text-sw-text"
             [ngClass]="activeTab === 'dashboard' ? 'text-sw-accent! border-b-sw-accent!' : ''"
             (click)="activeTab = 'dashboard'"
             data-testid="tab-dashboard"
@@ -73,7 +74,7 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
             Dashboard
           </button>
           <button
-            class="bg-none border-none border-b-2 border-b-transparent text-sw-text-dim text-sm font-mono px-5 py-2 cursor-pointer transition-all duration-200 hover:text-sw-text"
+            class="bg-transparent border-none border-b-2 border-b-transparent text-sw-text-dim text-sm font-mono px-5 py-2 cursor-pointer transition-all duration-200 hover:text-sw-text"
             [ngClass]="activeTab === 'settings' ? 'text-sw-accent! border-b-sw-accent!' : ''"
             (click)="activeTab = 'settings'"
             data-testid="tab-settings"
@@ -85,7 +86,7 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
         <div class="min-h-[200px]">
           @if (activeTab === 'dashboard') {
             <div data-testid="dashboard-content">
-              <p class="plugin-description text-sw-text-muted text-[13px] m-0 mb-4">
+              <p class="text-sw-text-muted text-[13px] m-0 mb-4" data-testid="plugin-description">
                 {{ plugin.description }}
               </p>
 
@@ -97,7 +98,7 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
                       class="px-3.5 py-2.5 rounded-md text-[13px] mb-2"
                       [ngClass]="
                         integrationStatuses.get(integration)
-                          ? 'bg-sw-success-dark text-sw-success-text border border-[#2d6a4f]'
+                          ? 'bg-sw-success-dark text-sw-success-text border border-sw-success-border'
                           : 'bg-sw-error-bg text-sw-accent border border-sw-accent'
                       "
                       [attr.data-testid]="'integration-status-' + integration"
@@ -124,7 +125,10 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
               }
 
               @if (plugin.requires_integrations.length === 0) {
-                <p class="dashboard-placeholder text-sw-text-ghost text-[13px] italic">
+                <p
+                  class="text-sw-text-ghost text-[13px] italic"
+                  data-testid="dashboard-placeholder"
+                >
                   Plugin dashboard content will appear here.
                 </p>
               }
@@ -144,9 +148,7 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
       }
     </div>
   `,
-  styles: [
-    ':host { display: block; background: var(--color-sw-bg-darkest); min-height: 100vh; padding: 24px; color: var(--color-sw-text); }',
-  ],
+  host: { class: 'block bg-sw-bg-darkest min-h-screen p-6 text-sw-text' },
 })
 export class PluginDetailComponent implements OnInit, OnDestroy {
   plugin: PluginStatusEntry | null = null;
