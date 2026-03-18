@@ -114,9 +114,7 @@ import { open } from '@tauri-apps/plugin-dialog';
       </section>
     </div>
   `,
-  styles: [
-    ':host { display: block; background: var(--color-sw-bg-darkest); min-height: 100vh; padding: 24px; color: var(--color-sw-text); }',
-  ],
+  host: { class: 'block bg-sw-bg-darkest min-h-screen p-6 text-sw-text' },
 })
 export class PluginsComponent implements OnInit, OnDestroy {
   plugins: PluginStatusEntry[] = [];

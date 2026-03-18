@@ -17,7 +17,7 @@ import { JsonSchema } from '../../models/plugin';
     } @else {
       <form (submit)="onSubmit($event)">
         @for (key of propertyKeys(); track key) {
-          <div class="form-group my-4">
+          <div class="my-4">
             <label class="block mb-1.5 text-[13px] text-sw-text-muted" [for]="'setting-' + key">{{
               key
             }}</label>
@@ -57,7 +57,7 @@ import { JsonSchema } from '../../models/plugin';
               <input
                 type="number"
                 [id]="'setting-' + key"
-                class="form-input w-full px-3 py-2.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-sm font-mono box-border focus:border-sw-accent focus:outline-none"
+                class="w-full px-3 py-2.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-sm font-mono box-border focus:border-sw-accent focus:outline-none"
                 [value]="getValue(key)"
                 (input)="onFieldChange(key, $event)"
                 [attr.data-testid]="'setting-' + key"
@@ -66,7 +66,7 @@ import { JsonSchema } from '../../models/plugin';
               <input
                 type="text"
                 [id]="'setting-' + key"
-                class="form-input w-full px-3 py-2.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-sm font-mono box-border focus:border-sw-accent focus:outline-none"
+                class="w-full px-3 py-2.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-sm font-mono box-border focus:border-sw-accent focus:outline-none"
                 [value]="getValue(key)"
                 (input)="onFieldChange(key, $event)"
                 [attr.data-testid]="'setting-' + key"
@@ -78,7 +78,7 @@ import { JsonSchema } from '../../models/plugin';
         <div class="flex gap-3 mt-4">
           <button
             type="submit"
-            class="btn-save px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:bg-sw-accent hover:text-sw-bg-darkest"
+            class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:bg-sw-accent hover:text-sw-bg-darkest"
             data-testid="settings-save"
           >
             Save Settings

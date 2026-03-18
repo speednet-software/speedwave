@@ -193,7 +193,7 @@ export interface SaveCredentialsEvent {
                     />
                     <button
                       type="button"
-                      class="remove-mapping-btn px-2.5 py-1.5 text-xs bg-transparent text-sw-error-text border border-sw-error-text rounded cursor-pointer font-mono"
+                      class="px-2.5 py-1.5 text-xs bg-transparent text-sw-error-text border border-sw-error-text rounded cursor-pointer font-mono"
                       (click)="onRemoveMapping(entry.key)"
                     >
                       x
@@ -202,7 +202,7 @@ export interface SaveCredentialsEvent {
                 }
                 <button
                   type="button"
-                  class="add-mapping-btn bg-transparent text-sw-accent border border-dashed border-sw-accent px-3 py-1.5 rounded cursor-pointer text-xs font-mono"
+                  class="bg-transparent text-sw-accent border border-dashed border-sw-accent px-3 py-1.5 rounded cursor-pointer text-xs font-mono"
                   (click)="onAddMapping()"
                 >
                   + Add Mapping
@@ -220,7 +220,7 @@ export interface SaveCredentialsEvent {
               </button>
               <button
                 type="button"
-                class="btn-cancel px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
+                class="px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
                 [attr.data-testid]="'integrations-remove-' + svc.service"
                 (click)="deleteCredentials.emit(svc)"
               >

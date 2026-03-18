@@ -122,9 +122,7 @@ import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
       }
     </div>
   `,
-  styles: [
-    ':host { display: block; background: #1a1a2e; min-height: 100vh; padding: 24px; color: #e0e0e0; }',
-  ],
+  host: { class: 'block bg-sw-bg-darkest min-h-screen p-6 text-sw-text' },
 })
 export class IntegrationsComponent implements OnInit, OnDestroy {
   private static readonly HIDDEN_SERVICES = new Set(['slack']);

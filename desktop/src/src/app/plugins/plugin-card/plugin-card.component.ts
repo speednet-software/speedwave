@@ -113,7 +113,7 @@ export interface SavePluginCredentialsEvent {
                 </button>
                 <button
                   type="button"
-                  class="btn-cancel px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
+                  class="px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
                   [attr.data-testid]="'plugin-delete-creds-' + plugin.slug"
                   (click)="deleteCredentials.emit(plugin)"
                 >
@@ -138,7 +138,7 @@ export interface SavePluginCredentialsEvent {
               >
               <button
                 type="button"
-                class="btn-remove px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
+                class="px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
                 [attr.data-testid]="'plugin-remove-confirm-' + plugin.slug"
                 (click)="onConfirmRemove()"
               >
@@ -146,7 +146,7 @@ export interface SavePluginCredentialsEvent {
               </button>
               <button
                 type="button"
-                class="btn-cancel px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
+                class="px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
                 [attr.data-testid]="'plugin-remove-cancel-' + plugin.slug"
                 (click)="confirmingRemove = false"
               >
@@ -155,7 +155,7 @@ export interface SavePluginCredentialsEvent {
             } @else {
               <button
                 type="button"
-                class="btn-remove px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
+                class="px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
                 [attr.data-testid]="'plugin-remove-' + plugin.slug"
                 (click)="confirmingRemove = true"
               >
