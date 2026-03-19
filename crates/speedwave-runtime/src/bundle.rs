@@ -232,9 +232,18 @@ pub fn load_bundle_state() -> BundleState {
         .unwrap_or_default()
 }
 
+pub fn load_bundle_state_in(data_dir: &Path) -> BundleState {
+    let path = data_dir.join(BUNDLE_STATE_FILE);
+    load_bundle_state_from(&path).unwrap_or_default()
+}
+
 pub fn save_bundle_state(state: &BundleState) -> anyhow::Result<()> {
     let path = bundle_state_path()?;
     save_bundle_state_to(state, &path)
+}
+
+pub fn save_bundle_state_in(state: &BundleState, data_dir: &Path) -> anyhow::Result<()> {
+    save_bundle_state_to(state, &data_dir.join(BUNDLE_STATE_FILE))
 }
 
 pub fn sync_claude_resources(build_root: &Path) -> anyhow::Result<()> {
