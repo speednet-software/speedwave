@@ -26,11 +26,11 @@ speedwave_<project>_network
 
 - `render_compose()` in `crates/speedwave-runtime/src/compose.rs` generates per-project compose files from the template
 - Never hand-edit generated compose files — modify the template instead
-- Addon services are merged into the compose document by `compose.rs`
+- Plugin services are merged into the compose document by `compose.rs`
 
 ## Image Build
 
-- Containerfiles live in `containers/` (e.g., `Containerfile.claude`, `containers/mcp-servers/Containerfile.mcp-base`)
+- Containerfiles live in `containers/` (e.g., `Containerfile.claude`) and in individual MCP server directories (e.g., `mcp-servers/hub/Containerfile`, `mcp-servers/slack/Dockerfile`)
 - `scripts/bundle-build-context.sh` bundles MCP sources into Tauri resources for Desktop builds
 - The `IMAGES` constant in `crates/speedwave-runtime/src/build.rs` must stay aligned with `scripts/bundle-build-context.sh`
 - All binary downloads in Containerfiles are **SHA256-verified** for supply chain security
