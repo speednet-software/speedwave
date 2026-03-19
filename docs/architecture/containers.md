@@ -28,6 +28,20 @@ speedwave_<project>_network
 - Never hand-edit generated compose files — modify the template instead
 - Addon services are merged into the compose document by `compose.rs`
 
+## Resource Limits
+
+Container memory limits are defined in `containers/compose.template.yml`:
+
+- **Claude container:** 8 GiB (`mem_limit: 8g`)
+- **MCP Hub:** 512 MiB (`mem_limit: 512m`)
+- **MCP workers:** 256 MiB each (`mem_limit: 256m`)
+
+The Lima VM must have enough RAM to run all containers plus kernel and containerd overhead. Current VM allocation: **12 GiB** (`LIMA_VM_MEMORY` in `setup_wizard.rs`).
+
+Breakdown: Claude (8g) + Hub (512m) + 4 workers (1g) + kernel/containerd (~1g) ≈ 10.5g. The 12 GiB allocation provides headroom without being excessive for 16 GB MacBooks.
+
+On upgrade from older versions (which used 8 GiB), `ensure_lima_vm_config()` automatically migrates the VM memory on startup. The migration stops the VM, edits both the source template and instance config, and restarts — no VM recreation needed.
+
 ## Image Build
 
 - Containerfiles live in `containers/` (e.g., `Containerfile.claude`, `containers/mcp-servers/Containerfile.mcp-base`)
