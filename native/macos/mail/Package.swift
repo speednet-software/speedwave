@@ -7,8 +7,7 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "mail-cli",
-            path: "Sources",
-            swiftSettings: [.unsafeFlags(["-parse-as-library"])]
+            path: "Sources"
         ),
         .testTarget(
             name: "MailTests",
