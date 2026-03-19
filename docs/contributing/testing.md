@@ -14,6 +14,7 @@ Speedwave's test strategy covers Rust crates, MCP servers, CLI, desktop, and end
 | `make test-angular`       | Angular desktop UI tests (`vitest run`)                             |
 | `make test-e2e`           | End-to-end CLI tests (requires `bats-core`)                         |
 | `make test-entrypoint`    | Container entrypoint script tests (requires `bats-core`)            |
+| `make test-swift`         | Swift tests for native macOS CLI packages (macOS only)              |
 | `make test-desktop-build` | Verifies desktop Tauri build succeeds                               |
 
 ## Coverage

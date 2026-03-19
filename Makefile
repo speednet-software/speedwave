@@ -27,7 +27,7 @@ LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
 .PHONY: all build test check clean dev install-deps setup-dev install-hooks \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets verify-bundled-assets \
-        test-rust test-cli test-desktop test-angular test-mcp test-os test-e2e test-entrypoint test-desktop-build \
+        test-rust test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-desktop-build \
         test-e2e-desktop _e2e-macos _e2e-linux _e2e-windows test-e2e-all setup-e2e-vms \
         check-clippy check-desktop-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
@@ -322,6 +322,17 @@ coverage-html: build-mcp
 	@[ "$$(uname)" = "Darwin" ] && open target/coverage/rust/html/index.html || true
 
 # ── E2E tests (requires bats-core) ──────────────────────────────────────────
+
+test-swift:
+	@if [ "$$(uname)" != "Darwin" ]; then \
+		echo "⬚  Skipping Swift tests (not macOS)"; \
+	else \
+		for pkg in reminders calendar mail notes; do \
+			echo "Testing $$pkg..." && \
+			(cd $(CURDIR)/native/macos/$$pkg && swift test) || exit 1; \
+		done && \
+		echo "✅ Swift tests passed"; \
+	fi
 
 test-e2e: build-cli
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }

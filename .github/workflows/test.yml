@@ -256,9 +256,4 @@ jobs:
         run: scripts/build-native-macos.sh
 
       - name: Run Swift tests
-        run: |
-          set -euo pipefail
-          for pkg in reminders calendar mail notes; do
-            echo "Testing $pkg..."
-            (cd native/macos/$pkg && swift test)
-          done
+        run: make test-swift
