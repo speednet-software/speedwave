@@ -220,6 +220,17 @@ build-native-macos:
 
 build-os-cli: build-native-macos
 
+test-swift:
+	@if [ "$$(uname)" != "Darwin" ]; then \
+		echo "⬚  Skipping Swift tests (not macOS)"; \
+	else \
+		for pkg in reminders calendar mail notes; do \
+			echo "Testing $$pkg..." && \
+			(cd $(CURDIR)/native/macos/$$pkg && swift test) || exit 1; \
+		done && \
+		echo "✅ Swift tests passed"; \
+	fi
+
 bundle-native-assets:
 	@scripts/bundle-native-assets.sh
 
@@ -322,17 +333,6 @@ coverage-html: build-mcp
 	@[ "$$(uname)" = "Darwin" ] && open target/coverage/rust/html/index.html || true
 
 # ── E2E tests (requires bats-core) ──────────────────────────────────────────
-
-test-swift:
-	@if [ "$$(uname)" != "Darwin" ]; then \
-		echo "⬚  Skipping Swift tests (not macOS)"; \
-	else \
-		for pkg in reminders calendar mail notes; do \
-			echo "Testing $$pkg..." && \
-			(cd $(CURDIR)/native/macos/$$pkg && swift test) || exit 1; \
-		done && \
-		echo "✅ Swift tests passed"; \
-	fi
 
 test-e2e: build-cli
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
