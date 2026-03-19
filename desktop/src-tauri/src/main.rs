@@ -883,6 +883,11 @@ fn main() {
             // Gated behind setup_started: CLI doesn't exist on fresh install,
             // and we must not recreate ~/.speedwave/ after factory reset.
             if setup_started {
+                #[cfg(target_os = "macos")]
+                if let Err(e) = setup_wizard::ensure_lima_vm_config() {
+                    log::warn!("Lima VM config migration failed: {e}");
+                }
+
                 if let Err(e) = setup_wizard::link_cli() {
                     log::warn!("CLI re-link on startup failed: {e}");
                 }

@@ -149,6 +149,14 @@ pub fn install_runtime() -> anyhow::Result<()> {
 // Step 3: Initialize VM (macOS only — Lima)
 // ---------------------------------------------------------------------------
 
+/// Desired Lima VM memory allocation.
+///
+/// Claude (8g) + Hub (512m) + 4 workers (1g) + kernel/containerd (~1g) ≈ 10.5g.
+/// 12 GiB provides headroom without being excessive for 16 GB MacBooks.
+/// Older installs had 8 GiB, which caused OOM kills (exit code 137).
+#[cfg(any(target_os = "macos", test))]
+const LIMA_VM_MEMORY: &str = "12GiB";
+
 /// Default Lima VM configuration for Speedwave.
 /// Uses Apple Virtualization Framework (vz) with containerd + nerdctl.
 #[cfg(target_os = "macos")]
@@ -165,7 +173,7 @@ images:
   - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
     arch: "aarch64"
 cpus: 4
-memory: "8GiB"
+memory: "12GiB"
 disk: "30GiB"
 mountType: virtiofs
 networks:
@@ -1196,6 +1204,144 @@ pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
         rt.container_exec_piped(&container_name, &[consts::CLAUDE_BINARY, "auth", "status"])?;
     let output = cmd.output()?;
     Ok(output.status.success())
+}
+
+// ---------------------------------------------------------------------------
+// Lima VM config migration — upgrade memory from older installs
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if the Lima config needs a memory upgrade.
+///
+/// Parses the `memory: "XGiB"` line and compares against [`LIMA_VM_MEMORY`].
+/// Returns `false` if current memory >= desired (don't downgrade users who
+/// manually set higher values) or if the value is unparseable (safety).
+#[cfg(any(target_os = "macos", test))]
+fn lima_vm_config_needs_update(config_content: &str) -> bool {
+    let desired = match LIMA_VM_MEMORY.strip_suffix("GiB").and_then(|s| s.parse::<u32>().ok()) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    for line in config_content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("memory:") {
+            let value = rest.trim().trim_matches('"');
+            return match value.strip_suffix("GiB").and_then(|s| s.parse::<u32>().ok()) {
+                Some(current) => current < desired,
+                None => false, // unparseable — don't touch
+            };
+        }
+    }
+
+    false // no memory line found
+}
+
+/// Migrates the Lima VM memory allocation on existing installs.
+///
+/// Reads the source template at `{data_dir()}/lima.yaml` and, if the memory
+/// value is below [`LIMA_VM_MEMORY`], updates both the source template and the
+/// Lima instance config. Stops and restarts the VM if it was running.
+///
+/// No-op when:
+/// - Source template doesn't exist (fresh install — `init_vm_macos` creates it)
+/// - Memory is already at or above the desired value
+#[cfg(target_os = "macos")]
+pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
+    let data_dir = consts::data_dir();
+    let source_template = data_dir.join("lima.yaml");
+
+    // Fresh install — init_vm_macos will create it with correct config
+    if !source_template.exists() {
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(&source_template)?;
+    if !lima_vm_config_needs_update(&content) {
+        return Ok(());
+    }
+
+    log::info!("Lima VM config migration: updating memory to {LIMA_VM_MEMORY}");
+
+    // Check if VM exists
+    let list_output = limactl_command()
+        .args(["list", "--format", "{{.Name}}"])
+        .output()?;
+    let list_str = String::from_utf8_lossy(&list_output.stdout);
+    let vm_exists = list_str
+        .lines()
+        .any(|line| line.trim() == consts::lima_vm_name());
+
+    // Stop VM if running
+    if vm_exists {
+        let status_output = limactl_command()
+            .args(["list", "--format", "{{.Status}}", consts::lima_vm_name()])
+            .output()?;
+        let status_str = String::from_utf8_lossy(&status_output.stdout);
+        if status_str.trim().eq_ignore_ascii_case("running") {
+            // --force kills the VM immediately. This runs on app startup before
+            // any project is actively running, so data loss risk is negligible.
+            log::info!("Stopping VM for memory migration");
+            let timeout = std::time::Duration::from_secs(30);
+            let mut stop_cmd = limactl_command();
+            stop_cmd.args(["stop", "--force", consts::lima_vm_name()]);
+            if let Err(e) = run_with_timeout(&mut stop_cmd, timeout) {
+                log::warn!("limactl stop timed out or failed: {e}, continuing with config update");
+            }
+        }
+    }
+
+    // Replace memory line in config text. Preserves all other user
+    // customizations (cpus, mounts, etc.) and original indentation.
+    let rewrite_memory_line = |text: &str| -> String {
+        let new_text: String = text
+            .lines()
+            .map(|line| {
+                if line.trim().starts_with("memory:") {
+                    let indent = &line[..line.len() - line.trim_start().len()];
+                    format!("{indent}memory: \"{LIMA_VM_MEMORY}\"")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Preserve trailing newline if original had one
+        if text.ends_with('\n') && !new_text.ends_with('\n') {
+            format!("{new_text}\n")
+        } else {
+            new_text
+        }
+    };
+
+    // Update source template (reuse `content` already read above)
+    std::fs::write(&source_template, rewrite_memory_line(&content))?;
+
+    // Update instance config (may not exist if VM was never created)
+    let instance_config = data_dir
+        .join(consts::LIMA_SUBDIR)
+        .join(consts::lima_vm_name())
+        .join("lima.yaml");
+    if instance_config.exists() {
+        let instance_content = std::fs::read_to_string(&instance_config)?;
+        std::fs::write(&instance_config, rewrite_memory_line(&instance_content))?;
+    }
+
+    // Reset setup state BEFORE restarting VM — if init_vm_macos() fails, the
+    // config files are already correct (idempotent), but reconcile_bundle_update
+    // must still know to rebuild images and restart containers on next launch.
+    let mut state = SetupState::load();
+    state.images_built = false;
+    state.containers_started = false;
+    state.save()?;
+
+    // Restart VM if it existed
+    if vm_exists {
+        log::info!("Starting VM after memory migration");
+        init_vm_macos()?;
+    }
+
+    log::info!("Lima VM config migration complete");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -3640,6 +3786,68 @@ networks:
         assert!(
             body.contains("bundle::load_current_bundle_manifest"),
             "build_images() must load the current manifest to get bundle_id for BundleState"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Lima VM config migration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn lima_vm_config_detects_old_8gib() {
+        let config = "vmType: vz\ncpus: 4\nmemory: \"8GiB\"\ndisk: \"30GiB\"\n";
+        assert!(lima_vm_config_needs_update(config));
+    }
+
+    #[test]
+    fn lima_vm_config_current_no_update() {
+        let config = "vmType: vz\ncpus: 4\nmemory: \"12GiB\"\ndisk: \"30GiB\"\n";
+        assert!(!lima_vm_config_needs_update(config));
+    }
+
+    #[test]
+    fn lima_vm_config_higher_memory_no_downgrade() {
+        let config = "vmType: vz\ncpus: 4\nmemory: \"16GiB\"\ndisk: \"30GiB\"\n";
+        assert!(!lima_vm_config_needs_update(config));
+    }
+
+    #[test]
+    fn lima_vm_config_lower_memory_triggers_update() {
+        let config = "vmType: vz\ncpus: 4\nmemory: \"4GiB\"\ndisk: \"30GiB\"\n";
+        assert!(lima_vm_config_needs_update(config));
+    }
+
+    #[test]
+    fn lima_vm_config_unparseable_memory_no_update() {
+        let config = "vmType: vz\ncpus: 4\nmemory: \"plenty\"\ndisk: \"30GiB\"\n";
+        assert!(!lima_vm_config_needs_update(config));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn lima_config_constant_has_correct_memory() {
+        assert!(
+            LIMA_CONFIG.contains(&format!("memory: \"{}\"", LIMA_VM_MEMORY)),
+            "LIMA_CONFIG must use LIMA_VM_MEMORY ({LIMA_VM_MEMORY}), \
+             but the memory line doesn't match"
+        );
+    }
+
+    /// Structural test: `ensure_lima_vm_config()` must be called in `main.rs`
+    /// before `reconcile_bundle_update()` so the VM memory is migrated before
+    /// images are rebuilt.
+    #[test]
+    fn ensure_lima_vm_config_called_before_reconcile() {
+        let source = include_str!("main.rs");
+        let migration_pos = source
+            .find("ensure_lima_vm_config()")
+            .expect("ensure_lima_vm_config() must be called in main.rs");
+        let reconcile_pos = source
+            .find("reconcile_bundle_update(")
+            .expect("reconcile_bundle_update() must be called in main.rs");
+        assert!(
+            migration_pos < reconcile_pos,
+            "ensure_lima_vm_config() must be called BEFORE reconcile_bundle_update() in main.rs"
         );
     }
 }
