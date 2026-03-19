@@ -454,14 +454,7 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
         }
 
         // Read current compose and check if WORKER_OS_URL matches the port file
-        let home = match dirs::home_dir() {
-            Some(h) => h,
-            None => {
-                log::debug!("reconcile_compose_port: cannot determine home directory");
-                return;
-            }
-        };
-        let data_dir = home.join(speedwave_runtime::consts::DATA_DIR);
+        let data_dir = speedwave_runtime::consts::data_dir();
         let port_path = data_dir.join(speedwave_runtime::consts::MCP_OS_PORT_FILE);
         let current_port = match std::fs::read_to_string(&port_path) {
             Ok(c) => match c.trim().parse::<u16>() {
@@ -1142,6 +1135,39 @@ mod tests {
             let result = resolve_resources_dir(&exe_parent);
             assert_eq!(result, Some(lib_dir));
         }
+    }
+
+    /// Structural test: verifies that `reconcile_bundle_update` in main.rs
+    /// is gated behind `setup_started`. On a fresh install the Lima VM does
+    /// not exist yet, so running reconcile would fail with "Runtime not
+    /// available" and poison `ImageReadiness`, blocking the setup wizard's
+    /// Start Containers step.
+    #[test]
+    fn reconcile_gated_behind_setup_started_in_main() {
+        let main_source = include_str!("main.rs");
+        // The reconcile call must be inside an `if setup_started` block.
+        // Find the reconcile_bundle_update call and verify it's preceded by
+        // `if setup_started`.
+        let idx = main_source
+            .find("reconcile::reconcile_bundle_update(app.handle())")
+            .expect("main.rs must call reconcile_bundle_update");
+        // Look backwards for the nearest `if setup_started`
+        let before = &main_source[..idx];
+        let last_if = before.rfind("if setup_started");
+        assert!(
+            last_if.is_some(),
+            "reconcile_bundle_update must be gated behind `if setup_started` in main.rs"
+        );
+        // Verify there's no closing brace between the guard and the call
+        // (i.e., the call is inside the same block as the guard).
+        let between = &main_source[last_if.unwrap()..idx];
+        let open_braces = between.matches('{').count();
+        let close_braces = between.matches('}').count();
+        assert!(
+            open_braces > close_braces,
+            "reconcile_bundle_update must be inside the `if setup_started` block, \
+             not after it (open={open_braces}, close={close_braces})"
+        );
     }
 
     #[cfg(target_os = "windows")]

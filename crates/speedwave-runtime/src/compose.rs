@@ -29,10 +29,18 @@ fn str_to_engine_path(path: &str) -> anyhow::Result<String> {
 }
 
 /// Resolves the tokens directory for a project. SSOT for the path formula.
+///
+/// Production callers should use `resolve_tokens_dir_default()` unless
+/// they need an explicit base path for testability.
 pub fn resolve_tokens_dir(home: &std::path::Path, project_name: &str) -> PathBuf {
     home.join(consts::DATA_DIR)
         .join("tokens")
         .join(project_name)
+}
+
+/// Returns the tokens directory using `consts::data_dir()`.
+fn resolve_tokens_dir_default(project_name: &str) -> PathBuf {
+    consts::data_dir().join("tokens").join(project_name)
 }
 
 /// Default compose template embedded at compile time from containers/compose.template.yml (SSOT).
@@ -47,13 +55,11 @@ pub fn render_compose(
     runtime: Option<&dyn ContainerRuntime>,
 ) -> anyhow::Result<String> {
     crate::validation::validate_project_name(project_name)?;
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-    let data_dir = home.join(consts::DATA_DIR);
-    let tokens_dir = resolve_tokens_dir(&home, project_name);
+    let data_dir = consts::data_dir();
+    let tokens_dir = resolve_tokens_dir_default(project_name);
     let claude_home = data_dir.join("claude-home").join(project_name);
     let resources_dir = data_dir.join("claude-resources");
-    let network_name = format!("{}_{}_network", consts::COMPOSE_PREFIX, project_name);
+    let network_name = format!("{}_{}_network", consts::compose_prefix(), project_name);
 
     let port_hub = consts::PORT_BASE;
     let port_slack = consts::PORT_BASE + 1;
@@ -63,7 +69,7 @@ pub fn render_compose(
     let bundle_manifest = bundle::load_current_bundle_manifest()?;
 
     let mut yaml = COMPOSE_TEMPLATE.to_string();
-    yaml = yaml.replace("${COMPOSE_PREFIX}", consts::COMPOSE_PREFIX);
+    yaml = yaml.replace("${COMPOSE_PREFIX}", consts::compose_prefix());
     yaml = yaml.replace("${PROJECT_NAME}", project_name);
     yaml = yaml.replace("${PROJECT_DIR}", &str_to_engine_path(project_dir)?);
     yaml = yaml.replace("${CLAUDE_HOME}", &to_engine_path(&claude_home)?);
@@ -103,7 +109,7 @@ pub fn render_compose(
 
     // Bridge writes lock files directly to ~/.speedwave/ide-bridge/
     // Mount it as /home/speedwave/.claude/ide/ — no copying needed.
-    let ide_lock_dir = home.join(consts::DATA_DIR).join("ide-bridge");
+    let ide_lock_dir = data_dir.join("ide-bridge");
     std::fs::create_dir_all(&ide_lock_dir)?;
     yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
     yaml = yaml.replace("${HOST_GATEWAY}", host_gateway_ip());
@@ -151,9 +157,7 @@ pub fn render_compose(
 /// Path: ~/.speedwave/secrets/<project>/
 pub fn init_secrets_dir(project: &str) -> anyhow::Result<PathBuf> {
     crate::validation::validate_project_name(project)?;
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-    let secrets_dir = home.join(consts::DATA_DIR).join("secrets").join(project);
+    let secrets_dir = consts::data_dir().join("secrets").join(project);
     std::fs::create_dir_all(&secrets_dir)?;
 
     #[cfg(unix)]
@@ -168,12 +172,20 @@ pub fn init_secrets_dir(project: &str) -> anyhow::Result<PathBuf> {
 /// Returns the path where the rendered compose file should be saved.
 pub fn compose_output_path(project: &str) -> anyhow::Result<PathBuf> {
     crate::validation::validate_project_name(project)?;
-    Ok(dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
-        .join(consts::DATA_DIR)
+    Ok(consts::data_dir()
         .join("compose")
         .join(project)
         .join("compose.yml"))
+}
+
+/// Testable variant: resolves compose output path under an explicit data directory.
+#[cfg(test)]
+pub fn compose_output_path_in(
+    data_dir: &std::path::Path,
+    project: &str,
+) -> anyhow::Result<PathBuf> {
+    crate::validation::validate_project_name(project)?;
+    Ok(data_dir.join("compose").join(project).join("compose.yml"))
 }
 
 /// Saves the rendered compose YAML to disk.
@@ -233,14 +245,9 @@ fn apply_llm_config(yaml: &str, project_name: &str, llm: &LlmConfig) -> anyhow::
             let proxy_token = uuid::Uuid::new_v4().to_string();
             let proxy_port = consts::PORT_BASE + 9; // 4009
 
-            let home = dirs::home_dir()
-                .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-            let secrets_dir = home
-                .join(consts::DATA_DIR)
-                .join("secrets")
-                .join(project_name);
+            let secrets_dir = consts::data_dir().join("secrets").join(project_name);
             let llm_env_file = secrets_dir.join("llm.env");
-            let network_name = format!("{}_{}_network", consts::COMPOSE_PREFIX, project_name);
+            let network_name = format!("{}_{}_network", consts::compose_prefix(), project_name);
 
             // Parse existing YAML and add llm-proxy service
             let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
@@ -272,7 +279,7 @@ deploy:
       cpus: '0.5'
       memory: 512m
 "#,
-                prefix = consts::COMPOSE_PREFIX,
+                prefix = consts::compose_prefix(),
                 project = project_name,
                 container_user = container_user(),
                 port = proxy_port,
@@ -394,10 +401,7 @@ fn apply_plugins(
 /// into the claude service environment. If no key file exists, returns
 /// the YAML unchanged.
 pub fn apply_auth_config(yaml: &str, project: &str) -> anyhow::Result<String> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-    let key_path = home
-        .join(consts::DATA_DIR)
+    let key_path = consts::data_dir()
         .join("secrets")
         .join(project)
         .join("anthropic_api_key");
@@ -700,9 +704,7 @@ fn remove_hub_env_var(doc: &mut serde_yaml_ng::Value, env_var_name: &str) {
 ///
 /// Claude container is NOT modified — it only sees the hub.
 fn apply_mcp_os_config(yaml: &str) -> anyhow::Result<String> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-    let data_dir = home.join(consts::DATA_DIR);
+    let data_dir = consts::data_dir();
     let token_path = data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE);
     let port_path = data_dir.join(consts::MCP_OS_PORT_FILE);
     apply_mcp_os_config_with_path(yaml, &token_path, &port_path)
@@ -918,9 +920,7 @@ impl SecurityExpectedPaths {
     }
 
     pub fn compute(project_name: &str, project_dir: &str) -> anyhow::Result<Self> {
-        let home =
-            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-        let tokens_dir = resolve_tokens_dir(&home, project_name);
+        let tokens_dir = resolve_tokens_dir_default(project_name);
         Ok(Self {
             project_engine_path: to_engine_path(std::path::Path::new(project_dir))?,
             tokens_engine_dir: to_engine_path(&tokens_dir)?,

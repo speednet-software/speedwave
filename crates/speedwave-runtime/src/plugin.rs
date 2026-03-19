@@ -79,19 +79,19 @@ pub struct PluginManifest {
 
 /// Returns `~/.speedwave/plugins/`
 pub fn plugins_base_dir() -> anyhow::Result<PathBuf> {
-    Ok(dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot find home dir"))?
-        .join(consts::DATA_DIR)
-        .join("plugins"))
+    Ok(consts::data_dir().join("plugins"))
 }
 
 /// Returns `~/.speedwave/tokens/<project>/<service_id>/`
 pub fn token_dir(project: &str, service_id: &str) -> anyhow::Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home dir"))?;
-    Ok(token_dir_with_base(&home, project, service_id))
+    Ok(consts::data_dir()
+        .join("tokens")
+        .join(project)
+        .join(service_id))
 }
 
 /// Testable version: constructs `<base>/.speedwave/tokens/<project>/<service_id>/`
+#[cfg(test)]
 fn token_dir_with_base(home: &Path, project: &str, service_id: &str) -> PathBuf {
     home.join(consts::DATA_DIR)
         .join("tokens")
@@ -107,10 +107,26 @@ pub fn configure_plugin_tokens(
     service_id: &str,
     tokens: &HashMap<String, String>,
 ) -> anyhow::Result<()> {
-    let base = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home dir"))?;
-    configure_plugin_tokens_with_base(&base, project, service_id, tokens)
+    let token_dir = consts::data_dir()
+        .join("tokens")
+        .join(project)
+        .join(service_id);
+    std::fs::create_dir_all(&token_dir)?;
+
+    for (key, value) in tokens {
+        let file_path = token_dir.join(key);
+        std::fs::write(&file_path, value)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    Ok(())
 }
 
+#[cfg(test)]
 fn configure_plugin_tokens_with_base(
     home: &Path,
     project: &str,
@@ -136,24 +152,11 @@ fn configure_plugin_tokens_with_base(
 
 /// Checks whether a plugin's required auth_fields have corresponding token files.
 pub fn get_plugin_token_status(project: &str, manifest: &PluginManifest) -> TokenStatus {
-    let base = match dirs::home_dir() {
-        Some(h) => h,
-        None => {
-            return TokenStatus::NotConfigured {
-                missing: manifest
-                    .auth_fields
-                    .iter()
-                    .filter(|f| f.is_secret)
-                    .map(|f| f.key.clone())
-                    .collect(),
-            };
-        }
-    };
-    get_plugin_token_status_with_base(&base, project, manifest)
+    get_plugin_token_status_in(consts::data_dir(), project, manifest)
 }
 
-fn get_plugin_token_status_with_base(
-    home: &Path,
+fn get_plugin_token_status_in(
+    data_dir: &Path,
     project: &str,
     manifest: &PluginManifest,
 ) -> TokenStatus {
@@ -172,7 +175,7 @@ fn get_plugin_token_status_with_base(
     }
 
     let service_id = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
-    let token_dir = token_dir_with_base(home, project, service_id);
+    let token_dir = data_dir.join("tokens").join(project).join(service_id);
 
     let mut missing = Vec::new();
     for field in &secret_fields {
@@ -188,6 +191,16 @@ fn get_plugin_token_status_with_base(
     } else {
         TokenStatus::NotConfigured { missing }
     }
+}
+
+/// Testable variant — accepts explicit home dir (tests use fake_home pattern).
+#[cfg(test)]
+fn get_plugin_token_status_with_base(
+    home: &Path,
+    project: &str,
+    manifest: &PluginManifest,
+) -> TokenStatus {
+    get_plugin_token_status_in(&home.join(consts::DATA_DIR), project, manifest)
 }
 
 /// Derives WORKER_{SID}_URL from a service_id. E.g. "presale" → "WORKER_PRESALE_URL"
@@ -616,7 +629,7 @@ pub fn generate_plugin_service(
     let tag = plugin_image_tag(manifest);
     let container_name = format!(
         "{}_{}_{}_{}",
-        consts::COMPOSE_PREFIX,
+        consts::compose_prefix(),
         project_name,
         "mcp",
         sid.replace('-', "_")
@@ -794,11 +807,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> anyhow::Result<()> {
 
 /// Emit a warning if legacy addon directory exists and is non-empty.
 fn warn_legacy_addons() {
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => return,
-    };
-    let addons_dir = home.join(consts::DATA_DIR).join("addons");
+    let addons_dir = consts::data_dir().join("addons");
     if !addons_dir.exists() {
         return;
     }

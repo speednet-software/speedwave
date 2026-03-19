@@ -888,7 +888,14 @@ fn main() {
                 }
             }
 
-            reconcile::reconcile_bundle_update(app.handle());
+            // Reconcile container images when the bundled assets change (e.g. after
+            // an app update). Gated behind setup_started: on fresh install or after
+            // factory reset there is no runtime/VM yet — reconciling would fail with
+            // "Runtime not available" and poison ImageReadiness, blocking the setup
+            // wizard's Start Containers step.
+            if setup_started {
+                reconcile::reconcile_bundle_update(app.handle());
+            }
 
             // Build system tray.
             let tray_menu = tray::build_tray_menu(app.handle(), &None)?;

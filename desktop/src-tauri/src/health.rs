@@ -144,11 +144,7 @@ pub(crate) fn is_pid_alive(pid: u32) -> bool {
 /// Check if the mcp-os process is alive AND listening on its port.
 /// Used by both the health check UI (check_mcp_os) and the watchdog.
 pub(crate) fn is_mcp_os_alive() -> bool {
-    let Some(home) = dirs::home_dir() else {
-        return false;
-    };
-    let data_dir = home.join(speedwave_runtime::consts::DATA_DIR);
-    check_mcp_os_alive_in(&data_dir)
+    check_mcp_os_alive_in(speedwave_runtime::consts::data_dir())
 }
 
 /// Testable inner implementation: checks PID liveness + TCP port probe

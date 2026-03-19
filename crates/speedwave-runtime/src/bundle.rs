@@ -238,9 +238,41 @@ pub fn save_bundle_state(state: &BundleState) -> anyhow::Result<()> {
 }
 
 pub fn sync_claude_resources(build_root: &Path) -> anyhow::Result<()> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-    sync_claude_resources_to(build_root, &home)
+    let source = build_root.join("containers").join("claude-resources");
+    validate_claude_resources(&source)?;
+
+    let data_dir = consts::data_dir();
+    std::fs::create_dir_all(data_dir)?;
+
+    let target = data_dir.join("claude-resources");
+    let staging = data_dir.join(format!("claude-resources.tmp-{}", uuid::Uuid::new_v4()));
+    let backup = data_dir.join(format!("claude-resources.bak-{}", uuid::Uuid::new_v4()));
+
+    copy_dir_recursive(&source, &staging)?;
+    validate_claude_resources(&staging)?;
+
+    if target.exists() {
+        std::fs::rename(&target, &backup)?;
+    }
+
+    if let Err(err) = std::fs::rename(&staging, &target) {
+        if backup.exists() {
+            let _ = std::fs::rename(&backup, &target);
+        }
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(anyhow::Error::new(err));
+    }
+
+    if backup.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&backup) {
+            log::warn!(
+                "sync_claude_resources: failed to remove backup dir {}: {e}",
+                backup.display()
+            );
+        }
+    }
+
+    Ok(())
 }
 
 pub fn required_bundled_assets(target_os: &str) -> anyhow::Result<Vec<BundledAssetSpec>> {
@@ -266,13 +298,7 @@ pub fn validate_bundled_runtime_assets(
 }
 
 fn bundle_state_path() -> anyhow::Result<PathBuf> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-    Ok(bundle_state_path_with_home(&home))
-}
-
-fn bundle_state_path_with_home(home: &Path) -> PathBuf {
-    home.join(consts::DATA_DIR).join(BUNDLE_STATE_FILE)
+    Ok(consts::data_dir().join(BUNDLE_STATE_FILE))
 }
 
 fn load_bundle_state_from(path: &Path) -> anyhow::Result<BundleState> {
@@ -292,6 +318,7 @@ fn save_bundle_state_to(state: &BundleState, path: &Path) -> anyhow::Result<()> 
     Ok(())
 }
 
+#[cfg(test)]
 fn sync_claude_resources_to(build_root: &Path, home: &Path) -> anyhow::Result<()> {
     let source = build_root.join("containers").join("claude-resources");
     validate_claude_resources(&source)?;

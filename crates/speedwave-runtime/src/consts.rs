@@ -1,4 +1,5 @@
 pub const APP_NAME: &str = "speedwave";
+pub const DATA_DIR_ENV: &str = "SPEEDWAVE_DATA_DIR";
 pub const LIMA_VM_NAME: &str = "speedwave";
 pub const LIMA_SUBDIR: &str = "lima";
 pub const DATA_DIR: &str = ".speedwave";
@@ -404,9 +405,11 @@ pub fn claude_session_log_path_in(home: &std::path::Path, project: &str) -> std:
 }
 
 /// Build the per-project Claude session log path.
-/// Returns `None` when `dirs::home_dir()` is unavailable.
-pub fn claude_session_log_path(project: &str) -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|home| claude_session_log_path_in(&home, project))
+pub fn claude_session_log_path(project: &str) -> std::path::PathBuf {
+    data_dir()
+        .join("logs")
+        .join(project)
+        .join(CLAUDE_SESSION_LOG_FILE)
 }
 
 /// Built-in services defined in containers/compose.template.yml.
@@ -423,6 +426,94 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
 /// Built-in service IDs (logical names, not compose names).
 /// Used by plugin install to prevent slug collisions.
 pub const BUILT_IN_SERVICE_IDS: &[&str] = &["slack", "sharepoint", "redmine", "gitlab", "os"];
+
+/// Pure, testable function for resolving the data directory.
+/// `env_val` = None or empty string → `home.join(DATA_DIR)` (empty string treated as unset)
+/// `env_val` = absolute path → returns that path
+/// Panics if `env_val` is a relative path (including `~/...` — tilde is not expanded in Rust).
+pub fn data_dir_from(env_val: Option<&str>, home: &std::path::Path) -> std::path::PathBuf {
+    match env_val {
+        Some(val) if !val.is_empty() => {
+            let path = std::path::PathBuf::from(val);
+            assert!(
+                path.is_absolute(),
+                "SPEEDWAVE_DATA_DIR must be an absolute path, got: {val}"
+            );
+            path
+        }
+        _ => home.join(DATA_DIR),
+    }
+}
+
+/// Returns the Speedwave data directory, initialized once per process.
+///
+/// Resolution: reads `SPEEDWAVE_DATA_DIR` env var; falls back to `~/.speedwave/`.
+/// Panics only if neither the env var nor `dirs::home_dir()` is available (i.e.
+/// the process has no usable HOME — a fatal misconfiguration).
+pub fn data_dir() -> &'static std::path::PathBuf {
+    use std::sync::OnceLock;
+    static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let env_val = std::env::var(DATA_DIR_ENV).ok();
+        let Some(home) = dirs::home_dir() else {
+            // Fatal: no HOME and no SPEEDWAVE_DATA_DIR — process cannot function.
+            log::error!("cannot determine home directory and {DATA_DIR_ENV} is not set");
+            std::process::exit(1);
+        };
+        data_dir_from(env_val.as_deref(), &home)
+    })
+}
+
+/// Derives an instance name from a data directory path.
+///
+/// Strips leading dots from the basename (`.speedwave` → `speedwave`).
+/// Panics if the basename is empty or does not match `^[a-z][a-z0-9-]{0,63}$`.
+///
+/// # SSOT note
+/// The shell equivalent lives in `scripts/e2e-vm.sh` (`basename | sed 's/^\.//'`).
+/// Both must produce identical results.
+pub fn derive_instance_name_from(data_dir: &std::path::Path) -> String {
+    let Some(basename) = data_dir.file_name().and_then(|n| n.to_str()) else {
+        panic!(
+            "SPEEDWAVE_DATA_DIR must have a non-empty basename, got: {}",
+            data_dir.display()
+        );
+    };
+    let name = basename.trim_start_matches('.');
+    assert!(
+        !name.is_empty(),
+        "SPEEDWAVE_DATA_DIR basename is empty after stripping dots: {basename}"
+    );
+    assert!(
+        name.starts_with(|c: char| c.is_ascii_lowercase())
+            && name.len() <= 64
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+        "SPEEDWAVE_DATA_DIR basename '{name}' must match ^[a-z][a-z0-9-]{{0,63}}$"
+    );
+    name.to_string()
+}
+
+/// Derives the Lima VM name from the data directory basename.
+///
+/// Default: `"speedwave"` (when data_dir is `~/.speedwave`).
+/// Custom: basename of the data directory (e.g. `/opt/sw-test` -> `"sw-test"`).
+pub fn lima_vm_name() -> &'static str {
+    use std::sync::OnceLock;
+    static NAME: OnceLock<String> = OnceLock::new();
+    NAME.get_or_init(|| derive_instance_name_from(data_dir()))
+}
+
+/// Derives the compose project prefix from the data directory basename.
+///
+/// Default: `"speedwave"` (when data_dir is `~/.speedwave`).
+/// Custom: basename of the data directory (e.g. `/opt/sw-test` -> `"sw-test"`).
+pub fn compose_prefix() -> &'static str {
+    use std::sync::OnceLock;
+    static PREFIX: OnceLock<String> = OnceLock::new();
+    PREFIX.get_or_init(|| derive_instance_name_from(data_dir()))
+}
 
 #[cfg(test)]
 mod tests {
@@ -868,5 +959,141 @@ mod tests {
             path,
             std::path::PathBuf::from("/home/user/.speedwave/logs/proj.v1/claude-session.log")
         );
+    }
+
+    #[test]
+    fn test_data_dir_from_default() {
+        let home = std::path::Path::new("/fake/home");
+        assert_eq!(
+            data_dir_from(None, home),
+            std::path::PathBuf::from("/fake/home/.speedwave")
+        );
+    }
+
+    #[test]
+    fn test_data_dir_from_empty_string_treated_as_unset() {
+        let home = std::path::Path::new("/fake/home");
+        assert_eq!(
+            data_dir_from(Some(""), home),
+            std::path::PathBuf::from("/fake/home/.speedwave")
+        );
+    }
+
+    #[test]
+    fn test_data_dir_from_absolute_path() {
+        let home = std::path::Path::new("/fake/home");
+        assert_eq!(
+            data_dir_from(Some("/opt/sw-dev"), home),
+            std::path::PathBuf::from("/opt/sw-dev")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "must be an absolute path")]
+    fn test_data_dir_from_relative_path_panics() {
+        let home = std::path::Path::new("/fake/home");
+        data_dir_from(Some("relative/path"), home);
+    }
+
+    #[test]
+    #[should_panic(expected = "must be an absolute path")]
+    fn test_data_dir_from_tilde_path_panics() {
+        let home = std::path::Path::new("/fake/home");
+        data_dir_from(Some("~/foo"), home);
+    }
+
+    #[test]
+    fn test_data_dir_from_absolute_path_with_trailing_slash() {
+        let home = std::path::Path::new("/fake/home");
+        let result = data_dir_from(Some("/tmp/foo/"), home);
+        // PathBuf preserves trailing slash but path resolution works the same
+        assert!(result.starts_with("/tmp/foo"));
+    }
+
+    #[test]
+    fn test_derive_instance_name_strips_leading_dot() {
+        assert_eq!(
+            derive_instance_name_from(std::path::Path::new("/home/user/.speedwave")),
+            "speedwave"
+        );
+    }
+
+    #[test]
+    fn test_derive_instance_name_strips_dot_keeps_suffix() {
+        assert_eq!(
+            derive_instance_name_from(std::path::Path::new("/home/user/.speedwave-dev")),
+            "speedwave-dev"
+        );
+    }
+
+    #[test]
+    fn test_derive_instance_name_no_dot() {
+        assert_eq!(
+            derive_instance_name_from(std::path::Path::new("/some/path/mydata")),
+            "mydata"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "must have a non-empty basename")]
+    fn test_derive_instance_name_root_panics() {
+        derive_instance_name_from(std::path::Path::new("/"));
+    }
+
+    #[test]
+    fn test_derive_instance_name_trailing_slash_normalised() {
+        // Rust Path normalises trailing slashes: "/some/path/" → basename "path"
+        assert_eq!(
+            derive_instance_name_from(std::path::Path::new("/some/speedwave-dev/")),
+            "speedwave-dev"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "must match")]
+    fn test_derive_instance_name_unicode_panics() {
+        derive_instance_name_from(std::path::Path::new("/path/spëëdwavé"));
+    }
+
+    #[test]
+    #[should_panic(expected = "must match")]
+    fn test_derive_instance_name_uppercase_panics() {
+        derive_instance_name_from(std::path::Path::new("/path/.Speedwave-Dev"));
+    }
+
+    #[test]
+    #[should_panic(expected = "must match")]
+    fn test_derive_instance_name_spaces_panics() {
+        derive_instance_name_from(std::path::Path::new("/path/my data"));
+    }
+
+    #[test]
+    #[should_panic(expected = "must match")]
+    fn test_derive_instance_name_dots_in_name_panics() {
+        derive_instance_name_from(std::path::Path::new("/path/my.data.dir"));
+    }
+
+    #[test]
+    #[should_panic(expected = "must match")]
+    fn test_derive_instance_name_leading_hyphen_panics() {
+        derive_instance_name_from(std::path::Path::new("/path/-mydata"));
+    }
+
+    #[test]
+    fn test_derive_instance_name_max_length_64() {
+        let name = "a".repeat(64);
+        let path_str = format!("/path/{name}");
+        assert_eq!(
+            derive_instance_name_from(std::path::Path::new(&path_str)),
+            name
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "must match")]
+    fn test_derive_instance_name_65_chars_panics() {
+        let name = "a".repeat(65);
+        let path_str = format!("/path/{name}");
+        derive_instance_name_from(std::path::Path::new(&path_str));
     }
 }
