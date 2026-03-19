@@ -111,19 +111,7 @@ pub fn configure_plugin_tokens(
         .join("tokens")
         .join(project)
         .join(service_id);
-    std::fs::create_dir_all(&token_dir)?;
-
-    for (key, value) in tokens {
-        let file_path = token_dir.join(key);
-        std::fs::write(&file_path, value)?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o600))?;
-        }
-    }
-    Ok(())
+    write_token_files(&token_dir, tokens)
 }
 
 #[cfg(test)]
@@ -134,7 +122,11 @@ fn configure_plugin_tokens_with_base(
     tokens: &HashMap<String, String>,
 ) -> anyhow::Result<()> {
     let token_dir = token_dir_with_base(home, project, service_id);
-    std::fs::create_dir_all(&token_dir)?;
+    write_token_files(&token_dir, tokens)
+}
+
+fn write_token_files(token_dir: &Path, tokens: &HashMap<String, String>) -> anyhow::Result<()> {
+    std::fs::create_dir_all(token_dir)?;
 
     for (key, value) in tokens {
         let file_path = token_dir.join(key);
@@ -146,7 +138,6 @@ fn configure_plugin_tokens_with_base(
             std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o600))?;
         }
     }
-
     Ok(())
 }
 
@@ -325,6 +316,17 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
         }
     }
 
+    // Validate requires_integrations entries are known built-in service IDs
+    for req in &manifest.requires_integrations {
+        if !consts::BUILT_IN_SERVICE_IDS.contains(&req.as_str()) {
+            anyhow::bail!(
+                "requires_integrations entry '{}' is not a known built-in service ID. Known: {:?}",
+                req,
+                consts::BUILT_IN_SERVICE_IDS
+            );
+        }
+    }
+
     // Validate extra_env keys/values contain no newlines or null bytes (YAML injection defense)
     const RESERVED_ENV_KEYS: &[&str] = &["PORT"];
     if let Some(ref env) = manifest.extra_env {
@@ -334,6 +336,9 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
                     "extra_env key '{}' is reserved and injected automatically by Speedwave",
                     k
                 );
+            }
+            if k.contains('=') {
+                anyhow::bail!("extra_env key must not contain '=' (key: '{}')", k);
             }
             if k.contains('\n')
                 || k.contains('\r')
@@ -370,6 +375,12 @@ fn validate_plugin_port(port: u16, slug: &str, existing: &[PluginManifest]) -> a
             port,
             consts::PORT_BASE,
             builtin_end
+        );
+    }
+    if port == consts::PORT_LLM_PROXY {
+        anyhow::bail!(
+            "Port {} is reserved for the LLM proxy",
+            consts::PORT_LLM_PROXY
         );
     }
     for existing_manifest in existing {
@@ -757,11 +768,8 @@ fn validate_dir_recursive(canonical_base: &Path, dir: &Path) -> anyhow::Result<(
         let path = entry.path();
         let canonical = path.canonicalize()?;
         if !canonical.starts_with(canonical_base) {
-            if path.is_dir() {
-                let _ = std::fs::remove_dir_all(&path);
-            } else {
-                let _ = std::fs::remove_file(&path);
-            }
+            // No manual cleanup needed: TmpDirGuard owns the parent directory
+            // and will remove it on drop when the error propagates.
             anyhow::bail!(
                 "Zip Slip detected: path {:?} escapes plugin directory {:?}",
                 canonical,
@@ -2174,6 +2182,102 @@ mod tests {
 
         // First port above the range should be accepted
         assert!(validate_plugin_port(builtin_end + 1, "test", &no_existing).is_ok());
+    }
+
+    #[test]
+    fn test_install_rejects_llm_proxy_port() {
+        let no_existing: Vec<PluginManifest> = vec![];
+        let err = validate_plugin_port(consts::PORT_LLM_PROXY, "test", &no_existing)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("LLM proxy"),
+            "PORT_LLM_PROXY should be reserved, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_equals_in_extra_env_key() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-equals".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: Some(HashMap::from([(
+                "KEY=INJECT".to_string(),
+                "val".to_string(),
+            )])),
+            mem_limit: None,
+            requires_integrations: vec![],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("'='"),
+            "should reject '=' in extra_env key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_unknown_requires_integrations() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-reqint".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec!["nonexistent-service".to_string()],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("nonexistent-service"),
+            "should reject unknown service ID, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_accepts_valid_requires_integrations() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-reqint-ok".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![consts::BUILT_IN_SERVICE_IDS[0].to_string()],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_manifest(&manifest, tmp.path()).is_ok());
     }
 
     #[test]

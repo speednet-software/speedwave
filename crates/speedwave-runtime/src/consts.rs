@@ -6,6 +6,8 @@ pub const DATA_DIR: &str = ".speedwave";
 pub const CLI_BINARY: &str = "speedwave";
 pub const COMPOSE_PREFIX: &str = "speedwave";
 pub const PORT_BASE: u16 = 4000;
+/// Port reserved for the optional LLM proxy container (PORT_BASE + 9).
+pub const PORT_LLM_PROXY: u16 = PORT_BASE + 9;
 pub const MCP_OS_AUTH_TOKEN_FILE: &str = "mcp-os-auth-token";
 pub const MCP_OS_PORT_FILE: &str = "mcp-os-port";
 pub const MCP_OS_PID_FILE: &str = "mcp-os-pid";
@@ -456,9 +458,7 @@ pub fn data_dir() -> &'static std::path::PathBuf {
     DIR.get_or_init(|| {
         let env_val = std::env::var(DATA_DIR_ENV).ok();
         let Some(home) = dirs::home_dir() else {
-            // Fatal: no HOME and no SPEEDWAVE_DATA_DIR — process cannot function.
-            log::error!("cannot determine home directory and {DATA_DIR_ENV} is not set");
-            std::process::exit(1);
+            panic!("cannot determine home directory and {DATA_DIR_ENV} is not set");
         };
         data_dir_from(env_val.as_deref(), &home)
     })
@@ -608,25 +608,37 @@ mod tests {
     /// Guard against service list drift: TOGGLEABLE_MCP_SERVICES count must match
     /// the number of non-OS boolean fields in ResolvedIntegrationsConfig.
     /// If this test fails, a new service was added to one but not the other.
+    ///
+    /// We assert both directions: the constant matches the struct field count
+    /// AND each config_key in the constant resolves to a known field.
     #[test]
     fn test_toggleable_count_matches_resolved_config_fields() {
         let resolved = crate::config::ResolvedIntegrationsConfig::default();
-        // Count non-OS fields by checking all 5 MCP service booleans
-        let mcp_field_count = [
+        // Explicit field enumeration — update this when adding/removing MCP fields.
+        // Using a const to force a compile-time reminder when struct changes.
+        const EXPECTED_MCP_FIELDS: usize = 4; // slack, sharepoint, redmine, gitlab
+        let _ = (
             resolved.slack,
             resolved.sharepoint,
             resolved.redmine,
             resolved.gitlab,
-        ]
-        .len();
+        );
         assert_eq!(
             TOGGLEABLE_MCP_SERVICES.len(),
-            mcp_field_count,
+            EXPECTED_MCP_FIELDS,
             "TOGGLEABLE_MCP_SERVICES count ({}) must match ResolvedIntegrationsConfig MCP fields ({}). \
              Did you add a service to one but not the other?",
             TOGGLEABLE_MCP_SERVICES.len(),
-            mcp_field_count
+            EXPECTED_MCP_FIELDS
         );
+        // Verify each service config_key resolves to a known field
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            assert!(
+                resolved.is_service_enabled(svc.config_key).is_some(),
+                "TOGGLEABLE_MCP_SERVICES entry '{}' has no matching field in ResolvedIntegrationsConfig",
+                svc.config_key
+            );
+        }
     }
 
     /// Guard: every config_key in TOGGLEABLE_MCP_SERVICES must have a corresponding
@@ -916,21 +928,28 @@ mod tests {
     #[test]
     fn test_toggleable_os_count_matches_resolved_config_fields() {
         let resolved = crate::config::ResolvedIntegrationsConfig::default();
-        let os_field_count = [
+        const EXPECTED_OS_FIELDS: usize = 4; // os_reminders, os_calendar, os_mail, os_notes
+        let _ = (
             resolved.os_reminders,
             resolved.os_calendar,
             resolved.os_mail,
             resolved.os_notes,
-        ]
-        .len();
+        );
         assert_eq!(
             TOGGLEABLE_OS_SERVICES.len(),
-            os_field_count,
+            EXPECTED_OS_FIELDS,
             "TOGGLEABLE_OS_SERVICES count ({}) must match ResolvedIntegrationsConfig OS fields ({}). \
              Did you add a service to one but not the other?",
             TOGGLEABLE_OS_SERVICES.len(),
-            os_field_count
+            EXPECTED_OS_FIELDS
         );
+        for svc in TOGGLEABLE_OS_SERVICES {
+            assert!(
+                resolved.is_os_service_enabled(svc.config_key).is_some(),
+                "TOGGLEABLE_OS_SERVICES entry '{}' has no matching field in ResolvedIntegrationsConfig",
+                svc.config_key
+            );
+        }
     }
 
     #[test]

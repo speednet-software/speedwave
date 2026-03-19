@@ -28,18 +28,8 @@ fn str_to_engine_path(path: &str) -> anyhow::Result<String> {
     to_engine_path(std::path::Path::new(path))
 }
 
-/// Resolves the tokens directory for a project. SSOT for the path formula.
-///
-/// Production callers should use `resolve_tokens_dir_default()` unless
-/// they need an explicit base path for testability.
-pub fn resolve_tokens_dir(home: &std::path::Path, project_name: &str) -> PathBuf {
-    home.join(consts::DATA_DIR)
-        .join("tokens")
-        .join(project_name)
-}
-
-/// Returns the tokens directory using `consts::data_dir()`.
-fn resolve_tokens_dir_default(project_name: &str) -> PathBuf {
+/// Returns the tokens directory for a project using `consts::data_dir()`.
+fn resolve_tokens_dir(project_name: &str) -> PathBuf {
     consts::data_dir().join("tokens").join(project_name)
 }
 
@@ -56,7 +46,7 @@ pub fn render_compose(
 ) -> anyhow::Result<String> {
     crate::validation::validate_project_name(project_name)?;
     let data_dir = consts::data_dir();
-    let tokens_dir = resolve_tokens_dir_default(project_name);
+    let tokens_dir = resolve_tokens_dir(project_name);
     let claude_home = data_dir.join("claude-home").join(project_name);
     let resources_dir = data_dir.join("claude-resources");
     let network_name = format!("{}_{}_network", consts::compose_prefix(), project_name);
@@ -243,7 +233,7 @@ fn apply_llm_config(yaml: &str, project_name: &str, llm: &LlmConfig) -> anyhow::
         _ => {
             // External provider: add llm-proxy container (LiteLLM)
             let proxy_token = uuid::Uuid::new_v4().to_string();
-            let proxy_port = consts::PORT_BASE + 9; // 4009
+            let proxy_port = consts::PORT_LLM_PROXY;
 
             let secrets_dir = consts::data_dir().join("secrets").join(project_name);
             let llm_env_file = secrets_dir.join("llm.env");
@@ -920,7 +910,7 @@ impl SecurityExpectedPaths {
     }
 
     pub fn compute(project_name: &str, project_dir: &str) -> anyhow::Result<Self> {
-        let tokens_dir = resolve_tokens_dir_default(project_name);
+        let tokens_dir = resolve_tokens_dir(project_name);
         Ok(Self {
             project_engine_path: to_engine_path(std::path::Path::new(project_dir))?,
             tokens_engine_dir: to_engine_path(&tokens_dir)?,
