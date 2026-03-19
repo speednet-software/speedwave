@@ -1278,6 +1278,8 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
             .output()?;
         let status_str = String::from_utf8_lossy(&status_output.stdout);
         if status_str.trim().eq_ignore_ascii_case("running") {
+            // --force kills the VM immediately. This runs on app startup before
+            // any project is actively running, so data loss risk is negligible.
             log::info!("Stopping VM for memory migration");
             let timeout = std::time::Duration::from_secs(30);
             let mut stop_cmd = limactl_command();
@@ -1296,7 +1298,8 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
             .lines()
             .map(|line| {
                 if line.trim().starts_with("memory:") {
-                    format!("memory: \"{LIMA_VM_MEMORY}\"")
+                    let indent = &line[..line.len() - line.trim_start().len()];
+                    format!("{indent}memory: \"{LIMA_VM_MEMORY}\"")
                 } else {
                     line.to_string()
                 }
@@ -1325,17 +1328,19 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
         update_config_file(&instance_config)?;
     }
 
+    // Reset setup state BEFORE restarting VM — if init_vm_macos() fails, the
+    // config files are already correct (idempotent), but reconcile_bundle_update
+    // must still know to rebuild images and restart containers on next launch.
+    let mut state = SetupState::load();
+    state.images_built = false;
+    state.containers_started = false;
+    state.save()?;
+
     // Restart VM if it existed
     if vm_exists {
         log::info!("Starting VM after memory migration");
         init_vm_macos()?;
     }
-
-    // Reset setup state so reconcile_bundle_update rebuilds images and restarts containers
-    let mut state = SetupState::load();
-    state.images_built = false;
-    state.containers_started = false;
-    state.save()?;
 
     log::info!("Lima VM config migration complete");
     Ok(())
