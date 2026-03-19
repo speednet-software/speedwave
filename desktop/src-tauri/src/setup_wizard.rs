@@ -1290,10 +1290,9 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
         }
     }
 
-    // Replace memory line in both configs. This preserves all other
-    // user customizations (cpus, mounts, etc.).
-    let update_config_file = |path: &std::path::Path| -> anyhow::Result<()> {
-        let text = std::fs::read_to_string(path)?;
+    // Replace memory line in config text. Preserves all other user
+    // customizations (cpus, mounts, etc.) and original indentation.
+    let rewrite_memory_line = |text: &str| -> String {
         let new_text: String = text
             .lines()
             .map(|line| {
@@ -1307,17 +1306,15 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
             .collect::<Vec<_>>()
             .join("\n");
         // Preserve trailing newline if original had one
-        let final_text = if text.ends_with('\n') && !new_text.ends_with('\n') {
+        if text.ends_with('\n') && !new_text.ends_with('\n') {
             format!("{new_text}\n")
         } else {
             new_text
-        };
-        std::fs::write(path, final_text)?;
-        Ok(())
+        }
     };
 
-    // Update source template
-    update_config_file(&source_template)?;
+    // Update source template (reuse `content` already read above)
+    std::fs::write(&source_template, rewrite_memory_line(&content))?;
 
     // Update instance config (may not exist if VM was never created)
     let instance_config = data_dir
@@ -1325,7 +1322,8 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
         .join(consts::lima_vm_name())
         .join("lima.yaml");
     if instance_config.exists() {
-        update_config_file(&instance_config)?;
+        let instance_content = std::fs::read_to_string(&instance_config)?;
+        std::fs::write(&instance_config, rewrite_memory_line(&instance_content))?;
     }
 
     // Reset setup state BEFORE restarting VM — if init_vm_macos() fails, the
@@ -3826,6 +3824,7 @@ networks:
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn lima_config_constant_has_correct_memory() {
         assert!(
             LIMA_CONFIG.contains(&format!("memory: \"{}\"", LIMA_VM_MEMORY)),
