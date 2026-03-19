@@ -299,10 +299,11 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
         if field.key.contains('/')
             || field.key.contains('\\')
             || field.key.contains("..")
+            || field.key.contains('\0')
             || field.key.is_empty()
         {
             anyhow::bail!(
-                "Invalid auth_field key '{}': must not contain path separators or '..'",
+                "Invalid auth_field key '{}': must not contain path separators, '..', or null bytes",
                 field.key
             );
         }
@@ -2278,6 +2279,41 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_null_byte_in_auth_field_key() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-null-auth".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![AuthFieldDef {
+                key: "bad\0key".to_string(),
+                label: "test".to_string(),
+                field_type: "text".to_string(),
+                placeholder: "".to_string(),
+                is_secret: false,
+            }],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            requires_integrations: vec![],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("null bytes"),
+            "should reject null byte in auth_field key, got: {err}"
+        );
     }
 
     #[test]

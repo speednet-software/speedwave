@@ -467,6 +467,72 @@ fn apply_worker_auth_tokens(
 }
 
 /// Testable version: accepts explicit secrets directory and plugin list.
+/// Reads or generates a Bearer auth token, writes it atomically with 0o600
+/// permissions, injects the env var into the worker container, and mounts
+/// the token file into the hub.
+fn ensure_worker_auth_token(
+    doc: &mut serde_yaml_ng::Value,
+    secrets_dir: &std::path::Path,
+    token_key: &str,
+    compose_name: &str,
+    env_key: &str,
+) -> anyhow::Result<()> {
+    let token_file_name = format!("{token_key}-auth-token");
+    let token_path = secrets_dir.join(&token_file_name);
+
+    // Read existing token or generate a new one.
+    // is_file() rejects directories, symlinks, and missing paths.
+    let token = if token_path.is_file() {
+        let content = std::fs::read_to_string(&token_path)?.trim().to_string();
+        if content.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            content
+        }
+    } else {
+        // Remove stale directory/symlink at token path if present
+        if token_path.is_symlink() {
+            log::warn!(
+                "Stale symlink at token location, removing: {}",
+                token_path.display()
+            );
+            std::fs::remove_file(&token_path)?;
+        } else if token_path.exists() {
+            log::warn!(
+                "Stale path at token location, removing: {}",
+                token_path.display()
+            );
+            std::fs::remove_dir_all(&token_path)?;
+        }
+        uuid::Uuid::new_v4().to_string()
+    };
+
+    // Atomic write with 0o600 permissions (pattern from update.rs)
+    let tmp_path = token_path.with_extension("tmp");
+    std::fs::write(&tmp_path, &token)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&tmp_path, &token_path)?;
+
+    // Inject env var into worker container (fail-loud)
+    add_service_env_var(doc, compose_name, env_key, &token)?;
+
+    // Mount token file into hub as /secrets/<service>-auth-token:ro
+    add_hub_volume(
+        doc,
+        &format!(
+            "{}:/secrets/{}:ro",
+            to_engine_path(&token_path)?,
+            token_file_name
+        ),
+    );
+
+    Ok(())
+}
+
 fn apply_worker_auth_tokens_with_dir(
     yaml: &str,
     secrets_dir: &std::path::Path,
@@ -482,60 +548,14 @@ fn apply_worker_auth_tokens_with_dir(
         {
             continue;
         }
-
-        let token_file_name = format!("{}-auth-token", svc.config_key);
-        let token_path = secrets_dir.join(&token_file_name);
-
-        // Read existing token or generate a new one.
-        // is_file() rejects directories, symlinks, and missing paths.
-        let token = if token_path.is_file() {
-            let content = std::fs::read_to_string(&token_path)?.trim().to_string();
-            if content.is_empty() {
-                uuid::Uuid::new_v4().to_string()
-            } else {
-                content
-            }
-        } else {
-            // Remove stale directory/symlink at token path if present
-            if token_path.is_symlink() {
-                log::warn!(
-                    "Stale symlink at token location, removing: {}",
-                    token_path.display()
-                );
-                std::fs::remove_file(&token_path)?;
-            } else if token_path.exists() {
-                log::warn!(
-                    "Stale path at token location, removing: {}",
-                    token_path.display()
-                );
-                std::fs::remove_dir_all(&token_path)?;
-            }
-            uuid::Uuid::new_v4().to_string()
-        };
-
-        // Atomic write with 0o600 permissions (pattern from update.rs)
-        let tmp_path = token_path.with_extension("tmp");
-        std::fs::write(&tmp_path, &token)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        std::fs::rename(&tmp_path, &token_path)?;
-
-        // Inject env var into worker container (fail-loud)
         let env_key = format!("MCP_{}_AUTH_TOKEN", svc.config_key.to_uppercase());
-        add_service_env_var(&mut doc, svc.compose_name, &env_key, &token)?;
-
-        // Mount token file into hub as /secrets/<service>-auth-token:ro
-        add_hub_volume(
+        ensure_worker_auth_token(
             &mut doc,
-            &format!(
-                "{}:/secrets/{}:ro",
-                to_engine_path(&token_path)?,
-                token_file_name
-            ),
-        );
+            secrets_dir,
+            svc.config_key,
+            svc.compose_name,
+            &env_key,
+        )?;
     }
 
     // Generate auth tokens for enabled plugin MCP workers (same pattern as built-in)
@@ -547,47 +567,9 @@ fn apply_worker_auth_tokens_with_dir(
         if !integrations.is_plugin_enabled(sid) {
             continue;
         }
-
-        let token_file_name = format!("{sid}-auth-token");
-        let token_path = secrets_dir.join(&token_file_name);
-
-        let token = if token_path.is_file() {
-            let content = std::fs::read_to_string(&token_path)?.trim().to_string();
-            if content.is_empty() {
-                uuid::Uuid::new_v4().to_string()
-            } else {
-                content
-            }
-        } else {
-            if token_path.is_symlink() {
-                std::fs::remove_file(&token_path)?;
-            } else if token_path.exists() {
-                std::fs::remove_dir_all(&token_path)?;
-            }
-            uuid::Uuid::new_v4().to_string()
-        };
-
-        let tmp_path = token_path.with_extension("tmp");
-        std::fs::write(&tmp_path, &token)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        std::fs::rename(&tmp_path, &token_path)?;
-
         let compose_name = plugin::derive_compose_name(sid);
         let env_key = format!("MCP_{}_AUTH_TOKEN", sid.to_uppercase().replace('-', "_"));
-        add_service_env_var(&mut doc, &compose_name, &env_key, &token)?;
-
-        add_hub_volume(
-            &mut doc,
-            &format!(
-                "{}:/secrets/{}:ro",
-                to_engine_path(&token_path)?,
-                token_file_name
-            ),
-        );
+        ensure_worker_auth_token(&mut doc, secrets_dir, sid, &compose_name, &env_key)?;
     }
 
     Ok(serde_yaml_ng::to_string(&doc)?)
