@@ -419,10 +419,7 @@ pub(crate) fn handle_jsonrpc_message(
 /// longer listening. Called at IDE Bridge startup to clean up leftovers from
 /// crashed sessions.
 fn cleanup_stale_lock_files() {
-    let lock_dir = match dirs::home_dir() {
-        Some(h) => h.join(consts::DATA_DIR).join("ide-bridge"),
-        None => return,
-    };
+    let lock_dir = consts::data_dir().join("ide-bridge");
     let entries = match std::fs::read_dir(&lock_dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -564,12 +561,10 @@ impl IdeBridge {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let tcp_port = listener.local_addr()?.port();
 
-        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
         // Write to ~/.speedwave/ide-bridge/ — this dir is mounted directly into
         // the container as /home/speedwave/.claude/ide/ so Claude Code discovers us
         // without any file copying. No local Claude Code installation required.
-        let lock_file_path = home
-            .join(consts::DATA_DIR)
+        let lock_file_path = consts::data_dir()
             .join("ide-bridge")
             .join(format!("{}.lock", tcp_port));
 

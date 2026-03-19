@@ -71,7 +71,10 @@ pub struct ConversationTranscript {
 // ---------------------------------------------------------------------------
 
 fn base_dir() -> anyhow::Result<PathBuf> {
-    dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))
+    consts::data_dir()
+        .parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| anyhow::anyhow!("data_dir has no parent"))
 }
 
 fn claude_dot_dir_impl(base: &Path, project: &str) -> anyhow::Result<PathBuf> {

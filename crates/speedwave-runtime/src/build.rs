@@ -141,10 +141,18 @@ fn resolve_build_root_inner(
 /// Step 2 before 3 ensures `make dev` uses local sources (with hoisted
 /// `node_modules`) instead of a stale bundle path written by the installed app.
 pub fn resolve_mcp_os_script() -> Option<std::path::PathBuf> {
-    resolve_mcp_os_script_with_home(dirs::home_dir())
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|repo| repo.join("mcp-servers/os/dist/index.js"));
+    resolve_mcp_os_script_inner(
+        crate::consts::data_dir().parent().map(|p| p.to_path_buf()),
+        dev,
+    )
 }
 
 /// Internal implementation that accepts an explicit home directory for testability.
+#[cfg(test)]
 fn resolve_mcp_os_script_with_home(home: Option<PathBuf>) -> Option<std::path::PathBuf> {
     let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -249,13 +257,17 @@ fn resolve_from_marker(home: &std::path::Path) -> Option<PathBuf> {
 /// Uses write-to-tmp + rename to prevent the CLI from reading a partial path.
 /// Called by the Desktop app on startup so the CLI can locate bundled resources.
 pub fn write_resources_marker(resources_dir: &std::path::Path) -> anyhow::Result<()> {
-    write_resources_marker_to(
-        resources_dir,
-        &dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?,
-    )
+    let marker_dir = crate::consts::data_dir();
+    let marker = marker_dir.join(crate::consts::RESOURCES_MARKER);
+    std::fs::create_dir_all(marker_dir)?;
+    let tmp = marker_dir.join(format!("{}.tmp", crate::consts::RESOURCES_MARKER));
+    std::fs::write(&tmp, resources_dir.to_string_lossy().as_bytes())?;
+    std::fs::rename(&tmp, &marker)?;
+    Ok(())
 }
 
 /// Internal implementation that accepts an explicit home directory for testability.
+#[cfg(test)]
 fn write_resources_marker_to(
     resources_dir: &std::path::Path,
     home: &std::path::Path,

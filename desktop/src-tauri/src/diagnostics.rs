@@ -146,7 +146,12 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
         };
 
         let serial_log = if cfg!(target_os = "macos") {
-            dirs::home_dir().map(|h| h.join(".speedwave/lima/speedwave/serial.log"))
+            Some(
+                speedwave_runtime::consts::data_dir()
+                    .join(speedwave_runtime::consts::LIMA_SUBDIR)
+                    .join(speedwave_runtime::consts::lima_vm_name())
+                    .join("serial.log"),
+            )
         } else {
             None
         };
@@ -154,22 +159,31 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
         let rt = speedwave_runtime::runtime::detect_runtime();
         let container_logs = rt.compose_logs(&project, 5000).ok();
 
-        let compose_path = dirs::home_dir().map(|h| {
-            h.join(speedwave_runtime::consts::DATA_DIR)
+        let compose_path = Some(
+            speedwave_runtime::consts::data_dir()
                 .join("projects")
                 .join(&project)
-                .join("compose.yml")
-        });
+                .join("compose.yml"),
+        );
 
-        let mcp_os_log = dirs::home_dir()
-            .map(|h| {
-                h.join(speedwave_runtime::consts::DATA_DIR)
-                    .join(speedwave_runtime::consts::MCP_OS_LOG_FILE)
-            })
-            .filter(|p| p.exists());
+        let mcp_os_log = {
+            let p = speedwave_runtime::consts::data_dir()
+                .join(speedwave_runtime::consts::MCP_OS_LOG_FILE);
+            if p.exists() {
+                Some(p)
+            } else {
+                None
+            }
+        };
 
-        let claude_session_log =
-            speedwave_runtime::consts::claude_session_log_path(&project).filter(|p| p.exists());
+        let claude_session_log = {
+            let p = speedwave_runtime::consts::claude_session_log_path(&project);
+            if p.exists() {
+                Some(p)
+            } else {
+                None
+            }
+        };
 
         let input = DiagnosticsInput {
             log_dir,

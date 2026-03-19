@@ -1579,7 +1579,6 @@ name = "speedwave-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "dirs",
  "env_logger",
  "log",
  "self_update",

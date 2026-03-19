@@ -116,7 +116,10 @@ fn phase_name(phase: bundle::BundleReconcilePhase) -> String {
 }
 
 pub(crate) fn current_bundle_status() -> BundleReconcileStatus {
-    let state = bundle::load_bundle_state();
+    bundle_status_from(&bundle::load_bundle_state())
+}
+
+fn bundle_status_from(state: &bundle::BundleState) -> BundleReconcileStatus {
     let current_bundle_id = bundle::load_current_bundle_manifest()
         .ok()
         .map(|manifest| manifest.bundle_id);
@@ -487,14 +490,7 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
         }
 
         // Read current compose and check if WORKER_OS_URL matches the port file
-        let home = match dirs::home_dir() {
-            Some(h) => h,
-            None => {
-                log::debug!("reconcile_compose_port: cannot determine home directory");
-                return;
-            }
-        };
-        let data_dir = home.join(speedwave_runtime::consts::DATA_DIR);
+        let data_dir = speedwave_runtime::consts::data_dir();
         let port_path = data_dir.join(speedwave_runtime::consts::MCP_OS_PORT_FILE);
         let current_port = match std::fs::read_to_string(&port_path) {
             Ok(c) => match c.trim().parse::<u16>() {
@@ -715,28 +711,6 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    struct HomeGuard {
-        original_home: Option<std::ffi::OsString>,
-    }
-
-    impl HomeGuard {
-        fn set(path: &std::path::Path) -> Self {
-            let original_home = std::env::var_os("HOME");
-            std::env::set_var("HOME", path);
-            Self { original_home }
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            if let Some(home) = &self.original_home {
-                std::env::set_var("HOME", home);
-            } else {
-                std::env::remove_var("HOME");
-            }
-        }
-    }
-
     mod stop_all_containers_tests {
         use super::stop_all_containers;
         use speedwave_runtime::config::ProjectUserEntry;
@@ -869,45 +843,44 @@ mod tests {
     mod bundle_status_tests {
         use super::*;
 
+        /// All tests use `bundle_status_from()` with an explicit `BundleState`
+        /// to avoid dependence on the global `data_dir()` OnceLock, which
+        /// points to the real `~/.speedwave/` directory during test runs.
+        /// Tests that mutate `BUNDLE_RECONCILE_PHASE` must be `#[serial]`.
+
         #[test]
         #[serial]
         fn current_bundle_status_marks_bundle_change_as_in_progress() {
-            let temp = tempfile::tempdir().unwrap();
-            let _home = HomeGuard::set(temp.path());
-            let manifest = bundle::load_current_bundle_manifest().unwrap();
+            BUNDLE_RECONCILE_PHASE.store(RECONCILE_IDLE, Ordering::Relaxed);
 
-            bundle::save_bundle_state(&bundle::BundleState {
+            let state = bundle::BundleState {
                 applied_bundle_id: Some("older-bundle".to_string()),
                 phase: bundle::BundleReconcilePhase::Pending,
                 pending_running_projects: vec!["alpha".to_string()],
                 last_error: None,
-            })
-            .unwrap();
+            };
 
-            let status = current_bundle_status();
+            let status = bundle_status_from(&state);
             assert!(status.in_progress);
             assert_eq!(status.phase, "pending");
             assert_eq!(status.pending_running_projects, vec!["alpha"]);
             assert_eq!(status.applied_bundle_id, Some("older-bundle".to_string()));
-            assert_ne!(status.applied_bundle_id, Some(manifest.bundle_id));
         }
 
         #[test]
         #[serial]
         fn current_bundle_status_hides_stale_error_when_bundle_already_applied() {
-            let temp = tempfile::tempdir().unwrap();
-            let _home = HomeGuard::set(temp.path());
+            BUNDLE_RECONCILE_PHASE.store(RECONCILE_IDLE, Ordering::Relaxed);
             let manifest = bundle::load_current_bundle_manifest().unwrap();
 
-            bundle::save_bundle_state(&bundle::BundleState {
+            let state = bundle::BundleState {
                 applied_bundle_id: Some(manifest.bundle_id),
                 phase: bundle::BundleReconcilePhase::ImagesBuilt,
                 pending_running_projects: vec!["alpha".to_string()],
                 last_error: Some("stale error".to_string()),
-            })
-            .unwrap();
+            };
 
-            let status = current_bundle_status();
+            let status = bundle_status_from(&state);
             assert!(!status.in_progress);
             assert!(status.last_error.is_none());
             assert!(status.pending_running_projects.is_empty());
@@ -916,23 +889,19 @@ mod tests {
         #[test]
         #[serial]
         fn checking_phase_is_not_reported_as_in_progress() {
-            let temp = tempfile::tempdir().unwrap();
-            let _home = HomeGuard::set(temp.path());
             let manifest = bundle::load_current_bundle_manifest().unwrap();
 
-            // Bundle already applied → no disk-level change
-            bundle::save_bundle_state(&bundle::BundleState {
+            let state = bundle::BundleState {
                 applied_bundle_id: Some(manifest.bundle_id),
                 phase: bundle::BundleReconcilePhase::Done,
                 pending_running_projects: Vec::new(),
                 last_error: None,
-            })
-            .unwrap();
+            };
 
             // Simulate the CHECKING phase (thread spawned, not yet confirmed rebuild)
             BUNDLE_RECONCILE_PHASE.store(RECONCILE_CHECKING, Ordering::Relaxed);
 
-            let status = current_bundle_status();
+            let status = bundle_status_from(&state);
             assert!(
                 !status.in_progress,
                 "CHECKING phase must not show as in_progress"
@@ -945,23 +914,19 @@ mod tests {
         #[test]
         #[serial]
         fn rebuilding_phase_is_reported_as_in_progress() {
-            let temp = tempfile::tempdir().unwrap();
-            let _home = HomeGuard::set(temp.path());
             let manifest = bundle::load_current_bundle_manifest().unwrap();
 
-            // Bundle already applied → no disk-level change
-            bundle::save_bundle_state(&bundle::BundleState {
+            let state = bundle::BundleState {
                 applied_bundle_id: Some(manifest.bundle_id),
                 phase: bundle::BundleReconcilePhase::Done,
                 pending_running_projects: Vec::new(),
                 last_error: None,
-            })
-            .unwrap();
+            };
 
             // Simulate the REBUILDING phase
             BUNDLE_RECONCILE_PHASE.store(RECONCILE_REBUILDING, Ordering::Relaxed);
 
-            let status = current_bundle_status();
+            let status = bundle_status_from(&state);
             assert!(
                 status.in_progress,
                 "REBUILDING phase must show as in_progress"
@@ -974,18 +939,16 @@ mod tests {
         #[test]
         #[serial]
         fn current_bundle_status_surfaces_reconcile_error_for_new_bundle() {
-            let temp = tempfile::tempdir().unwrap();
-            let _home = HomeGuard::set(temp.path());
+            BUNDLE_RECONCILE_PHASE.store(RECONCILE_IDLE, Ordering::Relaxed);
 
-            bundle::save_bundle_state(&bundle::BundleState {
+            let state = bundle::BundleState {
                 applied_bundle_id: Some("older-bundle".to_string()),
                 phase: bundle::BundleReconcilePhase::ImagesBuilt,
                 pending_running_projects: vec!["alpha".to_string(), "beta".to_string()],
                 last_error: Some("Image rebuild failed".to_string()),
-            })
-            .unwrap();
+            };
 
-            let status = current_bundle_status();
+            let status = bundle_status_from(&state);
             assert!(!status.in_progress);
             assert_eq!(status.phase, "images_built");
             assert_eq!(status.last_error.as_deref(), Some("Image rebuild failed"));
@@ -998,12 +961,12 @@ mod tests {
         #[test]
         #[serial]
         fn missing_applied_bundle_id_is_reported_as_in_progress() {
-            let temp = tempfile::tempdir().unwrap();
-            let _home = HomeGuard::set(temp.path());
+            BUNDLE_RECONCILE_PHASE.store(RECONCILE_IDLE, Ordering::Relaxed);
 
             // Simulate fresh install: no bundle-state.json → applied_bundle_id is None
             // (default BundleState). This should be in_progress because bundle_changed=true.
-            let status = current_bundle_status();
+            let state = bundle::BundleState::default();
+            let status = bundle_status_from(&state);
             assert!(
                 status.in_progress,
                 "missing applied_bundle_id (fresh install) must report in_progress"
@@ -1191,6 +1154,39 @@ mod tests {
             let result = resolve_resources_dir(&exe_parent);
             assert_eq!(result, Some(lib_dir));
         }
+    }
+
+    /// Structural test: verifies that `reconcile_bundle_update` in main.rs
+    /// is gated behind `setup_started`. On a fresh install the Lima VM does
+    /// not exist yet, so running reconcile would fail with "Runtime not
+    /// available" and poison `ImageReadiness`, blocking the setup wizard's
+    /// Start Containers step.
+    #[test]
+    fn reconcile_gated_behind_setup_started_in_main() {
+        let main_source = include_str!("main.rs");
+        // The reconcile call must be inside an `if setup_started` block.
+        // Find the reconcile_bundle_update call and verify it's preceded by
+        // `if setup_started`.
+        let idx = main_source
+            .find("reconcile::reconcile_bundle_update(app.handle())")
+            .expect("main.rs must call reconcile_bundle_update");
+        // Look backwards for the nearest `if setup_started`
+        let before = &main_source[..idx];
+        let last_if = before.rfind("if setup_started");
+        assert!(
+            last_if.is_some(),
+            "reconcile_bundle_update must be gated behind `if setup_started` in main.rs"
+        );
+        // Verify there's no closing brace between the guard and the call
+        // (i.e., the call is inside the same block as the guard).
+        let between = &main_source[last_if.unwrap()..idx];
+        let open_braces = between.matches('{').count();
+        let close_braces = between.matches('}').count();
+        assert!(
+            open_braces > close_braces,
+            "reconcile_bundle_update must be inside the `if setup_started` block, \
+             not after it (open={open_braces}, close={close_braces})"
+        );
     }
 
     #[cfg(target_os = "windows")]
