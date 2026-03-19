@@ -95,7 +95,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 
       <section class="mb-6" data-testid="plugins-list">
         @if (plugins.length === 0) {
-          <p class="empty-state text-sw-text-dim text-[13px] py-5 text-center">
+          <p class="text-sw-text-dim text-[13px] py-5 text-center" data-testid="empty-state">
             No plugins installed. Click "Install Plugin" to add one.
           </p>
         }
@@ -114,9 +114,7 @@ import { open } from '@tauri-apps/plugin-dialog';
       </section>
     </div>
   `,
-  styles: [
-    ':host { display: block; background: var(--color-sw-bg-darkest); min-height: 100vh; padding: 24px; color: var(--color-sw-text); }',
-  ],
+  host: { class: 'block bg-sw-bg-darkest min-h-screen p-6 text-sw-text' },
 })
 export class PluginsComponent implements OnInit, OnDestroy {
   plugins: PluginStatusEntry[] = [];
