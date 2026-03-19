@@ -15,7 +15,6 @@ describe('App Lifecycle', function () {
       async () => (await browser.getTitle()) === 'Speedwave',
       { timeout: 30_000, timeoutMsg: 'Window title did not become "Speedwave" within 30s' },
     );
-    expect(await browser.getTitle()).toBe('Speedwave');
   });
 
   it('should render the Angular app root', async function () {

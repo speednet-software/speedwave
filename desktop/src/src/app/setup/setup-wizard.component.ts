@@ -91,7 +91,9 @@ interface SetupStep {
                   }
                 </div>
                 <div class="flex-1">
-                  <div class="font-semibold text-sm text-sw-text">{{ step.title }}</div>
+                  <div class="font-semibold text-sm text-sw-text" data-testid="step-title">
+                    {{ step.title }}
+                  </div>
                   <div class="text-xs text-sw-text-ghost">{{ step.description }}</div>
                   @if (step.detail && (step.status === 'active' || step.status === 'error')) {
                     <div

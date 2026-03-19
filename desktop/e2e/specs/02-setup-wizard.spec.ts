@@ -129,9 +129,8 @@ describe('Setup Wizard — Full Flow', function () {
       'Finalize',
     ];
     for (let i = 0; i < expectedTitles.length; i++) {
-      // Step title is the first child div's text
-      const text = await stepElements[i].getText();
-      expect(text).toContain(expectedTitles[i]);
+      const titleEl = await stepElements[i].$('[data-testid="step-title"]');
+      expect((await titleEl.getText()).trim()).toBe(expectedTitles[i]);
     }
   });
 
