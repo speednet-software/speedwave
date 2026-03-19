@@ -170,7 +170,7 @@ pub fn system_command(program: &str) -> Command {
 /// Speedwave uses a dedicated LIMA_HOME so that its VM data does not collide
 /// with a user-installed Lima (`~/.lima`).
 pub fn lima_home() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(consts::DATA_DIR).join(consts::LIMA_SUBDIR))
+    Some(consts::data_dir().join(consts::LIMA_SUBDIR))
 }
 
 #[cfg(test)]

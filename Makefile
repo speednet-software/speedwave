@@ -22,6 +22,12 @@
 # (git hooks and CI run /bin/sh which does not source ~/.zshenv)
 export PATH := $(HOME)/.cargo/bin:/opt/homebrew/bin:$(PATH)
 
+# Isolate dev builds from production (~/.speedwave/).
+# Unit tests use fake_home/tmpdir — they ignore this variable.
+# E2E tests backup/restore this directory (not production ~/.speedwave/).
+SPEEDWAVE_DATA_DIR ?= $(HOME)/.speedwave-dev
+export SPEEDWAVE_DATA_DIR
+
 LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
 
 .PHONY: all build test check clean dev install-deps setup-dev install-hooks \
@@ -261,7 +267,7 @@ build-angular:
 # ── Rust tests ───────────────────────────────────────────────────────────────
 
 test-rust:
-	cargo test -p speedwave-runtime -p speedwave-cli
+	SPEEDWAVE_DATA_DIR= cargo test -p speedwave-runtime -p speedwave-cli
 	@echo "✅ Rust tests passed"
 
 test-cli:
@@ -271,7 +277,7 @@ test-cli:
 
 test-desktop: build-cli build-angular build-mcp build-os-cli
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -f desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
-	@if [ "$$(uname)" = "Linux" ] && [ ! -d desktop/src-tauri/nerdctl-full ]; then $(MAKE) download-nerdctl-full; fi
+	@if [ "$$(uname)" = "Linux" ] && [ ! -f desktop/src-tauri/nerdctl-full/bin/nerdctl ]; then $(MAKE) download-nerdctl-full; fi
 	@if [ "$(OS)" = "Windows_NT" ] && [ ! -f desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then $(MAKE) download-wsl-resources; fi
 	@if [ ! -s desktop/src-tauri/nodejs/bin/node ] && [ ! -s desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
 	@scripts/bundle-build-context.sh
@@ -284,7 +290,7 @@ else
 	@chmod +x desktop/src-tauri/cli/speedwave
 endif
 	@$(MAKE) verify-bundled-assets
-	cd desktop/src-tauri && cargo test
+	cd desktop/src-tauri && SPEEDWAVE_DATA_DIR= cargo test
 	@echo "✅ Desktop tests passed"
 
 # ── Angular tests ───────────────────────────────────────────────────────────
@@ -360,7 +366,7 @@ test-desktop-build: build-angular build-mcp
 # Used by e2e-vm.sh (build as root, test as desktop user with display access).
 test-e2e-desktop-build: build-cli build-mcp build-os-cli
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -f desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
-	@if [ "$$(uname)" = "Linux" ] && [ ! -d desktop/src-tauri/nerdctl-full ]; then $(MAKE) download-nerdctl-full; fi
+	@if [ "$$(uname)" = "Linux" ] && [ ! -f desktop/src-tauri/nerdctl-full/bin/nerdctl ]; then $(MAKE) download-nerdctl-full; fi
 	@if [ "$(OS)" = "Windows_NT" ] && [ ! -f desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then $(MAKE) download-wsl-resources; fi
 	@if [ ! -f desktop/src-tauri/nodejs/bin/node ] && [ ! -f desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
 	@scripts/bundle-build-context.sh
@@ -405,14 +411,14 @@ _e2e-run:
 	@sleep 1
 	@rm -rf /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
 	@mkdir -p /tmp/speedwave-e2e-project /tmp/speedwave-e2e-project-2
-	@E2E_BAK=$$HOME/.speedwave.e2e-bak; \
+	@E2E_BAK=$$SPEEDWAVE_DATA_DIR.e2e-bak; \
 	backup_dir() { \
 		if [ -d "$$1" ]; then rm -rf "$$2"; mv "$$1" "$$2"; fi; \
 	}; \
 	restore_dir() { \
 		if [ -d "$$2" ]; then rm -rf "$$1" 2>/dev/null || true; mv "$$2" "$$1"; fi; \
 	}; \
-	backup_dir "$$HOME/.speedwave" "$$E2E_BAK"; \
+	backup_dir "$$SPEEDWAVE_DATA_DIR" "$$E2E_BAK"; \
 	if [ "$$(uname)" = "Darwin" ]; then \
 		backup_dir "$$HOME/Library/Caches/lima" "$$HOME/Library/Caches/lima.e2e-bak"; \
 	elif [ "$$(uname)" = "Linux" ]; then \
@@ -431,7 +437,7 @@ _e2e-run:
 			systemctl --user stop containerd 2>/dev/null || true; \
 		fi; \
 		sleep 1; \
-		restore_dir "$$HOME/.speedwave" "$$E2E_BAK"; \
+		restore_dir "$$SPEEDWAVE_DATA_DIR" "$$E2E_BAK"; \
 		if [ "$$(uname)" = "Darwin" ]; then \
 			restore_dir "$$HOME/Library/Caches/lima" "$$HOME/Library/Caches/lima.e2e-bak"; \
 		elif [ "$$(uname)" = "Linux" ]; then \
@@ -570,7 +576,7 @@ download-lima:
 	curl -fsSL "$$SUMS_URL" -o /tmp/lima-SHA256SUMS && \
 	echo "  Verifying SHA256 checksum..." && \
 	EXPECTED=$$(grep "$$TARBALL" /tmp/lima-SHA256SUMS | awk '{print $$1}') && \
-	ACTUAL=$$(shasum -a 256 "/tmp/$$TARBALL" | awk '{print $$1}') && \
+	ACTUAL=$$( (sha256sum "/tmp/$$TARBALL" 2>/dev/null || shasum -a 256 "/tmp/$$TARBALL") | awk '{print $$1}') && \
 	if [ "$$EXPECTED" != "$$ACTUAL" ]; then \
 		echo "CHECKSUM MISMATCH! Expected $$EXPECTED, got $$ACTUAL"; exit 1; \
 	fi && \
@@ -613,7 +619,7 @@ download-nodejs:
 	echo "  Verifying SHA256 checksum..." && \
 	EXPECTED=$$(grep "$$TARBALL" /tmp/nodejs-SHASUMS256.txt | awk '{print $$1}') && \
 	[ -n "$$EXPECTED" ] || { echo "CHECKSUM NOT FOUND for $$TARBALL in SHASUMS256.txt"; exit 1; } && \
-	ACTUAL=$$(shasum -a 256 "/tmp/$$TARBALL" | awk '{print $$1}') && \
+	ACTUAL=$$( (sha256sum "/tmp/$$TARBALL" 2>/dev/null || shasum -a 256 "/tmp/$$TARBALL") | awk '{print $$1}') && \
 	if [ "$$EXPECTED" != "$$ACTUAL" ]; then \
 		echo "CHECKSUM MISMATCH! Expected $$EXPECTED, got $$ACTUAL"; exit 1; \
 	fi && \
@@ -639,6 +645,7 @@ WSL_ROOTFS_SHA256_AMD64  := $(shell grep -A1 '^pub const WSL_ROOTFS_SHA256_AMD64
 
 download-nerdctl-full:
 	@echo "Downloading nerdctl-full $(NERDCTL_FULL_VERSION)..."
+	@rm -rf desktop/src-tauri/nerdctl-full
 	@mkdir -p desktop/src-tauri/nerdctl-full desktop/src-tauri/THIRD-PARTY-LICENSES
 	@ARCH=$$(uname -m); \
 	case "$$ARCH" in \
@@ -654,7 +661,7 @@ download-nerdctl-full:
 	curl -fsSL "$$SUMS_URL" -o /tmp/nerdctl-SHA256SUMS && \
 	echo "  Verifying SHA256 checksum..." && \
 	EXPECTED=$$(grep "$$TARBALL" /tmp/nerdctl-SHA256SUMS | awk '{print $$1}') && \
-	ACTUAL=$$(shasum -a 256 "/tmp/$$TARBALL" | awk '{print $$1}') && \
+	ACTUAL=$$( (sha256sum "/tmp/$$TARBALL" 2>/dev/null || shasum -a 256 "/tmp/$$TARBALL") | awk '{print $$1}') && \
 	if [ "$$EXPECTED" != "$$ACTUAL" ]; then \
 		echo "CHECKSUM MISMATCH! Expected $$EXPECTED, got $$ACTUAL"; exit 1; \
 	fi && \

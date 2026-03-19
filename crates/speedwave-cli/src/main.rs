@@ -102,25 +102,30 @@ struct UpdateCheckCache {
     latest_version: String,
 }
 
-fn update_cache_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(consts::DATA_DIR).join("update-check.json"))
+fn update_cache_path() -> PathBuf {
+    consts::data_dir().join("update-check.json")
+}
+
+/// Testable variant: resolves update cache path under an explicit data directory.
+#[cfg(test)]
+fn update_cache_path_in(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("update-check.json")
 }
 
 fn read_update_cache() -> Option<UpdateCheckCache> {
-    let path = update_cache_path()?;
+    let path = update_cache_path();
     let data = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&data).ok()
 }
 
 fn write_update_cache(cache: &UpdateCheckCache) {
-    if let Some(path) = update_cache_path() {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = serde_json::to_string(cache)
-            .ok()
-            .and_then(|json| std::fs::write(path, json).ok());
+    let path = update_cache_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
+    let _ = serde_json::to_string(cache)
+        .ok()
+        .and_then(|json| std::fs::write(path, json).ok());
 }
 
 fn now_secs() -> u64 {
@@ -274,14 +279,12 @@ fn main() -> anyhow::Result<()> {
     // This lets the CLI find bundled binaries (nerdctl, node) without inheriting
     // the Desktop's environment.
     if std::env::var(consts::BUNDLE_RESOURCES_ENV).is_err() {
-        if let Some(home) = dirs::home_dir() {
-            let marker = home.join(consts::DATA_DIR).join(consts::RESOURCES_MARKER);
-            if let Ok(contents) = std::fs::read_to_string(&marker) {
-                let resources_dir = contents.trim();
-                if !resources_dir.is_empty() {
-                    log::debug!("loaded resources dir from marker: {resources_dir}");
-                    std::env::set_var(consts::BUNDLE_RESOURCES_ENV, resources_dir);
-                }
+        let marker = consts::data_dir().join(consts::RESOURCES_MARKER);
+        if let Ok(contents) = std::fs::read_to_string(&marker) {
+            let resources_dir = contents.trim();
+            if !resources_dir.is_empty() {
+                log::debug!("loaded resources dir from marker: {resources_dir}");
+                std::env::set_var(consts::BUNDLE_RESOURCES_ENV, resources_dir);
             }
         }
     }
@@ -539,7 +542,7 @@ fn main() -> anyhow::Result<()> {
     runtime.compose_up(&project_name)?;
 
     // exec -it -> interactive Claude terminal inside container
-    let container_name = format!("{}_{}_claude", consts::COMPOSE_PREFIX, project_name);
+    let container_name = format!("{}_{}_claude", consts::compose_prefix(), project_name);
     let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
     exec_cmd.extend_from_slice(&resolved.flags);
     let status = runtime
@@ -962,26 +965,18 @@ mod tests {
     }
 
     #[test]
-    fn update_cache_path_returns_some_under_data_dir() {
-        let path = update_cache_path().expect("update_cache_path should return Some");
-        let path_str = path.to_string_lossy();
+    fn update_cache_path_returns_path_under_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = update_cache_path_in(dir.path());
         assert!(
-            path_str.contains(".speedwave/update-check.json"),
-            "cache path should be under ~/.speedwave/, got: {}",
-            path_str
+            path.starts_with(dir.path()),
+            "cache path should be under data_dir, got: {}",
+            path.display()
         );
-    }
-
-    #[test]
-    fn test_update_cache_path_under_speedwave() {
-        let path = update_cache_path();
-        let path_str = path
-            .expect("update_cache_path should return Some")
-            .to_string_lossy()
-            .to_string();
         assert!(
-            path_str.contains(".speedwave"),
-            "update_cache_path should be under .speedwave, got: {path_str}"
+            path.ends_with("update-check.json"),
+            "cache path should end with update-check.json, got: {}",
+            path.display()
         );
     }
 
