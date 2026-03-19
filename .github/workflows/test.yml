@@ -244,3 +244,21 @@ jobs:
 
       - name: cargo audit (desktop)
         run: cargo audit --file desktop/src-tauri/Cargo.lock
+
+  swift:
+    if: github.event_name == 'pull_request'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Build native macOS CLI binaries (universal)
+        run: scripts/build-native-macos.sh
+
+      - name: Run Swift tests
+        run: |
+          set -euo pipefail
+          for pkg in reminders calendar mail notes; do
+            echo "Testing $pkg..."
+            (cd native/macos/$pkg && swift test)
+          done
