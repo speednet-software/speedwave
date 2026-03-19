@@ -314,10 +314,7 @@ fn load_repo_config_logged(project_dir: &Path) -> Option<ProjectRepoConfig> {
 }
 
 pub fn load_user_config() -> anyhow::Result<SpeedwaveUserConfig> {
-    let config_path = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
-        .join(crate::consts::DATA_DIR)
-        .join("config.json");
+    let config_path = crate::consts::data_dir().join("config.json");
     load_user_config_from(&config_path)
 }
 
@@ -331,10 +328,7 @@ pub(crate) fn load_user_config_from(path: &Path) -> anyhow::Result<SpeedwaveUser
 }
 
 pub fn save_user_config(config: &SpeedwaveUserConfig) -> anyhow::Result<()> {
-    let config_path = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
-        .join(crate::consts::DATA_DIR)
-        .join("config.json");
+    let config_path = crate::consts::data_dir().join("config.json");
     save_user_config_to(config, &config_path)
 }
 
@@ -349,19 +343,18 @@ pub(crate) fn save_user_config_to(config: &SpeedwaveUserConfig, path: &Path) -> 
     Ok(())
 }
 
-/// Acquires an exclusive file lock on `~/.speedwave/config.lock` and runs the
+/// Acquires an exclusive file lock on `<data_dir>/config.lock` and runs the
 /// closure `f` while the lock is held.  This prevents race conditions between
 /// concurrent processes (CLI vs Desktop) that read-modify-write `config.json`.
-pub fn with_config_lock<F, T>(f: F) -> anyhow::Result<T>
+///
+/// Testable variant that accepts an explicit data directory.
+pub fn with_config_lock_in<F, T>(data_dir: &std::path::Path, f: F) -> anyhow::Result<T>
 where
     F: FnOnce() -> anyhow::Result<T>,
 {
     use fs2::FileExt;
 
-    let lock_path = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
-        .join(crate::consts::DATA_DIR)
-        .join("config.lock");
+    let lock_path = data_dir.join("config.lock");
 
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -374,6 +367,16 @@ where
     let result = f();
     lock_file.unlock()?;
     result
+}
+
+/// Acquires an exclusive file lock on `~/.speedwave/config.lock` and runs the
+/// closure `f` while the lock is held.  Delegates to `with_config_lock_in`
+/// using `consts::data_dir()`.
+pub fn with_config_lock<F, T>(f: F) -> anyhow::Result<T>
+where
+    F: FnOnce() -> anyhow::Result<T>,
+{
+    with_config_lock_in(crate::consts::data_dir(), f)
 }
 
 fn merge_env(base: &mut HashMap<String, String>, overlay: Option<HashMap<String, String>>) {

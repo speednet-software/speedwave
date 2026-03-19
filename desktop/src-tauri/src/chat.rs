@@ -565,7 +565,7 @@ pub fn build_claude_args(resume_session_id: Option<&str>, flags: &[&str]) -> Vec
 
 /// Build the container name for a project's Claude container.
 pub fn claude_container_name(project: &str) -> String {
-    format!("{}_{}_claude", consts::COMPOSE_PREFIX, project)
+    format!("{}_{}_claude", consts::compose_prefix(), project)
 }
 
 /// Manages a Claude Code subprocess running inside the container.
@@ -657,20 +657,15 @@ impl ChatSession {
         self.shared_stdin = Some(shared_stdin.clone());
 
         // Best-effort session log init — errors here do NOT kill the session
-        let session_log_path = match consts::claude_session_log_path(&self.project_name) {
-            Some(path) => {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                crate::log_file::truncate_if_oversized(&path, 2 * 1024 * 1024);
-                let mut f = crate::log_file::open_log_file(&path);
-                crate::log_file::write_log_line(&mut f, "SESSION", "started");
-                Some(path)
+        let session_log_path = {
+            let path = consts::claude_session_log_path(&self.project_name);
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
             }
-            None => {
-                log::warn!("cannot determine session log path");
-                None
-            }
+            crate::log_file::truncate_if_oversized(&path, 2 * 1024 * 1024);
+            let mut f = crate::log_file::open_log_file(&path);
+            crate::log_file::write_log_line(&mut f, "SESSION", "started");
+            Some(path)
         };
         self.session_log_path = session_log_path.clone();
 

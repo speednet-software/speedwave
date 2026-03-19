@@ -56,21 +56,16 @@ pub fn has_api_key(project: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// Run a closure with HOME temporarily overridden to a temp directory.
-    /// Uses a global mutex to prevent concurrent tests from racing on HOME.
-    fn with_temp_home<F: FnOnce(&std::path::Path)>(f: F) {
-        use std::sync::Mutex;
-        static HOME_LOCK: Mutex<()> = Mutex::new(());
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("HOME").ok();
-        std::env::set_var("HOME", tmp.path().as_os_str());
-        f(tmp.path());
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
+    /// Generate a unique project name for tests to avoid collisions in parallel runs.
+    fn unique_project(prefix: &str) -> String {
+        format!(
+            "{}-{}",
+            prefix,
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .subsec_nanos()
+        )
     }
 
     #[test]
@@ -78,54 +73,81 @@ mod tests {
     fn save_api_key_creates_file_with_0600_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
-        with_temp_home(|home| {
-            save_api_key("testproj", "sk-test-key").unwrap();
-            let path = home.join(".speedwave/secrets/testproj/anthropic_api_key");
-            assert!(path.exists(), "API key file should be created");
+        let project = unique_project("auth-perms");
+        save_api_key(&project, "sk-test-key").unwrap();
+        let path = api_key_path(&project).unwrap();
 
-            let perms = std::fs::metadata(&path).unwrap().permissions();
-            assert_eq!(
-                perms.mode() & 0o777,
-                0o600,
-                "File should be created with mode 0600"
-            );
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(path.parent().unwrap().to_path_buf());
 
-            let content = std::fs::read_to_string(&path).unwrap();
-            assert_eq!(content, "sk-test-key");
-        });
+        assert!(path.exists(), "API key file should be created");
+
+        let perms = std::fs::metadata(&path).unwrap().permissions();
+        assert_eq!(
+            perms.mode() & 0o777,
+            0o600,
+            "File should be created with mode 0600"
+        );
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "sk-test-key");
     }
 
     #[test]
     #[cfg(unix)]
     fn save_api_key_overwrites_existing_file() {
-        with_temp_home(|_home| {
-            save_api_key("testproj", "old-key").unwrap();
-            save_api_key("testproj", "new-key").unwrap();
+        let project = unique_project("auth-overwrite");
+        save_api_key(&project, "old-key").unwrap();
+        save_api_key(&project, "new-key").unwrap();
 
-            assert!(has_api_key("testproj"));
-            let path = api_key_path("testproj").unwrap();
-            let content = std::fs::read_to_string(&path).unwrap();
-            assert_eq!(content, "new-key");
-        });
+        assert!(has_api_key(&project));
+        let path = api_key_path(&project).unwrap();
+
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(path.parent().unwrap().to_path_buf());
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "new-key");
     }
 
     #[test]
     #[cfg(unix)]
     fn delete_api_key_removes_file() {
-        with_temp_home(|_home| {
-            save_api_key("testproj", "sk-key").unwrap();
-            assert!(has_api_key("testproj"));
+        let project = unique_project("auth-delete");
+        save_api_key(&project, "sk-key").unwrap();
+        assert!(has_api_key(&project));
 
-            delete_api_key("testproj").unwrap();
-            assert!(!has_api_key("testproj"));
-        });
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(
+            api_key_path(&project)
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf(),
+        );
+
+        delete_api_key(&project).unwrap();
+        assert!(!has_api_key(&project));
     }
 
     #[test]
     #[cfg(unix)]
     fn has_api_key_returns_false_when_missing() {
-        with_temp_home(|_home| {
-            assert!(!has_api_key("nonexistent"));
-        });
+        assert!(!has_api_key("nonexistent-auth-test"));
     }
 }

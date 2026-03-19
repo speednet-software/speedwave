@@ -33,16 +33,73 @@ pub use crate::validation::validate_project_name;
 // ---------------------------------------------------------------------------
 
 fn snapshot_dir(project: &str) -> anyhow::Result<PathBuf> {
-    let dir = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
-        .join(consts::DATA_DIR)
-        .join("snapshots")
-        .join(project);
+    let dir = consts::data_dir().join("snapshots").join(project);
     Ok(dir)
 }
 
 fn snapshot_path(project: &str) -> anyhow::Result<PathBuf> {
     Ok(snapshot_dir(project)?.join("snapshot.json"))
+}
+
+/// Testable variant: resolves snapshot path under an explicit data directory.
+#[cfg(test)]
+fn snapshot_path_in(data_dir: &std::path::Path, project: &str) -> PathBuf {
+    data_dir
+        .join("snapshots")
+        .join(project)
+        .join("snapshot.json")
+}
+
+/// Testable variant: saves a snapshot reading compose from an explicit data directory.
+#[cfg(test)]
+fn save_snapshot_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result<()> {
+    let compose_path = compose::compose_output_path_in(data_dir, project)?;
+    let compose_yml = std::fs::read_to_string(&compose_path).map_err(|e| {
+        anyhow::anyhow!(
+            "cannot read current compose file at {}: {}",
+            compose_path.display(),
+            e
+        )
+    })?;
+
+    let dir = data_dir.join("snapshots").join(project);
+    std::fs::create_dir_all(&dir)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    let snapshot = UpdateSnapshot {
+        project: project.to_string(),
+        compose_yml,
+        plugin_manifests: vec![],
+    };
+
+    let path = snapshot_path_in(data_dir, project);
+    let json = serde_json::to_string_pretty(&snapshot)?;
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, &json)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    std::fs::rename(&tmp_path, &path)?;
+    Ok(())
+}
+
+/// Testable variant: loads a snapshot from an explicit data directory.
+#[cfg(test)]
+fn load_snapshot_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result<UpdateSnapshot> {
+    let path = snapshot_path_in(data_dir, project);
+    let data = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("no snapshot found for project '{}': {}", project, e))?;
+    let snapshot: UpdateSnapshot = serde_json::from_str(&data)?;
+    Ok(snapshot)
 }
 
 pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
@@ -304,39 +361,16 @@ mod tests {
     fn test_snapshot_permissions_after_save() {
         use std::os::unix::fs::PermissionsExt;
 
-        let project = format!(
-            "perms-test-{}",
-            std::time::SystemTime::UNIX_EPOCH
-                .elapsed()
-                .unwrap()
-                .subsec_nanos()
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let project = "perms-test";
 
-        let compose_path = compose::compose_output_path(&project).unwrap();
-        let snap_path = snapshot_path(&project).unwrap();
-
-        struct Cleanup {
-            paths: Vec<std::path::PathBuf>,
-        }
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                for p in &self.paths {
-                    let _ = std::fs::remove_dir_all(p);
-                }
-            }
-        }
-        let _cleanup = Cleanup {
-            paths: vec![
-                compose_path.parent().unwrap().to_path_buf(),
-                snap_path.parent().unwrap().to_path_buf(),
-            ],
-        };
-
+        let compose_path = compose::compose_output_path_in(dir.path(), project).unwrap();
         std::fs::create_dir_all(compose_path.parent().unwrap()).unwrap();
         std::fs::write(&compose_path, "version: '3'\nservices: {}\n").unwrap();
 
-        save_snapshot(&project).unwrap();
+        save_snapshot_in(dir.path(), project).unwrap();
 
+        let snap_path = snapshot_path_in(dir.path(), project);
         let perms = std::fs::metadata(&snap_path).unwrap().permissions();
         assert_eq!(
             perms.mode() & 0o777,
@@ -347,55 +381,28 @@ mod tests {
 
     #[test]
     fn test_snapshot_path_format() {
-        let path = snapshot_path("my-project").unwrap();
-        let path_str = path.to_string_lossy();
-        assert!(path_str.contains(consts::DATA_DIR));
-        assert!(path_str.contains("snapshots"));
-        assert!(path_str.contains("my-project"));
-        assert!(path_str.ends_with("snapshot.json"));
+        let dir = tempfile::tempdir().unwrap();
+        let path = snapshot_path_in(dir.path(), "my-project");
+        assert!(path.starts_with(dir.path()));
+        assert!(path.to_string_lossy().contains("snapshots"));
+        assert!(path.to_string_lossy().contains("my-project"));
+        assert!(path.to_string_lossy().ends_with("snapshot.json"));
     }
 
     #[test]
     fn test_snapshot_atomic_write_no_tmp_residue() {
-        // Call the real save_snapshot() by setting up the compose output file it reads.
-        // Uses a unique project name to avoid collisions in parallel test runs.
-        let project = format!(
-            "atomic-write-test-{}",
-            std::time::SystemTime::UNIX_EPOCH
-                .elapsed()
-                .unwrap()
-                .subsec_nanos()
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let project = "atomic-write-test";
 
-        // Set up the compose file that save_snapshot() will read
-        let compose_path = compose::compose_output_path(&project).unwrap();
-        let snap_path = snapshot_path(&project).unwrap();
-
-        // RAII guard: clean up $HOME/.speedwave/ subdirs even on panic
-        struct Cleanup {
-            paths: Vec<std::path::PathBuf>,
-        }
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                for p in &self.paths {
-                    let _ = std::fs::remove_dir_all(p);
-                }
-            }
-        }
-        let _cleanup = Cleanup {
-            paths: vec![
-                compose_path.parent().unwrap().to_path_buf(),
-                snap_path.parent().unwrap().to_path_buf(),
-            ],
-        };
-
+        // Set up the compose file that save_snapshot_in() will read
+        let compose_path = compose::compose_output_path_in(dir.path(), project).unwrap();
         std::fs::create_dir_all(compose_path.parent().unwrap()).unwrap();
         std::fs::write(&compose_path, "version: '3'\nservices: {}\n").unwrap();
 
-        // Call the real function
-        save_snapshot(&project).unwrap();
+        save_snapshot_in(dir.path(), project).unwrap();
 
         // Verify no .json.tmp residue remains
+        let snap_path = snapshot_path_in(dir.path(), project);
         let tmp_path = snap_path.with_extension("json.tmp");
         assert!(
             !tmp_path.exists(),
@@ -403,7 +410,7 @@ mod tests {
         );
 
         // Verify content was written correctly
-        let loaded = load_snapshot(&project).unwrap();
+        let loaded = load_snapshot_in(dir.path(), project).unwrap();
         assert_eq!(loaded.project, project);
         assert_eq!(loaded.compose_yml, "version: '3'\nservices: {}\n");
 

@@ -206,13 +206,22 @@ pub fn parse_version(version_output: &str) -> Option<(u32, u32, u32)> {
 ///
 /// Layout: `~/.speedwave/compose/<project>/compose.yml`
 pub fn compose_file_path(project: &str) -> anyhow::Result<String> {
-    let data_dir = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
-        .join(consts::DATA_DIR)
+    let path = consts::data_dir()
         .join("compose")
         .join(project)
         .join("compose.yml");
-    Ok(data_dir.to_string_lossy().to_string())
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Testable variant: resolves compose file path under an explicit data directory.
+#[cfg(test)]
+fn compose_file_path_in(data_dir: &std::path::Path, project: &str) -> String {
+    data_dir
+        .join("compose")
+        .join(project)
+        .join("compose.yml")
+        .to_string_lossy()
+        .to_string()
 }
 
 fn configured_project_container_names(project: &str) -> Vec<String> {
@@ -479,8 +488,9 @@ mod tests {
 
     #[test]
     fn test_compose_file_path_format() {
-        let path = compose_file_path("my-project").expect("compose_file_path");
-        assert!(path.contains(crate::consts::DATA_DIR));
+        let dir = tempfile::tempdir().unwrap();
+        let path = compose_file_path_in(dir.path(), "my-project");
+        assert!(path.starts_with(&dir.path().to_string_lossy().to_string()));
         assert!(path.contains("compose"));
         assert!(path.contains("my-project"));
         assert!(path.ends_with("compose.yml"));
@@ -791,8 +801,6 @@ services:
 
     #[test]
     fn test_force_remove_project_containers_always_tries_configured_names() {
-        static HOME_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-
         struct RecordingRunner {
             commands: Arc<Mutex<Vec<String>>>,
             responses: HashMap<String, anyhow::Result<String>>,
@@ -810,20 +818,29 @@ services:
             }
         }
 
-        let _guard = HOME_LOCK
-            .get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        // Use a unique project name to avoid collisions with parallel tests.
+        let project = format!(
+            "cleanup-names-test-{}",
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .subsec_nanos()
+        );
 
-        let compose_dir = temp
-            .path()
-            .join(crate::consts::DATA_DIR)
-            .join("compose")
-            .join("tmp");
+        // Write compose file at the path that compose_file_path() will resolve
+        // via the OnceLock-cached data_dir() (no HOME manipulation needed).
+        let compose_dir = crate::consts::data_dir().join("compose").join(&project);
         std::fs::create_dir_all(&compose_dir).unwrap();
+
+        // RAII guard: clean up the compose dir even on panic
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(compose_dir.clone());
+
         std::fs::write(
             compose_dir.join("compose.yml"),
             r#"
@@ -839,7 +856,10 @@ services:
         .unwrap();
 
         let commands = Arc::new(Mutex::new(Vec::new()));
-        let ps_key = "nerdctl ps -a --filter label=com.docker.compose.project=tmp -q".to_string();
+        let ps_key = format!(
+            "nerdctl ps -a --filter label=com.docker.compose.project={} -q",
+            project
+        );
         let rm_ids_key = "nerdctl rm -f stale-id".to_string();
         let rm_claude_key = "nerdctl rm -f speedwave_tmp_claude".to_string();
         let rm_hub_key = "nerdctl rm -f speedwave_tmp_mcp_hub".to_string();
@@ -857,12 +877,7 @@ services:
             ]),
         };
 
-        force_remove_project_containers(&runner, "nerdctl", "tmp", &[]);
-
-        match previous_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
+        force_remove_project_containers(&runner, "nerdctl", &project, &[]);
 
         assert_eq!(
             commands.lock().unwrap().as_slice(),

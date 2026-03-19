@@ -4,11 +4,7 @@ use std::path::Path;
 /// Best-effort cleanup of project directories created by `init_project_dirs_in`.
 /// Used for rollback when a later step of `add_project` fails.
 pub fn cleanup_project_dirs(project: &str) {
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => return,
-    };
-    cleanup_project_dirs_in(project, &home.join(crate::consts::DATA_DIR));
+    cleanup_project_dirs_in(project, crate::consts::data_dir());
 }
 
 /// Best-effort cleanup of project directories under a given data directory.
@@ -65,10 +61,8 @@ pub fn add_project(name: &str, dir: &str) -> anyhow::Result<()> {
 }
 
 fn add_project_inner(name: &str, dir: &str) -> anyhow::Result<()> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-    let data_dir = home.join(crate::consts::DATA_DIR);
-    add_project_with_data_dir(name, dir, &data_dir)
+    let data_dir = crate::consts::data_dir();
+    add_project_with_data_dir(name, dir, data_dir)
 }
 
 /// Core implementation of project registration, parameterized by `data_dir`

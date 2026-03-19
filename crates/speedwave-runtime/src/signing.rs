@@ -89,8 +89,11 @@ fn compute_plugin_digest(plugin_dir: &Path) -> anyhow::Result<Vec<u8>> {
             .strip_prefix(plugin_dir)
             .unwrap_or(file)
             .to_string_lossy();
-        // Hash: relative path + file contents
-        hasher.update(rel.as_bytes());
+        // Hash: relative path (length-prefixed) + file contents.
+        // Length prefix prevents ambiguity between ("ab","cd") and ("a","bcd").
+        let rel_bytes = rel.as_bytes();
+        hasher.update((rel_bytes.len() as u64).to_le_bytes());
+        hasher.update(rel_bytes);
         let content = std::fs::read(file)?;
         hasher.update(&content);
     }
