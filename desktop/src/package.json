@@ -42,6 +42,7 @@
     "@angular/build": "^21.2.2",
     "@angular/cli": "^21.2.2",
     "@angular/compiler-cli": "^21.2.4",
+    "@tailwindcss/postcss": "^4.2.1",
     "@tauri-apps/cli": "^2.10.1",
     "@vitest/coverage-v8": "^4.0.18",
     "angular-eslint": "^21.3.0",
@@ -50,7 +51,9 @@
     "eslint-plugin-jsdoc": "^62.8.0",
     "eslint-plugin-prettier": "^5",
     "jsdom": "^28.1.0",
+    "postcss": "^8.5.8",
     "prettier": "^3",
+    "tailwindcss": "^4.2.1",
     "typescript": "~5.9.0",
     "typescript-eslint": "^8",
     "vitest": "^4.0.18"

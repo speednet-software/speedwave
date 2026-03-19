@@ -26,7 +26,6 @@ import { SessionStatsComponent } from './session-stats/session-stats.component';
   imports: [CommonModule, FormsModule, ChatMessageComponent, SessionStatsComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './chat.component.html',
-  styleUrl: './chat.component.css',
 })
 export class ChatComponent implements OnInit, OnDestroy {
   @ViewChild('messageList') messageList!: ElementRef<HTMLDivElement>;

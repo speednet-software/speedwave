@@ -1115,24 +1115,21 @@ pub fn build_images() -> anyhow::Result<()> {
         Err(e) => return Err(e),
     }
 
-    // Sync claude-resources to ~/.speedwave/ so they are available for
+    // Sync claude-resources to data_dir so they are available for
     // compose volume mounts and container entrypoints.
     let build_root = build::resolve_build_root()?;
     bundle::sync_claude_resources(&build_root)?;
 
-    // Record the current bundle as applied so that the background reconcile
-    // on next startup sees bundle_changed=false and skips a redundant rebuild.
-    if let Ok(manifest) = bundle::load_current_bundle_manifest() {
-        let bundle_state = bundle::BundleState {
-            applied_bundle_id: Some(manifest.bundle_id),
-            phase: bundle::BundleReconcilePhase::Done,
-            pending_running_projects: Vec::new(),
-            last_error: None,
-        };
-        if let Err(e) = bundle::save_bundle_state(&bundle_state) {
-            log::warn!("Failed to save bundle state after build_images: {e}");
-        }
-    }
+    // Record that the current bundle's images are now built so that
+    // reconcile_bundle_update (on next startup) sees bundle_changed=false
+    // and skips the unnecessary rebuild.
+    let manifest = bundle::load_current_bundle_manifest()?;
+    let mut bundle_state = bundle::load_bundle_state();
+    bundle_state.applied_bundle_id = Some(manifest.bundle_id);
+    bundle_state.phase = bundle::BundleReconcilePhase::Done;
+    bundle_state.pending_running_projects.clear();
+    bundle_state.last_error = None;
+    bundle::save_bundle_state(&bundle_state)?;
 
     let mut state = SetupState::load();
     state.images_built = true;
@@ -3556,6 +3553,38 @@ networks:
         );
     }
 
+    /// Extracts the body of a top-level `pub fn <name>()` from source text by
+    /// counting braces. Used by structural tests to assert on function contents.
+    ///
+    /// Limitation: string literals containing `{` or `}` will throw off the
+    /// depth counter. This is acceptable for architectural guard tests — if a
+    /// future change adds brace-containing strings, the test may need updating.
+    fn extract_fn_body<'a>(source: &'a str, fn_signature: &str) -> &'a str {
+        let after_sig = source
+            .split(fn_signature)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{fn_signature} not found in source"));
+        let brace_start = after_sig.find('{').expect("opening brace not found");
+        let rest = &after_sig[brace_start..];
+        let mut depth = 0i32;
+        let mut end = 0;
+        for (i, ch) in rest.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(end > 0, "closing brace not found for {fn_signature}");
+        &rest[..end]
+    }
+
     /// Structural test: verifies that `build_images()` handles
     /// `SnapshotterRecoveryFailed` by calling `restart_container_engine()` and
     /// retrying the build. This is a source-level test — if the recovery pattern
@@ -3574,94 +3603,43 @@ networks:
             "build_images() must call restart_container_engine() on snapshotter recovery failure"
         );
 
-        // Verify the pattern: downcast → restart → retry (all in build_images)
-        let build_images_fn = source
-            .split("pub fn build_images()")
-            .nth(1)
-            .and_then(|rest| {
-                // Find the matching closing brace by counting braces
-                let mut depth = 0i32;
-                let mut end = 0;
-                for (i, ch) in rest.char_indices() {
-                    match ch {
-                        '{' => depth += 1,
-                        '}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                end = i;
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                if end > 0 {
-                    Some(&rest[..end])
-                } else {
-                    None
-                }
-            })
-            .expect("build_images() function body should exist");
+        let body = extract_fn_body(source, "pub fn build_images()");
 
         assert!(
-            build_images_fn.contains("downcast_ref::<build::SnapshotterRecoveryFailed>"),
+            body.contains("downcast_ref::<build::SnapshotterRecoveryFailed>"),
             "build_images() must use downcast_ref to detect SnapshotterRecoveryFailed"
         );
         assert!(
-            build_images_fn.contains("restart_container_engine()"),
+            body.contains("restart_container_engine()"),
             "build_images() must call restart_container_engine() in the recovery path"
         );
         assert!(
-            build_images_fn.contains("build::build_all_images(rt.as_ref())?"),
+            body.contains("build::build_all_images(rt.as_ref())?"),
             "build_images() must retry build_all_images after engine restart"
         );
     }
 
-    /// Structural test: verifies that `build_images()` records the applied
-    /// bundle ID after building. Without this, the next startup would trigger
-    /// a redundant full reconcile (seeing bundle_changed=true because
-    /// applied_bundle_id was never set).
+    /// Structural test: verifies that `build_images()` persists `BundleState`
+    /// (with `applied_bundle_id`) after a successful image build and syncs
+    /// claude-resources. Without this, `reconcile_bundle_update` sees
+    /// `bundle_changed=true` on the next startup and triggers a phantom rebuild.
     #[test]
-    fn build_images_records_applied_bundle_id() {
+    fn build_images_writes_bundle_state_after_success() {
         let source = include_str!("setup_wizard.rs");
-        let build_images_fn = source
-            .split("pub fn build_images()")
-            .nth(1)
-            .and_then(|rest| {
-                let mut depth = 0i32;
-                let mut end = 0;
-                for (i, ch) in rest.char_indices() {
-                    match ch {
-                        '{' => depth += 1,
-                        '}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                end = i;
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                if end > 0 {
-                    Some(&rest[..end])
-                } else {
-                    None
-                }
-            })
-            .expect("build_images() function body should exist");
+        let body = extract_fn_body(source, "pub fn build_images()");
 
         assert!(
-            build_images_fn.contains("sync_claude_resources"),
+            body.contains("sync_claude_resources"),
             "build_images() must sync claude-resources for compose mounts"
         );
         assert!(
-            build_images_fn.contains("save_bundle_state"),
-            "build_images() must save bundle state with applied_bundle_id"
+            body.contains("bundle::save_bundle_state"),
+            "build_images() must persist BundleState (applied_bundle_id) after building images \
+             so that reconcile_bundle_update sees bundle_changed=false on next startup"
         );
         assert!(
-            build_images_fn.contains("applied_bundle_id"),
-            "build_images() must set applied_bundle_id to prevent redundant reconcile"
+            body.contains("bundle::load_current_bundle_manifest"),
+            "build_images() must load the current manifest to get bundle_id for BundleState"
         );
     }
 }

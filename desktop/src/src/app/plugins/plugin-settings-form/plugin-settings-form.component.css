@@ -18,21 +18,7 @@
   color: #666;
   margin-bottom: 6px;
 }
-.form-input {
-  width: 100%;
-  padding: 10px 12px;
-  background: #1a1a2e;
-  border: 1px solid #0f3460;
-  border-radius: 4px;
-  color: #e0e0e0;
-  font-size: 14px;
-  font-family: monospace;
-  box-sizing: border-box;
-}
-.form-input:focus {
-  border-color: #e94560;
-  outline: none;
-}
+.form-input,
 .select-input {
   width: 100%;
   padding: 10px 12px;
@@ -44,6 +30,7 @@
   font-family: monospace;
   box-sizing: border-box;
 }
+.form-input:focus,
 .select-input:focus {
   border-color: #e94560;
   outline: none;

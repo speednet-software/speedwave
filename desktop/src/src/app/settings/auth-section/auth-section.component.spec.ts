@@ -59,14 +59,14 @@ describe('AuthSectionComponent', () => {
   it('shows ollama message when llmProvider is ollama', () => {
     component.llmProvider = 'ollama';
     fixture.detectChanges();
-    const note = fixture.nativeElement.querySelector('.note');
+    const note = fixture.nativeElement.querySelector('[data-testid="auth-note"]');
     expect(note?.textContent).toContain('No authentication needed for Ollama');
   });
 
   it('shows external message when llmProvider is external', () => {
     component.llmProvider = 'external';
     fixture.detectChanges();
-    const note = fixture.nativeElement.querySelector('.note');
+    const note = fixture.nativeElement.querySelector('[data-testid="auth-note"]');
     expect(note?.textContent).toContain('Uses API key env var');
   });
 
@@ -255,7 +255,7 @@ describe('AuthSectionComponent', () => {
     component.llmProvider = 'anthropic';
     component.apiKeyConfigured = true;
     fixture.detectChanges();
-    const statusEl = fixture.nativeElement.querySelector('.status-ok');
+    const statusEl = fixture.nativeElement.querySelector('[data-testid="auth-status-value"]');
     expect(statusEl?.textContent).toContain('API Key configured');
   });
 
@@ -264,7 +264,7 @@ describe('AuthSectionComponent', () => {
     component.apiKeyConfigured = false;
     component.oauthAuthenticated = false;
     fixture.detectChanges();
-    const valueEl = fixture.nativeElement.querySelector('.info-value');
+    const valueEl = fixture.nativeElement.querySelector('[data-testid="auth-status-value"]');
     expect(valueEl?.textContent?.trim()).toContain('Not authenticated');
   });
 });

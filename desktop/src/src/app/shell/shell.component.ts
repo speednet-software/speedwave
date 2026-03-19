@@ -24,146 +24,85 @@ import { ProjectStateService } from '../services/project-state.service';
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div class="app-layout">
+    <div class="flex flex-col h-screen bg-sw-bg-darkest text-sw-text">
       @if (projectState.status !== 'ready') {
         @if (projectState.status === 'error') {
-          <div class="blocking-error-banner" data-testid="blocking-error">
+          <div
+            class="flex items-center justify-between px-4 py-2 bg-[#3d0000] border-b border-sw-accent text-sw-accent text-[13px] font-mono"
+            data-testid="blocking-error"
+          >
             <span>{{ projectState.error }}</span>
-            <div class="blocking-error-actions">
-              <button (click)="retry()">Retry</button>
-              <button (click)="dismiss()">Dismiss</button>
+            <div class="flex gap-2">
+              <button
+                class="bg-transparent border border-sw-accent text-sw-accent px-2.5 py-0.5 rounded text-xs cursor-pointer"
+                (click)="retry()"
+              >
+                Retry
+              </button>
+              <button
+                class="bg-transparent border border-sw-accent text-sw-accent px-2.5 py-0.5 rounded text-xs cursor-pointer"
+                (click)="dismiss()"
+              >
+                Dismiss
+              </button>
             </div>
           </div>
         } @else {
-          <div class="blocking-overlay" data-testid="blocking-overlay">
-            <div class="blocking-spinner"></div>
-            <p class="blocking-text">{{ statusMessage }}</p>
+          <div
+            class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-sw-bg-darkest/[0.92]"
+            data-testid="blocking-overlay"
+          >
+            <div
+              class="w-8 h-8 border-[3px] border-sw-border-dark border-t-sw-accent rounded-full animate-sw-spin"
+            ></div>
+            <p class="mt-4 font-mono text-sm text-sw-text">{{ statusMessage }}</p>
           </div>
         }
       }
       <app-update-notification />
-      <header class="app-header">
-        <span class="app-title" data-testid="shell-title">Speedwave</span>
-        <nav class="app-nav">
-          <a routerLink="/chat" routerLinkActive="active" data-testid="nav-chat">Chat</a>
-          <a routerLink="/integrations" routerLinkActive="active" data-testid="nav-integrations"
+      <header
+        class="flex items-center justify-between px-4 py-2 bg-sw-bg-dark border-b border-sw-border"
+      >
+        <span class="font-mono text-[16px] font-bold text-sw-accent" data-testid="shell-title"
+          >Speedwave</span
+        >
+        <nav class="flex gap-4" data-testid="app-nav">
+          <a
+            routerLink="/chat"
+            routerLinkActive="!text-sw-accent font-bold"
+            class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
+            data-testid="nav-chat"
+            >Chat</a
+          >
+          <a
+            routerLink="/integrations"
+            routerLinkActive="!text-sw-accent font-bold"
+            class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
+            data-testid="nav-integrations"
             >Integrations</a
           >
-          <a routerLink="/plugins" routerLinkActive="active" data-testid="nav-plugins">Plugins</a>
-          <a routerLink="/settings" routerLinkActive="active" data-testid="nav-settings"
+          <a
+            routerLink="/plugins"
+            routerLinkActive="!text-sw-accent font-bold"
+            class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
+            data-testid="nav-plugins"
+            >Plugins</a
+          >
+          <a
+            routerLink="/settings"
+            routerLinkActive="!text-sw-accent font-bold"
+            class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
+            data-testid="nav-settings"
             >Settings</a
           >
         </nav>
         <app-project-switcher />
       </header>
-      <main class="app-main">
+      <main class="flex-1 overflow-y-auto overflow-x-hidden">
         <router-outlet />
       </main>
     </div>
   `,
-  styles: [
-    `
-      .app-layout {
-        display: flex;
-        flex-direction: column;
-        height: 100vh;
-        background: #1a1a2e;
-        color: #e0e0e0;
-      }
-      .app-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 8px 16px;
-        background: #16213e;
-        border-bottom: 1px solid #0f3460;
-      }
-      .app-title {
-        font-family: monospace;
-        font-size: 16px;
-        font-weight: bold;
-        color: #e94560;
-      }
-      .app-nav {
-        display: flex;
-        gap: 16px;
-      }
-      .app-nav a {
-        color: #888;
-        text-decoration: none;
-        font-size: 13px;
-        font-family: monospace;
-        padding: 4px 8px;
-        border-radius: 4px;
-        transition: color 0.2s;
-      }
-      .app-nav a:hover {
-        color: #e0e0e0;
-      }
-      .app-nav a.active {
-        color: #e94560;
-        font-weight: bold;
-      }
-      .app-main {
-        flex: 1;
-        overflow-y: auto;
-        overflow-x: hidden;
-      }
-      .blocking-overlay {
-        position: fixed;
-        inset: 0;
-        z-index: 9999;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        background: rgba(26, 26, 46, 0.92);
-      }
-      .blocking-spinner {
-        width: 32px;
-        height: 32px;
-        border: 3px solid #333;
-        border-top-color: #e94560;
-        border-radius: 50%;
-        animation: shell-spin 0.8s linear infinite;
-      }
-      @keyframes shell-spin {
-        to {
-          transform: rotate(360deg);
-        }
-      }
-      .blocking-text {
-        margin-top: 16px;
-        font-family: monospace;
-        font-size: 14px;
-        color: #e0e0e0;
-      }
-      .blocking-error-banner {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 8px 16px;
-        background: #3d0000;
-        border-bottom: 1px solid #e94560;
-        color: #e94560;
-        font-size: 13px;
-        font-family: monospace;
-      }
-      .blocking-error-actions {
-        display: flex;
-        gap: 8px;
-      }
-      .blocking-error-banner button {
-        background: none;
-        border: 1px solid #e94560;
-        color: #e94560;
-        padding: 2px 10px;
-        border-radius: 4px;
-        font-size: 12px;
-        cursor: pointer;
-      }
-    `,
-  ],
 })
 export class ShellComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);

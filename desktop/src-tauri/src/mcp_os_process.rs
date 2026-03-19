@@ -555,7 +555,8 @@ srv.listen(0, '127.0.0.1', () => {
         )
         .unwrap();
 
-        let result = McpOsProcess::spawn(&script.to_string_lossy());
+        let data_dir = tmp.path().join("data");
+        let result = McpOsProcess::spawn_in_dir(&script.to_string_lossy(), &data_dir);
         if let Ok(mut proc) = result {
             assert!(proc.port() > 0, "Port should be assigned");
             assert!(!proc.token().is_empty(), "Token should be generated");
@@ -581,20 +582,20 @@ srv.listen(0, '127.0.0.1', () => {
         )
         .unwrap();
 
-        let result = McpOsProcess::spawn(&script.to_string_lossy());
+        let data_dir = tmp.path().join("data");
+        let result = McpOsProcess::spawn_in_dir(&script.to_string_lossy(), &data_dir);
         if let Ok(mut proc) = result {
             let port_path = proc.port_path.clone();
             assert!(port_path.exists(), "Port file should exist");
             let content = std::fs::read_to_string(&port_path).unwrap();
-            // Multiple spawn-based tests run in parallel and share the same
-            // global port file (~/.speedwave/port). Another test may overwrite
-            // it between our write and read. Verify it contains a valid port
-            // (the exact match is validated by the non-concurrent unit tests
-            // that use new_with()).
             let file_port: u16 = content
                 .parse()
                 .expect("port file should contain a valid u16");
-            assert!(file_port > 0, "Port file should contain a non-zero port");
+            assert_eq!(
+                file_port,
+                proc.port(),
+                "Port file should match process port"
+            );
             assert!(proc.port() > 0, "Process port should be assigned");
             proc.stop().unwrap();
         }
@@ -616,25 +617,20 @@ srv.listen(0, '127.0.0.1', () => {
         )
         .unwrap();
 
-        let result = McpOsProcess::spawn(&script.to_string_lossy());
+        let data_dir = tmp.path().join("data");
+        let result = McpOsProcess::spawn_in_dir(&script.to_string_lossy(), &data_dir);
         if let Ok(mut proc) = result {
             let pid_path = proc.pid_path.clone();
-            // Multiple spawn-based tests run in parallel and share the same
-            // global PID file (~/.speedwave/mcp-os-pid). Another test's stop()
-            // may delete it between our write and read. Verify the file existed
-            // at some point by checking proc state instead.
-            if pid_path.exists() {
-                let content = std::fs::read_to_string(&pid_path).unwrap();
-                let pid: u32 = content
-                    .trim()
-                    .parse()
-                    .expect("PID file should contain a valid u32");
-                assert!(pid > 0, "PID should be positive");
-            }
-            // The child process itself must have a valid PID regardless of the file
-            assert!(
-                proc.child.as_ref().map(|c| c.id()).unwrap_or(0) > 0,
-                "Child process should have a valid PID"
+            assert!(pid_path.exists(), "PID file should exist");
+            let content = std::fs::read_to_string(&pid_path).unwrap();
+            let pid: u32 = content
+                .trim()
+                .parse()
+                .expect("PID file should contain a valid u32");
+            assert_eq!(
+                pid,
+                proc.child.as_ref().unwrap().id(),
+                "PID file should match child PID"
             );
             proc.stop().unwrap();
         }

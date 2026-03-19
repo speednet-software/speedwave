@@ -470,7 +470,7 @@ describe('PluginsComponent', () => {
       await component.ngOnInit();
       fixture.changeDetectorRef.markForCheck();
       fixture.detectChanges();
-      const emptyState = fixture.nativeElement.querySelector('.empty-state');
+      const emptyState = fixture.nativeElement.querySelector('[data-testid="empty-state"]');
       expect(emptyState).not.toBeNull();
       expect(emptyState.textContent).toContain('No plugins installed');
     });

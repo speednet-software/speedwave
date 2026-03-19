@@ -886,14 +886,6 @@ fn main() {
                 if let Err(e) = setup_wizard::link_cli() {
                     log::warn!("CLI re-link on startup failed: {e}");
                 }
-            }
-
-            // Reconcile container images when the bundled assets change (e.g. after
-            // an app update). Gated behind setup_started: on fresh install or after
-            // factory reset there is no runtime/VM yet — reconciling would fail with
-            // "Runtime not available" and poison ImageReadiness, blocking the setup
-            // wizard's Start Containers step.
-            if setup_started {
                 reconcile::reconcile_bundle_update(app.handle());
             }
 

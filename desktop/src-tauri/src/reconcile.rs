@@ -294,17 +294,50 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
             "reconcile_bundle: building images for bundle {}",
             manifest.bundle_id,
         );
-        build::build_all_images_for_bundle(rt.as_ref(), &manifest.bundle_id).map_err(|e| {
-            let msg = format!("Image rebuild failed: {e}");
-            log::error!("reconcile_bundle: {msg}");
-            set_bundle_error(&mut state, msg)
-        })?;
+        // build.rs handles: build → fail → prune → retry → SnapshotterRecoveryFailed.
+        // Here we escalate: restart engine → retry build. Safe because we are in the
+        // pre-restore phase — no containers are running yet (see ContainerRuntime
+        // trait docs for restart_container_engine).
+        match build::build_all_images_for_bundle(rt.as_ref(), &manifest.bundle_id) {
+            Ok(_) => {}
+            Err(e)
+                if e.downcast_ref::<build::SnapshotterRecoveryFailed>()
+                    .is_some() =>
+            {
+                log::warn!("reconcile_bundle: snapshotter recovery failed, restarting engine");
+                rt.restart_container_engine().map_err(|re| {
+                    let msg = format!("Engine restart failed: {re}");
+                    log::error!("reconcile_bundle: {msg}");
+                    set_bundle_error(&mut state, msg)
+                })?;
+                build::build_all_images_for_bundle(rt.as_ref(), &manifest.bundle_id).map_err(
+                    |e| {
+                        let msg = format!("Image rebuild failed after engine restart: {e}");
+                        log::error!("reconcile_bundle: {msg}");
+                        set_bundle_error(&mut state, msg)
+                    },
+                )?;
+            }
+            Err(e) => {
+                let msg = format!("Image rebuild failed: {e}");
+                log::error!("reconcile_bundle: {msg}");
+                return Err(set_bundle_error(&mut state, msg));
+            }
+        }
         state.phase = bundle::BundleReconcilePhase::ImagesBuilt;
         state.last_error = None;
         bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
         set_image_readiness(ImageReadiness::Ready);
         log::info!("reconcile_bundle: all images built, waiters unblocked");
         emit_bundle_status(app_handle);
+
+        // After heavy image builds, containerd may be degraded (especially Linux
+        // rootless). Re-check readiness before querying running containers.
+        rt.ensure_ready().map_err(|e| {
+            let msg = format!("Runtime not ready after image build: {e}");
+            log::error!("reconcile_bundle: {msg}");
+            set_bundle_error(&mut state, msg)
+        })?;
     }
 
     let user_config = match config::load_user_config() {
@@ -954,6 +987,22 @@ mod tests {
                 vec!["alpha".to_string(), "beta".to_string()]
             );
         }
+
+        #[test]
+        #[serial]
+        fn missing_applied_bundle_id_is_reported_as_in_progress() {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = HomeGuard::set(temp.path());
+
+            // Simulate fresh install: no bundle-state.json → applied_bundle_id is None
+            // (default BundleState). This should be in_progress because bundle_changed=true.
+            let status = current_bundle_status();
+            assert!(
+                status.in_progress,
+                "missing applied_bundle_id (fresh install) must report in_progress"
+            );
+            assert!(status.applied_bundle_id.is_none());
+        }
     }
 
     mod wait_for_images_ready_tests {
@@ -1260,5 +1309,55 @@ mod tests {
             let result = resolve_resources_dir(&exe_parent);
             assert_eq!(result, Some(exe_parent));
         }
+    }
+
+    #[test]
+    fn reconcile_bundle_update_gated_behind_setup_started() {
+        let source = include_str!("main.rs");
+        // Find text after `setup_wizard::link_cli()` up to the closing brace of the
+        // enclosing `if setup_started` block. `reconcile_bundle_update` must appear
+        // in that window — i.e. inside the same guard block, not after it.
+        let after_link_cli = source
+            .split_once("setup_wizard::link_cli()")
+            .expect("main.rs must contain setup_wizard::link_cli()")
+            .1;
+        // The `if setup_started` block is indented with 12 spaces; its closing
+        // brace sits on a line that is exactly "            }\n".
+        let closing = "\n            }\n";
+        let until_close = after_link_cli
+            .split_once(closing)
+            .expect("should find closing brace of if setup_started block")
+            .0;
+        assert!(
+            until_close.contains("reconcile_bundle_update"),
+            "reconcile_bundle_update must be inside the if setup_started block with link_cli"
+        );
+    }
+
+    #[test]
+    fn reconcile_inner_has_snapshotter_recovery_and_ensure_ready_after_build() {
+        let source = include_str!("reconcile.rs");
+        let inner_fn = source
+            .split("fn reconcile_bundle_update_inner(")
+            .nth(1)
+            .expect("reconcile_bundle_update_inner function should exist");
+        assert!(
+            inner_fn.contains("SnapshotterRecoveryFailed"),
+            "reconcile must handle SnapshotterRecoveryFailed"
+        );
+        assert!(
+            inner_fn.contains("restart_container_engine"),
+            "reconcile must call restart_container_engine on snapshotter failure"
+        );
+        // ensure_ready must appear inside the ImagesBuilt phase block,
+        // after set_image_readiness(Ready) and before the block closes.
+        let images_built_block = inner_fn
+            .split("is_before(bundle::BundleReconcilePhase::ImagesBuilt)")
+            .nth(1)
+            .expect("ImagesBuilt phase guard should exist");
+        assert!(
+            images_built_block.contains("ensure_ready"),
+            "reconcile must call ensure_ready inside the ImagesBuilt phase block"
+        );
     }
 }
