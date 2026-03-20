@@ -24,6 +24,27 @@ jobs:
           token: ${{ secrets.RELEASE_TOKEN }}
           target-branch: main
 
+      # Defense-in-depth: ensure the release PR has the label that release-please
+      # needs to identify it as a merged release PR. The labeling API call inside
+      # release-please can fail transiently (PR node ID not propagated yet).
+      - name: Ensure release PR has autorelease label
+        if: steps.release.outputs.pr
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          PR_NUMBER: ${{ steps.release.outputs.pr }}
+          REPO: ${{ github.repository }}
+        run: |
+          LABELS=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name')
+          if echo "$LABELS" | grep -q "autorelease: pending"; then
+            echo "Label already present"
+            exit 0
+          fi
+          for i in 1 2 3; do
+            sleep $((i * 5))
+            gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "autorelease: pending" && exit 0
+          done
+          echo "::warning::Failed to apply label after 3 retries"
+
   build-and-publish:
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'

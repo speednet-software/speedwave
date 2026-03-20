@@ -1,0 +1,34 @@
+name: 'Download WSL resources'
+description: 'Downloads nerdctl-full and Ubuntu rootfs for Windows WSL2 offline bundling'
+runs:
+  using: 'composite'
+  steps:
+    - name: Download WSL resources for offline bundling
+      shell: bash
+      run: |
+        CONSTS=crates/speedwave-runtime/src/consts.rs
+
+        # Read versions and hashes from SSOT (grep -A1 handles multiline const declarations)
+        NERDCTL_VERSION=$(grep -A1 '^pub const NERDCTL_FULL_VERSION' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
+        [ -n "$NERDCTL_VERSION" ] || { echo "::error::Failed to parse NERDCTL_FULL_VERSION from consts.rs"; exit 1; }
+
+        NERDCTL_SHA256=$(grep -A1 '^pub const NERDCTL_FULL_SHA256_AMD64' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
+        [ -n "$NERDCTL_SHA256" ] || { echo "::error::Failed to parse NERDCTL_FULL_SHA256_AMD64 from consts.rs"; exit 1; }
+
+        ROOTFS_URL=$(grep -A1 '^pub const WSL_ROOTFS_URL_AMD64' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
+        [ -n "$ROOTFS_URL" ] || { echo "::error::Failed to parse WSL_ROOTFS_URL_AMD64 from consts.rs"; exit 1; }
+
+        ROOTFS_SHA256=$(grep -A1 '^pub const WSL_ROOTFS_SHA256_AMD64' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
+        [ -n "$ROOTFS_SHA256" ] || { echo "::error::Failed to parse WSL_ROOTFS_SHA256_AMD64 from consts.rs"; exit 1; }
+
+        mkdir -p desktop/src-tauri/wsl
+
+        # Download and verify nerdctl-full
+        curl -fsSL "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/nerdctl-full-${NERDCTL_VERSION}-linux-amd64.tar.gz" \
+          -o desktop/src-tauri/wsl/nerdctl-full.tar.gz
+        echo "${NERDCTL_SHA256}  desktop/src-tauri/wsl/nerdctl-full.tar.gz" | sha256sum -c -
+
+        # Download and verify Ubuntu rootfs
+        curl -fsSL "${ROOTFS_URL}" \
+          -o desktop/src-tauri/wsl/ubuntu-rootfs.tar.gz
+        echo "${ROOTFS_SHA256}  desktop/src-tauri/wsl/ubuntu-rootfs.tar.gz" | sha256sum -c -

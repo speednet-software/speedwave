@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/speednet-software/speedwave/compare/v0.2.0...v0.3.0) (2026-03-20)
+
+
+### Features
+
+* release — docs sync, Lima memory fix, plugin system, Swift CI alignment ([#215](https://github.com/speednet-software/speedwave/issues/215)) ([b7b045d](https://github.com/speednet-software/speedwave/commit/b7b045d576547476d5542c5cd23bc57c7d8e5020))
+
 ## [0.2.0](https://github.com/speednet-software/speedwave/compare/v0.1.0...v0.2.0) (2026-03-18)
 
 

@@ -10,6 +10,7 @@ on:
       - "Cargo.lock"
       - ".node-version"
       - ".github/actions/download-nodejs/**"
+      - ".github/actions/download-wsl-resources/**"
   push:
     branches: [main, dev]
     paths:
@@ -19,6 +20,7 @@ on:
       - "Cargo.lock"
       - ".node-version"
       - ".github/actions/download-nodejs/**"
+      - ".github/actions/download-wsl-resources/**"
 
 permissions:
   contents: read
@@ -106,24 +108,7 @@ jobs:
 
       - name: Download WSL resources for offline bundling
         if: matrix.platform == 'windows-latest'
-        shell: bash
-        run: |
-          CONSTS=crates/speedwave-runtime/src/consts.rs
-          NERDCTL_VERSION=$(grep -A1 '^pub const NERDCTL_FULL_VERSION' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
-          [ -n "$NERDCTL_VERSION" ] || { echo "::error::Failed to parse NERDCTL_FULL_VERSION"; exit 1; }
-          NERDCTL_SHA256=$(grep -A1 '^pub const NERDCTL_FULL_SHA256_AMD64' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
-          [ -n "$NERDCTL_SHA256" ] || { echo "::error::Failed to parse NERDCTL_FULL_SHA256_AMD64"; exit 1; }
-          ROOTFS_URL=$(grep -A1 '^pub const WSL_ROOTFS_URL_AMD64' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
-          [ -n "$ROOTFS_URL" ] || { echo "::error::Failed to parse WSL_ROOTFS_URL_AMD64"; exit 1; }
-          ROOTFS_SHA256=$(grep -A1 '^pub const WSL_ROOTFS_SHA256_AMD64' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
-          [ -n "$ROOTFS_SHA256" ] || { echo "::error::Failed to parse WSL_ROOTFS_SHA256_AMD64"; exit 1; }
-          mkdir -p desktop/src-tauri/wsl
-          curl -fsSL "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/nerdctl-full-${NERDCTL_VERSION}-linux-amd64.tar.gz" \
-            -o desktop/src-tauri/wsl/nerdctl-full.tar.gz
-          echo "${NERDCTL_SHA256}  desktop/src-tauri/wsl/nerdctl-full.tar.gz" | sha256sum -c -
-          curl -fsSL "${ROOTFS_URL}" \
-            -o desktop/src-tauri/wsl/ubuntu-rootfs.tar.gz
-          echo "${ROOTFS_SHA256}  desktop/src-tauri/wsl/ubuntu-rootfs.tar.gz" | sha256sum -c -
+        uses: ./.github/actions/download-wsl-resources
 
       - name: Download Node.js for bundling
         uses: ./.github/actions/download-nodejs

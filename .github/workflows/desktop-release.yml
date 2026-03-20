@@ -58,6 +58,7 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
       tag_name: ${{ steps.resolve.outputs.tag_name }}
       release_id: ${{ steps.resolve.outputs.release_id }}
+      tag_exists: ${{ steps.resolve.outputs.tag_exists }}
     steps:
       - name: Resolve version and release parameters
         id: resolve
@@ -92,11 +93,20 @@ jobs:
             echo "Found existing release ID: $RELEASE_ID for tag $TAG"
           fi
 
+          # Check if tag exists on remote (needed for deterministic checkout)
+          TAG_EXISTS=$(gh api "repos/$REPO/git/refs/tags/$TAG" --jq '.ref' 2>/dev/null || true)
+          if [ -n "$TAG_EXISTS" ]; then
+            echo "tag_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Tag $TAG does not exist — build will use branch HEAD"
+            echo "tag_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
 
-          echo "Resolved: version=$VERSION tag=$TAG release_id=$RELEASE_ID"
+          echo "Resolved: version=$VERSION tag=$TAG release_id=$RELEASE_ID tag_exists=$TAG_EXISTS"
 
   # ── Desktop app (Tauri) — official tauri-action pattern ──────────────────
   publish-tauri:
@@ -120,6 +130,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          ref: ${{ needs.resolve.outputs.tag_exists == 'true' && needs.resolve.outputs.tag_name || '' }}
           persist-credentials: false
 
       - name: Install Linux system dependencies
@@ -221,24 +232,7 @@ jobs:
 
       - name: Download WSL resources for offline bundling
         if: matrix.platform == 'windows-latest'
-        shell: bash
-        run: |
-          CONSTS=crates/speedwave-runtime/src/consts.rs
-          NERDCTL_VERSION=$(grep -A1 '^pub const NERDCTL_FULL_VERSION' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
-          [ -n "$NERDCTL_VERSION" ] || { echo "::error::Failed to parse NERDCTL_FULL_VERSION"; exit 1; }
-          NERDCTL_SHA256=$(grep -A1 '^pub const NERDCTL_FULL_SHA256_AMD64' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
-          [ -n "$NERDCTL_SHA256" ] || { echo "::error::Failed to parse NERDCTL_FULL_SHA256_AMD64"; exit 1; }
-          ROOTFS_URL=$(grep -A1 '^pub const WSL_ROOTFS_URL_AMD64' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
-          [ -n "$ROOTFS_URL" ] || { echo "::error::Failed to parse WSL_ROOTFS_URL_AMD64"; exit 1; }
-          ROOTFS_SHA256=$(grep -A1 '^pub const WSL_ROOTFS_SHA256_AMD64' "$CONSTS" | grep '"' | sed 's/.*"\(.*\)".*/\1/')
-          [ -n "$ROOTFS_SHA256" ] || { echo "::error::Failed to parse WSL_ROOTFS_SHA256_AMD64"; exit 1; }
-          mkdir -p desktop/src-tauri/wsl
-          curl -fsSL "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/nerdctl-full-${NERDCTL_VERSION}-linux-amd64.tar.gz" \
-            -o desktop/src-tauri/wsl/nerdctl-full.tar.gz
-          echo "${NERDCTL_SHA256}  desktop/src-tauri/wsl/nerdctl-full.tar.gz" | sha256sum -c -
-          curl -fsSL "${ROOTFS_URL}" \
-            -o desktop/src-tauri/wsl/ubuntu-rootfs.tar.gz
-          echo "${ROOTFS_SHA256}  desktop/src-tauri/wsl/ubuntu-rootfs.tar.gz" | sha256sum -c -
+        uses: ./.github/actions/download-wsl-resources
 
       - name: Download Node.js for bundling
         uses: ./.github/actions/download-nodejs
@@ -264,9 +258,12 @@ jobs:
 
       - name: Build CLI for bundling
         shell: bash
+        env:
+          MATRIX_ARGS: ${{ matrix.args }}
+          MATRIX_PLATFORM: ${{ matrix.platform }}
         run: |
           # Extract --target value from matrix.args using sed (BSD-compatible)
-          TARGET=$(echo "${{ matrix.args }}" | sed -n 's/.*--target \([^ ]*\).*/\1/p')
+          TARGET=$(echo "$MATRIX_ARGS" | sed -n 's/.*--target \([^ ]*\).*/\1/p')
           if [ -n "$TARGET" ]; then
             cargo build --release --target "$TARGET" -p speedwave-cli
             CLI_BIN="target/$TARGET/release/speedwave"
@@ -275,7 +272,7 @@ jobs:
             CLI_BIN="target/release/speedwave"
           fi
           # Windows: append .exe
-          if [ "${{ matrix.platform }}" = "windows-latest" ]; then
+          if [ "$MATRIX_PLATFORM" = "windows-latest" ]; then
             CLI_BIN="${CLI_BIN}.exe"
           fi
           mkdir -p desktop/src-tauri/cli
@@ -283,10 +280,12 @@ jobs:
 
       - name: Verify bundled runtime assets
         shell: bash
+        env:
+          MATRIX_PLATFORM: ${{ matrix.platform }}
         run: |
-          if [ "${{ matrix.platform }}" = "windows-latest" ]; then
+          if [ "$MATRIX_PLATFORM" = "windows-latest" ]; then
             scripts/verify-bundled-assets.sh windows
-          elif [ "${{ matrix.platform }}" = "ubuntu-22.04" ]; then
+          elif [ "$MATRIX_PLATFORM" = "ubuntu-22.04" ]; then
             scripts/verify-bundled-assets.sh linux
           else
             scripts/verify-bundled-assets.sh macos
@@ -341,6 +340,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          ref: ${{ needs.resolve.outputs.tag_exists == 'true' && needs.resolve.outputs.tag_name || '' }}
           persist-credentials: false
 
       - name: Install Rust stable
@@ -349,7 +349,9 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Ensure cross-compile target is installed
-        run: rustup target add ${{ matrix.target }}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: rustup target add "$TARGET"
 
       - name: Rust cache
         uses: swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5  # v2.8.2
@@ -404,6 +406,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ needs.resolve.outputs.tag_name }}
+          VERSION: ${{ needs.resolve.outputs.version }}
           RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
           REPO: ${{ github.repository }}
         run: |
@@ -420,12 +423,25 @@ jobs:
             exit 1
           fi
 
-          # Verify assets were uploaded (4 Tauri + 4 CLI + latest.json = 9 minimum)
+          # Verify asset count (~12 Tauri + 4 CLI + latest.json = 17 minimum)
           ASSET_COUNT=$(gh api "repos/$REPO/releases/$RID/assets" --jq 'length')
           echo "Release has $ASSET_COUNT assets"
-          if [ "$ASSET_COUNT" -lt 9 ]; then
-            echo "::warning::Release has fewer than 9 assets (expected: 4 Tauri + 4 CLI + latest.json) — some platforms may have failed"
+          if [ "$ASSET_COUNT" -lt 17 ]; then
+            echo "::error::Release has $ASSET_COUNT assets (expected 17+: ~12 Tauri + 4 CLI + latest.json). Some platforms may have failed."
+            echo "::error::To publish anyway: gh api --method PATCH repos/$REPO/releases/$RID -f draft=false"
+            exit 1
           fi
+
           # Publish: draft -> live
           gh api --method PATCH "repos/$REPO/releases/$RID" -f draft=false
           echo "Release published successfully"
+
+          # Verify latest.json has correct version
+          LATEST_VERSION=$(gh release download "$TAG_NAME" --repo "$REPO" --pattern "latest.json" --output - | jq -r '.version')
+          if [ "$LATEST_VERSION" != "$VERSION" ]; then
+            echo "::error::latest.json reports version '$LATEST_VERSION' but expected '$VERSION'"
+            echo "::error::This indicates the build checked out wrong code. Reverting to draft."
+            gh api --method PATCH "repos/$REPO/releases/$RID" -f draft=true
+            exit 1
+          fi
+          echo "Verified: latest.json version matches expected version $VERSION"

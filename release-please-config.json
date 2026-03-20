@@ -6,8 +6,6 @@
   "include-v-in-tag": true,
   "include-component-in-tag": false,
   "bump-minor-pre-major": true,
-  "bootstrap-sha": "88d7a3dc5b87eff887760e1a374f2b97ce180265",
-  "last-release-sha": "27af03db358aa0712c0256679c42dc334be87cc0",
   "changelog-sections": [
     { "type": "feat", "section": "Features" },
     { "type": "fix", "section": "Bug Fixes" },
