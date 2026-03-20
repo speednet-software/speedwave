@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/speednet-software/speedwave/compare/v0.3.1...v0.3.2) (2026-03-20)
+
+
+### Bug Fixes
+
+* **ci:** fix Windows CLI build, tag creation, backmerge conflicts, and release-please label parsing ([#229](https://github.com/speednet-software/speedwave/issues/229)) ([338dec5](https://github.com/speednet-software/speedwave/commit/338dec5bf4d6f35014f46749fe4c151165a6304f))
+
 ## [0.3.1](https://github.com/speednet-software/speedwave/compare/v0.3.0...v0.3.1) (2026-03-20)
 
 
