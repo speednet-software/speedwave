@@ -411,7 +411,10 @@ jobs:
     steps:
       - name: Validate artifacts and publish release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Use RELEASE_TOKEN (PAT) instead of GITHUB_TOKEN so that the
+          # release:published event triggers downstream workflows (backmerge).
+          # GITHUB_TOKEN events don't trigger new workflow runs.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           TAG_NAME: ${{ needs.resolve.outputs.tag_name }}
           VERSION: ${{ needs.resolve.outputs.version }}
           RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
