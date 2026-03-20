@@ -573,58 +573,6 @@ fn apply_worker_auth_tokens_with_dir(
         ensure_worker_auth_token(&mut doc, secrets_dir, sid, &compose_name, &env_key)?;
     }
 
-    // Generate auth tokens for enabled plugin MCP workers (same pattern as built-in)
-    for manifest in installed_plugins {
-        let sid = match manifest.service_id.as_deref() {
-            Some(s) => s,
-            None => continue,
-        };
-        if !integrations.is_plugin_enabled(sid) {
-            continue;
-        }
-
-        let token_file_name = format!("{sid}-auth-token");
-        let token_path = secrets_dir.join(&token_file_name);
-
-        let token = if token_path.is_file() {
-            let content = std::fs::read_to_string(&token_path)?.trim().to_string();
-            if content.is_empty() {
-                uuid::Uuid::new_v4().to_string()
-            } else {
-                content
-            }
-        } else {
-            if token_path.is_symlink() {
-                std::fs::remove_file(&token_path)?;
-            } else if token_path.exists() {
-                std::fs::remove_dir_all(&token_path)?;
-            }
-            uuid::Uuid::new_v4().to_string()
-        };
-
-        let tmp_path = token_path.with_extension("tmp");
-        std::fs::write(&tmp_path, &token)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        std::fs::rename(&tmp_path, &token_path)?;
-
-        let compose_name = plugin::derive_compose_name(sid);
-        let env_key = format!("MCP_{}_AUTH_TOKEN", sid.to_uppercase().replace('-', "_"));
-        add_service_env_var(&mut doc, &compose_name, &env_key, &token)?;
-
-        add_hub_volume(
-            &mut doc,
-            &format!(
-                "{}:/secrets/{}:ro",
-                to_engine_path(&token_path)?,
-                token_file_name
-            ),
-        );
-    }
-
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
