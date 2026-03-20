@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/speednet-software/speedwave/compare/v0.3.2...v0.3.3) (2026-03-20)
+
+
+### Bug Fixes
+
+* **e2e:** repair broken selectors and macOS clean_state after Tailwind migration ([#238](https://github.com/speednet-software/speedwave/issues/238)) ([f798226](https://github.com/speednet-software/speedwave/commit/f798226171fc71c6bc49d66dddb5af2fd79b270f))
+
 ## [0.3.2](https://github.com/speednet-software/speedwave/compare/v0.3.1...v0.3.2) (2026-03-20)
 
 
