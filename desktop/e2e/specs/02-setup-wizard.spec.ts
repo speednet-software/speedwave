@@ -21,8 +21,8 @@ const E2E_PROJECT_DIR = process.env.E2E_PROJECT_DIR || '/tmp/speedwave-e2e-proje
 /** Check if setup is complete by invoking the Tauri command directly.
  *
  * This is the SSOT — if Rust says setup is complete, it is complete.
- * DOM state (CSS classes, element existence) is secondary and subject
- * to WebDriver timing issues.
+ * DOM state (data-status attributes, element existence) is secondary and
+ * subject to WebDriver timing issues.
  *
  * Uses executeAsync because __TAURI_INTERNALS__.invoke() returns a Promise.
  * browser.execute() cannot await Promises — it returns null for them.
@@ -39,7 +39,7 @@ async function isSetupComplete(): Promise<boolean> {
 /** Wait for a setup wizard step (0-based index) to reach a terminal state.
  *
  * When steps complete very fast (cached images), the wizard may jump straight
- * to phase='complete' before a poll catches the individual step's 'done' class.
+ * to phase='complete' before a poll catches the individual step's status.
  * We treat the presence of `[data-testid="setup-success"]` as "all steps done".
  *
  * If DOM polling times out but Tauri reports setup complete, the step is
@@ -47,21 +47,21 @@ async function isSetupComplete(): Promise<boolean> {
  * individual step DOM states before WebDriver catches them.
  */
 async function waitForStepTerminal(index: number, timeout: number): Promise<string> {
-  let resultCls = '';
+  let status = '';
   try {
     await browser.waitUntil(
       async () => {
         // If the wizard already shows the success screen, all steps completed.
         const success = await $('[data-testid="setup-success"]');
         if (await success.isExisting()) {
-          resultCls = 'done';
+          status = 'done';
           return true;
         }
-        const steps = await $$('.step');
+        const steps = await $$('[data-testid="setup-step"]');
         if (index >= (await steps.length)) return false;
-        const cls = await steps[index].getAttribute('class');
-        if (cls !== null && (cls.includes('done') || cls.includes('error'))) {
-          resultCls = cls;
+        const stepStatus = await steps[index].getAttribute('data-status');
+        if (stepStatus === 'done' || stepStatus === 'error') {
+          status = stepStatus;
           return true;
         }
         return false;
@@ -71,26 +71,26 @@ async function waitForStepTerminal(index: number, timeout: number): Promise<stri
   } catch (e) {
     // DOM poll timed out — check Tauri state as fallback.
     // On fast second installs, steps 4-5 complete and the wizard redirects
-    // before WebDriver catches the individual step's CSS class change.
+    // before WebDriver catches the individual step's data-status change.
     const complete = await isSetupComplete();
     if (complete) {
-      resultCls = 'done';
+      status = 'done';
     } else {
       throw e;
     }
   }
-  return resultCls;
+  return status;
 }
 
 /** Assert a step completed successfully. If it errored, include the error message. */
 async function assertStepDone(index: number, timeout: number): Promise<void> {
-  const cls = await waitForStepTerminal(index, timeout);
-  if (cls.includes('error')) {
+  const status = await waitForStepTerminal(index, timeout);
+  if (status === 'error') {
     const errorBanner = await $('[data-testid="setup-error"]');
     const errorText = (await errorBanner.isExisting()) ? await errorBanner.getText() : 'unknown error';
     throw new Error(`Step ${index} failed: ${errorText}`);
   }
-  expect(cls).toContain('done');
+  expect(status).toBe('done');
 }
 
 describe('Setup Wizard — Full Flow', function () {
@@ -114,10 +114,10 @@ describe('Setup Wizard — Full Flow', function () {
     const btn = await $('[data-testid="setup-start-btn"]');
     await btn.click();
 
-    const stepsContainer = await $('.steps');
+    const stepsContainer = await $('[data-testid="setup-steps"]');
     await stepsContainer.waitForExist({ timeout: 5_000 });
 
-    const stepElements = await $$('.step');
+    const stepElements = await $$('[data-testid="setup-step"]');
     expect(await stepElements.length).toBe(6);
 
     const expectedTitles = [
@@ -129,7 +129,7 @@ describe('Setup Wizard — Full Flow', function () {
       'Finalize',
     ];
     for (let i = 0; i < expectedTitles.length; i++) {
-      const titleEl = await stepElements[i].$('.step-title');
+      const titleEl = await stepElements[i].$('[data-testid="step-title"]');
       expect((await titleEl.getText()).trim()).toBe(expectedTitles[i]);
     }
   });
@@ -168,9 +168,9 @@ describe('Setup Wizard — Full Flow', function () {
     expect(await createBtn.isEnabled()).toBe(false);
 
     // Verify step 3 is active
-    const steps = await $$('.step');
-    const step3cls = await steps[3].getAttribute('class');
-    expect(step3cls).toContain('active');
+    const steps = await $$('[data-testid="setup-step"]');
+    const step3status = await steps[3].getAttribute('data-status');
+    expect(step3status).toBe('active');
   });
 
   it('should fill project form and create the project', async function () {
