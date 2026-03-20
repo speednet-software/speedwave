@@ -97,7 +97,13 @@ jobs:
           TAG_EXISTS=$(gh api "repos/$REPO/git/refs/tags/$TAG" --jq '.ref' 2>/dev/null || true)
           if [ -n "$TAG_EXISTS" ]; then
             echo "tag_exists=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "$INPUT_TAG_NAME" ]; then
+            # workflow_dispatch (no tag_name input) — tag must exist to ensure correct code
+            echo "::error::Tag $TAG does not exist. Manual dispatch requires an existing tag to build the correct code."
+            echo "::error::Either create the tag first, or use workflow_call from release-please."
+            exit 1
           else
+            # workflow_call — tag may not exist yet (race condition), fall back to branch HEAD
             echo "::warning::Tag $TAG does not exist — build will use branch HEAD"
             echo "tag_exists=false" >> "$GITHUB_OUTPUT"
           fi

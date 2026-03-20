@@ -326,6 +326,8 @@ After every release, `main` has commits that `dev` doesn't (version bumps, CHANG
 
 **Why regular merge (not squash)?** Squash merge would create a new commit with a different SHA. Release-please on `main` would then see the same changes as "new" commits the next time `dev` is merged back to `main`, causing phantom release PRs with duplicate changelog entries.
 
+**Prerequisite:** the repository must have **"Allow auto-merge"** enabled in GitHub Settings > General > Pull Requests. Without this, `gh pr merge --auto` silently does nothing and backmerge PRs will require manual merge.
+
 ## Known Pitfalls
 
 ### Version mismatch between code and release

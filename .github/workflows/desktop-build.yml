@@ -156,10 +156,12 @@ jobs:
 
       - name: Verify bundled runtime assets
         shell: bash
+        env:
+          MATRIX_PLATFORM: ${{ matrix.platform }}
         run: |
-          if [ "${{ matrix.platform }}" = "windows-latest" ]; then
+          if [ "$MATRIX_PLATFORM" = "windows-latest" ]; then
             scripts/verify-bundled-assets.sh windows
-          elif [ "${{ matrix.platform }}" = "ubuntu-22.04" ]; then
+          elif [ "$MATRIX_PLATFORM" = "ubuntu-22.04" ]; then
             scripts/verify-bundled-assets.sh linux
           else
             scripts/verify-bundled-assets.sh macos
@@ -172,4 +174,5 @@ jobs:
           CI: true
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx --prefix ../src tauri build ${{ matrix.args }}
+          MATRIX_ARGS: ${{ matrix.args }}
+        run: npx --prefix ../src tauri build $MATRIX_ARGS

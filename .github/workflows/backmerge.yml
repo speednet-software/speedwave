@@ -51,7 +51,7 @@ jobs:
           EXISTING_PR=$(gh pr list --repo "$REPO" --head "$BRANCH" --base dev --state open --json number --jq '.[0].number' 2>/dev/null || true)
           if [ -n "$EXISTING_PR" ]; then
             echo "Closing existing backmerge PR #$EXISTING_PR"
-            gh pr close "$EXISTING_PR" --repo "$REPO" --delete-branch 2>/dev/null || true
+            gh pr close "$EXISTING_PR" --repo "$REPO" --delete-branch 2>&1 || echo "::warning::Could not close/delete previous backmerge PR #$EXISTING_PR"
           fi
 
           git checkout -b "$BRANCH" origin/dev
@@ -81,8 +81,11 @@ jobs:
             echo "Created PR: $PR_URL"
             # Enable auto-merge with merge strategy (not squash — preserve main's history)
             PR_NUMBER=$(echo "$PR_URL" | grep -o '[0-9]*$')
-            gh pr merge "$PR_NUMBER" --repo "$REPO" --merge --auto
-            echo "Auto-merge enabled"
+            if gh pr merge "$PR_NUMBER" --repo "$REPO" --merge --auto; then
+              echo "Auto-merge enabled"
+            else
+              echo "::notice::Could not enable auto-merge. Ensure 'Allow auto-merge' is enabled in repo settings (Settings > General > Pull Requests)."
+            fi
             exit 0
           fi
 
@@ -190,5 +193,8 @@ jobs:
           )")
           echo "Created PR: $PR_URL"
           PR_NUMBER=$(echo "$PR_URL" | grep -o '[0-9]*$')
-          gh pr merge "$PR_NUMBER" --repo "$REPO" --merge --auto
-          echo "Auto-merge enabled"
+          if gh pr merge "$PR_NUMBER" --repo "$REPO" --merge --auto; then
+            echo "Auto-merge enabled"
+          else
+            echo "::notice::Could not enable auto-merge. Ensure 'Allow auto-merge' is enabled in repo settings (Settings > General > Pull Requests)."
+          fi
