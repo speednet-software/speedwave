@@ -355,6 +355,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Ensure cross-compile target is installed
+        shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: rustup target add "$TARGET"

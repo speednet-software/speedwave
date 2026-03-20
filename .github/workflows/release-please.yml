@@ -29,11 +29,17 @@ jobs:
       # release-please can fail transiently (PR node ID not propagated yet).
       - name: Ensure release PR has autorelease label
         if: steps.release.outputs.pr
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          PR_NUMBER: ${{ steps.release.outputs.pr }}
+          PR_JSON: ${{ steps.release.outputs.pr }}
           REPO: ${{ github.repository }}
         run: |
+          PR_NUMBER=$(echo "$PR_JSON" | jq -r '.number // empty' 2>/dev/null || echo "$PR_JSON")
+          if [ -z "$PR_NUMBER" ] || ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "::warning::Could not parse PR number from release-please output"
+            exit 0
+          fi
           LABELS=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name')
           if echo "$LABELS" | grep -q "autorelease: pending"; then
             echo "Label already present"
@@ -44,6 +50,29 @@ jobs:
             gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "autorelease: pending" && exit 0
           done
           echo "::warning::Failed to apply label after 3 retries"
+
+      # Defense-in-depth: ensure the git tag exists as a ref. GitHub draft
+      # releases may not create a git ref, even with force-tag-creation: true.
+      # Without the tag, checkout in desktop-release.yml fails.
+      - name: Ensure release tag exists
+        if: steps.release.outputs.release_created == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          TAG_NAME: ${{ steps.release.outputs.tag_name }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          if gh api "repos/$REPO/git/refs/tags/${TAG_NAME#v}" --jq '.ref' 2>/dev/null || \
+             gh api "repos/$REPO/git/refs/tags/$TAG_NAME" --jq '.ref' 2>/dev/null; then
+            echo "Tag $TAG_NAME already exists"
+            exit 0
+          fi
+          echo "Tag $TAG_NAME missing — creating from $SHA"
+          gh api "repos/$REPO/git/refs" \
+            -f "ref=refs/tags/$TAG_NAME" \
+            -f "sha=$SHA" --jq '.ref'
+          echo "Tag created successfully"
 
   build-and-publish:
     needs: release-please
