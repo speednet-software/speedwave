@@ -18,6 +18,16 @@
 
 set -euo pipefail
 
+# --- Instance isolation ---
+# SPEEDWAVE_DATA_DIR overrides ~/.speedwave (see ADR-031).
+# Derive instance name — MUST match Rust derive_instance_name_from() in consts.rs
+SPEEDWAVE_DATA_DIR="${SPEEDWAVE_DATA_DIR:-$HOME/.speedwave}"
+SPEEDWAVE_VM_NAME="$(basename "$SPEEDWAVE_DATA_DIR" | sed 's/^\.//')"
+if ! echo "$SPEEDWAVE_VM_NAME" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
+    echo "ERROR: SPEEDWAVE_DATA_DIR basename '$SPEEDWAVE_VM_NAME' is invalid (must match ^[a-z][a-z0-9-]{0,63}$)" >&2
+    exit 1
+fi
+
 # -- Configuration (shared) ----------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -247,8 +257,10 @@ windows_rsync_to() {
     # quoting issues with bash -c inside a single command).
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- rm -rf ${dst}"
+    # Ensure the parent directory exists — /home/<user>/ may not exist if the
+    # WSL distro was freshly installed or the default user's home wasn't created.
     # shellcheck disable=SC2086
-    ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- mkdir -p ${dst}"
+    ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -c 'mkdir -p ${dst}'"
     # Create a local tar archive, scp it to the Windows host, then extract
     # inside WSL2. Piping tar directly through SSH → cmd.exe → wsl.exe is
     # unreliable — stdin forwarding breaks after WSL VM restarts.
@@ -410,19 +422,19 @@ set -euo pipefail
 pkill -f speedwave-desktop 2>/dev/null || true
 pkill -f 'mcp-os.*index.js' 2>/dev/null || true
 sleep 1
-# Stop and remove containers inside Lima VM BEFORE removing ~/.speedwave
-LIMACTL="$HOME/.speedwave/lima/bin/limactl"
-if [ -x "$LIMACTL" ] && LIMA_HOME="$HOME/.speedwave/lima" "$LIMACTL" list -q 2>/dev/null | grep -q speedwave; then
-    for compose_file in ~/.speedwave/compose/*/compose.yml; do
+# Stop and remove containers inside Lima VM BEFORE removing $SPEEDWAVE_DATA_DIR
+LIMACTL="$SPEEDWAVE_DATA_DIR/lima/bin/limactl"
+if [ -x "$LIMACTL" ] && LIMA_HOME="$SPEEDWAVE_DATA_DIR/lima" "$LIMACTL" list -q 2>/dev/null | grep -q $SPEEDWAVE_VM_NAME; then
+    for compose_file in $SPEEDWAVE_DATA_DIR/compose/*/compose.yml; do
         [ -f "$compose_file" ] || continue
         project=$(basename "$(dirname "$compose_file")")
-        LIMA_HOME="$HOME/.speedwave/lima" "$LIMACTL" shell speedwave \
+        LIMA_HOME="$SPEEDWAVE_DATA_DIR/lima" "$LIMACTL" shell $SPEEDWAVE_VM_NAME \
             sudo nerdctl compose -f "$compose_file" -p "$project" down 2>/dev/null || true
     done
 fi
 # Kill Lima VM (hostagent ignores SIGTERM)
 pkill -9 -f limactl 2>/dev/null || true
-rm -f ~/.speedwave/lima/*/ssh.sock 2>/dev/null || true
+rm -f $SPEEDWAVE_DATA_DIR/lima/*/ssh.sock 2>/dev/null || true
 # Unmount all Speedwave DMG volumes (Finder appends " 1", " 2" for duplicates)
 for vol in /Volumes/Speedwave*; do
     [ -d "$vol" ] || continue
@@ -430,7 +442,7 @@ for vol in /Volumes/Speedwave*; do
 done
 rm -rf /Applications/Speedwave.app 2>/dev/null || true
 # Remove Speedwave user data (config, Lima VM, setup markers, cached downloads)
-rm -rf ~/.speedwave 2>/dev/null || true
+rm -rf "$SPEEDWAVE_DATA_DIR" 2>/dev/null || true
 rm -rf ~/Library/Caches/lima 2>/dev/null || true
 # Remove previous build/test dirs and artifacts
 rm -rf /tmp/speedwave-e2e /tmp/speedwave.dmg /tmp/speedwave.log 2>/dev/null || true
@@ -930,10 +942,17 @@ cd desktop/e2e && npm ci && cd ../..
 
 echo "── Building full release (.dmg)..."
 make test-e2e-desktop-build
+SCRIPT
 
+    # Locate and copy the .dmg artifact in a separate SSH call — the long-running
+    # build above can consume stdin (via npm/cargo subprocesses), which would
+    # swallow subsequent commands if they were in the same heredoc.
+    echo "[macos] Locating .dmg artifact on remote..."
+    macos_ssh bash <<'SCRIPT'
+set -euo pipefail
+cd /tmp/speedwave-e2e
 echo "── Locating .dmg artifact..."
 ls -la desktop/src-tauri/target/release/bundle/dmg/*.dmg
-
 echo "── Copying .dmg to ~/Desktop/ for reuse across phases..."
 cp desktop/src-tauri/target/release/bundle/dmg/*.dmg ~/Desktop/speedwave.dmg
 SCRIPT
@@ -1067,7 +1086,7 @@ cleanup() {
     pkill -9 -f limactl 2>/dev/null || true
     pkill -9 -f 'mcp-os.*index.js' 2>/dev/null || true
     # Clean up Lima SSH mux sockets
-    rm -f ~/.speedwave/lima/*/ssh.sock 2>/dev/null || true
+    rm -f $SPEEDWAVE_DATA_DIR/lima/*/ssh.sock 2>/dev/null || true
 }
 trap cleanup EXIT
 

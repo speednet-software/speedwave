@@ -4,17 +4,19 @@ Speedwave's test strategy covers Rust crates, MCP servers, CLI, desktop, and end
 
 ## Running Tests
 
-| Command                   | What it runs                                                        |
-| ------------------------- | ------------------------------------------------------------------- |
-| `make test`               | All tests (Rust + MCP + entrypoint)                                 |
-| `make test-rust`          | Rust unit/integration tests (`speedwave-runtime` + `speedwave-cli`) |
-| `make test-cli`           | CLI-specific tests                                                  |
-| `make test-mcp`           | All MCP workspace tests (shared, hub, slack, gitlab, etc.)          |
-| `make test-os`            | OS MCP server tests only                                            |
-| `make test-angular`       | Angular desktop UI tests (`vitest run`)                             |
-| `make test-e2e`           | End-to-end CLI tests (requires `bats-core`)                         |
-| `make test-entrypoint`    | Container entrypoint script tests (requires `bats-core`)            |
-| `make test-desktop-build` | Verifies desktop Tauri build succeeds                               |
+| Command                   | What it runs                                                            |
+| ------------------------- | ----------------------------------------------------------------------- |
+| `make test`               | All tests (Rust + Angular + MCP + entrypoint + desktop-build + desktop) |
+| `make test-rust`          | Rust unit/integration tests (`speedwave-runtime` + `speedwave-cli`)     |
+| `make test-cli`           | CLI-specific tests                                                      |
+| `make test-mcp`           | All MCP workspace tests (shared, hub, slack, gitlab, etc.)              |
+| `make test-os`            | OS MCP server tests only                                                |
+| `make test-angular`       | Angular desktop UI tests (`vitest run`)                                 |
+| `make test-e2e`           | End-to-end CLI tests (requires `bats-core`)                             |
+| `make test-entrypoint`    | Container entrypoint script tests (requires `bats-core`)                |
+| `make test-swift`         | Swift tests for native macOS CLI packages (macOS only)                  |
+| `make test-desktop`       | Desktop integration tests (builds CLI, Angular, MCP, OS CLI first)      |
+| `make test-desktop-build` | Verifies desktop Tauri build succeeds                                   |
 
 ## Coverage
 
@@ -39,12 +41,13 @@ Thresholds are enforced locally via vitest `coverage.thresholds` in each workspa
 
 ## CI Pipeline
 
-The `.github/workflows/test.yml` workflow runs on every push to `main` and every PR to `main`/`dev`. It has four jobs:
+The `.github/workflows/test.yml` workflow runs on every push to `main`/`dev` and every PR to `main`/`dev`. It has five jobs:
 
 1. **lint** — Rust clippy + format, Prettier, MCP type-check (tsc), MCP ESLint
 2. **test** — Rust tests, MCP tests with coverage enforcement, entrypoint tests (bats)
 3. **desktop** — Desktop clippy, Angular ESLint, Angular tests with coverage enforcement, Tauri build check
 4. **audit** — npm audit + cargo audit for all workspaces
+5. **swift** (PRs only) — Builds native macOS CLI binaries as universal binaries (`scripts/build-native-macos.sh`) and runs Swift tests on `macos-latest`. Catches xcbuild/`@main` attribute issues that `swift build` (llbuild) tolerates locally
 
 ## Test Patterns
 

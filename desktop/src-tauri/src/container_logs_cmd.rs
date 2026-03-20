@@ -5,10 +5,10 @@ use crate::types::check_project;
 /// Validate that a container name starts with the Speedwave compose prefix
 /// and contains only safe characters (alphanumeric, underscore, hyphen, dot).
 fn validate_container_name(container: &str) -> Result<(), String> {
-    if !container.starts_with(&format!("{}_", speedwave_runtime::consts::COMPOSE_PREFIX)) {
+    if !container.starts_with(&format!("{}_", speedwave_runtime::consts::compose_prefix())) {
         return Err(format!(
             "Invalid container name: must start with '{}_'",
-            speedwave_runtime::consts::COMPOSE_PREFIX
+            speedwave_runtime::consts::compose_prefix()
         ));
     }
     if !container
@@ -21,9 +21,9 @@ fn validate_container_name(container: &str) -> Result<(), String> {
 }
 
 /// Parse the project name from a Claude container name.
-/// Expected format: `{COMPOSE_PREFIX}_{project}_claude`.
+/// Expected format: `{compose_prefix()}_{project}_claude`.
 fn parse_claude_project(container: &str) -> Result<String, String> {
-    let prefix = format!("{}_", speedwave_runtime::consts::COMPOSE_PREFIX);
+    let prefix = format!("{}_", speedwave_runtime::consts::compose_prefix());
     let without_prefix = container
         .strip_prefix(&prefix)
         .ok_or_else(|| "Not a claude container".to_string())?;
@@ -91,10 +91,8 @@ pub(crate) async fn get_compose_logs(project: String, tail: Option<u32>) -> Resu
 #[tauri::command]
 pub(crate) async fn get_mcp_os_logs(tail: Option<u32>) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
-        let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
-        let log_path = home
-            .join(speedwave_runtime::consts::DATA_DIR)
-            .join(speedwave_runtime::consts::MCP_OS_LOG_FILE);
+        let log_path =
+            speedwave_runtime::consts::data_dir().join(speedwave_runtime::consts::MCP_OS_LOG_FILE);
         let tail = tail.unwrap_or(200).min(10_000) as usize;
         read_tail_sanitized(&log_path, tail)
     })
@@ -114,10 +112,7 @@ pub(crate) async fn get_claude_session_logs(
     let tail = tail.unwrap_or(200).min(10_000) as usize;
 
     tokio::task::spawn_blocking(move || {
-        let log_path = match speedwave_runtime::consts::claude_session_log_path(&project) {
-            Some(p) => p,
-            None => return Ok(String::new()),
-        };
+        let log_path = speedwave_runtime::consts::claude_session_log_path(&project);
         read_tail_sanitized(&log_path, tail)
     })
     .await

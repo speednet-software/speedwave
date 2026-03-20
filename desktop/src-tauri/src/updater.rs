@@ -54,7 +54,7 @@ impl UpdateSettings {
 // ---------------------------------------------------------------------------
 
 fn settings_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(consts::DATA_DIR).join("update-settings.json"))
+    Some(consts::data_dir().join("update-settings.json"))
 }
 
 pub fn load_update_settings() -> UpdateSettings {

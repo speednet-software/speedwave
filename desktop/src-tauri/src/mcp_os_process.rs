@@ -53,8 +53,7 @@ impl McpOsProcess {
     /// Before spawning, kills any stale mcp-os process left over from a
     /// previous session by reading the PID file.
     pub fn spawn(script_path: &str) -> anyhow::Result<Self> {
-        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
-        Self::spawn_in(script_path, &home.join(consts::DATA_DIR))
+        Self::spawn_in(script_path, consts::data_dir())
     }
 
     fn spawn_in(script_path: &str, data_dir: &Path) -> anyhow::Result<Self> {

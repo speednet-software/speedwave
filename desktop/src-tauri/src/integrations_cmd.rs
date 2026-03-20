@@ -157,9 +157,7 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
     let integrations =
         config::resolve_integrations(std::path::Path::new(project_dir), &user_config, &project);
 
-    let home = dirs::home_dir().ok_or("cannot determine home directory")?;
-    let tokens_dir = home
-        .join(speedwave_runtime::consts::DATA_DIR)
+    let tokens_dir = speedwave_runtime::consts::data_dir()
         .join("tokens")
         .join(&project);
 
@@ -230,15 +228,43 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
 }
 
 pub(crate) fn is_service_configured(project: &str, service: &str) -> bool {
-    let home = match dirs::home_dir() {
-        Some(h) => h,
+    let svc_desc = match speedwave_runtime::consts::find_mcp_service(service) {
+        Some(d) => d,
         None => return false,
     };
-    is_service_configured_with_home(&home, project, service)
+    if svc_desc.auth_fields.is_empty() {
+        return false;
+    }
+    let svc_token_dir = speedwave_runtime::consts::data_dir()
+        .join("tokens")
+        .join(project)
+        .join(service);
+
+    let has_config_fields = svc_desc.auth_fields.iter().any(|f| f.stored_in_config_json);
+    let config_json = if has_config_fields {
+        read_service_config(&svc_token_dir)
+    } else {
+        serde_json::json!({})
+    };
+
+    svc_desc.auth_fields.iter().all(|f| {
+        if f.stored_in_config_json {
+            config_json
+                .get(f.key)
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
+        } else {
+            let path = svc_token_dir.join(f.key);
+            std::fs::metadata(&path)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        }
+    })
 }
 
-/// Testable core of [`is_service_configured`] — takes an explicit `home` path
-/// instead of reading `dirs::home_dir()`.
+/// Testable core: takes an explicit `home` path so tests can inject a temp dir.
+#[cfg(test)]
 fn is_service_configured_with_home(home: &std::path::Path, project: &str, service: &str) -> bool {
     let svc_desc = match speedwave_runtime::consts::find_mcp_service(service) {
         Some(d) => d,
@@ -355,9 +381,7 @@ pub fn save_integration_credentials(
     let allowed =
         get_allowed_fields(&service).ok_or_else(|| format!("unknown service: {}", service))?;
 
-    let home = dirs::home_dir().ok_or("cannot determine home directory")?;
-    let svc_dir = home
-        .join(speedwave_runtime::consts::DATA_DIR)
+    let svc_dir = speedwave_runtime::consts::data_dir()
         .join("tokens")
         .join(&project)
         .join(&service);
@@ -393,9 +417,7 @@ pub fn save_redmine_mappings(
 ) -> Result<(), String> {
     check_project(&project)?;
     log::info!("save_redmine_mappings: project={project}");
-    let home = dirs::home_dir().ok_or("cannot determine home directory")?;
-    let config_path = home
-        .join(speedwave_runtime::consts::DATA_DIR)
+    let config_path = speedwave_runtime::consts::data_dir()
         .join("tokens")
         .join(&project)
         .join("redmine")
@@ -442,9 +464,7 @@ pub fn delete_integration_credentials(project: String, service: String) -> Resul
     let allowed =
         get_allowed_fields(&service).ok_or_else(|| format!("unknown service: {}", service))?;
 
-    let home = dirs::home_dir().ok_or("cannot determine home directory")?;
-    let svc_dir = home
-        .join(speedwave_runtime::consts::DATA_DIR)
+    let svc_dir = speedwave_runtime::consts::data_dir()
         .join("tokens")
         .join(&project)
         .join(&service);

@@ -89,9 +89,13 @@ fn compute_plugin_digest(plugin_dir: &Path) -> anyhow::Result<Vec<u8>> {
             .strip_prefix(plugin_dir)
             .unwrap_or(file)
             .to_string_lossy();
-        // Hash: relative path + file contents
-        hasher.update(rel.as_bytes());
+        // Hash: relative path (length-prefixed) + file contents (length-prefixed).
+        // Length prefixes prevent ambiguity between ("ab","cd") and ("a","bcd").
+        let rel_bytes = rel.as_bytes();
+        hasher.update((rel_bytes.len() as u64).to_le_bytes());
+        hasher.update(rel_bytes);
         let content = std::fs::read(file)?;
+        hasher.update((content.len() as u64).to_le_bytes());
         hasher.update(&content);
     }
 
@@ -330,6 +334,26 @@ mod tests {
         assert!(
             result.is_err(),
             "Without SPEEDWAVE_ALLOW_UNSIGNED, unsigned plugins must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_compute_digest_path_content_boundary() {
+        // Without length-prefixing both path and content, these two layouts
+        // would produce the same raw hash input bytes:
+        //   dir1: file "ab" with content "cd"  → path(2,"ab") + content(2,"cd")
+        //   dir2: file "a"  with content "bcd" → path(1,"a")  + content(3,"bcd")
+        let tmp1 = tempfile::tempdir().unwrap();
+        std::fs::write(tmp1.path().join("ab"), b"cd").unwrap();
+
+        let tmp2 = tempfile::tempdir().unwrap();
+        std::fs::write(tmp2.path().join("a"), b"bcd").unwrap();
+
+        let d1 = compute_plugin_digest(tmp1.path()).unwrap();
+        let d2 = compute_plugin_digest(tmp2.path()).unwrap();
+        assert_ne!(
+            d1, d2,
+            "Different path/content splits must produce different digests"
         );
     }
 

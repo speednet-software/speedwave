@@ -15,7 +15,7 @@ pub struct LimaRuntime {
 fn ssh_config_path() -> anyhow::Result<PathBuf> {
     let lima_dir = crate::binary::lima_home()
         .ok_or_else(|| anyhow::anyhow!("cannot determine home directory for LIMA_HOME"))?;
-    Ok(lima_dir.join(consts::LIMA_VM_NAME).join("ssh.config"))
+    Ok(lima_dir.join(consts::lima_vm_name()).join("ssh.config"))
 }
 
 impl Default for LimaRuntime {
@@ -61,7 +61,7 @@ impl LimaRuntime {
         } else {
             anyhow::bail!(
                 "Lima VM '{}' is not running. Start it with `ensure_ready()` first.",
-                consts::LIMA_VM_NAME,
+                consts::lima_vm_name(),
             )
         }
     }
@@ -96,6 +96,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
 }
 
 /// Internal implementation that accepts an explicit home directory for testability.
+#[cfg(test)]
 fn prepare_build_context_with_home(build_root: &Path, home: &Path) -> anyhow::Result<PathBuf> {
     if build_root.starts_with(home) {
         return Ok(build_root.to_path_buf());
@@ -112,6 +113,7 @@ fn prepare_build_context_with_home(build_root: &Path, home: &Path) -> anyhow::Re
 impl ContainerRuntime for LimaRuntime {
     fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
+        let vm = consts::lima_vm_name();
         // Clean up stale systemd healthcheck timers before compose up.
         // nerdctl creates transient systemd timers for container healthchecks,
         // but doesn't always clean them up on container stop/remove.
@@ -123,7 +125,7 @@ impl ContainerRuntime for LimaRuntime {
             "limactl",
             &[
                 "shell",
-                consts::LIMA_VM_NAME,
+                vm,
                 "--",
                 "bash",
                 "-c",
@@ -136,7 +138,7 @@ impl ContainerRuntime for LimaRuntime {
             "limactl",
             &[
                 "shell",
-                consts::LIMA_VM_NAME,
+                vm,
                 "--",
                 "sudo",
                 "nerdctl",
@@ -155,6 +157,7 @@ impl ContainerRuntime for LimaRuntime {
 
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
+        let vm = consts::lima_vm_name();
         let compose_file = super::compose_file_path(project)?;
         super::compose_down_and_cleanup(
             &*self.runner,
@@ -162,7 +165,7 @@ impl ContainerRuntime for LimaRuntime {
             project,
             &[
                 "shell",
-                consts::LIMA_VM_NAME,
+                vm,
                 "--",
                 "sudo",
                 "nerdctl",
@@ -174,7 +177,7 @@ impl ContainerRuntime for LimaRuntime {
                 "down",
                 "--remove-orphans",
             ],
-            &["shell", consts::LIMA_VM_NAME, "--", "sudo", "nerdctl"],
+            &["shell", vm, "--", "sudo", "nerdctl"],
         )
     }
 
@@ -185,7 +188,7 @@ impl ContainerRuntime for LimaRuntime {
             "limactl",
             &[
                 "shell",
-                consts::LIMA_VM_NAME,
+                consts::lima_vm_name(),
                 "--",
                 "sudo",
                 "nerdctl",
@@ -203,6 +206,7 @@ impl ContainerRuntime for LimaRuntime {
     }
 
     fn container_exec(&self, container: &str, cmd: &[&str]) -> Command {
+        let vm = consts::lima_vm_name();
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
 
         // Use direct SSH with Lima's generated ssh.config instead of `limactl shell`.
@@ -225,7 +229,7 @@ impl ContainerRuntime for LimaRuntime {
                 let mut command = crate::binary::command("limactl");
                 command.args([
                     "shell",
-                    consts::LIMA_VM_NAME,
+                    vm,
                     "--",
                     "sudo",
                     "nerdctl",
@@ -244,6 +248,7 @@ impl ContainerRuntime for LimaRuntime {
             }
         };
 
+        let lima_host = format!("lima-{}", vm);
         let mut command = Command::new("ssh");
         command.args([
             "-F",
@@ -251,7 +256,7 @@ impl ContainerRuntime for LimaRuntime {
             "-t",
             "-o",
             "LogLevel=ERROR",
-            &format!("lima-{}", consts::LIMA_VM_NAME),
+            &lima_host,
             "--",
             "sudo",
             "nerdctl",
@@ -277,7 +282,7 @@ impl ContainerRuntime for LimaRuntime {
         let mut command = crate::binary::command("limactl");
         command.args([
             "shell",
-            consts::LIMA_VM_NAME,
+            consts::lima_vm_name(),
             "--",
             "sudo",
             "nerdctl",
@@ -302,7 +307,7 @@ impl ContainerRuntime for LimaRuntime {
         self.runner
             .run(
                 "limactl",
-                &["list", "--format", "{{.Status}}", consts::LIMA_VM_NAME],
+                &["list", "--format", "{{.Status}}", consts::lima_vm_name()],
             )
             .map(|output| output.trim() == "Running")
             .unwrap_or(false)
@@ -320,9 +325,10 @@ impl ContainerRuntime for LimaRuntime {
             .iter()
             .map(|(k, v)| format!("{}={}", k, v))
             .collect();
+        let vm = consts::lima_vm_name();
         let mut args: Vec<&str> = vec![
             "shell",
-            consts::LIMA_VM_NAME,
+            vm,
             "--",
             "sudo",
             "nerdctl",
@@ -342,9 +348,19 @@ impl ContainerRuntime for LimaRuntime {
     }
 
     fn prepare_build_context(&self, build_root: &Path) -> anyhow::Result<PathBuf> {
+        let data = consts::data_dir();
         let home =
             dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-        prepare_build_context_with_home(build_root, &home)
+        if build_root.starts_with(&home) {
+            return Ok(build_root.to_path_buf());
+        }
+
+        let cache = data.join("build-cache");
+        if cache.exists() {
+            std::fs::remove_dir_all(&cache)?;
+        }
+        copy_dir_recursive(build_root, &cache)?;
+        Ok(cache)
     }
 
     fn container_logs(&self, container: &str, tail: u32) -> anyhow::Result<String> {
@@ -354,7 +370,7 @@ impl ContainerRuntime for LimaRuntime {
             "limactl",
             &[
                 "shell",
-                consts::LIMA_VM_NAME,
+                consts::lima_vm_name(),
                 "--",
                 "sudo",
                 "nerdctl",
@@ -374,7 +390,7 @@ impl ContainerRuntime for LimaRuntime {
             "limactl",
             &[
                 "shell",
-                consts::LIMA_VM_NAME,
+                consts::lima_vm_name(),
                 "--",
                 "sudo",
                 "nerdctl",
@@ -397,7 +413,7 @@ impl ContainerRuntime for LimaRuntime {
             "limactl",
             &[
                 "shell",
-                consts::LIMA_VM_NAME,
+                consts::lima_vm_name(),
                 "--",
                 "sudo",
                 "nerdctl",
@@ -421,7 +437,7 @@ impl ContainerRuntime for LimaRuntime {
             "limactl",
             &[
                 "shell",
-                consts::LIMA_VM_NAME,
+                consts::lima_vm_name(),
                 "--",
                 "sudo",
                 "nerdctl",
@@ -435,13 +451,14 @@ impl ContainerRuntime for LimaRuntime {
 
     fn restart_container_engine(&self) -> anyhow::Result<()> {
         self.require_running()?;
+        let vm = consts::lima_vm_name();
 
         log::info!("restarting containerd inside Lima VM");
         self.runner.run(
             "limactl",
             &[
                 "shell",
-                consts::LIMA_VM_NAME,
+                vm,
                 "--",
                 "sudo",
                 "systemctl",
@@ -455,7 +472,7 @@ impl ContainerRuntime for LimaRuntime {
             "limactl",
             &[
                 "shell",
-                consts::LIMA_VM_NAME,
+                vm,
                 "--",
                 "sudo",
                 "systemctl",
@@ -480,32 +497,14 @@ impl ContainerRuntime for LimaRuntime {
 
             let nerdctl_ok = self
                 .runner
-                .run(
-                    "limactl",
-                    &[
-                        "shell",
-                        consts::LIMA_VM_NAME,
-                        "--",
-                        "sudo",
-                        "nerdctl",
-                        "info",
-                    ],
-                )
+                .run("limactl", &["shell", vm, "--", "sudo", "nerdctl", "info"])
                 .is_ok();
 
             let buildctl_ok = self
                 .runner
                 .run(
                     "limactl",
-                    &[
-                        "shell",
-                        consts::LIMA_VM_NAME,
-                        "--",
-                        "sudo",
-                        "buildctl",
-                        "debug",
-                        "workers",
-                    ],
+                    &["shell", vm, "--", "sudo", "buildctl", "debug", "workers"],
                 )
                 .is_ok();
 
@@ -518,7 +517,7 @@ impl ContainerRuntime for LimaRuntime {
                     "containerd/buildkit not ready after restart ({max} attempts). \
                      Try: limactl shell {vm} -- sudo systemctl restart containerd && \
                      limactl shell {vm} -- sudo systemctl restart buildkit",
-                    vm = consts::LIMA_VM_NAME,
+                    vm = consts::lima_vm_name(),
                 );
             }
             log::info!("waiting for containerd/buildkit readiness (attempt {attempt}/{max})");
@@ -547,25 +546,22 @@ impl ContainerRuntime for LimaRuntime {
         }
 
         // Check if VM exists and is running
+        let vm = consts::lima_vm_name();
         let status = self
             .runner
-            .run(
-                "limactl",
-                &["list", "--format", "{{.Status}}", consts::LIMA_VM_NAME],
-            )
+            .run("limactl", &["list", "--format", "{{.Status}}", vm])
             .unwrap_or_default();
 
         match status.trim() {
             "Running" => Ok(()),
             "Stopped" => {
-                self.runner
-                    .run("limactl", &["start", consts::LIMA_VM_NAME])?;
+                self.runner.run("limactl", &["start", vm])?;
                 Ok(())
             }
             _ => {
                 anyhow::bail!(
                     "Lima VM '{}' not found. Run Speedwave.app setup wizard to create it.",
-                    consts::LIMA_VM_NAME
+                    vm
                 );
             }
         }
