@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/speednet-software/speedwave/compare/v0.3.0...v0.3.1) (2026-03-20)
+
+
+### Bug Fixes
+
+* **ci:** fix gitflow pipeline — tag-aware checkout, version sync, backmerge automation ([#221](https://github.com/speednet-software/speedwave/issues/221)) ([fc7f22a](https://github.com/speednet-software/speedwave/commit/fc7f22ae098d227da314f5b551b0e23ceecf2746))
+
 ## [0.3.0](https://github.com/speednet-software/speedwave/compare/v0.2.0...v0.3.0) (2026-03-20)
 
 
