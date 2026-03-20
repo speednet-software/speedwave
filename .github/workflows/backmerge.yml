@@ -92,8 +92,11 @@ jobs:
           echo "Merge conflicts detected — attempting auto-resolution of version files"
 
           # Auto-resolve version files (main wins — it has the latest release version)
-          VERSION_FILES=(
+          # Version files + release config (main always wins)
+          AUTO_RESOLVE_FILES=(
             .release-please-manifest.json
+            release-please-config.json
+            .github/workflows/release-please.yml
             package.json
             package-lock.json
             desktop/src/package.json
@@ -115,7 +118,7 @@ jobs:
             CHANGELOG.md
           )
 
-          for f in "${VERSION_FILES[@]}"; do
+          for f in "${AUTO_RESOLVE_FILES[@]}"; do
             if git diff --name-only --diff-filter=U | grep -qx "$f"; then
               echo "Auto-resolving $f (using main's version)"
               git checkout --theirs "$f"
@@ -126,48 +129,10 @@ jobs:
           # Check if any unresolved conflicts remain
           REMAINING=$(git diff --name-only --diff-filter=U || true)
           if [ -n "$REMAINING" ]; then
-            echo "::warning::Unresolved conflicts remain in: $REMAINING"
+            echo "::error::Unresolved conflicts in: $REMAINING"
+            echo "::error::Manual backmerge needed. Run: git checkout -b chore/backmerge origin/dev && git merge origin/main"
             git merge --abort
-
-            # Create PR for manual resolution
-            # Reset branch to dev HEAD for the PR (can't push unresolved conflicts)
-            git checkout -B "$BRANCH" origin/dev
-            git push origin "$BRANCH" --force
-            gh pr create \
-              --repo "$REPO" \
-              --head "$BRANCH" \
-              --base dev \
-              --title "chore: backmerge main into dev after $TAG (conflicts)" \
-              --body "$(cat <<PREOF
-          ## Summary
-
-          Automated backmerge of \`main\` into \`dev\` after release \`$TAG\` has **unresolved conflicts**.
-
-          ### Conflicting files
-
-          \`\`\`
-          $REMAINING
-          \`\`\`
-
-          ### How to resolve
-
-          \`\`\`bash
-          git fetch origin
-          git checkout $BRANCH
-          git merge origin/main
-          # Resolve conflicts manually
-          git add .
-          git commit
-          git push
-          \`\`\`
-
-          ## Test plan
-
-          - [ ] All conflicts resolved
-          - [ ] CI passes on this PR
-          PREOF
-          )"
-            exit 0
+            exit 1
           fi
 
           # All conflicts auto-resolved
