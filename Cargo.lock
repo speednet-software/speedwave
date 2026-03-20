@@ -1576,7 +1576,7 @@ dependencies = [
 
 [[package]]
 name = "speedwave-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -1591,7 +1591,7 @@ dependencies = [
 
 [[package]]
 name = "speedwave-runtime"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "base64",
