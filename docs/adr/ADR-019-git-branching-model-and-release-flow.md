@@ -253,7 +253,7 @@ Tauri's built-in updater[^53] checks a `latest.json` endpoint on startup and whe
 
 ```json
 {
-  "version": "v2.1.0",
+  "version": "2.1.0",
   "notes": "Bug fixes and performance improvements",
   "pub_date": "2026-02-18T12:00:00Z",
   "platforms": {
