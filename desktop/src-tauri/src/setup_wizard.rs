@@ -1217,7 +1217,10 @@ pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
 /// manually set higher values) or if the value is unparseable (safety).
 #[cfg(any(target_os = "macos", test))]
 fn lima_vm_config_needs_update(config_content: &str) -> bool {
-    let desired = match LIMA_VM_MEMORY.strip_suffix("GiB").and_then(|s| s.parse::<u32>().ok()) {
+    let desired = match LIMA_VM_MEMORY
+        .strip_suffix("GiB")
+        .and_then(|s| s.parse::<u32>().ok())
+    {
         Some(v) => v,
         None => return false,
     };
@@ -1226,7 +1229,10 @@ fn lima_vm_config_needs_update(config_content: &str) -> bool {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("memory:") {
             let value = rest.trim().trim_matches('"');
-            return match value.strip_suffix("GiB").and_then(|s| s.parse::<u32>().ok()) {
+            return match value
+                .strip_suffix("GiB")
+                .and_then(|s| s.parse::<u32>().ok())
+            {
                 Some(current) => current < desired,
                 None => false, // unparseable — don't touch
             };
@@ -1278,14 +1284,19 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
             .output()?;
         let status_str = String::from_utf8_lossy(&status_output.stdout);
         if status_str.trim().eq_ignore_ascii_case("running") {
-            // --force kills the VM immediately. This runs on app startup before
-            // any project is actively running, so data loss risk is negligible.
-            log::info!("Stopping VM for memory migration");
+            log::warn!(
+                "Stopping VM for memory migration — any running Claude sessions will be interrupted"
+            );
             let timeout = std::time::Duration::from_secs(30);
             let mut stop_cmd = limactl_command();
-            stop_cmd.args(["stop", "--force", consts::lima_vm_name()]);
+            stop_cmd.args(["stop", consts::lima_vm_name()]);
             if let Err(e) = run_with_timeout(&mut stop_cmd, timeout) {
-                log::warn!("limactl stop timed out or failed: {e}, continuing with config update");
+                log::warn!("graceful stop failed ({e}), forcing stop");
+                let mut force_cmd = limactl_command();
+                force_cmd.args(["stop", "--force", consts::lima_vm_name()]);
+                if let Err(e2) = run_with_timeout(&mut force_cmd, timeout) {
+                    log::warn!("forced stop also failed: {e2}, continuing with config update");
+                }
             }
         }
     }

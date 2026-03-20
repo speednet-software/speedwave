@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/speednet-software/speedwave/compare/v0.1.0...v0.2.0) (2026-03-18)
+
+
+### Features
+
+* release — plugin system, Tailwind migration, chat UI, security hardening ([#203](https://github.com/speednet-software/speedwave/issues/203)) ([4155156](https://github.com/speednet-software/speedwave/commit/415515630b159bf7da6eddbcf3bab3b377e8e0c9))
+
 ## [0.1.0](https://github.com/speednet-software/speedwave/compare/v0.0.1...v0.1.0) (2026-03-15)
 
 
