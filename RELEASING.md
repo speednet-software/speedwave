@@ -149,7 +149,7 @@ Speedwave uses [release-please](https://github.com/googleapis/release-please) to
 2. Wait for CI to pass on `main`
 3. Release-please automatically opens (or updates) a release PR
 4. Review the release PR — it shows the changelog and version bump
-5. **Merge the release PR**
+5. **Merge the release PR** — use **squash merge** (same as all PRs to main)
 6. Release-please creates a draft GitHub Release and tag
 7. Builds run automatically on all platforms
 8. After all builds succeed, the release is published
@@ -158,7 +158,7 @@ That's it — no manual version bumping, no workflow dispatch, no release type s
 
 ### Why squash merge matters
 
-When merging `dev` → `main`, you **must use squash merge** in the GitHub UI. This is because:
+**All PRs to `main` must use squash merge** — this includes `dev` → `main` PRs and release-please PRs. Release-please is compatible with squash merge thanks to `force-tag-creation: true` and manifest-based version tracking. This is because:
 
 - Release-please uses `--first-parent` commit traversal and parses each commit's message as a conventional commit
 - Regular merge commits have messages like `Merge pull request #N from speednet-software/dev` — this is **not** a conventional commit and release-please ignores it
