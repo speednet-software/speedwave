@@ -18,8 +18,11 @@ describe('ShellComponent', () => {
       if (cmd === 'list_projects')
         return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
       if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
+      if (cmd === 'run_system_check') return undefined;
       if (cmd === 'check_containers_running') return true;
       if (cmd === 'start_containers') return undefined;
+      if (cmd === 'get_auth_status')
+        return { api_key_configured: false, oauth_authenticated: true };
       return undefined;
     };
 
@@ -167,5 +170,75 @@ describe('ShellComponent', () => {
     component.retry();
     expect(spy).toHaveBeenCalled();
     spy.mockRestore();
+  });
+
+  it('shows fullscreen blocking overlay on check_failed', async () => {
+    await component.ngOnInit();
+    await fixture.whenStable();
+    projectState.status = 'check_failed';
+    projectState.error = 'WSL2 is not available';
+    component['cdr'].markForCheck();
+    fixture.detectChanges();
+
+    const overlay = fixture.nativeElement.querySelector('[data-testid="blocking-check-failed"]');
+    expect(overlay).not.toBeNull();
+    expect(overlay.textContent).toContain('System Check Failed');
+    expect(overlay.textContent).toContain('WSL2 is not available');
+  });
+
+  it('check_failed overlay shows only Retry button, no Dismiss', async () => {
+    await component.ngOnInit();
+    await fixture.whenStable();
+    projectState.status = 'check_failed';
+    projectState.error = 'prereq failure';
+    component['cdr'].markForCheck();
+    fixture.detectChanges();
+
+    const overlay = fixture.nativeElement.querySelector('[data-testid="blocking-check-failed"]');
+    const buttons = Array.from(overlay.querySelectorAll('button')) as HTMLButtonElement[];
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0].textContent?.trim()).toBe('Retry');
+  });
+
+  it('check_failed Retry button calls ensureContainersRunning', async () => {
+    const spy = vi.spyOn(projectState, 'ensureContainersRunning').mockResolvedValue();
+    component.retryCheck();
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('shows spinner with system check message during system_check', async () => {
+    await component.ngOnInit();
+    await fixture.whenStable();
+    projectState.status = 'system_check';
+    component['cdr'].markForCheck();
+    fixture.detectChanges();
+
+    const overlay = fixture.nativeElement.querySelector('[data-testid="blocking-overlay"]');
+    expect(overlay).not.toBeNull();
+    expect(overlay.textContent).toContain('Running system checks...');
+  });
+
+  it('shows auth-required overlay when status is auth_required', async () => {
+    await component.ngOnInit();
+    projectState.status = 'auth_required';
+    component['cdr'].markForCheck();
+    fixture.detectChanges();
+
+    const overlay = fixture.nativeElement.querySelector('[data-testid="blocking-auth-required"]');
+    expect(overlay).not.toBeNull();
+    expect(overlay.textContent).toContain('Authentication Required');
+  });
+
+  it('auth-required overlay has authenticate and check-status buttons', async () => {
+    await component.ngOnInit();
+    projectState.status = 'auth_required';
+    component['cdr'].markForCheck();
+    fixture.detectChanges();
+
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="auth-authenticate-btn"]')
+    ).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="auth-check-btn"]')).not.toBeNull();
   });
 });

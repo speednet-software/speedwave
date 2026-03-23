@@ -208,7 +208,8 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
     })?;
 
     let mut state = bundle::load_bundle_state();
-    let bundle_changed = state.applied_bundle_id.as_deref() != Some(manifest.bundle_id.as_str());
+    let mut bundle_changed =
+        state.applied_bundle_id.as_deref() != Some(manifest.bundle_id.as_str());
 
     log::info!(
         "reconcile_bundle: current={} applied={} changed={}",
@@ -216,6 +217,20 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         state.applied_bundle_id.as_deref().unwrap_or("(none)"),
         bundle_changed,
     );
+
+    // Even when bundle_id matches, verify images actually exist.
+    // They may have been lost after containerd reinstall or VM recreation.
+    if !bundle_changed {
+        let rt = speedwave_runtime::runtime::detect_runtime();
+        if rt.is_available() {
+            if let Err(e) = rt.ensure_ready() {
+                log::warn!("reconcile: runtime not ready, skipping image check: {e}");
+            } else if !build::images_exist(&*rt) {
+                log::warn!("reconcile: bundle unchanged but images missing, forcing rebuild");
+                bundle_changed = true;
+            }
+        }
+    }
 
     if !bundle_changed {
         if state.phase != bundle::BundleReconcilePhase::Done
@@ -794,6 +809,9 @@ mod tests {
             fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
                 Ok(())
             }
+            fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
+                Ok(true)
+            }
         }
 
         fn project(name: &str) -> ProjectUserEntry {
@@ -1328,6 +1346,36 @@ mod tests {
         assert!(
             images_built_block.contains("ensure_ready"),
             "reconcile must call ensure_ready inside the ImagesBuilt phase block"
+        );
+    }
+
+    /// Structural test: verifies that `reconcile_bundle_update_inner` checks
+    /// `images_exist` when `bundle_changed` is false. Without this, a
+    /// containerd restart that wipes images would leave the app believing
+    /// everything is fine while containers cannot start.
+    #[test]
+    fn reconcile_forces_rebuild_when_images_missing() {
+        let source = include_str!("reconcile.rs");
+        let inner_fn = source
+            .split("fn reconcile_bundle_update_inner(")
+            .nth(1)
+            .expect("reconcile_bundle_update_inner function should exist");
+
+        assert!(
+            inner_fn.contains("images_exist"),
+            "reconcile must check images_exist when bundle unchanged"
+        );
+
+        // images_exist check must appear BEFORE set_image_readiness(Ready)
+        let images_pos = inner_fn
+            .find("images_exist")
+            .expect("images_exist call not found");
+        let ready_pos = inner_fn
+            .find("set_image_readiness(ImageReadiness::Ready)")
+            .expect("set_image_readiness(Ready) not found");
+        assert!(
+            images_pos < ready_pos,
+            "images_exist check must come before set_image_readiness(Ready)"
         );
     }
 }

@@ -5,12 +5,20 @@ import type { BundleReconcileStatus, ProjectList } from '../models/update';
 /** Lifecycle status of the project + container lifecycle. */
 export type ProjectStatus =
   | 'loading'
+  | 'system_check'
+  | 'check_failed'
   | 'checking'
   | 'starting'
   | 'rebuilding'
+  | 'auth_required'
   | 'ready'
   | 'switching'
   | 'error';
+
+interface AuthStatusResponse {
+  api_key_configured: boolean;
+  oauth_authenticated: boolean;
+}
 
 /**
  * SSOT for project lifecycle state. All project switching, adding,
@@ -100,15 +108,37 @@ export class ProjectStateService {
     }
   }
 
-  /** Checks if containers are running for the active project, starts them if not. */
+  /** Checks OS prereqs, then verifies containers are running, starting them if not. */
   async ensureContainersRunning(): Promise<void> {
+    if (
+      this.status === 'system_check' ||
+      this.status === 'checking' ||
+      this.status === 'starting' ||
+      this.status === 'auth_required'
+    ) {
+      return; // guard: already in progress
+    }
     if (!this.activeProject) {
       this.status = 'error';
       this.error = 'No active project selected.';
       this.notifyChange();
       return;
     }
+
+    // Phase 1: OS prerequisite check
+    this.status = 'system_check';
     this.error = '';
+    this.notifyChange();
+    try {
+      await this.tauri.invoke('run_system_check');
+    } catch (err) {
+      this.status = 'check_failed';
+      this.error = String(err);
+      this.notifyChange();
+      return;
+    }
+
+    // Phase 2: check/start containers (includes SecurityCheck in backend)
     this.status = 'checking';
     this.notifyChange();
     try {
@@ -122,17 +152,33 @@ export class ProjectStateService {
         // The 'starting' overlay stays visible for the duration.
         await this.tauri.invoke('start_containers', { project: this.activeProject });
       }
-      this.status = 'ready';
+      // Phase 3: verify Claude authentication before declaring ready
+      const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
+        project: this.activeProject,
+      });
+      if (auth.api_key_configured || auth.oauth_authenticated) {
+        this.status = 'ready';
+      } else {
+        this.status = 'auth_required';
+      }
     } catch (err) {
-      this.status = 'error';
-      this.error = String(err);
+      const msg = String(err);
+      // SSOT coupling: must match crates/speedwave-runtime/src/consts.rs SYSTEM_CHECK_FAILED_PREFIX
+      if (msg.startsWith('System check failed:')) {
+        this.status = 'check_failed';
+      } else {
+        this.status = 'error';
+      }
+      this.error = msg;
     }
     this.notifyChange();
     if (this.status === 'ready') {
       this.notifyReady();
       this.notifySettled();
-    } else if (this.status === 'error') {
+    } else if (this.status === 'error' || this.status === 'check_failed') {
       this.notifyFailed(this.error);
+      this.notifySettled();
+    } else if (this.status === 'auth_required') {
       this.notifySettled();
     }
   }
@@ -154,6 +200,24 @@ export class ProjectStateService {
       this.error = '';
     }
     this.notifyChange();
+  }
+
+  /** Re-checks Claude auth status after user completes authentication. */
+  async retryAuth(): Promise<void> {
+    if (!this.activeProject) return;
+    try {
+      const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
+        project: this.activeProject,
+      });
+      if (auth.api_key_configured || auth.oauth_authenticated) {
+        this.status = 'ready';
+        this.notifyChange();
+        this.notifyReady();
+        this.notifySettled();
+      }
+    } catch {
+      // Auth check failed — stay in auth_required
+    }
   }
 
   /**
@@ -211,7 +275,8 @@ export class ProjectStateService {
         if (
           this.status === 'switching' ||
           this.status === 'starting' ||
-          this.status === 'checking'
+          this.status === 'checking' ||
+          this.status === 'auth_required'
         ) {
           return;
         }

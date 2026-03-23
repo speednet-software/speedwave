@@ -8,6 +8,7 @@ pub mod config;
 pub mod consts;
 pub mod defaults;
 pub mod log_sanitizer;
+pub mod os_prereqs;
 pub mod plugin;
 pub mod project;
 pub mod resources;

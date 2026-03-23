@@ -107,7 +107,11 @@ The mechanism uses a `Condvar` with tri-state `ImageReadiness` (`Ready`, `Buildi
 
 The Desktop frontend shows a unified blocking overlay in the Shell component while containers are not ready (checking, starting, switching, rebuilding states).
 
-## Stale Container Recovery (post-sleep/resume)
+## Container Recovery
+
+Speedwave auto-recovers from two container failure modes:
+
+### Stale containers (post-sleep/resume)
 
 After macOS sleep/resume the Lima VM's virtiofs/9p mounts can become stale while containers remain "running" in containerd state. Any `nerdctl exec` into such a container triggers runc's `verifyCwd()` security check (CVE-2024-21626), which rejects the operation:
 
@@ -116,14 +120,23 @@ OCI runtime exec failed: … current working directory is outside of container
 mount namespace root -- possible container breakout detected
 ```
 
-Speedwave auto-recovers from this:
+### Missing containers (after containerd restart/VM recreation)
+
+After a containerd reinstall, VM recreation, or other event that wipes container state, containers no longer exist despite `setup_state.json` reporting them as started. The exec probe detects "no such container" errors and triggers the same recovery path.
+
+### Recovery flow
 
 1. Before each interactive exec (CLI) or chat session start (Desktop), a lightweight probe runs `nerdctl exec <container> true`
-2. If the probe fails with a mount-namespace error, `compose_up_recreate()` force-recreates all project containers (`--force-recreate`)
+2. If the probe fails with a stale-mount or missing-container error, `compose_up_recreate()` force-recreates all project containers
 3. A second probe verifies the fix succeeded
 4. If recovery fails, the user sees an actionable message ("Please restart Speedwave")
+5. `start_containers()` additionally verifies exec health before marking `containers_started = true` in setup state
 
-The recovery logic is in `ensure_exec_healthy()` (`crates/speedwave-runtime/src/runtime/mod.rs`), called from three sites: CLI (`main.rs`), Desktop chat (`chat.rs`), and auth check (`setup_wizard.rs`).
+The recovery logic is in `ensure_exec_healthy()` (`crates/speedwave-runtime/src/runtime/mod.rs`), called from four sites: CLI (`main.rs`), Desktop chat (`chat.rs`), auth check (`setup_wizard.rs`), and container start (`setup_wizard.rs`).
+
+### Missing images (reconcile-time detection)
+
+At startup, `reconcile_bundle_update` verifies that all expected container images exist even when the bundle ID has not changed. If images are missing (e.g. containerd was reinstalled), the reconcile forces a full image rebuild before setting `IMAGES_READY = Ready`. This prevents `start_containers` from attempting `compose_up` with nonexistent images.
 
 ## See Also
 

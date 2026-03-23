@@ -118,9 +118,14 @@ export class ChatStateService {
       try {
         await this.tauri.invoke('start_chat', { project });
       } catch (err) {
-        console.error('Failed to start chat session:', err);
-        this.projectState.status = 'error';
-        this.projectState.error = `Failed to start chat session: ${err}`;
+        const msg = String(err);
+        if (msg.includes('not authenticated')) {
+          this.projectState.status = 'auth_required';
+        } else {
+          console.error('Failed to start chat session:', err);
+          this.projectState.status = 'error';
+          this.projectState.error = `Failed to start chat session: ${err}`;
+        }
         this.notifyChange();
       }
     }
@@ -163,6 +168,13 @@ export class ChatStateService {
             return;
           }
         } catch (retryErr) {
+          const retryMsg = String(retryErr);
+          if (retryMsg.includes('not authenticated')) {
+            this.projectState.status = 'auth_required';
+            this.isStreaming = false;
+            this.notifyChange();
+            return;
+          }
           this.isStreaming = false;
           this._messages = [
             ...this._messages,

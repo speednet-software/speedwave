@@ -449,6 +449,24 @@ describe('ChatComponent', () => {
       );
     });
 
+    it('routes auth error in resumeConversation to auth_required', async () => {
+      const mockTranscript = {
+        session_id: 's1',
+        messages: [{ role: 'user', content: 'Hi', timestamp: '2026-03-06T10:00:00Z' }],
+      };
+      component.viewingTranscript = mockTranscript;
+      projectState.activeProject = 'test';
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'resume_conversation')
+          throw new Error('Claude is not authenticated. Please authenticate first.');
+        return undefined;
+      };
+
+      await component.resumeConversation('s1');
+      expect(projectState.status).toBe('auth_required');
+    });
+
     it('clears transcript and history state after resuming', async () => {
       component.viewingTranscript = {
         session_id: 's1',

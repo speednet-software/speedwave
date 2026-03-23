@@ -435,6 +435,22 @@ impl ContainerRuntime for WslRuntime {
         Ok(())
     }
 
+    fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
+        let result = self.runner.run(
+            "wsl.exe",
+            &[
+                "-d",
+                consts::WSL_DISTRO_NAME,
+                "--",
+                "nerdctl",
+                "image",
+                "inspect",
+                tag,
+            ],
+        );
+        Ok(result.is_ok())
+    }
+
     fn system_prune(&self) -> anyhow::Result<()> {
         self.runner.run(
             "wsl.exe",
@@ -511,13 +527,19 @@ impl ContainerRuntime for WslRuntime {
     }
 
     fn ensure_ready(&self) -> anyhow::Result<()> {
+        // OS prerequisite check (SSOT: os_prereqs module)
+        let violations = crate::os_prereqs::check_os_prereqs();
+        if let Some(v) = violations.first() {
+            anyhow::bail!("{v}");
+        }
+
         let raw = self
             .runner
             .run_raw_stdout("wsl.exe", &["--list", "--quiet"])
             .map_err(|_| {
                 anyhow::anyhow!(
-                    "WSL2 not available. Ensure Windows Subsystem for Linux is enabled.\n\
-                     Run: wsl --install"
+                    "WSL2 distribution '{}' not found. Run Speedwave.app setup wizard to import it.",
+                    consts::WSL_DISTRO_NAME
                 )
             })?;
 
@@ -647,6 +669,9 @@ mod tests {
         assert!(err.contains("setup wizard"));
     }
 
+    /// On Windows, os_prereqs::check_os_prereqs() catches missing WSL.
+    /// On macOS/Linux (dev/CI), prereqs return empty so ensure_ready()
+    /// proceeds to the distro list check — which fails via mock.
     #[test]
     fn test_ensure_ready_wsl_not_installed() {
         let runner = MockRunner::new().with_error("wsl.exe --list --quiet", "not found");
@@ -654,7 +679,19 @@ mod tests {
         let result = rt.ensure_ready();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("WSL2 not available"));
+        // On Windows: os_prereqs catches missing WSL → "WSL2 check failed"
+        // On macOS/Linux: os_prereqs returns empty, mock fails on --list → distro not found
+        if cfg!(target_os = "windows") {
+            assert!(
+                err.contains("WSL2"),
+                "error should mention WSL2 on Windows, got: {err}"
+            );
+        } else {
+            assert!(
+                err.contains("not found") || err.contains("Speedwave"),
+                "error should mention distro on non-Windows, got: {err}"
+            );
+        }
     }
 
     #[test]

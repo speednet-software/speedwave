@@ -26,7 +26,7 @@ This renders compose for the current bundle, starts containers for the project, 
 ```
 speedwave                      # default: compose_up + exec claude in container
 speedwave init [name]          # register CWD as a project
-speedwave check                # run security checks, exit 0/1
+speedwave check                # run OS prereq + security checks, exit 0/1
 speedwave update               # rebuild current bundle images + recreate containers
 speedwave self-update          # download latest CLI from GitHub Releases
 speedwave plugin install <path.zip>  # install plugin from signed ZIP
@@ -43,7 +43,7 @@ speedwave plugin disable <slug> --project <name>  # disable plugin for a project
   cd ~/projects/acme && speedwave init my-app # registers as "my-app"
   ```
   If the directory is already registered, prints the existing project name and exits.
-- **`speedwave check`** — validates the environment (Lima/WSL2/nerdctl availability, container health), exits 0 on success or 1 on failure
+- **`speedwave check`** — runs OS prerequisite checks (WSL2 on Windows, uidmap on Linux) and compose security validation (cap_drop, token isolation, port binding, etc.), exits 0 on success or 1 on failure with detailed violation messages and remediation steps
 - **`speedwave update`** — rebuilds the built-in images for the current `bundle_id` and recreates containers with the current bundle manifest
 - **`speedwave self-update`** — downloads the latest CLI binary from GitHub Releases and replaces the current binary
 - **`speedwave plugin install <path.zip>`** — verifies the Ed25519 signature, extracts the plugin to `~/.speedwave/plugins/<slug>/`, and registers it

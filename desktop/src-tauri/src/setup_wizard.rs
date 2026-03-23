@@ -399,28 +399,11 @@ fn init_vm_macos() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Checks whether `newuidmap` is available (required for rootless containers).
-#[cfg(unix)]
-#[cfg_attr(target_os = "macos", allow(dead_code))]
-fn check_uidmap(newuidmap_bin: &str) -> anyhow::Result<()> {
-    // newuidmap has no --help flag; use `command -v` to test existence
-    let ok = std::process::Command::new("sh")
-        .args(["-c", &format!("command -v '{}'", newuidmap_bin)])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !ok {
-        anyhow::bail!(consts::UIDMAP_MISSING_MSG);
-    }
-    Ok(())
-}
-
 /// Resolves the PATH with the setup tool's parent directory prepended,
 /// so that sibling binaries (containerd-rootless.sh, containerd, etc.)
 /// are discoverable by the setup script. .deb bundles place these
 /// binaries outside the system PATH.
-#[cfg(unix)]
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
 fn setup_tool_path_env(setup_tool: &str) -> Option<String> {
     let setup_path = std::path::Path::new(setup_tool);
     let bin_dir = setup_path.parent()?;
@@ -443,8 +426,7 @@ fn setup_tool_path_env(setup_tool: &str) -> Option<String> {
 /// 2. Unmask the services (in case they got masked)
 /// 3. Remove the unit files so `install` recreates them with the new path
 /// 4. Reload systemd daemon to pick up the removal
-#[cfg(unix)]
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
 fn cleanup_stale_containerd() {
     log::info!("Cleaning up stale containerd systemd units from previous run");
 
@@ -483,8 +465,7 @@ fn cleanup_stale_containerd() {
 }
 
 /// Returns `true` if a containerd systemd user unit exists (stale or active).
-#[cfg(unix)]
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
 fn has_stale_containerd_unit() -> bool {
     let home = match std::env::var("HOME") {
         Ok(h) => h,
@@ -500,8 +481,7 @@ fn has_stale_containerd_unit() -> bool {
 /// Always cleans up stale systemd units from previous runs before installing.
 /// Upgrading .deb packages may change binary paths, so old units
 /// referencing previous paths must be removed to prevent startup failures.
-#[cfg(unix)]
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
 fn start_rootless_containerd(setup_tool: &str) -> anyhow::Result<()> {
     let path_env = setup_tool_path_env(setup_tool);
 
@@ -532,8 +512,7 @@ fn start_rootless_containerd(setup_tool: &str) -> anyhow::Result<()> {
 /// Waits for containerd to become ready by polling `nerdctl info`.
 ///
 /// Retries up to `max_retries` times with `interval` between attempts.
-#[cfg(unix)]
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
 fn wait_for_containerd(
     nerdctl_bin: &str,
     max_retries: u32,
@@ -698,8 +677,7 @@ fn ensure_apparmor_profile(rootlesskit_path: &str) -> anyhow::Result<()> {
 
 /// Runs `containerd-rootless-setuptool.sh install-buildkit` to set up BuildKit
 /// as a systemd --user service. Required for `nerdctl build` to work.
-#[cfg(unix)]
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
 fn install_buildkit(setup_tool: &str) -> anyhow::Result<()> {
     let path_env = setup_tool_path_env(setup_tool);
 
@@ -733,7 +711,11 @@ fn install_buildkit(setup_tool: &str) -> anyhow::Result<()> {
 fn init_vm_linux() -> anyhow::Result<()> {
     use speedwave_runtime::binary;
 
-    check_uidmap("newuidmap")?;
+    // OS prerequisite check (SSOT: os_prereqs module)
+    let violations = speedwave_runtime::os_prereqs::check_os_prereqs();
+    if let Some(v) = violations.first() {
+        anyhow::bail!("{v}");
+    }
 
     let rootlesskit = binary::resolve_binary("rootlesskit");
     ensure_apparmor_profile(&rootlesskit)?;
@@ -751,7 +733,12 @@ fn init_vm_linux() -> anyhow::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn init_vm_windows() -> anyhow::Result<()> {
-    ensure_wsl2_available()?;
+    // OS prerequisite check (SSOT: os_prereqs module)
+    let violations = speedwave_runtime::os_prereqs::check_os_prereqs();
+    if !violations.is_empty() {
+        // WSL not available — attempt auto-install (always bails: restart or failure)
+        attempt_wsl_install()?;
+    }
 
     let list = speedwave_runtime::binary::system_command("wsl.exe")
         .args(["--list", "--quiet"])
@@ -807,35 +794,28 @@ fn expected_wsl_vhdx_path() -> anyhow::Result<PathBuf> {
         .join("ext4.vhdx"))
 }
 
-/// Checks whether WSL2 is available. If not, triggers an elevated install and
-/// bails with a restart prompt.
+/// Attempts to install WSL2 via elevated PowerShell. Always bails: either
+/// with a restart prompt (success) or an installation failure message.
+/// Detection is handled by `os_prereqs::check_os_prereqs()` — this function
+/// only performs the install action.
 #[cfg(target_os = "windows")]
-fn ensure_wsl2_available() -> anyhow::Result<()> {
-    let wsl_available = speedwave_runtime::binary::system_command("wsl.exe")
-        .args(["--status"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if !wsl_available {
-        let status = speedwave_runtime::binary::system_command("powershell")
-            .args([
-                "-Command",
-                "Start-Process wsl.exe -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait",
-            ])
-            .status()?;
-        if !status.success() {
-            anyhow::bail!(
-                "WSL2 installation failed or was cancelled. \
-                 Please enable WSL2 manually: wsl --install"
-            );
-        }
+fn attempt_wsl_install() -> anyhow::Result<()> {
+    let status = speedwave_runtime::binary::system_command("powershell")
+        .args([
+            "-Command",
+            "Start-Process wsl.exe -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait",
+        ])
+        .status()?;
+    if !status.success() {
         anyhow::bail!(
-            "WSL2 has been installed. Please restart your computer and run Speedwave setup again."
+            "WSL2 installation failed or was cancelled.\n\
+             {}",
+            speedwave_runtime::consts::WSL_NOT_AVAILABLE_MSG
         );
     }
-
-    Ok(())
+    anyhow::bail!(
+        "WSL2 has been installed. Please restart your computer and run Speedwave setup again."
+    );
 }
 
 /// Downloads the Ubuntu rootfs (with SHA256 verification) and imports it as a
@@ -1193,13 +1173,24 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     let violations = compose::SecurityCheck::run(&yaml, project, &manifests, &expected_paths);
     if !violations.is_empty() {
         anyhow::bail!(
-            "Security check failed:\n{}",
+            "{}\n{}",
+            speedwave_runtime::consts::SYSTEM_CHECK_FAILED_PREFIX,
             crate::containers_cmd::format_security_violations(&violations)
         );
     }
 
     compose::save_compose(project, &yaml)?;
     rt.compose_up_recreate(project)?;
+
+    // Verify containers are actually functional before marking as started.
+    // Only probes the claude container — MCP workers are health-checked
+    // separately via get_health.
+    let claude_container = format!(
+        "{}_{}_claude",
+        speedwave_runtime::consts::compose_prefix(),
+        project
+    );
+    runtime::ensure_exec_healthy(&*rt, project, &claude_container)?;
 
     let mut state = SetupState::load();
     state.containers_started = true;
@@ -1275,6 +1266,7 @@ fn lima_vm_config_needs_update_with(config_content: &str, desired_gib: u32) -> b
 /// - Memory is already at or above the desired value
 #[cfg(target_os = "macos")]
 pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
+    use speedwave_runtime::binary;
     let data_dir = consts::data_dir();
     let source_template = data_dir.join("lima.yaml");
 
@@ -1313,11 +1305,11 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
             let timeout = std::time::Duration::from_secs(30);
             let mut stop_cmd = limactl_command();
             stop_cmd.args(["stop", consts::lima_vm_name()]);
-            if let Err(e) = run_with_timeout(&mut stop_cmd, timeout) {
+            if let Err(e) = binary::run_with_timeout(&mut stop_cmd, timeout) {
                 log::warn!("graceful stop failed ({e}), forcing stop");
                 let mut force_cmd = limactl_command();
                 force_cmd.args(["stop", "--force", consts::lima_vm_name()]);
-                if let Err(e2) = run_with_timeout(&mut force_cmd, timeout) {
+                if let Err(e2) = binary::run_with_timeout(&mut force_cmd, timeout) {
                     log::warn!("forced stop also failed: {e2}, continuing with config update");
                 }
             }
@@ -1382,40 +1374,6 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
 // Factory reset — stops containers, destroys VM, wipes setup state
 // ---------------------------------------------------------------------------
 
-/// Spawns a command and waits up to `timeout` for it to finish.
-/// If it exceeds the timeout, kills the child and returns `Err`.
-///
-/// Does not capture stdout/stderr — output goes to the parent's streams.
-/// Do not use with `Stdio::piped()` as that risks pipe-buffer deadlock.
-#[cfg(any(target_os = "macos", test))]
-fn run_with_timeout(
-    cmd: &mut std::process::Command,
-    timeout: std::time::Duration,
-) -> anyhow::Result<std::process::ExitStatus> {
-    let program = cmd.get_program().to_string_lossy().to_string();
-    let mut child = cmd.spawn()?;
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait()? {
-            Some(status) => return Ok(status),
-            None => {
-                if start.elapsed() >= timeout {
-                    if let Err(e) = child.kill() {
-                        log::warn!("run_with_timeout: kill failed: {e}");
-                    }
-                    let _ = child.wait();
-                    anyhow::bail!(
-                        "command '{}' timed out after {}s",
-                        program,
-                        timeout.as_secs()
-                    );
-                }
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-        }
-    }
-}
-
 pub fn factory_reset() -> anyhow::Result<()> {
     let state = SetupState::load();
 
@@ -1457,19 +1415,20 @@ pub fn factory_reset() -> anyhow::Result<()> {
     // 2. Destroy VM (macOS only) — force-stop then force-delete, each with timeout
     #[cfg(target_os = "macos")]
     {
+        use speedwave_runtime::binary;
         let timeout = std::time::Duration::from_secs(30);
 
         log::info!("stopping VM");
         let mut stop_cmd = limactl_command();
         stop_cmd.args(["stop", "--force", consts::lima_vm_name()]);
-        if let Err(e) = run_with_timeout(&mut stop_cmd, timeout) {
+        if let Err(e) = binary::run_with_timeout(&mut stop_cmd, timeout) {
             log::warn!("limactl stop timed out or failed: {e}, continuing");
         }
 
         log::info!("deleting VM");
         let mut delete_cmd = limactl_command();
         delete_cmd.args(["delete", consts::lima_vm_name(), "--force"]);
-        if let Err(e) = run_with_timeout(&mut delete_cmd, timeout) {
+        if let Err(e) = binary::run_with_timeout(&mut delete_cmd, timeout) {
             log::warn!("limactl delete timed out or failed: {e}, continuing");
         }
     }
@@ -2481,45 +2440,6 @@ mod tests {
         assert!(loaded.runtime_ready);
     }
 
-    // -- run_with_timeout tests ─────────────────────────────────────────────
-
-    #[test]
-    #[cfg(unix)]
-    fn run_with_timeout_succeeds_for_fast_command() {
-        use std::process::Command;
-        use std::time::Duration;
-
-        let result = run_with_timeout(Command::new("echo").arg("hello"), Duration::from_secs(5));
-        assert!(result.is_ok(), "fast command should succeed");
-        assert!(result.unwrap().success());
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn run_with_timeout_kills_slow_command() {
-        use std::process::Command;
-        use std::time::{Duration, Instant};
-
-        let start = Instant::now();
-        let result = run_with_timeout(Command::new("sleep").arg("60"), Duration::from_secs(1));
-        let elapsed = start.elapsed();
-
-        assert!(result.is_err(), "slow command should be killed");
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("timed out"),
-            "error should mention timeout"
-        );
-        assert!(
-            err_msg.contains("sleep"),
-            "error should include program name 'sleep', got: {err_msg}"
-        );
-        assert!(
-            elapsed < Duration::from_secs(5),
-            "should not wait for the full 60s, elapsed: {elapsed:?}"
-        );
-    }
-
     // -- ps_escape tests (Windows PowerShell path escaping) --
 
     #[cfg(target_os = "windows")]
@@ -2616,7 +2536,7 @@ mod tests {
 
     #[cfg(unix)]
     mod init_vm_linux_tests {
-        use super::super::{check_uidmap, start_rootless_containerd, wait_for_containerd};
+        use super::super::{start_rootless_containerd, wait_for_containerd};
         use std::os::unix::fs::PermissionsExt;
 
         /// Creates an executable script in `dir` with given name and content.
@@ -2631,39 +2551,6 @@ mod tests {
             perms.set_mode(0o755);
             std::fs::set_permissions(&path, perms).expect("chmod");
             path
-        }
-
-        #[test]
-        fn check_uidmap_missing_returns_error_with_install_instructions() {
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let fake_bin = tmp.path().join("nonexistent-uidmap-binary");
-            let result = check_uidmap(fake_bin.to_str().unwrap());
-            assert!(result.is_err());
-            let err = result.unwrap_err().to_string();
-            assert!(
-                err.contains("newuidmap not found"),
-                "error should mention newuidmap: {err}"
-            );
-            assert!(
-                err.contains("sudo apt-get install"),
-                "error should include Debian instructions: {err}"
-            );
-            assert!(
-                err.contains("sudo dnf install"),
-                "error should include Fedora instructions: {err}"
-            );
-            assert!(
-                err.contains("sudo zypper install"),
-                "error should include openSUSE instructions: {err}"
-            );
-        }
-
-        #[test]
-        fn check_uidmap_success_when_binary_exists() {
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let script = create_mock_script(tmp.path(), "newuidmap", "#!/bin/sh\nexit 0\n");
-            let result = check_uidmap(script.to_str().unwrap());
-            assert!(result.is_ok(), "should succeed when newuidmap exits 0");
         }
 
         #[test]
@@ -3001,55 +2888,6 @@ mod tests {
             mode & 0o111,
             0,
             "copied binary should have executable permission"
-        );
-    }
-
-    #[test]
-    fn run_with_timeout_returns_error_for_nonexistent_command() {
-        use std::process::Command;
-        use std::time::Duration;
-
-        let result = run_with_timeout(
-            &mut Command::new("nonexistent-binary-xyz-12345"),
-            Duration::from_secs(5),
-        );
-        assert!(result.is_err(), "nonexistent command should fail to spawn");
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn run_with_timeout_reports_nonzero_exit() {
-        use std::process::Command;
-        use std::time::Duration;
-
-        let result = run_with_timeout(&mut Command::new("false"), Duration::from_secs(5));
-        assert!(result.is_ok(), "command should finish (not timeout)");
-        assert!(!result.unwrap().success(), "exit code should be non-zero");
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn run_with_timeout_zero_duration_kills_immediately() {
-        use std::process::Command;
-        use std::time::{Duration, Instant};
-
-        let start = Instant::now();
-        let result = run_with_timeout(Command::new("sleep").arg("60"), Duration::ZERO);
-        let elapsed = start.elapsed();
-
-        assert!(result.is_err(), "zero timeout should kill immediately");
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("timed out"),
-            "error should mention timeout"
-        );
-        assert!(
-            err_msg.contains("sleep"),
-            "error should include program name 'sleep', got: {err_msg}"
-        );
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "should kill near-instantly, elapsed: {elapsed:?}"
         );
     }
 
@@ -3934,10 +3772,14 @@ services:
             .iter()
             .map(|v| format!("[{}] {} -- {}", v.container, v.rule, v.message))
             .collect();
-        let error_msg = format!("Security check failed:\n{}", msgs.join("\n"));
+        let error_msg = format!(
+            "{}\n{}",
+            speedwave_runtime::consts::SYSTEM_CHECK_FAILED_PREFIX,
+            msgs.join("\n")
+        );
         assert!(
-            error_msg.contains("Security check failed"),
-            "Error message should contain 'Security check failed'"
+            error_msg.contains(speedwave_runtime::consts::SYSTEM_CHECK_FAILED_PREFIX),
+            "Error message should contain system check failed prefix"
         );
         assert!(
             error_msg.contains("CAP_DROP_ALL"),
@@ -4111,6 +3953,35 @@ networks:
         assert!(
             body.contains("bundle::load_current_bundle_manifest"),
             "build_images() must load the current manifest to get bundle_id for BundleState"
+        );
+    }
+
+    /// Structural test: verifies that `start_containers()` calls
+    /// `ensure_exec_healthy` between `compose_up_recreate` and `SetupState`
+    /// save. Without this, `containers_started = true` could be persisted
+    /// while containers are broken or missing.
+    #[test]
+    fn start_containers_probes_exec_after_compose_up() {
+        let source = include_str!("setup_wizard.rs");
+        let body = extract_fn_body(source, "pub fn start_containers(");
+
+        let recreate_pos = body
+            .find("compose_up_recreate")
+            .expect("start_containers must call compose_up_recreate");
+        let probe_pos = body
+            .find("ensure_exec_healthy")
+            .expect("start_containers must call ensure_exec_healthy");
+        let state_pos = body
+            .find("containers_started = true")
+            .expect("start_containers must set containers_started = true");
+
+        assert!(
+            recreate_pos < probe_pos,
+            "ensure_exec_healthy must come AFTER compose_up_recreate"
+        );
+        assert!(
+            probe_pos < state_pos,
+            "ensure_exec_healthy must come BEFORE containers_started = true"
         );
     }
 

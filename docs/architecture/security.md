@@ -92,6 +92,34 @@ Invalid URLs are treated as unconfigured services (fail-closed).
 
 Because the full project directory is now mounted, the `path-validator.ts` denylist blocks MCP workers from accessing sensitive paths within the workspace: `.git/`, `.env`, and `.speedwave/`. This provides defense-in-depth — even if an MCP worker is compromised, it cannot exfiltrate repository history, environment secrets, or Speedwave configuration.
 
+## OS Prerequisite Checks
+
+`os_prereqs::check_os_prereqs()` validates host-level requirements before any container operations:
+
+- **Windows**: Verifies WSL2 is available via `wsl.exe --status` (10s timeout). If missing, reports actionable remediation (DISM commands or Windows Features GUI).
+- **Linux**: Verifies `newuidmap` is installed (required for rootless user namespaces).
+- **macOS**: No OS prerequisites — Lima runtime is bundled by Speedwave.
+
+These checks run at multiple points: setup wizard (before VM init), container start (blocking overlay in Desktop, exit in CLI), and update/rollback. Violations produce `PrereqViolation` structs with remediation text, following the same pattern as `SecurityCheck` violations.
+
+Both OS prereq failures and `SecurityCheck` compose violations block the application — containers never start if either check fails.
+
+## Authentication Gate
+
+Claude Code must be authenticated (OAuth or API key) before the app allows
+chat access. Enforced at two layers:
+
+- **Backend (`start_chat`, `resume_conversation`):** Runs `claude auth status`
+  inside the container before spawning an interactive session. Returns a clear
+  error if not authenticated, preventing the hang that occurs when Claude
+  prompts for interactive login on stdin while the frontend waits for
+  stream-json on stdout.
+
+- **Frontend (`ProjectStateService`):** After containers are running, calls
+  `get_auth_status`. If neither OAuth nor API key is configured, sets status to
+  `auth_required` — an overlay with an "Authenticate" button opens a native
+  terminal (`open_auth_terminal`) for the user to complete OAuth login.
+
 ## See Also
 
 - [ADR-009: Per-Project Isolation Preserved](../adr/ADR-009-per-project-isolation-preserved.md)

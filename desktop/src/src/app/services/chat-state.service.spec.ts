@@ -19,10 +19,14 @@ describe('ChatStateService', () => {
           return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
         case 'get_bundle_reconcile_state':
           return MOCK_BUNDLE_RECONCILE_DONE;
+        case 'run_system_check':
+          return undefined;
         case 'check_containers_running':
           return true;
         case 'start_containers':
           return undefined;
+        case 'get_auth_status':
+          return { api_key_configured: false, oauth_authenticated: true };
         case 'start_chat':
           return undefined;
         case 'send_message':
@@ -780,6 +784,48 @@ describe('ChatStateService', () => {
         toolUseId: 'toolu_ask1',
         answer: 'apple, banana',
       });
+    });
+  });
+
+  describe('auth error routing', () => {
+    it('surfaces auth error as auth_required status', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      // Bypass normal init — set ready directly so startChatSession fires
+      projectState.activeProject = 'test';
+      projectState.status = 'ready';
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_chat')
+          throw new Error('Claude is not authenticated. Please authenticate first.');
+        return undefined;
+      };
+
+      await service.init();
+      expect(projectState.status).toBe('auth_required');
+    });
+
+    it('routes auth error in sendMessage retry to auth_required', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      projectState.activeProject = 'test';
+      projectState.status = 'ready';
+
+      let callCount = 0;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_chat') {
+          callCount++;
+          if (callCount > 1)
+            throw new Error('Claude is not authenticated. Please authenticate first.');
+          return undefined;
+        }
+        if (cmd === 'send_message') throw new Error('session exited');
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        return undefined;
+      };
+
+      await service.init();
+      await service.sendMessage('hello');
+      expect(projectState.status).toBe('auth_required');
     });
   });
 });
