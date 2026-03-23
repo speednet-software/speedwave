@@ -146,7 +146,7 @@ pub fn is_oom_exit(status: &ExitStatus) -> bool {
 }
 
 /// User-facing OOM message shared between CLI and Desktop (DRY).
-pub const OOM_MESSAGE: &str = "\n\
+pub const OOM_MESSAGE: &str = "\
     The Claude session was likely killed due to insufficient memory \
     (exit code 137 / SIGKILL).\n\n\
     Suggestions:\n  \
