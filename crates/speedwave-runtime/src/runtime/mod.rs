@@ -997,6 +997,8 @@ services:
         custom_error: Option<String>,
         /// When set, `compose_up_recreate` returns this error.
         recreate_error: Option<String>,
+        /// When true, `compose_up_recreate` does NOT flip `exec_healthy`.
+        stay_stale: bool,
     }
 
     impl ProbeTestRuntime {
@@ -1006,6 +1008,7 @@ services:
                 recreate_called: std::sync::atomic::AtomicBool::new(false),
                 custom_error: None,
                 recreate_error: None,
+                stay_stale: false,
             }
         }
 
@@ -1015,6 +1018,17 @@ services:
                 recreate_called: std::sync::atomic::AtomicBool::new(false),
                 custom_error: None,
                 recreate_error: None,
+                stay_stale: false,
+            }
+        }
+
+        fn stay_stale_after_recreate() -> Self {
+            Self {
+                exec_healthy: std::sync::atomic::AtomicBool::new(false),
+                recreate_called: std::sync::atomic::AtomicBool::new(false),
+                custom_error: None,
+                recreate_error: None,
+                stay_stale: true,
             }
         }
 
@@ -1084,9 +1098,11 @@ services:
             if let Some(ref msg) = self.recreate_error {
                 anyhow::bail!("{msg}");
             }
-            // Recovery: flip exec to healthy
-            self.exec_healthy
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            // Recovery: flip exec to healthy (unless stay_stale is set)
+            if !self.stay_stale {
+                self.exec_healthy
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             Ok(())
         }
     }
@@ -1132,6 +1148,22 @@ services:
         assert!(
             err.to_string().contains("Please restart Speedwave"),
             "recovery failure should include actionable message: {err}"
+        );
+    }
+
+    #[test]
+    fn test_ensure_exec_healthy_still_broken_after_recovery() {
+        let rt = ProbeTestRuntime::stay_stale_after_recreate();
+        let err = ensure_exec_healthy(&rt, "proj", "container").unwrap_err();
+        assert!(rt.was_recreated(), "compose_up_recreate should be called");
+        assert!(
+            err.to_string()
+                .contains("Containers still broken after recovery"),
+            "should report still-broken state: {err}"
+        );
+        assert!(
+            err.to_string().contains("Please restart Speedwave"),
+            "should include actionable message: {err}"
         );
     }
 }
