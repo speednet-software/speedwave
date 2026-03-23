@@ -271,7 +271,11 @@ pub fn rollback_containers(runtime: &dyn ContainerRuntime, project: &str) -> any
 
     let snapshot = load_snapshot(project)?;
 
-    // OS prerequisite check
+    // OS prerequisite check.
+    // Note: intentionally NOT using SYSTEM_CHECK_FAILED_PREFIX here — rollback
+    // is only triggered via CLI/Tauri update flow, not from the main Desktop
+    // startup path. The "Rollback aborted" prefix makes the context clearer
+    // than the generic "System check failed:" prefix.
     let prereq_violations = crate::os_prereqs::check_os_prereqs();
     if !prereq_violations.is_empty() {
         let msgs: Vec<String> = prereq_violations.iter().map(|v| v.to_string()).collect();

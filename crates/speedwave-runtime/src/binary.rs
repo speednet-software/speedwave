@@ -568,6 +568,40 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_run_with_timeout_nonexistent_command() {
+        use std::process::Command;
+        use std::time::Duration;
+
+        let result = run_with_timeout(
+            &mut Command::new("__nonexistent_binary_4f3a2b1c__"),
+            Duration::from_secs(5),
+        );
+        assert!(result.is_err(), "nonexistent command should fail on spawn");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_with_timeout_nonzero_exit() {
+        use std::process::Command;
+        use std::time::Duration;
+
+        let result = run_with_timeout(&mut Command::new("false"), Duration::from_secs(5));
+        assert!(result.is_ok(), "non-zero exit is not an error");
+        assert!(!result.unwrap().success(), "exit code should be non-zero");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_with_timeout_zero_duration_kills_immediately() {
+        use std::process::Command;
+        use std::time::Duration;
+
+        let result = run_with_timeout(Command::new("sleep").arg("60"), Duration::from_secs(0));
+        assert!(result.is_err(), "zero timeout should kill immediately");
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+    }
+
+    #[test]
     #[cfg(unix)]
     fn test_run_with_timeout_exceeds_deadline() {
         use std::process::Command;

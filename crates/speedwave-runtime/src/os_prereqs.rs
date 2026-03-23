@@ -19,6 +19,7 @@ impl fmt::Display for PrereqRule {
 }
 
 /// A single OS prerequisite violation with actionable remediation.
+#[derive(Debug)]
 pub struct PrereqViolation {
     pub rule: PrereqRule,
     pub message: String,
@@ -38,7 +39,7 @@ impl fmt::Display for PrereqViolation {
 /// - **Linux**: Verifies `newuidmap` exists (required for rootless user namespaces).
 /// - **macOS**: No OS prerequisites (Lima runtime is bundled).
 pub fn check_os_prereqs() -> Vec<PrereqViolation> {
-    let violations = Vec::new();
+    let violations: Vec<PrereqViolation> = Vec::new();
 
     #[cfg(target_os = "windows")]
     let violations = check_wsl();
@@ -55,7 +56,9 @@ fn check_wsl() -> Vec<PrereqViolation> {
 
     let timeout = std::time::Duration::from_secs(10);
     let mut cmd = binary::system_command("wsl.exe");
-    cmd.args(["--status"]);
+    cmd.args(["--status"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
 
     match binary::run_with_timeout(&mut cmd, timeout) {
         Ok(status) if status.success() => Vec::new(),
@@ -127,6 +130,19 @@ mod tests {
             violations.is_empty(),
             "macOS should have no OS prereq violations, got {} violation(s)",
             violations.len()
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_check_os_prereqs_linux_with_uidmap_present() {
+        // On CI and dev machines, newuidmap is typically installed.
+        // If this test fails, install: sudo apt install uidmap
+        let violations = check_os_prereqs();
+        assert!(
+            violations.is_empty(),
+            "Linux with newuidmap installed should have no prereq violations, got: {:?}",
+            violations
         );
     }
 
