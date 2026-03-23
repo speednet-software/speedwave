@@ -1131,4 +1131,15 @@ mod tests {
         let path_str = format!("/path/{name}");
         derive_instance_name_from(std::path::Path::new(&path_str));
     }
+
+    /// Guard: SYSTEM_CHECK_FAILED_PREFIX must not change without updating
+    /// the frontend match in project-state.service.ts (startsWith check).
+    #[test]
+    fn test_system_check_failed_prefix_is_stable() {
+        assert_eq!(
+            SYSTEM_CHECK_FAILED_PREFIX, "System check failed:",
+            "Changing this prefix silently breaks the Desktop UI — \
+             update project-state.service.ts startsWith check to match"
+        );
+    }
 }

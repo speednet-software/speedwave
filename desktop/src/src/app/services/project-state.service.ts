@@ -10,9 +10,15 @@ export type ProjectStatus =
   | 'checking'
   | 'starting'
   | 'rebuilding'
+  | 'auth_required'
   | 'ready'
   | 'switching'
   | 'error';
+
+interface AuthStatusResponse {
+  api_key_configured: boolean;
+  oauth_authenticated: boolean;
+}
 
 /**
  * SSOT for project lifecycle state. All project switching, adding,
@@ -107,7 +113,8 @@ export class ProjectStateService {
     if (
       this.status === 'system_check' ||
       this.status === 'checking' ||
-      this.status === 'starting'
+      this.status === 'starting' ||
+      this.status === 'auth_required'
     ) {
       return; // guard: already in progress
     }
@@ -145,9 +152,18 @@ export class ProjectStateService {
         // The 'starting' overlay stays visible for the duration.
         await this.tauri.invoke('start_containers', { project: this.activeProject });
       }
-      this.status = 'ready';
+      // Phase 3: verify Claude authentication before declaring ready
+      const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
+        project: this.activeProject,
+      });
+      if (auth.api_key_configured || auth.oauth_authenticated) {
+        this.status = 'ready';
+      } else {
+        this.status = 'auth_required';
+      }
     } catch (err) {
       const msg = String(err);
+      // SSOT coupling: must match crates/speedwave-runtime/src/consts.rs SYSTEM_CHECK_FAILED_PREFIX
       if (msg.startsWith('System check failed:')) {
         this.status = 'check_failed';
       } else {
@@ -161,6 +177,8 @@ export class ProjectStateService {
       this.notifySettled();
     } else if (this.status === 'error' || this.status === 'check_failed') {
       this.notifyFailed(this.error);
+      this.notifySettled();
+    } else if (this.status === 'auth_required') {
       this.notifySettled();
     }
   }
@@ -182,6 +200,24 @@ export class ProjectStateService {
       this.error = '';
     }
     this.notifyChange();
+  }
+
+  /** Re-checks Claude auth status after user completes authentication. */
+  async retryAuth(): Promise<void> {
+    if (!this.activeProject) return;
+    try {
+      const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
+        project: this.activeProject,
+      });
+      if (auth.api_key_configured || auth.oauth_authenticated) {
+        this.status = 'ready';
+        this.notifyChange();
+        this.notifyReady();
+        this.notifySettled();
+      }
+    } catch {
+      // Auth check failed — stay in auth_required
+    }
   }
 
   /**
