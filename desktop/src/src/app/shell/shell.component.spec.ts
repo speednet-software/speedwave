@@ -21,6 +21,8 @@ describe('ShellComponent', () => {
       if (cmd === 'run_system_check') return undefined;
       if (cmd === 'check_containers_running') return true;
       if (cmd === 'start_containers') return undefined;
+      if (cmd === 'get_auth_status')
+        return { api_key_configured: false, oauth_authenticated: true };
       return undefined;
     };
 
@@ -215,5 +217,28 @@ describe('ShellComponent', () => {
     const overlay = fixture.nativeElement.querySelector('[data-testid="blocking-overlay"]');
     expect(overlay).not.toBeNull();
     expect(overlay.textContent).toContain('Running system checks...');
+  });
+
+  it('shows auth-required overlay when status is auth_required', async () => {
+    await component.ngOnInit();
+    projectState.status = 'auth_required';
+    component['cdr'].markForCheck();
+    fixture.detectChanges();
+
+    const overlay = fixture.nativeElement.querySelector('[data-testid="blocking-auth-required"]');
+    expect(overlay).not.toBeNull();
+    expect(overlay.textContent).toContain('Authentication Required');
+  });
+
+  it('auth-required overlay has authenticate and check-status buttons', async () => {
+    await component.ngOnInit();
+    projectState.status = 'auth_required';
+    component['cdr'].markForCheck();
+    fixture.detectChanges();
+
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="auth-authenticate-btn"]')
+    ).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="auth-check-btn"]')).not.toBeNull();
   });
 });

@@ -104,6 +104,22 @@ These checks run at multiple points: setup wizard (before VM init), container st
 
 Both OS prereq failures and `SecurityCheck` compose violations block the application — containers never start if either check fails.
 
+## Authentication Gate
+
+Claude Code must be authenticated (OAuth or API key) before the app allows
+chat access. Enforced at two layers:
+
+- **Backend (`start_chat`, `resume_conversation`):** Runs `claude auth status`
+  inside the container before spawning an interactive session. Returns a clear
+  error if not authenticated, preventing the hang that occurs when Claude
+  prompts for interactive login on stdin while the frontend waits for
+  stream-json on stdout.
+
+- **Frontend (`ProjectStateService`):** After containers are running, calls
+  `get_auth_status`. If neither OAuth nor API key is configured, sets status to
+  `auth_required` — an overlay with an "Authenticate" button opens a native
+  terminal (`open_auth_terminal`) for the user to complete OAuth login.
+
 ## See Also
 
 - [ADR-009: Per-Project Isolation Preserved](../adr/ADR-009-per-project-isolation-preserved.md)

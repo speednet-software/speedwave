@@ -10,6 +10,7 @@ import { RouterOutlet, RouterLink, RouterLinkActive } from '@angular/router';
 import { ProjectSwitcherComponent } from '../project-switcher/project-switcher.component';
 import { UpdateNotificationComponent } from '../update-notification/update-notification.component';
 import { ProjectStateService } from '../services/project-state.service';
+import { TauriService } from '../services/tauri.service';
 
 /** Main application shell with header navigation and project switcher. */
 @Component({
@@ -44,6 +45,33 @@ import { ProjectStateService } from '../services/project-state.service';
             >
               Retry
             </button>
+          </div>
+        } @else if (projectState.status === 'auth_required') {
+          <div
+            class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-sw-bg-darkest"
+            data-testid="blocking-auth-required"
+          >
+            <span class="text-sw-accent text-lg font-mono font-bold">Authentication Required</span>
+            <p class="mt-4 max-w-lg text-center font-mono text-sm text-sw-text-muted">
+              Claude Code needs to be authenticated before you can start a conversation. Click
+              "Authenticate" to open a terminal and complete the login.
+            </p>
+            <div class="mt-6 flex gap-3">
+              <button
+                class="px-6 py-2.5 rounded text-sm font-semibold font-mono border-none cursor-pointer transition-colors bg-sw-accent text-white hover:bg-sw-accent-hover"
+                data-testid="auth-authenticate-btn"
+                (click)="openAuthTerminal()"
+              >
+                Authenticate
+              </button>
+              <button
+                class="px-6 py-2.5 rounded text-sm font-semibold font-mono border border-sw-border bg-transparent text-sw-text cursor-pointer transition-colors hover:bg-sw-bg-dark"
+                data-testid="auth-check-btn"
+                (click)="checkAuth()"
+              >
+                Check Status
+              </button>
+            </div>
           </div>
         } @else if (projectState.status === 'error') {
           <div
@@ -126,6 +154,7 @@ import { ProjectStateService } from '../services/project-state.service';
 export class ShellComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
   private cdr = inject(ChangeDetectorRef);
+  private tauri = inject(TauriService);
   private unsubscribe: (() => void) | null = null;
 
   /** Human-readable status message for the blocking overlay. */
@@ -164,6 +193,25 @@ export class ShellComponent implements OnInit, OnDestroy {
   /** Retries system check (prereqs + security). */
   retryCheck(): void {
     this.projectState.ensureContainersRunning();
+  }
+
+  /** Opens a native terminal for Claude OAuth login. */
+  async openAuthTerminal(): Promise<void> {
+    const project = this.projectState.activeProject;
+    if (project) {
+      try {
+        await this.tauri.invoke('open_auth_terminal', { project });
+      } catch (err) {
+        this.projectState.error = `Failed to open terminal: ${err}`;
+        this.cdr.markForCheck();
+      }
+    }
+  }
+
+  /** Re-checks auth status after user completes authentication. */
+  async checkAuth(): Promise<void> {
+    await this.projectState.retryAuth();
+    this.cdr.markForCheck();
   }
 
   /** Dismisses the error banner. */

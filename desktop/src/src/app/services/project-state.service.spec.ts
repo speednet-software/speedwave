@@ -22,6 +22,8 @@ describe('ProjectStateService', () => {
           return true;
         case 'start_containers':
           return undefined;
+        case 'get_auth_status':
+          return { api_key_configured: false, oauth_authenticated: true };
         default:
           return undefined;
       }
@@ -97,6 +99,8 @@ describe('ProjectStateService', () => {
             return false;
           case 'start_containers':
             return undefined;
+          case 'get_auth_status':
+            return { api_key_configured: false, oauth_authenticated: true };
           default:
             return undefined;
         }
@@ -513,6 +517,142 @@ describe('ProjectStateService', () => {
       const spy = vi.spyOn(mockTauri, 'invoke');
       await service.addProject('beta', '/tmp/beta');
       expect(spy).toHaveBeenCalledWith('add_project', { name: 'beta', dir: '/tmp/beta' });
+    });
+  });
+
+  describe('auth gate', () => {
+    it('transitions to auth_required when Claude is not authenticated', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return { api_key_configured: false, oauth_authenticated: false };
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+      expect(service.status).toBe('auth_required');
+    });
+
+    it('transitions to ready when OAuth is authenticated', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return { api_key_configured: false, oauth_authenticated: true };
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+      expect(service.status).toBe('ready');
+    });
+
+    it('transitions to ready when API key is configured', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return { api_key_configured: true, oauth_authenticated: false };
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+      expect(service.status).toBe('ready');
+    });
+
+    it('sets error when get_auth_status throws', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            throw new Error('container not ready');
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+      expect(service.status).toBe('error');
+    });
+
+    it('retryAuth transitions to ready when auth succeeds', async () => {
+      let authed = false;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return { api_key_configured: false, oauth_authenticated: authed };
+          default:
+            return undefined;
+        }
+      };
+      await service.init();
+      expect(service.status).toBe('auth_required');
+
+      authed = true;
+      await service.retryAuth();
+      expect(service.status).toBe('ready');
+    });
+
+    it('does not fire onProjectReady for auth_required', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return { api_key_configured: false, oauth_authenticated: false };
+          default:
+            return undefined;
+        }
+      };
+      const cb = vi.fn();
+      service.onProjectReady(cb);
+      await service.init();
+      expect(service.status).toBe('auth_required');
+      expect(cb).not.toHaveBeenCalled();
     });
   });
 });
