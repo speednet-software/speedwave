@@ -6,7 +6,7 @@ use speedwave_runtime::compose::{self, SecurityCheck};
 use speedwave_runtime::config;
 use speedwave_runtime::consts;
 use speedwave_runtime::plugin;
-use speedwave_runtime::runtime::detect_runtime;
+use speedwave_runtime::runtime::{detect_runtime, ensure_exec_healthy};
 use speedwave_runtime::update;
 use speedwave_runtime::validation;
 
@@ -541,8 +541,12 @@ fn main() -> anyhow::Result<()> {
     compose::save_compose(&project_name, &compose_yml)?;
     runtime.compose_up(&project_name)?;
 
-    // exec -it -> interactive Claude terminal inside container
+    // Verify container exec works before starting interactive session.
+    // Recovers automatically from stale mounts after macOS sleep/resume.
     let container_name = format!("{}_{}_claude", consts::compose_prefix(), project_name);
+    ensure_exec_healthy(&*runtime, &project_name, &container_name)?;
+
+    // exec -it -> interactive Claude terminal inside container
     let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
     exec_cmd.extend_from_slice(&resolved.flags);
     let status = runtime

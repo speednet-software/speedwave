@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use speedwave_runtime::runtime::ensure_exec_healthy;
 use speedwave_runtime::{build, bundle, compose, config, consts, project, runtime};
 use std::path::PathBuf;
 
@@ -1200,6 +1201,7 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
 pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
     let rt = runtime::detect_runtime();
     let container_name = format!("{}_{}_claude", consts::compose_prefix(), project);
+    ensure_exec_healthy(&*rt, project, &container_name)?;
     let mut cmd =
         rt.container_exec_piped(&container_name, &[consts::CLAUDE_BINARY, "auth", "status"])?;
     let output = cmd.output()?;

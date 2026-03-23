@@ -1,4 +1,5 @@
 use crate::history;
+use speedwave_runtime::runtime::ensure_exec_healthy;
 use speedwave_runtime::{config, consts, runtime};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -632,6 +633,10 @@ impl ChatSession {
 
         let (args, container) =
             Self::prepare_start(&self.project_name, &user_config, resume_session_id)?;
+
+        // Verify container exec works before starting chat session.
+        // Recovers automatically from stale mounts after macOS sleep/resume.
+        ensure_exec_healthy(&*rt, &self.project_name, &container)?;
 
         let mut cmd = rt.container_exec_piped(
             &container,
