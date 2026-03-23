@@ -5,6 +5,8 @@ import type { BundleReconcileStatus, ProjectList } from '../models/update';
 /** Lifecycle status of the project + container lifecycle. */
 export type ProjectStatus =
   | 'loading'
+  | 'system_check'
+  | 'check_failed'
   | 'checking'
   | 'starting'
   | 'rebuilding'
@@ -100,15 +102,36 @@ export class ProjectStateService {
     }
   }
 
-  /** Checks if containers are running for the active project, starts them if not. */
+  /** Checks OS prereqs, then verifies containers are running, starting them if not. */
   async ensureContainersRunning(): Promise<void> {
+    if (
+      this.status === 'system_check' ||
+      this.status === 'checking' ||
+      this.status === 'starting'
+    ) {
+      return; // guard: already in progress
+    }
     if (!this.activeProject) {
       this.status = 'error';
       this.error = 'No active project selected.';
       this.notifyChange();
       return;
     }
+
+    // Phase 1: OS prerequisite check
+    this.status = 'system_check';
     this.error = '';
+    this.notifyChange();
+    try {
+      await this.tauri.invoke('run_system_check');
+    } catch (err) {
+      this.status = 'check_failed';
+      this.error = String(err);
+      this.notifyChange();
+      return;
+    }
+
+    // Phase 2: check/start containers (includes SecurityCheck in backend)
     this.status = 'checking';
     this.notifyChange();
     try {
@@ -124,14 +147,19 @@ export class ProjectStateService {
       }
       this.status = 'ready';
     } catch (err) {
-      this.status = 'error';
-      this.error = String(err);
+      const msg = String(err);
+      if (msg.startsWith('System check failed:')) {
+        this.status = 'check_failed';
+      } else {
+        this.status = 'error';
+      }
+      this.error = msg;
     }
     this.notifyChange();
     if (this.status === 'ready') {
       this.notifyReady();
       this.notifySettled();
-    } else if (this.status === 'error') {
+    } else if (this.status === 'error' || this.status === 'check_failed') {
       this.notifyFailed(this.error);
       this.notifySettled();
     }

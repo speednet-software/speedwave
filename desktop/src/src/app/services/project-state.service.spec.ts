@@ -16,6 +16,8 @@ describe('ProjectStateService', () => {
           return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
         case 'get_bundle_reconcile_state':
           return MOCK_BUNDLE_RECONCILE_DONE;
+        case 'run_system_check':
+          return undefined;
         case 'check_containers_running':
           return true;
         case 'start_containers':
@@ -89,6 +91,8 @@ describe('ProjectStateService', () => {
             return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
           case 'get_bundle_reconcile_state':
             return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+            return undefined;
           case 'check_containers_running':
             return false;
           case 'start_containers':
@@ -113,6 +117,7 @@ describe('ProjectStateService', () => {
     it('sets error on failure', async () => {
       await service.init();
       mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'run_system_check') return undefined;
         if (cmd === 'check_containers_running') throw new Error('connection refused');
         return undefined;
       };
@@ -130,6 +135,82 @@ describe('ProjectStateService', () => {
 
       expect(service.status).toBe('error');
       expect(service.error).toContain('No active project');
+    });
+
+    it('sets system_check status during prereq phase', async () => {
+      await service.init();
+      const statuses: string[] = [];
+      service.onChange(() => statuses.push(service.status));
+
+      await service.ensureContainersRunning();
+
+      expect(statuses).toContain('system_check');
+    });
+
+    it('sets check_failed when run_system_check throws', async () => {
+      await service.init();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'run_system_check') throw new Error('WSL2 is not available');
+        return undefined;
+      };
+
+      await service.ensureContainersRunning();
+
+      expect(service.status).toBe('check_failed');
+      expect(service.error).toContain('WSL2 is not available');
+    });
+
+    it('guard prevents reentry when status is system_check', async () => {
+      await service.init();
+      service.status = 'system_check';
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      const callsBefore = spy.mock.calls.length;
+
+      await service.ensureContainersRunning();
+
+      expect(spy.mock.calls.length).toBe(callsBefore);
+      expect(service.status).toBe('system_check');
+    });
+
+    it('proceeds to checking after successful system check', async () => {
+      await service.init();
+      const statuses: string[] = [];
+      service.onChange(() => statuses.push(service.status));
+
+      await service.ensureContainersRunning();
+
+      const systemCheckIdx = statuses.indexOf('system_check');
+      const checkingIdx = statuses.indexOf('checking');
+      expect(systemCheckIdx).toBeGreaterThanOrEqual(0);
+      expect(checkingIdx).toBeGreaterThan(systemCheckIdx);
+    });
+
+    it('sets check_failed on security failure prefix', async () => {
+      await service.init();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'run_system_check') return undefined;
+        if (cmd === 'check_containers_running') throw 'System check failed: cap_drop ALL missing';
+        return undefined;
+      };
+
+      await service.ensureContainersRunning();
+
+      expect(service.status).toBe('check_failed');
+      expect(service.error).toContain('System check failed:');
+    });
+
+    it('sets dismissable error on runtime failure', async () => {
+      await service.init();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'run_system_check') return undefined;
+        if (cmd === 'check_containers_running') throw new Error('network timeout');
+        return undefined;
+      };
+
+      await service.ensureContainersRunning();
+
+      expect(service.status).toBe('error');
+      expect(service.error).toContain('network timeout');
     });
   });
 
@@ -389,6 +470,7 @@ describe('ProjectStateService', () => {
       service.status = 'rebuilding';
 
       mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'run_system_check') return undefined;
         if (cmd === 'check_containers_running') throw new Error('check failed');
         return undefined;
       };
@@ -414,7 +496,7 @@ describe('ProjectStateService', () => {
       service.onChange(() => statuses.push(service.status));
       await service.ensureContainersRunning();
       expect(service.error).toBe('');
-      expect(statuses[0]).toBe('checking');
+      expect(statuses[0]).toBe('system_check');
     });
   });
 

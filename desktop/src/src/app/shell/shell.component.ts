@@ -26,7 +26,26 @@ import { ProjectStateService } from '../services/project-state.service';
   template: `
     <div class="flex flex-col h-screen bg-sw-bg-darkest text-sw-text">
       @if (projectState.status !== 'ready') {
-        @if (projectState.status === 'error') {
+        @if (projectState.status === 'check_failed') {
+          <div
+            class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-sw-bg-darkest"
+            data-testid="blocking-check-failed"
+          >
+            <span class="text-sw-accent text-lg font-mono font-bold">System Check Failed</span>
+            <p
+              class="mt-4 max-w-lg text-center font-mono text-sm text-sw-text-muted whitespace-pre-line"
+            >
+              {{ projectState.error }}
+            </p>
+            <button
+              class="mt-6 px-6 py-2.5 rounded text-sm font-semibold font-mono border-none cursor-pointer transition-colors bg-sw-accent text-white hover:bg-sw-accent-hover"
+              data-testid="check-retry-btn"
+              (click)="retryCheck()"
+            >
+              Retry
+            </button>
+          </div>
+        } @else if (projectState.status === 'error') {
           <div
             class="flex items-center justify-between px-4 py-2 bg-[#3d0000] border-b border-sw-accent text-sw-accent text-[13px] font-mono"
             data-testid="blocking-error"
@@ -114,6 +133,8 @@ export class ShellComponent implements OnInit, OnDestroy {
     switch (this.projectState.status) {
       case 'loading':
         return 'Loading...';
+      case 'system_check':
+        return 'Running system checks...';
       case 'checking':
         return 'Checking containers...';
       case 'starting':
@@ -137,6 +158,11 @@ export class ShellComponent implements OnInit, OnDestroy {
 
   /** Retries container lifecycle check. */
   retry(): void {
+    this.projectState.ensureContainersRunning();
+  }
+
+  /** Retries system check (prereqs + security). */
+  retryCheck(): void {
     this.projectState.ensureContainersRunning();
   }
 
