@@ -1089,6 +1089,8 @@ fn main() {
             containers_cmd::init_vm,
             containers_cmd::create_project,
             containers_cmd::link_cli,
+            // System checks
+            containers_cmd::run_system_check,
             // Container lifecycle
             containers_cmd::is_setup_complete,
             containers_cmd::build_images,

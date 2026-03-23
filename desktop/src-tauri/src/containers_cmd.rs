@@ -156,11 +156,26 @@ pub(crate) fn render_and_save_compose(
     let expected_paths =
         speedwave_runtime::compose::SecurityExpectedPaths::compute(project, &project_dir)
             .map_err(|e| e.to_string())?;
+    // OS prerequisite check
+    let prereq_violations = speedwave_runtime::os_prereqs::check_os_prereqs();
+    if !prereq_violations.is_empty() {
+        return Err(format!(
+            "{} {}",
+            speedwave_runtime::consts::SYSTEM_CHECK_FAILED_PREFIX,
+            prereq_violations
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        ));
+    }
+
     let violations =
         speedwave_runtime::compose::SecurityCheck::run(&yaml, project, &manifests, &expected_paths);
     if !violations.is_empty() {
         return Err(format!(
-            "Security check failed:\n{}",
+            "{}\n{}",
+            speedwave_runtime::consts::SYSTEM_CHECK_FAILED_PREFIX,
             format_security_violations(&violations)
         ));
     }
@@ -178,6 +193,24 @@ pub(crate) fn format_security_violations(
         .map(|v| format!("[{}] {} -- {}", v.container, v.rule, v.message))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Runs OS prerequisite checks. Returns Ok(()) if all pass, or Err with
+/// violation details. Used by the frontend before attempting container start.
+#[tauri::command]
+pub async fn run_system_check() -> Result<(), String> {
+    let violations = tokio::task::spawn_blocking(speedwave_runtime::os_prereqs::check_os_prereqs)
+        .await
+        .map_err(|e| e.to_string())?;
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(violations
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join("\n\n"))
+    }
 }
 
 // ---------------------------------------------------------------------------

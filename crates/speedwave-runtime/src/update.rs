@@ -179,7 +179,18 @@ pub fn update_containers(
     let compose_yml =
         compose::render_compose(project, &project_dir, &resolved, &integrations, None)?;
 
-    // 3. Mandatory security gate — BEFORE saving anything
+    // 3a. OS prerequisite check
+    let prereq_violations = crate::os_prereqs::check_os_prereqs();
+    if !prereq_violations.is_empty() {
+        let msgs: Vec<String> = prereq_violations.iter().map(|v| v.to_string()).collect();
+        anyhow::bail!(
+            "{} {}",
+            crate::consts::SYSTEM_CHECK_FAILED_PREFIX,
+            msgs.join("\n\n")
+        );
+    }
+
+    // 3b. Mandatory security gate — BEFORE saving anything
     let manifests = crate::plugin::list_installed_plugins().unwrap_or_else(|e| {
         log::warn!("Failed to list installed plugins for security check: {e}");
         Vec::new()
@@ -191,7 +202,11 @@ pub fn update_containers(
             .iter()
             .map(|v| format!("[{}] {} -- {}", v.container, v.rule, v.message))
             .collect();
-        anyhow::bail!("Security check failed:\n{}", msgs.join("\n"));
+        anyhow::bail!(
+            "{}\n{}",
+            crate::consts::SYSTEM_CHECK_FAILED_PREFIX,
+            msgs.join("\n")
+        );
     }
 
     // 4. Save snapshot of current compose.yml for rollback (AFTER security check)
@@ -255,6 +270,16 @@ pub fn rollback_containers(runtime: &dyn ContainerRuntime, project: &str) -> any
     validate_project_name(project)?;
 
     let snapshot = load_snapshot(project)?;
+
+    // OS prerequisite check
+    let prereq_violations = crate::os_prereqs::check_os_prereqs();
+    if !prereq_violations.is_empty() {
+        let msgs: Vec<String> = prereq_violations.iter().map(|v| v.to_string()).collect();
+        anyhow::bail!(
+            "Rollback aborted — OS prerequisites not met:\n{}",
+            msgs.join("\n\n")
+        );
+    }
 
     // Security check on the snapshot compose.yml before applying.
     // Use manifests from the snapshot (live state may differ post-uninstall).
@@ -487,6 +512,57 @@ mod tests {
         assert!(
             violations.is_empty(),
             "empty compose with empty manifests should produce no violations"
+        );
+    }
+
+    #[test]
+    fn test_update_checks_os_prereqs() {
+        // Structural test: verify os_prereqs::check_os_prereqs() runs BEFORE
+        // SecurityCheck in update_containers. Same approach as
+        // test_build_before_compose_down_in_update_containers.
+        let source = include_str!("update.rs");
+
+        let fn_start = source
+            .find("fn update_containers(")
+            .expect("update_containers function must exist in update.rs");
+        let fn_body = &source[fn_start..];
+
+        let prereq_pos = fn_body
+            .find("os_prereqs::check_os_prereqs()")
+            .expect("os_prereqs::check_os_prereqs() call must exist in update_containers");
+        let security_pos = fn_body
+            .find("SecurityCheck::run(")
+            .expect("SecurityCheck::run() call must exist in update_containers");
+
+        assert!(
+            prereq_pos < security_pos,
+            "OS prerequisite check (at byte offset {prereq_pos}) must appear before \
+             SecurityCheck::run (at byte offset {security_pos}) in update_containers",
+        );
+    }
+
+    #[test]
+    fn test_rollback_checks_os_prereqs() {
+        // Structural test: verify os_prereqs::check_os_prereqs() runs BEFORE
+        // SecurityCheck in rollback_containers.
+        let source = include_str!("update.rs");
+
+        let fn_start = source
+            .find("fn rollback_containers(")
+            .expect("rollback_containers function must exist in update.rs");
+        let fn_body = &source[fn_start..];
+
+        let prereq_pos = fn_body
+            .find("os_prereqs::check_os_prereqs()")
+            .expect("os_prereqs::check_os_prereqs() call must exist in rollback_containers");
+        let security_pos = fn_body
+            .find("SecurityCheck::run(")
+            .expect("SecurityCheck::run() call must exist in rollback_containers");
+
+        assert!(
+            prereq_pos < security_pos,
+            "OS prerequisite check (at byte offset {prereq_pos}) must appear before \
+             SecurityCheck::run (at byte offset {security_pos}) in rollback_containers",
         );
     }
 
