@@ -552,7 +552,16 @@ fn main() -> anyhow::Result<()> {
     let status = runtime
         .container_exec(&container_name, &exec_cmd)
         .status()?;
-    std::process::exit(status.code().unwrap_or(1));
+
+    let is_oom = speedwave_runtime::resources::is_oom_exit(&status);
+    if is_oom {
+        eprintln!("{}", speedwave_runtime::resources::OOM_MESSAGE);
+    }
+    // Normalize: when OOM is detected via signal()==Some(9) (Linux),
+    // code() returns None. Return 137 for consistency with macOS
+    // (where nerdctl translates SIGKILL → exit code 137).
+    let code = status.code().unwrap_or(if is_oom { 137 } else { 1 });
+    std::process::exit(code);
 }
 
 /// Resolves project name from CWD path matching against configured projects.
