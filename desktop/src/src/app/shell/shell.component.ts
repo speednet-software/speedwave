@@ -172,6 +172,8 @@ export class ShellComponent implements OnInit, OnDestroy {
         return 'Switching project...';
       case 'rebuilding':
         return 'Rebuilding container images...';
+      case 'auth_required':
+        return 'Claude authentication required';
       default:
         return '';
     }

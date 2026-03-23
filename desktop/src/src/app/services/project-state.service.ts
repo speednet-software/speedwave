@@ -275,7 +275,8 @@ export class ProjectStateService {
         if (
           this.status === 'switching' ||
           this.status === 'starting' ||
-          this.status === 'checking'
+          this.status === 'checking' ||
+          this.status === 'auth_required'
         ) {
           return;
         }
