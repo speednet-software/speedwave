@@ -106,6 +106,11 @@ pub fn render_compose(
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
     yaml = yaml.replace("${CONTAINER_USER}", container_user());
 
+    // Adaptive Claude container memory based on host resources.
+    // SSOT: resources::effective_claude_memory_gib() handles platform detection.
+    let claude_mem = crate::resources::effective_claude_memory_gib();
+    yaml = yaml.replace("${CLAUDE_MEMORY}", &format!("{}g", claude_mem));
+
     // Inject Claude environment variables from resolved config
     yaml = inject_claude_env(&yaml, &resolved_config.env);
 

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-pub const CLAUDE_VERSION: &str = "2.1.76";
+pub const CLAUDE_VERSION: &str = "2.1.81";
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
