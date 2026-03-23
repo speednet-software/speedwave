@@ -73,6 +73,16 @@ Built-in images are versioned by the installed desktop bundle, not by a shared `
 
 This keeps CLI-driven container starts aligned with the desktop bundle that installed the CLI.
 
+## Troubleshooting
+
+If the `speedwave` command is not found after installation, run the diagnostic script:
+
+```bash
+bash scripts/diagnose-cli.sh
+```
+
+It checks the binary location, PATH configuration, shell config files, and Speedwave data directory to identify the issue.
+
 ## See Also
 
 - [ADR-005: Two Interfaces — CLI and Desktop](../adr/ADR-005-two-interfaces-cli-and-desktop.md)

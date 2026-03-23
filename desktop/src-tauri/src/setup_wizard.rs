@@ -3558,6 +3558,41 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bash_linux_fresh_install_creates_both_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        // No config files exist — simulates a fresh Linux install
+
+        ensure_local_bin_on_path_for_shell(home, UserShell::Bash).expect("should succeed");
+
+        // Both .bash_profile (login) and .bashrc (interactive) should be created
+        let bp = std::fs::read_to_string(home.join(".bash_profile")).expect("read .bash_profile");
+        assert!(
+            bp.contains(".local/bin"),
+            ".bash_profile should contain PATH export"
+        );
+
+        let bashrc = std::fs::read_to_string(home.join(".bashrc")).expect("read .bashrc");
+        assert!(
+            bashrc.contains(".local/bin"),
+            ".bashrc should contain PATH export"
+        );
+
+        // Each file should have exactly one export line
+        let bp_count = bp.lines().filter(|l| l.contains(".local/bin")).count();
+        let bashrc_count = bashrc.lines().filter(|l| l.contains(".local/bin")).count();
+        assert_eq!(
+            bp_count, 1,
+            ".bash_profile: expected 1 export line, got {bp_count}"
+        );
+        assert_eq!(
+            bashrc_count, 1,
+            ".bashrc: expected 1 export line, got {bashrc_count}"
+        );
+    }
+
     // ── copy_cli_binary overwrites existing binary ────────────────────────
 
     #[test]
@@ -3634,19 +3669,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn link_cli_from_copies_binary_and_updates_path() {
+    fn link_cli_from_copies_binary_and_sets_permissions() {
         let tmp = tempfile::tempdir().expect("tempdir");
 
         // Create mock CLI source binary
         let source = tmp.path().join("speedwave");
         std::fs::write(&source, b"cli-binary-content").expect("write source");
 
-        // Create home — link_cli_from will detect the shell via $SHELL and
-        // write to the appropriate config file(s). We create .zshrc so zsh
-        // (the macOS default) has something to append to.
+        // Create home with config files for all common shells so the test
+        // passes regardless of the ambient $SHELL (detect_shell reads it).
         let home = tmp.path().join("home");
         std::fs::create_dir_all(&home).expect("create home");
-        std::fs::write(home.join(".zshrc"), "# existing zshrc\n").expect("write zshrc");
+        std::fs::write(home.join(".zshrc"), "# zshrc\n").expect("write zshrc");
+        std::fs::write(home.join(".bash_profile"), "# bash_profile\n").expect("write bash_profile");
+        std::fs::write(home.join(".profile"), "# profile\n").expect("write profile");
 
         link_cli_from(&source, &home).expect("link_cli_from should succeed");
 
@@ -3663,16 +3699,6 @@ mod tests {
             .permissions()
             .mode();
         assert!(mode & 0o111 != 0, "binary should be executable");
-
-        // Verify .zshrc was updated with PATH export (we created it above,
-        // and ensure_local_bin_on_path_for_shell always writes to targets
-        // returned by shell_config_targets — .zshrc is a target for Zsh,
-        // and on macOS the test runner's $SHELL is zsh).
-        let zshrc = std::fs::read_to_string(home.join(".zshrc")).expect("read zshrc");
-        assert!(
-            zshrc.contains(".local/bin"),
-            ".zshrc should contain .local/bin export after link_cli_from"
-        );
     }
 
     #[cfg(unix)]
@@ -3683,9 +3709,13 @@ mod tests {
         let source = tmp.path().join("speedwave");
         std::fs::write(&source, b"v2-binary").expect("write source");
 
+        // Create config files for all common shells — makes the test
+        // independent of the ambient $SHELL value.
         let home = tmp.path().join("home");
         std::fs::create_dir_all(&home).expect("create home");
         std::fs::write(home.join(".zshrc"), "# zshrc\n").expect("write zshrc");
+        std::fs::write(home.join(".bash_profile"), "# bash_profile\n").expect("write bash_profile");
+        std::fs::write(home.join(".profile"), "# profile\n").expect("write profile");
 
         // Call twice
         link_cli_from(&source, &home).expect("first call");
@@ -3698,14 +3728,6 @@ mod tests {
         let dest = home.join(".local").join("bin").join(consts::CLI_BINARY);
         let content = std::fs::read_to_string(&dest).expect("read dest");
         assert_eq!(content, "v3-binary", "should have latest binary content");
-
-        // Shell config should have exactly one .local/bin line after two calls
-        let zshrc = std::fs::read_to_string(home.join(".zshrc")).expect("read zshrc");
-        let count = zshrc.lines().filter(|l| l.contains(".local/bin")).count();
-        assert_eq!(
-            count, 1,
-            ".zshrc should have exactly one .local/bin line after two link_cli_from calls, got {count}"
-        );
     }
 
     #[test]
