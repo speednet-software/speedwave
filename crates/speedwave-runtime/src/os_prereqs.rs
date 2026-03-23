@@ -39,15 +39,20 @@ impl fmt::Display for PrereqViolation {
 /// - **Linux**: Verifies `newuidmap` exists (required for rootless user namespaces).
 /// - **macOS**: No OS prerequisites (Lima runtime is bundled).
 pub fn check_os_prereqs() -> Vec<PrereqViolation> {
-    let violations: Vec<PrereqViolation> = Vec::new();
-
     #[cfg(target_os = "windows")]
-    let violations = check_wsl();
+    {
+        return check_wsl();
+    }
 
     #[cfg(target_os = "linux")]
-    let violations = check_uidmap();
+    {
+        return check_uidmap();
+    }
 
-    violations
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        Vec::new()
+    }
 }
 
 #[cfg(target_os = "windows")]

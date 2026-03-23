@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use speedwave_runtime::runtime::ensure_exec_healthy;
-use speedwave_runtime::{binary, build, bundle, compose, config, consts, project, runtime};
+use speedwave_runtime::{build, bundle, compose, config, consts, project, runtime};
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
@@ -1266,6 +1266,7 @@ fn lima_vm_config_needs_update_with(config_content: &str, desired_gib: u32) -> b
 /// - Memory is already at or above the desired value
 #[cfg(target_os = "macos")]
 pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
+    use speedwave_runtime::binary;
     let data_dir = consts::data_dir();
     let source_template = data_dir.join("lima.yaml");
 
@@ -1414,6 +1415,7 @@ pub fn factory_reset() -> anyhow::Result<()> {
     // 2. Destroy VM (macOS only) — force-stop then force-delete, each with timeout
     #[cfg(target_os = "macos")]
     {
+        use speedwave_runtime::binary;
         let timeout = std::time::Duration::from_secs(30);
 
         log::info!("stopping VM");

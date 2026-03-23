@@ -367,9 +367,11 @@ mod tests {
         assert!(!rt.is_available());
     }
 
-    /// On Linux, os_prereqs::check_os_prereqs() catches missing uidmap.
-    /// On macOS (dev/CI), prereqs return empty so ensure_ready() proceeds
-    /// to the nerdctl version check — which fails via mock.
+    /// Verifies ensure_ready() delegates to os_prereqs before nerdctl checks.
+    /// os_prereqs::check_os_prereqs() is called live (not mockable), so:
+    /// - On Linux CI with uidmap installed: prereqs pass → fails on "nerdctl not found"
+    /// - On Linux without uidmap: prereqs catch it → fails on "newuidmap not found"
+    /// - On macOS/Windows: prereqs return empty → fails on "nerdctl not found"
     #[test]
     fn test_ensure_ready_uidmap_missing() {
         let runner =
@@ -378,19 +380,11 @@ mod tests {
         let result = rt.ensure_ready();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        // On Linux: os_prereqs catches uidmap → "newuidmap not found"
-        // On macOS: os_prereqs returns empty, mock has no nerdctl → "nerdctl not found"
-        if cfg!(target_os = "linux") {
-            assert!(
-                err.contains("newuidmap"),
-                "error should mention newuidmap on Linux, got: {err}"
-            );
-        } else {
-            assert!(
-                err.contains("nerdctl"),
-                "error should mention nerdctl on non-Linux, got: {err}"
-            );
-        }
+        // Either prereqs caught missing uidmap, or mock runner has no nerdctl
+        assert!(
+            err.contains("newuidmap") || err.contains("nerdctl"),
+            "error should mention newuidmap or nerdctl, got: {err}"
+        );
     }
 
     #[test]
