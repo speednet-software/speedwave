@@ -165,6 +165,40 @@ pub fn system_command(program: &str) -> Command {
     command
 }
 
+/// Runs a command with a timeout. Kills the process if it exceeds the deadline.
+/// Polls `child.try_wait()` every 200ms. On timeout, kills the child process
+/// (logging a warning if kill fails) and bails with a descriptive error.
+///
+/// Does not capture stdout/stderr — output goes to the parent's streams.
+/// Do not use with `Stdio::piped()` as that risks pipe-buffer deadlock.
+pub fn run_with_timeout(
+    cmd: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> anyhow::Result<std::process::ExitStatus> {
+    let program = cmd.get_program().to_string_lossy().to_string();
+    let mut child = cmd.spawn()?;
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait()? {
+            Some(status) => return Ok(status),
+            None => {
+                if start.elapsed() >= timeout {
+                    if let Err(e) = child.kill() {
+                        log::warn!("run_with_timeout: kill failed: {e}");
+                    }
+                    let _ = child.wait();
+                    anyhow::bail!(
+                        "command '{}' timed out after {}s",
+                        program,
+                        timeout.as_secs()
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+    }
+}
+
 /// Returns the isolated LIMA_HOME directory: `~/.speedwave/lima`.
 ///
 /// Speedwave uses a dedicated LIMA_HOME so that its VM data does not collide
@@ -519,6 +553,39 @@ pub(crate) mod tests {
         assert!(
             lima_home_env.is_none(),
             "system_command should not set LIMA_HOME even for 'limactl'"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_with_timeout_success() {
+        use std::process::Command;
+        use std::time::Duration;
+
+        let result = run_with_timeout(Command::new("echo").arg("hello"), Duration::from_secs(5));
+        assert!(result.is_ok(), "fast command should succeed");
+        assert!(result.unwrap().success());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_with_timeout_exceeds_deadline() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let result = run_with_timeout(Command::new("sleep").arg("60"), Duration::from_secs(1));
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "slow command should be killed");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("timed out"),
+            "error should mention timeout, got: {err_msg}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "should not wait for the full 60s, elapsed: {elapsed:?}"
         );
     }
 }
