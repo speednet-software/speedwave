@@ -926,6 +926,9 @@ mod tests {
         fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
             Ok(())
         }
+        fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(true)
+        }
     }
 
     // -- teardown_and_restore tests --
