@@ -130,6 +130,7 @@ describe('Setup Wizard — Full Flow', function () {
     ];
     for (let i = 0; i < expectedTitles.length; i++) {
       const titleEl = await stepElements[i].$('[data-testid="step-title"]');
+      await titleEl.waitForExist({ timeout: 5_000 });
       expect((await titleEl.getText()).trim()).toBe(expectedTitles[i]);
     }
   });
