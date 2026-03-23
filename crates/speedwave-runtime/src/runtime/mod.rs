@@ -45,6 +45,8 @@ pub trait ContainerRuntime: Send + Sync {
     }
     fn container_logs(&self, container: &str, tail: u32) -> anyhow::Result<String>;
     fn compose_logs(&self, project: &str, tail: u32) -> anyhow::Result<String>;
+    /// Returns `true` if the given image tag exists in the container runtime.
+    fn image_exists(&self, tag: &str) -> anyhow::Result<bool>;
     /// Recreates all containers using `--force-recreate --remove-orphans`.
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()>;
 
@@ -313,12 +315,20 @@ fn run_rm_force(
     runner.run(cmd, &rm_args).map(|_| ())
 }
 
+/// Returns `true` if the message indicates the container does not exist.
+/// Single source of truth for missing-container error patterns.
+/// Note: `probe_container_exec` runs `nerdctl exec`, so these
+/// messages always refer to containers, not images.
+fn is_missing_container_error_msg(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("no such")
+        || lower.contains("not found")
+        || lower.contains("does not exist")
+        || lower.contains("not exist")
+}
+
 fn is_missing_container_error(err: &anyhow::Error) -> bool {
-    let message = err.to_string().to_ascii_lowercase();
-    message.contains("no such")
-        || message.contains("not found")
-        || message.contains("does not exist")
-        || message.contains("not exist")
+    is_missing_container_error_msg(&err.to_string())
 }
 
 /// Returns `true` if the error indicates broken container mount namespaces,
@@ -346,12 +356,16 @@ fn probe_container_exec(runtime: &dyn ContainerRuntime, container: &str) -> anyh
     }
 }
 
-/// Verifies container exec is functional.  If mount namespaces are stale
-/// (e.g. after macOS sleep/resume), force-recreates containers and retries
-/// once.
+/// Verifies container exec is functional.  Recovers from two failure modes:
+///
+/// 1. **Stale containers** — mount namespaces broken after macOS sleep/resume.
+/// 2. **Missing containers** — containers lost after containerd restart, VM
+///    recreation, or image loss.
+///
+/// In both cases, calls `compose_up_recreate` and re-probes once.
 ///
 /// Call this between `compose_up()` and the real `container_exec()` to
-/// transparently recover from post-sleep mount breakage.
+/// transparently recover from container failures.
 pub fn ensure_exec_healthy(
     runtime: &dyn ContainerRuntime,
     project: &str,
@@ -361,21 +375,35 @@ pub fn ensure_exec_healthy(
         Ok(()) => return Ok(()),
         Err(e) => {
             let msg = e.to_string();
-            if !is_stale_container_error(&msg) {
+            if is_stale_container_error(&msg) {
+                log::warn!(
+                    "Stale container detected for '{container}' \
+                     (mount namespace broken after sleep/resume). \
+                     Force-recreating containers..."
+                );
+            } else if is_missing_container_error_msg(&msg) {
+                log::warn!(
+                    "Container '{container}' not found. \
+                     Recreating containers..."
+                );
+            } else {
                 return Err(e);
             }
-            log::warn!(
-                "Stale container detected for '{container}' \
-                 (mount namespace broken after sleep/resume). \
-                 Force-recreating containers..."
-            );
         }
     }
     runtime.compose_up_recreate(project).map_err(|e| {
-        anyhow::anyhow!(
-            "Container recovery after sleep/resume failed: {e}. \
-             Please restart Speedwave."
-        )
+        let msg = e.to_string().to_ascii_lowercase();
+        if msg.contains("no such image") || msg.contains("image not found") {
+            anyhow::anyhow!(
+                "Container images are missing — please restart the app \
+                 to trigger a rebuild. ({e})"
+            )
+        } else {
+            anyhow::anyhow!(
+                "Container recovery failed: {e}. \
+                 Please restart Speedwave."
+            )
+        }
     })?;
     probe_container_exec(runtime, container).map_err(|e| {
         anyhow::anyhow!(
@@ -1105,6 +1133,9 @@ services:
             }
             Ok(())
         }
+        fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(true)
+        }
     }
 
     #[test]
@@ -1165,5 +1196,37 @@ services:
             err.to_string().contains("Please restart Speedwave"),
             "should include actionable message: {err}"
         );
+    }
+
+    #[test]
+    fn test_ensure_exec_healthy_recovers_missing_container() {
+        let rt =
+            ProbeTestRuntime::stale().with_custom_error("no such container: speedwave_test_claude");
+        ensure_exec_healthy(&rt, "proj", "container").unwrap();
+        assert!(
+            rt.was_recreated(),
+            "compose_up_recreate should be called for missing container"
+        );
+    }
+
+    #[test]
+    fn test_ensure_exec_healthy_recovers_container_not_found() {
+        let rt = ProbeTestRuntime::stale().with_custom_error("container not found");
+        ensure_exec_healthy(&rt, "proj", "container").unwrap();
+        assert!(
+            rt.was_recreated(),
+            "compose_up_recreate should be called for 'not found' container"
+        );
+    }
+
+    #[test]
+    fn test_is_missing_container_error_msg() {
+        assert!(is_missing_container_error_msg("No such container: abc"));
+        assert!(is_missing_container_error_msg("container not found"));
+        assert!(is_missing_container_error_msg("container does not exist"));
+        assert!(is_missing_container_error_msg("not exist"));
+        assert!(!is_missing_container_error_msg("connection refused"));
+        assert!(!is_missing_container_error_msg("mount namespace root"));
+        assert!(!is_missing_container_error_msg("permission denied"));
     }
 }

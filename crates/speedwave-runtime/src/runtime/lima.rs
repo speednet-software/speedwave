@@ -431,6 +431,24 @@ impl ContainerRuntime for LimaRuntime {
         Ok(())
     }
 
+    fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
+        self.require_running()?;
+        let result = self.runner.run(
+            "limactl",
+            &[
+                "shell",
+                consts::lima_vm_name(),
+                "--",
+                "sudo",
+                "nerdctl",
+                "image",
+                "inspect",
+                tag,
+            ],
+        );
+        Ok(result.is_ok())
+    }
+
     fn system_prune(&self) -> anyhow::Result<()> {
         self.require_running()?;
         self.runner.run(
