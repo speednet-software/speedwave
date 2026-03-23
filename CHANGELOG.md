@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/speednet-software/speedwave/compare/v0.3.3...v0.4.0) (2026-03-23)
+
+
+### Features
+
+* **runtime:** OS prerequisite checks, container recovery, and adaptive memory ([#257](https://github.com/speednet-software/speedwave/issues/257)) ([b4577d6](https://github.com/speednet-software/speedwave/commit/b4577d699551e98401c37c0f431e15580e03d0cd))
+
 ## [0.3.3](https://github.com/speednet-software/speedwave/compare/v0.3.2...v0.3.3) (2026-03-20)
 
 
