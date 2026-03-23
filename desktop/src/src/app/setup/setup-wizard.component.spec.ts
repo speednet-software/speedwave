@@ -148,7 +148,7 @@ describe('SetupWizardComponent', () => {
     const winFixture = TestBed.createComponent(SetupWizardComponent);
     winFixture.detectChanges();
     await new Promise((r) => setTimeout(r, 0));
-    expect(winFixture.componentInstance.steps[0].description).toBe('Verify WSL2 / nerdctl');
+    expect(winFixture.componentInstance.steps[0].description).toBe('Verify system requirements');
     expect(winFixture.componentInstance.steps[1].description).toBe('Set up WSL2 distribution');
   });
 

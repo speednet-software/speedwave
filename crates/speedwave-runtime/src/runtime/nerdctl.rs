@@ -201,6 +201,11 @@ impl ContainerRuntime for NerdctlRuntime {
         Ok(())
     }
 
+    fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
+        let result = self.runner.run("nerdctl", &["image", "inspect", tag]);
+        Ok(result.is_ok())
+    }
+
     fn system_prune(&self) -> anyhow::Result<()> {
         self.runner
             .run("nerdctl", &["system", "prune", "--force"])?;
@@ -275,11 +280,11 @@ impl ContainerRuntime for NerdctlRuntime {
     }
 
     fn ensure_ready(&self) -> anyhow::Result<()> {
-        // (1) Check uidmap (required for rootless nerdctl)
-        // Use `command -v` — newuidmap has no --help flag and exits non-zero on any invocation
-        self.runner
-            .run("sh", &["-c", "command -v newuidmap >/dev/null 2>&1"])
-            .map_err(|_| anyhow::anyhow!("{}", consts::UIDMAP_MISSING_MSG))?;
+        // (1) OS prerequisite check (SSOT: os_prereqs module)
+        let violations = crate::os_prereqs::check_os_prereqs();
+        if let Some(v) = violations.first() {
+            anyhow::bail!("{v}");
+        }
 
         // (2) Check nerdctl version >= 2.0.0
         let version_output = self
@@ -362,6 +367,11 @@ mod tests {
         assert!(!rt.is_available());
     }
 
+    /// Verifies ensure_ready() delegates to os_prereqs before nerdctl checks.
+    /// os_prereqs::check_os_prereqs() is called live (not mockable), so:
+    /// - On Linux CI with uidmap installed: prereqs pass → fails on "nerdctl not found"
+    /// - On Linux without uidmap: prereqs catch it → fails on "newuidmap not found"
+    /// - On macOS/Windows: prereqs return empty → fails on "nerdctl not found"
     #[test]
     fn test_ensure_ready_uidmap_missing() {
         let runner =
@@ -370,15 +380,10 @@ mod tests {
         let result = rt.ensure_ready();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
+        // Either prereqs caught missing uidmap, or mock runner has no nerdctl
         assert!(
-            err.contains("newuidmap"),
-            "error should mention newuidmap, got: {}",
-            err
-        );
-        assert!(
-            err.contains("uidmap"),
-            "error should mention uidmap package, got: {}",
-            err
+            err.contains("newuidmap") || err.contains("nerdctl"),
+            "error should mention newuidmap or nerdctl, got: {err}"
         );
     }
 

@@ -191,19 +191,24 @@ export class ChatComponent implements OnInit, OnDestroy {
       }
       this.chat.loadMessages(messages);
     } catch (err) {
-      this.chat.loadMessages([
-        ...messages,
-        {
-          role: 'assistant',
-          blocks: [
-            {
-              type: 'error' as const,
-              content: `Failed to resume session: ${err}. Showing transcript for context only.`,
-            },
-          ],
-          timestamp: Date.now(),
-        },
-      ]);
+      const msg = String(err);
+      if (msg.includes('not authenticated')) {
+        this.projectState.status = 'auth_required';
+      } else {
+        this.chat.loadMessages([
+          ...messages,
+          {
+            role: 'assistant',
+            blocks: [
+              {
+                type: 'error' as const,
+                content: `Failed to resume session: ${err}. Showing transcript for context only.`,
+              },
+            ],
+            timestamp: Date.now(),
+          },
+        ]);
+      }
     }
 
     this.viewingTranscript = null;

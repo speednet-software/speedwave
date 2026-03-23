@@ -106,6 +106,11 @@ pub fn render_compose(
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
     yaml = yaml.replace("${CONTAINER_USER}", container_user());
 
+    // Adaptive Claude container memory based on host resources.
+    // SSOT: resources::effective_claude_memory_gib() handles platform detection.
+    let claude_mem = crate::resources::effective_claude_memory_gib();
+    yaml = yaml.replace("${CLAUDE_MEMORY}", &format!("{}g", claude_mem));
+
     // Inject Claude environment variables from resolved config
     yaml = inject_claude_env(&yaml, &resolved_config.env);
 
@@ -2192,6 +2197,16 @@ services:
         assert!(yaml.contains("speedwave_test-project_claude"));
         assert!(yaml.contains("speedwave_test-project_mcp_hub"));
         assert!(yaml.contains("/workspace"));
+        // ${CLAUDE_MEMORY} must be substituted with a concrete value (e.g. "8g")
+        assert!(
+            !yaml.contains("${CLAUDE_MEMORY}"),
+            "CLAUDE_MEMORY placeholder must be substituted"
+        );
+        assert!(
+            yaml.lines()
+                .any(|l| l.trim().starts_with("memory:") && l.contains('g')),
+            "rendered YAML must contain a concrete memory limit (e.g. memory: 8g)"
+        );
         // Verify it's valid YAML
         let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         assert!(parsed.get("services").is_some());

@@ -69,6 +69,24 @@ pub fn image_ref(name: &str, bundle_id: &str) -> String {
     format!("{name}:{bundle_id}")
 }
 
+/// Returns `true` if all expected built-in container images exist in the runtime.
+///
+/// Callers should guard with `rt.is_available()` and `rt.ensure_ready()` first —
+/// this function does not check runtime readiness.
+pub fn images_exist(rt: &dyn super::runtime::ContainerRuntime) -> bool {
+    let manifest = match crate::bundle::load_current_bundle_manifest() {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!("images_exist: cannot load bundle manifest: {e}");
+            return false;
+        }
+    };
+    IMAGES.iter().all(|img| {
+        let tag = image_ref(img.name, &manifest.bundle_id);
+        rt.image_exists(&tag).unwrap_or(false)
+    })
+}
+
 /// Resolves the root directory containing container build context (`containers/`, `mcp-servers/`).
 ///
 /// Resolution order:
@@ -1076,6 +1094,9 @@ mod tests {
             fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
                 Ok(())
             }
+            fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
+                Ok(true)
+            }
         }
 
         let build_calls = Arc::new(Mutex::new(Vec::new()));
@@ -1216,6 +1237,9 @@ mod tests {
         }
         fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
             Ok(())
+        }
+        fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(true)
         }
         fn system_prune(&self) -> anyhow::Result<()> {
             self.calls.lock().unwrap().push("system_prune".to_string());
@@ -1528,5 +1552,89 @@ mod tests {
             err.to_string().contains("network timeout"),
             "original error should propagate unchanged"
         );
+    }
+
+    // ── images_exist tests ─────────────────────────────────────────────
+
+    mod images_exist_tests {
+        use super::*;
+        use crate::runtime::ContainerRuntime;
+        use std::sync::Mutex;
+
+        struct ImageCheckRuntime {
+            missing_tags: Mutex<Vec<String>>,
+        }
+
+        impl ImageCheckRuntime {
+            fn all_present() -> Self {
+                Self {
+                    missing_tags: Mutex::new(vec![]),
+                }
+            }
+
+            fn with_missing(tags: Vec<&str>) -> Self {
+                Self {
+                    missing_tags: Mutex::new(tags.into_iter().map(String::from).collect()),
+                }
+            }
+        }
+
+        impl ContainerRuntime for ImageCheckRuntime {
+            fn compose_up(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn compose_down(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+                Ok(vec![])
+            }
+            fn container_exec(&self, _: &str, _: &[&str]) -> Command {
+                Command::new("true")
+            }
+            fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
+                Ok(Command::new("true"))
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn ensure_ready(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn build_image(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &[(&str, &str)],
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
+                let missing = self.missing_tags.lock().unwrap();
+                Ok(!missing.iter().any(|t| tag.contains(t.as_str())))
+            }
+        }
+
+        #[test]
+        fn test_images_exist_returns_true_when_all_present() {
+            let rt = ImageCheckRuntime::all_present();
+            assert!(images_exist(&rt));
+        }
+
+        #[test]
+        fn test_images_exist_returns_false_when_any_missing() {
+            let rt = ImageCheckRuntime::with_missing(vec!["speedwave-claude"]);
+            assert!(!images_exist(&rt));
+        }
     }
 }

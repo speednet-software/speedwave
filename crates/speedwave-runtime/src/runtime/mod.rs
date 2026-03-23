@@ -45,6 +45,8 @@ pub trait ContainerRuntime: Send + Sync {
     }
     fn container_logs(&self, container: &str, tail: u32) -> anyhow::Result<String>;
     fn compose_logs(&self, project: &str, tail: u32) -> anyhow::Result<String>;
+    /// Returns `true` if the given image tag exists in the container runtime.
+    fn image_exists(&self, tag: &str) -> anyhow::Result<bool>;
     /// Recreates all containers using `--force-recreate --remove-orphans`.
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()>;
 
@@ -313,12 +315,102 @@ fn run_rm_force(
     runner.run(cmd, &rm_args).map(|_| ())
 }
 
+/// Returns `true` if the message indicates the container does not exist.
+/// Single source of truth for missing-container error patterns.
+/// Note: `probe_container_exec` runs `nerdctl exec`, so these
+/// messages always refer to containers, not images.
+fn is_missing_container_error_msg(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("no such")
+        || lower.contains("not found")
+        || lower.contains("does not exist")
+        || lower.contains("not exist")
+}
+
 fn is_missing_container_error(err: &anyhow::Error) -> bool {
-    let message = err.to_string().to_ascii_lowercase();
-    message.contains("no such")
-        || message.contains("not found")
-        || message.contains("does not exist")
-        || message.contains("not exist")
+    is_missing_container_error_msg(&err.to_string())
+}
+
+/// Returns `true` if the error indicates broken container mount namespaces,
+/// typically after macOS sleep/resume invalidating Lima VM overlayfs state.
+///
+/// After VM suspend/resume, virtiofs/9p mounts become stale while containers
+/// remain "running" in containerd state.  runc's `verifyCwd()` security check
+/// (CVE-2024-21626) detects the broken namespace and produces this error.
+fn is_stale_container_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("mount namespace root") || lower.contains("container breakout detected")
+}
+
+/// Probes whether `nerdctl exec` works on the given container by running a
+/// trivial command (`true`).  Returns `Ok(())` on success, or the stderr
+/// content as an error.
+fn probe_container_exec(runtime: &dyn ContainerRuntime, container: &str) -> anyhow::Result<()> {
+    let mut cmd = runtime.container_exec_piped(container, &["true"])?;
+    let output = cmd.output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("{}", stderr.trim())
+    }
+}
+
+/// Verifies container exec is functional.  Recovers from two failure modes:
+///
+/// 1. **Stale containers** — mount namespaces broken after macOS sleep/resume.
+/// 2. **Missing containers** — containers lost after containerd restart, VM
+///    recreation, or image loss.
+///
+/// In both cases, calls `compose_up_recreate` and re-probes once.
+///
+/// Call this between `compose_up()` and the real `container_exec()` to
+/// transparently recover from container failures.
+pub fn ensure_exec_healthy(
+    runtime: &dyn ContainerRuntime,
+    project: &str,
+    container: &str,
+) -> anyhow::Result<()> {
+    match probe_container_exec(runtime, container) {
+        Ok(()) => return Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            if is_stale_container_error(&msg) {
+                log::warn!(
+                    "Stale container detected for '{container}' \
+                     (mount namespace broken after sleep/resume). \
+                     Force-recreating containers..."
+                );
+            } else if is_missing_container_error_msg(&msg) {
+                log::warn!(
+                    "Container '{container}' not found. \
+                     Recreating containers..."
+                );
+            } else {
+                return Err(e);
+            }
+        }
+    }
+    runtime.compose_up_recreate(project).map_err(|e| {
+        let msg = e.to_string().to_ascii_lowercase();
+        if msg.contains("no such image") || msg.contains("image not found") {
+            anyhow::anyhow!(
+                "Container images are missing — please restart the app \
+                 to trigger a rebuild. ({e})"
+            )
+        } else {
+            anyhow::anyhow!(
+                "Container recovery failed: {e}. \
+                 Please restart Speedwave."
+            )
+        }
+    })?;
+    probe_container_exec(runtime, container).map_err(|e| {
+        anyhow::anyhow!(
+            "Containers still broken after recovery: {e}. \
+             Please restart Speedwave."
+        )
+    })
 }
 
 /// Force-remove any containers still registered in the nerdctl name-store for
@@ -883,5 +975,258 @@ services:
             commands.lock().unwrap().as_slice(),
             &[ps_key, rm_ids_key, rm_claude_key, rm_hub_key]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Stale container detection & recovery tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_stale_container_error_matches_mount_namespace() {
+        assert!(is_stale_container_error(
+            "OCI runtime exec failed: exec failed: unable to start container process: \
+             current working directory is outside of container mount namespace root \
+             -- possible container breakout detected"
+        ));
+    }
+
+    #[test]
+    fn test_is_stale_container_error_matches_breakout_variant() {
+        assert!(is_stale_container_error(
+            "possible container breakout detected"
+        ));
+    }
+
+    #[test]
+    fn test_is_stale_container_error_case_insensitive() {
+        assert!(is_stale_container_error("MOUNT NAMESPACE ROOT error"));
+        assert!(is_stale_container_error("Container Breakout Detected!"));
+    }
+
+    #[test]
+    fn test_is_stale_container_error_rejects_unrelated_errors() {
+        assert!(!is_stale_container_error("no such container"));
+        assert!(!is_stale_container_error("connection refused"));
+        assert!(!is_stale_container_error("permission denied"));
+        assert!(!is_stale_container_error(""));
+    }
+
+    /// Mock runtime for testing `ensure_exec_healthy()`.
+    ///
+    /// `exec_healthy` controls whether `container_exec_piped` returns a
+    /// command that succeeds (true) or fails with a stale-mount error.
+    /// `compose_up_recreate` flips `exec_healthy` to `true` and records
+    /// the call.
+    struct ProbeTestRuntime {
+        exec_healthy: std::sync::atomic::AtomicBool,
+        recreate_called: std::sync::atomic::AtomicBool,
+        /// When set, `container_exec_piped` returns a command that fails
+        /// with this message instead of the stale-mount error.
+        custom_error: Option<String>,
+        /// When set, `compose_up_recreate` returns this error.
+        recreate_error: Option<String>,
+        /// When true, `compose_up_recreate` does NOT flip `exec_healthy`.
+        stay_stale: bool,
+    }
+
+    impl ProbeTestRuntime {
+        fn healthy() -> Self {
+            Self {
+                exec_healthy: std::sync::atomic::AtomicBool::new(true),
+                recreate_called: std::sync::atomic::AtomicBool::new(false),
+                custom_error: None,
+                recreate_error: None,
+                stay_stale: false,
+            }
+        }
+
+        fn stale() -> Self {
+            Self {
+                exec_healthy: std::sync::atomic::AtomicBool::new(false),
+                recreate_called: std::sync::atomic::AtomicBool::new(false),
+                custom_error: None,
+                recreate_error: None,
+                stay_stale: false,
+            }
+        }
+
+        fn stay_stale_after_recreate() -> Self {
+            Self {
+                exec_healthy: std::sync::atomic::AtomicBool::new(false),
+                recreate_called: std::sync::atomic::AtomicBool::new(false),
+                custom_error: None,
+                recreate_error: None,
+                stay_stale: true,
+            }
+        }
+
+        fn with_custom_error(mut self, msg: &str) -> Self {
+            self.custom_error = Some(msg.to_string());
+            self
+        }
+
+        fn with_recreate_error(mut self, msg: &str) -> Self {
+            self.recreate_error = Some(msg.to_string());
+            self
+        }
+
+        fn was_recreated(&self) -> bool {
+            self.recreate_called
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl ContainerRuntime for ProbeTestRuntime {
+        fn compose_up(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn compose_down(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+            Ok(vec![])
+        }
+        fn container_exec(&self, _: &str, _: &[&str]) -> Command {
+            Command::new("true")
+        }
+        fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
+            if self.exec_healthy.load(std::sync::atomic::Ordering::SeqCst) {
+                Ok(Command::new("true"))
+            } else if let Some(ref msg) = self.custom_error {
+                let mut cmd = Command::new("sh");
+                cmd.args(["-c", &format!("echo '{}' >&2; exit 1", msg)]);
+                Ok(cmd)
+            } else {
+                let mut cmd = Command::new("sh");
+                cmd.args([
+                    "-c",
+                    "echo 'current working directory is outside of container mount namespace root -- possible container breakout detected' >&2; exit 1",
+                ]);
+                Ok(cmd)
+            }
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn ensure_ready(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn build_image(&self, _: &str, _: &str, _: &str, _: &[(&str, &str)]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+            self.recreate_called
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(ref msg) = self.recreate_error {
+                anyhow::bail!("{msg}");
+            }
+            // Recovery: flip exec to healthy (unless stay_stale is set)
+            if !self.stay_stale {
+                self.exec_healthy
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        }
+        fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+    }
+
+    #[test]
+    fn test_ensure_exec_healthy_noop_when_healthy() {
+        let rt = ProbeTestRuntime::healthy();
+        ensure_exec_healthy(&rt, "proj", "container").unwrap();
+        assert!(
+            !rt.was_recreated(),
+            "compose_up_recreate should NOT be called when container is healthy"
+        );
+    }
+
+    #[test]
+    fn test_ensure_exec_healthy_recovers_stale_container() {
+        let rt = ProbeTestRuntime::stale();
+        ensure_exec_healthy(&rt, "proj", "container").unwrap();
+        assert!(
+            rt.was_recreated(),
+            "compose_up_recreate should be called for stale container"
+        );
+    }
+
+    #[test]
+    fn test_ensure_exec_healthy_passes_through_non_stale_error() {
+        let rt = ProbeTestRuntime::stale().with_custom_error("connection refused");
+        let err = ensure_exec_healthy(&rt, "proj", "container").unwrap_err();
+        assert!(
+            err.to_string().contains("connection refused"),
+            "non-stale error should propagate: {err}"
+        );
+        assert!(
+            !rt.was_recreated(),
+            "compose_up_recreate should NOT be called for non-stale errors"
+        );
+    }
+
+    #[test]
+    fn test_ensure_exec_healthy_recovery_failure_gives_actionable_message() {
+        let rt = ProbeTestRuntime::stale().with_recreate_error("nerdctl compose failed");
+        let err = ensure_exec_healthy(&rt, "proj", "container").unwrap_err();
+        assert!(
+            err.to_string().contains("Please restart Speedwave"),
+            "recovery failure should include actionable message: {err}"
+        );
+    }
+
+    #[test]
+    fn test_ensure_exec_healthy_still_broken_after_recovery() {
+        let rt = ProbeTestRuntime::stay_stale_after_recreate();
+        let err = ensure_exec_healthy(&rt, "proj", "container").unwrap_err();
+        assert!(rt.was_recreated(), "compose_up_recreate should be called");
+        assert!(
+            err.to_string()
+                .contains("Containers still broken after recovery"),
+            "should report still-broken state: {err}"
+        );
+        assert!(
+            err.to_string().contains("Please restart Speedwave"),
+            "should include actionable message: {err}"
+        );
+    }
+
+    #[test]
+    fn test_ensure_exec_healthy_recovers_missing_container() {
+        let rt =
+            ProbeTestRuntime::stale().with_custom_error("no such container: speedwave_test_claude");
+        ensure_exec_healthy(&rt, "proj", "container").unwrap();
+        assert!(
+            rt.was_recreated(),
+            "compose_up_recreate should be called for missing container"
+        );
+    }
+
+    #[test]
+    fn test_ensure_exec_healthy_recovers_container_not_found() {
+        let rt = ProbeTestRuntime::stale().with_custom_error("container not found");
+        ensure_exec_healthy(&rt, "proj", "container").unwrap();
+        assert!(
+            rt.was_recreated(),
+            "compose_up_recreate should be called for 'not found' container"
+        );
+    }
+
+    #[test]
+    fn test_is_missing_container_error_msg() {
+        assert!(is_missing_container_error_msg("No such container: abc"));
+        assert!(is_missing_container_error_msg("container not found"));
+        assert!(is_missing_container_error_msg("container does not exist"));
+        assert!(is_missing_container_error_msg("not exist"));
+        assert!(!is_missing_container_error_msg("connection refused"));
+        assert!(!is_missing_container_error_msg("mount namespace root"));
+        assert!(!is_missing_container_error_msg("permission denied"));
     }
 }

@@ -6,7 +6,7 @@ use speedwave_runtime::compose::{self, SecurityCheck};
 use speedwave_runtime::config;
 use speedwave_runtime::consts;
 use speedwave_runtime::plugin;
-use speedwave_runtime::runtime::detect_runtime;
+use speedwave_runtime::runtime::{detect_runtime, ensure_exec_healthy};
 use speedwave_runtime::update;
 use speedwave_runtime::validation;
 
@@ -505,16 +505,23 @@ fn main() -> anyhow::Result<()> {
     let expected_paths =
         compose::SecurityExpectedPaths::compute(&project_name, &project_dir.to_string_lossy())?;
 
+    // OS prerequisite check
+    let prereq_violations = speedwave_runtime::os_prereqs::check_os_prereqs();
+
     // Handle `speedwave check` subcommand
     if action == CliAction::Check {
-        let violations =
+        let security_violations =
             SecurityCheck::run(&compose_yml, &project_name, &manifests, &expected_paths);
-        if violations.is_empty() {
-            println!("speedwave check OK -- all security invariants satisfied");
+        if prereq_violations.is_empty() && security_violations.is_empty() {
+            println!("speedwave check OK -- all system checks passed");
             std::process::exit(0);
         } else {
             eprintln!("speedwave check FAILED -- containers NOT started\n");
-            for v in &violations {
+            for v in &prereq_violations {
+                eprintln!("  {} -- {}", v.rule, v.message);
+                eprintln!("  Fix: {}\n", v.remediation);
+            }
+            for v in &security_violations {
                 eprintln!("  [{}] {} -- {}", v.container, v.rule, v.message);
                 eprintln!("  Fix: {}\n", v.remediation);
             }
@@ -522,7 +529,15 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Mandatory security gate before container start
+    // Mandatory prereq + security gate before container start
+    if !prereq_violations.is_empty() {
+        eprintln!("speedwave check FAILED -- containers NOT started\n");
+        for v in &prereq_violations {
+            eprintln!("  {} -- {}", v.rule, v.message);
+            eprintln!("  Fix: {}\n", v.remediation);
+        }
+        std::process::exit(1);
+    }
     let violations = SecurityCheck::run(&compose_yml, &project_name, &manifests, &expected_paths);
     if !violations.is_empty() {
         eprintln!("speedwave check FAILED -- containers NOT started\n");
@@ -541,14 +556,27 @@ fn main() -> anyhow::Result<()> {
     compose::save_compose(&project_name, &compose_yml)?;
     runtime.compose_up(&project_name)?;
 
-    // exec -it -> interactive Claude terminal inside container
+    // Verify container exec works before starting interactive session.
+    // Recovers automatically from stale mounts after macOS sleep/resume.
     let container_name = format!("{}_{}_claude", consts::compose_prefix(), project_name);
+    ensure_exec_healthy(&*runtime, &project_name, &container_name)?;
+
+    // exec -it -> interactive Claude terminal inside container
     let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
     exec_cmd.extend_from_slice(&resolved.flags);
     let status = runtime
         .container_exec(&container_name, &exec_cmd)
         .status()?;
-    std::process::exit(status.code().unwrap_or(1));
+
+    let is_oom = speedwave_runtime::resources::is_oom_exit(&status);
+    if is_oom {
+        eprintln!("{}", speedwave_runtime::resources::OOM_MESSAGE);
+    }
+    // Normalize: when OOM is detected via signal()==Some(9) (Linux),
+    // code() returns None. Return 137 for consistency with macOS
+    // (where nerdctl translates SIGKILL → exit code 137).
+    let code = status.code().unwrap_or(if is_oom { 137 } else { 1 });
+    std::process::exit(code);
 }
 
 /// Resolves project name from CWD path matching against configured projects.
@@ -1103,6 +1131,46 @@ mod tests {
             "--project".to_string(),
         ];
         assert!(parse_action(&args).is_err());
+    }
+
+    #[test]
+    fn test_check_includes_os_prereqs() {
+        // Structural test: verify that `speedwave check` calls
+        // os_prereqs::check_os_prereqs() BEFORE SecurityCheck::run,
+        // and that prereq violations are printed in the expected format.
+        let source = include_str!("main.rs");
+
+        // Locate the check subcommand handler
+        let check_start = source
+            .find("if action == CliAction::Check")
+            .expect("CliAction::Check handler must exist in main.rs");
+        let check_body = &source[check_start..];
+
+        // prereq_violations is consumed inside the check handler
+        assert!(
+            check_body.contains("prereq_violations.is_empty()"),
+            "check handler must test prereq_violations.is_empty()"
+        );
+
+        // Verify the output format: rule -- message + Fix: remediation
+        assert!(
+            check_body.contains(r#""{} -- {}", v.rule, v.message"#),
+            "check handler must print prereq violations as 'rule -- message'"
+        );
+        assert!(
+            check_body.contains(r#""  Fix: {}\n", v.remediation"#),
+            "check handler must print 'Fix: remediation' for each prereq violation"
+        );
+
+        // Verify prereqs also gate container start (after the check subcommand block)
+        let gate_start = source
+            .find("// Mandatory prereq + security gate")
+            .expect("pre-compose prereq gate must exist in main.rs");
+        let gate_body = &source[gate_start..];
+        assert!(
+            gate_body.contains("prereq_violations.is_empty()"),
+            "pre-compose gate must check prereq_violations"
+        );
     }
 
     #[test]

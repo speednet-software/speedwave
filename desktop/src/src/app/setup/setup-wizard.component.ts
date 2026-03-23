@@ -202,7 +202,7 @@ export class SetupWizardComponent {
   // 6 steps: environment setup only, no auth/token configuration.
   // Descriptions are platform-specific — updated in constructor via get_platform.
   steps: SetupStep[] = [
-    { title: 'Check Runtime', description: 'Verify container runtime', status: 'pending' },
+    { title: 'System Check', description: 'Verify system requirements', status: 'pending' },
     { title: 'Initialize VM', description: 'Set up container environment', status: 'pending' },
     { title: 'Build Images', description: 'Build container images', status: 'pending' },
     { title: 'Create Project', description: 'Set up your first project', status: 'pending' },
@@ -227,7 +227,7 @@ export class SetupWizardComponent {
           this.steps[1].description = 'Create and start the Lima VM';
           break;
         case 'windows':
-          this.steps[0].description = 'Verify WSL2 / nerdctl';
+          this.steps[0].description = 'Verify system requirements';
           this.steps[1].description = 'Set up WSL2 distribution';
           break;
         case 'linux':

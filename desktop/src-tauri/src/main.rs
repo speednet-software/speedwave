@@ -66,6 +66,15 @@ fn start_chat(
     state: tauri::State<SharedChatSession>,
 ) -> Result<(), String> {
     check_project(&project)?;
+
+    // Pre-flight: verify Claude is authenticated before spawning an
+    // interactive session.  `claude auth status` exits quickly with a
+    // non-zero code when not authed — no hang risk.
+    let authed = setup_wizard::check_claude_auth(&project).map_err(|e| e.to_string())?;
+    if !authed {
+        return Err("Claude is not authenticated. Please authenticate first.".to_string());
+    }
+
     let mut session = state.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     // Stop any existing session before starting a new one
     session.stop().map_err(|e| e.to_string())?;
@@ -159,6 +168,13 @@ async fn resume_conversation(
     log::info!("resume_conversation: project={project}");
     let session_arc = state.inner().clone();
     tokio::task::spawn_blocking(move || {
+        // Pre-flight: verify Claude is authenticated before spawning an
+        // interactive session.
+        let authed = setup_wizard::check_claude_auth(&project).map_err(|e| e.to_string())?;
+        if !authed {
+            return Err("Claude is not authenticated. Please authenticate first.".to_string());
+        }
+
         let mut session = session_arc
             .lock()
             .map_err(|e| format!("Lock poisoned: {e}"))?;
@@ -1089,6 +1105,8 @@ fn main() {
             containers_cmd::init_vm,
             containers_cmd::create_project,
             containers_cmd::link_cli,
+            // System checks
+            containers_cmd::run_system_check,
             // Container lifecycle
             containers_cmd::is_setup_complete,
             containers_cmd::build_images,
@@ -1206,6 +1224,72 @@ fn main() {
 mod tests {
     use super::*;
     use config::{ProjectUserEntry, SpeedwaveUserConfig};
+
+    /// Extracts the body of a function from source code by matching `{`/`}`
+    /// counting braces.  Used by structural tests to assert on function contents.
+    fn extract_fn_body<'a>(source: &'a str, fn_signature: &str) -> &'a str {
+        let after_sig = source
+            .split(fn_signature)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{fn_signature} not found in source"));
+        let brace_start = after_sig.find('{').expect("opening brace not found");
+        let rest = &after_sig[brace_start..];
+        let mut depth = 0i32;
+        let mut end = 0;
+        for (i, ch) in rest.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(end > 0, "closing brace not found for {fn_signature}");
+        &rest[..end]
+    }
+
+    // -- auth pre-flight structural tests --
+
+    #[test]
+    fn start_chat_checks_auth_before_session_start() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "fn start_chat(");
+
+        let auth_pos = body
+            .find("check_claude_auth")
+            .expect("start_chat must call check_claude_auth");
+        let start_pos = body
+            .find("session.start(")
+            .expect("start_chat must call session.start()");
+
+        assert!(
+            auth_pos < start_pos,
+            "check_claude_auth must come BEFORE session.start()"
+        );
+    }
+
+    #[test]
+    fn resume_conversation_checks_auth_before_session_start() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "async fn resume_conversation(");
+
+        let auth_pos = body
+            .find("check_claude_auth")
+            .expect("resume_conversation must call check_claude_auth");
+        let start_pos = body
+            .find("session.start(")
+            .expect("resume_conversation must call session.start()");
+
+        assert!(
+            auth_pos < start_pos,
+            "check_claude_auth must come BEFORE session.start()"
+        );
+    }
 
     fn make_config_with_projects() -> SpeedwaveUserConfig {
         SpeedwaveUserConfig {

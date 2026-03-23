@@ -96,6 +96,22 @@ pub const UIDMAP_MISSING_MSG: &str = "newuidmap not found. Install the uidmap pa
      - Fedora/RHEL:   sudo dnf install -y shadow-utils\n\
      - openSUSE:      sudo zypper install -y shadow";
 
+/// Error message with remediation steps when WSL2 is not available on Windows.
+/// Used by `os_prereqs::check_os_prereqs()`.
+pub const WSL_NOT_AVAILABLE_MSG: &str = "Enable required Windows features:\n\n\
+    1. Run in elevated PowerShell (Run as Administrator):\n\
+       dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart\n\
+       dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart\n\n\
+    2. Or open Settings > Apps > Optional Features > More Windows Features:\n\
+       - Check 'Windows Subsystem for Linux'\n\
+       - Check 'Virtual Machine Platform'\n\n\
+    Then restart your computer and run Speedwave again.";
+
+/// Error prefix used by backend when SecurityCheck or OS prereqs fail.
+/// Frontend matches on this string to distinguish blocking (check_failed)
+/// from dismissable (error) failures.
+pub const SYSTEM_CHECK_FAILED_PREFIX: &str = "System check failed:";
+
 /// Default interval (in hours) between automatic update checks.
 /// Used by both the CLI (converted to seconds) and the Desktop updater
 /// (as the default for `UpdateSettings::check_interval_hours`).
@@ -1114,5 +1130,16 @@ mod tests {
         let name = "a".repeat(65);
         let path_str = format!("/path/{name}");
         derive_instance_name_from(std::path::Path::new(&path_str));
+    }
+
+    /// Guard: SYSTEM_CHECK_FAILED_PREFIX must not change without updating
+    /// the frontend match in project-state.service.ts (startsWith check).
+    #[test]
+    fn test_system_check_failed_prefix_is_stable() {
+        assert_eq!(
+            SYSTEM_CHECK_FAILED_PREFIX, "System check failed:",
+            "Changing this prefix silently breaks the Desktop UI — \
+             update project-state.service.ts startsWith check to match"
+        );
     }
 }

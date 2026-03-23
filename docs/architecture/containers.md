@@ -30,17 +30,48 @@ speedwave_<project>_network
 
 ## Resource Limits
 
-Container memory limits are defined in `containers/compose.template.yml`:
+Container memory limits are defined in `containers/compose.template.yml`. The Claude container memory is **adaptive** based on host RAM; other services use fixed limits:
 
-- **Claude container:** 8 GiB (`mem_limit: 8g`)
-- **MCP Hub:** 512 MiB (`mem_limit: 512m`)
-- **MCP workers:** 256 MiB each (`mem_limit: 256m`)
+- **Claude container:** adaptive (`${CLAUDE_MEMORY}` — see scaling below)
+- **MCP Hub:** 512 MiB (fixed)
+- **MCP workers:** 256 MiB each (fixed)
 
-The Lima VM must have enough RAM to run all containers plus kernel and containerd overhead. Current VM allocation: **12 GiB** (`LIMA_VM_MEMORY` in `setup_wizard.rs`).
+All resource formulas live in `crates/speedwave-runtime/src/resources.rs` (SSOT).
 
-Breakdown: Claude (8g) + Hub (512m) + 4 workers (1g) + kernel/containerd (~1g) ≈ 10.5g. The 12 GiB allocation provides headroom without being excessive for 16 GB MacBooks.
+### Adaptive scaling (macOS — Lima VM)
 
-On upgrade from older versions (which used 8 GiB), `ensure_lima_vm_config()` automatically migrates the VM memory on startup. The migration stops the VM, edits both the source template and instance config, and restarts — no VM recreation needed.
+The Lima VM and Claude container memory scale based on host RAM:
+
+| Host RAM | Lima VM | Claude container |
+| -------- | ------- | ---------------- |
+| ≤15 GiB  | 12 GiB  | 8 g (default)    |
+| 16 GiB   | 12 GiB  | 8 g              |
+| 24 GiB   | 12 GiB  | 8 g              |
+| 32 GiB   | 16 GiB  | 12 g             |
+| 64 GiB   | 32 GiB  | 28 g             |
+| 128 GiB  | 32 GiB  | 28 g (cap)       |
+
+Formulas: VM = `(host_ram / 2).clamp(12, 32)`, Claude = `(vm_mem - 4).clamp(6, 28)`. Hosts <16 GiB always get 12 GiB VM (no regression).
+
+### Adaptive scaling (Linux — native nerdctl)
+
+No VM layer. Claude container memory scales directly from host RAM with 6 GiB reserved for the OS and user applications:
+
+| Host RAM | Claude container |
+| -------- | ---------------- |
+| 16 GiB   | 10 g             |
+| 32 GiB   | 26 g             |
+| 64 GiB   | 28 g (cap)       |
+
+### Windows (WSL2)
+
+Speedwave does not manage `.wslconfig`. The Claude container uses a fixed 8 g default.
+
+### Migration
+
+On upgrade from older versions, `ensure_lima_vm_config()` automatically migrates the VM memory on startup. The migration stops the VM, edits both the source template and instance config, and restarts — no VM recreation needed. User customizations (manually increased memory) are preserved — the migration never downgrades.
+
+Existing projects receive the new Claude container memory limit on next container start (when `render_compose()` generates a fresh compose.yml), not immediately on upgrade.
 
 ## Image Build
 
@@ -75,6 +106,37 @@ The mechanism uses a `Condvar` with tri-state `ImageReadiness` (`Ready`, `Buildi
 - **Scope guard**: ensures `Building→Failed` transition even if the reconcile thread panics
 
 The Desktop frontend shows a unified blocking overlay in the Shell component while containers are not ready (checking, starting, switching, rebuilding states).
+
+## Container Recovery
+
+Speedwave auto-recovers from two container failure modes:
+
+### Stale containers (post-sleep/resume)
+
+After macOS sleep/resume the Lima VM's virtiofs/9p mounts can become stale while containers remain "running" in containerd state. Any `nerdctl exec` into such a container triggers runc's `verifyCwd()` security check (CVE-2024-21626), which rejects the operation:
+
+```
+OCI runtime exec failed: … current working directory is outside of container
+mount namespace root -- possible container breakout detected
+```
+
+### Missing containers (after containerd restart/VM recreation)
+
+After a containerd reinstall, VM recreation, or other event that wipes container state, containers no longer exist despite `setup_state.json` reporting them as started. The exec probe detects "no such container" errors and triggers the same recovery path.
+
+### Recovery flow
+
+1. Before each interactive exec (CLI) or chat session start (Desktop), a lightweight probe runs `nerdctl exec <container> true`
+2. If the probe fails with a stale-mount or missing-container error, `compose_up_recreate()` force-recreates all project containers
+3. A second probe verifies the fix succeeded
+4. If recovery fails, the user sees an actionable message ("Please restart Speedwave")
+5. `start_containers()` additionally verifies exec health before marking `containers_started = true` in setup state
+
+The recovery logic is in `ensure_exec_healthy()` (`crates/speedwave-runtime/src/runtime/mod.rs`), called from four sites: CLI (`main.rs`), Desktop chat (`chat.rs`), auth check (`setup_wizard.rs`), and container start (`setup_wizard.rs`).
+
+### Missing images (reconcile-time detection)
+
+At startup, `reconcile_bundle_update` verifies that all expected container images exist even when the bundle ID has not changed. If images are missing (e.g. containerd was reinstalled), the reconcile forces a full image rebuild before setting `IMAGES_READY = Ready`. This prevents `start_containers` from attempting `compose_up` with nonexistent images.
 
 ## See Also
 
