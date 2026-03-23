@@ -198,7 +198,7 @@ export class ToolBlockComponent {
   private normalizer = inject(ToolNormalizerService);
   private cdr = inject(ChangeDetectorRef);
 
-  /** Collapsed state keyed by tool_id (avoids mutating @Input). */
+  /** Collapsed state keyed by tool_id (avoids mutating `@Input`). */
   private collapsedTools = new Set<string>();
 
   /** Cached normalized result and the input_json it was computed from. */

@@ -2,7 +2,7 @@ import { ErrorHandler, Injectable } from '@angular/core';
 
 /**
  * Global error handler that forwards uncaught Angular errors to the Rust
- * log pipeline via @tauri-apps/plugin-log. Falls back to console.error
+ * log pipeline via `@tauri-apps/plugin-log`. Falls back to console.error
  * when running outside Tauri (e.g. during tests or ng serve).
  */
 @Injectable()

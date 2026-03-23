@@ -1,7 +1,7 @@
 /**
  * Angular TestBed initialization for Vitest.
  *
- * When tests are run via `ng test`, the @angular/build:unit-test builder
+ * When tests are run via `ng test`, the `@angular/build:unit-test` builder
  * generates an `init-testbed.js` setup file automatically. This file
  * replicates that initialization so `npx vitest run` also works.
  */
