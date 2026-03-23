@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use speedwave_runtime::runtime::ensure_exec_healthy;
 use speedwave_runtime::{build, bundle, compose, config, consts, project, runtime};
 use std::path::PathBuf;
 
@@ -1200,6 +1201,7 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
 pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
     let rt = runtime::detect_runtime();
     let container_name = format!("{}_{}_claude", consts::compose_prefix(), project);
+    ensure_exec_healthy(&*rt, project, &container_name)?;
     let mut cmd =
         rt.container_exec_piped(&container_name, &[consts::CLAUDE_BINARY, "auth", "status"])?;
     let output = cmd.output()?;
@@ -1217,7 +1219,10 @@ pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
 /// manually set higher values) or if the value is unparseable (safety).
 #[cfg(any(target_os = "macos", test))]
 fn lima_vm_config_needs_update(config_content: &str) -> bool {
-    let desired = match LIMA_VM_MEMORY.strip_suffix("GiB").and_then(|s| s.parse::<u32>().ok()) {
+    let desired = match LIMA_VM_MEMORY
+        .strip_suffix("GiB")
+        .and_then(|s| s.parse::<u32>().ok())
+    {
         Some(v) => v,
         None => return false,
     };
@@ -1226,7 +1231,10 @@ fn lima_vm_config_needs_update(config_content: &str) -> bool {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("memory:") {
             let value = rest.trim().trim_matches('"');
-            return match value.strip_suffix("GiB").and_then(|s| s.parse::<u32>().ok()) {
+            return match value
+                .strip_suffix("GiB")
+                .and_then(|s| s.parse::<u32>().ok())
+            {
                 Some(current) => current < desired,
                 None => false, // unparseable — don't touch
             };

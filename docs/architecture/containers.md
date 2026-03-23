@@ -76,6 +76,24 @@ The mechanism uses a `Condvar` with tri-state `ImageReadiness` (`Ready`, `Buildi
 
 The Desktop frontend shows a unified blocking overlay in the Shell component while containers are not ready (checking, starting, switching, rebuilding states).
 
+## Stale Container Recovery (post-sleep/resume)
+
+After macOS sleep/resume the Lima VM's virtiofs/9p mounts can become stale while containers remain "running" in containerd state. Any `nerdctl exec` into such a container triggers runc's `verifyCwd()` security check (CVE-2024-21626), which rejects the operation:
+
+```
+OCI runtime exec failed: … current working directory is outside of container
+mount namespace root -- possible container breakout detected
+```
+
+Speedwave auto-recovers from this:
+
+1. Before each interactive exec (CLI) or chat session start (Desktop), a lightweight probe runs `nerdctl exec <container> true`
+2. If the probe fails with a mount-namespace error, `compose_up_recreate()` force-recreates all project containers (`--force-recreate`)
+3. A second probe verifies the fix succeeded
+4. If recovery fails, the user sees an actionable message ("Please restart Speedwave")
+
+The recovery logic is in `ensure_exec_healthy()` (`crates/speedwave-runtime/src/runtime/mod.rs`), called from three sites: CLI (`main.rs`), Desktop chat (`chat.rs`), and auth check (`setup_wizard.rs`).
+
 ## See Also
 
 - [ADR-001: Eliminate Docker Desktop](../adr/ADR-001-eliminate-docker-desktop.md)
