@@ -46,6 +46,7 @@ The Lima VM and Claude container memory scale based on host RAM:
 | -------- | ------- | ---------------- |
 | ≤15 GiB  | 12 GiB  | 8 g (default)    |
 | 16 GiB   | 12 GiB  | 8 g              |
+| 24 GiB   | 12 GiB  | 8 g              |
 | 32 GiB   | 16 GiB  | 12 g             |
 | 64 GiB   | 32 GiB  | 28 g             |
 | 128 GiB  | 32 GiB  | 28 g (cap)       |

@@ -127,6 +127,10 @@ pub fn effective_claude_memory_gib() -> u32 {
 ///
 /// On Linux with `NerdctlRuntime` (no SSH layer) the host process could
 /// receive a raw signal instead, so we also check `signal() == Some(9)`.
+///
+/// Known false-positives: signal 9 can also be sent by `kill -9`, OS
+/// shutdown, or security sandbox enforcement.  The "likely" wording in
+/// [`OOM_MESSAGE`] accounts for this.
 pub fn is_oom_exit(status: &ExitStatus) -> bool {
     if status.code() == Some(137) {
         return true;
@@ -142,17 +146,15 @@ pub fn is_oom_exit(status: &ExitStatus) -> bool {
 }
 
 /// User-facing OOM message shared between CLI and Desktop (DRY).
-pub fn format_oom_message() -> String {
-    "\nThe Claude session was likely killed due to insufficient memory \
-     (exit code 137 / SIGKILL).\n\n\
-     Suggestions:\n  \
-     - Close memory-intensive applications and retry\n  \
-     - Start a shorter conversation to reduce context size\n  \
-     - On macOS: check Activity Monitor for Lima VM memory pressure\n\n\
-     If this persists, please report at \
-     https://github.com/speednet-software/speedwave/issues"
-        .to_string()
-}
+pub const OOM_MESSAGE: &str = "\n\
+    The Claude session was likely killed due to insufficient memory \
+    (exit code 137 / SIGKILL).\n\n\
+    Suggestions:\n  \
+    - Close memory-intensive applications and retry\n  \
+    - Start a shorter conversation to reduce context size\n  \
+    - On macOS: check Activity Monitor for Lima VM memory pressure\n\n\
+    If this persists, please report at \
+    https://github.com/speednet-software/speedwave/issues";
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -309,13 +311,12 @@ mod tests {
 
     #[test]
     fn oom_message_contains_key_info() {
-        let msg = format_oom_message();
-        assert!(msg.contains("137"), "must mention exit code 137");
+        assert!(OOM_MESSAGE.contains("137"), "must mention exit code 137");
         assert!(
-            msg.contains("likely") || msg.contains("probably"),
+            OOM_MESSAGE.contains("likely") || OOM_MESSAGE.contains("probably"),
             "must use non-definitive wording"
         );
-        assert!(msg.contains("memory"), "must mention memory");
+        assert!(OOM_MESSAGE.contains("memory"), "must mention memory");
     }
 
     // -- is_oom_exit --------------------------------------------------------

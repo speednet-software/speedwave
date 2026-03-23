@@ -2197,6 +2197,16 @@ services:
         assert!(yaml.contains("speedwave_test-project_claude"));
         assert!(yaml.contains("speedwave_test-project_mcp_hub"));
         assert!(yaml.contains("/workspace"));
+        // ${CLAUDE_MEMORY} must be substituted with a concrete value (e.g. "8g")
+        assert!(
+            !yaml.contains("${CLAUDE_MEMORY}"),
+            "CLAUDE_MEMORY placeholder must be substituted"
+        );
+        assert!(
+            yaml.lines()
+                .any(|l| l.trim().starts_with("memory:") && l.contains('g')),
+            "rendered YAML must contain a concrete memory limit (e.g. memory: 8g)"
+        );
         // Verify it's valid YAML
         let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         assert!(parsed.get("services").is_some());

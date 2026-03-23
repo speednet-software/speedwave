@@ -555,7 +555,7 @@ fn main() -> anyhow::Result<()> {
 
     let is_oom = speedwave_runtime::resources::is_oom_exit(&status);
     if is_oom {
-        eprintln!("{}", speedwave_runtime::resources::format_oom_message());
+        eprintln!("{}", speedwave_runtime::resources::OOM_MESSAGE);
     }
     // Normalize: when OOM is detected via signal()==Some(9) (Linux),
     // code() returns None. Return 137 for consistency with macOS

@@ -849,7 +849,7 @@ impl ChatSession {
         if let Some(status) = child.try_wait()? {
             self.child = None;
             if speedwave_runtime::resources::is_oom_exit(&status) {
-                anyhow::bail!("{}", speedwave_runtime::resources::format_oom_message());
+                anyhow::bail!("{}", speedwave_runtime::resources::OOM_MESSAGE);
             }
             anyhow::bail!("session exited ({})", status);
         }
@@ -879,7 +879,7 @@ impl ChatSession {
         if let Some(status) = child.try_wait()? {
             self.child = None;
             if speedwave_runtime::resources::is_oom_exit(&status) {
-                anyhow::bail!("{}", speedwave_runtime::resources::format_oom_message());
+                anyhow::bail!("{}", speedwave_runtime::resources::OOM_MESSAGE);
             }
             anyhow::bail!("session exited ({})", status);
         }
