@@ -91,6 +91,12 @@ impl McpOsProcess {
         //
         // 4. The bundled node binary is already resolved to an absolute path
         //    by binary::command(), so it executes correctly even without PATH.
+        //
+        // 5. SPEEDWAVE_RESOURCES_DIR and SPEEDWAVE_PROD are forwarded only when
+        //    the parent process has a non-empty SPEEDWAVE_RESOURCES_DIR (i.e.
+        //    running as a bundled .app). This lets mcp-os resolve native CLI
+        //    binaries from the flat Resources/ layout instead of the dev-mode
+        //    source tree.
         let mut cmd = speedwave_runtime::binary::command("node");
         cmd.arg(script_path).env_clear();
 
@@ -114,6 +120,16 @@ impl McpOsProcess {
         // USERPROFILE is already forwarded via WINDOWS_SYSTEM_ENV_VARS above.
         #[cfg(not(target_os = "windows"))]
         cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
+
+        // Production mode: forward resource directory so mcp-os resolves native
+        // CLI binaries from the bundled .app/Contents/Resources/ layout instead
+        // of the dev-mode source tree.
+        if let Ok(res) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
+            if !res.is_empty() {
+                cmd.env(consts::BUNDLE_RESOURCES_ENV, &res);
+                cmd.env("SPEEDWAVE_PROD", "1");
+            }
+        }
 
         let mut child = cmd
             .env("PORT", "0")
@@ -1511,5 +1527,92 @@ srv.listen(0, '127.0.0.1', () => {
             proc.stop().unwrap();
         }
         // node not available — skip
+    }
+
+    #[test]
+    fn test_spawn_forwards_resources_env_in_prod_mode() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let env_out = tmp.path().join("env.json");
+        let env_out_escaped = env_out.to_string_lossy().replace('\\', "/");
+        let script = tmp.path().join("test_env_forward.js");
+        std::fs::write(
+            &script,
+            format!(
+                r#"
+const fs = require('fs');
+const http = require('http');
+fs.writeFileSync({env_path}, JSON.stringify({{
+    SPEEDWAVE_PROD: process.env.SPEEDWAVE_PROD || null,
+    SPEEDWAVE_RESOURCES_DIR: process.env.SPEEDWAVE_RESOURCES_DIR || null,
+}}));
+const srv = http.createServer((_,r) => {{ r.end('ok'); }});
+srv.listen(0, '127.0.0.1', () => {{
+    process.stdout.write(JSON.stringify({{ port: srv.address().port }}) + '\n');
+}});
+"#,
+                env_path = serde_json::to_string(&env_out_escaped).unwrap(),
+            ),
+        )
+        .unwrap();
+
+        // Simulate production: set SPEEDWAVE_RESOURCES_DIR in parent
+        std::env::set_var(consts::BUNDLE_RESOURCES_ENV, "/fake/Resources");
+        let data_dir = tmp.path().join("data");
+        let result = McpOsProcess::spawn_in_dir(&script.to_string_lossy(), &data_dir);
+        std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
+
+        if let Ok(mut proc) = result {
+            assert!(proc.port() > 0);
+            let env_json: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&env_out).unwrap()).unwrap();
+            assert_eq!(env_json["SPEEDWAVE_PROD"], "1");
+            assert_eq!(env_json["SPEEDWAVE_RESOURCES_DIR"], "/fake/Resources");
+            proc.stop().unwrap();
+        }
+        // node not available — skip gracefully
+    }
+
+    #[test]
+    fn test_spawn_omits_resources_env_in_dev_mode() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let env_out = tmp.path().join("env.json");
+        let env_out_escaped = env_out.to_string_lossy().replace('\\', "/");
+        let script = tmp.path().join("test_env_dev.js");
+        std::fs::write(
+            &script,
+            format!(
+                r#"
+const fs = require('fs');
+const http = require('http');
+fs.writeFileSync({env_path}, JSON.stringify({{
+    SPEEDWAVE_PROD: process.env.SPEEDWAVE_PROD || null,
+    SPEEDWAVE_RESOURCES_DIR: process.env.SPEEDWAVE_RESOURCES_DIR || null,
+}}));
+const srv = http.createServer((_,r) => {{ r.end('ok'); }});
+srv.listen(0, '127.0.0.1', () => {{
+    process.stdout.write(JSON.stringify({{ port: srv.address().port }}) + '\n');
+}});
+"#,
+                env_path = serde_json::to_string(&env_out_escaped).unwrap(),
+            ),
+        )
+        .unwrap();
+
+        // Ensure SPEEDWAVE_RESOURCES_DIR is NOT set (dev mode)
+        std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
+        let data_dir = tmp.path().join("data");
+        let result = McpOsProcess::spawn_in_dir(&script.to_string_lossy(), &data_dir);
+
+        if let Ok(mut proc) = result {
+            assert!(proc.port() > 0);
+            let env_json: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&env_out).unwrap()).unwrap();
+            assert_eq!(env_json["SPEEDWAVE_PROD"], serde_json::Value::Null);
+            assert_eq!(env_json["SPEEDWAVE_RESOURCES_DIR"], serde_json::Value::Null);
+            proc.stop().unwrap();
+        }
+        // node not available — skip gracefully
     }
 }
