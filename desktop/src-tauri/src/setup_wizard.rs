@@ -1627,25 +1627,134 @@ pub fn copy_cli_binary(
     Ok(())
 }
 
-/// Ensures `~/.local/bin` is on PATH by appending an `export` line to existing shell
-/// config files (`.bashrc`, `.zshrc`, `.profile`) under the given `home` directory.
+/// The user's default shell, detected from `$SHELL`.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UserShell {
+    Bash,
+    Zsh,
+    Unknown,
+}
+
+/// Detects the user's default shell from the `$SHELL` environment variable.
 ///
-/// Skips files that don't exist or already contain `.local/bin`.
+/// Falls back to [`UserShell::Zsh`] on macOS when `$SHELL` is unset (common when
+/// the Desktop app is launched from Dock/Finder, where launchd may not propagate
+/// `$SHELL`). macOS has defaulted to zsh since Catalina (10.15).
+#[cfg(unix)]
+fn detect_shell() -> UserShell {
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    parse_shell_env(&shell)
+}
+
+/// Parses a `$SHELL` value into a [`UserShell`].
+///
+/// Separated from [`detect_shell`] so unit tests can exercise the parsing logic
+/// directly without depending on (or mutating) the `$SHELL` environment variable.
+#[cfg(unix)]
+fn parse_shell_env(shell: &str) -> UserShell {
+    if shell.ends_with("/bash") {
+        UserShell::Bash
+    } else if shell.ends_with("/zsh") {
+        UserShell::Zsh
+    } else if shell.is_empty() {
+        // $SHELL may be unset when launched from macOS Dock/Finder (launchd).
+        // macOS default shell is zsh since Catalina (10.15).
+        #[cfg(target_os = "macos")]
+        return UserShell::Zsh;
+        #[cfg(not(target_os = "macos"))]
+        return UserShell::Unknown;
+    } else {
+        UserShell::Unknown
+    }
+}
+
+/// Returns the shell config file path(s) to modify for the given shell.
+///
+/// Selection rules per shell initialization order:
+/// - **bash on macOS**: login shell reads first of `.bash_profile` > `.bash_login` >
+///   `.profile` (then stops). macOS terminals always open login shells, so only the
+///   login file is needed. Creates `.bash_profile` if none of the three exist.
+/// - **bash on Linux**: interactive shells read `.bashrc`; login shells (SSH, tty)
+///   read `.bash_profile` > `.bash_login` > `.profile`. We write to both `.bashrc`
+///   AND the first existing login file to cover both session types.
+/// - **zsh**: `.zshrc` is sourced for both login and interactive shells on all platforms.
+/// - **Unknown**: `.profile` — POSIX portable fallback.
+#[cfg(unix)]
+fn shell_config_targets(home: &std::path::Path, shell: UserShell) -> Vec<std::path::PathBuf> {
+    match shell {
+        UserShell::Zsh => vec![home.join(".zshrc")],
+        UserShell::Bash => {
+            let mut targets = Vec::new();
+            // bash login shell reads first found of these three, then stops:
+            let login_candidates = [".bash_profile", ".bash_login", ".profile"];
+            let login_target = login_candidates
+                .iter()
+                .find(|f| home.join(f).exists())
+                .unwrap_or(&".bash_profile"); // create .bash_profile if none exist
+            targets.push(home.join(login_target));
+
+            // On Linux, also need .bashrc for interactive (non-login) shells
+            // (terminal emulators open non-login shells by default).
+            // macOS terminals always open login shells — .bashrc not needed.
+            #[cfg(target_os = "linux")]
+            {
+                let bashrc = home.join(".bashrc");
+                if !targets.contains(&bashrc) {
+                    targets.push(bashrc);
+                }
+            }
+
+            targets
+        }
+        UserShell::Unknown => vec![home.join(".profile")],
+    }
+}
+
+/// Ensures `~/.local/bin` is on PATH by appending an `export` line to the correct
+/// shell config file(s) for the user's detected shell and platform.
+///
+/// Detects the user's shell via `$SHELL` and writes to the appropriate config file
+/// (e.g., `.bash_profile` for bash on macOS, `.zshrc` for zsh). Creates the target
+/// file if it doesn't exist. Skips files that already contain `.local/bin`.
 #[cfg(unix)]
 fn ensure_local_bin_on_path(home: &std::path::Path) -> anyhow::Result<()> {
+    ensure_local_bin_on_path_for_shell(home, detect_shell())
+}
+
+/// Inner implementation accepting an explicit [`UserShell`] for unit testing without
+/// depending on `$SHELL` env var.
+#[cfg(unix)]
+fn ensure_local_bin_on_path_for_shell(
+    home: &std::path::Path,
+    shell: UserShell,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let targets = shell_config_targets(home, shell);
     let export_line = "export PATH=\"$HOME/.local/bin:$PATH\"";
-    for rc_file in &[".bashrc", ".zshrc", ".profile"] {
-        let rc_path = home.join(rc_file);
-        if rc_path.exists() {
-            let content = std::fs::read_to_string(&rc_path).unwrap_or_default();
-            if !content.contains(".local/bin") {
-                let mut f = std::fs::OpenOptions::new().append(true).open(&rc_path)?;
-                use std::io::Write;
-                writeln!(f, "\n# Added by Speedwave setup")?;
-                writeln!(f, "{}", export_line)?;
+    let marker = ".local/bin";
+
+    for target in targets {
+        if target.exists() {
+            let content = std::fs::read_to_string(&target)?;
+            if content.contains(marker) {
+                continue;
             }
+            let mut f = std::fs::OpenOptions::new().append(true).open(&target)?;
+            writeln!(f, "\n# Added by Speedwave setup")?;
+            writeln!(f, "{}", export_line)?;
+        } else {
+            // Create the file — user has no config for their shell yet
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut f = std::fs::File::create(&target)?;
+            writeln!(f, "# Added by Speedwave setup")?;
+            writeln!(f, "{}", export_line)?;
         }
     }
+
     Ok(())
 }
 
@@ -3223,68 +3332,272 @@ mod tests {
         );
     }
 
-    // ── ensure_local_bin_on_path tests ────────────────────────────────────
+    // ── detect_shell tests ──────────────────────────────────────────────
 
     #[cfg(unix)]
     #[test]
-    fn ensure_local_bin_on_path_appends_to_existing_rc_files() {
+    fn detect_shell_parses_shell_env() {
+        assert_eq!(parse_shell_env("/bin/zsh"), UserShell::Zsh);
+        assert_eq!(parse_shell_env("/bin/bash"), UserShell::Bash);
+        assert_eq!(parse_shell_env("/usr/local/bin/bash"), UserShell::Bash);
+        assert_eq!(parse_shell_env("/opt/homebrew/bin/zsh"), UserShell::Zsh);
+        assert_eq!(parse_shell_env("/usr/bin/fish"), UserShell::Unknown);
+        assert_eq!(parse_shell_env("/bin/ksh"), UserShell::Unknown);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn detect_shell_empty_defaults_to_zsh_on_macos() {
+        // On macOS, empty $SHELL (launchd context) should default to Zsh.
+        assert_eq!(parse_shell_env(""), UserShell::Zsh);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn detect_shell_empty_defaults_to_unknown_on_linux() {
+        // On Linux, empty $SHELL should fall back to Unknown (→ .profile).
+        assert_eq!(parse_shell_env(""), UserShell::Unknown);
+    }
+
+    // ── shell_config_targets tests ───────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn zsh_targets_zshrc() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path();
+        let targets = shell_config_targets(home, UserShell::Zsh);
+        assert_eq!(targets, vec![home.join(".zshrc")]);
+    }
 
-        // Create .bashrc and .zshrc without .local/bin
-        std::fs::write(home.join(".bashrc"), "# existing content\n").expect("write .bashrc");
-        std::fs::write(home.join(".zshrc"), "# zsh config\n").expect("write .zshrc");
+    #[cfg(unix)]
+    #[test]
+    fn unknown_targets_profile() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        let targets = shell_config_targets(home, UserShell::Unknown);
+        assert_eq!(targets, vec![home.join(".profile")]);
+    }
 
-        ensure_local_bin_on_path(home).expect("should succeed");
+    #[cfg(unix)]
+    #[test]
+    fn bash_targets_bash_profile_when_it_exists() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        std::fs::write(home.join(".bash_profile"), "# bash_profile\n").expect("write");
+        std::fs::write(home.join(".profile"), "# profile\n").expect("write");
+
+        let targets = shell_config_targets(home, UserShell::Bash);
+        // .bash_profile takes priority over .profile
+        assert!(targets.contains(&home.join(".bash_profile")));
+        assert!(!targets.contains(&home.join(".profile")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bash_falls_through_to_bash_login() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        // Only .bash_login exists (no .bash_profile)
+        std::fs::write(home.join(".bash_login"), "# bash_login\n").expect("write");
+
+        let targets = shell_config_targets(home, UserShell::Bash);
+        assert!(targets.contains(&home.join(".bash_login")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bash_falls_through_to_profile() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        // Only .profile exists (no .bash_profile, no .bash_login)
+        std::fs::write(home.join(".profile"), "# profile\n").expect("write");
+
+        let targets = shell_config_targets(home, UserShell::Bash);
+        assert!(targets.contains(&home.join(".profile")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bash_creates_bash_profile_when_none_exist() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        // No login files exist at all
+
+        let targets = shell_config_targets(home, UserShell::Bash);
+        // Should default to .bash_profile for creation
+        assert!(targets.contains(&home.join(".bash_profile")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bash_linux_targets_bashrc_and_login() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        std::fs::write(home.join(".bash_profile"), "# bp\n").expect("write");
+
+        let targets = shell_config_targets(home, UserShell::Bash);
+        assert!(
+            targets.contains(&home.join(".bash_profile")),
+            "should include login file"
+        );
+        assert!(
+            targets.contains(&home.join(".bashrc")),
+            "should include .bashrc for interactive shells on Linux"
+        );
+    }
+
+    // ── ensure_local_bin_on_path_for_shell tests ─────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn zsh_creates_zshrc_when_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        // No .zshrc exists
+
+        ensure_local_bin_on_path_for_shell(home, UserShell::Zsh).expect("should succeed");
+
+        assert!(home.join(".zshrc").exists(), ".zshrc should be created");
+        let content = std::fs::read_to_string(home.join(".zshrc")).expect("read");
+        assert!(content.contains(".local/bin"), "should contain PATH export");
+        assert!(
+            content.contains("# Added by Speedwave setup"),
+            "should contain marker comment"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zsh_appends_to_existing_zshrc() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        std::fs::write(home.join(".zshrc"), "# existing zsh config\n").expect("write");
+
+        ensure_local_bin_on_path_for_shell(home, UserShell::Zsh).expect("should succeed");
+
+        let content = std::fs::read_to_string(home.join(".zshrc")).expect("read");
+        assert!(
+            content.starts_with("# existing zsh config"),
+            "should preserve existing content"
+        );
+        assert!(content.contains(".local/bin"), "should append PATH export");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skips_when_already_present() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        let existing = "# existing\nexport PATH=\"$HOME/.local/bin:$PATH\"\n";
+        std::fs::write(home.join(".zshrc"), existing).expect("write");
+
+        ensure_local_bin_on_path_for_shell(home, UserShell::Zsh).expect("should succeed");
+
+        let content = std::fs::read_to_string(home.join(".zshrc")).expect("read");
+        assert_eq!(
+            content, existing,
+            "should not be modified when already present"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idempotent_across_multiple_calls() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        std::fs::write(home.join(".zshrc"), "# zshrc\n").expect("write");
+
+        ensure_local_bin_on_path_for_shell(home, UserShell::Zsh).expect("first call");
+        ensure_local_bin_on_path_for_shell(home, UserShell::Zsh).expect("second call");
+
+        let content = std::fs::read_to_string(home.join(".zshrc")).expect("read");
+        let count = content.lines().filter(|l| l.contains(".local/bin")).count();
+        assert_eq!(
+            count, 1,
+            "should have exactly one .local/bin line, got {count}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn does_not_touch_other_shells_config() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        let bashrc_content = "# my bashrc\n";
+        std::fs::write(home.join(".bashrc"), bashrc_content).expect("write .bashrc");
+
+        // Zsh user — should only touch .zshrc, not .bashrc
+        ensure_local_bin_on_path_for_shell(home, UserShell::Zsh).expect("should succeed");
+
+        let bashrc = std::fs::read_to_string(home.join(".bashrc")).expect("read .bashrc");
+        assert_eq!(
+            bashrc, bashrc_content,
+            ".bashrc should not be modified for a zsh user"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bash_writes_to_bash_profile_not_bashrc_on_macos() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        std::fs::write(home.join(".bash_profile"), "# bp\n").expect("write");
+        std::fs::write(home.join(".bashrc"), "# bashrc\n").expect("write");
+
+        ensure_local_bin_on_path_for_shell(home, UserShell::Bash).expect("should succeed");
+
+        let bp = std::fs::read_to_string(home.join(".bash_profile")).expect("read");
+        assert!(
+            bp.contains(".local/bin"),
+            ".bash_profile should contain PATH export"
+        );
+
+        // On macOS, .bashrc should NOT be modified (macOS opens login shells).
+        // On Linux, .bashrc IS also a target — so this assertion is macOS-only.
+        #[cfg(target_os = "macos")]
+        {
+            let bashrc = std::fs::read_to_string(home.join(".bashrc")).expect("read");
+            assert_eq!(
+                bashrc, "# bashrc\n",
+                ".bashrc should not be modified on macOS"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bash_linux_fresh_install_creates_both_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        // No config files exist — simulates a fresh Linux install
+
+        ensure_local_bin_on_path_for_shell(home, UserShell::Bash).expect("should succeed");
+
+        // Both .bash_profile (login) and .bashrc (interactive) should be created
+        let bp = std::fs::read_to_string(home.join(".bash_profile")).expect("read .bash_profile");
+        assert!(
+            bp.contains(".local/bin"),
+            ".bash_profile should contain PATH export"
+        );
 
         let bashrc = std::fs::read_to_string(home.join(".bashrc")).expect("read .bashrc");
         assert!(
             bashrc.contains(".local/bin"),
             ".bashrc should contain PATH export"
         );
-        assert!(
-            bashrc.contains("# Added by Speedwave setup"),
-            ".bashrc should contain Speedwave comment"
-        );
 
-        let zshrc = std::fs::read_to_string(home.join(".zshrc")).expect("read .zshrc");
-        assert!(
-            zshrc.contains(".local/bin"),
-            ".zshrc should contain PATH export"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn ensure_local_bin_on_path_skips_rc_already_containing_local_bin() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let home = tmp.path();
-
-        let existing = "# existing\nexport PATH=\"$HOME/.local/bin:$PATH\"\n";
-        std::fs::write(home.join(".bashrc"), existing).expect("write .bashrc");
-
-        ensure_local_bin_on_path(home).expect("should succeed");
-
-        let bashrc = std::fs::read_to_string(home.join(".bashrc")).expect("read .bashrc");
+        // Each file should have exactly one export line
+        let bp_count = bp.lines().filter(|l| l.contains(".local/bin")).count();
+        let bashrc_count = bashrc.lines().filter(|l| l.contains(".local/bin")).count();
         assert_eq!(
-            bashrc, existing,
-            ".bashrc should not be modified when .local/bin already present"
+            bp_count, 1,
+            ".bash_profile: expected 1 export line, got {bp_count}"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn ensure_local_bin_on_path_skips_nonexistent_rc_files() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let home = tmp.path();
-        // No rc files exist
-
-        ensure_local_bin_on_path(home).expect("should succeed without error");
-
-        // Verify no rc files were created
-        assert!(!home.join(".bashrc").exists());
-        assert!(!home.join(".zshrc").exists());
-        assert!(!home.join(".profile").exists());
+        assert_eq!(
+            bashrc_count, 1,
+            ".bashrc: expected 1 export line, got {bashrc_count}"
+        );
     }
 
     // ── copy_cli_binary overwrites existing binary ────────────────────────
@@ -3363,18 +3676,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn link_cli_from_copies_binary_and_updates_path() {
+    fn link_cli_from_copies_binary_and_sets_permissions() {
         let tmp = tempfile::tempdir().expect("tempdir");
 
         // Create mock CLI source binary
         let source = tmp.path().join("speedwave");
         std::fs::write(&source, b"cli-binary-content").expect("write source");
 
-        // Create home with shell rc files
+        // Create home with config files for all common shells so the test
+        // passes regardless of the ambient $SHELL (detect_shell reads it).
         let home = tmp.path().join("home");
         std::fs::create_dir_all(&home).expect("create home");
-        std::fs::write(home.join(".bashrc"), "# existing bashrc\n").expect("write bashrc");
-        std::fs::write(home.join(".zshrc"), "# existing zshrc\n").expect("write zshrc");
+        std::fs::write(home.join(".zshrc"), "# zshrc\n").expect("write zshrc");
+        std::fs::write(home.join(".bash_profile"), "# bash_profile\n").expect("write bash_profile");
+        std::fs::write(home.join(".profile"), "# profile\n").expect("write profile");
 
         link_cli_from(&source, &home).expect("link_cli_from should succeed");
 
@@ -3391,18 +3706,6 @@ mod tests {
             .permissions()
             .mode();
         assert!(mode & 0o111 != 0, "binary should be executable");
-
-        // Verify PATH export appended to rc files
-        let bashrc = std::fs::read_to_string(home.join(".bashrc")).expect("read bashrc");
-        assert!(
-            bashrc.contains(".local/bin"),
-            "bashrc should contain .local/bin export"
-        );
-        let zshrc = std::fs::read_to_string(home.join(".zshrc")).expect("read zshrc");
-        assert!(
-            zshrc.contains(".local/bin"),
-            "zshrc should contain .local/bin export"
-        );
     }
 
     #[cfg(unix)]
@@ -3413,10 +3716,13 @@ mod tests {
         let source = tmp.path().join("speedwave");
         std::fs::write(&source, b"v2-binary").expect("write source");
 
+        // Create config files for all common shells — makes the test
+        // independent of the ambient $SHELL value.
         let home = tmp.path().join("home");
         std::fs::create_dir_all(&home).expect("create home");
-        std::fs::write(home.join(".bashrc"), "# bashrc\n").expect("write bashrc");
         std::fs::write(home.join(".zshrc"), "# zshrc\n").expect("write zshrc");
+        std::fs::write(home.join(".bash_profile"), "# bash_profile\n").expect("write bash_profile");
+        std::fs::write(home.join(".profile"), "# profile\n").expect("write profile");
 
         // Call twice
         link_cli_from(&source, &home).expect("first call");
@@ -3429,21 +3735,6 @@ mod tests {
         let dest = home.join(".local").join("bin").join(consts::CLI_BINARY);
         let content = std::fs::read_to_string(&dest).expect("read dest");
         assert_eq!(content, "v3-binary", "should have latest binary content");
-
-        // Shell rc files should have exactly one line referencing .local/bin
-        let bashrc = std::fs::read_to_string(home.join(".bashrc")).expect("read bashrc");
-        let count = bashrc.lines().filter(|l| l.contains(".local/bin")).count();
-        assert_eq!(
-            count, 1,
-            "bashrc should have exactly one .local/bin line, got {count}"
-        );
-
-        let zshrc = std::fs::read_to_string(home.join(".zshrc")).expect("read zshrc");
-        let count = zshrc.lines().filter(|l| l.contains(".local/bin")).count();
-        assert_eq!(
-            count, 1,
-            "zshrc should have exactly one .local/bin line, got {count}"
-        );
     }
 
     #[test]
