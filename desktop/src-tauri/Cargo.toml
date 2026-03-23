@@ -26,7 +26,7 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-webdriver = { version = "0.2", optional = true }
 url = "2"
-tokio-tungstenite = "0.28"
+tokio-tungstenite = "0.29"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 http = "1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
