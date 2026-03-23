@@ -215,8 +215,9 @@ export class ProjectStateService {
         this.notifyReady();
         this.notifySettled();
       }
-    } catch {
-      // Auth check failed — stay in auth_required
+    } catch (err) {
+      console.debug('retryAuth: auth check failed', err);
+      // Stay in auth_required
     }
   }
 
