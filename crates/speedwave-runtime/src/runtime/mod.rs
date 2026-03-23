@@ -395,8 +395,8 @@ pub fn ensure_exec_healthy(
         let msg = e.to_string().to_ascii_lowercase();
         if msg.contains("no such image") || msg.contains("image not found") {
             anyhow::anyhow!(
-                "Container images are missing — please restart the app \
-                 to trigger a rebuild. ({e})"
+                "Container images are missing — restarting the app \
+                 will trigger an automatic rebuild. ({e})"
             )
         } else {
             anyhow::anyhow!(
@@ -1094,7 +1094,8 @@ services:
                 Ok(Command::new("true"))
             } else if let Some(ref msg) = self.custom_error {
                 let mut cmd = Command::new("sh");
-                cmd.args(["-c", &format!("echo '{}' >&2; exit 1", msg)]);
+                cmd.env("TEST_MSG", msg)
+                    .args(["-c", "echo \"$TEST_MSG\" >&2; exit 1"]);
                 Ok(cmd)
             } else {
                 let mut cmd = Command::new("sh");
