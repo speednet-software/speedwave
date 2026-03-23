@@ -41,12 +41,12 @@ impl fmt::Display for PrereqViolation {
 pub fn check_os_prereqs() -> Vec<PrereqViolation> {
     #[cfg(target_os = "windows")]
     {
-        return check_wsl();
+        check_wsl()
     }
 
     #[cfg(target_os = "linux")]
     {
-        return check_uidmap();
+        check_uidmap()
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
