@@ -73,6 +73,22 @@ Built-in images are versioned by the installed desktop bundle, not by a shared `
 
 This keeps CLI-driven container starts aligned with the desktop bundle that installed the CLI.
 
+## Troubleshooting
+
+If the `speedwave` command is not found after installation, run the diagnostic script from the source repository:
+
+```bash
+bash scripts/diagnose-cli.sh
+```
+
+It checks the binary location, PATH configuration, shell config files, and Speedwave data directory to identify the issue.
+
+If you don't have the source repository cloned, you can download and run the script directly:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/speednet-software/speedwave/dev/scripts/diagnose-cli.sh | bash
+```
+
 ## See Also
 
 - [ADR-005: Two Interfaces — CLI and Desktop](../adr/ADR-005-two-interfaces-cli-and-desktop.md)
