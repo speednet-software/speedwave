@@ -1286,14 +1286,19 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
             .output()?;
         let status_str = String::from_utf8_lossy(&status_output.stdout);
         if status_str.trim().eq_ignore_ascii_case("running") {
-            // --force kills the VM immediately. This runs on app startup before
-            // any project is actively running, so data loss risk is negligible.
-            log::info!("Stopping VM for memory migration");
+            log::warn!(
+                "Stopping VM for memory migration — any running Claude sessions will be interrupted"
+            );
             let timeout = std::time::Duration::from_secs(30);
             let mut stop_cmd = limactl_command();
-            stop_cmd.args(["stop", "--force", consts::lima_vm_name()]);
+            stop_cmd.args(["stop", consts::lima_vm_name()]);
             if let Err(e) = run_with_timeout(&mut stop_cmd, timeout) {
-                log::warn!("limactl stop timed out or failed: {e}, continuing with config update");
+                log::warn!("graceful stop failed ({e}), forcing stop");
+                let mut force_cmd = limactl_command();
+                force_cmd.args(["stop", "--force", consts::lima_vm_name()]);
+                if let Err(e2) = run_with_timeout(&mut force_cmd, timeout) {
+                    log::warn!("forced stop also failed: {e2}, continuing with config update");
+                }
             }
         }
     }

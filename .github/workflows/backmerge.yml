@@ -1,0 +1,165 @@
+# Backmerge main → dev after a release is published
+#
+# Ensures dev stays up-to-date with release commits (version bumps, CHANGELOG).
+# Version file conflicts are auto-resolved (main wins — it has the latest release version).
+# If non-version conflicts remain, a PR is created for manual resolution.
+
+name: Backmerge
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: backmerge
+  cancel-in-progress: true
+
+jobs:
+  backmerge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Backmerge main into dev
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -e
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Guard: skip if dev already has all main commits
+          if git merge-base --is-ancestor origin/main origin/dev; then
+            echo "dev already contains all main commits — nothing to backmerge"
+            exit 0
+          fi
+
+          BRANCH="chore/backmerge-main-into-dev"
+
+          # Close existing backmerge PR if any
+          EXISTING_PR=$(gh pr list --repo "$REPO" --head "$BRANCH" --base dev --state open --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -n "$EXISTING_PR" ]; then
+            echo "Closing existing backmerge PR #$EXISTING_PR"
+            gh pr close "$EXISTING_PR" --repo "$REPO" --delete-branch 2>&1 || echo "::warning::Could not close/delete previous backmerge PR #$EXISTING_PR"
+          fi
+
+          git checkout -b "$BRANCH" origin/dev
+
+          # Attempt merge
+          if git merge origin/main --no-ff -m "chore: backmerge main into dev after $TAG"; then
+            echo "Clean merge — no conflicts"
+            git push origin "$BRANCH" --force
+            PR_URL=$(gh pr create \
+              --repo "$REPO" \
+              --head "$BRANCH" \
+              --base dev \
+              --title "chore: backmerge main into dev after $TAG" \
+              --body "$(cat <<'PREOF'
+          ## Summary
+
+          Automated backmerge of `main` into `dev` after release publication.
+
+          - Brings version bumps, CHANGELOG, and any hotfix commits into `dev`
+          - This PR was auto-created by the backmerge workflow
+
+          ## Test plan
+
+          - [ ] CI passes on this PR
+          PREOF
+          )")
+            echo "Created PR: $PR_URL"
+            # Enable auto-merge with merge strategy (not squash — preserve main's history)
+            PR_NUMBER=$(echo "$PR_URL" | grep -o '[0-9]*$')
+            if gh pr merge "$PR_NUMBER" --repo "$REPO" --merge --auto; then
+              echo "Auto-merge enabled"
+            else
+              echo "::notice::Could not enable auto-merge. Ensure 'Allow auto-merge' is enabled in repo settings (Settings > General > Pull Requests)."
+            fi
+            exit 0
+          fi
+
+          echo "Merge conflicts detected — attempting auto-resolution of version files"
+
+          # Auto-resolve version files (main wins — it has the latest release version)
+          # Version files + release config (main always wins)
+          AUTO_RESOLVE_FILES=(
+            .release-please-manifest.json
+            release-please-config.json
+            .github/workflows/release-please.yml
+            package.json
+            package-lock.json
+            desktop/src/package.json
+            desktop/src/package-lock.json
+            desktop/src-tauri/tauri.conf.json
+            crates/speedwave-runtime/Cargo.toml
+            crates/speedwave-cli/Cargo.toml
+            desktop/src-tauri/Cargo.toml
+            mcp-servers/hub/package.json
+            mcp-servers/shared/package.json
+            mcp-servers/slack/package.json
+            mcp-servers/sharepoint/package.json
+            mcp-servers/redmine/package.json
+            mcp-servers/gitlab/package.json
+            mcp-servers/os/package.json
+            mcp-servers/package-lock.json
+            Cargo.lock
+            desktop/src-tauri/Cargo.lock
+            CHANGELOG.md
+          )
+
+          for f in "${AUTO_RESOLVE_FILES[@]}"; do
+            if git diff --name-only --diff-filter=U | grep -qx "$f"; then
+              echo "Auto-resolving $f (using main's version)"
+              git checkout --theirs "$f"
+              git add "$f"
+            fi
+          done
+
+          # Check if any unresolved conflicts remain
+          REMAINING=$(git diff --name-only --diff-filter=U || true)
+          if [ -n "$REMAINING" ]; then
+            echo "::error::Unresolved conflicts in: $REMAINING"
+            echo "::error::Manual backmerge needed. Run: git checkout -b chore/backmerge origin/dev && git merge origin/main"
+            git merge --abort
+            exit 1
+          fi
+
+          # All conflicts auto-resolved
+          git commit --no-edit
+          git push origin "$BRANCH" --force
+          PR_URL=$(gh pr create \
+            --repo "$REPO" \
+            --head "$BRANCH" \
+            --base dev \
+            --title "chore: backmerge main into dev after $TAG" \
+            --body "$(cat <<'PREOF'
+          ## Summary
+
+          Automated backmerge of `main` into `dev` after release publication.
+
+          - Brings version bumps, CHANGELOG, and any hotfix commits into `dev`
+          - Version file conflicts were auto-resolved (main's versions win)
+
+          ## Test plan
+
+          - [ ] CI passes on this PR
+          PREOF
+          )")
+          echo "Created PR: $PR_URL"
+          PR_NUMBER=$(echo "$PR_URL" | grep -o '[0-9]*$')
+          if gh pr merge "$PR_NUMBER" --repo "$REPO" --merge --auto; then
+            echo "Auto-merge enabled"
+          else
+            echo "::notice::Could not enable auto-merge. Ensure 'Allow auto-merge' is enabled in repo settings (Settings > General > Pull Requests)."
+          fi

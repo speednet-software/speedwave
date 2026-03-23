@@ -58,10 +58,17 @@ feature/* ──PR→ dev           (integration branch, default)
 
 5. Publish (automatic after all builds succeed)
    publish-release job in desktop-release.yml
-   └── validates asset count (expects 9+: 4 Tauri + 4 CLI + latest.json)
+   └── validates asset count (expects 17+: ~12 Tauri + 4 CLI + latest.json)
+   └── validates latest.json version matches expected version
    └── flips draft → published via GitHub API
    └── /releases/latest/download/latest.json now points to this release
    └── users receive update notification
+
+6. Backmerge (automatic after release is published)
+   backmerge.yml triggered by release:published event
+   └── merges main → dev (regular merge, not squash)
+   └── auto-resolves version file conflicts (main wins)
+   └── opens PR with auto-merge enabled
 ```
 
 ## Update Channel
@@ -184,7 +191,9 @@ This model is based on the pattern described by Jacob Bolda (Tauri core contribu
 ├── desktop-build.yml           # Build Tauri app on push to main and PR to main (unsigned artifact preview)
 ├── release-please.yml          # Runs release-please, triggers desktop-release.yml on release
 ├── release-please-lockfile.yml # Regenerates Cargo.lock on release-please PRs
-└── desktop-release.yml         # Build + sign + publish binaries (called via workflow_call)
+├── desktop-release.yml         # Build + sign + publish binaries (called via workflow_call)
+├── backmerge.yml               # Automated main → dev backmerge after release publish
+└── merge-strategy-check.yml    # Enforces conventional commit PR titles on PRs to main
 ```
 
 **Flow:**
@@ -213,7 +222,18 @@ Push to main (after merge)
               │   ├── sign bundles with TAURI_SIGNING_PRIVATE_KEY
               │   └── upload artifacts + latest.json via releaseId
               ├── job: cli (cross-compile CLI for 4 targets)
-              └── job: publish-release (draft → published after all builds succeed)
+              └── job: publish-release (validate 17+ assets + latest.json version, draft → published)
+
+Release published
+  └── backmerge.yml
+      └── merge main → dev (regular merge)
+      └── auto-resolve version file conflicts (main wins)
+      └── open PR with auto-merge
+
+PR to main
+  └── merge-strategy-check.yml
+      └── validate PR title follows conventional commits
+      └── exempt: release-please and backmerge PRs
 ```
 
 ## Build Matrix
@@ -233,7 +253,7 @@ Tauri's built-in updater[^53] checks a `latest.json` endpoint on startup and whe
 
 ```json
 {
-  "version": "v2.1.0",
+  "version": "2.1.0",
   "notes": "Bug fixes and performance improvements",
   "pub_date": "2026-02-18T12:00:00Z",
   "platforms": {
@@ -323,6 +343,31 @@ macOS notarization[^56] requires an Apple Developer account ($99/year). For the 
 | Homebrew Cask   | macOS    | `brew install --cask speedwave` | Community tap initially          |
 | winget          | Windows  | `winget install speedwave`      | After first stable release       |
 | apt repo        | Linux    | `.deb`                          | Future — GitHub Releases for now |
+
+## Addendum: Backmerge Automation and Merge Strategy (2026-03-20)
+
+### Backmerge automation
+
+After the v0.3.0 incident (wrong-version artifacts due to manual dispatch from dev branch), two new workflows were added:
+
+- **`backmerge.yml`** — triggered on `release: [published]`. Merges `main` → `dev` using regular merge (not squash). Version file conflicts are auto-resolved using main's version (main always has the latest release version). Creates a PR with auto-merge enabled.
+
+- **`merge-strategy-check.yml`** — triggered on PRs to `main`. Validates that the PR title follows conventional commits format. Release-please and backmerge PRs are exempt.
+
+### Merge strategy clarification
+
+| PR direction                | Strategy      | Rationale                                                                |
+| --------------------------- | ------------- | ------------------------------------------------------------------------ |
+| Any → `dev`                 | Squash merge  | Clean dev history                                                        |
+| `dev` → `main`              | Squash merge  | PR title becomes the conventional commit that release-please parses      |
+| `main` → `dev` (backmerge)  | Regular merge | Preserves main's commit identity; squash would cause phantom release PRs |
+| release-please PR on `main` | Squash merge  | Compatible with `force-tag-creation: true` + manifest tracking           |
+
+### Release validation improvements
+
+- `publish-release` job now validates `latest.json` version matches expected version. If mismatch, release is reverted to draft.
+- Asset count threshold raised from 9 to 17 (error, not warning). With 9, half the platforms could be missing without detection.
+- Tag-aware checkout: `resolve` job checks if the release tag exists. When it does, all build jobs check out the tag (not branch HEAD), ensuring correct version in artifacts.
 
 ---
 

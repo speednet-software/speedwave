@@ -109,9 +109,21 @@ Speedwave uses [release-please](https://github.com/googleapis/release-please) to
   │    └─ x86_64-pc-windows-msvc   ─► .zip                     │
   │        │                                                    │
   │        ▼                                                    │
-  │  [job: publish-release]  validate 9+ assets, draft ─► live  │
+  │  [job: publish-release]                                     │
+  │    validate 17+ assets + latest.json version                │
+  │    draft ─► live                                            │
   │                                                             │
-  └─────────────────────────────────────────────────────────────┘
+  └──────────────────────────┬──────────────────────────────────┘
+                             │
+                             ▼
+  ┌──────────────── backmerge.yml ───────────────────────────────┐
+  │                                                              │
+  │  Triggered by: release published event                       │
+  │  Merges main → dev (regular merge, not squash)               │
+  │  Auto-resolves version file conflicts (main wins)            │
+  │  Opens PR with auto-merge enabled                            │
+  │                                                              │
+  └──────────────────────────────────────────────────────────────┘
 ```
 
 ```
@@ -137,7 +149,7 @@ Speedwave uses [release-please](https://github.com/googleapis/release-please) to
 2. Wait for CI to pass on `main`
 3. Release-please automatically opens (or updates) a release PR
 4. Review the release PR — it shows the changelog and version bump
-5. **Merge the release PR**
+5. **Merge the release PR** — use **squash merge** (same as all PRs to main)
 6. Release-please creates a draft GitHub Release and tag
 7. Builds run automatically on all platforms
 8. After all builds succeed, the release is published
@@ -146,7 +158,7 @@ That's it — no manual version bumping, no workflow dispatch, no release type s
 
 ### Why squash merge matters
 
-When merging `dev` → `main`, you **must use squash merge** in the GitHub UI. This is because:
+**All PRs to `main` must use squash merge** — this includes `dev` → `main` PRs and release-please PRs. Release-please is compatible with squash merge thanks to `force-tag-creation: true` and manifest-based version tracking. This is because:
 
 - Release-please uses `--first-parent` commit traversal and parses each commit's message as a conventional commit
 - Regular merge commits have messages like `Merge pull request #N from speednet-software/dev` — this is **not** a conventional commit and release-please ignores it
@@ -301,6 +313,43 @@ main (v1.2.0 — buggy)         dev (has unreleased work)
 5. Merge the release PR to trigger the release
 6. Cherry-pick the fix into `dev`: `git cherry-pick <commit-sha>` or open a PR
 
+## Backmerge (main → dev)
+
+After every release, `main` has commits that `dev` doesn't (version bumps, CHANGELOG updates, hotfixes). The `backmerge.yml` workflow automatically keeps `dev` in sync:
+
+1. **Trigger:** fires on `release: [published]` event
+2. **Guard:** skips if `dev` already contains all `main` commits
+3. **Merge:** attempts `git merge origin/main --no-ff` (regular merge, not squash)
+4. **Conflict resolution:** version files are auto-resolved using main's version (main wins). This includes all `package.json`, `Cargo.toml`, `tauri.conf.json`, lockfiles, and `CHANGELOG.md`
+5. **PR:** opens a PR targeting `dev` with auto-merge enabled (merge strategy, not squash)
+6. **Manual fallback:** if non-version file conflicts exist, the PR is created without auto-merge and lists conflicting files
+
+**Why regular merge (not squash)?** Squash merge would create a new commit with a different SHA. Release-please on `main` would then see the same changes as "new" commits the next time `dev` is merged back to `main`, causing phantom release PRs with duplicate changelog entries.
+
+**Prerequisite:** the repository must have **"Allow auto-merge"** enabled in GitHub Settings > General > Pull Requests. Without this, `gh pr merge --auto` silently does nothing and backmerge PRs will require manual merge.
+
+## Known Pitfalls
+
+### Version mismatch between code and release
+
+**Symptom:** Desktop app shows wrong version (e.g., release is v0.3.0 but app says 0.2.0).
+
+**Cause:** `workflow_dispatch` on `desktop-release.yml` checked out branch HEAD instead of the release tag. The branch had old version files.
+
+**Fix:** The `resolve` job now checks if the tag exists and conditionally sets the checkout `ref`. When a tag exists, builds always use tagged code. Falls back to branch HEAD only when no tag exists (testing scenarios).
+
+### Release-please labeling race condition
+
+**Symptom:** Release-please creates a PR but the `autorelease: pending` label is missing. When the PR is merged, `release_created` is never set to `true` because `findMergedReleasePullRequests()` filters by label.
+
+**Cause:** GitHub's API returns the PR before the node ID is fully propagated. The labeling API call inside release-please fails silently.
+
+**Fix:** `release-please.yml` has an idempotent label-ensure step that retries label application with backoff after every release-please run that produces a PR.
+
+### Manual dispatch requires existing tag for correct builds
+
+When using `workflow_dispatch` on `desktop-release.yml` to re-build an existing release, the tag must exist on the remote. The `resolve` job checks for the tag and warns if it doesn't exist. Without a tag, the build uses branch HEAD which may have different code than expected.
+
 ## Manual Desktop Build (without release)
 
 To trigger a desktop build without creating a release (e.g. for testing):
@@ -309,6 +358,8 @@ To trigger a desktop build without creating a release (e.g. for testing):
 # From Actions UI: run "Desktop Release" workflow manually
 # with version: "0.3.0"
 ```
+
+**Note:** `workflow_dispatch` now checks whether the tag exists. If `v0.3.0` tag exists, the build checks out that tag (builds from tagged code with correct version). If no tag exists, falls back to branch HEAD (for testing only — version in artifacts will match whatever the branch has).
 
 Or use `desktop-build.yml` which runs automatically on PRs to `main` (Linux only) and on push to `main` (all platforms). These builds are unsigned.
 
@@ -322,6 +373,8 @@ Or use `desktop-build.yml` which runs automatically on PRs to `main` (Linux only
 | `.github/workflows/release-please-lockfile.yml` | Regenerates Cargo.lock on release-please PRs                   |
 | `.github/workflows/desktop-release.yml`         | Matrix build, code signing, CLI cross-compile, publish         |
 | `.github/workflows/desktop-build.yml`           | PR/push CI build (unsigned)                                    |
+| `.github/workflows/backmerge.yml`               | Automated main → dev backmerge after release publish           |
+| `.github/workflows/merge-strategy-check.yml`    | Enforces conventional commit PR titles on PRs to main          |
 | `desktop/src-tauri/src/updater.rs`              | Stable endpoint, version comparator, auto-check loop           |
 | `desktop/src-tauri/tauri.conf.json`             | Tauri config — updater pubkey, default stable endpoint         |
 
@@ -343,4 +396,4 @@ Expected assets per release (~17):
 - 4 CLI archives (`speedwave-v{version}-{target}.tar.gz` / `.zip`) — standalone releases for CLI-only users
 - 1 `latest.json` (updater manifest, auto-generated by tauri-action)
 
-The `publish-release` job warns if fewer than 9 assets are found — that threshold catches gross failures (entire platforms missing) without blocking on exact counts, which vary by Tauri version.
+The `publish-release` job **fails** if fewer than 17 assets are found — that threshold catches platform failures (with 9, half the platforms could be missing). It also validates that `latest.json` reports the expected version, catching wrong-code checkout issues. If the version mismatches, the release is reverted to draft.

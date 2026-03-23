@@ -67,7 +67,7 @@ interface SetupStep {
 
         <!-- Phase: Progress — steps running -->
         @if (phase === 'progress' || phase === 'project') {
-          <div class="flex flex-col gap-1 mb-6">
+          <div class="flex flex-col gap-1 mb-6" data-testid="setup-steps">
             @for (step of steps; track step.title; let i = $index) {
               <div
                 class="flex items-start gap-3 px-3 py-2.5 rounded"
@@ -75,6 +75,7 @@ interface SetupStep {
                 [class.opacity-40]="step.status === 'pending'"
                 [class.opacity-70]="step.status === 'done'"
                 data-testid="setup-step"
+                [attr.data-status]="step.status"
               >
                 <div class="size-[22px] flex items-center justify-center text-sm shrink-0 mt-px">
                   @if (step.status === 'done') {
@@ -90,7 +91,9 @@ interface SetupStep {
                   }
                 </div>
                 <div class="flex-1">
-                  <div class="font-semibold text-sm text-sw-text">{{ step.title }}</div>
+                  <div class="font-semibold text-sm text-sw-text" data-testid="step-title">
+                    {{ step.title }}
+                  </div>
                   <div class="text-xs text-sw-text-ghost">{{ step.description }}</div>
                   @if (step.detail && (step.status === 'active' || step.status === 'error')) {
                     <div

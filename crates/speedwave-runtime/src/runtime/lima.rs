@@ -349,12 +349,9 @@ impl ContainerRuntime for LimaRuntime {
 
     fn prepare_build_context(&self, build_root: &Path) -> anyhow::Result<PathBuf> {
         let data = consts::data_dir();
-        // data_dir is typically ~/.speedwave — derive home as its parent for
-        // the "is build_root under home?" check.
-        let home = data
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("data_dir has no parent"))?;
-        if build_root.starts_with(home) {
+        let home =
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+        if build_root.starts_with(&home) {
             return Ok(build_root.to_path_buf());
         }
 

@@ -418,6 +418,8 @@ macos_clean_state() {
     echo "[macos] Cleaning previous state..."
     macos_ssh bash <<'CLEAN'
 set -euo pipefail
+SPEEDWAVE_DATA_DIR="${SPEEDWAVE_DATA_DIR:-$HOME/.speedwave}"
+SPEEDWAVE_VM_NAME="$(basename "$SPEEDWAVE_DATA_DIR" | sed 's/^\.//')"
 # Kill the app first so it doesn't restart containers
 pkill -f speedwave-desktop 2>/dev/null || true
 pkill -f 'mcp-os.*index.js' 2>/dev/null || true
@@ -1051,6 +1053,7 @@ SCRIPT
 run_macos_e2e() {
     macos_ssh bash <<'SCRIPT'
 set -euo pipefail
+SPEEDWAVE_DATA_DIR="${SPEEDWAVE_DATA_DIR:-$HOME/.speedwave}"
 export PATH="$HOME/.cargo/bin:$PATH"
 eval "$(/opt/homebrew/bin/brew shellenv)"
 

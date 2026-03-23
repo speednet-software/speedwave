@@ -533,6 +533,7 @@ fn ensure_worker_auth_token(
     Ok(())
 }
 
+/// Testable version: accepts explicit secrets directory and plugin list.
 fn apply_worker_auth_tokens_with_dir(
     yaml: &str,
     secrets_dir: &std::path::Path,
