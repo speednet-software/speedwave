@@ -3352,6 +3352,13 @@ mod tests {
         assert_eq!(parse_shell_env(""), UserShell::Zsh);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn detect_shell_empty_defaults_to_unknown_on_linux() {
+        // On Linux, empty $SHELL should fall back to Unknown (→ .profile).
+        assert_eq!(parse_shell_env(""), UserShell::Unknown);
+    }
+
     // ── shell_config_targets tests ───────────────────────────────────────
 
     #[cfg(unix)]
