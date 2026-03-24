@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { Router, RouterModule } from '@angular/router';
+import { RouterModule } from '@angular/router';
 import { ShellComponent } from './shell.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -47,20 +47,6 @@ describe('ShellComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  it('should render nav with Chat, Integrations, Plugins, Settings', () => {
-    const nav = fixture.nativeElement.querySelector('[data-testid="app-nav"]');
-    const links = Array.from(nav.querySelectorAll('a')) as HTMLAnchorElement[];
-    const labels = links.map((a) => a.textContent?.trim());
-    expect(labels).toEqual(['Chat', 'Integrations', 'Plugins', 'Settings']);
-  });
-
-  it('should NOT render a Setup link', () => {
-    const nav = fixture.nativeElement.querySelector('[data-testid="app-nav"]');
-    const links = Array.from(nav.querySelectorAll('a')) as HTMLAnchorElement[];
-    const labels = links.map((a) => a.textContent?.trim());
-    expect(labels).not.toContain('Setup');
-  });
-
   it('should render update-notification', () => {
     const el = fixture.nativeElement.querySelector('app-update-notification');
     expect(el).toBeTruthy();
@@ -96,7 +82,6 @@ describe('ShellComponent', () => {
   it('shows rebuilding overlay when reconcile in progress', async () => {
     await component.ngOnInit();
     await fixture.whenStable();
-    // Force rebuilding status
     projectState.status = 'rebuilding';
     component['cdr'].markForCheck();
     fixture.detectChanges();
@@ -225,39 +210,52 @@ describe('ShellComponent', () => {
     expect(overlay.textContent).toContain('Running system checks...');
   });
 
-  it('shows auth-required overlay only on /chat', async () => {
-    const router = TestBed.inject(Router);
-    await router.navigateByUrl('/chat');
+  it('does not show blocking overlay when auth_required', async () => {
+    await component.ngOnInit();
     projectState.status = 'auth_required';
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
-    const overlay = fixture.nativeElement.querySelector('[data-testid="blocking-auth-required"]');
-    expect(overlay).not.toBeNull();
-    expect(overlay.textContent).toContain('Authentication Required');
-  });
-
-  it('auth-required overlay has only Go to Settings link', async () => {
-    const router = TestBed.inject(Router);
-    await router.navigateByUrl('/chat');
-    projectState.status = 'auth_required';
-    component['cdr'].markForCheck();
-    fixture.detectChanges();
-
-    expect(fixture.nativeElement.querySelector('[data-testid="auth-settings-btn"]')).not.toBeNull();
-    expect(fixture.nativeElement.querySelector('[data-testid="auth-authenticate-btn"]')).toBeNull();
-    expect(fixture.nativeElement.querySelector('[data-testid="auth-check-btn"]')).toBeNull();
-  });
-
-  it('does not show auth-required overlay on /settings', async () => {
-    const router = TestBed.inject(Router);
-    await router.navigateByUrl('/settings');
-    projectState.status = 'auth_required';
-    component['cdr'].markForCheck();
-    fixture.detectChanges();
-
+    expect(fixture.nativeElement.querySelector('[data-testid="blocking-overlay"]')).toBeNull();
     expect(
       fixture.nativeElement.querySelector('[data-testid="blocking-auth-required"]')
     ).toBeNull();
+  });
+
+  it('hides Chat nav link when status is auth_required', async () => {
+    await component.ngOnInit();
+    projectState.status = 'auth_required';
+    component['cdr'].markForCheck();
+    fixture.detectChanges();
+
+    const nav = fixture.nativeElement.querySelector('[data-testid="app-nav"]');
+    const links = Array.from(nav.querySelectorAll('a')) as HTMLAnchorElement[];
+    const labels = links.map((a) => a.textContent?.trim());
+    expect(labels).toEqual(['Integrations', 'Plugins', 'Settings']);
+    expect(labels).not.toContain('Chat');
+  });
+
+  it('shows Chat nav link when status is ready', async () => {
+    await component.ngOnInit();
+    await fixture.whenStable();
+    projectState.status = 'ready';
+    component['cdr'].markForCheck();
+    fixture.detectChanges();
+
+    const nav = fixture.nativeElement.querySelector('[data-testid="app-nav"]');
+    const links = Array.from(nav.querySelectorAll('a')) as HTMLAnchorElement[];
+    const labels = links.map((a) => a.textContent?.trim());
+    expect(labels).toEqual(['Chat', 'Integrations', 'Plugins', 'Settings']);
+  });
+
+  it('shows Chat nav link when status is error', async () => {
+    await component.ngOnInit();
+    await fixture.whenStable();
+    projectState.status = 'error';
+    projectState.error = 'something failed';
+    component['cdr'].markForCheck();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-testid="nav-chat"]')).not.toBeNull();
   });
 });

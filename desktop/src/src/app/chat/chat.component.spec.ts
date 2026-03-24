@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { Router } from '@angular/router';
+import { RouterModule } from '@angular/router';
 import { ChatComponent } from './chat.component';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
@@ -42,7 +44,7 @@ describe('ChatComponent', () => {
     };
 
     await TestBed.configureTestingModule({
-      imports: [ChatComponent],
+      imports: [ChatComponent, RouterModule.forRoot([])],
       providers: [{ provide: TauriService, useValue: mockTauri }],
     }).compileComponents();
 
@@ -449,7 +451,8 @@ describe('ChatComponent', () => {
       );
     });
 
-    it('routes auth error in resumeConversation to auth_required', async () => {
+    it('routes auth error in resumeConversation to retryAuth', async () => {
+      const retrySpy = vi.spyOn(projectState, 'retryAuth').mockResolvedValue();
       const mockTranscript = {
         session_id: 's1',
         messages: [{ role: 'user', content: 'Hi', timestamp: '2026-03-06T10:00:00Z' }],
@@ -464,7 +467,8 @@ describe('ChatComponent', () => {
       };
 
       await component.resumeConversation('s1');
-      expect(projectState.status).toBe('auth_required');
+      expect(retrySpy).toHaveBeenCalled();
+      retrySpy.mockRestore();
     });
 
     it('clears transcript and history state after resuming', async () => {
@@ -812,6 +816,26 @@ describe('ChatComponent', () => {
       expect(component2.chat.messages).toHaveLength(1);
       expect(component2.chat.messages[0].blocks[0]).toEqual({ type: 'text', content: 'persisted' });
       fixture2.destroy();
+    });
+  });
+
+  // ── Auth-expired redirect ───────────────────────────────────────────────
+
+  describe('auth-expired redirect', () => {
+    it('navigates to /settings when projectState becomes auth_required', async () => {
+      const router = TestBed.inject(Router);
+      const navigateSpy = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+
+      projectState.status = 'ready';
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      // Simulate auth expiry via notifyChange
+      projectState.status = 'auth_required';
+      projectState['notifyChange']();
+
+      expect(navigateSpy).toHaveBeenCalledWith(['/settings']);
+      navigateSpy.mockRestore();
     });
   });
 });

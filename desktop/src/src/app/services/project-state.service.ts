@@ -15,7 +15,8 @@ export type ProjectStatus =
   | 'switching'
   | 'error';
 
-interface AuthStatusResponse {
+/** Backend response from the `get_auth_status` Tauri command. */
+export interface AuthStatusResponse {
   api_key_configured: boolean;
   oauth_authenticated: boolean;
 }
@@ -195,9 +196,31 @@ export class ProjectStateService {
         this.notifyChange();
         this.notifyReady();
         this.notifySettled();
+      } else {
+        this.status = 'auth_required';
+        this.notifyChange();
       }
     } catch {
-      // Auth check failed — stay in auth_required
+      this.status = 'auth_required';
+      this.notifyChange();
+    }
+  }
+
+  /**
+   * Applies a pre-fetched auth status without an extra Tauri round-trip.
+   * @param auth - The auth status response from the backend.
+   */
+  applyAuthStatus(auth: AuthStatusResponse): void {
+    if (auth.api_key_configured || auth.oauth_authenticated) {
+      if (this.status === 'auth_required') {
+        this.status = 'ready';
+        this.notifyChange();
+        this.notifyReady();
+        this.notifySettled();
+      }
+    } else {
+      this.status = 'auth_required';
+      this.notifyChange();
     }
   }
 
@@ -219,7 +242,6 @@ export class ProjectStateService {
     }
     this.notifyChange();
   }
-
   /**
    * The ONLY way to switch projects from the frontend.
    * @param name - The project name to switch to.
