@@ -12,12 +12,8 @@ import {
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { TauriService } from '../../services/tauri.service';
+import { ProjectStateService, AuthStatusResponse } from '../../services/project-state.service';
 import { AuthTerminalComponent } from '../auth-terminal.component';
-
-interface AuthStatusResponse {
-  api_key_configured: boolean;
-  oauth_authenticated: boolean;
-}
 
 /** Displays authentication status and controls for API key / OAuth login. */
 @Component({
@@ -142,6 +138,7 @@ export class AuthSectionComponent implements OnChanges {
 
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
+  private projectState = inject(ProjectStateService);
 
   /**
    * Reloads auth status when the active project changes.
@@ -162,6 +159,7 @@ export class AuthSectionComponent implements OnChanges {
       });
       this.apiKeyConfigured = status.api_key_configured;
       this.oauthAuthenticated = status.oauth_authenticated;
+      this.projectState.applyAuthStatus(status);
     } catch {
       // Auth status check failed -- container may not be running
     }

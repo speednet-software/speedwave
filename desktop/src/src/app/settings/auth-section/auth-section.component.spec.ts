@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { AuthSectionComponent } from './auth-section.component';
 import { TauriService } from '../../services/tauri.service';
+import { ProjectStateService } from '../../services/project-state.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 
 function setupMockTauri(mockTauri: MockTauriService): void {
@@ -106,6 +107,43 @@ describe('AuthSectionComponent', () => {
     component.activeProject = 'test-project';
     await component.loadAuthStatus();
     expect(component.oauthAuthenticated).toBe(true);
+  });
+
+  it('calls applyAuthStatus when loadAuthStatus detects no auth', async () => {
+    const projectState = TestBed.inject(ProjectStateService);
+    const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
+
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status')
+        return { api_key_configured: false, oauth_authenticated: false };
+      return undefined;
+    };
+
+    component.activeProject = 'test';
+    await component.loadAuthStatus();
+
+    expect(applySpy).toHaveBeenCalledWith({
+      api_key_configured: false,
+      oauth_authenticated: false,
+    });
+    applySpy.mockRestore();
+  });
+
+  it('calls applyAuthStatus when loadAuthStatus finds valid auth', async () => {
+    const projectState = TestBed.inject(ProjectStateService);
+    const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
+
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status')
+        return { api_key_configured: true, oauth_authenticated: false };
+      return undefined;
+    };
+
+    component.activeProject = 'test';
+    await component.loadAuthStatus();
+
+    expect(applySpy).toHaveBeenCalledWith({ api_key_configured: true, oauth_authenticated: false });
+    applySpy.mockRestore();
   });
 
   it('does not load auth status when activeProject is null', async () => {
@@ -266,5 +304,62 @@ describe('AuthSectionComponent', () => {
     fixture.detectChanges();
     const valueEl = fixture.nativeElement.querySelector('[data-testid="auth-status-value"]');
     expect(valueEl?.textContent?.trim()).toContain('Not authenticated');
+  });
+
+  it('calls applyAuthStatus after saving API key', async () => {
+    const projectState = TestBed.inject(ProjectStateService);
+    const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
+
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'save_api_key') return undefined;
+      if (cmd === 'get_auth_status')
+        return { api_key_configured: true, oauth_authenticated: false };
+      return undefined;
+    };
+
+    component.activeProject = 'test';
+    component.apiKeyInput = 'sk-ant-test';
+    await component.saveApiKey();
+
+    expect(applySpy).toHaveBeenCalledWith({ api_key_configured: true, oauth_authenticated: false });
+    applySpy.mockRestore();
+  });
+
+  it('calls applyAuthStatus after deleting API key', async () => {
+    const projectState = TestBed.inject(ProjectStateService);
+    const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
+
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'delete_api_key') return undefined;
+      if (cmd === 'get_auth_status')
+        return { api_key_configured: false, oauth_authenticated: false };
+      return undefined;
+    };
+
+    component.activeProject = 'test';
+    await component.deleteApiKey();
+
+    expect(applySpy).toHaveBeenCalledWith({
+      api_key_configured: false,
+      oauth_authenticated: false,
+    });
+    applySpy.mockRestore();
+  });
+
+  it('calls applyAuthStatus after OAuth done', async () => {
+    const projectState = TestBed.inject(ProjectStateService);
+    const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
+
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status')
+        return { api_key_configured: false, oauth_authenticated: true };
+      return undefined;
+    };
+
+    component.activeProject = 'test';
+    await component.onOAuthDone(true);
+
+    expect(applySpy).toHaveBeenCalledWith({ api_key_configured: false, oauth_authenticated: true });
+    applySpy.mockRestore();
   });
 });
