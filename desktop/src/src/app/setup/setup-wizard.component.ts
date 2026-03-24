@@ -95,10 +95,15 @@ interface SetupStep {
                     {{ step.title }}
                   </div>
                   <div class="text-xs text-sw-text-ghost">{{ step.description }}</div>
-                  @if (step.detail && (step.status === 'active' || step.status === 'error')) {
+                  @if (
+                    step.detail &&
+                    (step.status === 'active' || step.status === 'error' || step.status === 'done')
+                  ) {
                     <div
                       class="text-xs mt-0.5 font-mono"
-                      [class.text-sw-text-faint]="step.status === 'active'"
+                      [class.text-sw-text-faint]="
+                        step.status === 'active' || step.status === 'done'
+                      "
                       [class.text-sw-error]="step.status === 'error'"
                     >
                       {{ step.detail }}
@@ -213,6 +218,10 @@ export class SetupWizardComponent {
   // Track which step index we're on for retry
   private currentStepIndex = 0;
 
+  /** Existing projects fetched at setup start; empty on fresh install. */
+  private existingProjects: Array<{ name: string; dir: string }> = [];
+  private activeProject: string | null = null;
+
   /** Detect host platform and customize step descriptions. */
   constructor() {
     this.detectPlatform();
@@ -290,6 +299,17 @@ export class SetupWizardComponent {
   // ---- Private helpers ----
 
   private async runAutoSteps(): Promise<void> {
+    try {
+      const result = await this.tauri.invoke<{
+        projects: Array<{ name: string; dir: string }>;
+        active_project: string | null;
+      }>('list_projects');
+      this.existingProjects = result.projects;
+      this.activeProject = result.active_project;
+    } catch {
+      this.existingProjects = [];
+      this.activeProject = null;
+    }
     await this.runFromStep(0);
   }
 
@@ -297,8 +317,16 @@ export class SetupWizardComponent {
     for (let i = start; i < this.steps.length; i++) {
       this.currentStepIndex = i;
 
-      // Step 3: Create Project — needs user input
+      // Step 3: Create Project — skip if user already has a project
       if (i === 3) {
+        if (this.existingProjects.length > 0) {
+          const active = this.existingProjects.find((p) => p.name === this.activeProject);
+          const selected = active ?? this.existingProjects[0];
+          this.projectName = selected.name;
+          this.projectDir = selected.dir;
+          this.setStep(3, 'done', `Using existing project: ${this.projectName}`);
+          continue;
+        }
         this.phase = 'project';
         this.setStep(3, 'active', 'Waiting for project details...');
         return;

@@ -2,7 +2,7 @@
 # Speedwave CLI diagnostic script
 # Run on a machine where `speedwave` command is not working.
 
-set -euo pipefail
+set -uo pipefail
 
 echo "=== Speedwave CLI Diagnostics ==="
 echo "Date: $(date)"

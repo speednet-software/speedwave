@@ -631,6 +631,30 @@ describe('ProjectStateService', () => {
       expect(service.status).toBe('ready');
     });
 
+    it('retryAuth stays in auth_required when auth check fails', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'run_system_check':
+            return undefined;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            throw new Error('connection refused');
+          default:
+            return undefined;
+        }
+      };
+      service.activeProject = 'test';
+      service.status = 'auth_required';
+
+      await service.retryAuth();
+      expect(service.status).toBe('auth_required');
+    });
+
     it('does not fire onProjectReady for auth_required', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         switch (cmd) {
