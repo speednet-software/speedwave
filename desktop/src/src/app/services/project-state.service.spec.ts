@@ -660,6 +660,27 @@ describe('ProjectStateService', () => {
       expect(service.status).toBe('auth_required');
     });
 
+    it('applyAuthStatus sets ready when auth is valid', () => {
+      service.status = 'auth_required';
+      service.applyAuthStatus({ api_key_configured: true, oauth_authenticated: false });
+      expect(service.status).toBe('ready');
+    });
+
+    it('applyAuthStatus sets auth_required when no auth', () => {
+      service.status = 'ready';
+      service.applyAuthStatus({ api_key_configured: false, oauth_authenticated: false });
+      expect(service.status).toBe('auth_required');
+    });
+
+    it('applyAuthStatus does not downgrade ready to ready', () => {
+      service.status = 'ready';
+      const cb = vi.fn();
+      service.onChange(cb);
+      service.applyAuthStatus({ api_key_configured: true, oauth_authenticated: false });
+      expect(service.status).toBe('ready');
+      expect(cb).not.toHaveBeenCalled();
+    });
+
     it('does not fire onProjectReady for auth_required', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         switch (cmd) {

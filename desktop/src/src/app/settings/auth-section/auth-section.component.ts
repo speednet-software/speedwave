@@ -12,13 +12,8 @@ import {
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { TauriService } from '../../services/tauri.service';
-import { ProjectStateService } from '../../services/project-state.service';
+import { ProjectStateService, AuthStatusResponse } from '../../services/project-state.service';
 import { AuthTerminalComponent } from '../auth-terminal.component';
-
-interface AuthStatusResponse {
-  api_key_configured: boolean;
-  oauth_authenticated: boolean;
-}
 
 /** Displays authentication status and controls for API key / OAuth login. */
 @Component({
@@ -164,9 +159,7 @@ export class AuthSectionComponent implements OnChanges {
       });
       this.apiKeyConfigured = status.api_key_configured;
       this.oauthAuthenticated = status.oauth_authenticated;
-      if (!status.api_key_configured && !status.oauth_authenticated) {
-        await this.projectState.retryAuth();
-      }
+      this.projectState.applyAuthStatus(status);
     } catch {
       // Auth status check failed -- container may not be running
     }
@@ -187,7 +180,6 @@ export class AuthSectionComponent implements OnChanges {
       this.apiKeySaved = true;
       this.apiKeyInput = '';
       await this.loadAuthStatus();
-      await this.projectState.retryAuth();
       setTimeout(() => {
         this.apiKeySaved = false;
         this.cdr.markForCheck();
@@ -206,7 +198,6 @@ export class AuthSectionComponent implements OnChanges {
     try {
       await this.tauri.invoke('delete_api_key', { project: this.activeProject });
       await this.loadAuthStatus();
-      await this.projectState.retryAuth();
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
@@ -220,7 +211,6 @@ export class AuthSectionComponent implements OnChanges {
   async onOAuthDone(_success: boolean): Promise<void> {
     this.authMethod = 'api_key';
     await this.loadAuthStatus();
-    await this.projectState.retryAuth();
     this.cdr.markForCheck();
   }
 }

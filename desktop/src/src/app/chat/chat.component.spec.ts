@@ -451,7 +451,8 @@ describe('ChatComponent', () => {
       );
     });
 
-    it('routes auth error in resumeConversation to auth_required', async () => {
+    it('routes auth error in resumeConversation to retryAuth', async () => {
+      const retrySpy = vi.spyOn(projectState, 'retryAuth').mockResolvedValue();
       const mockTranscript = {
         session_id: 's1',
         messages: [{ role: 'user', content: 'Hi', timestamp: '2026-03-06T10:00:00Z' }],
@@ -466,7 +467,8 @@ describe('ChatComponent', () => {
       };
 
       await component.resumeConversation('s1');
-      expect(projectState.status).toBe('auth_required');
+      expect(retrySpy).toHaveBeenCalled();
+      retrySpy.mockRestore();
     });
 
     it('clears transcript and history state after resuming', async () => {

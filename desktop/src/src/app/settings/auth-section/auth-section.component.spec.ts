@@ -109,9 +109,9 @@ describe('AuthSectionComponent', () => {
     expect(component.oauthAuthenticated).toBe(true);
   });
 
-  it('calls retryAuth when loadAuthStatus detects no auth', async () => {
+  it('calls applyAuthStatus when loadAuthStatus detects no auth', async () => {
     const projectState = TestBed.inject(ProjectStateService);
-    const retrySpy = vi.spyOn(projectState, 'retryAuth').mockResolvedValue();
+    const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
 
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_auth_status')
@@ -122,13 +122,16 @@ describe('AuthSectionComponent', () => {
     component.activeProject = 'test';
     await component.loadAuthStatus();
 
-    expect(retrySpy).toHaveBeenCalled();
-    retrySpy.mockRestore();
+    expect(applySpy).toHaveBeenCalledWith({
+      api_key_configured: false,
+      oauth_authenticated: false,
+    });
+    applySpy.mockRestore();
   });
 
-  it('does not call retryAuth when loadAuthStatus finds valid auth', async () => {
+  it('calls applyAuthStatus when loadAuthStatus finds valid auth', async () => {
     const projectState = TestBed.inject(ProjectStateService);
-    const retrySpy = vi.spyOn(projectState, 'retryAuth').mockResolvedValue();
+    const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
 
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_auth_status')
@@ -139,8 +142,8 @@ describe('AuthSectionComponent', () => {
     component.activeProject = 'test';
     await component.loadAuthStatus();
 
-    expect(retrySpy).not.toHaveBeenCalled();
-    retrySpy.mockRestore();
+    expect(applySpy).toHaveBeenCalledWith({ api_key_configured: true, oauth_authenticated: false });
+    applySpy.mockRestore();
   });
 
   it('does not load auth status when activeProject is null', async () => {
@@ -303,9 +306,9 @@ describe('AuthSectionComponent', () => {
     expect(valueEl?.textContent?.trim()).toContain('Not authenticated');
   });
 
-  it('calls retryAuth after saving API key', async () => {
+  it('calls applyAuthStatus after saving API key', async () => {
     const projectState = TestBed.inject(ProjectStateService);
-    const retrySpy = vi.spyOn(projectState, 'retryAuth').mockResolvedValue();
+    const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
 
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'save_api_key') return undefined;
@@ -318,13 +321,13 @@ describe('AuthSectionComponent', () => {
     component.apiKeyInput = 'sk-ant-test';
     await component.saveApiKey();
 
-    expect(retrySpy).toHaveBeenCalled();
-    retrySpy.mockRestore();
+    expect(applySpy).toHaveBeenCalledWith({ api_key_configured: true, oauth_authenticated: false });
+    applySpy.mockRestore();
   });
 
-  it('calls retryAuth after deleting API key', async () => {
+  it('calls applyAuthStatus after deleting API key', async () => {
     const projectState = TestBed.inject(ProjectStateService);
-    const retrySpy = vi.spyOn(projectState, 'retryAuth').mockResolvedValue();
+    const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
 
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'delete_api_key') return undefined;
@@ -336,13 +339,16 @@ describe('AuthSectionComponent', () => {
     component.activeProject = 'test';
     await component.deleteApiKey();
 
-    expect(retrySpy).toHaveBeenCalled();
-    retrySpy.mockRestore();
+    expect(applySpy).toHaveBeenCalledWith({
+      api_key_configured: false,
+      oauth_authenticated: false,
+    });
+    applySpy.mockRestore();
   });
 
-  it('calls retryAuth after OAuth done', async () => {
+  it('calls applyAuthStatus after OAuth done', async () => {
     const projectState = TestBed.inject(ProjectStateService);
-    const retrySpy = vi.spyOn(projectState, 'retryAuth').mockResolvedValue();
+    const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
 
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_auth_status')
@@ -353,7 +359,7 @@ describe('AuthSectionComponent', () => {
     component.activeProject = 'test';
     await component.onOAuthDone(true);
 
-    expect(retrySpy).toHaveBeenCalled();
-    retrySpy.mockRestore();
+    expect(applySpy).toHaveBeenCalledWith({ api_key_configured: false, oauth_authenticated: true });
+    applySpy.mockRestore();
   });
 });

@@ -202,7 +202,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     } catch (err) {
       const msg = String(err);
       if (msg.includes('not authenticated')) {
-        this.projectState.status = 'auth_required';
+        await this.projectState.retryAuth();
       } else {
         this.chat.loadMessages([
           ...messages,
