@@ -11,6 +11,7 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { Router } from '@angular/router';
 import { marked } from 'marked';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
@@ -45,8 +46,10 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
+  private router = inject(Router);
   private unsubChange: (() => void) | null = null;
   private unsubProjectReady: (() => void) | null = null;
+  private unsubAuthWatch: (() => void) | null = null;
 
   /** Subscribes to state changes from the service. */
   constructor() {
@@ -61,6 +64,12 @@ export class ChatComponent implements OnInit, OnDestroy {
     await this.chat.init();
     this.cdr.markForCheck();
     this.scrollToBottom();
+
+    this.unsubAuthWatch = this.projectState.onChange(() => {
+      if (this.projectState.status === 'auth_required') {
+        this.router.navigate(['/settings']);
+      }
+    });
 
     this.unsubProjectReady = this.projectState.onProjectReady(async () => {
       this.viewingTranscript = null;
@@ -293,6 +302,10 @@ export class ChatComponent implements OnInit, OnDestroy {
     if (this.unsubProjectReady) {
       this.unsubProjectReady();
       this.unsubProjectReady = null;
+    }
+    if (this.unsubAuthWatch) {
+      this.unsubAuthWatch();
+      this.unsubAuthWatch = null;
     }
   }
 }

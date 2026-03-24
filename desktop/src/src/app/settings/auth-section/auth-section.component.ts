@@ -12,6 +12,7 @@ import {
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { TauriService } from '../../services/tauri.service';
+import { ProjectStateService } from '../../services/project-state.service';
 import { AuthTerminalComponent } from '../auth-terminal.component';
 
 interface AuthStatusResponse {
@@ -142,6 +143,7 @@ export class AuthSectionComponent implements OnChanges {
 
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
+  private projectState = inject(ProjectStateService);
 
   /**
    * Reloads auth status when the active project changes.
@@ -162,6 +164,9 @@ export class AuthSectionComponent implements OnChanges {
       });
       this.apiKeyConfigured = status.api_key_configured;
       this.oauthAuthenticated = status.oauth_authenticated;
+      if (!status.api_key_configured && !status.oauth_authenticated) {
+        await this.projectState.retryAuth();
+      }
     } catch {
       // Auth status check failed -- container may not be running
     }
@@ -182,6 +187,7 @@ export class AuthSectionComponent implements OnChanges {
       this.apiKeySaved = true;
       this.apiKeyInput = '';
       await this.loadAuthStatus();
+      await this.projectState.retryAuth();
       setTimeout(() => {
         this.apiKeySaved = false;
         this.cdr.markForCheck();
@@ -200,6 +206,7 @@ export class AuthSectionComponent implements OnChanges {
     try {
       await this.tauri.invoke('delete_api_key', { project: this.activeProject });
       await this.loadAuthStatus();
+      await this.projectState.retryAuth();
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
@@ -213,6 +220,7 @@ export class AuthSectionComponent implements OnChanges {
   async onOAuthDone(_success: boolean): Promise<void> {
     this.authMethod = 'api_key';
     await this.loadAuthStatus();
+    await this.projectState.retryAuth();
     this.cdr.markForCheck();
   }
 }

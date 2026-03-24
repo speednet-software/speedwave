@@ -6,7 +6,7 @@ import {
   OnDestroy,
   OnInit,
 } from '@angular/core';
-import { Router, RouterOutlet, RouterLink, RouterLinkActive } from '@angular/router';
+import { RouterOutlet, RouterLink, RouterLinkActive } from '@angular/router';
 import { ProjectSwitcherComponent } from '../project-switcher/project-switcher.component';
 import { UpdateNotificationComponent } from '../update-notification/update-notification.component';
 import { ProjectStateService } from '../services/project-state.service';
@@ -25,7 +25,7 @@ import { ProjectStateService } from '../services/project-state.service';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="flex flex-col h-screen bg-sw-bg-darkest text-sw-text">
-      @if (projectState.status !== 'ready') {
+      @if (projectState.status !== 'ready' && projectState.status !== 'auth_required') {
         @if (projectState.status === 'check_failed') {
           <div
             class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-sw-bg-darkest"
@@ -44,24 +44,6 @@ import { ProjectStateService } from '../services/project-state.service';
             >
               Retry
             </button>
-          </div>
-        } @else if (projectState.status === 'auth_required' && isChatRoute) {
-          <div
-            class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-sw-bg-darkest"
-            data-testid="blocking-auth-required"
-          >
-            <span class="text-sw-accent text-lg font-mono font-bold">Authentication Required</span>
-            <p class="mt-4 max-w-lg text-center font-mono text-sm text-sw-text-muted">
-              Claude Code needs to be authenticated before you can start a conversation. Go to
-              Settings to configure your API key or log in via OAuth.
-            </p>
-            <a
-              routerLink="/settings"
-              class="mt-6 px-6 py-2.5 rounded text-sm font-semibold font-mono border-none cursor-pointer transition-colors bg-sw-accent text-white hover:bg-sw-accent-hover no-underline"
-              data-testid="auth-settings-btn"
-            >
-              Go to Settings
-            </a>
           </div>
         } @else if (projectState.status === 'error') {
           <div
@@ -104,13 +86,15 @@ import { ProjectStateService } from '../services/project-state.service';
           >Speedwave</span
         >
         <nav class="flex gap-4" data-testid="app-nav">
-          <a
-            routerLink="/chat"
-            routerLinkActive="!text-sw-accent font-bold"
-            class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
-            data-testid="nav-chat"
-            >Chat</a
-          >
+          @if (projectState.status === 'ready' || projectState.status === 'error') {
+            <a
+              routerLink="/chat"
+              routerLinkActive="!text-sw-accent font-bold"
+              class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
+              data-testid="nav-chat"
+              >Chat</a
+            >
+          }
           <a
             routerLink="/integrations"
             routerLinkActive="!text-sw-accent font-bold"
@@ -144,13 +128,7 @@ import { ProjectStateService } from '../services/project-state.service';
 export class ShellComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
   private cdr = inject(ChangeDetectorRef);
-  private router = inject(Router);
   private unsubscribe: (() => void) | null = null;
-
-  /** Whether the current route is /chat (auth overlay only blocks chat). */
-  get isChatRoute(): boolean {
-    return this.router.url === '/chat' || this.router.url.startsWith('/chat?');
-  }
 
   /** Human-readable status message for the blocking overlay. */
   get statusMessage(): string {

@@ -644,6 +644,22 @@ describe('ProjectStateService', () => {
       expect(service.status).toBe('auth_required');
     });
 
+    it('retryAuth sets auth_required when no auth configured', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'get_auth_status':
+            return { api_key_configured: false, oauth_authenticated: false };
+          default:
+            return undefined;
+        }
+      };
+      service.activeProject = 'test';
+      service.status = 'ready';
+
+      await service.retryAuth();
+      expect(service.status).toBe('auth_required');
+    });
+
     it('does not fire onProjectReady for auth_required', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         switch (cmd) {

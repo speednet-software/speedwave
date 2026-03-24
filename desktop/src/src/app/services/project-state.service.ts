@@ -195,6 +195,9 @@ export class ProjectStateService {
         this.notifyChange();
         this.notifyReady();
         this.notifySettled();
+      } else {
+        this.status = 'auth_required';
+        this.notifyChange();
       }
     } catch {
       // Auth check failed — stay in auth_required
@@ -219,7 +222,6 @@ export class ProjectStateService {
     }
     this.notifyChange();
   }
-
   /**
    * The ONLY way to switch projects from the frontend.
    * @param name - The project name to switch to.

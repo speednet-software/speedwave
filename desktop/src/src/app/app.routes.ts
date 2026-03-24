@@ -1,6 +1,7 @@
 import { Routes } from '@angular/router';
 import { setupCompleteGuard } from './guards/setup-complete.guard';
 import { setupNotCompleteGuard } from './guards/setup-not-complete.guard';
+import { authRequiredGuard } from './guards/auth-required.guard';
 
 export const routes: Routes = [
   {
@@ -17,6 +18,7 @@ export const routes: Routes = [
       { path: '', redirectTo: 'chat', pathMatch: 'full' },
       {
         path: 'chat',
+        canActivate: [authRequiredGuard],
         loadComponent: () => import('./chat/chat.component').then((m) => m.ChatComponent),
       },
       {
