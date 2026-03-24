@@ -100,6 +100,7 @@ describe('SetupWizardComponent', () => {
     let callCount = 0;
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_platform') return 'macos';
+      if (cmd === 'list_projects') return { projects: [], active_project: null };
       if (cmd === 'check_runtime') {
         callCount++;
         if (callCount === 1) throw new Error('runtime check failed');
@@ -121,6 +122,7 @@ describe('SetupWizardComponent', () => {
   it('should show error when createProject fails', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_platform') return 'macos';
+      if (cmd === 'list_projects') return { projects: [], active_project: null };
       if (cmd === 'create_project') throw new Error('project creation failed');
       if (cmd === 'check_runtime') return 'NotReady';
       return undefined;
@@ -144,6 +146,7 @@ describe('SetupWizardComponent', () => {
   it('should set platform-specific step descriptions for windows', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_platform') return 'windows';
+      if (cmd === 'list_projects') return { projects: [], active_project: null };
       if (cmd === 'check_runtime') return 'NotReady';
       return undefined;
     };
@@ -157,6 +160,7 @@ describe('SetupWizardComponent', () => {
   it('should set platform-specific step descriptions for linux', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_platform') return 'linux';
+      if (cmd === 'list_projects') return { projects: [], active_project: null };
       if (cmd === 'check_runtime') return 'NotReady';
       return undefined;
     };
