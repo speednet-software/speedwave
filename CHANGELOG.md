@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/speednet-software/speedwave/compare/v0.4.0...v0.4.1) (2026-03-24)
+
+
+### Bug Fixes
+
+* **desktop:** setup screen regression and wizard dead-end after v0.4.0 update ([#278](https://github.com/speednet-software/speedwave/issues/278)) ([ead2aad](https://github.com/speednet-software/speedwave/commit/ead2aad7627fd2f8adfb5469e04208ee24176162))
+
 ## [0.4.0](https://github.com/speednet-software/speedwave/compare/v0.3.3...v0.4.0) (2026-03-23)
 
 
