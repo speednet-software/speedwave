@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/speednet-software/speedwave/compare/v0.4.1...v0.4.2) (2026-03-24)
+
+
+### Bug Fixes
+
+* **desktop:** auth overlay blocks only chat, setup regressions, OS prereqs ([#284](https://github.com/speednet-software/speedwave/issues/284)) ([68fef67](https://github.com/speednet-software/speedwave/commit/68fef6709232446e3ee61c777d57036713a63f4b))
+
 ## [0.4.1](https://github.com/speednet-software/speedwave/compare/v0.4.0...v0.4.1) (2026-03-24)
 
 
