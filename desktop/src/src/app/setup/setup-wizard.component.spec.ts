@@ -26,6 +26,8 @@ describe('SetupWizardComponent', () => {
         case 'link_cli':
         case 'create_project':
           return undefined;
+        case 'list_projects':
+          return { projects: [], active_project: null };
         default:
           return undefined;
       }
@@ -170,5 +172,64 @@ describe('SetupWizardComponent', () => {
     component.backToWelcome();
     expect(component.phase).toBe('welcome');
     expect(component.error).toBeNull();
+  });
+
+  it('should skip project creation step when project already exists', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      switch (cmd) {
+        case 'get_platform':
+          return 'macos';
+        case 'check_runtime':
+          return 'Ready';
+        case 'list_projects':
+          return {
+            projects: [{ name: 'existing-project', dir: '/tmp/existing' }],
+            active_project: 'existing-project',
+          };
+        case 'build_images':
+        case 'start_containers':
+        case 'link_cli':
+          return undefined;
+        default:
+          return undefined;
+      }
+    };
+
+    await component.startSetup();
+    await fixture.whenStable();
+
+    expect(component.steps[3].status).toBe('done');
+    expect(component.projectName).toBe('existing-project');
+  });
+
+  it('should prefer active_project over first project in list', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      switch (cmd) {
+        case 'get_platform':
+          return 'macos';
+        case 'check_runtime':
+          return 'Ready';
+        case 'list_projects':
+          return {
+            projects: [
+              { name: 'first-project', dir: '/tmp/first' },
+              { name: 'active-one', dir: '/tmp/active' },
+            ],
+            active_project: 'active-one',
+          };
+        case 'build_images':
+        case 'start_containers':
+        case 'link_cli':
+          return undefined;
+        default:
+          return undefined;
+      }
+    };
+
+    await component.startSetup();
+    await fixture.whenStable();
+
+    expect(component.steps[3].status).toBe('done');
+    expect(component.projectName).toBe('active-one');
   });
 });
