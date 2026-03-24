@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { RouterModule } from '@angular/router';
+import { Router, RouterModule } from '@angular/router';
 import { ShellComponent } from './shell.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -27,7 +27,13 @@ describe('ShellComponent', () => {
     };
 
     await TestBed.configureTestingModule({
-      imports: [ShellComponent, RouterModule.forRoot([])],
+      imports: [
+        ShellComponent,
+        RouterModule.forRoot([
+          { path: 'chat', component: ShellComponent },
+          { path: 'settings', component: ShellComponent },
+        ]),
+      ],
       providers: [{ provide: TauriService, useValue: mockTauri }],
     }).compileComponents();
 
@@ -219,8 +225,9 @@ describe('ShellComponent', () => {
     expect(overlay.textContent).toContain('Running system checks...');
   });
 
-  it('shows auth-required overlay when status is auth_required', async () => {
-    await component.ngOnInit();
+  it('shows auth-required overlay only on /chat', async () => {
+    const router = TestBed.inject(Router);
+    await router.navigateByUrl('/chat');
     projectState.status = 'auth_required';
     component['cdr'].markForCheck();
     fixture.detectChanges();
@@ -230,54 +237,27 @@ describe('ShellComponent', () => {
     expect(overlay.textContent).toContain('Authentication Required');
   });
 
-  it('auth-required overlay has authenticate and check-status buttons', async () => {
-    await component.ngOnInit();
+  it('auth-required overlay has only Go to Settings link', async () => {
+    const router = TestBed.inject(Router);
+    await router.navigateByUrl('/chat');
+    projectState.status = 'auth_required';
+    component['cdr'].markForCheck();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-testid="auth-settings-btn"]')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="auth-authenticate-btn"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="auth-check-btn"]')).toBeNull();
+  });
+
+  it('does not show auth-required overlay on /settings', async () => {
+    const router = TestBed.inject(Router);
+    await router.navigateByUrl('/settings');
     projectState.status = 'auth_required';
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
     expect(
-      fixture.nativeElement.querySelector('[data-testid="auth-authenticate-btn"]')
-    ).not.toBeNull();
-    expect(fixture.nativeElement.querySelector('[data-testid="auth-check-btn"]')).not.toBeNull();
-  });
-
-  it('openAuthTerminal invokes open_auth_terminal command', async () => {
-    projectState.activeProject = 'test';
-    const spy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
-
-    await component.openAuthTerminal();
-
-    expect(spy).toHaveBeenCalledWith('open_auth_terminal', { project: 'test' });
-    spy.mockRestore();
-  });
-
-  it('openAuthTerminal sets error when invoke throws', async () => {
-    projectState.activeProject = 'test';
-    const spy = vi.spyOn(mockTauri, 'invoke').mockRejectedValue(new Error('spawn failed'));
-
-    await component.openAuthTerminal();
-
-    expect(projectState.error).toBe('Failed to open terminal: Error: spawn failed');
-    spy.mockRestore();
-  });
-
-  it('openAuthTerminal does nothing when no active project', async () => {
-    projectState.activeProject = '';
-    const spy = vi.spyOn(mockTauri, 'invoke');
-
-    await component.openAuthTerminal();
-
-    expect(spy).not.toHaveBeenCalledWith('open_auth_terminal', expect.anything());
-    spy.mockRestore();
-  });
-
-  it('checkAuth calls retryAuth on projectState', async () => {
-    const spy = vi.spyOn(projectState, 'retryAuth').mockResolvedValue();
-
-    await component.checkAuth();
-
-    expect(spy).toHaveBeenCalled();
-    spy.mockRestore();
+      fixture.nativeElement.querySelector('[data-testid="blocking-auth-required"]')
+    ).toBeNull();
   });
 });
