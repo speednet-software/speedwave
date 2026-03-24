@@ -172,8 +172,6 @@ export class ShellComponent implements OnInit, OnDestroy {
         return 'Switching project...';
       case 'rebuilding':
         return 'Rebuilding container images...';
-      case 'auth_required':
-        return 'Claude authentication required';
       default:
         return '';
     }
@@ -197,7 +195,7 @@ export class ShellComponent implements OnInit, OnDestroy {
     this.projectState.ensureContainersRunning();
   }
 
-  /** Opens a native terminal for Claude OAuth login. */
+  /** Opens a terminal inside the container for Claude OAuth login. */
   async openAuthTerminal(): Promise<void> {
     const project = this.projectState.activeProject;
     if (project) {
@@ -210,7 +208,7 @@ export class ShellComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Re-checks auth status after user completes authentication. */
+  /** Re-checks Claude auth status after user completes authentication. */
   async checkAuth(): Promise<void> {
     await this.projectState.retryAuth();
     this.cdr.markForCheck();

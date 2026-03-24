@@ -241,4 +241,23 @@ describe('ShellComponent', () => {
     ).not.toBeNull();
     expect(fixture.nativeElement.querySelector('[data-testid="auth-check-btn"]')).not.toBeNull();
   });
+
+  it('openAuthTerminal invokes open_auth_terminal command', async () => {
+    projectState.activeProject = 'test';
+    const spy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
+
+    await component.openAuthTerminal();
+
+    expect(spy).toHaveBeenCalledWith('open_auth_terminal', { project: 'test' });
+    spy.mockRestore();
+  });
+
+  it('checkAuth calls retryAuth on projectState', async () => {
+    const spy = vi.spyOn(projectState, 'retryAuth').mockResolvedValue();
+
+    await component.checkAuth();
+
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
 });
