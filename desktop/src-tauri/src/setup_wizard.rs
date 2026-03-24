@@ -1352,14 +1352,6 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
         std::fs::write(&instance_config, rewrite_memory_line(&instance_content))?;
     }
 
-    // Reset setup state BEFORE restarting VM — if init_vm_macos() fails, the
-    // config files are already correct (idempotent), but reconcile_bundle_update
-    // must still know to rebuild images and restart containers on next launch.
-    let mut state = SetupState::load();
-    state.images_built = false;
-    state.containers_started = false;
-    state.save()?;
-
     // Restart VM if it existed
     if vm_exists {
         log::info!("Starting VM after memory migration");
@@ -4060,6 +4052,30 @@ networks:
         assert!(
             migration_pos < reconcile_pos,
             "ensure_lima_vm_config() must be called BEFORE reconcile_bundle_update() in main.rs"
+        );
+    }
+
+    /// ensure_lima_vm_config must NOT reset SetupState flags.
+    ///
+    /// VM memory migration does not invalidate container images or running
+    /// containers — the VM restart preserves all containerd state.
+    /// Reconcile handles image rebuilds independently via BundleState.
+    /// Resetting SetupState here causes existing users to see the Setup
+    /// screen after an app update (regression from 0.4.0).
+    #[test]
+    fn ensure_lima_vm_config_does_not_reset_setup_state() {
+        let source = include_str!("setup_wizard.rs");
+        let body = extract_fn_body(source, "pub fn ensure_lima_vm_config()");
+
+        assert!(
+            !body.contains("images_built = false"),
+            "ensure_lima_vm_config must NOT reset images_built — \
+             VM memory migration does not invalidate images"
+        );
+        assert!(
+            !body.contains("containers_started = false"),
+            "ensure_lima_vm_config must NOT reset containers_started — \
+             VM memory migration does not invalidate containers"
         );
     }
 }
