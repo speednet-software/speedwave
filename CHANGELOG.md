@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/speednet-software/speedwave/compare/v0.4.2...v0.5.0) (2026-03-24)
+
+
+### Features
+
+* **desktop:** auth UX improvements and v0.4.2 release ([#292](https://github.com/speednet-software/speedwave/issues/292)) ([edb12d1](https://github.com/speednet-software/speedwave/commit/edb12d1b785b60cb86105adde64935f0de6a881e))
+
 ## [0.4.2](https://github.com/speednet-software/speedwave/compare/v0.4.1...v0.4.2) (2026-03-24)
 
 

@@ -1,6 +1,6 @@
 {
   "name": "@speedwave/mcp-shared",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Shared MCP infrastructure for Speedwave workers",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
