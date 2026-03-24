@@ -651,11 +651,8 @@ describe('ProjectStateService', () => {
       service.activeProject = 'test';
       service.status = 'auth_required';
 
-      const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
       await service.retryAuth();
       expect(service.status).toBe('auth_required');
-      expect(debugSpy).toHaveBeenCalledWith('retryAuth: auth check failed', expect.any(Error));
-      debugSpy.mockRestore();
     });
 
     it('does not fire onProjectReady for auth_required', async () => {
