@@ -236,4 +236,60 @@ describe('SetupWizardComponent', () => {
     expect(component.steps[3].status).toBe('done');
     expect(component.projectName).toBe('active-one');
   });
+
+  it('should fall back to first project when active_project is stale', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      switch (cmd) {
+        case 'get_platform':
+          return 'macos';
+        case 'check_runtime':
+          return 'Ready';
+        case 'list_projects':
+          return {
+            projects: [{ name: 'only-project', dir: '/tmp/x' }],
+            active_project: 'deleted-project',
+          };
+        case 'build_images':
+        case 'start_containers':
+        case 'link_cli':
+          return undefined;
+        default:
+          return undefined;
+      }
+    };
+
+    await component.startSetup();
+    await fixture.whenStable();
+
+    expect(component.steps[3].status).toBe('done');
+    expect(component.projectName).toBe('only-project');
+  });
+
+  it('should set detail text on skipped project step', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      switch (cmd) {
+        case 'get_platform':
+          return 'macos';
+        case 'check_runtime':
+          return 'Ready';
+        case 'list_projects':
+          return {
+            projects: [{ name: 'my-project', dir: '/tmp/p' }],
+            active_project: 'my-project',
+          };
+        case 'build_images':
+        case 'start_containers':
+        case 'link_cli':
+          return undefined;
+        default:
+          return undefined;
+      }
+    };
+
+    await component.startSetup();
+    await fixture.whenStable();
+
+    expect(component.steps[3].status).toBe('done');
+    expect(component.steps[3].detail).toBe('Using existing project: my-project');
+  });
 });

@@ -95,10 +95,15 @@ interface SetupStep {
                     {{ step.title }}
                   </div>
                   <div class="text-xs text-sw-text-ghost">{{ step.description }}</div>
-                  @if (step.detail && (step.status === 'active' || step.status === 'error')) {
+                  @if (
+                    step.detail &&
+                    (step.status === 'active' || step.status === 'error' || step.status === 'done')
+                  ) {
                     <div
                       class="text-xs mt-0.5 font-mono"
-                      [class.text-sw-text-faint]="step.status === 'active'"
+                      [class.text-sw-text-faint]="
+                        step.status === 'active' || step.status === 'done'
+                      "
                       [class.text-sw-error]="step.status === 'error'"
                     >
                       {{ step.detail }}
