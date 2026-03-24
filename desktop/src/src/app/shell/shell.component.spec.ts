@@ -252,6 +252,26 @@ describe('ShellComponent', () => {
     spy.mockRestore();
   });
 
+  it('openAuthTerminal sets error when invoke throws', async () => {
+    projectState.activeProject = 'test';
+    const spy = vi.spyOn(mockTauri, 'invoke').mockRejectedValue(new Error('spawn failed'));
+
+    await component.openAuthTerminal();
+
+    expect(projectState.error).toBe('Failed to open terminal: Error: spawn failed');
+    spy.mockRestore();
+  });
+
+  it('openAuthTerminal does nothing when no active project', async () => {
+    projectState.activeProject = '';
+    const spy = vi.spyOn(mockTauri, 'invoke');
+
+    await component.openAuthTerminal();
+
+    expect(spy).not.toHaveBeenCalledWith('open_auth_terminal', expect.anything());
+    spy.mockRestore();
+  });
+
   it('checkAuth calls retryAuth on projectState', async () => {
     const spy = vi.spyOn(projectState, 'retryAuth').mockResolvedValue();
 
