@@ -183,6 +183,24 @@ export class ProjectStateService {
     }
   }
 
+  /** Re-checks Claude auth status after user completes authentication. */
+  async retryAuth(): Promise<void> {
+    if (!this.activeProject) return;
+    try {
+      const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
+        project: this.activeProject,
+      });
+      if (auth.api_key_configured || auth.oauth_authenticated) {
+        this.status = 'ready';
+        this.notifyChange();
+        this.notifyReady();
+        this.notifySettled();
+      }
+    } catch {
+      // Auth check failed — stay in auth_required
+    }
+  }
+
   /** Dismisses the error banner, checking containers first. */
   async dismissError(): Promise<void> {
     try {
@@ -200,24 +218,6 @@ export class ProjectStateService {
       this.error = '';
     }
     this.notifyChange();
-  }
-
-  /** Re-checks Claude auth status after user completes authentication. */
-  async retryAuth(): Promise<void> {
-    if (!this.activeProject) return;
-    try {
-      const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
-        project: this.activeProject,
-      });
-      if (auth.api_key_configured || auth.oauth_authenticated) {
-        this.status = 'ready';
-        this.notifyChange();
-        this.notifyReady();
-        this.notifySettled();
-      }
-    } catch {
-      // Auth check failed — stay in auth_required
-    }
   }
 
   /**
