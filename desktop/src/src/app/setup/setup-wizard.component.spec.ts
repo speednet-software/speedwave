@@ -26,6 +26,8 @@ describe('SetupWizardComponent', () => {
         case 'link_cli':
         case 'create_project':
           return undefined;
+        case 'list_projects':
+          return { projects: [], active_project: null };
         default:
           return undefined;
       }
@@ -98,6 +100,7 @@ describe('SetupWizardComponent', () => {
     let callCount = 0;
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_platform') return 'macos';
+      if (cmd === 'list_projects') return { projects: [], active_project: null };
       if (cmd === 'check_runtime') {
         callCount++;
         if (callCount === 1) throw new Error('runtime check failed');
@@ -119,6 +122,7 @@ describe('SetupWizardComponent', () => {
   it('should show error when createProject fails', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_platform') return 'macos';
+      if (cmd === 'list_projects') return { projects: [], active_project: null };
       if (cmd === 'create_project') throw new Error('project creation failed');
       if (cmd === 'check_runtime') return 'NotReady';
       return undefined;
@@ -142,6 +146,7 @@ describe('SetupWizardComponent', () => {
   it('should set platform-specific step descriptions for windows', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_platform') return 'windows';
+      if (cmd === 'list_projects') return { projects: [], active_project: null };
       if (cmd === 'check_runtime') return 'NotReady';
       return undefined;
     };
@@ -155,6 +160,7 @@ describe('SetupWizardComponent', () => {
   it('should set platform-specific step descriptions for linux', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_platform') return 'linux';
+      if (cmd === 'list_projects') return { projects: [], active_project: null };
       if (cmd === 'check_runtime') return 'NotReady';
       return undefined;
     };
@@ -170,5 +176,120 @@ describe('SetupWizardComponent', () => {
     component.backToWelcome();
     expect(component.phase).toBe('welcome');
     expect(component.error).toBeNull();
+  });
+
+  it('should skip project creation step when project already exists', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      switch (cmd) {
+        case 'get_platform':
+          return 'macos';
+        case 'check_runtime':
+          return 'Ready';
+        case 'list_projects':
+          return {
+            projects: [{ name: 'existing-project', dir: '/tmp/existing' }],
+            active_project: 'existing-project',
+          };
+        case 'build_images':
+        case 'start_containers':
+        case 'link_cli':
+          return undefined;
+        default:
+          return undefined;
+      }
+    };
+
+    await component.startSetup();
+    await fixture.whenStable();
+
+    expect(component.steps[3].status).toBe('done');
+    expect(component.projectName).toBe('existing-project');
+  });
+
+  it('should prefer active_project over first project in list', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      switch (cmd) {
+        case 'get_platform':
+          return 'macos';
+        case 'check_runtime':
+          return 'Ready';
+        case 'list_projects':
+          return {
+            projects: [
+              { name: 'first-project', dir: '/tmp/first' },
+              { name: 'active-one', dir: '/tmp/active' },
+            ],
+            active_project: 'active-one',
+          };
+        case 'build_images':
+        case 'start_containers':
+        case 'link_cli':
+          return undefined;
+        default:
+          return undefined;
+      }
+    };
+
+    await component.startSetup();
+    await fixture.whenStable();
+
+    expect(component.steps[3].status).toBe('done');
+    expect(component.projectName).toBe('active-one');
+  });
+
+  it('should fall back to first project when active_project is stale', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      switch (cmd) {
+        case 'get_platform':
+          return 'macos';
+        case 'check_runtime':
+          return 'Ready';
+        case 'list_projects':
+          return {
+            projects: [{ name: 'only-project', dir: '/tmp/x' }],
+            active_project: 'deleted-project',
+          };
+        case 'build_images':
+        case 'start_containers':
+        case 'link_cli':
+          return undefined;
+        default:
+          return undefined;
+      }
+    };
+
+    await component.startSetup();
+    await fixture.whenStable();
+
+    expect(component.steps[3].status).toBe('done');
+    expect(component.projectName).toBe('only-project');
+  });
+
+  it('should set detail text on skipped project step', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      switch (cmd) {
+        case 'get_platform':
+          return 'macos';
+        case 'check_runtime':
+          return 'Ready';
+        case 'list_projects':
+          return {
+            projects: [{ name: 'my-project', dir: '/tmp/p' }],
+            active_project: 'my-project',
+          };
+        case 'build_images':
+        case 'start_containers':
+        case 'link_cli':
+          return undefined;
+        default:
+          return undefined;
+      }
+    };
+
+    await component.startSetup();
+    await fixture.whenStable();
+
+    expect(component.steps[3].status).toBe('done');
+    expect(component.steps[3].detail).toBe('Using existing project: my-project');
   });
 });
