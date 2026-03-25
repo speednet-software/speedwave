@@ -1713,7 +1713,10 @@ fn ensure_local_bin_on_path_for_shell(
 ///
 /// - Unix: `~/.local/bin/speedwave`
 /// - Windows: `~/.speedwave/bin/speedwave.exe`
-pub fn cli_install_path() -> Option<std::path::PathBuf> {
+///
+/// Used only in tests to verify the path computation matches `link_cli_from`.
+#[cfg(test)]
+fn cli_install_path() -> Option<std::path::PathBuf> {
     #[cfg(unix)]
     let path = dirs::home_dir()?
         .join(".local")
