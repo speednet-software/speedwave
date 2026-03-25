@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/speednet-software/speedwave/compare/v0.5.0...v0.5.1) (2026-03-25)
+
+
+### Bug Fixes
+
+* **ci:** force-push backmerge and ghost commit cleanup ([#293](https://github.com/speednet-software/speedwave/issues/293)) ([#310](https://github.com/speednet-software/speedwave/issues/310)) ([cdb9faa](https://github.com/speednet-software/speedwave/commit/cdb9faa08fd84a0a3fcc1db77974f91ddb99de56))
+
 ## [0.5.0](https://github.com/speednet-software/speedwave/compare/v0.4.2...v0.5.0) (2026-03-24)
 
 
