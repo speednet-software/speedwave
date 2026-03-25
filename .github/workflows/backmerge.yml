@@ -50,19 +50,25 @@ jobs:
             exit 0
           fi
 
-          # Check if dev has commits not on main (someone merged between release and backmerge)
-          NEW_ON_DEV=$(git log --oneline origin/dev --not origin/main | wc -l | tr -d ' ')
+          # Check if dev has genuinely new commits added AFTER the release.
+          # We cannot use `git log dev --not main` because ghost commits
+          # (squash-merged to main with different SHAs) also appear in that
+          # list. Instead, check for commits newer than the release tag —
+          # ghost commits predate the release, genuinely new work postdates it.
+          RELEASE_TS=$(git log -1 --format="%ct" "$TAG" 2>/dev/null || git log -1 --format="%ct" "origin/main")
+          NEW_SINCE_RELEASE=$(git log --oneline origin/dev --not origin/main \
+            --after="@$RELEASE_TS" | wc -l | tr -d ' ')
 
-          if [ "$NEW_ON_DEV" -eq 0 ]; then
-            # Happy path: dev has no new commits, just reset to main
-            echo "dev has no commits ahead of main — resetting dev to main"
+          if [ "$NEW_SINCE_RELEASE" -eq 0 ]; then
+            # No genuinely new commits — safe to force-push dev=main
+            echo "dev has no commits newer than $TAG — resetting dev to main"
             git push origin origin/main:refs/heads/dev --force
             echo "dev is now identical to main ($TAG)"
             exit 0
           fi
 
-          # Fallback: dev has new commits — regular merge via PR
-          echo "::warning::dev has $NEW_ON_DEV commit(s) not on main — falling back to regular merge PR"
+          # Genuinely new commits exist — someone merged to dev after the release
+          echo "::warning::dev has $NEW_SINCE_RELEASE commit(s) added after $TAG — falling back to regular merge PR"
 
           BRANCH="chore/backmerge-main-into-dev"
 
@@ -84,6 +90,7 @@ jobs:
             AUTO_RESOLVE_FILES=(
               .release-please-manifest.json
               release-please-config.json
+              .github/workflows/release-please.yml
               package.json
               package-lock.json
               desktop/src/package.json
