@@ -117,8 +117,14 @@ chat access. Enforced at two layers:
 
 - **Frontend (`ProjectStateService`):** After containers are running, calls
   `get_auth_status`. If neither OAuth nor API key is configured, sets status to
-  `auth_required` — an overlay with an "Authenticate" button opens a native
-  terminal (`open_auth_terminal`) for the user to complete OAuth login.
+  `auth_required` — an overlay displays a CLI command (`get_auth_command`) for
+  the user to copy into their own terminal to complete OAuth login. The command
+  is displayed as text only (never executed by the app), eliminating shell
+  injection risk. When the Desktop app's data directory differs from the
+  default (`~/.speedwave`), the command includes an
+  `export SPEEDWAVE_DATA_DIR=...` prefix. The value comes from the Desktop
+  app's own data directory, which is determined at process start and never
+  re-read from the terminal session's environment.
 
 ## See Also
 
