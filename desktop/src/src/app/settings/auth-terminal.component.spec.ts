@@ -20,6 +20,7 @@ describe('AuthTerminalComponent', () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_auth_status') return { oauth_authenticated: false };
       if (cmd === 'get_auth_command') return SAMPLE_COMMAND;
+      if (cmd === 'get_platform') return 'macos';
       return undefined;
     };
 
@@ -204,6 +205,28 @@ describe('AuthTerminalComponent', () => {
     ) as HTMLButtonElement;
     expect(btn).toBeTruthy();
     expect(btn.disabled).toBe(false);
+  });
+
+  it('does not show Windows note on non-Windows platforms', async () => {
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    fixture.detectChanges();
+    const note = (fixture.nativeElement as HTMLElement).textContent;
+    expect(note).not.toContain('On Windows');
+  });
+
+  it('shows Windows note on Windows platform', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') return { oauth_authenticated: false };
+      if (cmd === 'get_auth_command') return SAMPLE_COMMAND;
+      if (cmd === 'get_platform') return 'windows';
+      return undefined;
+    };
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    fixture.detectChanges();
+    const note = (fixture.nativeElement as HTMLElement).textContent;
+    expect(note).toContain('On Windows');
   });
 
   it('starts polling on init', () => {

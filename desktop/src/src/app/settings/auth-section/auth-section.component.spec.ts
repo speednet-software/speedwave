@@ -12,6 +12,8 @@ function setupMockTauri(mockTauri: MockTauriService): void {
         return { api_key_configured: false, oauth_authenticated: false };
       case 'get_auth_command':
         return "cd '/tmp/project' && speedwave";
+      case 'get_platform':
+        return 'macos';
       default:
         return undefined;
     }

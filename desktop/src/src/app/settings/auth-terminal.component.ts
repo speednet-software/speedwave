@@ -38,16 +38,17 @@ import { TauriService } from '../services/tauri.service';
           <button
             class="px-3 py-1 bg-sw-accent text-sw-bg-abyss border-none rounded text-[12px] font-mono cursor-pointer transition-colors duration-200 hover:bg-sw-accent-hover shrink-0"
             data-testid="auth-copy-command"
-            [disabled]="!command"
             (click)="copyCommand()"
           >
             {{ copied ? 'Copied!' : 'Copy' }}
           </button>
         </div>
       }
-      <p class="text-xs text-sw-text-faint m-0 mb-2 leading-relaxed">
-        On Windows, run this in a WSL or bash terminal.
-      </p>
+      @if (isWindows) {
+        <p class="text-xs text-sw-text-faint m-0 mb-2 leading-relaxed">
+          On Windows, run this in a WSL or bash terminal.
+        </p>
+      }
       @if (error) {
         <div
           class="bg-sw-error-bg border border-sw-error rounded px-3 py-2 mb-3 text-sw-error-text text-[13px] leading-snug"
@@ -80,13 +81,15 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
   copied = false;
   /** Error message displayed when command fetch or clipboard fails. */
   error = '';
+  /** Whether the current platform is Windows (for WSL terminal hint). */
+  isWindows = false;
 
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private pollTimer?: ReturnType<typeof setInterval>;
   private copyTimer?: ReturnType<typeof setTimeout>;
 
-  /** Fetches the CLI command and starts polling for auth status. */
+  /** Fetches the CLI command, detects platform, and starts polling for auth status. */
   ngOnInit(): void {
     this.tauri
       .invoke<string>('get_auth_command', { project: this.project })
@@ -98,6 +101,10 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
         this.error = err;
         this.cdr.markForCheck();
       });
+    this.tauri.invoke<string>('get_platform').then((platform) => {
+      this.isWindows = platform === 'windows';
+      this.cdr.markForCheck();
+    });
     this.startPolling();
   }
 
