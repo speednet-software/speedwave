@@ -85,36 +85,27 @@ Manage git worktrees for parallel feature development on Speedwave. Parse `$ARGU
    cd <worktree_path> && make build-mcp
    ```
 
-9. **Run tests to verify the worktree is healthy:**
+9. **Print summary and Claude Code launch command:**
 
-   ```bash
-   cd <worktree_path> && make test
    ```
+   Worktree ready: <branch> (based on dev)
 
-   If tests fail, warn the user but don't block — they may want to start working anyway.
+   Path:     <worktree_path>
+   Angular:  http://localhost:<angular_port>
 
-10. **Print summary and Claude Code launch command:**
+   Quick start:
+     cd <worktree_path>
+     make dev          # Start desktop in dev mode (Tauri + Angular)
+     make check        # Lint + clippy + type-check
+     make status       # Quick health check
 
-    ```
-    Worktree ready: <branch> (based on dev)
+   Note: Angular dev server will use port <angular_port>.
+   To set the port, run: cd <worktree_path> && TAURI_DEV_SERVER_PORT=<angular_port> make dev
+   Or modify desktop/src/angular.json "serve.options.port" to <angular_port>.
 
-    Path:     <worktree_path>
-    Angular:  http://localhost:<angular_port>
-
-    Quick start:
-      cd <worktree_path>
-      make dev          # Start desktop in dev mode (Tauri + Angular)
-      make test         # Run all tests
-      make check        # Lint + clippy + type-check
-      make status       # Quick health check
-
-    Note: Angular dev server will use port <angular_port>.
-    To set the port, run: cd <worktree_path> && TAURI_DEV_SERVER_PORT=<angular_port> make dev
-    Or modify desktop/src/angular.json "serve.options.port" to <angular_port>.
-
-    Launch Claude Code in this worktree:
-      cd <worktree_path> && claude --dangerously-skip-permissions "Pracujesz w worktree <branch> projektu Speedwave. Angular dev server uzywa portu <angular_port>. Przed uruchomieniem make dev ustaw port: zmien desktop/src/angular.json serve.options.port na <angular_port>, albo uzyj TAURI_DEV_SERVER_PORT=<angular_port> make dev. Wszystkie komendy przez Makefile: make dev, make test, make check, make build. Po kazdej zmianie uruchom make test zeby zweryfikowac ze nic nie zepsules."
-    ```
+   Launch Claude Code in this worktree:
+     cd <worktree_path> && claude --dangerously-skip-permissions "Pracujesz w worktree <branch> projektu Speedwave. Angular dev server uzywa portu <angular_port>. Przed uruchomieniem make dev ustaw port: zmien desktop/src/angular.json serve.options.port na <angular_port>, albo uzyj TAURI_DEV_SERVER_PORT=<angular_port> make dev. Wszystkie komendy przez Makefile: make dev, make check, make build."
+   ```
 
 ### `list` — List all worktrees with info
 

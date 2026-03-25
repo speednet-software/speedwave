@@ -45,7 +45,10 @@ speedwave plugin disable <slug> --project <name>  # disable plugin for a project
   If the directory is already registered, prints the existing project name and exits.
 - **`speedwave check`** — runs OS prerequisite checks (WSL2 on Windows, uidmap on Linux) and compose security validation (cap_drop, token isolation, port binding, etc.), exits 0 on success or 1 on failure with detailed violation messages and remediation steps
 - **`speedwave update`** — rebuilds the built-in images for the current `bundle_id` and recreates containers with the current bundle manifest
-- **`speedwave self-update`** — downloads the latest CLI binary from GitHub Releases, replaces the current binary, and automatically rebuilds container images if the version changed. If the rebuild fails (e.g., when run from a non-project directory or without Desktop running), run `speedwave update` from your project directory. For multiple projects, run `speedwave update` from each project directory or restart the Desktop app
+- **`speedwave self-update`** — downloads the latest CLI binary from GitHub Releases, replaces the current binary, and automatically rebuilds container images if the version changed.
+
+  > **Note:** If the rebuild fails (e.g., when run from a non-project directory or without Desktop running), run `speedwave update` from your project directory. For multiple projects, run `speedwave update` from each project directory or restart the Desktop app.
+
 - **`speedwave plugin install <path.zip>`** — verifies the Ed25519 signature, extracts the plugin to `~/.speedwave/plugins/<slug>/`, and registers it
 - **`speedwave plugin list`** — lists all installed plugins, showing name, version, and enabled/configured status per project
 - **`speedwave plugin remove <slug>`** — removes the plugin directory from `~/.speedwave/plugins/<slug>/`. Note: credential files at `~/.speedwave/tokens/<project>/<slug>/` and config entries are **not** cleaned by the CLI — use the Desktop UI for full cleanup, or remove token directories manually

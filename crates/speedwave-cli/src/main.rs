@@ -199,6 +199,10 @@ fn maybe_print_update_hint() {
 /// Must re-exec because the current process has a stale `bundle_id` compiled
 /// into `env!("CARGO_PKG_VERSION")` — only the new binary knows the correct
 /// image tags.
+///
+/// CWD is intentionally inherited from the caller. If the user runs
+/// `speedwave self-update` from a non-project directory, `update` will fail
+/// to resolve a project — the error message guides them to run it manually.
 fn run_rebuild(exe: &std::path::Path) -> anyhow::Result<()> {
     let status = std::process::Command::new(exe)
         .arg("update")
@@ -253,8 +257,9 @@ fn run_self_update() -> anyhow::Result<()> {
             eprintln!("Binary updated successfully, but container rebuild failed: {e}");
             std::process::exit(1);
         }
+        println!("Container images rebuilt successfully.");
     } else {
-        println!("Already up to date ({})", current);
+        println!("Already up to date ({}).", current);
     }
 
     Ok(())
@@ -1218,6 +1223,23 @@ mod tests {
 
     // ── self-update rebuild structural tests ─────────────────────────────
 
+    /// Extract the body of a top-level function from source, stopping at the
+    /// next top-level `fn ` definition. This prevents structural tests from
+    /// accidentally matching strings in test code that appears later in the
+    /// file.
+    fn extract_fn_body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let fn_start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} must exist in main.rs"));
+        let after_start = &source[fn_start..];
+        // Find the next top-level fn definition (starts at column 0).
+        let fn_end = after_start[1..]
+            .find("\nfn ")
+            .map(|i| i + 1)
+            .unwrap_or(after_start.len());
+        &after_start[..fn_end]
+    }
+
     #[test]
     fn test_self_update_captures_exe_before_update() {
         // Structural test: verify that run_self_update() captures current_exe()
@@ -1227,11 +1249,7 @@ mod tests {
         // This test intentionally checks source structure — update it if
         // the function or its callees are renamed.
         let source = include_str!("main.rs");
-
-        let fn_start = source
-            .find("fn run_self_update(")
-            .expect("run_self_update function must exist in main.rs");
-        let fn_body = &source[fn_start..];
+        let fn_body = extract_fn_body(source, "fn run_self_update(");
 
         let exe_capture = fn_body
             .find("current_exe()")
@@ -1262,11 +1280,7 @@ mod tests {
         // This test intentionally checks source structure — update it if
         // the error handling pattern changes.
         let source = include_str!("main.rs");
-
-        let fn_start = source
-            .find("fn run_self_update(")
-            .expect("run_self_update function must exist in main.rs");
-        let fn_body = &source[fn_start..];
+        let fn_body = extract_fn_body(source, "fn run_self_update(");
 
         assert!(
             fn_body.contains("if let Err(e) = run_rebuild("),
@@ -1280,11 +1294,7 @@ mod tests {
         // parent, so it reads the fresh marker file instead of a stale value.
         // This test intentionally checks source structure.
         let source = include_str!("main.rs");
-
-        let fn_start = source
-            .find("fn run_rebuild(")
-            .expect("run_rebuild function must exist in main.rs");
-        let fn_body = &source[fn_start..];
+        let fn_body = extract_fn_body(source, "fn run_rebuild(");
 
         assert!(
             fn_body.contains(".env_remove("),
@@ -1298,11 +1308,7 @@ mod tests {
         // not unconditionally. Verify it appears between the updated check
         // and the "Already up to date" branch.
         let source = include_str!("main.rs");
-
-        let fn_start = source
-            .find("fn run_self_update(")
-            .expect("run_self_update function must exist in main.rs");
-        let fn_body = &source[fn_start..];
+        let fn_body = extract_fn_body(source, "fn run_self_update(");
 
         let updated_check = fn_body
             .find("status.updated()")
@@ -1356,4 +1362,9 @@ mod tests {
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("Failed to run"), "unexpected error: {msg}");
     }
+
+    // No Windows equivalent of run_rebuild_failing_command: /usr/bin/false
+    // ignores args, but Windows has no built-in that exits non-zero when
+    // given an arbitrary argument. The nonexistent-binary test covers the
+    // Windows error path.
 }
