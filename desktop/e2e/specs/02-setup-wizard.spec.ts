@@ -128,6 +128,13 @@ describe('Setup Wizard — Full Flow', function () {
     // Verify first step is active or done (wizard started processing)
     const firstStatus = await stepElements[0].getAttribute('data-status');
     expect(['active', 'done']).toContain(firstStatus);
+
+    // Assert first step label to catch rename regressions (querying child of
+    // an already-resolved parent avoids the msedge @for race)
+    const firstTitle = await stepElements[0].$('[data-testid="step-title"]');
+    if (await firstTitle.isExisting()) {
+      expect((await firstTitle.getText()).trim()).toBe('System Check');
+    }
   });
 
   it('should complete System Check (step 0)', async function () {

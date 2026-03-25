@@ -42,6 +42,20 @@ describe('Navigation', function () {
     expect((await settings.getText()).trim()).toBe('Settings');
   });
 
+  it('should navigate to Chat when clicking Chat link (if authenticated)', async function () {
+    this.timeout(30_000);
+    const chat = await $('[data-testid="nav-chat"]');
+    if (await chat.isExisting()) {
+      await chat.click();
+      await browser.waitUntil(
+        async () =>
+          (await $('[data-testid="chat-messages"]').isExisting()) ||
+          (await $('[data-testid="chat-status-overlay"]').isExisting()),
+        { timeout: 20_000, timeoutMsg: 'Chat view did not render (neither messages nor status overlay found)' },
+      );
+    }
+  });
+
   it('should navigate to Integrations when clicking Integrations link', async function () {
     this.timeout(15_000);
     const integrations = await $('[data-testid="nav-integrations"]');

@@ -60,6 +60,19 @@ describe('Navigation', function () {
     expect((await settings.getText()).trim()).toBe('Settings');
   });
 
+  it('should navigate to Chat when clicking Chat link (if authenticated)', async function () {
+    this.timeout(30_000);
+    const chat = await $('[data-testid="nav-chat"]');
+    if (await chat.isExisting()) {
+      await chat.click();
+      const messages = await $('[data-testid="chat-messages"]');
+      await messages.waitForExist({
+        timeout: 20_000,
+        timeoutMsg: 'Chat messages container did not render',
+      });
+    }
+  });
+
   it('should navigate to Integrations when clicking Integrations link', async function () {
     this.timeout(15_000);
     const integrations = await $('[data-testid="nav-integrations"]');
