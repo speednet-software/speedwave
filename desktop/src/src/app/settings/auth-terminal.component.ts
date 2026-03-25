@@ -13,7 +13,7 @@ import { TauriService } from '../services/tauri.service';
 
 /**
  * OAuth login instructions card.
- * Tells the user to run `speedwave auth login` in the terminal,
+ * Displays a copyable CLI command for the user to paste into their terminal,
  * then polls auth status to detect when login completes.
  */
 @Component({
@@ -23,19 +23,32 @@ import { TauriService } from '../services/tauri.service';
   template: `
     <div class="bg-sw-bg-darkest border border-sw-border rounded-lg p-4 mt-3">
       <p class="text-[13px] text-sw-text m-0 mb-3 leading-relaxed">
-        Open Claude Code in a terminal, then type <code>/login</code> to authenticate:
+        Open a terminal and run the following command, then type <code>/login</code> to
+        authenticate:
       </p>
-      <div class="flex gap-2 mb-3">
-        <button
-          class="px-4 py-1.5 bg-sw-accent text-sw-bg-abyss border-none rounded text-[13px] font-mono font-bold cursor-pointer transition-colors duration-200 hover:bg-sw-accent-hover"
-          data-testid="auth-open-terminal"
-          tabindex="0"
-          (click)="openTerminal()"
-          (keydown.enter)="openTerminal()"
+      @if (command) {
+        <div
+          class="flex items-center gap-2 mb-3 bg-sw-bg-dark border border-sw-border rounded px-3 py-2"
         >
-          Open Terminal
-        </button>
-      </div>
+          <code
+            class="text-[13px] text-sw-accent font-mono flex-1 select-all break-all"
+            data-testid="auth-command"
+            >{{ command }}</code
+          >
+          <button
+            class="px-3 py-1 bg-sw-accent text-sw-bg-abyss border-none rounded text-[12px] font-mono cursor-pointer transition-colors duration-200 hover:bg-sw-accent-hover shrink-0"
+            data-testid="auth-copy-command"
+            (click)="copyCommand()"
+          >
+            {{ copied ? 'Copied!' : 'Copy' }}
+          </button>
+        </div>
+      }
+      @if (isWindows) {
+        <p class="text-xs text-sw-text-faint m-0 mb-2 leading-relaxed">
+          On Windows, run this in a WSL or bash terminal.
+        </p>
+      }
       @if (error) {
         <div
           class="bg-sw-error-bg border border-sw-error rounded px-3 py-2 mb-3 text-sw-error-text text-[13px] leading-snug"
@@ -62,31 +75,62 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
   /** Emits when the OAuth session finishes. */
   @Output() done = new EventEmitter<boolean>();
 
-  /** Error message displayed when terminal launch fails. */
+  /** CLI command to display for the user to copy. */
+  command = '';
+  /** Whether the "Copied!" feedback is showing. */
+  copied = false;
+  /** Error message displayed when command fetch or clipboard fails. */
   error = '';
+  /** Whether the current platform is Windows (for WSL terminal hint). */
+  isWindows = false;
 
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private pollTimer?: ReturnType<typeof setInterval>;
+  private copyTimer?: ReturnType<typeof setTimeout>;
 
-  /** Starts polling for auth status. */
+  /** Fetches the CLI command, detects platform, and starts polling for auth status. */
   ngOnInit(): void {
+    this.tauri
+      .invoke<string>('get_auth_command', { project: this.project })
+      .then((cmd) => {
+        this.command = cmd;
+        this.cdr.markForCheck();
+      })
+      .catch((err: string) => {
+        this.error = err;
+        this.cdr.markForCheck();
+      });
+    this.tauri.invoke<string>('get_platform').then((platform) => {
+      this.isWindows = platform === 'windows';
+      this.cdr.markForCheck();
+    });
     this.startPolling();
   }
 
-  /** Opens a native terminal running speedwave (Claude Code). */
-  openTerminal(): void {
-    this.error = '';
-    this.tauri.invoke('open_auth_terminal', { project: this.project }).catch((err: string) => {
-      this.error = err;
+  /** Copies the CLI command to the clipboard. */
+  async copyCommand(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(this.command);
+      this.copied = true;
       this.cdr.markForCheck();
-    });
+      this.copyTimer = setTimeout(() => {
+        this.copied = false;
+        this.cdr.markForCheck();
+      }, 2000);
+    } catch {
+      this.error = 'Failed to copy to clipboard';
+      this.cdr.markForCheck();
+    }
   }
 
-  /** Cleans up polling timer. */
+  /** Cleans up timers. */
   ngOnDestroy(): void {
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
+    }
+    if (this.copyTimer) {
+      clearTimeout(this.copyTimer);
     }
   }
 
