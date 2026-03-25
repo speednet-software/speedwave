@@ -30,7 +30,7 @@ jobs:
             exit 0
           fi
 
-          # Backmerge PRs are exempt (they use regular merge, not squash)
+          # Backmerge PRs are exempt (fallback merge when dev has new commits)
           if [[ "$HEAD_REF" == chore/backmerge-* ]]; then
             echo "Backmerge PR — skipping title check"
             exit 0

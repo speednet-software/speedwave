@@ -119,9 +119,8 @@ Speedwave uses [release-please](https://github.com/googleapis/release-please) to
   ┌──────────────── backmerge.yml ───────────────────────────────┐
   │                                                              │
   │  Triggered by: release published event                       │
-  │  Merges main → dev (regular merge, not squash)               │
-  │  Auto-resolves version file conflicts (main wins)            │
-  │  Opens PR with auto-merge enabled                            │
+  │  Resets dev to main (force-push) to prevent ghost commits     │
+  │  Falls back to regular merge PR if dev has new commits       │
   │                                                              │
   └──────────────────────────────────────────────────────────────┘
 ```
@@ -319,14 +318,14 @@ After every release, `main` has commits that `dev` doesn't (version bumps, CHANG
 
 1. **Trigger:** fires on `release: [published]` event
 2. **Guard:** skips if `dev` already contains all `main` commits
-3. **Merge:** attempts `git merge origin/main --no-ff` (regular merge, not squash)
-4. **Conflict resolution:** version files are auto-resolved using main's version (main wins). This includes all `package.json`, `Cargo.toml`, `tauri.conf.json`, lockfiles, and `CHANGELOG.md`
-5. **PR:** opens a PR targeting `dev` with auto-merge enabled (merge strategy, not squash)
-6. **Manual fallback:** if non-version file conflicts exist, the PR is created without auto-merge and lists conflicting files
+3. **Reset (default):** force-pushes `main` to `dev` so they are identical — this prevents ghost commits from accumulating due to SHA divergence from squash merges
+4. **Fallback:** if `dev` has new commits not yet on `main` (someone merged between release and backmerge), falls back to a regular merge via PR with auto-merge enabled
 
-**Why regular merge (not squash)?** Squash merge would create a new commit with a different SHA. Release-please on `main` would then see the same changes as "new" commits the next time `dev` is merged back to `main`, causing phantom release PRs with duplicate changelog entries.
+**Why force-push instead of regular merge?** Squash merge from `dev` → `main` creates new commit SHAs. A regular backmerge preserves the original SHAs on `dev`, so Git sees them as "unmerged" — these ghost commits accumulate over time and pollute future PR diffs. Force-pushing `dev = main` eliminates this divergence entirely.
 
-**Prerequisite:** the repository must have **"Allow auto-merge"** enabled in GitHub Settings > General > Pull Requests. Without this, `gh pr merge --auto` silently does nothing and backmerge PRs will require manual merge.
+**Branch protection:** The `dev` branch uses a GitHub Repository Ruleset (not legacy branch protection) that grants admin role bypass for force-push. The `RELEASE_TOKEN` (admin PAT) used by `backmerge.yml` can force-push; regular users cannot.
+
+**Prerequisite:** the repository must have **"Allow auto-merge"** enabled in GitHub Settings > General > Pull Requests. Without this, `gh pr merge --auto` silently does nothing and fallback backmerge PRs will require manual merge.
 
 ## Known Pitfalls
 

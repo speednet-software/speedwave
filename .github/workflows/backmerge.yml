@@ -1,8 +1,13 @@
 # Backmerge main → dev after a release is published
 #
-# Ensures dev stays up-to-date with release commits (version bumps, CHANGELOG).
-# Version file conflicts are auto-resolved (main wins — it has the latest release version).
-# If non-version conflicts remain, a PR is created for manual resolution.
+# Resets dev to match main exactly (force-push). This prevents ghost commits
+# from accumulating on dev due to SHA divergence from squash merges.
+#
+# If dev has commits not yet on main (someone merged between release and
+# backmerge), falls back to a regular merge via PR for manual resolution.
+#
+# Force-push is allowed by the dev branch ruleset which grants bypass to
+# admin role (used by RELEASE_TOKEN).
 
 name: Backmerge
 
@@ -28,7 +33,7 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_TOKEN }}
 
-      - name: Backmerge main into dev
+      - name: Sync dev to main
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           REPO: ${{ github.repository }}
@@ -45,6 +50,47 @@ jobs:
             exit 0
           fi
 
+          # Check if dev has genuinely new work not on main.
+          #
+          # We cannot use `git log dev --not main` because ghost commits
+          # (squash-merged to main with different SHAs) also appear there.
+          # We cannot use commit timestamps because commits merged to dev
+          # between the squash merge and the release tag would be lost.
+          #
+          # Instead, compare file trees: after squash merge dev→main, both
+          # have identical content. Main then gets a version bump (release-
+          # please), so we exclude version/release files from the diff.
+          # Any remaining difference = genuinely new work on dev.
+          VERSION_EXCLUDES=(
+            ':!.release-please-manifest.json'
+            ':!release-please-config.json'
+            ':!CHANGELOG.md'
+            ':!package.json' ':!package-lock.json'
+            ':!desktop/src/package.json' ':!desktop/src/package-lock.json'
+            ':!desktop/src-tauri/tauri.conf.json'
+            ':!desktop/src-tauri/Cargo.toml' ':!desktop/src-tauri/Cargo.lock'
+            ':!crates/speedwave-runtime/Cargo.toml'
+            ':!crates/speedwave-cli/Cargo.toml'
+            ':!Cargo.lock'
+            ':!mcp-servers/hub/package.json' ':!mcp-servers/shared/package.json'
+            ':!mcp-servers/slack/package.json' ':!mcp-servers/sharepoint/package.json'
+            ':!mcp-servers/redmine/package.json' ':!mcp-servers/gitlab/package.json'
+            ':!mcp-servers/os/package.json' ':!mcp-servers/package-lock.json'
+          )
+          CONTENT_DIFF=$(git diff --name-only origin/dev origin/main -- . "${VERSION_EXCLUDES[@]}")
+
+          if [ -z "$CONTENT_DIFF" ]; then
+            # No new work on dev — safe to force-push dev=main
+            echo "dev has no new content vs main (only version files differ) — resetting dev to main"
+            git push origin origin/main:refs/heads/dev --force
+            echo "dev is now identical to main ($TAG)"
+            exit 0
+          fi
+
+          # Dev has genuinely new file changes — someone added work after the release merge
+          echo "::warning::dev has new content not on main — falling back to regular merge PR"
+          echo "Changed files: $CONTENT_DIFF"
+
           BRANCH="chore/backmerge-main-into-dev"
 
           # Close existing backmerge PR if any
@@ -56,87 +102,56 @@ jobs:
 
           git checkout -b "$BRANCH" origin/dev
 
-          # Attempt merge
           if git merge origin/main --no-ff -m "chore: backmerge main into dev after $TAG"; then
             echo "Clean merge — no conflicts"
-            git push origin "$BRANCH" --force
-            PR_URL=$(gh pr create \
-              --repo "$REPO" \
-              --head "$BRANCH" \
-              --base dev \
-              --title "chore: backmerge main into dev after $TAG" \
-              --body "$(cat <<'PREOF'
-          ## Summary
+          else
+            echo "Merge conflicts detected — attempting auto-resolution of version files"
 
-          Automated backmerge of `main` into `dev` after release publication.
+            # Auto-resolve version files (main wins — it has the latest release version)
+            AUTO_RESOLVE_FILES=(
+              .release-please-manifest.json
+              release-please-config.json
+              .github/workflows/release-please.yml
+              package.json
+              package-lock.json
+              desktop/src/package.json
+              desktop/src/package-lock.json
+              desktop/src-tauri/tauri.conf.json
+              crates/speedwave-runtime/Cargo.toml
+              crates/speedwave-cli/Cargo.toml
+              desktop/src-tauri/Cargo.toml
+              mcp-servers/hub/package.json
+              mcp-servers/shared/package.json
+              mcp-servers/slack/package.json
+              mcp-servers/sharepoint/package.json
+              mcp-servers/redmine/package.json
+              mcp-servers/gitlab/package.json
+              mcp-servers/os/package.json
+              mcp-servers/package-lock.json
+              Cargo.lock
+              desktop/src-tauri/Cargo.lock
+              CHANGELOG.md
+            )
 
-          - Brings version bumps, CHANGELOG, and any hotfix commits into `dev`
-          - This PR was auto-created by the backmerge workflow
+            for f in "${AUTO_RESOLVE_FILES[@]}"; do
+              if git diff --name-only --diff-filter=U | grep -qx "$f"; then
+                echo "Auto-resolving $f (using main's version)"
+                git checkout --theirs "$f"
+                git add "$f"
+              fi
+            done
 
-          ## Test plan
-
-          - [ ] CI passes on this PR
-          PREOF
-          )")
-            echo "Created PR: $PR_URL"
-            # Enable auto-merge with merge strategy (not squash — preserve main's history)
-            PR_NUMBER=$(echo "$PR_URL" | grep -o '[0-9]*$')
-            if gh pr merge "$PR_NUMBER" --repo "$REPO" --merge --auto; then
-              echo "Auto-merge enabled"
-            else
-              echo "::notice::Could not enable auto-merge. Ensure 'Allow auto-merge' is enabled in repo settings (Settings > General > Pull Requests)."
+            REMAINING=$(git diff --name-only --diff-filter=U || true)
+            if [ -n "$REMAINING" ]; then
+              echo "::error::Unresolved conflicts in: $REMAINING"
+              echo "::error::Manual backmerge needed. Run: git checkout -b chore/backmerge origin/dev && git merge origin/main"
+              git merge --abort
+              exit 1
             fi
-            exit 0
+
+            git commit --no-edit
           fi
 
-          echo "Merge conflicts detected — attempting auto-resolution of version files"
-
-          # Auto-resolve version files (main wins — it has the latest release version)
-          # Version files + release config (main always wins)
-          AUTO_RESOLVE_FILES=(
-            .release-please-manifest.json
-            release-please-config.json
-            .github/workflows/release-please.yml
-            package.json
-            package-lock.json
-            desktop/src/package.json
-            desktop/src/package-lock.json
-            desktop/src-tauri/tauri.conf.json
-            crates/speedwave-runtime/Cargo.toml
-            crates/speedwave-cli/Cargo.toml
-            desktop/src-tauri/Cargo.toml
-            mcp-servers/hub/package.json
-            mcp-servers/shared/package.json
-            mcp-servers/slack/package.json
-            mcp-servers/sharepoint/package.json
-            mcp-servers/redmine/package.json
-            mcp-servers/gitlab/package.json
-            mcp-servers/os/package.json
-            mcp-servers/package-lock.json
-            Cargo.lock
-            desktop/src-tauri/Cargo.lock
-            CHANGELOG.md
-          )
-
-          for f in "${AUTO_RESOLVE_FILES[@]}"; do
-            if git diff --name-only --diff-filter=U | grep -qx "$f"; then
-              echo "Auto-resolving $f (using main's version)"
-              git checkout --theirs "$f"
-              git add "$f"
-            fi
-          done
-
-          # Check if any unresolved conflicts remain
-          REMAINING=$(git diff --name-only --diff-filter=U || true)
-          if [ -n "$REMAINING" ]; then
-            echo "::error::Unresolved conflicts in: $REMAINING"
-            echo "::error::Manual backmerge needed. Run: git checkout -b chore/backmerge origin/dev && git merge origin/main"
-            git merge --abort
-            exit 1
-          fi
-
-          # All conflicts auto-resolved
-          git commit --no-edit
           git push origin "$BRANCH" --force
           PR_URL=$(gh pr create \
             --repo "$REPO" \
@@ -148,8 +163,10 @@ jobs:
 
           Automated backmerge of `main` into `dev` after release publication.
 
+          **Note:** This is a fallback regular merge because dev had new commits
+          since the last release. Normally, dev is reset to match main exactly.
+
           - Brings version bumps, CHANGELOG, and any hotfix commits into `dev`
-          - Version file conflicts were auto-resolved (main's versions win)
 
           ## Test plan
 
