@@ -195,11 +195,37 @@ fn maybe_print_update_hint() {
     });
 }
 
+/// Re-exec the given binary with `update` arg to rebuild container images.
+/// Must re-exec because the current process has a stale `bundle_id` compiled
+/// into `env!("CARGO_PKG_VERSION")` — only the new binary knows the correct
+/// image tags.
+fn run_rebuild(exe: &std::path::Path) -> anyhow::Result<()> {
+    let status = std::process::Command::new(exe)
+        .arg("update")
+        .env_remove(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV)
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to run container image rebuild: {e}"))?;
+    if !status.success() {
+        anyhow::bail!(
+            "Container image rebuild failed (exit {}). \
+             Ensure Speedwave Desktop is running, then run `speedwave update` \
+             in your project directory.",
+            status.code().unwrap_or(-1)
+        );
+    }
+    Ok(())
+}
+
 /// Run the self-update: download the latest release from GitHub and replace the current binary.
 fn run_self_update() -> anyhow::Result<()> {
     if is_app_bundle() {
         anyhow::bail!("This binary is part of a Speedwave.app bundle. Please update via the Desktop app instead.");
     }
+
+    // Capture exe path BEFORE self-replace, because on Linux /proc/self/exe
+    // will point to the deleted old inode after atomic rename.
+    let exe_path = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("Failed to locate current binary: {e}"))?;
 
     let current = env!("CARGO_PKG_VERSION");
     println!("Current version: {}", current);
@@ -221,7 +247,12 @@ fn run_self_update() -> anyhow::Result<()> {
     });
 
     if status.updated() {
-        println!("Updated to version {}", status.version());
+        println!("Updated to version {}.", status.version());
+        println!("Rebuilding container images...");
+        if let Err(e) = run_rebuild(&exe_path) {
+            eprintln!("Binary updated successfully, but container rebuild failed: {e}");
+            std::process::exit(1);
+        }
     } else {
         println!("Already up to date ({})", current);
     }
@@ -1183,5 +1214,146 @@ mod tests {
             "--project".to_string(),
         ];
         assert!(parse_action(&args).is_err());
+    }
+
+    // ── self-update rebuild structural tests ─────────────────────────────
+
+    #[test]
+    fn test_self_update_captures_exe_before_update() {
+        // Structural test: verify that run_self_update() captures current_exe()
+        // BEFORE calling .update(), and calls run_rebuild inside the
+        // status.updated() branch. On Linux, current_exe() after self-replace
+        // returns a dead /proc/self/exe path, so capture must come first.
+        // This test intentionally checks source structure — update it if
+        // the function or its callees are renamed.
+        let source = include_str!("main.rs");
+
+        let fn_start = source
+            .find("fn run_self_update(")
+            .expect("run_self_update function must exist in main.rs");
+        let fn_body = &source[fn_start..];
+
+        let exe_capture = fn_body
+            .find("current_exe()")
+            .expect("run_self_update must call current_exe()");
+        let update_call = fn_body
+            .find(".update()")
+            .expect("run_self_update must call .update()");
+        let rebuild_call = fn_body
+            .find("run_rebuild(")
+            .expect("run_self_update must call run_rebuild()");
+
+        assert!(
+            exe_capture < update_call,
+            "current_exe() must be captured BEFORE .update() call \
+             (Linux /proc/self/exe points to deleted inode after rename)"
+        );
+        assert!(
+            update_call < rebuild_call,
+            "run_rebuild must be called AFTER .update()"
+        );
+    }
+
+    #[test]
+    fn test_self_update_does_not_propagate_rebuild_error() {
+        // The rebuild error must NOT propagate via `?` because the caller
+        // prints "Self-update failed: ..." which is misleading after a
+        // successful binary replacement. Verify `if let Err` pattern is used.
+        // This test intentionally checks source structure — update it if
+        // the error handling pattern changes.
+        let source = include_str!("main.rs");
+
+        let fn_start = source
+            .find("fn run_self_update(")
+            .expect("run_self_update function must exist in main.rs");
+        let fn_body = &source[fn_start..];
+
+        assert!(
+            fn_body.contains("if let Err(e) = run_rebuild("),
+            "run_rebuild error must be handled with `if let Err`, not `?`"
+        );
+    }
+
+    #[test]
+    fn test_run_rebuild_clears_resources_env() {
+        // The subprocess must NOT inherit SPEEDWAVE_RESOURCES_DIR from the
+        // parent, so it reads the fresh marker file instead of a stale value.
+        // This test intentionally checks source structure.
+        let source = include_str!("main.rs");
+
+        let fn_start = source
+            .find("fn run_rebuild(")
+            .expect("run_rebuild function must exist in main.rs");
+        let fn_body = &source[fn_start..];
+
+        assert!(
+            fn_body.contains(".env_remove("),
+            "run_rebuild must clear BUNDLE_RESOURCES_ENV from subprocess"
+        );
+    }
+
+    #[test]
+    fn test_self_update_rebuild_only_when_updated() {
+        // run_rebuild must be called inside the `status.updated()` branch,
+        // not unconditionally. Verify it appears between the updated check
+        // and the "Already up to date" branch.
+        let source = include_str!("main.rs");
+
+        let fn_start = source
+            .find("fn run_self_update(")
+            .expect("run_self_update function must exist in main.rs");
+        let fn_body = &source[fn_start..];
+
+        let updated_check = fn_body
+            .find("status.updated()")
+            .expect("must check status.updated()");
+        let rebuild_call = fn_body.find("run_rebuild(").expect("must call run_rebuild");
+        let already_up_to_date = fn_body
+            .find("Already up to date")
+            .expect("must have 'Already up to date' branch");
+
+        assert!(
+            updated_check < rebuild_call && rebuild_call < already_up_to_date,
+            "run_rebuild must be between status.updated() and 'Already up to date'"
+        );
+    }
+
+    // ── run_rebuild unit tests ──────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rebuild_nonexistent_binary() {
+        let result = run_rebuild(std::path::Path::new("/nonexistent/speedwave"));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Failed to run"), "unexpected error: {msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rebuild_failing_command() {
+        let result = run_rebuild(std::path::Path::new("/usr/bin/false"));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Ensure Speedwave Desktop"),
+            "should include remediation guidance: {msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rebuild_successful_command() {
+        let result = run_rebuild(std::path::Path::new("/usr/bin/true"));
+        assert!(result.is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_rebuild_nonexistent_binary_windows() {
+        let result = run_rebuild(std::path::Path::new("C:\\nonexistent\\speedwave.exe"));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Failed to run"), "unexpected error: {msg}");
     }
 }
