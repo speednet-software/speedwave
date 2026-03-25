@@ -37,3 +37,4 @@ Service globals are injected automatically based on enabled integrations (no imp
   - Merging or closing merge requests
   - Writing to or deleting SharePoint documents
 - NEVER write to or delete files outside `/workspace` and `$HOME` without explicit user confirmation
+- Always confirm before any other destructive operation on user data
