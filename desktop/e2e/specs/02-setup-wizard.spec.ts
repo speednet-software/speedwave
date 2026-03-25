@@ -132,9 +132,8 @@ describe('Setup Wizard — Full Flow', function () {
     // Assert first step label to catch rename regressions (querying child of
     // an already-resolved parent avoids the msedge @for race)
     const firstTitle = await stepElements[0].$('[data-testid="step-title"]');
-    if (await firstTitle.isExisting()) {
-      expect((await firstTitle.getText()).trim()).toBe('System Check');
-    }
+    await firstTitle.waitForExist({ timeout: 5_000 });
+    expect((await firstTitle.getText()).trim()).toBe('System Check');
   });
 
   it('should complete System Check (step 0)', async function () {
