@@ -64,6 +64,7 @@ jobs:
           VERSION_EXCLUDES=(
             ':!.release-please-manifest.json'
             ':!release-please-config.json'
+            ':!.github/workflows/release-please.yml'
             ':!CHANGELOG.md'
             ':!package.json' ':!package-lock.json'
             ':!desktop/src/package.json' ':!desktop/src/package-lock.json'
