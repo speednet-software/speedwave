@@ -50,25 +50,46 @@ jobs:
             exit 0
           fi
 
-          # Check if dev has genuinely new commits added AFTER the release.
+          # Check if dev has genuinely new work not on main.
+          #
           # We cannot use `git log dev --not main` because ghost commits
-          # (squash-merged to main with different SHAs) also appear in that
-          # list. Instead, check for commits newer than the release tag —
-          # ghost commits predate the release, genuinely new work postdates it.
-          RELEASE_TS=$(git log -1 --format="%ct" "$TAG" 2>/dev/null || git log -1 --format="%ct" "origin/main")
-          NEW_SINCE_RELEASE=$(git log --oneline origin/dev --not origin/main \
-            --after="@$RELEASE_TS" | wc -l | tr -d ' ')
+          # (squash-merged to main with different SHAs) also appear there.
+          # We cannot use commit timestamps because commits merged to dev
+          # between the squash merge and the release tag would be lost.
+          #
+          # Instead, compare file trees: after squash merge dev→main, both
+          # have identical content. Main then gets a version bump (release-
+          # please), so we exclude version/release files from the diff.
+          # Any remaining difference = genuinely new work on dev.
+          VERSION_EXCLUDES=(
+            ':!.release-please-manifest.json'
+            ':!release-please-config.json'
+            ':!CHANGELOG.md'
+            ':!package.json' ':!package-lock.json'
+            ':!desktop/src/package.json' ':!desktop/src/package-lock.json'
+            ':!desktop/src-tauri/tauri.conf.json'
+            ':!desktop/src-tauri/Cargo.toml' ':!desktop/src-tauri/Cargo.lock'
+            ':!crates/speedwave-runtime/Cargo.toml'
+            ':!crates/speedwave-cli/Cargo.toml'
+            ':!Cargo.lock'
+            ':!mcp-servers/hub/package.json' ':!mcp-servers/shared/package.json'
+            ':!mcp-servers/slack/package.json' ':!mcp-servers/sharepoint/package.json'
+            ':!mcp-servers/redmine/package.json' ':!mcp-servers/gitlab/package.json'
+            ':!mcp-servers/os/package.json' ':!mcp-servers/package-lock.json'
+          )
+          CONTENT_DIFF=$(git diff --name-only origin/dev origin/main -- . "${VERSION_EXCLUDES[@]}")
 
-          if [ "$NEW_SINCE_RELEASE" -eq 0 ]; then
-            # No genuinely new commits — safe to force-push dev=main
-            echo "dev has no commits newer than $TAG — resetting dev to main"
+          if [ -z "$CONTENT_DIFF" ]; then
+            # No new work on dev — safe to force-push dev=main
+            echo "dev has no new content vs main (only version files differ) — resetting dev to main"
             git push origin origin/main:refs/heads/dev --force
             echo "dev is now identical to main ($TAG)"
             exit 0
           fi
 
-          # Genuinely new commits exist — someone merged to dev after the release
-          echo "::warning::dev has $NEW_SINCE_RELEASE commit(s) added after $TAG — falling back to regular merge PR"
+          # Dev has genuinely new file changes — someone added work after the release merge
+          echo "::warning::dev has new content not on main — falling back to regular merge PR"
+          echo "Changed files: $CONTENT_DIFF"
 
           BRANCH="chore/backmerge-main-into-dev"
 
