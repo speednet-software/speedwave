@@ -66,9 +66,8 @@ feature/* ──PR→ dev           (integration branch, default)
 
 6. Backmerge (automatic after release is published)
    backmerge.yml triggered by release:published event
-   └── merges main → dev (regular merge, not squash)
-   └── auto-resolves version file conflicts (main wins)
-   └── opens PR with auto-merge enabled
+   └── resets dev to main via force-push (prevents ghost commit accumulation)
+   └── if dev has new commits: falls back to regular merge via PR
 ```
 
 ## Update Channel
@@ -226,9 +225,8 @@ Push to main (after merge)
 
 Release published
   └── backmerge.yml
-      └── merge main → dev (regular merge)
-      └── auto-resolve version file conflicts (main wins)
-      └── open PR with auto-merge
+      └── reset dev to main (force-push)
+      └── fallback: regular merge via PR if dev has new commits
 
 PR to main
   └── merge-strategy-check.yml
@@ -350,18 +348,18 @@ macOS notarization[^56] requires an Apple Developer account ($99/year). For the 
 
 After the v0.3.0 incident (wrong-version artifacts due to manual dispatch from dev branch), two new workflows were added:
 
-- **`backmerge.yml`** — triggered on `release: [published]`. Merges `main` → `dev` using regular merge (not squash). Version file conflicts are auto-resolved using main's version (main always has the latest release version). Creates a PR with auto-merge enabled.
+- **`backmerge.yml`** — triggered on `release: [published]`. Resets `dev` to `main` via force-push to prevent ghost commit accumulation from squash merge SHA divergence. Falls back to regular merge via PR if `dev` has new commits since the release. Force-push is permitted by a GitHub Repository Ruleset that grants admin role bypass on `dev`.
 
 - **`merge-strategy-check.yml`** — triggered on PRs to `main`. Validates that the PR title follows conventional commits format. Release-please and backmerge PRs are exempt.
 
 ### Merge strategy clarification
 
-| PR direction                | Strategy      | Rationale                                                                |
-| --------------------------- | ------------- | ------------------------------------------------------------------------ |
-| Any → `dev`                 | Squash merge  | Clean dev history                                                        |
-| `dev` → `main`              | Squash merge  | PR title becomes the conventional commit that release-please parses      |
-| `main` → `dev` (backmerge)  | Regular merge | Preserves main's commit identity; squash would cause phantom release PRs |
-| release-please PR on `main` | Squash merge  | Compatible with `force-tag-creation: true` + manifest tracking           |
+| PR direction                | Strategy            | Rationale                                                           |
+| --------------------------- | ------------------- | ------------------------------------------------------------------- |
+| Any → `dev`                 | Squash merge        | Clean dev history                                                   |
+| `dev` → `main`              | Squash merge        | PR title becomes the conventional commit that release-please parses |
+| `main` → `dev` (backmerge)  | Force-push dev=main | Prevents ghost commit accumulation from squash merge SHA divergence |
+| release-please PR on `main` | Squash merge        | Compatible with `force-tag-creation: true` + manifest tracking      |
 
 ### Release validation improvements
 

@@ -1125,7 +1125,7 @@ fn main() {
             url_validation::open_url,
             // Platform
             url_validation::get_platform,
-            auth_commands::open_auth_terminal,
+            auth_commands::get_auth_command,
             // Chat
             start_chat,
             send_message,

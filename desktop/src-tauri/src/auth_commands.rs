@@ -1,9 +1,10 @@
-// Auth and terminal commands — extracted from main.rs
+// Auth commands — extracted from main.rs
 //
-// Tauri command wrappers for API-key management and native terminal launch.
+// Tauri command wrappers for API-key management and CLI auth command generation.
+
+use crate::types::{check_project, AuthStatusResponse};
 
 use super::{auth, setup_wizard};
-use crate::types::{check_project, AuthStatusResponse};
 
 // ---------------------------------------------------------------------------
 // Authentication commands (API key only — OAuth is done via CLI)
@@ -57,26 +58,8 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
 }
 
 // ---------------------------------------------------------------------------
-// Open native terminal with speedwave (Claude Code)
+// CLI auth command generation
 // ---------------------------------------------------------------------------
-
-/// Resolves and validates the CLI binary path.
-///
-/// Uses [`setup_wizard::cli_install_path()`] as the SSOT for the install location.
-/// Returns the path to the installed CLI binary, or an error if it doesn't exist.
-pub fn validate_cli_path() -> Result<std::path::PathBuf, String> {
-    let cli_path = setup_wizard::cli_install_path()
-        .ok_or_else(|| "cannot determine home directory".to_string())?;
-
-    if !cli_path.exists() {
-        return Err(format!(
-            "CLI binary not found at {}. Please restart Speedwave to re-link the CLI.",
-            cli_path.display()
-        ));
-    }
-
-    Ok(cli_path)
-}
 
 /// Shell-escape a string for use inside single quotes (POSIX standard).
 /// Each embedded single-quote becomes: close-quote, backslash-escaped quote, open-quote.
@@ -84,28 +67,52 @@ fn shell_escape_single_quoted(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-/// Validates that a string contains no control characters (U+0000..U+001F, U+007F).
+/// Builds the CLI command string for the user to copy into their terminal.
 ///
-/// Control characters in paths embedded into AppleScript or shell commands
-/// can break quoting and enable injection attacks. This rejects newlines,
-/// carriage returns, null bytes, tabs, and all other ASCII control characters.
-fn validate_no_control_chars(s: &str) -> Result<(), String> {
-    if let Some(pos) = s.find(|c: char| c.is_ascii_control()) {
-        let byte = s.as_bytes()[pos];
-        return Err(format!(
-            "path contains control character 0x{byte:02X} at position {pos} — \
-             this is not allowed for security reasons"
-        ));
+/// When `data_dir` differs from `default_data_dir`, the command includes an
+/// `export SPEEDWAVE_DATA_DIR=...` prefix so the CLI uses the correct data
+/// directory regardless of the terminal's inherited environment.
+///
+/// Paths are single-quote escaped (POSIX) to handle spaces, `&`, `|`, and
+/// other shell metacharacters. The user pastes this into a shell, so quoting
+/// must be correct for safe execution.
+fn build_auth_command(
+    project_dir: &str,
+    data_dir: &std::path::Path,
+    default_data_dir: Option<&std::path::Path>,
+) -> String {
+    let needs_env_pin = default_data_dir.map(|d| d != data_dir).unwrap_or(false);
+
+    let data_dir_str = data_dir.to_string_lossy();
+
+    if needs_env_pin {
+        format!(
+            "export {}='{}' && cd '{}' && speedwave",
+            speedwave_runtime::consts::DATA_DIR_ENV,
+            shell_escape_single_quoted(&data_dir_str),
+            shell_escape_single_quoted(project_dir),
+        )
+    } else {
+        format!(
+            "cd '{}' && speedwave",
+            shell_escape_single_quoted(project_dir),
+        )
     }
-    Ok(())
 }
 
+/// Returns a CLI command string for the user to copy into their terminal
+/// to authenticate with Claude Code.
+///
+/// When the Desktop app's data directory differs from the default
+/// (`~/.speedwave`), the command includes an `export SPEEDWAVE_DATA_DIR=...`
+/// prefix to ensure the CLI uses the correct data directory regardless of
+/// the terminal's inherited environment.
 #[tauri::command]
-pub async fn open_auth_terminal(project: String) -> Result<(), String> {
+pub async fn get_auth_command(project: String) -> Result<String, String> {
+    check_project(&project)?;
     tokio::task::spawn_blocking(move || {
-        log::info!("open_auth_terminal: project={project}");
+        log::info!("get_auth_command: project={project}");
 
-        // Resolve project dir from config
         let user_config = speedwave_runtime::config::load_user_config()
             .map_err(|e| format!("Failed to load config: {e}"))?;
         let project_dir = user_config
@@ -113,73 +120,15 @@ pub async fn open_auth_terminal(project: String) -> Result<(), String> {
             .map(|p| p.dir.clone())
             .ok_or_else(|| format!("project '{}' not found in config", project))?;
 
-        // Reject paths with control characters (newlines, carriage returns, etc.)
-        // to prevent AppleScript / shell injection via crafted project directory names.
-        validate_no_control_chars(&project_dir)?;
+        let data_dir = speedwave_runtime::consts::data_dir();
+        let default_data_dir =
+            dirs::home_dir().map(|h| h.join(speedwave_runtime::consts::DATA_DIR));
 
-        // Find the speedwave CLI binary
-        let cli_path = validate_cli_path()?;
-
-        let cli_str = cli_path.to_string_lossy().to_string();
-
-        #[cfg(target_os = "macos")]
-        {
-            // Escape a string for embedding inside an AppleScript double-quoted string.
-            // AppleScript treats backslash and double-quote as special inside "...".
-            fn applescript_escape(s: &str) -> String {
-                s.replace('\\', "\\\\").replace('"', "\\\"")
-            }
-
-            // Build the shell command with proper single-quote escaping, then
-            // escape the result for embedding in the AppleScript "do script" string.
-            let shell_cmd = format!(
-                "cd '{}' && '{}'",
-                shell_escape_single_quoted(&project_dir),
-                shell_escape_single_quoted(&cli_str),
-            );
-            let apple_script = format!(
-                "tell application \"Terminal\"\n  activate\n  do script \"{}\"\nend tell",
-                applescript_escape(&shell_cmd),
-            );
-            std::process::Command::new("osascript")
-                .arg("-e")
-                .arg(&apple_script)
-                .status()
-                .map_err(|e| e.to_string())?;
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            let shell_cmd = format!(
-                "cd '{}' && exec '{}'",
-                shell_escape_single_quoted(&project_dir),
-                shell_escape_single_quoted(&cli_str),
-            );
-            let terminals = ["x-terminal-emulator", "gnome-terminal", "xterm"];
-            let mut launched = false;
-            for term in &terminals {
-                if std::process::Command::new(term)
-                    .args(["--", "bash", "-c", &shell_cmd])
-                    .spawn()
-                    .is_ok()
-                {
-                    launched = true;
-                    break;
-                }
-            }
-            if !launched {
-                return Err("No terminal emulator found".to_string());
-            }
-        }
-
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        {
-            let _ = cli_str;
-            return Err("Terminal launch not supported on this platform yet".to_string());
-        }
-
-        #[allow(unreachable_code)]
-        Ok(())
+        Ok(build_auth_command(
+            &project_dir,
+            data_dir,
+            default_data_dir.as_deref(),
+        ))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -189,24 +138,6 @@ pub async fn open_auth_terminal(project: String) -> Result<(), String> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-
-    // -- validate_cli_path tests --
-
-    #[test]
-    fn validate_cli_path_returns_error_when_binary_missing() {
-        // validate_cli_path delegates to setup_wizard::cli_install_path() for
-        // the platform-specific path. Since this test runs in a clean CI
-        // environment (or dev machine without a full install), the binary is
-        // very unlikely to exist — but if it does, the test still passes.
-        let result = validate_cli_path();
-        match result {
-            Ok(path) => assert!(path.exists(), "returned path should exist"),
-            Err(msg) => assert!(
-                msg.contains("not found"),
-                "error should mention 'not found': {msg}"
-            ),
-        }
-    }
 
     // -- shell_escape_single_quoted tests --
 
@@ -230,97 +161,140 @@ mod tests {
         assert_eq!(shell_escape_single_quoted(""), "");
     }
 
-    // -- validate_no_control_chars tests --
+    // -- build_auth_command tests --
 
     #[test]
-    fn validate_no_control_chars_accepts_normal_path() {
-        assert!(validate_no_control_chars("/Users/dev/my project").is_ok());
-    }
-
-    #[test]
-    fn validate_no_control_chars_accepts_unicode() {
-        assert!(validate_no_control_chars("/Users/dev/projekt-zółw").is_ok());
-    }
-
-    #[test]
-    fn validate_no_control_chars_rejects_newline() {
-        let result = validate_no_control_chars("/tmp/evil\n; rm -rf /");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("0x0A"),
-            "error should mention 0x0A for newline: {err}"
+    fn build_auth_command_default_data_dir() {
+        let cmd = build_auth_command(
+            "/Users/test/Projects",
+            std::path::Path::new("/Users/test/.speedwave"),
+            Some(std::path::Path::new("/Users/test/.speedwave")),
         );
+        assert_eq!(cmd, "cd '/Users/test/Projects' && speedwave");
+        assert!(!cmd.contains("export"));
     }
 
     #[test]
-    fn validate_no_control_chars_rejects_carriage_return() {
-        let result = validate_no_control_chars("/tmp/evil\r");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("0x0D"),
-            "error should mention 0x0D for CR: {err}"
+    fn build_auth_command_custom_data_dir() {
+        let cmd = build_auth_command(
+            "/Users/test/Projects",
+            std::path::Path::new("/Users/test/.speedwave-dev"),
+            Some(std::path::Path::new("/Users/test/.speedwave")),
         );
+        assert!(cmd.starts_with(&format!(
+            "export {}=",
+            speedwave_runtime::consts::DATA_DIR_ENV
+        )));
+        assert!(cmd.contains("/Users/test/.speedwave-dev"));
+        assert!(cmd.contains("cd '/Users/test/Projects'"));
+        assert!(cmd.ends_with("&& speedwave"));
     }
 
     #[test]
-    fn validate_no_control_chars_rejects_null_byte() {
-        let result = validate_no_control_chars("/tmp/evil\0");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("0x00"),
-            "error should mention 0x00 for null: {err}"
+    fn build_auth_command_custom_data_dir_quotes_value() {
+        let cmd = build_auth_command(
+            "/proj",
+            std::path::Path::new("/Users/test/.speedwave-dev"),
+            Some(std::path::Path::new("/Users/test/.speedwave")),
         );
+        assert!(cmd.contains("='/Users/test/.speedwave-dev'"));
     }
 
     #[test]
-    fn validate_no_control_chars_rejects_tab() {
-        let result = validate_no_control_chars("/tmp/evil\there");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("0x09"),
-            "error should mention 0x09 for tab: {err}"
+    fn build_auth_command_no_default_data_dir() {
+        let cmd = build_auth_command("/projects", std::path::Path::new("/data/.speedwave"), None);
+        assert_eq!(cmd, "cd '/projects' && speedwave");
+    }
+
+    #[test]
+    fn build_auth_command_quotes_paths_with_spaces() {
+        let cmd = build_auth_command(
+            "/Users/John Smith/My Projects",
+            std::path::Path::new("/Users/John Smith/.speedwave"),
+            Some(std::path::Path::new("/Users/John Smith/.speedwave")),
         );
+        assert!(cmd.contains("cd '/Users/John Smith/My Projects'"));
     }
 
     #[test]
-    fn validate_no_control_chars_rejects_escape() {
-        let result = validate_no_control_chars("/tmp/\x1B[31mred");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("0x1B"),
-            "error should mention 0x1B for ESC: {err}"
+    fn build_auth_command_escapes_single_quotes_in_project_dir() {
+        let cmd = build_auth_command(
+            "/Users/O'Brien/project",
+            std::path::Path::new("/Users/O'Brien/.speedwave"),
+            Some(std::path::Path::new("/Users/O'Brien/.speedwave")),
         );
+        assert!(cmd.contains("O'\\''Brien"));
+        assert!(cmd.contains("cd '"));
+        assert!(cmd.ends_with("&& speedwave"));
     }
 
     #[test]
-    fn validate_no_control_chars_rejects_del() {
-        let result = validate_no_control_chars("/tmp/evil\x7F");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("0x7F"),
-            "error should mention 0x7F for DEL: {err}"
+    fn build_auth_command_escapes_single_quotes_in_data_dir() {
+        let cmd = build_auth_command(
+            "/projects",
+            std::path::Path::new("/Users/O'Brien/.speedwave-dev"),
+            Some(std::path::Path::new("/Users/O'Brien/.speedwave")),
         );
+        assert!(cmd.contains("export"));
+        assert!(cmd.contains("O'\\''Brien"));
     }
 
     #[test]
-    fn validate_no_control_chars_reports_position() {
-        let result = validate_no_control_chars("abcd\nefg");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("position 4"),
-            "error should report position 4: {err}"
+    fn build_auth_command_quotes_paths_with_special_chars() {
+        let cmd = build_auth_command(
+            "/Users/test/proj&ect",
+            std::path::Path::new("/Users/test/.speedwave"),
+            Some(std::path::Path::new("/Users/test/.speedwave")),
         );
+        assert!(cmd.contains("cd '/Users/test/proj&ect'"));
     }
 
     #[test]
-    fn validate_no_control_chars_accepts_empty_string() {
-        assert!(validate_no_control_chars("").is_ok());
+    fn build_auth_command_unicode_paths() {
+        let cmd = build_auth_command(
+            "/Users/tëst/プロジェクト",
+            std::path::Path::new("/Users/tëst/.speedwave"),
+            Some(std::path::Path::new("/Users/tëst/.speedwave")),
+        );
+        assert!(cmd.contains("プロジェクト"));
+    }
+
+    #[test]
+    fn build_auth_command_trailing_slash_does_not_cause_mismatch() {
+        // Rust's Path normalizes trailing slashes: Path("/a/") == Path("/a")
+        let cmd = build_auth_command(
+            "/projects",
+            std::path::Path::new("/Users/test/.speedwave/"),
+            Some(std::path::Path::new("/Users/test/.speedwave")),
+        );
+        assert!(
+            !cmd.contains("export"),
+            "trailing slash should not trigger export prefix (Path normalizes)"
+        );
+        assert_eq!(cmd, "cd '/projects' && speedwave");
+    }
+
+    #[test]
+    fn build_auth_command_ordering() {
+        let cmd = build_auth_command(
+            "/proj",
+            std::path::Path::new("/data-dev"),
+            Some(std::path::Path::new("/data")),
+        );
+        let export_pos = cmd.find("export").unwrap();
+        let cd_pos = cmd.find("cd ").unwrap();
+        let sw_pos = cmd.find("speedwave").unwrap();
+        assert!(export_pos < cd_pos);
+        assert!(cd_pos < sw_pos);
+    }
+
+    #[test]
+    fn build_auth_command_empty_project_dir() {
+        let cmd = build_auth_command(
+            "",
+            std::path::Path::new("/data"),
+            Some(std::path::Path::new("/data")),
+        );
+        assert_eq!(cmd, "cd '' && speedwave");
     }
 }

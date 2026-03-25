@@ -53,18 +53,18 @@ git push
 
 - **PRs always target `dev`** — never open a PR directly to `main`
 - **`dev` -> `main`:** always squash merge in GitHub UI. PR title must be a conventional commit (e.g. `feat(runtime): add logging`). See [RELEASING.md](RELEASING.md#why-squash-merge-matters)
-- **Backmerge (`main` -> `dev`):** automated via `backmerge.yml` on release publish. Uses regular merge (not squash) to preserve main's commit identity and avoid duplicate changelog entries
+- **Backmerge (`main` -> `dev`):** automated via `backmerge.yml` on release publish. Resets dev to main (force-push) to prevent ghost commit accumulation. Falls back to regular merge PR if dev has new commits since the release
 - **`merge-strategy-check.yml`** enforces conventional commit PR titles on PRs to `main` (release-please and backmerge PRs are exempt)
 - Link commits to GitHub issues when they exist
 
 ### Merge strategy table
 
-| PR direction                  | Strategy      | Enforced by                         |
-| ----------------------------- | ------------- | ----------------------------------- |
-| `feature/*` / `fix/*` → `dev` | Squash merge  | Convention                          |
-| `dev` → `main`                | Squash merge  | `merge-strategy-check.yml`          |
-| `main` → `dev` (backmerge)    | Regular merge | `backmerge.yml` (automated)         |
-| release-please PR on `main`   | Squash merge  | `merge-strategy-check.yml` (exempt) |
+| PR direction                  | Strategy            | Enforced by                         |
+| ----------------------------- | ------------------- | ----------------------------------- |
+| `feature/*` / `fix/*` → `dev` | Squash merge        | Convention                          |
+| `dev` → `main`                | Squash merge        | `merge-strategy-check.yml`          |
+| `main` → `dev` (backmerge)    | Force-push dev=main | `backmerge.yml` (automated)         |
+| release-please PR on `main`   | Squash merge        | `merge-strategy-check.yml` (exempt) |
 
 ## Plugins
 
