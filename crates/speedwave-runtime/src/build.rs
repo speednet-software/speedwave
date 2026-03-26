@@ -496,7 +496,6 @@ fn is_transient_build_error(err: &anyhow::Error) -> bool {
             || msg.contains("connection reset")
             || msg.contains("temporary failure")
             || msg.contains("resource temporarily unavailable")
-            || msg.contains("cannot allocate memory")
         {
             return true;
         }
@@ -1738,9 +1737,12 @@ mod tests {
     }
 
     #[test]
-    fn test_is_transient_build_error_memory() {
+    fn test_is_transient_build_error_memory_is_not_transient() {
         let err = anyhow::anyhow!("Cannot allocate memory");
-        assert!(is_transient_build_error(&err));
+        assert!(
+            !is_transient_build_error(&err),
+            "OOM is not transient — retry would waste time"
+        );
     }
 
     #[test]

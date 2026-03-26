@@ -160,7 +160,6 @@ fn is_virtual_machine(model: &str, manufacturer: &str) -> bool {
 fn check_nested_virt() -> Vec<String> {
     use crate::binary;
 
-    let timeout = std::time::Duration::from_secs(10);
     let mut cmd = binary::system_command("powershell.exe");
     cmd.args([
         "-NoProfile",
@@ -170,18 +169,18 @@ fn check_nested_virt() -> Vec<String> {
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
 
+    // No explicit timeout — cmd.output() blocks until PowerShell exits.
+    // PowerShell startup is ~2-3s; the Get-CimInstance query is fast.
+    // If WMI hangs, the warning is skipped (fail-open) on the next startup.
     let output = match cmd.output() {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         Ok(_) | Err(_) => return Vec::new(), // Fail open
     };
 
-    // Check if the command completed within a reasonable time would require
-    // run_with_timeout, but we use simple output() here since the command
-    // is lightweight. PowerShell startup is the main cost (~2-3s).
     match parse_vm_info(&output) {
         Some((model, manufacturer)) if is_virtual_machine(&model, &manufacturer) => {
             vec![format!(
-                "Windows is running inside a virtual machine ({model}).\n{}",
+                "Nested virtualization detected — running inside {model}.\n{}",
                 crate::consts::NESTED_VIRT_WARNING_MSG
             )]
         }
@@ -383,9 +382,8 @@ mod tests {
             "NESTED_VIRT_WARNING_MSG should mention memory"
         );
         assert!(
-            consts::NESTED_VIRT_WARNING_MSG.contains("nested virtualization")
-                || consts::NESTED_VIRT_WARNING_MSG.contains("Nested virtualization"),
-            "NESTED_VIRT_WARNING_MSG should mention nested virtualization"
+            consts::NESTED_VIRT_WARNING_MSG.contains("Hyper-V"),
+            "NESTED_VIRT_WARNING_MSG should mention Hyper-V"
         );
     }
 

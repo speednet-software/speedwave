@@ -109,8 +109,7 @@ pub const WSL_NOT_AVAILABLE_MSG: &str = "Enable required Windows features:\n\n\
 
 /// Non-blocking warning when nested virtualization is detected (e.g. WSL2 inside VMware).
 /// Used by `os_prereqs::check_os_warnings()`.
-pub const NESTED_VIRT_WARNING_MSG: &str = "Nested virtualization detected — \
-    Windows is running inside a virtual machine.\n\
+pub const NESTED_VIRT_WARNING_MSG: &str = "\
     WSL2 uses Hyper-V, which may have degraded I/O performance in nested environments.\n\
     Image builds may be slower or fail.\n\n\
     If builds fail, try:\n\
