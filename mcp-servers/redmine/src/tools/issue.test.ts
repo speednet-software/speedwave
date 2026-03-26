@@ -248,6 +248,21 @@ describe('issue-tools', () => {
       expect(mockClient.listIssues).toHaveBeenCalledWith({ assigned_to_id: 42 });
     });
 
+    it('skips resolution when both assigned_to and assigned_to_id are provided', async () => {
+      mockClient.listIssues.mockResolvedValue({ issues: [{ id: 1 }], total_count: 1 });
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueIds')?.handler;
+
+      await handler!({ assigned_to: 'john.doe', assigned_to_id: 42 });
+
+      expect(mockClient.resolveUser).not.toHaveBeenCalled();
+      expect(mockClient.listIssues).toHaveBeenCalledWith({
+        assigned_to: 'john.doe',
+        assigned_to_id: 42,
+      });
+    });
+
     it('resolves assigned_to numeric string to assigned_to_id', async () => {
       mockClient.listIssues.mockResolvedValue({ issues: [{ id: 1 }], total_count: 1 });
       mockClient.resolveUser.mockResolvedValue(123);
