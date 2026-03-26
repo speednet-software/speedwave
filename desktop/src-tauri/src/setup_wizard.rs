@@ -1147,7 +1147,10 @@ pub fn build_images() -> anyhow::Result<()> {
 
 pub fn start_containers(project: &str) -> anyhow::Result<()> {
     let rt = runtime::detect_runtime();
+
+    log::info!("ensuring runtime is ready");
     rt.ensure_ready()?;
+    log::info!("runtime ready, rendering compose");
 
     // Re-render compose.yml before every start. Dynamic config (mcp-os token,
     // auth keys, addons) may have changed since create_project() first rendered it.
@@ -1180,7 +1183,10 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     }
 
     compose::save_compose(project, &yaml)?;
+
+    log::info!("starting containers via compose_up_recreate");
     rt.compose_up_recreate(project)?;
+    log::info!("containers started, verifying health");
 
     // Verify containers are actually functional before marking as started.
     // Only probes the claude container — MCP workers are health-checked

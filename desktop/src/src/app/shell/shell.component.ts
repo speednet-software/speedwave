@@ -69,6 +69,9 @@ import { ProjectStateService } from '../services/project-state.service';
         } @else {
           <div
             class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-sw-bg-darkest/[0.92]"
+            role="alertdialog"
+            aria-modal="true"
+            [attr.aria-label]="statusMessage"
             data-testid="blocking-overlay"
           >
             <div

@@ -548,6 +548,13 @@ fn main() -> anyhow::Result<()> {
     if action == CliAction::Check {
         let security_violations =
             SecurityCheck::run(&compose_yml, &project_name, &manifests, &expected_paths);
+
+        // Non-blocking warnings (e.g. nested virtualization) — printed in both OK and FAILED paths
+        let os_warnings = speedwave_runtime::os_prereqs::check_os_warnings();
+        for w in &os_warnings {
+            eprintln!("  WARNING: {w}\n");
+        }
+
         if prereq_violations.is_empty() && security_violations.is_empty() {
             println!("speedwave check OK -- all system checks passed");
             std::process::exit(0);
@@ -1206,6 +1213,19 @@ mod tests {
         assert!(
             gate_body.contains("prereq_violations.is_empty()"),
             "pre-compose gate must check prereq_violations"
+        );
+    }
+
+    #[test]
+    fn test_cli_check_calls_check_os_warnings() {
+        let source = include_str!("main.rs");
+        let check_start = source
+            .find("if action == CliAction::Check")
+            .expect("CliAction::Check handler must exist in main.rs");
+        let check_body = &source[check_start..];
+        assert!(
+            check_body.contains("check_os_warnings"),
+            "CliAction::Check handler must call check_os_warnings()"
         );
     }
 
