@@ -53,11 +53,7 @@ Only after completing ALL reads above, begin analysis.
 
 ## The Plan to Analyze
 
-<plan>
-
-$ARGUMENTS
-
-</plan>
+Read the plan file at path `$ARGUMENTS` using the Read tool. If the file does not exist, use AskUserQuestion to ask for the correct path. Analyze the full content of that file below.
 
 ## Verification Axes
 
