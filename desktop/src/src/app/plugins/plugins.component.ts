@@ -24,6 +24,18 @@ import { open } from '@tauri-apps/plugin-dialog';
   imports: [CommonModule, PluginCardComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
+    @if (installing) {
+      <div
+        class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-sw-bg-darkest/[0.92]"
+        data-testid="plugins-install-overlay"
+      >
+        <div
+          class="w-8 h-8 border-[3px] border-sw-border-dark border-t-sw-accent rounded-full animate-sw-spin"
+        ></div>
+        <p class="mt-4 font-mono text-sm text-sw-text">Installing plugin…</p>
+      </div>
+    }
+
     @if (needsRestart) {
       <div
         class="bg-sw-accent text-white px-5 py-3 rounded-lg flex justify-between items-center mb-5"
