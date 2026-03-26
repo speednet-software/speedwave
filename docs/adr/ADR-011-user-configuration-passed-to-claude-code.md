@@ -92,7 +92,7 @@ The `ClaudeOverrides` struct accepts a `settings: Option<serde_json::Value>` fie
 
 Three-level merge with last-writer-wins per key:
 
-1. **Defaults** (`speedwave-runtime/src/defaults.rs`) — `ANTHROPIC_MODEL=claude-sonnet-4-6`[^3], telemetry disabled, autoupdater disabled
+1. **Defaults** (`speedwave-runtime/src/defaults.rs`) — telemetry disabled, autoupdater disabled, sandbox flag enabled[^3]
 2. **Repo config** (`.speedwave.json` in project root) — shared across team members via git
 3. **User config** (`~/.speedwave/config.json`) — personal overrides, highest priority
 
@@ -109,6 +109,6 @@ Resolution logic: `resolve_claude_config()` in `crates/speedwave-runtime/src/con
 
 [^2]: `serde_json::Value` allows arbitrary JSON — see [serde_json::Value docs](https://docs.rs/serde_json/latest/serde_json/enum.Value.html)
 
-[^3]: Anthropic model identifiers — `claude-sonnet-4-6` is the default model set by `defaults::base_env()`
+[^3]: As of fix #301, `ANTHROPIC_MODEL` is no longer set by `defaults::base_env()`. Users who want a specific model set it explicitly via `claude.env.ANTHROPIC_MODEL` in `.speedwave.json` or `~/.speedwave/config.json`.
 
 [^4]: Config merge implementation — `crates/speedwave-runtime/src/config.rs:55-86`

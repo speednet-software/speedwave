@@ -56,7 +56,7 @@ A `.speedwave.json` file in the project repository root provides repo-level defa
 
 Environment variables defined in `claude.env` are passed directly to Claude Code inside the container:
 
-- `ANTHROPIC_MODEL` — override the default Claude model
+- `ANTHROPIC_MODEL` — set a specific Claude model (not set by default — Claude Code uses its own model selection)
 - Custom variables can be used by MCP servers or Claude Code configuration
 - Variables are injected at container start via the compose template
 

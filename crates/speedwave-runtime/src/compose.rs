@@ -1929,7 +1929,6 @@ services:
       - /home/user/.speedwave/claude-resources:/speedwave/resources:ro
     environment:
       - CLAUDE_VERSION=1.0.3
-      - ANTHROPIC_MODEL=claude-sonnet-4-6
       - DISABLE_AUTOUPDATER=1
     networks:
       - speedwave_test_network
@@ -4792,7 +4791,6 @@ services:
       - /home/user/.speedwave/claude-resources:/speedwave/resources:ro
     environment:
       - CLAUDE_VERSION=1.0.3
-      - ANTHROPIC_MODEL=claude-sonnet-4-6
       - DISABLE_AUTOUPDATER=1
     networks:
       - speedwave_test_network
