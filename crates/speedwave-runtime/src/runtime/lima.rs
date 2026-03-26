@@ -583,9 +583,8 @@ impl ContainerRuntime for LimaRuntime {
                     .run_with_timeout("limactl", &["start", vm], timeout)
                     .map_err(|e| {
                         anyhow::anyhow!(
-                            "Failed to start Lima VM '{vm}' within {}s: {e}. \
+                            "Failed to start Lima VM '{vm}': {e}. \
                              Please restart Speedwave or check system resources.",
-                            timeout.as_secs(),
                         )
                     })?;
                 log::info!("Lima VM '{}' started successfully", vm);

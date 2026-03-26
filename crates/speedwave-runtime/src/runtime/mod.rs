@@ -105,7 +105,13 @@ pub trait CommandRunner: Send + Sync {
     }
 
     /// Like `run`, but kills the process if it exceeds `timeout`.
-    /// Returns only success/failure (does not capture stdout/stderr).
+    ///
+    /// Captures stderr so that failure diagnostics (e.g. from `limactl start`)
+    /// appear in the Tauri log, not just in the parent's terminal streams.
+    /// Stdout is inherited (goes to parent streams). Stderr is read after the
+    /// process exits — safe because the pipe buffer (64 KB) is more than enough
+    /// for diagnostic output from lifecycle commands.
+    ///
     /// Suitable for long-running lifecycle commands like `limactl start`.
     fn run_with_timeout(
         &self,
@@ -115,11 +121,53 @@ pub trait CommandRunner: Send + Sync {
     ) -> anyhow::Result<()> {
         let mut command = binary::command(cmd);
         command.args(args);
-        let status = binary::run_with_timeout(&mut command, timeout)?;
-        if status.success() {
-            Ok(())
-        } else {
-            anyhow::bail!("{} failed with exit code {:?}", cmd, status.code());
+        command.stderr(std::process::Stdio::piped());
+
+        let program = command.get_program().to_string_lossy().to_string();
+        let mut child = command.spawn()?;
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait()? {
+                Some(status) => {
+                    if status.success() {
+                        return Ok(());
+                    }
+                    let stderr = child
+                        .stderr
+                        .take()
+                        .map(|mut s| {
+                            let mut buf = String::new();
+                            std::io::Read::read_to_string(&mut s, &mut buf).ok();
+                            buf
+                        })
+                        .unwrap_or_default();
+                    let detail = stderr.trim();
+                    if detail.is_empty() {
+                        anyhow::bail!("{} failed with exit code {:?}", program, status.code());
+                    } else {
+                        anyhow::bail!(
+                            "{} failed with exit code {:?}: {}",
+                            program,
+                            status.code(),
+                            detail
+                        );
+                    }
+                }
+                None => {
+                    if start.elapsed() >= timeout {
+                        if let Err(e) = child.kill() {
+                            log::warn!("run_with_timeout: kill failed: {e}");
+                        }
+                        let _ = child.wait();
+                        anyhow::bail!(
+                            "command '{}' timed out after {}s",
+                            program,
+                            timeout.as_secs()
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
         }
     }
 }
@@ -1300,6 +1348,24 @@ services:
         assert!(
             err_msg.contains("failed with exit code"),
             "error should mention exit code, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_with_timeout_captures_stderr() {
+        let runner = RealRunner;
+        // `sh -c 'echo diagnostic >&2; exit 1'` writes to stderr then fails
+        let result = runner.run_with_timeout(
+            "sh",
+            &["-c", "echo diagnostic >&2; exit 1"],
+            std::time::Duration::from_secs(5),
+        );
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("diagnostic"),
+            "error should include stderr output, got: {err_msg}"
         );
     }
 
