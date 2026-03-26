@@ -16,6 +16,17 @@ Git hooks exist to catch problems early. If a hook fails, **fix the underlying i
 
 **Every piece of code must be covered by tests.** All functions, methods, branches, and error paths must have corresponding test cases. When writing or modifying code, always write or update tests in the same commit. Never leave code untested — if it's worth writing, it's worth testing.
 
+### Required test coverage categories
+
+Every new or modified function must have tests covering **all four categories** where applicable:
+
+1. **Happy path** — expected inputs produce expected outputs. The basic "it works" case.
+2. **Edge cases** — boundary values, empty inputs, `null`/`undefined`/`None`, zero-length collections, maximum values, single-element collections, off-by-one boundaries, Unicode/special characters in strings.
+3. **Error paths** — invalid inputs, malformed data, network failures, permission errors, timeouts, missing files, disk full, concurrent access violations. Verify that errors are reported correctly (right error type, message, status code) — not just that "it doesn't crash."
+4. **State transitions** — when the function mutates state, test the before/after invariants. For concurrent code, test race conditions and ordering guarantees where applicable.
+
+If a category does not apply (e.g., a pure function has no state transitions), skip it — but document **why** in a brief test comment if it's not obvious.
+
 **NEVER skip tests to work around failures.**
 
 - Do not use `.skip`, `xit`, `xdescribe`, or rename files to `.skip`

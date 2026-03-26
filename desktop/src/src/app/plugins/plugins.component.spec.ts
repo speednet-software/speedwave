@@ -357,6 +357,59 @@ describe('PluginsComponent', () => {
     });
   });
 
+  describe('install overlay', () => {
+    it('shows overlay during installPlugin() and hides after completion', async () => {
+      await component.ngOnInit();
+      vi.mocked(open).mockResolvedValue('/tmp/plugin.zip');
+
+      let resolveFn!: (value: string) => void;
+      mockTauri.invokeHandler = (cmd: string) => {
+        if (cmd === 'install_plugin') {
+          return new Promise<string>((resolve) => {
+            resolveFn = resolve;
+          });
+        }
+        if (cmd === 'get_plugins') return Promise.resolve(cloneMockPlugins());
+        if (cmd === 'list_projects')
+          return Promise.resolve({
+            projects: [{ name: 'test-project', dir: '/tmp/test' }],
+            active_project: 'test-project',
+          });
+        return Promise.resolve(undefined);
+      };
+
+      const promise = component.installPlugin();
+      // Flush microtask for open() to resolve, which sets installing=true
+      await new Promise((r) => setTimeout(r, 0));
+      fixture.detectChanges();
+
+      const overlay = fixture.nativeElement.querySelector(
+        '[data-testid="plugins-install-overlay"]'
+      );
+      expect(overlay).not.toBeNull();
+      expect(overlay.textContent).toContain('Installing plugin');
+
+      resolveFn('Plugin installed');
+      await promise;
+      fixture.detectChanges();
+
+      const overlayAfter = fixture.nativeElement.querySelector(
+        '[data-testid="plugins-install-overlay"]'
+      );
+      expect(overlayAfter).toBeNull();
+    });
+
+    it('does not show overlay when not installing', async () => {
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const overlay = fixture.nativeElement.querySelector(
+        '[data-testid="plugins-install-overlay"]'
+      );
+      expect(overlay).toBeNull();
+    });
+  });
+
   describe('restartContainers()', () => {
     it('invokes restart_integration_containers and clears needsRestart', async () => {
       await component.ngOnInit();
