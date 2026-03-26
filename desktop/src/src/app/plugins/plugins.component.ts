@@ -27,6 +27,9 @@ import { open } from '@tauri-apps/plugin-dialog';
     @if (installing) {
       <div
         class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-sw-bg-darkest/[0.92]"
+        role="alertdialog"
+        aria-modal="true"
+        aria-label="Installing plugin"
         data-testid="plugins-install-overlay"
       >
         <div
