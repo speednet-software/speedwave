@@ -14,6 +14,17 @@ Speedwave connects Claude Code with external services through MCP (Model Context
 
 OS sub-integrations (Reminders, Calendar, Mail, Notes) run via mcp-os on the host — they access native APIs directly (EventKit on macOS, CalDAV/zbus on Linux, WinRT/MAPI on Windows).
 
+### Credential Requirements
+
+Each MCP integration requires specific credentials to function. Fields marked as optional do not block the "Configured" status — the integration works without them.
+
+| Integration | Required Fields                                                 | Optional Fields                                                      |
+| ----------- | --------------------------------------------------------------- | -------------------------------------------------------------------- |
+| Slack       | `bot_token`, `user_token`                                       | —                                                                    |
+| SharePoint  | `client_id`, `tenant_id`, `site_id`, `base_path` + OAuth tokens | —                                                                    |
+| GitLab      | `token`, `host_url`                                             | —                                                                    |
+| Redmine     | `api_key`, `host_url`                                           | `project_id`, `project_name` (scope operations to a default project) |
+
 ## MCP Hub Architecture
 
 The MCP Hub (`speedwave_<project>_mcp_hub`, port 4000) is the **only** MCP server Claude sees:

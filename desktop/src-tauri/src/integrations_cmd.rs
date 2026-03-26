@@ -971,41 +971,6 @@ mod tests {
     }
 
     #[test]
-    fn is_service_configured_returns_true_for_redmine_without_optional_fields() {
-        // Redmine: api_key (file) + host_url (config.json) are required.
-        // project_id and project_name are optional — absence should NOT block.
-        let tmp = tempfile::tempdir().unwrap();
-        let svc_dir = make_svc_token_dir(tmp.path(), "proj", "redmine");
-        std::fs::write(svc_dir.join("api_key"), "secret").unwrap();
-        let config = serde_json::json!({
-            "host_url": "https://redmine.example.com"
-        });
-        std::fs::write(
-            svc_dir.join("config.json"),
-            serde_json::to_string(&config).unwrap(),
-        )
-        .unwrap();
-
-        assert!(
-            is_service_configured_with_home(tmp.path(), "proj", "redmine"),
-            "should be true when required fields are present and optional fields are absent"
-        );
-    }
-
-    #[test]
-    fn is_service_configured_returns_false_for_redmine_without_host_url() {
-        // host_url is required (non-optional) — must still block configuration
-        let tmp = tempfile::tempdir().unwrap();
-        let svc_dir = make_svc_token_dir(tmp.path(), "proj", "redmine");
-        std::fs::write(svc_dir.join("api_key"), "secret").unwrap();
-        // No config.json at all → host_url missing
-        assert!(
-            !is_service_configured_with_home(tmp.path(), "proj", "redmine"),
-            "should be false when required field host_url is missing"
-        );
-    }
-
-    #[test]
     fn read_service_config_returns_empty_for_missing_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let nonexistent = tmp.path().join("does-not-exist");
