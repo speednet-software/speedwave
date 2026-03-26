@@ -101,6 +101,94 @@ fn check_uidmap() -> Vec<PrereqViolation> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Non-blocking OS warnings (separate from blocking prereqs)
+// ---------------------------------------------------------------------------
+
+/// Returns non-blocking OS warnings (e.g. nested virtualization detected).
+/// Separate from `check_os_prereqs()` which returns blocking errors.
+///
+/// Warnings are logged by callers — they do not block container operations.
+pub fn check_os_warnings() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        check_nested_virt()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Vec::new()
+    }
+}
+
+/// Parses JSON output from `Get-CimInstance Win32_ComputerSystem` and extracts
+/// the `Model` and `Manufacturer` fields.
+///
+/// Returns `None` for malformed, missing, or non-string fields.
+#[cfg(any(target_os = "windows", test))]
+fn parse_vm_info(json: &str) -> Option<(String, String)> {
+    let val: serde_json::Value = serde_json::from_str(json).ok()?;
+    let model = val.get("Model")?.as_str()?.to_string();
+    let manufacturer = val.get("Manufacturer")?.as_str()?.to_string();
+    if model.is_empty() && manufacturer.is_empty() {
+        return None;
+    }
+    Some((model, manufacturer))
+}
+
+/// Returns `true` if the WMI Model/Manufacturer strings indicate a virtual machine.
+///
+/// Case-insensitive matching. Checks both fields to catch all major hypervisors:
+/// - VMware: model contains "vmware"
+/// - VirtualBox: model contains "virtualbox" OR manufacturer contains "innotek"
+/// - Hyper-V: model contains "virtual machine" AND manufacturer contains "microsoft"
+///   (requires both to avoid false positives on Microsoft Surface hardware)
+/// - QEMU/KVM: manufacturer contains "qemu" (model is generic, e.g. "Standard PC")
+#[cfg(any(target_os = "windows", test))]
+fn is_virtual_machine(model: &str, manufacturer: &str) -> bool {
+    let model_lower = model.to_ascii_lowercase();
+    let mfr_lower = manufacturer.to_ascii_lowercase();
+
+    model_lower.contains("vmware")
+        || model_lower.contains("virtualbox")
+        || (model_lower.contains("virtual machine") && mfr_lower.contains("microsoft"))
+        || mfr_lower.contains("qemu")
+        || mfr_lower.contains("innotek")
+}
+
+#[cfg(target_os = "windows")]
+fn check_nested_virt() -> Vec<String> {
+    use crate::binary;
+
+    let timeout = std::time::Duration::from_secs(10);
+    let mut cmd = binary::system_command("powershell.exe");
+    cmd.args([
+        "-NoProfile",
+        "-Command",
+        "(Get-CimInstance Win32_ComputerSystem | Select-Object -Property Model,Manufacturer | ConvertTo-Json)",
+    ]);
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+
+    let output = match cmd.output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Ok(_) | Err(_) => return Vec::new(), // Fail open
+    };
+
+    // Check if the command completed within a reasonable time would require
+    // run_with_timeout, but we use simple output() here since the command
+    // is lightweight. PowerShell startup is the main cost (~2-3s).
+    match parse_vm_info(&output) {
+        Some((model, manufacturer)) if is_virtual_machine(&model, &manufacturer) => {
+            vec![format!(
+                "Windows is running inside a virtual machine ({model}).\n{}",
+                crate::consts::NESTED_VIRT_WARNING_MSG
+            )]
+        }
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +253,154 @@ mod tests {
             consts::UIDMAP_MISSING_MSG.contains("uidmap"),
             "UIDMAP_MISSING_MSG should contain uidmap install instructions"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_vm_info() tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_vm_info_valid_json() {
+        let json = r#"{"Model":"VMware Virtual Platform","Manufacturer":"VMware, Inc."}"#;
+        let result = parse_vm_info(json);
+        assert_eq!(
+            result,
+            Some(("VMware Virtual Platform".into(), "VMware, Inc.".into()))
+        );
+    }
+
+    #[test]
+    fn test_parse_vm_info_empty_json() {
+        assert_eq!(parse_vm_info("{}"), None);
+    }
+
+    #[test]
+    fn test_parse_vm_info_missing_model() {
+        let json = r#"{"Manufacturer":"HP"}"#;
+        assert_eq!(parse_vm_info(json), None);
+    }
+
+    #[test]
+    fn test_parse_vm_info_missing_manufacturer() {
+        let json = r#"{"Model":"HP ProLiant"}"#;
+        assert_eq!(parse_vm_info(json), None);
+    }
+
+    #[test]
+    fn test_parse_vm_info_malformed() {
+        assert_eq!(parse_vm_info("not json at all"), None);
+    }
+
+    #[test]
+    fn test_parse_vm_info_empty_string() {
+        assert_eq!(parse_vm_info(""), None);
+    }
+
+    #[test]
+    fn test_parse_vm_info_powershell_error() {
+        assert_eq!(parse_vm_info("Get-CimInstance : Access is denied"), None);
+    }
+
+    #[test]
+    fn test_parse_vm_info_null_fields() {
+        let json = r#"{"Model":null,"Manufacturer":null}"#;
+        assert_eq!(parse_vm_info(json), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // is_virtual_machine() tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_vm_vmware_model() {
+        assert!(is_virtual_machine("VMware Virtual Platform", ""));
+    }
+
+    #[test]
+    fn test_is_vm_vmware7_model() {
+        assert!(is_virtual_machine("VMware7,1", ""));
+    }
+
+    #[test]
+    fn test_is_vm_virtualbox_model() {
+        assert!(is_virtual_machine("VirtualBox", ""));
+    }
+
+    #[test]
+    fn test_is_vm_virtualbox_manufacturer() {
+        assert!(is_virtual_machine("", "innotek GmbH"));
+    }
+
+    #[test]
+    fn test_is_vm_hyperv() {
+        assert!(is_virtual_machine(
+            "Virtual Machine",
+            "Microsoft Corporation"
+        ));
+    }
+
+    #[test]
+    fn test_is_vm_qemu_manufacturer() {
+        assert!(is_virtual_machine("Standard PC (Q35 + ICH9, 2009)", "QEMU"));
+    }
+
+    #[test]
+    fn test_is_vm_bare_metal_hp() {
+        assert!(!is_virtual_machine("HP ProLiant DL380 Gen10", "HP"));
+    }
+
+    #[test]
+    fn test_is_vm_bare_metal_dell() {
+        assert!(!is_virtual_machine("PowerEdge R640", "Dell Inc."));
+    }
+
+    #[test]
+    fn test_is_vm_microsoft_surface() {
+        assert!(!is_virtual_machine(
+            "Surface Pro 9",
+            "Microsoft Corporation"
+        ));
+    }
+
+    #[test]
+    fn test_is_vm_empty_strings() {
+        assert!(!is_virtual_machine("", ""));
+    }
+
+    #[test]
+    fn test_is_vm_case_insensitive() {
+        assert!(is_virtual_machine("vmware virtual platform", ""));
+    }
+
+    // -----------------------------------------------------------------------
+    // check_os_warnings() and NESTED_VIRT_WARNING_MSG tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_nested_virt_warning_msg_contains_remediation() {
+        assert!(
+            consts::NESTED_VIRT_WARNING_MSG.contains("memory"),
+            "NESTED_VIRT_WARNING_MSG should mention memory"
+        );
+        assert!(
+            consts::NESTED_VIRT_WARNING_MSG.contains("nested virtualization")
+                || consts::NESTED_VIRT_WARNING_MSG.contains("Nested virtualization"),
+            "NESTED_VIRT_WARNING_MSG should mention nested virtualization"
+        );
+    }
+
+    #[test]
+    fn test_check_os_warnings_returns_empty_on_non_windows() {
+        // On macOS/Linux (dev/CI), check_os_warnings() returns empty Vec
+        // because check_nested_virt() is #[cfg(target_os = "windows")] only.
+        #[cfg(not(target_os = "windows"))]
+        {
+            let warnings = check_os_warnings();
+            assert!(
+                warnings.is_empty(),
+                "check_os_warnings() should return empty on non-Windows, got: {:?}",
+                warnings
+            );
+        }
     }
 }
