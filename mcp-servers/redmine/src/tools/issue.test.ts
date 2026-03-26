@@ -164,6 +164,152 @@ describe('issue-tools', () => {
         ],
       });
     });
+
+    it('resolves assigned_to "me" to assigned_to_id', async () => {
+      mockClient.listIssues.mockResolvedValue({ issues: [{ id: 1 }], total_count: 1 });
+      mockClient.resolveUser.mockResolvedValue(496);
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueIds')?.handler;
+
+      await handler!({ assigned_to: 'me' });
+
+      expect(mockClient.resolveUser).toHaveBeenCalledWith('me');
+      expect(mockClient.listIssues).toHaveBeenCalledWith({ assigned_to_id: 496 });
+    });
+
+    it('resolves assigned_to username to assigned_to_id', async () => {
+      mockClient.listIssues.mockResolvedValue({ issues: [{ id: 1 }], total_count: 1 });
+      mockClient.resolveUser.mockResolvedValue(42);
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueIds')?.handler;
+
+      await handler!({ assigned_to: 'john.doe' });
+
+      expect(mockClient.resolveUser).toHaveBeenCalledWith('john.doe');
+      expect(mockClient.listIssues).toHaveBeenCalledWith({ assigned_to_id: 42 });
+    });
+
+    it('resolves assigned_to with special status open', async () => {
+      mockClient.listIssues.mockResolvedValue({ issues: [], total_count: 0 });
+      mockClient.resolveUser.mockResolvedValue(496);
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueIds')?.handler;
+
+      await handler!({ status: 'open', assigned_to: 'me' });
+
+      expect(mockClient.resolveUser).toHaveBeenCalledWith('me');
+      expect(mockClient.listIssues).toHaveBeenCalledWith({
+        status_id: 'open',
+        assigned_to_id: 496,
+      });
+    });
+
+    it('resolves assigned_to with non-special status', async () => {
+      mockClient.listIssues.mockResolvedValue({ issues: [], total_count: 0 });
+      mockClient.resolveUser.mockResolvedValue(496);
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueIds')?.handler;
+
+      await handler!({ status: 'new', assigned_to: 'me' });
+
+      expect(mockClient.resolveUser).toHaveBeenCalledWith('me');
+      expect(mockClient.listIssues).toHaveBeenCalledWith({
+        status_id: 1,
+        assigned_to_id: 496,
+      });
+    });
+
+    it('skips resolution when resolveUser returns null', async () => {
+      mockClient.listIssues.mockResolvedValue({ issues: [], total_count: 0 });
+      mockClient.resolveUser.mockResolvedValue(null);
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueIds')?.handler;
+
+      await handler!({ assigned_to: 'nonexistent' });
+
+      expect(mockClient.resolveUser).toHaveBeenCalledWith('nonexistent');
+      expect(mockClient.listIssues).toHaveBeenCalledWith({});
+    });
+
+    it('preserves assigned_to_id when already provided', async () => {
+      mockClient.listIssues.mockResolvedValue({ issues: [{ id: 1 }], total_count: 1 });
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueIds')?.handler;
+
+      await handler!({ assigned_to_id: 42 });
+
+      expect(mockClient.resolveUser).not.toHaveBeenCalled();
+      expect(mockClient.listIssues).toHaveBeenCalledWith({ assigned_to_id: 42 });
+    });
+
+    it('resolves assigned_to numeric string to assigned_to_id', async () => {
+      mockClient.listIssues.mockResolvedValue({ issues: [{ id: 1 }], total_count: 1 });
+      mockClient.resolveUser.mockResolvedValue(123);
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueIds')?.handler;
+
+      await handler!({ assigned_to: '123' });
+
+      expect(mockClient.resolveUser).toHaveBeenCalledWith('123');
+      expect(mockClient.listIssues).toHaveBeenCalledWith({ assigned_to_id: 123 });
+    });
+
+    it('skips resolution when assigned_to is empty string', async () => {
+      mockClient.listIssues.mockResolvedValue({ issues: [], total_count: 0 });
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueIds')?.handler;
+
+      await handler!({ assigned_to: '' });
+
+      expect(mockClient.resolveUser).not.toHaveBeenCalled();
+      expect(mockClient.listIssues).toHaveBeenCalledWith({ assigned_to: '' });
+    });
+
+    it('skips resolution when assigned_to is null', async () => {
+      mockClient.listIssues.mockResolvedValue({ issues: [], total_count: 0 });
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueIds')?.handler;
+
+      await handler!({ assigned_to: null });
+
+      expect(mockClient.resolveUser).not.toHaveBeenCalled();
+      expect(mockClient.listIssues).toHaveBeenCalledWith({ assigned_to: null });
+    });
+
+    it('skips resolution when assigned_to is undefined', async () => {
+      mockClient.listIssues.mockResolvedValue({ issues: [], total_count: 0 });
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueIds')?.handler;
+
+      await handler!({ assigned_to: undefined });
+
+      expect(mockClient.resolveUser).not.toHaveBeenCalled();
+      expect(mockClient.listIssues).toHaveBeenCalledWith({});
+    });
+
+    it('handles resolveUser error gracefully', async () => {
+      mockClient.resolveUser.mockRejectedValue(new Error('User API error'));
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueIds')?.handler;
+
+      const result = await handler!({ assigned_to: 'me' });
+
+      expect(result).toEqual({
+        content: [{ type: 'text', text: 'Error: User API error' }],
+        isError: true,
+      });
+    });
   });
 
   describe('getIssueFull', () => {
