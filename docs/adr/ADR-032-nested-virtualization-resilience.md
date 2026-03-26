@@ -25,7 +25,7 @@ We apply a three-layer resilience strategy:
 
 `build_all_images_for_bundle()` in `build.rs` already retries on containerd snapshotter corruption errors. We extend this with a second retry path for transient I/O errors (case-insensitive matching):
 
-- `"i/o timeout"`, `"input/output error"`, `"connection reset"`, `"temporary failure"`, `"resource temporarily unavailable"`, `"cannot allocate memory"`
+- `"i/o timeout"`, `"input/output error"`, `"connection reset"`, `"temporary failure"`, `"resource temporarily unavailable"`
 
 If the first build attempt fails with a transient error, it retries once without any recovery action (the error is often a one-off I/O hiccup). If the retry also fails, the error is enriched with VM-specific troubleshooting guidance.
 
