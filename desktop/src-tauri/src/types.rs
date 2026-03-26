@@ -51,6 +51,7 @@ pub(crate) struct AuthField {
     pub(crate) field_type: String,
     pub(crate) placeholder: String,
     pub(crate) oauth_flow: bool,
+    pub(crate) optional: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -105,6 +106,7 @@ pub(crate) fn get_auth_fields(service: &str) -> Vec<AuthField> {
                     field_type: f.field_type.to_string(),
                     placeholder: f.placeholder.to_string(),
                     oauth_flow: f.oauth_flow,
+                    optional: f.optional,
                 })
                 .collect()
         })
@@ -279,6 +281,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn get_auth_fields_includes_optional() {
+        let fields = get_auth_fields("redmine");
+        let project_id = fields.iter().find(|f| f.key == "project_id").unwrap();
+        assert!(project_id.optional, "project_id must have optional=true");
+        let project_name = fields.iter().find(|f| f.key == "project_name").unwrap();
+        assert!(
+            project_name.optional,
+            "project_name must have optional=true"
+        );
+        let api_key = fields.iter().find(|f| f.key == "api_key").unwrap();
+        assert!(!api_key.optional, "api_key must have optional=false");
     }
 
     #[test]

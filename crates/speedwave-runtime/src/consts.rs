@@ -107,6 +107,16 @@ pub const WSL_NOT_AVAILABLE_MSG: &str = "Enable required Windows features:\n\n\
        - Check 'Virtual Machine Platform'\n\n\
     Then restart your computer and run Speedwave again.";
 
+/// Non-blocking warning when nested virtualization is detected (e.g. WSL2 inside VMware).
+/// Used by `os_prereqs::check_os_warnings()`.
+pub const NESTED_VIRT_WARNING_MSG: &str = "\
+    WSL2 uses Hyper-V, which may have degraded I/O performance in nested environments.\n\
+    Image builds may be slower or fail.\n\n\
+    If builds fail, try:\n\
+    - Increase VM memory to at least 8 GB\n\
+    - Enable nested virtualization in VM settings (VT-x/EPT or AMD-V/RVI)\n\
+    - Close other memory-intensive applications";
+
 /// Error prefix used by backend when SecurityCheck or OS prereqs fail.
 /// Frontend matches on this string to distinguish blocking (check_failed)
 /// from dismissable (error) failures.
@@ -166,6 +176,10 @@ pub struct McpAuthFieldDescriptor {
     /// Fields with `oauth_flow: true` are hidden from the credential form and
     /// populated automatically by the Device Code Flow.
     pub oauth_flow: bool,
+    /// Whether this field is optional for service configuration.
+    /// Optional fields are shown in the UI but do not block the
+    /// "Configured" status when left empty.
+    pub optional: bool,
 }
 
 /// OAuth scopes requested during the SharePoint Device Code Flow.
@@ -210,6 +224,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 is_secret: true,
                 stored_in_config_json: false,
                 oauth_flow: false,
+                optional: false,
             },
             McpAuthFieldDescriptor {
                 key: "user_token",
@@ -219,6 +234,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 is_secret: true,
                 stored_in_config_json: false,
                 oauth_flow: false,
+                optional: false,
             },
         ],
         credential_files: &["bot_token", "user_token"],
@@ -238,6 +254,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 is_secret: true,
                 stored_in_config_json: false,
                 oauth_flow: true,
+                optional: false,
             },
             McpAuthFieldDescriptor {
                 key: "refresh_token",
@@ -247,6 +264,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 is_secret: true,
                 stored_in_config_json: false,
                 oauth_flow: true,
+                optional: false,
             },
             McpAuthFieldDescriptor {
                 key: "client_id",
@@ -256,6 +274,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 is_secret: false,
                 stored_in_config_json: false,
                 oauth_flow: false,
+                optional: false,
             },
             McpAuthFieldDescriptor {
                 key: "tenant_id",
@@ -265,6 +284,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 is_secret: false,
                 stored_in_config_json: false,
                 oauth_flow: false,
+                optional: false,
             },
             McpAuthFieldDescriptor {
                 key: "site_id",
@@ -274,6 +294,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 is_secret: false,
                 stored_in_config_json: false,
                 oauth_flow: false,
+                optional: false,
             },
             McpAuthFieldDescriptor {
                 key: "base_path",
@@ -283,6 +304,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 is_secret: false,
                 stored_in_config_json: false,
                 oauth_flow: false,
+                optional: false,
             },
         ],
         credential_files: &[
@@ -309,6 +331,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 is_secret: true,
                 stored_in_config_json: false,
                 oauth_flow: false,
+                optional: false,
             },
             McpAuthFieldDescriptor {
                 key: "host_url",
@@ -318,6 +341,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 is_secret: false,
                 stored_in_config_json: true,
                 oauth_flow: false,
+                optional: false,
             },
             McpAuthFieldDescriptor {
                 key: "project_id",
@@ -327,6 +351,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 is_secret: false,
                 stored_in_config_json: true,
                 oauth_flow: false,
+                optional: true,
             },
             McpAuthFieldDescriptor {
                 key: "project_name",
@@ -336,6 +361,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 is_secret: false,
                 stored_in_config_json: true,
                 oauth_flow: false,
+                optional: true,
             },
         ],
         credential_files: &[
@@ -361,6 +387,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 is_secret: true,
                 stored_in_config_json: false,
                 oauth_flow: false,
+                optional: false,
             },
             McpAuthFieldDescriptor {
                 key: "host_url",
@@ -370,6 +397,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 is_secret: false,
                 stored_in_config_json: false,
                 oauth_flow: false,
+                optional: false,
             },
         ],
         credential_files: &["token", "host_url"],
@@ -847,6 +875,36 @@ mod tests {
                 assert!(
                     !field.oauth_flow,
                     "field '{}' in service '{}' should not have oauth_flow=true",
+                    field.key, svc.config_key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_optional_only_on_redmine_project_fields() {
+        let redmine = find_mcp_service("redmine").unwrap();
+        let optional_fields: Vec<&str> = redmine
+            .auth_fields
+            .iter()
+            .filter(|f| f.optional)
+            .map(|f| f.key)
+            .collect();
+        assert_eq!(
+            optional_fields,
+            vec!["project_id", "project_name"],
+            "only Redmine's project_id and project_name should be optional"
+        );
+
+        // No other service should have optional fields
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            if svc.config_key == "redmine" {
+                continue;
+            }
+            for field in svc.auth_fields {
+                assert!(
+                    !field.optional,
+                    "field '{}' in service '{}' should not be optional",
                     field.key, svc.config_key
                 );
             }

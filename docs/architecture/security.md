@@ -104,6 +104,8 @@ These checks run at multiple points: setup wizard (before VM init), container st
 
 Both OS prereq failures and `SecurityCheck` compose violations block the application — containers never start if either check fails.
 
+Additionally, `check_os_warnings()` provides non-blocking diagnostic warnings (e.g. nested virtualization detected) logged via `log::warn!` during system checks. These warnings do not block container operations but appear in `speedwave check` output and Desktop log files.
+
 ## Authentication Gate
 
 Claude Code must be authenticated (OAuth or API key) before the app allows
