@@ -15,9 +15,13 @@ FROM node:24-bookworm-slim
 ENV HOME=/home/speedwave
 RUN mkdir -p /home/speedwave && chown 1000:1000 /home/speedwave
 
-# Install minimal runtime dependencies
-RUN apt-get update && \
+# Apt resilience: retries for update (network), unsafe-io for install (nested virt I/O).
+# --force-unsafe-io skips fsync during dpkg unpack — safe in a container build context
+# (layers are disposable) and eliminates the fsync bottleneck in nested virtualization
+# environments (WSL2/Hyper-V inside VMware). Installed files are byte-identical.
+RUN apt-get update -o Acquire::Retries=3 && \
     apt-get install -y --no-install-recommends \
+        -o Dpkg::Options::="--force-unsafe-io" \
         bash \
         ca-certificates \
         curl \
