@@ -103,6 +103,25 @@ pub trait CommandRunner: Send + Sync {
         // Default: delegate to run() and return as UTF-8 bytes
         self.run(cmd, args).map(|s| s.into_bytes())
     }
+
+    /// Like `run`, but kills the process if it exceeds `timeout`.
+    /// Returns only success/failure (does not capture stdout/stderr).
+    /// Suitable for long-running lifecycle commands like `limactl start`.
+    fn run_with_timeout(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<()> {
+        let mut command = binary::command(cmd);
+        command.args(args);
+        let status = binary::run_with_timeout(&mut command, timeout)?;
+        if status.success() {
+            Ok(())
+        } else {
+            anyhow::bail!("{} failed with exit code {:?}", cmd, status.code());
+        }
+    }
 }
 
 pub struct RealRunner;
@@ -567,6 +586,16 @@ pub(crate) mod test_support {
                 };
             }
             self.run(cmd, args).map(|s| s.into_bytes())
+        }
+
+        fn run_with_timeout(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            _timeout: std::time::Duration,
+        ) -> anyhow::Result<()> {
+            self.run(cmd, args)?;
+            Ok(())
         }
     }
 }
@@ -1229,5 +1258,66 @@ services:
         assert!(!is_missing_container_error_msg("connection refused"));
         assert!(!is_missing_container_error_msg("mount namespace root"));
         assert!(!is_missing_container_error_msg("permission denied"));
+    }
+
+    #[test]
+    fn mock_runner_run_with_timeout_delegates_to_run() {
+        let runner = test_support::MockRunner::new().with_response("echo hello", "world");
+        let result =
+            runner.run_with_timeout("echo", &["hello"], std::time::Duration::from_secs(10));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn mock_runner_run_with_timeout_propagates_error() {
+        let runner = test_support::MockRunner::new().with_error("fail cmd", "simulated failure");
+        let result = runner.run_with_timeout("fail", &["cmd"], std::time::Duration::from_secs(10));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("simulated failure"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_with_timeout_success() {
+        let runner = RealRunner;
+        let result = runner.run_with_timeout("echo", &["hello"], std::time::Duration::from_secs(5));
+        assert!(
+            result.is_ok(),
+            "fast command should succeed via trait method"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_with_timeout_nonzero_exit() {
+        let runner = RealRunner;
+        let result = runner.run_with_timeout("false", &[], std::time::Duration::from_secs(5));
+        assert!(result.is_err(), "non-zero exit should be an error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("failed with exit code"),
+            "error should mention exit code, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_with_timeout_kills_on_deadline() {
+        let runner = RealRunner;
+        let start = std::time::Instant::now();
+        let result = runner.run_with_timeout("sleep", &["10"], std::time::Duration::from_secs(1));
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "slow command should be killed");
+        assert!(
+            result.unwrap_err().to_string().contains("timed out"),
+            "error should mention timeout"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "should not wait for the full 10s, elapsed: {elapsed:?}"
+        );
     }
 }

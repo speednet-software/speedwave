@@ -573,7 +573,22 @@ impl ContainerRuntime for LimaRuntime {
         match status.trim() {
             "Running" => Ok(()),
             "Stopped" => {
-                self.runner.run("limactl", &["start", vm])?;
+                let timeout = std::time::Duration::from_secs(consts::LIMA_VM_START_TIMEOUT_SECS);
+                log::info!(
+                    "Lima VM '{}' is stopped, starting (timeout: {}s)",
+                    vm,
+                    timeout.as_secs()
+                );
+                self.runner
+                    .run_with_timeout("limactl", &["start", vm], timeout)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to start Lima VM '{vm}' within {}s: {e}. \
+                             Please restart Speedwave or check system resources.",
+                            timeout.as_secs(),
+                        )
+                    })?;
+                log::info!("Lima VM '{}' started successfully", vm);
                 Ok(())
             }
             _ => {
@@ -935,6 +950,35 @@ mod tests {
         assert!(
             rt.ensure_ready().is_ok(),
             "ensure_ready should start a stopped VM"
+        );
+    }
+
+    #[test]
+    fn test_ensure_ready_stopped_vm_start_fails() {
+        let runner = MockRunner::new()
+            .with_response("limactl --version", "limactl version 1.0.0")
+            .with_response(
+                &format!(
+                    "limactl list --format {{{{.Status}}}} {}",
+                    consts::LIMA_VM_NAME
+                ),
+                "Stopped",
+            )
+            .with_error(
+                &format!("limactl start {}", consts::LIMA_VM_NAME),
+                "timed out after 120s",
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let result = rt.ensure_ready();
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to start Lima VM"),
+            "error should mention VM start failure, got: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("restart Speedwave"),
+            "error should suggest restarting, got: {err_msg}"
         );
     }
 

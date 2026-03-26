@@ -141,6 +141,11 @@ pub const CONTAINERD_RESTART_READY_DELAY_SECS: u64 = 5;
 /// nerdctl info), so Linux rootless worst-case is 60s. Lima/WSL2 are single-phase (30s).
 pub const CONTAINERD_RESTART_READY_MAX_RETRIES: u32 = 6;
 
+/// Maximum seconds to wait for `limactl start` to boot the Lima VM.
+/// Lima VM cold boot typically takes 15-45s; 120s allows for slow machines
+/// while preventing indefinite hangs that freeze the Desktop UI.
+pub const LIMA_VM_START_TIMEOUT_SECS: u64 = 120;
+
 /// Descriptor for a single auth/credential field of an MCP service.
 pub struct McpAuthFieldDescriptor {
     /// Field key used as filename in the tokens directory (e.g. "bot_token").
