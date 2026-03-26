@@ -13,13 +13,22 @@ function makeGitlabSvc(): IntegrationStatusEntry {
     auth_fields: [
       {
         key: 'token',
-        label: 'Token',
+        label: 'Personal Access Token',
         field_type: 'password',
         placeholder: 'glpat-...',
         oauth_flow: false,
+        optional: false,
+      },
+      {
+        key: 'host_url',
+        label: 'GitLab URL',
+        field_type: 'url',
+        placeholder: 'https://gitlab.com',
+        oauth_flow: false,
+        optional: false,
       },
     ],
-    current_values: { token: 'existing-token' },
+    current_values: { token: 'existing-token', host_url: 'https://gitlab.com' },
     mappings: undefined,
   };
 }
@@ -33,18 +42,36 @@ function makeRedmineSvc(): IntegrationStatusEntry {
     description: 'Project management',
     auth_fields: [
       {
-        key: 'url',
-        label: 'URL',
-        field_type: 'url',
-        placeholder: 'https://...',
-        oauth_flow: false,
-      },
-      {
         key: 'api_key',
         label: 'API Key',
         field_type: 'password',
-        placeholder: '',
+        placeholder: 'abcdef1234567890...',
         oauth_flow: false,
+        optional: false,
+      },
+      {
+        key: 'host_url',
+        label: 'Redmine URL',
+        field_type: 'url',
+        placeholder: 'https://redmine.company.com',
+        oauth_flow: false,
+        optional: false,
+      },
+      {
+        key: 'project_id',
+        label: 'Project ID',
+        field_type: 'text',
+        placeholder: 'my-project',
+        oauth_flow: false,
+        optional: true,
+      },
+      {
+        key: 'project_name',
+        label: 'Project Name',
+        field_type: 'text',
+        placeholder: 'My Project',
+        oauth_flow: false,
+        optional: true,
       },
     ],
     current_values: {},
@@ -66,6 +93,7 @@ function makeSharepointSvc(): IntegrationStatusEntry {
         field_type: 'password',
         placeholder: 'eyJ0...',
         oauth_flow: true,
+        optional: false,
       },
       {
         key: 'refresh_token',
@@ -73,6 +101,7 @@ function makeSharepointSvc(): IntegrationStatusEntry {
         field_type: 'password',
         placeholder: '0.AR...',
         oauth_flow: true,
+        optional: false,
       },
       {
         key: 'client_id',
@@ -80,6 +109,7 @@ function makeSharepointSvc(): IntegrationStatusEntry {
         field_type: 'text',
         placeholder: '00000000-0000-...',
         oauth_flow: false,
+        optional: false,
       },
       {
         key: 'tenant_id',
@@ -87,6 +117,7 @@ function makeSharepointSvc(): IntegrationStatusEntry {
         field_type: 'text',
         placeholder: '00000000-0000-...',
         oauth_flow: false,
+        optional: false,
       },
       {
         key: 'site_id',
@@ -94,6 +125,7 @@ function makeSharepointSvc(): IntegrationStatusEntry {
         field_type: 'text',
         placeholder: 'site-id',
         oauth_flow: false,
+        optional: false,
       },
       {
         key: 'base_path',
@@ -101,6 +133,7 @@ function makeSharepointSvc(): IntegrationStatusEntry {
         field_type: 'text',
         placeholder: 'Projects/my-project',
         oauth_flow: false,
+        optional: false,
       },
     ],
     current_values: {},
@@ -250,14 +283,14 @@ describe('ServiceCardComponent', () => {
 
     it('includes redmine mappings when service is redmine', () => {
       component.svc = makeRedmineSvc();
-      component.editedValues = { url: 'https://redmine.test' };
+      component.editedValues = { host_url: 'https://redmine.test' };
       component.editedMappings = { tracker: 2, status: 5 };
       const spy = vi.spyOn(component.saveCredentials, 'emit');
       const event = { preventDefault: vi.fn() } as unknown as Event;
       component.onSave(event);
       expect(spy).toHaveBeenCalledWith({
         svc: component.svc,
-        credentials: { url: 'https://redmine.test' },
+        credentials: { host_url: 'https://redmine.test' },
         mappings: { tracker: 2, status: 5 },
       });
     });
@@ -366,7 +399,7 @@ describe('ServiceCardComponent', () => {
       expect(el.querySelector('#sharepoint-base_path')).not.toBeNull();
     });
 
-    it('marks all visible inputs as required', () => {
+    it('marks all visible SharePoint inputs as required', () => {
       component.svc = makeSharepointSvc();
       component.expanded = true;
       fixture.detectChanges();
@@ -515,6 +548,61 @@ describe('ServiceCardComponent', () => {
       component.oauthStatus = 'polling';
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="polling-status"]')).not.toBeNull();
+    });
+  });
+
+  describe('optional fields', () => {
+    it('appends (optional) to label for optional fields', () => {
+      component.svc = makeRedmineSvc();
+      component.expanded = true;
+      fixture.detectChanges();
+      const el = fixture.nativeElement;
+      // Query labels by their `for` attribute — immune to field reordering
+      expect(el.querySelector('label[for="redmine-api_key"]').textContent).not.toContain(
+        '(optional)'
+      );
+      expect(el.querySelector('label[for="redmine-host_url"]').textContent).not.toContain(
+        '(optional)'
+      );
+      expect(el.querySelector('label[for="redmine-project_id"]').textContent).toContain(
+        '(optional)'
+      );
+      expect(el.querySelector('label[for="redmine-project_name"]').textContent).toContain(
+        '(optional)'
+      );
+    });
+
+    it('does not mark optional fields as required', () => {
+      component.svc = makeRedmineSvc();
+      component.expanded = true;
+      fixture.detectChanges();
+      const el = fixture.nativeElement;
+      // Query inputs by their ID — immune to field reordering
+      expect(el.querySelector('#redmine-api_key').required).toBe(true);
+      expect(el.querySelector('#redmine-host_url').required).toBe(true);
+      expect(el.querySelector('#redmine-project_id').required).toBe(false);
+      expect(el.querySelector('#redmine-project_name').required).toBe(false);
+    });
+
+    it('onSave sends empty string for cleared optional fields', () => {
+      component.svc = makeRedmineSvc();
+      component.editedValues = { project_id: '' };
+      const spy = vi.spyOn(component.saveCredentials, 'emit');
+      component.onSave(new Event('submit'));
+      expect(spy).toHaveBeenCalledTimes(1);
+      const payload = spy.mock.calls[0][0];
+      expect(payload.credentials['project_id']).toBe('');
+    });
+
+    it('onSave does not send empty string for cleared required fields', () => {
+      component.svc = makeRedmineSvc();
+      component.editedValues = { api_key: '', host_url: 'https://example.com' };
+      const spy = vi.spyOn(component.saveCredentials, 'emit');
+      component.onSave(new Event('submit'));
+      expect(spy).toHaveBeenCalledTimes(1);
+      const payload = spy.mock.calls[0][0];
+      expect(payload.credentials['api_key']).toBeUndefined();
+      expect(payload.credentials['host_url']).toBe('https://example.com');
     });
   });
 
