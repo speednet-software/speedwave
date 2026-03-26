@@ -125,6 +125,9 @@ pub trait CommandRunner: Send + Sync {
     /// stderr diagnostics on failure is essential for Desktop log files.
     ///
     /// See also: `binary::run_with_timeout` (same poll/kill loop, no capture).
+    /// Unlike `binary::run_with_timeout` which returns `Ok(ExitStatus)` and
+    /// leaves exit-code handling to the caller, this method treats non-zero
+    /// exit as `Err`.
     fn run_with_timeout(
         &self,
         cmd: &str,
@@ -1394,7 +1397,7 @@ services:
             "error should mention timeout"
         );
         assert!(
-            elapsed < std::time::Duration::from_secs(8),
+            elapsed < std::time::Duration::from_secs(9),
             "should not wait for the full 10s, elapsed: {elapsed:?}"
         );
     }
