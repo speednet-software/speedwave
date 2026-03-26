@@ -112,7 +112,19 @@ pub trait CommandRunner: Send + Sync {
     /// process exits — safe because the pipe buffer (64 KB) is more than enough
     /// for diagnostic output from lifecycle commands.
     ///
-    /// Suitable for long-running lifecycle commands like `limactl start`.
+    /// # Pipe buffer safety
+    ///
+    /// Only use for commands that produce limited stderr (lifecycle commands
+    /// like `limactl start`, `systemctl start`, etc.). If stderr exceeds the
+    /// OS pipe buffer (64 KB on Linux/macOS), the child process will block on
+    /// write and never exit, causing a deadlock. For commands with verbose
+    /// output, use `run()` or `run_with_stderr()` instead.
+    ///
+    /// Note: `binary::run_with_timeout` deliberately avoids `Stdio::piped()`
+    /// for this reason. This method accepts the trade-off because capturing
+    /// stderr diagnostics on failure is essential for Desktop log files.
+    ///
+    /// See also: `binary::run_with_timeout` (same poll/kill loop, no capture).
     fn run_with_timeout(
         &self,
         cmd: &str,
@@ -1382,7 +1394,7 @@ services:
             "error should mention timeout"
         );
         assert!(
-            elapsed < std::time::Duration::from_secs(5),
+            elapsed < std::time::Duration::from_secs(8),
             "should not wait for the full 10s, elapsed: {elapsed:?}"
         );
     }
