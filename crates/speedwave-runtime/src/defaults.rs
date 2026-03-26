@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 pub const CLAUDE_VERSION: &str = "2.1.81";
-pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 
@@ -27,7 +26,6 @@ pub const DEFAULT_FLAGS: &[&str] = &[
 
 pub fn base_env() -> HashMap<String, String> {
     let mut env = HashMap::new();
-    env.insert("ANTHROPIC_MODEL".into(), DEFAULT_MODEL.into());
     env.insert("CLAUDE_CODE_ENABLE_TELEMETRY".into(), "0".into());
     env.insert("DISABLE_AUTOUPDATER".into(), "1".into());
     // Signal sandboxed environment to Claude Code. On Linux rootless nerdctl,
@@ -54,6 +52,17 @@ mod tests {
             re.is_match(CLAUDE_VERSION),
             "CLAUDE_VERSION must be a semver (e.g. '2.1.76'), got: '{}'",
             CLAUDE_VERSION
+        );
+    }
+
+    #[test]
+    fn base_env_does_not_set_model() {
+        let env = base_env();
+        assert!(
+            env.get("ANTHROPIC_MODEL").is_none(),
+            "base_env() must not set ANTHROPIC_MODEL — the user's Claude Code model \
+             selection must not be overridden. Users who want a specific model can set \
+             claude.env.ANTHROPIC_MODEL in .speedwave.json or ~/.speedwave/config.json."
         );
     }
 
