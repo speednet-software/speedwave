@@ -556,28 +556,32 @@ describe('ServiceCardComponent', () => {
       component.svc = makeRedmineSvc();
       component.expanded = true;
       fixture.detectChanges();
-      const labels = fixture.nativeElement.querySelectorAll('label.block');
-      const labelTexts = Array.from(labels).map((l: Element) => l.textContent);
-      // Required fields should NOT have "(optional)"
-      expect(labelTexts[0]).not.toContain('(optional)'); // API Key
-      expect(labelTexts[1]).not.toContain('(optional)'); // Redmine URL
-      // Optional fields SHOULD have "(optional)"
-      expect(labelTexts[2]).toContain('(optional)'); // Project ID
-      expect(labelTexts[3]).toContain('(optional)'); // Project Name
+      const el = fixture.nativeElement;
+      // Query labels by their `for` attribute — immune to field reordering
+      expect(el.querySelector('label[for="redmine-api_key"]').textContent).not.toContain(
+        '(optional)'
+      );
+      expect(el.querySelector('label[for="redmine-host_url"]').textContent).not.toContain(
+        '(optional)'
+      );
+      expect(el.querySelector('label[for="redmine-project_id"]').textContent).toContain(
+        '(optional)'
+      );
+      expect(el.querySelector('label[for="redmine-project_name"]').textContent).toContain(
+        '(optional)'
+      );
     });
 
     it('does not mark optional fields as required', () => {
       component.svc = makeRedmineSvc();
       component.expanded = true;
       fixture.detectChanges();
-      const inputs = fixture.nativeElement.querySelectorAll('[data-testid="auth-field-input"]');
-      expect(inputs.length).toBe(4); // api_key, host_url, project_id, project_name
-      // Required fields
-      expect(inputs[0].required).toBe(true); // api_key
-      expect(inputs[1].required).toBe(true); // host_url
-      // Optional fields
-      expect(inputs[2].required).toBe(false); // project_id
-      expect(inputs[3].required).toBe(false); // project_name
+      const el = fixture.nativeElement;
+      // Query inputs by their ID — immune to field reordering
+      expect(el.querySelector('#redmine-api_key').required).toBe(true);
+      expect(el.querySelector('#redmine-host_url').required).toBe(true);
+      expect(el.querySelector('#redmine-project_id').required).toBe(false);
+      expect(el.querySelector('#redmine-project_name').required).toBe(false);
     });
 
     it('onSave sends empty string for cleared optional fields', () => {

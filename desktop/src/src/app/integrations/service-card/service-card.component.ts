@@ -315,6 +315,9 @@ export class ServiceCardComponent {
       if (value !== undefined && value !== '') {
         credentials[field.key] = value;
       } else if (value === '' && field.optional) {
+        // Send empty string explicitly so the backend overwrites any
+        // previously-saved value in config.json (omitting the key would
+        // leave the stale value intact).
         credentials[field.key] = '';
       }
     }
