@@ -199,9 +199,18 @@ pub(crate) fn format_security_violations(
 /// violation details. Used by the frontend before attempting container start.
 #[tauri::command]
 pub async fn run_system_check() -> Result<(), String> {
-    let violations = tokio::task::spawn_blocking(speedwave_runtime::os_prereqs::check_os_prereqs)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (violations, warnings) = tokio::task::spawn_blocking(|| {
+        let v = speedwave_runtime::os_prereqs::check_os_prereqs();
+        let w = speedwave_runtime::os_prereqs::check_os_warnings();
+        (v, w)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    for w in &warnings {
+        log::warn!("OS warning: {w}");
+    }
+
     if violations.is_empty() {
         Ok(())
     } else {
@@ -1303,5 +1312,19 @@ mod tests {
         // IMAGES_READY defaults to Ready — ensure_images_ready should return Ok
         let result = ensure_images_ready();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_system_check_calls_check_os_warnings() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_start = source
+            .find("pub async fn run_system_check()")
+            .expect("run_system_check function must exist");
+        // Find the next function boundary (next `pub async fn` or `pub fn` or end of file)
+        let fn_body = &source[fn_start..];
+        assert!(
+            fn_body.contains("check_os_warnings"),
+            "run_system_check must call check_os_warnings()"
+        );
     }
 }

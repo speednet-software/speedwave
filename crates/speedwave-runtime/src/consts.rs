@@ -107,6 +107,16 @@ pub const WSL_NOT_AVAILABLE_MSG: &str = "Enable required Windows features:\n\n\
        - Check 'Virtual Machine Platform'\n\n\
     Then restart your computer and run Speedwave again.";
 
+/// Non-blocking warning when nested virtualization is detected (e.g. WSL2 inside VMware).
+/// Used by `os_prereqs::check_os_warnings()`.
+pub const NESTED_VIRT_WARNING_MSG: &str = "\
+    WSL2 uses Hyper-V, which may have degraded I/O performance in nested environments.\n\
+    Image builds may be slower or fail.\n\n\
+    If builds fail, try:\n\
+    - Increase VM memory to at least 8 GB\n\
+    - Enable nested virtualization in VM settings (VT-x/EPT or AMD-V/RVI)\n\
+    - Close other memory-intensive applications";
+
 /// Error prefix used by backend when SecurityCheck or OS prereqs fail.
 /// Frontend matches on this string to distinguish blocking (check_failed)
 /// from dismissable (error) failures.
