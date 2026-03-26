@@ -37,6 +37,8 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-028](ADR-028-tauri-over-electron.md)                              | Tauri v2 over Electron for Desktop Shell                | Accepted              |
 | [ADR-029](ADR-029-sandbox-prototype-chain-hardening.md)                | Sandbox Prototype Chain Hardening                       | Accepted              |
 | [ADR-030](ADR-030-bundle-reconcile-after-app-update.md)                | Bundle Reconcile After App Update                       | Accepted              |
+| [ADR-031](ADR-031-data-dir-env-var-for-instance-isolation.md)          | Data Dir Env Var for Instance Isolation                 | Accepted              |
+| [ADR-032](ADR-032-nested-virtualization-resilience.md)                 | Nested Virtualization Resilience                        | Accepted              |
 
 ## Creating a New ADR
 
