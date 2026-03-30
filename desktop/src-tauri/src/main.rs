@@ -24,6 +24,7 @@ mod mcp_os_process;
 mod oauth_cmd;
 mod plugin_cmd;
 mod reconcile;
+mod redmine_api_cmd;
 mod setup_wizard;
 mod tray;
 mod types;
@@ -1180,6 +1181,9 @@ fn main() {
             // OAuth
             oauth_cmd::start_sharepoint_oauth,
             oauth_cmd::cancel_sharepoint_oauth,
+            // Redmine API proxy
+            redmine_api_cmd::validate_redmine_credentials,
+            redmine_api_cmd::fetch_redmine_enumerations,
             // Plugins
             plugin_cmd::get_plugins,
             plugin_cmd::install_plugin,
