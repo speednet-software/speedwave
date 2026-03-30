@@ -80,7 +80,7 @@ export interface SaveCredentialsEvent {
                   <label
                     class="block mb-1.5 text-[13px] text-sw-text-dim"
                     [for]="svc.service + '-' + field.key"
-                    >{{ field.label }}</label
+                    >{{ field.label }}{{ field.optional ? ' (optional)' : '' }}</label
                   >
                   <input
                     [id]="svc.service + '-' + field.key"
@@ -90,7 +90,7 @@ export interface SaveCredentialsEvent {
                     (input)="onFieldInput(field.key, $event)"
                     class="w-full px-3 py-2.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-sm font-mono box-border focus:border-sw-accent focus:outline-none"
                     data-testid="auth-field-input"
-                    required
+                    [required]="!field.optional"
                   />
                 </div>
               }
@@ -314,6 +314,11 @@ export class ServiceCardComponent {
       const value = this.editedValues[field.key];
       if (value !== undefined && value !== '') {
         credentials[field.key] = value;
+      } else if (value === '' && field.optional) {
+        // Send empty string explicitly so the backend overwrites any
+        // previously-saved value in config.json (omitting the key would
+        // leave the stale value intact).
+        credentials[field.key] = '';
       }
     }
 

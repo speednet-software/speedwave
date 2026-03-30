@@ -103,6 +103,88 @@ pub trait CommandRunner: Send + Sync {
         // Default: delegate to run() and return as UTF-8 bytes
         self.run(cmd, args).map(|s| s.into_bytes())
     }
+
+    /// Like `run`, but kills the process if it exceeds `timeout`.
+    ///
+    /// Captures stderr so that failure diagnostics (e.g. from `limactl start`)
+    /// appear in the Tauri log, not just in the parent's terminal streams.
+    /// Stdout is inherited (goes to parent streams). Stderr is read after the
+    /// process exits — safe because the pipe buffer (64 KB) is more than enough
+    /// for diagnostic output from lifecycle commands.
+    ///
+    /// # Pipe buffer safety
+    ///
+    /// Only use for commands that produce limited stderr (lifecycle commands
+    /// like `limactl start`, `systemctl start`, etc.). If stderr exceeds the
+    /// OS pipe buffer (64 KB on Linux/macOS), the child process will block on
+    /// write and never exit, causing a deadlock. For commands with verbose
+    /// output, use `run()` or `run_with_stderr()` instead.
+    ///
+    /// Note: `binary::run_with_timeout` deliberately avoids `Stdio::piped()`
+    /// for this reason. This method accepts the trade-off because capturing
+    /// stderr diagnostics on failure is essential for Desktop log files.
+    ///
+    /// See also: `binary::run_with_timeout` (same poll/kill loop, no capture).
+    /// Unlike `binary::run_with_timeout` which returns `Ok(ExitStatus)` and
+    /// leaves exit-code handling to the caller, this method treats non-zero
+    /// exit as `Err`.
+    fn run_with_timeout(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<()> {
+        let mut command = binary::command(cmd);
+        command.args(args);
+        command.stderr(std::process::Stdio::piped());
+
+        let program = command.get_program().to_string_lossy().to_string();
+        let mut child = command.spawn()?;
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait()? {
+                Some(status) => {
+                    if status.success() {
+                        return Ok(());
+                    }
+                    let stderr = child
+                        .stderr
+                        .take()
+                        .map(|mut s| {
+                            let mut buf = String::new();
+                            std::io::Read::read_to_string(&mut s, &mut buf).ok();
+                            buf
+                        })
+                        .unwrap_or_default();
+                    let detail = stderr.trim();
+                    if detail.is_empty() {
+                        anyhow::bail!("{} failed with exit code {:?}", program, status.code());
+                    } else {
+                        anyhow::bail!(
+                            "{} failed with exit code {:?}: {}",
+                            program,
+                            status.code(),
+                            detail
+                        );
+                    }
+                }
+                None => {
+                    if start.elapsed() >= timeout {
+                        if let Err(e) = child.kill() {
+                            log::warn!("run_with_timeout: kill failed: {e}");
+                        }
+                        let _ = child.wait();
+                        anyhow::bail!(
+                            "command '{}' timed out after {}s",
+                            program,
+                            timeout.as_secs()
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
+        }
+    }
 }
 
 pub struct RealRunner;
@@ -567,6 +649,16 @@ pub(crate) mod test_support {
                 };
             }
             self.run(cmd, args).map(|s| s.into_bytes())
+        }
+
+        fn run_with_timeout(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            _timeout: std::time::Duration,
+        ) -> anyhow::Result<()> {
+            self.run(cmd, args)?;
+            Ok(())
         }
     }
 }
@@ -1229,5 +1321,84 @@ services:
         assert!(!is_missing_container_error_msg("connection refused"));
         assert!(!is_missing_container_error_msg("mount namespace root"));
         assert!(!is_missing_container_error_msg("permission denied"));
+    }
+
+    #[test]
+    fn mock_runner_run_with_timeout_delegates_to_run() {
+        let runner = test_support::MockRunner::new().with_response("echo hello", "world");
+        let result =
+            runner.run_with_timeout("echo", &["hello"], std::time::Duration::from_secs(10));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn mock_runner_run_with_timeout_propagates_error() {
+        let runner = test_support::MockRunner::new().with_error("fail cmd", "simulated failure");
+        let result = runner.run_with_timeout("fail", &["cmd"], std::time::Duration::from_secs(10));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("simulated failure"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_with_timeout_success() {
+        let runner = RealRunner;
+        let result = runner.run_with_timeout("echo", &["hello"], std::time::Duration::from_secs(5));
+        assert!(
+            result.is_ok(),
+            "fast command should succeed via trait method"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_with_timeout_nonzero_exit() {
+        let runner = RealRunner;
+        let result = runner.run_with_timeout("false", &[], std::time::Duration::from_secs(5));
+        assert!(result.is_err(), "non-zero exit should be an error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("failed with exit code"),
+            "error should mention exit code, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_with_timeout_captures_stderr() {
+        let runner = RealRunner;
+        // `sh -c 'echo diagnostic >&2; exit 1'` writes to stderr then fails
+        let result = runner.run_with_timeout(
+            "sh",
+            &["-c", "echo diagnostic >&2; exit 1"],
+            std::time::Duration::from_secs(5),
+        );
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("diagnostic"),
+            "error should include stderr output, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_with_timeout_kills_on_deadline() {
+        let runner = RealRunner;
+        let start = std::time::Instant::now();
+        let result = runner.run_with_timeout("sleep", &["10"], std::time::Duration::from_secs(1));
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "slow command should be killed");
+        assert!(
+            result.unwrap_err().to_string().contains("timed out"),
+            "error should mention timeout"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(9),
+            "should not wait for the full 10s, elapsed: {elapsed:?}"
+        );
     }
 }

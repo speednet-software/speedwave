@@ -411,10 +411,6 @@ mod tests {
     fn test_default_config_has_expected_env() {
         let defaults = defaults::base_env();
         assert_eq!(
-            defaults.get("ANTHROPIC_MODEL"),
-            Some(&"claude-sonnet-4-6".to_string())
-        );
-        assert_eq!(
             defaults.get("CLAUDE_CODE_ENABLE_TELEMETRY"),
             Some(&"0".to_string())
         );
@@ -426,10 +422,7 @@ mod tests {
         let user_config = SpeedwaveUserConfig::default();
         let tmp = tempfile::tempdir().unwrap();
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
-        assert_eq!(
-            resolved.env.get("ANTHROPIC_MODEL"),
-            Some(&"claude-sonnet-4-6".to_string())
-        );
+        assert_eq!(resolved.env.get("ANTHROPIC_MODEL"), None);
         assert!(resolved.flags.contains(&"--dangerously-skip-permissions"));
         assert!(resolved.flags.contains(&"--mcp-config"));
         assert!(resolved.flags.contains(&defaults::MCP_CONFIG_PATH));

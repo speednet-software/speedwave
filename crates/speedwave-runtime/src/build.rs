@@ -392,8 +392,24 @@ pub fn build_all_images_for_bundle(
             try_build_all(runtime, &vm_root, bundle_id).map_err(|second_err| {
                 anyhow::Error::new(SnapshotterRecoveryFailed { inner: second_err })
             })
+        } else if is_transient_build_error(&first_err) {
+            log::warn!("build failed with transient error, retrying once: {first_err}");
+            try_build_all(runtime, &vm_root, bundle_id)
         } else {
             Err(first_err)
+        }
+    });
+
+    // Enrich final error with VM guidance if I/O related
+    let result = result.map_err(|err| {
+        if is_transient_build_error(&err) {
+            err.context(
+                "Image build failed due to an I/O error. If running inside a virtual machine \
+                 (VMware, VirtualBox), try increasing VM memory to at least 8 GB and ensuring \
+                 nested virtualization is enabled in VM settings.",
+            )
+        } else {
+            err
         }
     });
 
@@ -456,10 +472,30 @@ fn try_build_all(
 /// - `"failed to rename"` + `"file exists"` — OS-level rename failure on stale snapshot
 fn is_snapshotter_error(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
-        let msg = cause.to_string();
+        let msg = cause.to_string().to_ascii_lowercase();
         if msg.contains("apply layer error")
             || msg.contains("failed to prepare extraction snapshot")
             || (msg.contains("failed to rename") && msg.contains("file exists"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns `true` if the build error looks transient (I/O timeout, connection reset,
+/// temporary unavailable). These may succeed on retry without any recovery action.
+///
+/// Uses case-insensitive matching because kernel/libc error messages vary in casing
+/// across distros and locales.
+fn is_transient_build_error(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        let msg = cause.to_string().to_ascii_lowercase();
+        if msg.contains("i/o timeout")
+            || msg.contains("input/output error")
+            || msg.contains("connection reset")
+            || msg.contains("temporary failure")
+            || msg.contains("resource temporarily unavailable")
         {
             return true;
         }
@@ -1636,5 +1672,191 @@ mod tests {
             let rt = ImageCheckRuntime::with_missing(vec!["speedwave-claude"]);
             assert!(!images_exist(&rt));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Containerfile structural tests (Step 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_containerfile_claude_uses_apt_retries() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+        let root = resolve_build_root_with_home(None).unwrap();
+        let containerfile = std::fs::read_to_string(root.join("containers/Containerfile.claude"))
+            .expect("Containerfile.claude should be readable");
+
+        assert!(
+            containerfile
+                .lines()
+                .any(|l| l.contains("apt-get update") && l.contains("Acquire::Retries")),
+            "Containerfile.claude should use Acquire::Retries on apt-get update"
+        );
+    }
+
+    #[test]
+    fn test_containerfile_claude_uses_unsafe_io_for_install() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+        let root = resolve_build_root_with_home(None).unwrap();
+        let containerfile = std::fs::read_to_string(root.join("containers/Containerfile.claude"))
+            .expect("Containerfile.claude should be readable");
+
+        assert!(
+            containerfile.contains("force-unsafe-io"),
+            "Containerfile.claude should use --force-unsafe-io for apt-get install"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // is_transient_build_error() tests (Step 2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_transient_build_error_io_timeout() {
+        let err = anyhow::anyhow!("nerdctl build failed: i/o timeout");
+        assert!(is_transient_build_error(&err));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_input_output_error() {
+        let err = anyhow::anyhow!("dpkg: error processing: Input/output error");
+        assert!(is_transient_build_error(&err));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_connection_reset() {
+        let err = anyhow::anyhow!("connection reset by peer");
+        assert!(is_transient_build_error(&err));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_temporary_failure() {
+        let err = anyhow::anyhow!("Temporary failure resolving deb.debian.org");
+        assert!(is_transient_build_error(&err));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_memory_is_not_transient() {
+        let err = anyhow::anyhow!("Cannot allocate memory");
+        assert!(
+            !is_transient_build_error(&err),
+            "OOM is not transient — retry would waste time"
+        );
+    }
+
+    #[test]
+    fn test_is_transient_build_error_resource_unavailable() {
+        let err = anyhow::anyhow!("Resource temporarily unavailable");
+        assert!(is_transient_build_error(&err));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_case_insensitive() {
+        let err = anyhow::anyhow!("I/O TIMEOUT during build");
+        assert!(is_transient_build_error(&err));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_unrelated() {
+        let err = anyhow::anyhow!("permission denied");
+        assert!(!is_transient_build_error(&err));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_empty() {
+        let err = anyhow::anyhow!("");
+        assert!(!is_transient_build_error(&err));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_chain() {
+        let inner = anyhow::anyhow!("input/output error");
+        let outer = inner
+            .context("nerdctl build failed")
+            .context("build step 3/10");
+        assert!(is_transient_build_error(&outer));
+    }
+
+    // -----------------------------------------------------------------------
+    // is_snapshotter_error() Boy Scout case-insensitivity test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_snapshotter_error_case_insensitive() {
+        let err = anyhow::anyhow!("Apply Layer Error");
+        assert!(is_snapshotter_error(&err));
+    }
+
+    // -----------------------------------------------------------------------
+    // Priority: snapshotter error takes precedence over transient
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_snapshotter_error_takes_priority_over_transient() {
+        // Error contains both a snapshotter pattern and a transient I/O pattern
+        let err = anyhow::anyhow!("apply layer error: input/output error");
+        assert!(
+            is_snapshotter_error(&err),
+            "is_snapshotter_error should match when both patterns present"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Error enrichment tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_error_enrichment_adds_vm_hint() {
+        let err = anyhow::anyhow!("input/output error");
+        let enriched = if is_transient_build_error(&err) {
+            err.context(
+                "Image build failed due to an I/O error. If running inside a virtual machine \
+                 (VMware, VirtualBox), try increasing VM memory to at least 8 GB and ensuring \
+                 nested virtualization is enabled in VM settings.",
+            )
+        } else {
+            err
+        };
+        let msg = format!("{enriched:#}");
+        assert!(
+            msg.contains("virtual machine"),
+            "enriched error should contain VM guidance, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_build_error_enrichment_preserves_unrelated() {
+        let err = anyhow::anyhow!("permission denied");
+        let result = if is_transient_build_error(&err) {
+            err.context("VM hint")
+        } else {
+            err
+        };
+        let msg = format!("{result:#}");
+        assert!(
+            !msg.contains("virtual machine"),
+            "non-I/O error should not get VM hint, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_build_error_enrichment_chain_wrapped() {
+        let inner = anyhow::anyhow!("i/o timeout");
+        let outer = inner.context("nerdctl build failed");
+        let enriched = if is_transient_build_error(&outer) {
+            outer.context(
+                "Image build failed due to an I/O error. If running inside a virtual machine \
+                 (VMware, VirtualBox), try increasing VM memory to at least 8 GB and ensuring \
+                 nested virtualization is enabled in VM settings.",
+            )
+        } else {
+            outer
+        };
+        let msg = format!("{enriched:#}");
+        assert!(
+            msg.contains("virtual machine"),
+            "chain-wrapped I/O error should still get VM hint, got: {msg}"
+        );
     }
 }

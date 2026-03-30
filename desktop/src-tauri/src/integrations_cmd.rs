@@ -247,20 +247,25 @@ pub(crate) fn is_service_configured(project: &str, service: &str) -> bool {
         serde_json::json!({})
     };
 
-    svc_desc.auth_fields.iter().all(|f| {
-        if f.stored_in_config_json {
-            config_json
-                .get(f.key)
-                .and_then(|v| v.as_str())
-                .map(|s| !s.is_empty())
-                .unwrap_or(false)
-        } else {
-            let path = svc_token_dir.join(f.key);
-            std::fs::metadata(&path)
-                .map(|m| m.len() > 0)
-                .unwrap_or(false)
-        }
-    })
+    // Skip optional fields (e.g. Redmine project_id/project_name)
+    svc_desc
+        .auth_fields
+        .iter()
+        .filter(|f| !f.optional)
+        .all(|f| {
+            if f.stored_in_config_json {
+                config_json
+                    .get(f.key)
+                    .and_then(|v| v.as_str())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+            } else {
+                let path = svc_token_dir.join(f.key);
+                std::fs::metadata(&path)
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false)
+            }
+        })
 }
 
 /// Testable core: takes an explicit `home` path so tests can inject a temp dir.
@@ -286,20 +291,25 @@ fn is_service_configured_with_home(home: &std::path::Path, project: &str, servic
         serde_json::json!({})
     };
 
-    svc_desc.auth_fields.iter().all(|f| {
-        if f.stored_in_config_json {
-            config_json
-                .get(f.key)
-                .and_then(|v| v.as_str())
-                .map(|s| !s.is_empty())
-                .unwrap_or(false)
-        } else {
-            let path = svc_token_dir.join(f.key);
-            std::fs::metadata(&path)
-                .map(|m| m.len() > 0)
-                .unwrap_or(false)
-        }
-    })
+    // Skip optional fields (e.g. Redmine project_id/project_name)
+    svc_desc
+        .auth_fields
+        .iter()
+        .filter(|f| !f.optional)
+        .all(|f| {
+            if f.stored_in_config_json {
+                config_json
+                    .get(f.key)
+                    .and_then(|v| v.as_str())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+            } else {
+                let path = svc_token_dir.join(f.key);
+                std::fs::metadata(&path)
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false)
+            }
+        })
 }
 
 #[tauri::command]
@@ -871,18 +881,33 @@ mod tests {
 
     #[test]
     fn is_service_configured_checks_stored_in_config_json_for_redmine() {
-        // Redmine has host_url, project_id, project_name in config.json + api_key as file
+        // Redmine: api_key (file) + host_url (config.json, required) +
+        // project_id/project_name (config.json, optional)
         let tmp = tempfile::tempdir().unwrap();
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "redmine");
 
-        // Only api_key file — config.json fields missing → false
+        // Only api_key file — required config.json field host_url missing → false
         std::fs::write(svc_dir.join("api_key"), "secret").unwrap();
         assert!(
             !is_service_configured_with_home(tmp.path(), "proj", "redmine"),
-            "should be false when config.json fields are missing"
+            "should be false when required config.json field (host_url) is missing"
         );
 
-        // Add config.json with required fields → true
+        // Add config.json with only host_url (optional fields absent) → true
+        let config = serde_json::json!({
+            "host_url": "https://redmine.example.com"
+        });
+        std::fs::write(
+            svc_dir.join("config.json"),
+            serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            is_service_configured_with_home(tmp.path(), "proj", "redmine"),
+            "should be true when required fields are present (optional fields absent)"
+        );
+
+        // Add all fields including optional → also true
         let config = serde_json::json!({
             "host_url": "https://redmine.example.com",
             "project_id": "my-proj",
@@ -895,7 +920,7 @@ mod tests {
         .unwrap();
         assert!(
             is_service_configured_with_home(tmp.path(), "proj", "redmine"),
-            "should be true when all auth_fields (file + config.json) are present"
+            "should be true when all fields (including optional) are present"
         );
     }
 
@@ -923,7 +948,8 @@ mod tests {
 
     #[test]
     fn is_service_configured_returns_false_for_empty_config_json_values() {
-        // Redmine: config.json exists but host_url is empty string → false
+        // Redmine: host_url is a required (non-optional) config.json field.
+        // An empty host_url blocks configuration even if optional fields are present.
         let tmp = tempfile::tempdir().unwrap();
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "redmine");
         std::fs::write(svc_dir.join("api_key"), "secret").unwrap();
@@ -940,7 +966,7 @@ mod tests {
 
         assert!(
             !is_service_configured_with_home(tmp.path(), "proj", "redmine"),
-            "should be false when a config.json field is an empty string"
+            "should be false when required config.json field (host_url) is empty"
         );
     }
 

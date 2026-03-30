@@ -276,9 +276,9 @@ test-cli:
 	@echo "✅ CLI tests passed"
 
 test-desktop: build-cli build-angular build-mcp build-os-cli
-	@if [ "$$(uname)" = "Darwin" ] && [ ! -f desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
-	@if [ "$$(uname)" = "Linux" ] && [ ! -f desktop/src-tauri/nerdctl-full/bin/nerdctl ]; then $(MAKE) download-nerdctl-full; fi
-	@if [ "$(OS)" = "Windows_NT" ] && [ ! -f desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then $(MAKE) download-wsl-resources; fi
+	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
+	@if [ "$$(uname)" = "Linux" ] && [ ! -s desktop/src-tauri/nerdctl-full/bin/nerdctl ]; then $(MAKE) download-nerdctl-full; fi
+	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then $(MAKE) download-wsl-resources; fi
 	@if [ ! -s desktop/src-tauri/nodejs/bin/node ] && [ ! -s desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
 	@scripts/bundle-build-context.sh
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
@@ -365,9 +365,9 @@ test-desktop-build: build-angular build-mcp
 # Build only: download deps, compile CLI + MCP + Tauri binary. No test run.
 # Used by e2e-vm.sh (build as root, test as desktop user with display access).
 test-e2e-desktop-build: build-cli build-mcp build-os-cli
-	@if [ "$$(uname)" = "Darwin" ] && [ ! -f desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
-	@if [ "$$(uname)" = "Linux" ] && [ ! -f desktop/src-tauri/nerdctl-full/bin/nerdctl ]; then $(MAKE) download-nerdctl-full; fi
-	@if [ "$(OS)" = "Windows_NT" ] && [ ! -f desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then $(MAKE) download-wsl-resources; fi
+	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then $(MAKE) download-lima; fi
+	@if [ "$$(uname)" = "Linux" ] && [ ! -s desktop/src-tauri/nerdctl-full/bin/nerdctl ]; then $(MAKE) download-nerdctl-full; fi
+	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then $(MAKE) download-wsl-resources; fi
 	@if [ ! -f desktop/src-tauri/nodejs/bin/node ] && [ ! -f desktop/src-tauri/nodejs/node.exe ]; then $(MAKE) download-nodejs; fi
 	@scripts/bundle-build-context.sh
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi

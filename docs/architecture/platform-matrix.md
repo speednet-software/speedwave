@@ -32,6 +32,7 @@ Speedwave supports macOS, Linux, and Windows with platform-specific VM, containe
 - `mapi-rs` (Microsoft-maintained) for Outlook mail/calendar
 - Setup Wizard auto-installs WSL2, imports Ubuntu rootfs, and sets up nerdctl-full
 - IDE lock file: `%USERPROFILE%\.claude\ide\<port>.lock`
+- **Nested virtualization:** WSL2 uses Hyper-V, which requires hardware virtualization. Running WSL2 inside a VM (VMware, VirtualBox, QEMU/KVM) is nested virtualization and may degrade I/O performance during container image builds. Speedwave detects this via `Get-CimInstance Win32_ComputerSystem` and shows a non-blocking warning in `speedwave check` and Desktop logs. The `Containerfile.claude` uses `--force-unsafe-io` and `Acquire::Retries=3` to mitigate build failures in these environments. See [ADR-032](../adr/ADR-032-nested-virtualization-resilience.md).
 
 ## See Also
 
