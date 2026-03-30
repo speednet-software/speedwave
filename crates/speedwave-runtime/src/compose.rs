@@ -1905,7 +1905,7 @@ impl SecurityCheck {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if let Ok(ft) = entry.file_type() {
-                    if ft.is_file() && path.extension().map_or(false, |e| e == "lock") {
+                    if ft.is_file() && path.extension().is_some_and(|e| e == "lock") {
                         violations.extend(Self::verify_path(&path, 0o600, false, expected_uid));
                     }
                 }

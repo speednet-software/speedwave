@@ -555,11 +555,17 @@ fn main() -> anyhow::Result<()> {
             eprintln!("  WARNING: {w}\n");
         }
 
+        // ANSI color codes (only when stderr is a terminal)
+        let use_color = std::io::IsTerminal::is_terminal(&std::io::stderr());
+        let green = if use_color { "\x1b[32m" } else { "" };
+        let red = if use_color { "\x1b[31m" } else { "" };
+        let reset = if use_color { "\x1b[0m" } else { "" };
+
         if prereq_violations.is_empty() && security_violations.is_empty() {
             println!("speedwave check OK -- all system checks passed");
             eprintln!();
             for rule in SecurityRule::ALL_RULES {
-                eprintln!("  OK    {}  {}", rule, rule.description());
+                eprintln!("  {green}OK{reset}    {}  {}", rule, rule.description());
             }
             std::process::exit(0);
         } else {
@@ -568,9 +574,9 @@ fn main() -> anyhow::Result<()> {
                 security_violations.iter().map(|v| v.rule).collect();
             for rule in SecurityRule::ALL_RULES {
                 if failed_rules.contains(rule) {
-                    eprintln!("  FAIL  {}  {}", rule, rule.description());
+                    eprintln!("  {red}FAIL{reset}  {}  {}", rule, rule.description());
                 } else {
-                    eprintln!("  OK    {}  {}", rule, rule.description());
+                    eprintln!("  {green}OK{reset}    {}  {}", rule, rule.description());
                 }
             }
             if !prereq_violations.is_empty() {
