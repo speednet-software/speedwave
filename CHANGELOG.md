@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/speednet-software/speedwave/compare/v0.5.1...v0.6.0) (2026-03-30)
+
+
+### Features
+
+* **release:** runtime fixes, Redmine improvements, and plan skills ([#331](https://github.com/speednet-software/speedwave/issues/331)) ([baf8bf8](https://github.com/speednet-software/speedwave/commit/baf8bf83c5a830b433b26613ae6b8589348170ba))
+
 ## [0.5.1](https://github.com/speednet-software/speedwave/compare/v0.5.0...v0.5.1) (2026-03-25)
 
 
