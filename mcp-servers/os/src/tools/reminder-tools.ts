@@ -41,6 +41,8 @@ interface CreateReminderParams {
   priority?: number;
   /** Additional notes. */
   notes?: string;
+  /** Tags to assign (macOS 15+; silently ignored on older macOS). */
+  tags?: string[];
 }
 
 /** Input parameters for the completeReminder tool. */
@@ -117,6 +119,8 @@ const listRemindersTool: Tool = {
             due_date: { type: 'string', description: 'ISO8601 date' },
             completed: { type: 'boolean' },
             priority: { type: 'number', description: '0=none, 1=high, 5=medium, 9=low' },
+            notes: { type: 'string', description: 'Reminder notes/body' },
+            tags: { type: 'array', items: { type: 'string' }, description: 'Tags (macOS 15+)' },
             list_id: { type: 'string' },
           },
         },
@@ -158,6 +162,7 @@ const getReminderTool: Tool = {
       completed: { type: 'boolean' },
       completed_date: { type: 'string', description: 'ISO8601 date' },
       priority: { type: 'number' },
+      tags: { type: 'array', items: { type: 'string' }, description: 'Tags (macOS 15+)' },
       list_id: { type: 'string' },
       list_name: { type: 'string' },
     },
@@ -188,6 +193,11 @@ const createReminderTool: Tool = {
       due_date: { type: 'string', description: 'Due date in ISO8601 format' },
       priority: { type: 'number', description: 'Priority (0=none, 1=high, 5=medium, 9=low)' },
       notes: { type: 'string', description: 'Additional notes' },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Tags to assign (macOS 15+; silently ignored on older macOS)',
+      },
     },
     required: ['name'],
   },
@@ -211,6 +221,7 @@ const createReminderTool: Tool = {
         due_date: '2025-01-15T10:00:00Z',
         priority: 1,
         notes: 'Check test coverage',
+        tags: ['work', 'code-review'],
       },
     },
   ],
@@ -304,6 +315,7 @@ export async function handleCreateReminder(params: CreateReminderParams): Promis
     ],
     numbers: [['priority', 0, 9]],
     dates: ['due_date'],
+    stringArrays: [['tags', 50, MAX_LENGTHS.short]],
   });
   if (!v.valid) return v.error;
   const result = await runCommand('reminders', 'create_reminder', p);

@@ -14,6 +14,8 @@ Speedwave connects Claude Code with external services through MCP (Model Context
 
 OS sub-integrations (Reminders, Calendar, Mail, Notes) run via mcp-os on the host — they access native APIs directly (EventKit on macOS, CalDAV/zbus on Linux, WinRT/MAPI on Windows).
 
+The Reminders integration supports native tags on macOS 15+ (Sequoia). Use `tags: ["idea", "work"]` in `createReminder` to assign up to 50 tags; `listReminders` and `getReminder` include tags in their response when present. On older macOS versions, the `tags` parameter is silently ignored.
+
 ### Credential Requirements
 
 Each MCP integration requires specific credentials to function. Fields marked as optional do not block the "Configured" status — the integration works without them.

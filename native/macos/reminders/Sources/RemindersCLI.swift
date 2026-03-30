@@ -175,6 +175,12 @@ func createReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
         reminder.notes = notes
     }
 
+    if #available(macOS 15.0, *) {
+        if let tags = params["tags"] as? [String], !tags.isEmpty {
+            reminder.tags = tags
+        }
+    }
+
     try store.save(reminder, commit: true)
 
     return [
@@ -221,6 +227,13 @@ func reminderToDict(_ r: EKReminder) -> [String: Any] {
 
     if let notes = r.notes, !notes.isEmpty {
         dict["notes"] = notes
+    }
+
+    if #available(macOS 15.0, *) {
+        let tags = r.tags
+        if !tags.isEmpty {
+            dict["tags"] = tags
+        }
     }
 
     return dict

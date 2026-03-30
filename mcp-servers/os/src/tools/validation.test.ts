@@ -10,6 +10,7 @@ import {
   validateStringFields,
   validateNumberFields,
   validateBooleanFields,
+  validateStringArrayFields,
   validateAll,
   validateDateFields,
   asRecord,
@@ -372,6 +373,171 @@ describe('validation', () => {
     });
   });
 
+  describe('validateStringArrayFields', () => {
+    const spec: [string, number, number][] = [['tags', 50, 1000]];
+
+    it('accepts valid string array', () => {
+      const result = validateStringArrayFields({ tags: ['a', 'b'] }, spec);
+      expect(result.valid).toBe(true);
+    });
+
+    it('skips undefined (optional)', () => {
+      const result = validateStringArrayFields({}, spec);
+      expect(result.valid).toBe(true);
+    });
+
+    it('accepts empty array', () => {
+      const result = validateStringArrayFields({ tags: [] }, spec);
+      expect(result.valid).toBe(true);
+    });
+
+    it('accepts array at max items (boundary)', () => {
+      const result = validateStringArrayFields({ tags: Array(50).fill('x') }, spec);
+      expect(result.valid).toBe(true);
+    });
+
+    it('accepts item at max length (boundary)', () => {
+      const result = validateStringArrayFields({ tags: ['a'.repeat(1000)] }, spec);
+      expect(result.valid).toBe(true);
+    });
+
+    it('accepts Unicode and emoji in items', () => {
+      const result = validateStringArrayFields({ tags: ['🏷️ work', 'café'] }, spec);
+      expect(result.valid).toBe(true);
+    });
+
+    it('accepts single-element array (boundary)', () => {
+      const result = validateStringArrayFields({ tags: ['single'] }, spec);
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects null (not treated as optional)', () => {
+      const result = validateStringArrayFields({ tags: null }, spec);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('INVALID_TYPE');
+        expect(result.error.error?.message).toContain('must be an array');
+      }
+    });
+
+    it('rejects non-array (string)', () => {
+      const result = validateStringArrayFields({ tags: 'not-array' }, spec);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('INVALID_TYPE');
+        expect(result.error.error?.message).toContain('must be an array');
+      }
+    });
+
+    it('rejects non-array (number)', () => {
+      const result = validateStringArrayFields({ tags: 123 }, spec);
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.error.error?.code).toBe('INVALID_TYPE');
+    });
+
+    it('rejects non-array (object)', () => {
+      const result = validateStringArrayFields({ tags: { key: 'val' } }, spec);
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.error.error?.code).toBe('INVALID_TYPE');
+    });
+
+    it('rejects array exceeding max items', () => {
+      const result = validateStringArrayFields({ tags: Array(51).fill('x') }, spec);
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.error.error?.code).toBe('ARRAY_TOO_LONG');
+    });
+
+    it('rejects non-string element (number)', () => {
+      const result = validateStringArrayFields({ tags: ['ok', 123] }, spec);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('INVALID_TYPE');
+        expect(result.error.error?.message).toContain('tags[1]');
+      }
+    });
+
+    it('rejects null element', () => {
+      const result = validateStringArrayFields({ tags: ['ok', null] }, spec);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('INVALID_TYPE');
+        expect(result.error.error?.message).toContain('tags[1] must be a string');
+      }
+    });
+
+    it('rejects undefined element', () => {
+      const result = validateStringArrayFields({ tags: ['ok', undefined] }, spec);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('INVALID_TYPE');
+        expect(result.error.error?.message).toContain('tags[1] must be a string');
+      }
+    });
+
+    it('rejects boolean element', () => {
+      const result = validateStringArrayFields({ tags: ['ok', true] }, spec);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('INVALID_TYPE');
+        expect(result.error.error?.message).toContain('tags[1] must be a string');
+      }
+    });
+
+    it('rejects empty string element', () => {
+      const result = validateStringArrayFields({ tags: ['ok', ''] }, spec);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('EMPTY_FIELDS');
+        expect(result.error.error?.message).toContain('tags[1]');
+      }
+    });
+
+    it('rejects whitespace-only element', () => {
+      const result = validateStringArrayFields({ tags: ['ok', '   '] }, spec);
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.error.error?.code).toBe('EMPTY_FIELDS');
+    });
+
+    it('rejects element exceeding max length', () => {
+      const result = validateStringArrayFields({ tags: ['a'.repeat(1001)] }, spec);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('FIELD_TOO_LONG');
+        expect(result.error.error?.message).toContain('tags[0]');
+      }
+    });
+
+    it('rejects null byte in element', () => {
+      const result = validateStringArrayFields({ tags: ['ok\x00bad'] }, spec);
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.error.error?.code).toBe('INVALID_CHARACTERS');
+    });
+
+    it('rejects bell char in element', () => {
+      const result = validateStringArrayFields({ tags: ['test\x07val'] }, spec);
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.error.error?.code).toBe('INVALID_CHARACTERS');
+    });
+
+    it('rejects newline in element (strict)', () => {
+      const result = validateStringArrayFields({ tags: ['line1\nline2'] }, spec);
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.error.error?.code).toBe('INVALID_CHARACTERS');
+    });
+
+    it('rejects tab in element (strict)', () => {
+      const result = validateStringArrayFields({ tags: ['ok\ttab'] }, spec);
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.error.error?.code).toBe('INVALID_CHARACTERS');
+    });
+
+    it('stops on first invalid element', () => {
+      const result = validateStringArrayFields({ tags: [123, 456] }, spec);
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.error.error?.message).toContain('tags[0]');
+    });
+  });
+
   describe('validateAll', () => {
     it('returns valid when no spec keys are provided', () => {
       const result = validateAll({ anything: 'goes' }, {});
@@ -507,6 +673,64 @@ describe('validation', () => {
       );
       expect(result.valid).toBe(false);
       if (!result.valid) expect(result.error.error?.code).toBe('OUT_OF_RANGE');
+    });
+
+    it('validates stringArrays in spec', () => {
+      const result = validateAll(
+        { id: 'abc', tags: ['work', 'idea'] },
+        {
+          required: ['id'],
+          stringArrays: [['tags', 50, 1000]],
+        }
+      );
+      expect(result.valid).toBe(true);
+    });
+
+    it('fails on invalid stringArrays', () => {
+      const result = validateAll(
+        { id: 'abc', tags: 'not-array' },
+        {
+          required: ['id'],
+          stringArrays: [['tags', 50, 1000]],
+        }
+      );
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.error.error?.code).toBe('INVALID_TYPE');
+    });
+
+    it('rejects null in stringArrays field', () => {
+      const result = validateAll(
+        { id: 'abc', tags: null },
+        {
+          required: ['id'],
+          stringArrays: [['tags', 50, 1000]],
+        }
+      );
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.error.error?.code).toBe('INVALID_TYPE');
+    });
+
+    it('skips undefined in stringArrays field', () => {
+      const result = validateAll(
+        { id: 'abc' },
+        {
+          required: ['id'],
+          stringArrays: [['tags', 50, 1000]],
+        }
+      );
+      expect(result.valid).toBe(true);
+    });
+
+    it('runs stringArrays after dates: date error reported first', () => {
+      const result = validateAll(
+        { due_date: 'not-a-date', tags: 123 },
+        {
+          dates: ['due_date'],
+          stringArrays: [['tags', 50, 1000]],
+        }
+      );
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.error.error?.code).toBe('INVALID_DATE');
     });
   });
 

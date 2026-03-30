@@ -74,6 +74,38 @@ describe('reminder-tools', () => {
         show_completed: true,
       });
     });
+
+    it('returns reminders with tags and notes', async () => {
+      const mockData = {
+        reminders: [
+          {
+            id: 'r-1',
+            name: 'Tagged',
+            completed: false,
+            tags: ['idea'],
+            notes: 'Some note',
+          },
+        ],
+      };
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
+
+      const result = await handleListReminders({});
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(mockData);
+    });
+
+    it('returns reminders without tags when absent from CLI output', async () => {
+      const mockData = {
+        reminders: [{ id: 'r-1', name: 'No tags', completed: false }],
+      };
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
+
+      const result = await handleListReminders({});
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(mockData);
+    });
   });
 
   describe('handleGetReminder', () => {
@@ -100,6 +132,31 @@ describe('reminder-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('EMPTY_FIELDS');
       expect(result.error?.message).toContain('id');
+    });
+
+    it('returns reminder with tags', async () => {
+      const mockData = {
+        id: 'r-1',
+        name: 'Tagged',
+        completed: false,
+        tags: ['work'],
+      };
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
+
+      const result = await handleGetReminder({ id: 'r-1' });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(mockData);
+    });
+
+    it('returns reminder without tags when absent from CLI output', async () => {
+      const mockData = { id: 'r-1', name: 'No tags', completed: false };
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
+
+      const result = await handleGetReminder({ id: 'r-1' });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(mockData);
     });
   });
 
@@ -149,6 +206,47 @@ describe('reminder-tools', () => {
         list_id: 'list-2',
       });
     });
+
+    it('creates reminder with tags', async () => {
+      vi.mocked(runCommand).mockResolvedValue({
+        stdout: '',
+        parsed: { id: 'r-t', status: 'created' },
+      });
+
+      await handleCreateReminder({ name: 'Test', tags: ['idea', 'work'] });
+
+      expect(runCommand).toHaveBeenCalledWith(
+        'reminders',
+        'create_reminder',
+        expect.objectContaining({ tags: ['idea', 'work'] })
+      );
+    });
+
+    it('passes empty tags array', async () => {
+      vi.mocked(runCommand).mockResolvedValue({
+        stdout: '',
+        parsed: { id: 'r-e', status: 'created' },
+      });
+
+      await handleCreateReminder({ name: 'Test', tags: [] });
+
+      expect(runCommand).toHaveBeenCalledWith(
+        'reminders',
+        'create_reminder',
+        expect.objectContaining({ tags: [] })
+      );
+    });
+
+    it('creates reminder without tags when omitted', async () => {
+      vi.mocked(runCommand).mockResolvedValue({
+        stdout: '',
+        parsed: { id: 'r-n', status: 'created' },
+      });
+
+      await handleCreateReminder({ name: 'Test' });
+
+      expect(vi.mocked(runCommand).mock.calls[0][2]).not.toHaveProperty('tags');
+    });
   });
 
   describe('handleCompleteReminder', () => {
@@ -190,6 +288,31 @@ describe('reminder-tools', () => {
       for (const t of tools) {
         expect(t.handler).toBeTypeOf('function');
       }
+    });
+
+    it('createReminderTool inputSchema includes tags', () => {
+      const tools = createReminderTools();
+      const createTool = tools.find((t) => t.tool.name === 'createReminder')!;
+      const props = createTool.tool.inputSchema.properties as Record<string, { type: string }>;
+      expect(props.tags).toBeDefined();
+      expect(props.tags.type).toBe('array');
+    });
+
+    it('listRemindersTool outputSchema includes notes and tags', () => {
+      const tools = createReminderTools();
+      const listTool = tools.find((t) => t.tool.name === 'listReminders')!;
+      const items = (listTool.tool.outputSchema as any)?.properties?.reminders?.items;
+      expect(items?.properties?.notes).toBeDefined();
+      expect(items?.properties?.tags).toBeDefined();
+      expect(items?.properties?.tags?.type).toBe('array');
+    });
+
+    it('getReminderTool outputSchema includes tags', () => {
+      const tools = createReminderTools();
+      const getTool = tools.find((t) => t.tool.name === 'getReminder')!;
+      const props = (getTool.tool.outputSchema as any)?.properties;
+      expect(props?.tags).toBeDefined();
+      expect(props?.tags?.type).toBe('array');
     });
   });
 
@@ -240,6 +363,54 @@ describe('reminder-tools', () => {
         });
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_DATE');
+      });
+
+      it('rejects tags as string', async () => {
+        const result = await handleCreateReminder({ name: 'Test', tags: 'not-array' as any });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_TYPE');
+      });
+
+      it('rejects tags as null', async () => {
+        const result = await handleCreateReminder({ name: 'Test', tags: null as any });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_TYPE');
+      });
+
+      it('rejects tags with non-string element', async () => {
+        const result = await handleCreateReminder({ name: 'Test', tags: ['ok', 123 as any] });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_TYPE');
+      });
+
+      it('rejects tags with empty string', async () => {
+        const result = await handleCreateReminder({ name: 'Test', tags: ['ok', ''] });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('EMPTY_FIELDS');
+      });
+
+      it('rejects tags with control chars', async () => {
+        const result = await handleCreateReminder({ name: 'Test', tags: ['ok\x00bad'] });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_CHARACTERS');
+      });
+
+      it('rejects tags as boolean', async () => {
+        const result = await handleCreateReminder({ name: 'Test', tags: true as any });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_TYPE');
+      });
+
+      it('rejects tags exceeding max items', async () => {
+        const result = await handleCreateReminder({ name: 'Test', tags: Array(51).fill('tag') });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('ARRAY_TOO_LONG');
+      });
+
+      it('rejects tag exceeding max length', async () => {
+        const result = await handleCreateReminder({ name: 'Test', tags: ['a'.repeat(1001)] });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('FIELD_TOO_LONG');
       });
     });
 
