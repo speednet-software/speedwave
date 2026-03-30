@@ -79,18 +79,115 @@ point (`getWorkerUrl()`) before any `fetch()` call:
 
 Invalid URLs are treated as unconfigured services (fail-closed).
 
-## SecurityCheck — Workspace Mount Validation
+## SecurityCheck — Compose and Host Validation
 
-`SecurityCheck::run()` validates the `/workspace:rw` mount for both plugin services and built-in SharePoint:
+`SecurityCheck::run()` validates the generated compose YAML and host filesystem state before any `compose_up`. If any rule is violated, containers are blocked from starting (fail-closed). Both CLI (`speedwave check`, `speedwave`) and Desktop (blocking overlay) enforce this gate.
 
-- **Host path** must match `{project_dir}` (via `SecurityExpectedPaths`)
-- **Mode** must be `:rw`
-- **Presence** — both `/tokens` and `/workspace` mounts are required
-- **Long-form volumes** (YAML mappings) are rejected — only short-form strings allowed
+Every rule below corresponds to a variant in the `SecurityRule` enum. Compose YAML checks use `serde_yaml_ng` for structured parsing — never string matching on raw YAML. Host filesystem checks use `symlink_metadata()` to avoid following symlinks.
 
-`SecurityExpectedPaths` is computed once and shared between `render_compose()` and `SecurityCheck::run()` to prevent path drift.
+### YAML Validation
 
-Because the full project directory is now mounted, the `path-validator.ts` denylist blocks MCP workers from accessing sensitive paths within the workspace: `.git/`, `.env`, and `.speedwave/`. This provides defense-in-depth — even if an MCP worker is compromised, it cannot exfiltrate repository history, environment secrets, or Speedwave configuration.
+| Rule               | Scope        | What it checks                                |
+| ------------------ | ------------ | --------------------------------------------- |
+| `YAML_PARSE_ERROR` | Compose file | Compose YAML can be parsed by `serde_yaml_ng` |
+
+### Container Hardening Rules
+
+| Rule           | Scope           | What it checks                                      |
+| -------------- | --------------- | --------------------------------------------------- |
+| `CAP_DROP_ALL` | All containers  | `cap_drop: [ALL]` is present                        |
+| `NO_NEW_PRIVS` | All containers  | `security_opt: [no-new-privileges:true]` is present |
+| `READ_ONLY_FS` | claude, mcp-hub | `read_only: true` is set                            |
+| `TMPFS_NOEXEC` | claude, mcp-hub | `/tmp` is mounted as `tmpfs` with `noexec,nosuid`   |
+
+### Token / Secret Isolation Rules
+
+| Rule               | Scope   | What it checks                                                                                     |
+| ------------------ | ------- | -------------------------------------------------------------------------------------------------- |
+| `NO_TOKENS_CLAUDE` | claude  | No `TOKEN`, `KEY`, or `SECRET` env vars (allowlist: `CLAUDE_*`, `ANTHROPIC_*`, `IS_SANDBOX`, etc.) |
+| `NO_TOKENS_HUB`    | mcp-hub | No env vars except `WORKER_*_URL`, `PORT`, and `ENABLED_SERVICES`                                  |
+
+### Network Security Rules
+
+| Rule                          | Scope                     | What it checks                                                                                   |
+| ----------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------ |
+| `PORTS_LOCALHOST`             | All containers with ports | All exposed ports bind to `127.0.0.1`, not `0.0.0.0`                                             |
+| `NO_SOCKET_CLAUDE`            | claude                    | No `docker.sock` or `nerdctl.sock` volume mounts                                                 |
+| `NO_EXTERNAL_LLM_KEYS_CLAUDE` | claude                    | No `OPENAI_*`, `GEMINI_*`, `DEEPSEEK_*`, `OPENROUTER_*` env vars (these belong in the LLM proxy) |
+| `NO_PORTS_WORKERS`            | Built-in MCP workers      | Built-in services must not expose ports at all — inter-container communication uses Docker DNS   |
+
+### Container User Rule
+
+| Rule             | Scope          | What it checks                                                                                                                                                                                  |
+| ---------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTAINER_USER` | All containers | `user:` field matches the platform-expected value from `container_user()` (UID 1000 on macOS/Windows, UID 0 on Linux rootless — see [ADR-026](../adr/ADR-026-linux-rootless-container-user.md)) |
+
+### Plugin Security Rules
+
+| Rule                             | Scope           | What it checks                                                                  |
+| -------------------------------- | --------------- | ------------------------------------------------------------------------------- |
+| `PLUGIN_NO_PRIVILEGED`           | Plugin services | `privileged: true` is not set                                                   |
+| `PLUGIN_NO_HOST_NETWORK`         | Plugin services | `network_mode: host` is not set                                                 |
+| `PLUGIN_MANIFEST_MISSING`        | Plugin services | Signed manifest exists for the plugin                                           |
+| `PLUGIN_VOLUME_LONG_FORM`        | Plugin services | Volumes use short-form strings only (no YAML mappings)                          |
+| `PLUGIN_TOKEN_PATH_MISMATCH`     | Plugin services | `/tokens` mount host path matches `~/.speedwave/tokens/<project>/<service_id>/` |
+| `PLUGIN_TOKEN_MOUNT_MODE`        | Plugin services | `/tokens` mount mode matches the signed manifest (`:ro` or `:rw`)               |
+| `PLUGIN_WORKSPACE_PATH_MISMATCH` | Plugin services | `/workspace` mount host path matches `{project_dir}`                            |
+| `PLUGIN_WORKSPACE_MOUNT_MODE`    | Plugin services | `/workspace` mount mode is `:rw`                                                |
+| `PLUGIN_NO_EXTRA_VOLUMES`        | Plugin services | No volumes beyond `/tokens` and `/workspace`                                    |
+| `PLUGIN_MISSING_TOKENS_MOUNT`    | Plugin services | `/tokens` mount is present                                                      |
+| `PLUGIN_MISSING_WORKSPACE_MOUNT` | Plugin services | `/workspace` mount is present                                                   |
+
+### SharePoint Volume Rules
+
+Same checks as plugin volumes, applied to the built-in SharePoint service. SharePoint uses `:rw` token mount for OAuth refresh (see [ADR-009](../adr/ADR-009-per-project-isolation-preserved.md)).
+
+| Rule                                 | What it checks                        |
+| ------------------------------------ | ------------------------------------- |
+| `SHAREPOINT_VOLUME_LONG_FORM`        | Short-form volumes only               |
+| `SHAREPOINT_TOKEN_PATH_MISMATCH`     | Token mount path matches expected     |
+| `SHAREPOINT_TOKEN_MOUNT_MODE`        | Token mount mode is `:rw`             |
+| `SHAREPOINT_WORKSPACE_PATH_MISMATCH` | Workspace mount path matches expected |
+| `SHAREPOINT_WORKSPACE_MOUNT_MODE`    | Workspace mount mode is `:rw`         |
+| `SHAREPOINT_NO_EXTRA_VOLUMES`        | No extra volumes                      |
+| `SHAREPOINT_MISSING_TOKENS_MOUNT`    | Token mount present                   |
+| `SHAREPOINT_MISSING_WORKSPACE_MOUNT` | Workspace mount present               |
+
+### Host File Security Rules
+
+| Rule                      | Scope                       | What it checks                                                                         |
+| ------------------------- | --------------------------- | -------------------------------------------------------------------------------------- |
+| `FILE_SECURITY_VIOLATION` | Host filesystem (Unix only) | Sensitive files/directories have correct permissions AND are owned by the current user |
+
+**Permission requirements:**
+
+Sensitive directories must be `0o700` (owner rwx only):
+
+- `~/.speedwave/secrets/<project>/` — worker auth tokens
+- `~/.speedwave/snapshots/<project>/` — compose rollback snapshots
+- `~/.speedwave/ide-bridge/` — IDE bridge lock files
+- `~/.speedwave/tokens/<project>/` — token parent directory
+- `~/.speedwave/tokens/<project>/<service>/` — per-service token directories
+
+Sensitive files must be `0o600` (owner rw only):
+
+- `~/.speedwave/secrets/<project>/*` — service auth tokens
+- `~/.speedwave/tokens/<project>/<service>/*` — plugin credentials
+- `~/.speedwave/snapshots/<project>/*.json` — compose snapshots
+- `~/.speedwave/ide-bridge/*.lock` — IDE bridge auth tokens
+- `~/.speedwave/bundle-state.json` — bundle reconciliation state
+
+**Ownership requirement:** All sensitive files and directories must be owned by the current user (UID match). This prevents scenarios where files have correct mode bits but are owned by a different user (e.g. root), making them inaccessible to the container runtime.
+
+**Limitations:** Validates Unix mode bits and UID only — not ACLs, xattrs, or Windows DACLs. On Windows, this check is a no-op. Symlinks within scanned directories are skipped (not followed) to prevent traversal attacks. Missing paths are silently skipped — they may not exist for fresh projects or unused integrations.
+
+### Workspace Path Protection
+
+Because the full project directory is mounted as `/workspace:rw`, the `path-validator.ts` denylist blocks MCP workers from accessing sensitive paths within the workspace: `.git/`, `.env`, and `.speedwave/`. This provides defense-in-depth — even if an MCP worker is compromised, it cannot exfiltrate repository history, environment secrets, or Speedwave configuration.
+
+### Shared Infrastructure
+
+`SecurityExpectedPaths` is computed once and shared between `render_compose()` and `SecurityCheck::run()` to prevent path drift. On Windows, paths are translated from `C:\Users\...` to `/mnt/c/Users/...` for WSL2 compatibility.
 
 ## OS Prerequisite Checks
 

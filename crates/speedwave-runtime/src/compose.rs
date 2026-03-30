@@ -941,7 +941,7 @@ pub struct SecurityCheck;
 /// Using an enum instead of `&'static str` guarantees that rule identifiers are
 /// unique and typo-free — a misspelled variant is a compile error, whereas a
 /// misspelled string literal would silently pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SecurityRule {
     YamlParseError,
     CapDropAll,
@@ -974,6 +974,10 @@ pub enum SecurityRule {
     SharepointMissingTokensMount,
     SharepointMissingWorkspaceMount,
     ContainerUser,
+    /// Host file or directory has wrong permissions or ownership.
+    /// Covers both mode bits (e.g. 0o644 instead of 0o600) and UID mismatch.
+    /// Unix-only — skipped on Windows.
+    FileSecurityViolation,
 }
 
 impl SecurityRule {
@@ -991,6 +995,80 @@ impl SecurityRule {
                 | Self::SharepointMissingWorkspaceMount
         )
     }
+
+    /// Human-readable description for verbose check output.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::YamlParseError => "Compose YAML is parseable",
+            Self::CapDropAll => "All containers have cap_drop: [ALL]",
+            Self::NoNewPrivs => "All containers have no-new-privileges",
+            Self::ReadOnlyFs => "Core containers have read-only filesystem",
+            Self::TmpfsNoexec => "Core containers have /tmp as tmpfs with noexec",
+            Self::NoTokensClaude => "Claude container has no token/key/secret env vars",
+            Self::NoTokensHub => "Hub has no token env vars (only WORKER_*_URL)",
+            Self::PortsLocalhost => "All exposed ports bind to 127.0.0.1",
+            Self::NoSocketClaude => "Claude container has no docker/nerdctl socket",
+            Self::NoExternalLlmKeysClaude => "Claude container has no external LLM API keys",
+            Self::NoPortsWorkers => "Built-in workers do not expose ports",
+            Self::ContainerUser => "All containers use correct platform user",
+            Self::PluginNoPrivileged => "Plugin containers are not privileged",
+            Self::PluginNoHostNetwork => "Plugin containers do not use host network",
+            Self::PluginManifestMissing => "All plugin services have signed manifests",
+            Self::PluginVolumeLongForm => "Plugin volumes use short-form only",
+            Self::PluginTokenPathMismatch => "Plugin token mount paths match expected",
+            Self::PluginTokenMountMode => "Plugin token mount modes match manifest",
+            Self::PluginWorkspacePathMismatch => "Plugin workspace paths match expected",
+            Self::PluginWorkspaceMountMode => "Plugin workspace mount mode is :rw",
+            Self::PluginNoExtraVolumes => "Plugin containers have no extra volumes",
+            Self::PluginMissingTokensMount => "Plugin containers have /tokens mount",
+            Self::PluginMissingWorkspaceMount => "Plugin containers have /workspace mount",
+            Self::SharepointVolumeLongForm => "SharePoint volumes use short-form only",
+            Self::SharepointTokenPathMismatch => "SharePoint token path matches expected",
+            Self::SharepointTokenMountMode => "SharePoint token mount mode is :rw",
+            Self::SharepointWorkspacePathMismatch => "SharePoint workspace path matches expected",
+            Self::SharepointWorkspaceMountMode => "SharePoint workspace mount mode is :rw",
+            Self::SharepointNoExtraVolumes => "SharePoint has no extra volumes",
+            Self::SharepointMissingTokensMount => "SharePoint has /tokens mount",
+            Self::SharepointMissingWorkspaceMount => "SharePoint has /workspace mount",
+            Self::FileSecurityViolation => "Host file permissions and ownership are correct",
+        }
+    }
+
+    /// All rules in check order — used for verbose `speedwave check` output.
+    pub const ALL_RULES: &[SecurityRule] = &[
+        Self::YamlParseError,
+        Self::CapDropAll,
+        Self::NoNewPrivs,
+        Self::ReadOnlyFs,
+        Self::TmpfsNoexec,
+        Self::NoTokensClaude,
+        Self::NoTokensHub,
+        Self::PortsLocalhost,
+        Self::NoSocketClaude,
+        Self::NoExternalLlmKeysClaude,
+        Self::NoPortsWorkers,
+        Self::ContainerUser,
+        Self::PluginNoPrivileged,
+        Self::PluginNoHostNetwork,
+        Self::PluginManifestMissing,
+        Self::PluginVolumeLongForm,
+        Self::PluginTokenPathMismatch,
+        Self::PluginTokenMountMode,
+        Self::PluginWorkspacePathMismatch,
+        Self::PluginWorkspaceMountMode,
+        Self::PluginNoExtraVolumes,
+        Self::PluginMissingTokensMount,
+        Self::PluginMissingWorkspaceMount,
+        Self::SharepointVolumeLongForm,
+        Self::SharepointTokenPathMismatch,
+        Self::SharepointTokenMountMode,
+        Self::SharepointWorkspacePathMismatch,
+        Self::SharepointWorkspaceMountMode,
+        Self::SharepointNoExtraVolumes,
+        Self::SharepointMissingTokensMount,
+        Self::SharepointMissingWorkspaceMount,
+        Self::FileSecurityViolation,
+    ];
 }
 
 impl std::fmt::Display for SecurityRule {
@@ -1027,6 +1105,7 @@ impl std::fmt::Display for SecurityRule {
             Self::SharepointMissingTokensMount => "SHAREPOINT_MISSING_TOKENS_MOUNT",
             Self::SharepointMissingWorkspaceMount => "SHAREPOINT_MISSING_WORKSPACE_MOUNT",
             Self::ContainerUser => "CONTAINER_USER",
+            Self::FileSecurityViolation => "FILE_SECURITY_VIOLATION",
         };
         f.write_str(s)
     }
@@ -1051,18 +1130,39 @@ impl std::fmt::Display for SecurityViolation {
 }
 
 impl SecurityCheck {
-    /// Verifies all security invariants on the generated compose YAML.
+    /// Verifies all security invariants on the generated compose YAML and host filesystem.
     /// Returns Vec of violations — if non-empty, compose_up MUST be blocked.
     ///
     /// `plugin_manifests` provides signed manifest data for cross-referencing
     /// plugin compose services against their declared token mount modes.
     ///
-    /// Uses serde_yaml_ng for structured parsing — NOT string matching on raw YAML.
+    /// Delegates to `run_with_data_dir()` using `consts::data_dir()` for host filesystem checks.
     pub fn run(
         compose_yml: &str,
-        _project: &str,
+        project: &str,
         plugin_manifests: &[PluginManifest],
         expected_paths: &SecurityExpectedPaths,
+    ) -> Vec<SecurityViolation> {
+        Self::run_with_data_dir(
+            compose_yml,
+            project,
+            plugin_manifests,
+            expected_paths,
+            crate::consts::data_dir(),
+        )
+    }
+
+    /// Testable version that accepts an explicit data_dir for host filesystem checks.
+    ///
+    /// Separated from `run()` so tests can pass a temp directory for
+    /// `check_file_security()` without depending on `consts::data_dir()`.
+    /// On non-Unix platforms, `check_file_security()` is a no-op.
+    pub(crate) fn run_with_data_dir(
+        compose_yml: &str,
+        project: &str,
+        plugin_manifests: &[PluginManifest],
+        expected_paths: &SecurityExpectedPaths,
+        data_dir: &std::path::Path,
     ) -> Vec<SecurityViolation> {
         let doc: serde_yaml_ng::Value = match serde_yaml_ng::from_str(compose_yml) {
             Ok(v) => v,
@@ -1097,6 +1197,8 @@ impl SecurityCheck {
             Self::check_plugin_volumes(&doc, expected_paths, plugin_manifests),
             // Built-in SharePoint context mount validation
             Self::check_builtin_sharepoint_volumes(&doc, expected_paths),
+            // Host filesystem checks (I/O — unlike pure YAML checks above)
+            Self::check_file_security(data_dir, project),
         ]
         .into_iter()
         .flatten()
@@ -1663,6 +1765,235 @@ impl SecurityCheck {
         }
         violations
     }
+
+    /// Validates file permissions and ownership on sensitive host paths.
+    ///
+    /// Unlike other `check_*` methods which validate in-memory compose YAML,
+    /// this method performs filesystem I/O — it reads metadata from host paths
+    /// under `data_dir`. This is intentional: host file permissions are a
+    /// security property that cannot be derived from the compose template.
+    ///
+    /// Rules:
+    /// - Files containing secrets must be 0o600 (owner rw only).
+    /// - Directories containing secrets must be 0o700 (owner rwx only).
+    /// - All sensitive files/dirs must be owned by the current user (UID match).
+    /// - Missing paths are silently skipped — they may not exist yet.
+    /// - Symlinks are skipped (not followed) to prevent traversal attacks.
+    ///
+    /// Known limitations: validates mode bits and UID only, not ACLs or xattrs.
+    /// TOCTOU: permissions are checked before container start; a concurrent
+    /// change between check and start is theoretically possible but acceptable.
+    ///
+    /// Performance: scans 1-2 directory levels (not recursive). Bounded by
+    /// the number of configured services per project — typically under 10 files.
+    /// Negligible compared to compose_up latency.
+    #[cfg(unix)]
+    fn check_file_security(data_dir: &std::path::Path, project: &str) -> Vec<SecurityViolation> {
+        use std::os::unix::fs::MetadataExt;
+        // Get current user's UID by checking ownership of data_dir itself.
+        // This avoids unsafe libc::getuid() while respecting workspace unsafe_code = "deny".
+        let expected_uid = match std::fs::metadata(data_dir) {
+            Ok(m) => m.uid(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(e) => {
+                log::warn!(
+                    "check_file_security: cannot read data_dir {}: {e}",
+                    data_dir.display()
+                );
+                return Vec::new();
+            }
+        };
+        Self::check_file_security_with_uid(data_dir, project, expected_uid)
+    }
+
+    /// Testable version that accepts an explicit expected UID.
+    #[cfg(unix)]
+    pub(crate) fn check_file_security_with_uid(
+        data_dir: &std::path::Path,
+        project: &str,
+        expected_uid: u32,
+    ) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+
+        // --- Directories that must be 0o700 ---
+        let mut required_dirs: Vec<std::path::PathBuf> = vec![
+            // Top-level directories (prevent project name enumeration)
+            data_dir.join("secrets"),
+            data_dir.join("snapshots"),
+            data_dir.join("tokens"),
+            // Per-project directories
+            data_dir.join("secrets").join(project),
+            data_dir.join("snapshots").join(project),
+            data_dir.join("ide-bridge"),
+            data_dir.join("tokens").join(project),
+        ];
+
+        // Scan tokens/<project>/<service>/ subdirectories — single read_dir pass
+        // collects both directory paths (for 0o700 check) and file paths (for 0o600 check).
+        let tokens_project_dir = data_dir.join("tokens").join(project);
+        let mut token_credential_files: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(services) = std::fs::read_dir(&tokens_project_dir) {
+            for entry in services.flatten() {
+                if let Ok(ft) = entry.file_type() {
+                    if ft.is_dir() {
+                        required_dirs.push(entry.path());
+                        // Scan files inside service dir
+                        if let Ok(files) = std::fs::read_dir(entry.path()) {
+                            for file_entry in files.flatten() {
+                                if let Ok(fft) = file_entry.file_type() {
+                                    if fft.is_file() {
+                                        token_credential_files.push(file_entry.path());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for dir in &required_dirs {
+            violations.extend(Self::verify_path(dir, 0o700, true, expected_uid));
+        }
+
+        // --- Files at data_dir root that must be 0o600 ---
+        let root_files = [data_dir.join("bundle-state.json")];
+        for file in &root_files {
+            violations.extend(Self::verify_path(file, 0o600, false, expected_uid));
+        }
+
+        // --- Files in subdirectories that must be 0o600 ---
+
+        // secrets/<project>/*  (worker auth tokens)
+        let secrets_dir = data_dir.join("secrets").join(project);
+        if let Ok(entries) = std::fs::read_dir(&secrets_dir) {
+            for entry in entries.flatten() {
+                if let Ok(ft) = entry.file_type() {
+                    if ft.is_file() {
+                        violations.extend(Self::verify_path(
+                            &entry.path(),
+                            0o600,
+                            false,
+                            expected_uid,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // tokens/<project>/<service>/<key>  (plugin credentials, collected above)
+        for file in &token_credential_files {
+            violations.extend(Self::verify_path(file, 0o600, false, expected_uid));
+        }
+
+        // snapshots/<project>/*.json
+        let snapshots_dir = data_dir.join("snapshots").join(project);
+        if let Ok(entries) = std::fs::read_dir(&snapshots_dir) {
+            for entry in entries.flatten() {
+                if let Ok(ft) = entry.file_type() {
+                    if ft.is_file() {
+                        violations.extend(Self::verify_path(
+                            &entry.path(),
+                            0o600,
+                            false,
+                            expected_uid,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // ide-bridge/*.lock  (IDE auth tokens)
+        let ide_dir = data_dir.join("ide-bridge");
+        if let Ok(entries) = std::fs::read_dir(&ide_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Ok(ft) = entry.file_type() {
+                    if ft.is_file() && path.extension().is_some_and(|e| e == "lock") {
+                        violations.extend(Self::verify_path(&path, 0o600, false, expected_uid));
+                    }
+                }
+            }
+        }
+
+        violations
+    }
+
+    /// No-op on non-Unix platforms.
+    #[cfg(not(unix))]
+    fn check_file_security(_data_dir: &std::path::Path, _project: &str) -> Vec<SecurityViolation> {
+        Vec::new()
+    }
+
+    /// Verifies a single path's permissions and ownership.
+    /// Returns empty Vec if path is missing or is a symlink.
+    #[cfg(unix)]
+    fn verify_path(
+        path: &std::path::Path,
+        expected_mode: u32,
+        is_dir: bool,
+        expected_uid: u32,
+    ) -> Vec<SecurityViolation> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let meta = match std::fs::symlink_metadata(path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(e) => {
+                log::warn!(
+                    "verify_path: cannot read metadata for {}: {e}",
+                    path.display()
+                );
+                return Vec::new();
+            }
+        };
+        if meta.file_type().is_symlink() {
+            return Vec::new(); // Skip symlinks — prevent traversal attacks
+        }
+
+        let mut violations = Vec::new();
+
+        // Ownership check
+        if meta.uid() != expected_uid {
+            violations.push(SecurityViolation {
+                container: "host".into(),
+                rule: SecurityRule::FileSecurityViolation,
+                message: format!(
+                    "{} owned by uid {}, expected uid {}",
+                    path.display(),
+                    meta.uid(),
+                    expected_uid
+                ),
+                remediation: if is_dir {
+                    "Run: chown -R $(id -u) on the directory shown above"
+                } else {
+                    "Run: chown $(id -u) on the file shown above"
+                },
+            });
+        }
+
+        // Permission check
+        let mode = meta.permissions().mode() & 0o777;
+        if mode != expected_mode {
+            violations.push(SecurityViolation {
+                container: "host".into(),
+                rule: SecurityRule::FileSecurityViolation,
+                message: format!(
+                    "{} has mode {:#05o}, expected {:#05o}",
+                    path.display(),
+                    mode,
+                    expected_mode
+                ),
+                remediation: if is_dir {
+                    "Run: chmod 700 on the directory shown above"
+                } else {
+                    "Run: chmod 600 on the file shown above"
+                },
+            });
+        }
+
+        violations
+    }
 }
 
 /// Per-rule names and remediation strings for volume validation.
@@ -1975,8 +2306,15 @@ networks:
 
     #[test]
     fn test_security_check_valid_compose() {
+        let tmp = tempfile::tempdir().unwrap();
         let yaml = valid_compose_yaml();
-        let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp.path(),
+        );
         assert!(
             violations.is_empty(),
             "Expected no violations, got: {:?}",
@@ -2440,11 +2778,13 @@ services:
             None,
         )
         .unwrap();
-        let violations = SecurityCheck::run(
+        let tmp = tempfile::tempdir().unwrap();
+        let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
             &[],
             &SecurityExpectedPaths::compute("test-project", "/home/user/projects/test").unwrap(),
+            tmp.path(),
         );
         assert!(
             violations.is_empty(),
@@ -3839,7 +4179,14 @@ services:
         let integrations = ResolvedIntegrationsConfig::default(); // all false
         let yaml = valid_compose_yaml();
         let filtered = apply_integrations_filter(&yaml, &integrations).unwrap();
-        let violations = SecurityCheck::run(&filtered, "test", &[], &test_expected_paths());
+        let tmp = tempfile::tempdir().unwrap();
+        let violations = SecurityCheck::run_with_data_dir(
+            &filtered,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp.path(),
+        );
         assert!(
             violations.is_empty(),
             "All-disabled compose should pass security check. Violations: {:?}",
@@ -5147,7 +5494,8 @@ networks:
         let result =
             apply_worker_auth_tokens_with_dir(&yaml, tmp.path(), &integrations, &[]).unwrap();
 
-        let violations = SecurityCheck::run(
+        let data_tmp = tempfile::tempdir().unwrap();
+        let violations = SecurityCheck::run_with_data_dir(
             &result,
             "test",
             &[],
@@ -5155,6 +5503,7 @@ networks:
                 "/home/user/projects/test",
                 "/home/user/.speedwave/tokens/test",
             ),
+            data_tmp.path(),
         );
         assert!(
             violations.is_empty(),
@@ -5462,6 +5811,441 @@ services:
                 .iter()
                 .map(|v| format!("{}", v))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    // --- ALL_RULES sync test ---
+
+    #[test]
+    fn test_all_rules_covers_every_variant() {
+        // If this fails, a SecurityRule variant was added but not included in ALL_RULES.
+        // Update ALL_RULES in the SecurityRule impl block.
+        assert_eq!(
+            SecurityRule::ALL_RULES.len(),
+            32,
+            "ALL_RULES count doesn't match SecurityRule variant count — did you add a new rule?"
+        );
+    }
+
+    // --- Integration: run() delegation ---
+
+    #[test]
+    fn test_security_check_run_delegates_without_panic() {
+        // Calls run() which uses consts::data_dir() internally.
+        // Verifies the delegation from run() to run_with_data_dir() works
+        // without panicking. On dev machines, real files may exist and produce
+        // violations — that's fine, we only check that it doesn't crash.
+        let yaml = valid_compose_yaml();
+        let _violations =
+            SecurityCheck::run(&yaml, "nonexistent-project", &[], &test_expected_paths());
+        // No assertion on violations — dev machines may have real files with
+        // various permissions. The test verifies the delegation path works.
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_security_check_run_includes_file_security() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        let secrets_dir = data_dir.join("secrets").join("test");
+        std::fs::create_dir_all(&secrets_dir).unwrap();
+        std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let yaml = valid_compose_yaml();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &test_expected_paths(), data_dir);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::FileSecurityViolation),
+            "run_with_data_dir() should include file security violations"
+        );
+        // Note: this assertion depends on valid_compose_yaml() producing no
+        // YAML-level violations. If valid_compose_yaml() changes, this may need updating.
+        assert!(
+            violations
+                .iter()
+                .all(|v| v.rule == SecurityRule::FileSecurityViolation),
+            "Only file security violations expected — compose YAML should be valid"
+        );
+    }
+
+    // --- File security check tests ---
+
+    /// Creates a directory tree under data_dir with 0o700 on all components.
+    /// E.g. `secure_mkdir(data_dir, &["secrets", "proj"])` creates `data_dir/secrets/`
+    /// and `data_dir/secrets/proj/`, both with 0o700.
+    #[cfg(unix)]
+    fn secure_mkdir(data_dir: &std::path::Path, components: &[&str]) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut path = data_dir.to_path_buf();
+        for comp in components {
+            path = path.join(comp);
+            if !path.exists() {
+                std::fs::create_dir(&path).unwrap();
+            }
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_security_passes_for_correct_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        secure_mkdir(data_dir, &["secrets", "testproj"]);
+        let secrets_dir = data_dir.join("secrets").join("testproj");
+
+        let token_file = secrets_dir.join("slack-auth-token");
+        std::fs::write(&token_file, "secret").unwrap();
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        assert!(
+            violations.is_empty(),
+            "Expected no violations for correct permissions, got: {:?}",
+            violations
+                .iter()
+                .map(|v| format!("{v}"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_security_detects_world_readable_secret() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        secure_mkdir(data_dir, &["secrets", "testproj"]);
+        let secrets_dir = data_dir.join("secrets").join("testproj");
+
+        let token_file = secrets_dir.join("slack-auth-token");
+        std::fs::write(&token_file, "secret").unwrap();
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::FileSecurityViolation),
+            "Expected FILE_SECURITY_VIOLATION"
+        );
+        assert!(
+            violations[0].message.contains("0o644"),
+            "Message should contain actual permissions"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_security_detects_group_readable_secret() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        secure_mkdir(data_dir, &["secrets", "testproj"]);
+        let secrets_dir = data_dir.join("secrets").join("testproj");
+
+        let token_file = secrets_dir.join("slack-auth-token");
+        std::fs::write(&token_file, "secret").unwrap();
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::FileSecurityViolation),
+            "0o640 (group-readable) should be a violation — expected 0o600"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_security_detects_world_readable_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        // Parent secrets/ is correct, only project subdir is wrong
+        secure_mkdir(data_dir, &["secrets"]);
+        let secrets_dir = data_dir.join("secrets").join("testproj");
+        std::fs::create_dir(&secrets_dir).unwrap();
+        std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::FileSecurityViolation),
+            "Expected violation for directory with 0o755"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_security_skips_missing_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        assert!(
+            violations.is_empty(),
+            "Missing paths should be skipped, not reported as violations"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_security_skips_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        secure_mkdir(data_dir, &["secrets", "testproj"]);
+        let secrets_dir = data_dir.join("secrets").join("testproj");
+
+        let target = tmp.path().join("outside-file");
+        std::fs::write(&target, "data").unwrap();
+        std::os::unix::fs::symlink(&target, secrets_dir.join("symlink-token")).unwrap();
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        assert!(
+            violations.is_empty(),
+            "Symlinks should be skipped, got: {:?}",
+            violations
+                .iter()
+                .map(|v| format!("{v}"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_security_token_dir_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        secure_mkdir(data_dir, &["tokens", "testproj", "myplugin"]);
+        let token_dir = data_dir.join("tokens").join("testproj").join("myplugin");
+
+        let token_file = token_dir.join("api_key");
+        std::fs::write(&token_file, "key123").unwrap();
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        assert_eq!(
+            violations
+                .iter()
+                .filter(|v| v.rule == SecurityRule::FileSecurityViolation)
+                .count(),
+            1,
+            "Expected exactly 1 violation for the token file, dirs are correct"
+        );
+        assert!(
+            violations[0].message.contains("api_key"),
+            "Violation should reference the token file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_security_bundle_state() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        let state_file = data_dir.join("bundle-state.json");
+        std::fs::write(&state_file, "{}").unwrap();
+        std::fs::set_permissions(&state_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::FileSecurityViolation
+                    && v.message.contains("bundle-state.json")),
+            "Expected violation for bundle-state.json with wrong permissions"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_security_unreadable_directory() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        // Root can read any directory regardless of mode bits
+        let tmp_check = tempfile::tempdir().unwrap();
+        let check_meta = std::fs::metadata(tmp_check.path()).unwrap();
+        if check_meta.uid() == 0 {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        secure_mkdir(data_dir, &["secrets", "testproj"]);
+        let secrets_dir = data_dir.join("secrets").join("testproj");
+        std::fs::write(secrets_dir.join("token"), "secret").unwrap();
+        std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::FileSecurityViolation
+                    && v.message.contains("0o000")),
+            "Directory with 0o000 should be flagged"
+        );
+
+        // Restore permissions so tempdir cleanup can delete it
+        std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_security_ide_bridge() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        let ide_dir = data_dir.join("ide-bridge");
+        std::fs::create_dir_all(&ide_dir).unwrap();
+        std::fs::set_permissions(&ide_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let lock_file = ide_dir.join("4000.lock");
+        std::fs::write(&lock_file, "{}").unwrap();
+        std::fs::set_permissions(&lock_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        assert_eq!(
+            violations
+                .iter()
+                .filter(|v| v.rule == SecurityRule::FileSecurityViolation)
+                .count(),
+            2,
+            "Expected 2 violations: directory + lock file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_security_snapshots() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        // Parent snapshots/ dir is correct, only project subdir is wrong
+        secure_mkdir(data_dir, &["snapshots"]);
+        let snap_dir = data_dir.join("snapshots").join("testproj");
+        std::fs::create_dir(&snap_dir).unwrap();
+        std::fs::set_permissions(&snap_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let snap_file = snap_dir.join("update-snapshot-testproj.json");
+        std::fs::write(&snap_file, "{}").unwrap();
+        std::fs::set_permissions(&snap_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        assert_eq!(
+            violations
+                .iter()
+                .filter(|v| v.rule == SecurityRule::FileSecurityViolation)
+                .count(),
+            2,
+            "Expected 2 violations: snapshots/testproj dir + snapshot file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_security_tokens_only_no_secrets() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        secure_mkdir(data_dir, &["tokens", "testproj", "myplugin"]);
+        let token_dir = data_dir.join("tokens").join("testproj").join("myplugin");
+
+        let token_file = token_dir.join("api_key");
+        std::fs::write(&token_file, "key123").unwrap();
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        assert!(
+            violations.is_empty(),
+            "No violations expected when only tokens exist with correct permissions"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_security_uid_mismatch() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        secure_mkdir(data_dir, &["secrets", "testproj"]);
+        let secrets_dir = data_dir.join("secrets").join("testproj");
+
+        let token_file = secrets_dir.join("slack-auth-token");
+        std::fs::write(&token_file, "secret").unwrap();
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // Get real UID from a file we own, then use fake_uid = real + 1
+        let real_uid = std::fs::metadata(&secrets_dir).unwrap().uid();
+        let fake_uid = real_uid + 1;
+        let violations =
+            SecurityCheck::check_file_security_with_uid(data_dir, "testproj", fake_uid);
+        assert!(
+            violations.iter().any(|v| {
+                v.rule == SecurityRule::FileSecurityViolation && v.message.contains("owned by uid")
+            }),
+            "Expected ownership violation when expected UID doesn't match file owner"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_security_token_directory_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        let token_service_dir = data_dir.join("tokens").join("testproj").join("slack");
+        std::fs::create_dir_all(&token_service_dir).unwrap();
+        let tokens_project_dir = data_dir.join("tokens").join("testproj");
+        std::fs::set_permissions(&tokens_project_dir, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        std::fs::set_permissions(&token_service_dir, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        let dir_violations: Vec<_> = violations
+            .iter()
+            .filter(|v| {
+                v.rule == SecurityRule::FileSecurityViolation && v.message.contains("0o755")
+            })
+            .collect();
+        assert!(
+            dir_violations.len() >= 2,
+            "Expected violations for tokens/<project>/ and tokens/<project>/slack/ directories"
         );
     }
 }

@@ -2,7 +2,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 #![allow(missing_docs)]
 
-use speedwave_runtime::compose::{self, SecurityCheck};
+use speedwave_runtime::compose::{self, SecurityCheck, SecurityRule};
 use speedwave_runtime::config;
 use speedwave_runtime::consts;
 use speedwave_runtime::plugin;
@@ -555,18 +555,43 @@ fn main() -> anyhow::Result<()> {
             eprintln!("  WARNING: {w}\n");
         }
 
+        // ANSI color codes (only when stderr is a terminal)
+        let use_color = std::io::IsTerminal::is_terminal(&std::io::stderr());
+        let green = if use_color { "\x1b[32m" } else { "" };
+        let red = if use_color { "\x1b[31m" } else { "" };
+        let reset = if use_color { "\x1b[0m" } else { "" };
+
         if prereq_violations.is_empty() && security_violations.is_empty() {
             println!("speedwave check OK -- all system checks passed");
+            eprintln!();
+            for rule in SecurityRule::ALL_RULES {
+                eprintln!("  {green}OK{reset}    {}  {}", rule, rule.description());
+            }
             std::process::exit(0);
         } else {
             eprintln!("speedwave check FAILED -- containers NOT started\n");
-            for v in &prereq_violations {
-                eprintln!("  {} -- {}", v.rule, v.message);
-                eprintln!("  Fix: {}\n", v.remediation);
+            let failed_rules: std::collections::HashSet<SecurityRule> =
+                security_violations.iter().map(|v| v.rule).collect();
+            for rule in SecurityRule::ALL_RULES {
+                if failed_rules.contains(rule) {
+                    eprintln!("  {red}FAIL{reset}  {}  {}", rule, rule.description());
+                } else {
+                    eprintln!("  {green}OK{reset}    {}  {}", rule, rule.description());
+                }
             }
-            for v in &security_violations {
-                eprintln!("  [{}] {} -- {}", v.container, v.rule, v.message);
-                eprintln!("  Fix: {}\n", v.remediation);
+            if !prereq_violations.is_empty() {
+                eprintln!();
+                for v in &prereq_violations {
+                    eprintln!("  {} -- {}", v.rule, v.message);
+                    eprintln!("  Fix: {}\n", v.remediation);
+                }
+            }
+            if !security_violations.is_empty() {
+                eprintln!();
+                for v in &security_violations {
+                    eprintln!("  [{}] {} -- {}", v.container, v.rule, v.message);
+                    eprintln!("  Fix: {}\n", v.remediation);
+                }
             }
             std::process::exit(1);
         }
