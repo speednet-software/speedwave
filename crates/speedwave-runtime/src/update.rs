@@ -507,11 +507,13 @@ mod tests {
         };
         assert!(snapshot.plugin_manifests.is_empty());
         // With no services in compose YAML, security check passes trivially
-        let violations = compose::SecurityCheck::run(
+        let tmp = tempfile::tempdir().unwrap();
+        let violations = compose::SecurityCheck::run_with_data_dir(
             &snapshot.compose_yml,
             "test",
             &snapshot.plugin_manifests,
             &compose::SecurityExpectedPaths::from_raw("/test", "/test/tokens"),
+            tmp.path(),
         );
         assert!(
             violations.is_empty(),

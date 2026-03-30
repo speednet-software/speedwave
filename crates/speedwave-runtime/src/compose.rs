@@ -1794,7 +1794,14 @@ impl SecurityCheck {
         // This avoids unsafe libc::getuid() while respecting workspace unsafe_code = "deny".
         let expected_uid = match std::fs::metadata(data_dir) {
             Ok(m) => m.uid(),
-            Err(_) => return Vec::new(), // data_dir doesn't exist — nothing to check
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(e) => {
+                log::warn!(
+                    "check_file_security: cannot read data_dir {}: {e}",
+                    data_dir.display()
+                );
+                return Vec::new();
+            }
         };
         Self::check_file_security_with_uid(data_dir, project, expected_uid)
     }
@@ -1810,19 +1817,36 @@ impl SecurityCheck {
 
         // --- Directories that must be 0o700 ---
         let mut required_dirs: Vec<std::path::PathBuf> = vec![
+            // Top-level directories (prevent project name enumeration)
+            data_dir.join("secrets"),
+            data_dir.join("snapshots"),
+            data_dir.join("tokens"),
+            // Per-project directories
             data_dir.join("secrets").join(project),
             data_dir.join("snapshots").join(project),
             data_dir.join("ide-bridge"),
             data_dir.join("tokens").join(project),
         ];
 
-        // Also check each tokens/<project>/<service>/ subdirectory
+        // Scan tokens/<project>/<service>/ subdirectories — single read_dir pass
+        // collects both directory paths (for 0o700 check) and file paths (for 0o600 check).
         let tokens_project_dir = data_dir.join("tokens").join(project);
+        let mut token_credential_files: Vec<std::path::PathBuf> = Vec::new();
         if let Ok(services) = std::fs::read_dir(&tokens_project_dir) {
             for entry in services.flatten() {
                 if let Ok(ft) = entry.file_type() {
                     if ft.is_dir() {
                         required_dirs.push(entry.path());
+                        // Scan files inside service dir
+                        if let Ok(files) = std::fs::read_dir(entry.path()) {
+                            for file_entry in files.flatten() {
+                                if let Ok(fft) = file_entry.file_type() {
+                                    if fft.is_file() {
+                                        token_credential_files.push(file_entry.path());
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1857,29 +1881,9 @@ impl SecurityCheck {
             }
         }
 
-        // tokens/<project>/<service>/<key>  (plugin credentials)
-        // Only scans 1 level of service subdirectories.
-        if let Ok(services) = std::fs::read_dir(&tokens_project_dir) {
-            for service_entry in services.flatten() {
-                if let Ok(ft) = service_entry.file_type() {
-                    if ft.is_dir() {
-                        if let Ok(files) = std::fs::read_dir(service_entry.path()) {
-                            for file_entry in files.flatten() {
-                                if let Ok(fft) = file_entry.file_type() {
-                                    if fft.is_file() {
-                                        violations.extend(Self::verify_path(
-                                            &file_entry.path(),
-                                            0o600,
-                                            false,
-                                            expected_uid,
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        // tokens/<project>/<service>/<key>  (plugin credentials, collected above)
+        for file in &token_credential_files {
+            violations.extend(Self::verify_path(file, 0o600, false, expected_uid));
         }
 
         // snapshots/<project>/*.json
@@ -1934,7 +1938,14 @@ impl SecurityCheck {
 
         let meta = match std::fs::symlink_metadata(path) {
             Ok(m) => m,
-            Err(_) => return Vec::new(), // Missing — skip
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(e) => {
+                log::warn!(
+                    "verify_path: cannot read metadata for {}: {e}",
+                    path.display()
+                );
+                return Vec::new();
+            }
         };
         if meta.file_type().is_symlink() {
             return Vec::new(); // Skip symlinks — prevent traversal attacks
@@ -2295,8 +2306,15 @@ networks:
 
     #[test]
     fn test_security_check_valid_compose() {
+        let tmp = tempfile::tempdir().unwrap();
         let yaml = valid_compose_yaml();
-        let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp.path(),
+        );
         assert!(
             violations.is_empty(),
             "Expected no violations, got: {:?}",
@@ -2760,11 +2778,13 @@ services:
             None,
         )
         .unwrap();
-        let violations = SecurityCheck::run(
+        let tmp = tempfile::tempdir().unwrap();
+        let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
             &[],
             &SecurityExpectedPaths::compute("test-project", "/home/user/projects/test").unwrap(),
+            tmp.path(),
         );
         assert!(
             violations.is_empty(),
@@ -4159,7 +4179,14 @@ services:
         let integrations = ResolvedIntegrationsConfig::default(); // all false
         let yaml = valid_compose_yaml();
         let filtered = apply_integrations_filter(&yaml, &integrations).unwrap();
-        let violations = SecurityCheck::run(&filtered, "test", &[], &test_expected_paths());
+        let tmp = tempfile::tempdir().unwrap();
+        let violations = SecurityCheck::run_with_data_dir(
+            &filtered,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp.path(),
+        );
         assert!(
             violations.is_empty(),
             "All-disabled compose should pass security check. Violations: {:?}",
@@ -5467,7 +5494,8 @@ networks:
         let result =
             apply_worker_auth_tokens_with_dir(&yaml, tmp.path(), &integrations, &[]).unwrap();
 
-        let violations = SecurityCheck::run(
+        let data_tmp = tempfile::tempdir().unwrap();
+        let violations = SecurityCheck::run_with_data_dir(
             &result,
             "test",
             &[],
@@ -5475,6 +5503,7 @@ networks:
                 "/home/user/projects/test",
                 "/home/user/.speedwave/tokens/test",
             ),
+            data_tmp.path(),
         );
         assert!(
             violations.is_empty(),
@@ -5834,6 +5863,8 @@ services:
                 .any(|v| v.rule == SecurityRule::FileSecurityViolation),
             "run_with_data_dir() should include file security violations"
         );
+        // Note: this assertion depends on valid_compose_yaml() producing no
+        // YAML-level violations. If valid_compose_yaml() changes, this may need updating.
         assert!(
             violations
                 .iter()
@@ -5844,6 +5875,22 @@ services:
 
     // --- File security check tests ---
 
+    /// Creates a directory tree under data_dir with 0o700 on all components.
+    /// E.g. `secure_mkdir(data_dir, &["secrets", "proj"])` creates `data_dir/secrets/`
+    /// and `data_dir/secrets/proj/`, both with 0o700.
+    #[cfg(unix)]
+    fn secure_mkdir(data_dir: &std::path::Path, components: &[&str]) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut path = data_dir.to_path_buf();
+        for comp in components {
+            path = path.join(comp);
+            if !path.exists() {
+                std::fs::create_dir(&path).unwrap();
+            }
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_file_security_passes_for_correct_permissions() {
@@ -5852,9 +5899,8 @@ services:
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 
+        secure_mkdir(data_dir, &["secrets", "testproj"]);
         let secrets_dir = data_dir.join("secrets").join("testproj");
-        std::fs::create_dir_all(&secrets_dir).unwrap();
-        std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
 
         let token_file = secrets_dir.join("slack-auth-token");
         std::fs::write(&token_file, "secret").unwrap();
@@ -5879,9 +5925,8 @@ services:
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 
+        secure_mkdir(data_dir, &["secrets", "testproj"]);
         let secrets_dir = data_dir.join("secrets").join("testproj");
-        std::fs::create_dir_all(&secrets_dir).unwrap();
-        std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
 
         let token_file = secrets_dir.join("slack-auth-token");
         std::fs::write(&token_file, "secret").unwrap();
@@ -5908,9 +5953,8 @@ services:
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 
+        secure_mkdir(data_dir, &["secrets", "testproj"]);
         let secrets_dir = data_dir.join("secrets").join("testproj");
-        std::fs::create_dir_all(&secrets_dir).unwrap();
-        std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
 
         let token_file = secrets_dir.join("slack-auth-token");
         std::fs::write(&token_file, "secret").unwrap();
@@ -5933,8 +5977,10 @@ services:
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 
+        // Parent secrets/ is correct, only project subdir is wrong
+        secure_mkdir(data_dir, &["secrets"]);
         let secrets_dir = data_dir.join("secrets").join("testproj");
-        std::fs::create_dir_all(&secrets_dir).unwrap();
+        std::fs::create_dir(&secrets_dir).unwrap();
         std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let violations = SecurityCheck::check_file_security(data_dir, "testproj");
@@ -5962,14 +6008,11 @@ services:
     #[cfg(unix)]
     #[test]
     fn test_file_security_skips_symlinks() {
-        use std::os::unix::fs::PermissionsExt;
-
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 
+        secure_mkdir(data_dir, &["secrets", "testproj"]);
         let secrets_dir = data_dir.join("secrets").join("testproj");
-        std::fs::create_dir_all(&secrets_dir).unwrap();
-        std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
 
         let target = tmp.path().join("outside-file");
         std::fs::write(&target, "data").unwrap();
@@ -5994,11 +6037,8 @@ services:
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 
-        let tokens_project = data_dir.join("tokens").join("testproj");
-        let token_dir = tokens_project.join("myplugin");
-        std::fs::create_dir_all(&token_dir).unwrap();
-        std::fs::set_permissions(&tokens_project, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::set_permissions(&token_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        secure_mkdir(data_dir, &["tokens", "testproj", "myplugin"]);
+        let token_dir = data_dir.join("tokens").join("testproj").join("myplugin");
 
         let token_file = token_dir.join("api_key");
         std::fs::write(&token_file, "key123").unwrap();
@@ -6056,8 +6096,8 @@ services:
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 
+        secure_mkdir(data_dir, &["secrets", "testproj"]);
         let secrets_dir = data_dir.join("secrets").join("testproj");
-        std::fs::create_dir_all(&secrets_dir).unwrap();
         std::fs::write(secrets_dir.join("token"), "secret").unwrap();
         std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
 
@@ -6109,8 +6149,10 @@ services:
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 
+        // Parent snapshots/ dir is correct, only project subdir is wrong
+        secure_mkdir(data_dir, &["snapshots"]);
         let snap_dir = data_dir.join("snapshots").join("testproj");
-        std::fs::create_dir_all(&snap_dir).unwrap();
+        std::fs::create_dir(&snap_dir).unwrap();
         std::fs::set_permissions(&snap_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let snap_file = snap_dir.join("update-snapshot-testproj.json");
@@ -6124,7 +6166,7 @@ services:
                 .filter(|v| v.rule == SecurityRule::FileSecurityViolation)
                 .count(),
             2,
-            "Expected 2 violations: snapshots dir + snapshot file"
+            "Expected 2 violations: snapshots/testproj dir + snapshot file"
         );
     }
 
@@ -6136,11 +6178,8 @@ services:
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 
-        let tokens_project = data_dir.join("tokens").join("testproj");
-        let token_dir = tokens_project.join("myplugin");
-        std::fs::create_dir_all(&token_dir).unwrap();
-        std::fs::set_permissions(&tokens_project, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::set_permissions(&token_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        secure_mkdir(data_dir, &["tokens", "testproj", "myplugin"]);
+        let token_dir = data_dir.join("tokens").join("testproj").join("myplugin");
 
         let token_file = token_dir.join("api_key");
         std::fs::write(&token_file, "key123").unwrap();
@@ -6161,9 +6200,8 @@ services:
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 
+        secure_mkdir(data_dir, &["secrets", "testproj"]);
         let secrets_dir = data_dir.join("secrets").join("testproj");
-        std::fs::create_dir_all(&secrets_dir).unwrap();
-        std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
 
         let token_file = secrets_dir.join("slack-auth-token");
         std::fs::write(&token_file, "secret").unwrap();
