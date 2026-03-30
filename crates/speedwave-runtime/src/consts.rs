@@ -169,8 +169,8 @@ pub struct McpAuthFieldDescriptor {
     /// Whether this field contains a secret (token, key, etc.).
     pub is_secret: bool,
     /// Whether this field is stored inside a `config.json` file rather than
-    /// as an individual credential file. Used by Redmine's `host_url`,
-    /// `project_id`, and `project_name` fields.
+    /// as an individual credential file. Used by Redmine's `host_url`
+    /// and `project_id` fields.
     pub stored_in_config_json: bool,
     /// Whether this field is obtained via an OAuth flow rather than manual entry.
     /// Fields with `oauth_flow: true` are hidden from the credential form and
@@ -348,16 +348,6 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 label: "Project ID",
                 field_type: "text",
                 placeholder: "my-project",
-                is_secret: false,
-                stored_in_config_json: true,
-                oauth_flow: false,
-                optional: true,
-            },
-            McpAuthFieldDescriptor {
-                key: "project_name",
-                label: "Project Name",
-                field_type: "text",
-                placeholder: "My Project",
                 is_secret: false,
                 stored_in_config_json: true,
                 oauth_flow: false,
@@ -737,7 +727,7 @@ mod tests {
         let expected: &[(&str, usize)] = &[
             ("slack", 2),
             ("sharepoint", 6),
-            ("redmine", 4),
+            ("redmine", 3),
             ("gitlab", 2),
         ];
         for &(key, count) in expected {
@@ -822,8 +812,8 @@ mod tests {
             .collect();
         assert_eq!(
             config_json_fields,
-            vec!["host_url", "project_id", "project_name"],
-            "only Redmine's host_url, project_id, project_name should be stored_in_config_json"
+            vec!["host_url", "project_id"],
+            "only Redmine's host_url and project_id should be stored_in_config_json"
         );
 
         // No other service should have stored_in_config_json fields
@@ -892,8 +882,8 @@ mod tests {
             .collect();
         assert_eq!(
             optional_fields,
-            vec!["project_id", "project_name"],
-            "only Redmine's project_id and project_name should be optional"
+            vec!["project_id"],
+            "only Redmine's project_id should be optional"
         );
 
         // No other service should have optional fields

@@ -325,7 +325,7 @@ export interface RedmineMappings {
 export interface RedmineConfig {
   /** Default project ID to use for operations */
   project_id?: string;
-  /** Default project name for display purposes */
+  /** Project name — auto-fetched from Redmine API at startup when absent from config. May be undefined if fetch fails. */
   project_name?: string;
   /** Base URL of the Redmine instance */
   url: string;
