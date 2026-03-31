@@ -640,6 +640,8 @@ interface TimeEntryPayload {
 
 const TOKENS_DIR = process.env.TOKENS_DIR || '/tokens';
 
+const REDMINE_STATUS_MAP: Record<string, number> = { active: 1, closed: 9, archived: 5 };
+
 /**
  * Load Redmine API key from tokens directory.
  * @returns Promise resolving to the API key string.
@@ -922,9 +924,9 @@ export class RedmineClient {
    * @returns The issue (for callers that need it).
    * @throws {ProjectScopeError} When the issue belongs to a different project.
    */
-  private async _ensureIssueInScope(issueId: number): Promise<RedmineIssue | void> {
+  private async _ensureIssueInScope(issueId: number): Promise<void> {
     if (this.getProjectScope()) {
-      return this.showIssue(issueId);
+      await this.showIssue(issueId);
     }
   }
 
@@ -1298,6 +1300,7 @@ export class RedmineClient {
    * @throws {Error} When API request fails or issue not found.
    */
   async listJournals(issueId: number): Promise<RedmineJournal[]> {
+    // Scope enforcement via showIssue() — do not refactor to skip showIssue without adding explicit scope check
     const issue = await this.showIssue(issueId, { include: ['journals'] });
     return issue.journals || [];
   }
@@ -1413,10 +1416,8 @@ export class RedmineClient {
     if (scope) {
       // When scoped, return only the configured project (ignore limit/offset — single project)
       const project = await this.showProject(scope);
-      // Apply status filter using the same statusMap as the unscoped path
       if (options.status && options.status !== 'all') {
-        const statusMap: Record<string, number> = { active: 1, closed: 9, archived: 5 };
-        const statusValue = statusMap[options.status];
+        const statusValue = REDMINE_STATUS_MAP[options.status];
         if (statusValue !== undefined && project.status !== statusValue) {
           return { projects: [], total_count: 0 };
         }
@@ -1434,8 +1435,7 @@ export class RedmineClient {
 
     // Filter by status (Redmine API doesn't support status parameter)
     if (options.status && options.status !== 'all') {
-      const statusMap: Record<string, number> = { active: 1, closed: 9, archived: 5 };
-      const statusValue = statusMap[options.status];
+      const statusValue = REDMINE_STATUS_MAP[options.status];
       if (statusValue !== undefined) {
         projects = projects.filter((p: RedmineProject) => p.status === statusValue);
       }
@@ -1471,7 +1471,7 @@ export class RedmineClient {
     // showProject validates via identifier (has full project object),
     // while showIssue validates via numeric project.id (issues only expose project.id).
     const scope = this.getProjectScope();
-    if (scope && project.identifier !== scope) {
+    if (scope && project.identifier !== scope && project.id.toString() !== scope) {
       throw new ProjectScopeError(scope, project.identifier);
     }
 
@@ -1573,8 +1573,10 @@ export class RedmineClient {
     delay?: number;
   }): Promise<{ relation: IssueRelation }> {
     // Validate both ends belong to scoped project
-    await this._ensureIssueInScope(options.issue_id);
-    await this._ensureIssueInScope(options.issue_to_id);
+    await Promise.all([
+      this._ensureIssueInScope(options.issue_id),
+      this._ensureIssueInScope(options.issue_to_id),
+    ]);
 
     const relation: { issue_to_id: number; relation_type?: string; delay?: number } = {
       issue_to_id: options.issue_to_id,

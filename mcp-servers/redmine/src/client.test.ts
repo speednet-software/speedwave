@@ -2060,6 +2060,33 @@ describe('RedmineClient', () => {
         const result = await client.showProject('any-project');
         expect(result.identifier).toBe('any-project');
       });
+
+      it('should succeed when scope is a numeric string matching project.id', async () => {
+        const numericScopeConfig: RedmineProjectConfig = {
+          host_url: 'https://redmine.example.com',
+          project_id: '42',
+        };
+        const numericScopeClient = new RedmineClient(config, numericScopeConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: scopedProject }, // project.id=42, identifier='my-project'
+        });
+
+        const result = await numericScopeClient.showProject('42');
+        expect(result.id).toBe(42);
+      });
+
+      it('should throw when scope is numeric string not matching project.id', async () => {
+        const numericScopeConfig: RedmineProjectConfig = {
+          host_url: 'https://redmine.example.com',
+          project_id: '99',
+        };
+        const numericScopeClient = new RedmineClient(config, numericScopeConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: scopedProject }, // project.id=42, identifier='my-project'
+        });
+
+        await expect(numericScopeClient.showProject('99')).rejects.toThrow(ProjectScopeError);
+      });
     });
 
     // ─── listProjects() scoping ─────────────────────────────────────────
