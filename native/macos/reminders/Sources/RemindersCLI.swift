@@ -265,9 +265,11 @@ func stripTags(from notes: String) -> String {
 
 /// Format tags as `[#tag]` markers and combine with notes.
 func combineTags(_ tags: [String], with notes: String?) -> String? {
-    let formatted = tags
+    var seen = Set<String>()
+    let normalized = tags
         .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-        .filter { !$0.isEmpty }
+        .filter { !$0.isEmpty && seen.insert($0).inserted }
+    let formatted = normalized
         .map { "[#\($0)]" }
         .joined(separator: " ")
     let clean = notes?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

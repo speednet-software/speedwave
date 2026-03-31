@@ -16,7 +16,7 @@ import {
   asRecord,
   MAX_LENGTHS,
 } from './validation.js';
-import type { ToolResult } from './validation.js';
+import type { ToolResult, StringArrayFieldSpec } from './validation.js';
 
 describe('validation', () => {
   describe('withValidation', () => {
@@ -374,7 +374,7 @@ describe('validation', () => {
   });
 
   describe('validateStringArrayFields', () => {
-    const spec: [string, number, number][] = [['tags', 50, 1000]];
+    const spec: StringArrayFieldSpec[] = [['tags', 50, 1000]];
 
     it('accepts valid string array', () => {
       const result = validateStringArrayFields({ tags: ['a', 'b'] }, spec);

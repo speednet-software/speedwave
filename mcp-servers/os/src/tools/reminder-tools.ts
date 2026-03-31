@@ -328,13 +328,13 @@ export async function handleCreateReminder(params: CreateReminderParams): Promis
   if (!v.valid) return v.error;
   const tags = p.tags as string[] | undefined;
   if (tags) {
-    const bad = tags.find((t) => /[[\]#]/.test(t));
-    if (bad !== undefined) {
+    const badIdx = tags.findIndex((t) => /[[\]#]/.test(t));
+    if (badIdx !== -1) {
       return {
         success: false,
         error: {
           code: 'INVALID_CHARACTERS',
-          message: 'Tag names must not contain [, ], or # characters',
+          message: `tags[${badIdx}] must not contain [, ], or # characters`,
         },
       };
     }

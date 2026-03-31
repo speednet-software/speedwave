@@ -191,4 +191,9 @@ final class RemindersTests: XCTestCase {
         let result = combineTags(["work", "", "  "], with: nil)
         XCTAssertEqual(result, "[#work]")
     }
+
+    func testCombineTagsDeduplicates() {
+        let result = combineTags(["Work", "work", "WORK"], with: nil)
+        XCTAssertEqual(result, "[#work]")
+    }
 }
