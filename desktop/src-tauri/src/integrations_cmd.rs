@@ -448,7 +448,10 @@ fn check_os_permission_with_timeout(
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err("Permission check timed out after 60s. Try again.".to_string());
+                    return Err(format!(
+                        "Permission check timed out after {}s. Try again.",
+                        timeout.as_secs()
+                    ));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
