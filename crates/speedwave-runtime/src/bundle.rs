@@ -800,6 +800,9 @@ mod tests {
         save_bundle_state_to(&state, &path).unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "bundle-state.json should be 0o600, got {mode:#05o}");
+        assert_eq!(
+            mode, 0o600,
+            "bundle-state.json should be 0o600, got {mode:#05o}"
+        );
     }
 }

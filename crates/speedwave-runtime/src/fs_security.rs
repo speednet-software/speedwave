@@ -355,7 +355,10 @@ mod tests {
             get_mode(&data_dir.join("secrets/proj/worker-auth-token")),
             0o600
         );
-        assert_eq!(get_mode(&data_dir.join("tokens/proj/slack/token.txt")), 0o600);
+        assert_eq!(
+            get_mode(&data_dir.join("tokens/proj/slack/token.txt")),
+            0o600
+        );
         assert_eq!(get_mode(&data_dir.join("bundle-state.json")), 0o600);
         assert_eq!(
             get_mode(&data_dir.join("snapshots/proj/snapshot.json")),
@@ -469,7 +472,9 @@ mod tests {
             "SecurityCheck should report UID mismatch violations"
         );
         assert!(
-            violations.iter().any(|v| v.message.contains("owned by uid")),
+            violations
+                .iter()
+                .any(|v| v.message.contains("owned by uid")),
             "At least one violation should be about UID ownership"
         );
     }
@@ -507,10 +512,7 @@ mod tests {
         assert!(
             violations.is_empty(),
             "SecurityCheck should pass after autofix, got: {:?}",
-            violations
-                .iter()
-                .map(|v| &v.message)
-                .collect::<Vec<_>>()
+            violations.iter().map(|v| &v.message).collect::<Vec<_>>()
         );
     }
 }

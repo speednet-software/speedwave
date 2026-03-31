@@ -3857,7 +3857,11 @@ services:
         let secrets_dir = init_secrets_dir_in(data_dir, "proj").unwrap();
 
         assert_eq!(
-            std::fs::metadata(&secrets_dir).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(&secrets_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
             0o700,
             "secrets/<project> should be 0o700"
         );

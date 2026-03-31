@@ -2781,11 +2781,7 @@ mod tests {
 
         // All 3 levels should be 0o700
         assert_eq!(
-            std::fs::metadata(&token_dir)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
+            std::fs::metadata(&token_dir).unwrap().permissions().mode() & 0o777,
             0o700,
             "tokens/proj/slack should be 0o700"
         );
