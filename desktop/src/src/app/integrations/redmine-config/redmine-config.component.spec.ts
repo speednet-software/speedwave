@@ -629,6 +629,20 @@ describe('RedmineConfigComponent', () => {
       expect(host.textContent.trim()).toBe('https://redmine.test');
     });
 
+    it('shows project_id fallback when enumerations not loaded', () => {
+      component.enumerations = null;
+      component.svc = {
+        ...component.svc,
+        current_values: { ...component.svc.current_values, project_id: 'my-project' },
+      };
+      fixture.detectChanges();
+      const project = fixture.nativeElement.querySelector(
+        '[data-testid="redmine-configured-project"]'
+      );
+      expect(project).not.toBeNull();
+      expect(project.textContent.trim()).toBe('my-project');
+    });
+
     it('shows mapping count', () => {
       component.editedMappings = { status_new: 1, tracker_bug: 2 };
       fixture.detectChanges();

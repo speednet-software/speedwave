@@ -353,11 +353,11 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
                     svc.current_values['host_url'] || hostUrl
                   }}</span>
                 </div>
-                @if (getConfiguredProjectName()) {
+                @if (getConfiguredProjectName() || svc.current_values['project_id']) {
                   <div class="flex gap-2">
                     <span class="text-sw-text-dim">Project:</span>
                     <span class="text-sw-text font-mono" data-testid="redmine-configured-project">{{
-                      getConfiguredProjectName()
+                      getConfiguredProjectName() ?? svc.current_values['project_id']
                     }}</span>
                   </div>
                 }

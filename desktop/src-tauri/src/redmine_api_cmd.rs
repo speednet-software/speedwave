@@ -370,7 +370,7 @@ pub async fn validate_redmine_credentials(
 
 /// Fetches Redmine enumerations (projects, statuses, trackers, priorities, activities).
 ///
-/// Makes 5 sequential requests. Per-endpoint error handling:
+/// Makes 5 parallel requests via `tokio::join!`. Per-endpoint error handling:
 /// - 404 → empty vec + log::info (endpoint may be disabled)
 /// - 500 → empty vec + log::warn
 /// - Success → validate JSON shape, then parse
