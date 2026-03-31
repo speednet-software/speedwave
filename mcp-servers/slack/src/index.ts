@@ -6,7 +6,7 @@
  * @module mcp-slack
  */
 
-import { createMCPServer, ts } from '@speedwave/mcp-shared';
+import { createMCPServer, ts, notConfiguredMessage, retryAsync } from '@speedwave/mcp-shared';
 import { initializeSlackClients } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 
@@ -35,11 +35,14 @@ async function main(): Promise<void> {
   }
 
   // Initialize Slack clients (may be null if not configured)
-  const slackClients = await initializeSlackClients();
+  const slackClients = await retryAsync(initializeSlackClients, {
+    maxRetries: 3,
+    baseDelayMs: 2000,
+    label: 'Slack client init',
+  });
 
   if (!slackClients) {
-    console.warn(`${ts()} ⚠️  Slack not configured (no tokens)`);
-    console.warn(`${ts()}    Run: speedwave setup slack`);
+    console.warn(`${ts()} ⚠️  ${notConfiguredMessage('Slack')}`);
     console.warn(`${ts()}    Server will start but tools will return errors until configured.`);
   } else {
     console.log(`${ts()} ✅ Slack clients initialized`);

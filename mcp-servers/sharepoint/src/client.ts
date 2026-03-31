@@ -9,7 +9,7 @@ import path from 'path';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import { Mutex } from 'async-mutex';
-import { loadToken, TIMEOUTS, ts } from '@speedwave/mcp-shared';
+import { loadToken, TIMEOUTS, ts, withSetupGuidance } from '@speedwave/mcp-shared';
 import { TokenManager } from './token-manager.js';
 import { PathValidator } from './path-validator.js';
 import { splitPath } from './path-utils.js';
@@ -194,7 +194,7 @@ export class SharePointClient {
 
     // Handle Graph API error responses
     if (message.includes('401') || message.includes('Unauthorized')) {
-      return 'Authentication failed. Your SharePoint token may have expired. Run: speedwave setup sharepoint';
+      return withSetupGuidance('Authentication failed. Your SharePoint token may have expired.');
     }
 
     if (message.includes('403') || message.includes('Forbidden')) {
@@ -210,7 +210,7 @@ export class SharePointClient {
     }
 
     if (message.includes('refresh') || message.includes('token')) {
-      return 'Token refresh failed. Run: speedwave setup sharepoint';
+      return withSetupGuidance('Token refresh failed.');
     }
 
     return message || 'SharePoint API error';
@@ -786,7 +786,7 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
 
     if (missingTokens.length > 0) {
       console.warn(
-        `${ts()} SharePoint tokens are empty or incomplete. Missing: ${missingTokens.join(', ')}. Run: speedwave setup sharepoint`
+        `${ts()} ${withSetupGuidance(`SharePoint tokens are empty or incomplete. Missing: ${missingTokens.join(', ')}.`)}`
       );
       // Graceful degradation: log warning, return null, let server start
       // DO NOT throw here - see JSDoc above for rationale

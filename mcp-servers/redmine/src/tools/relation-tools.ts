@@ -2,7 +2,13 @@
  * Relation Tools - 3 tools for Redmine issue relations
  */
 
-import { Tool, ToolDefinition, jsonResult, errorResult } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  jsonResult,
+  errorResult,
+  notConfiguredMessage,
+} from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 
 const listRelationsTool: Tool = {
@@ -187,8 +193,7 @@ type RelationType =
  * @param client - Redmine client instance
  */
 export function createRelationTools(client: RedmineClient | null): ToolDefinition[] {
-  const unconfigured = async () =>
-    errorResult('Redmine not configured. Run: speedwave setup redmine');
+  const unconfigured = async () => errorResult(notConfiguredMessage('Redmine'));
   if (!client) {
     return [
       { tool: listRelationsTool, handler: unconfigured },

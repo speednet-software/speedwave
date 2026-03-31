@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createJournalTools } from './journal-tools.js';
 import { ProjectScopeError } from '../client.js';
 import type { RedmineClient } from '../client.js';
@@ -426,7 +427,10 @@ describe('journal-tools', () => {
         const result = await handler({});
         expect(result).toEqual({
           content: [
-            { type: 'text', text: 'Error: Redmine not configured. Run: speedwave setup redmine' },
+            {
+              type: 'text',
+              text: `Error: ${notConfiguredMessage('Redmine')}`,
+            },
           ],
           isError: true,
         });
@@ -441,7 +445,10 @@ describe('journal-tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: Redmine not configured. Run: speedwave setup redmine' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('Redmine')}`,
+          },
         ],
         isError: true,
       });
@@ -459,7 +466,10 @@ describe('journal-tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: Redmine not configured. Run: speedwave setup redmine' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('Redmine')}`,
+          },
         ],
         isError: true,
       });
@@ -476,7 +486,10 @@ describe('journal-tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: Redmine not configured. Run: speedwave setup redmine' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('Redmine')}`,
+          },
         ],
         isError: true,
       });

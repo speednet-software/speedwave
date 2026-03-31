@@ -2,7 +2,13 @@
  * Config Tools - 2 tools for Redmine configuration
  */
 
-import { Tool, ToolDefinition, jsonResult, errorResult } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  jsonResult,
+  errorResult,
+  notConfiguredMessage,
+} from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 
 const getMappingsTool: Tool = {
@@ -77,8 +83,7 @@ const getConfigTool: Tool = {
  * @param client - Redmine client instance
  */
 export function createConfigTools(client: RedmineClient | null): ToolDefinition[] {
-  const unconfigured = async () =>
-    errorResult('Redmine not configured. Run: speedwave setup redmine');
+  const unconfigured = async () => errorResult(notConfiguredMessage('Redmine'));
   if (!client) {
     return [
       { tool: getMappingsTool, handler: unconfigured },

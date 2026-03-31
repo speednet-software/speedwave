@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createConfigTools } from './config-tools.js';
 import { RedmineClient, RedmineMappings } from '../client.js';
 
@@ -37,7 +38,10 @@ describe('Config Tools', () => {
       expect(result).toEqual({
         isError: true,
         content: [
-          { type: 'text', text: 'Error: Redmine not configured. Run: speedwave setup redmine' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('Redmine')}`,
+          },
         ],
       });
     });
@@ -51,7 +55,10 @@ describe('Config Tools', () => {
       expect(result).toEqual({
         isError: true,
         content: [
-          { type: 'text', text: 'Error: Redmine not configured. Run: speedwave setup redmine' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('Redmine')}`,
+          },
         ],
       });
     });
