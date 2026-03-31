@@ -4,16 +4,33 @@ import Foundation
 // MARK: - CLI Entry Point
 
 /// reminders-cli <command> [json-args]
-/// Commands: list_lists, list_reminders, get_reminder, create_reminder, complete_reminder
+/// Commands: check_permission, list_lists, list_reminders, get_reminder, create_reminder, complete_reminder
 @main
 struct RemindersCLI {
     static func main() {
         let args = CommandLine.arguments
         guard args.count >= 2 else {
-            exitWithError("Usage: reminders-cli <command> [json-args]\nCommands: list_lists, list_reminders, get_reminder, create_reminder, complete_reminder")
+            exitWithError("Usage: reminders-cli <command> [json-args]\nCommands: check_permission, list_lists, list_reminders, get_reminder, create_reminder, complete_reminder")
         }
 
         let command = args[1]
+
+        // check_permission: verify macOS TCC access without performing any operation.
+        // Returns JSON {"granted": true/false} on stdout, always exits 0.
+        // Pattern: see also calendar/Sources/CalendarCLI.swift check_permission
+        if command == "check_permission" {
+            let store = EKEventStore()
+            let (granted, error) = requestReminderAccess(store: store, timeout: 65)
+            if granted {
+                print(formatPermissionResult(granted: true, error: nil))
+            } else {
+                let msg = error?.localizedDescription ?? "Unknown error"
+                let detail = "Reminders access denied: \(msg)\nGrant access in System Settings > Privacy & Security > Reminders"
+                print(formatPermissionResult(granted: false, error: detail))
+            }
+            return
+        }
+
         let jsonArgs = args.count >= 3 ? args[2] : "{}"
 
         guard let argsData = jsonArgs.data(using: .utf8),
@@ -23,26 +40,7 @@ struct RemindersCLI {
         }
 
         let store = EKEventStore()
-
-        let semaphore = DispatchSemaphore(value: 0)
-        var accessGranted = false
-        var accessError: Error?
-
-        if #available(macOS 14.0, *) {
-            store.requestFullAccessToReminders { granted, error in
-                accessGranted = granted
-                accessError = error
-                semaphore.signal()
-            }
-        } else {
-            store.requestAccess(to: .reminder) { granted, error in
-                accessGranted = granted
-                accessError = error
-                semaphore.signal()
-            }
-        }
-
-        semaphore.wait()
+        let (accessGranted, accessError) = requestReminderAccess(store: store)
 
         guard accessGranted else {
             let msg = accessError?.localizedDescription ?? "Unknown error"
@@ -63,7 +61,7 @@ struct RemindersCLI {
             case "complete_reminder":
                 result = try completeReminder(store: store, params: params)
             default:
-                exitWithError("Unknown command: \(command)\nAvailable: list_lists, list_reminders, get_reminder, create_reminder, complete_reminder")
+                exitWithError("Unknown command: \(command)\nAvailable: check_permission, list_lists, list_reminders, get_reminder, create_reminder, complete_reminder")
             }
 
             let data = try JSONSerialization.data(
@@ -77,6 +75,59 @@ struct RemindersCLI {
             exitWithError(error.localizedDescription)
         }
     }
+}
+
+// MARK: - Permission Helpers
+
+/// Requests Reminders access from EventKit. Uses the macOS 14+ full-access API
+/// when available, falling back to the legacy requestAccess(to:) API.
+/// The optional timeout (default: unbounded) is a safety net for check_permission.
+func requestReminderAccess(store: EKEventStore, timeout: TimeInterval? = nil) -> (granted: Bool, error: Error?) {
+    let semaphore = DispatchSemaphore(value: 0)
+    var accessGranted = false
+    var accessError: Error?
+
+    if #available(macOS 14.0, *) {
+        store.requestFullAccessToReminders { granted, error in
+            accessGranted = granted
+            accessError = error
+            semaphore.signal()
+        }
+    } else {
+        store.requestAccess(to: .reminder) { granted, error in
+            accessGranted = granted
+            accessError = error
+            semaphore.signal()
+        }
+    }
+
+    if let timeout = timeout {
+        let result = semaphore.wait(timeout: .now() + timeout)
+        if result == .timedOut {
+            return (false, NSError(domain: "RemindersCLI", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Permission dialog timed out after \(Int(timeout))s",
+            ]))
+        }
+    } else {
+        semaphore.wait()
+    }
+
+    return (accessGranted, accessError)
+}
+
+/// Serializes a permission check result as JSON.
+/// Output contract: {"granted": true} or {"granted": false, "error": "..."}
+// SYNC: formatPermissionResult must match calendar/Sources/CalendarCLI.swift
+func formatPermissionResult(granted: Bool, error: String?) -> String {
+    var dict: [String: Any] = ["granted": granted]
+    if let error = error {
+        dict["error"] = error
+    }
+    guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
+          let json = String(data: data, encoding: .utf8) else {
+        return #"{"granted": false, "error": "Failed to serialize permission result"}"#
+    }
+    return json
 }
 
 // MARK: - Commands

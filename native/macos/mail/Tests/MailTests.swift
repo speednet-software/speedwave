@@ -209,4 +209,46 @@ final class MailTests: XCTestCase {
         XCTAssertNil(params["to"])
         XCTAssertNil(params["body"])
     }
+
+    // MARK: - Permission Check (formatPermissionResult)
+
+    func testFormatPermissionResultGranted() {
+        let json = formatPermissionResult(granted: true, error: nil)
+        let data = json.data(using: .utf8)!
+        let parsed = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertTrue(parsed["granted"] is Bool)
+        XCTAssertEqual(parsed["granted"] as? Bool, true)
+        XCTAssertNil(parsed["error"])
+    }
+
+    func testFormatPermissionResultWithAutomationPermissionError() {
+        let errorMsg = ScriptError.automationPermission("not allowed").errorDescription!
+        let json = formatPermissionResult(granted: false, error: errorMsg)
+        let data = json.data(using: .utf8)!
+        let parsed = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertTrue(parsed["granted"] is Bool)
+        XCTAssertEqual(parsed["granted"] as? Bool, false)
+        XCTAssertTrue(parsed["error"] is String)
+        XCTAssertTrue((parsed["error"] as! String).contains("Automation permission denied"))
+    }
+
+    func testFormatPermissionResultWithTimeoutError() {
+        let errorMsg = ScriptError.timeout(15).errorDescription!
+        let json = formatPermissionResult(granted: false, error: errorMsg)
+        let data = json.data(using: .utf8)!
+        let parsed = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertEqual(parsed["granted"] as? Bool, false)
+        XCTAssertTrue(parsed["error"] is String)
+        XCTAssertTrue((parsed["error"] as! String).contains("timed out after 15s"))
+    }
+
+    func testFormatPermissionResultWithScriptFailedError() {
+        let errorMsg = ScriptError.scriptFailed("some error").errorDescription!
+        let json = formatPermissionResult(granted: false, error: errorMsg)
+        let data = json.data(using: .utf8)!
+        let parsed = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertEqual(parsed["granted"] as? Bool, false)
+        XCTAssertTrue(parsed["error"] is String)
+        XCTAssertTrue((parsed["error"] as! String).contains("AppleScript error"))
+    }
 }

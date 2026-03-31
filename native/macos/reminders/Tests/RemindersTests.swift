@@ -1,3 +1,4 @@
+import EventKit
 import XCTest
 @testable import reminders_cli
 
@@ -195,5 +196,34 @@ final class RemindersTests: XCTestCase {
     func testCombineTagsDeduplicates() {
         let result = combineTags(["Work", "work", "WORK"], with: nil)
         XCTAssertEqual(result, "[#work]")
+    }
+
+    // MARK: - Permission Check (formatPermissionResult)
+
+    func testFormatPermissionResultGranted() {
+        let json = formatPermissionResult(granted: true, error: nil)
+        let data = json.data(using: .utf8)!
+        let parsed = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertTrue(parsed["granted"] is Bool)
+        XCTAssertEqual(parsed["granted"] as? Bool, true)
+        XCTAssertNil(parsed["error"])
+    }
+
+    func testFormatPermissionResultDenied() {
+        let json = formatPermissionResult(granted: false, error: "access denied")
+        let data = json.data(using: .utf8)!
+        let parsed = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertTrue(parsed["granted"] is Bool)
+        XCTAssertEqual(parsed["granted"] as? Bool, false)
+        XCTAssertTrue(parsed["error"] is String)
+        XCTAssertEqual(parsed["error"] as? String, "access denied")
+    }
+
+    func testRequestReminderAccessReturnsTuple() {
+        // Compile-time check: requestReminderAccess returns (granted: Bool, error: Error?)
+        let store = EKEventStore()
+        let result: (granted: Bool, error: Error?) = requestReminderAccess(store: store, timeout: 0.001)
+        // With a near-zero timeout, we just verify the return type
+        XCTAssertNotNil(result)
     }
 }
