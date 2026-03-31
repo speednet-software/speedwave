@@ -374,9 +374,12 @@ test-e2e-desktop-build: build-cli build-mcp build-os-cli
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
 	@mkdir -p desktop/src-tauri/cli
 	@cargo build -p speedwave-cli --release
-	@cp target/release/speedwave desktop/src-tauri/cli/speedwave 2>/dev/null && \
-	  chmod +x desktop/src-tauri/cli/speedwave 2>/dev/null || \
-	  cp target/release/speedwave.exe desktop/src-tauri/cli/speedwave.exe 2>/dev/null || true
+ifeq ($(OS),Windows_NT)
+	@cp target/release/speedwave.exe desktop/src-tauri/cli/speedwave.exe 2>/dev/null || true
+else
+	@cp target/release/speedwave desktop/src-tauri/cli/speedwave
+	@chmod +x desktop/src-tauri/cli/speedwave
+endif
 	@$(MAKE) verify-bundled-assets
 	@echo "── Building release binary with bundle (e2e feature = WebDriver on :4445)..."
 	cd desktop/src-tauri && cargo tauri build --features e2e $(if $(TAURI_SIGNING_PRIVATE_KEY),,--no-sign)

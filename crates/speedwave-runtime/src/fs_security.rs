@@ -23,6 +23,7 @@ pub(crate) fn ensure_data_dir_permissions_in(
     data_dir: &std::path::Path,
     project: &str,
 ) -> anyhow::Result<()> {
+    use anyhow::Context;
     use std::os::unix::fs::PermissionsExt;
 
     let (dirs, files) = collect_security_paths(data_dir, project);
@@ -102,8 +103,6 @@ pub(crate) fn ensure_data_dir_permissions_in(
     log::debug!("file permission autofix skipped (non-Unix)");
     Ok(())
 }
-
-use anyhow::Context;
 
 /// Enumerates security-sensitive paths under `data_dir` for a project.
 ///

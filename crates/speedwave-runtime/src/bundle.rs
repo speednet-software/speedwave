@@ -323,6 +323,8 @@ fn save_bundle_state_to(state: &BundleState, path: &Path) -> anyhow::Result<()> 
     let json = serde_json::to_string_pretty(state)?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json)?;
+    // Restrict permissions before rename — rename preserves the inode (and
+    // thus the mode bits) on Unix, so the final file inherits 0o600.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
