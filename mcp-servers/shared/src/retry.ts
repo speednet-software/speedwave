@@ -43,6 +43,8 @@ export async function retryAsync<T>(
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const delay = Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
+    // Jitter is additive (0–30% of base delay). maxDelayMs caps only the base
+    // component, so totalDelay can exceed maxDelayMs by up to 30%.
     const jitter = Math.floor(Math.random() * delay * 0.3);
     const totalDelay = delay + jitter;
 

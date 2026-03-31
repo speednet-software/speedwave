@@ -39,7 +39,7 @@ Key design decisions:
 - **Exponential backoff with jitter** — Delays of 2 s, 4 s, 8 s (capped at 15 s) with 30 % random jitter[^3]. Jitter prevents thundering-herd effects when multiple containers restart simultaneously.
 - **Catches exceptions** — `retryAsync` catches both `null` returns and thrown exceptions (e.g., `TypeError` from failed DNS resolution in `fetch`). Exceptions are logged as warnings but do not propagate.
 - **`setTimeout`-based delays** — Standard Node.js timer API[^4] for scheduling retries. No external dependencies.
-- **Total worst-case delay: ~14 s** — Acceptable for container startup, gives DNS/network time to stabilize.
+- **Total worst-case delay: ~18 s** — Jitter is added on top of the capped base delay: (2.6 + 5.2 + 10.4) s. Acceptable for container startup, gives DNS/network time to stabilize.
 - **No internal changes to `initializeXXXClient()`** — The retry wraps the existing function wholesale, preserving the graceful degradation contract ("returns null, doesn't throw").
 - **SharePoint keeps fail-fast behavior** — After retry exhaustion, `process.exit(1)` is still called. The retry gives SharePoint a better chance to succeed on OAuth token refresh.
 
@@ -51,7 +51,7 @@ Key design decisions:
 
 - Users see correct guidance ("Desktop app Integrations tab") instead of a non-existent CLI command.
 - Transient startup failures no longer permanently disable a service for the container's lifetime.
-- Container startup time increases by up to ~14 s in the worst case (all retries fail). Normal case: no delay (first attempt succeeds).
+- Container startup time increases by up to ~18 s in the worst case (all retries fail). Normal case: no delay (first attempt succeeds).
 - The `SETUP_GUIDANCE` constant is a single point to update if the wording ever changes.
 
 [^1]: Speedwave CLI subcommands defined in `crates/speedwave-cli/src/main.rs` via clap `Subcommand` enum.

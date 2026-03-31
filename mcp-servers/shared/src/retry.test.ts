@@ -185,6 +185,15 @@ describe('retryAsync', () => {
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
+  it('does not retry when maxRetries=0 and fn throws', async () => {
+    const fn = vi.fn().mockRejectedValue(new Error('boom'));
+
+    const result = await retryAsync(fn, { maxRetries: 0, label: 'no-retry-throw' });
+
+    expect(result).toBeNull();
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
   // ── Backoff timing ────────────────────────────────────────────────────
 
   it('uses exponential backoff (2s, 4s, 8s pattern)', async () => {
@@ -192,8 +201,6 @@ describe('retryAsync', () => {
     vi.spyOn(Math, 'random').mockReturnValue(0); // zero jitter
 
     const fn = vi.fn().mockResolvedValue(null);
-    const delays: number[] = [];
-    const originalSetTimeout = globalThis.setTimeout;
 
     // Capture sleep calls by intercepting setTimeout
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
