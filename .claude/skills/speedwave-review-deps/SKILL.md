@@ -118,6 +118,7 @@ Additionally research:
 
 - How the dependency is used in the Speedwave codebase (what operations, any security-sensitive usage like auth, tokens, crypto, container config)
 - Whether behavioral changes in the update could affect those operations
+- **CI coverage note** — CI (`test.yml`) does not run all local tests. Pre-push hook runs `make test` which includes `test-desktop-build` (bundle script tests). For npm MCP updates, recommend running `make test-desktop-build` locally before approving.
 
 ## Step 4 — Compile Analysis
 
@@ -140,6 +141,8 @@ For each package update, you must critically analyze the following aspects:
 6. **Changelog Analysis**: Review what changes are included in the update and assess their risk level
 
 7. **Version Jump Assessment**: Evaluate if the version change is minor/patch (lower risk) or major (higher risk)
+
+8. **Build Pipeline Impact**: For npm workspace updates, note that `package-lock.json` changes can affect isolated install contexts (bundle scripts, Docker builds). Recommend `make test-desktop-build` for MCP dependency updates.
 
 Before providing your final assessment, use the <analysis> section to think through each package update systematically. For each package, work through all seven aspects listed above.
 
