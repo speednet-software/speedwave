@@ -94,10 +94,16 @@ Before using CLI tools, check availability with `which npm` / `which cargo`. If 
 2. **SHA-to-tag verification (CRITICAL)** — Dependabot pins actions by SHA (e.g., `actions/checkout@abc1234`). Verify that the new SHA corresponds to a signed, tagged release — a SHA that doesn't match any release tag is a **HIGH-SEVERITY red flag** (could be a malicious commit pushed directly). Use:
 
    ```bash
-   gh api repos/<owner>/<action>/git/matching-refs/tags --jq '.[].object.sha'
+   gh api repos/<owner>/<action>/git/matching-refs/tags --jq '.[].object'
    ```
 
-   Cross-reference the new SHA from the PR diff against the tag SHAs. Also verify the tag points to the expected version via `gh api repos/<owner>/<action>/releases`.
+   For each tag ref: if `object.type` is `"tag"` (annotated tag), dereference to the commit SHA:
+
+   ```bash
+   gh api repos/<owner>/<action>/git/tags/<object.sha> --jq '.object.sha'
+   ```
+
+   If `object.type` is `"commit"` (lightweight tag), use the SHA directly. Cross-reference the dereferenced commit SHAs against the new SHA from the PR diff. Also verify the tag points to the expected version via `gh api repos/<owner>/<action>/releases`.
 
 3. **Release/tag inspection** — fetch the release notes for the new version tag. Check what changed.
 4. **Security advisories** — `WebSearch` for any known security incidents involving the action (e.g., compromised action, credential theft).

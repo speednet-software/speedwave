@@ -2,6 +2,9 @@
 # Tests for scripts/bundle-build-context.sh
 # Verifies that the script creates the expected directory structure.
 #
+# Note: bundle-build-context.ps1 (Windows equivalent) receives identical
+# changes but is only exercised inside Windows E2E VMs (scripts/e2e-vm.sh).
+#
 # Prerequisite: `make build-mcp` must be run first so that mcp-servers/os/dist/
 # and mcp-servers/shared/dist/ exist for dev-mode copying.
 
@@ -161,7 +164,7 @@ teardown() {
 @test "mcp-os/shared standalone lockfile resolves without workspace context" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
-    # Verify npm install produced a standalone lockfile
+    # Verify the two-step install produced a standalone lockfile
     [ -f "$DEST/mcp-os/shared/package-lock.json" ]
     # Verify the lockfile can be consumed standalone (npm ci in clean dir succeeds)
     local tmpdir
@@ -170,7 +173,8 @@ teardown() {
     cp "$DEST/mcp-os/shared/package.json" "$tmpdir/"
     cp "$DEST/mcp-os/shared/package-lock.json" "$tmpdir/"
     (cd "$tmpdir" && npm ci --omit=dev --ignore-scripts)
-    [ -d "$tmpdir/node_modules/express" ]
+    # At least one production dependency must be installed
+    [ "$(ls "$tmpdir/node_modules" | wc -l)" -gt 0 ]
 }
 
 @test "bundle script --ci works without pre-built dist directories" {

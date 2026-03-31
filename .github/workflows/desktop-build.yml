@@ -15,7 +15,8 @@ on:
       - "mcp-servers/package-lock.json"
       - "mcp-servers/shared/**"
       - "mcp-servers/os/**"
-      - "scripts/bundle-build-context*"
+      - "scripts/bundle-build-context.sh"
+      - "scripts/bundle-build-context.ps1"
   push:
     branches: [main, dev]
     paths:
@@ -30,7 +31,8 @@ on:
       - "mcp-servers/package-lock.json"
       - "mcp-servers/shared/**"
       - "mcp-servers/os/**"
-      - "scripts/bundle-build-context*"
+      - "scripts/bundle-build-context.sh"
+      - "scripts/bundle-build-context.ps1"
 
 permissions:
   contents: read
