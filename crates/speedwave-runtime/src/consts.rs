@@ -354,7 +354,13 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 optional: true,
             },
         ],
-        credential_files: &["api_key", "config.json", "host_url", "project_id"],
+        credential_files: &[
+            "api_key",
+            "config.json",
+            "host_url",
+            "project_id",
+            "project_name",
+        ],
     },
     McpServiceDescriptor {
         config_key: "gitlab",
