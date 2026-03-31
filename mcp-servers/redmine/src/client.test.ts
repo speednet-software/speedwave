@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import axios, { AxiosError } from 'axios';
-import { RedmineClient, initializeRedmineClient } from './client.js';
+import { RedmineClient, initializeRedmineClient, ProjectScopeError } from './client.js';
 import type {
   RedmineConfig,
   RedmineIssue,
@@ -789,11 +789,11 @@ describe('RedmineClient', () => {
         limit: 50,
       });
 
+      // When issue_id is present, project_id is not sent to API (issue_id filter is sufficient)
       expect(mockAxiosInstance.get).toHaveBeenCalledWith('/time_entries.json', {
         params: {
           limit: 50,
           issue_id: 123,
-          project_id: 'test-project',
           user_id: 456,
           from: '2024-01-01',
           to: '2024-01-31',
@@ -840,10 +840,10 @@ describe('RedmineClient', () => {
         spent_on: '2024-01-15',
       });
 
+      // When issue_id is present, project_id is not sent to Redmine (Redmine derives project from issue)
       expect(mockAxiosInstance.post).toHaveBeenCalledWith('/time_entries.json', {
         time_entry: {
           issue_id: 123,
-          project_id: 'test-project',
           hours: 8,
           activity_id: 9,
           comments: 'Development work',
@@ -1741,6 +1741,1319 @@ describe('RedmineClient', () => {
       expect(call[1].issue.description).not.toContain('SCRIPT');
       expect(call[1].issue.description).not.toContain('iFrAmE');
       expect(call[1].issue.description).toContain('safe');
+    });
+  });
+
+  //═══════════════════════════════════════════════════════════════════════════════
+  // Project Scoping
+  //═══════════════════════════════════════════════════════════════════════════════
+
+  describe('Project Scoping', () => {
+    const scopedProjectConfig: RedmineProjectConfig = {
+      host_url: 'https://redmine.example.com',
+      project_id: 'my-project',
+    };
+
+    const scopedProject = {
+      id: 42,
+      identifier: 'my-project',
+      name: 'My Project',
+      status: 1,
+      is_public: true,
+      created_on: '2024-01-01T00:00:00Z',
+      updated_on: '2024-01-01T00:00:00Z',
+    };
+
+    const inScopeIssue = {
+      id: 1,
+      subject: 'In-scope issue',
+      project: { id: 42, name: 'My Project' },
+      tracker: { id: 1, name: 'Bug' },
+      status: { id: 1, name: 'New' },
+      priority: { id: 2, name: 'Normal' },
+      author: { id: 1, name: 'Test User' },
+      created_on: '2024-01-01T00:00:00Z',
+      updated_on: '2024-01-01T00:00:00Z',
+    };
+
+    const outOfScopeIssue = {
+      id: 2,
+      subject: 'Out-of-scope issue',
+      project: { id: 99, name: 'Other Project' },
+      tracker: { id: 1, name: 'Bug' },
+      status: { id: 1, name: 'New' },
+      priority: { id: 2, name: 'Normal' },
+      author: { id: 1, name: 'Test User' },
+      created_on: '2024-01-01T00:00:00Z',
+      updated_on: '2024-01-01T00:00:00Z',
+    };
+
+    /** Route mockAxiosInstance.get by URL for scoped tests. */
+    function setupScopedGetMock(overrides?: Record<string, any>) {
+      mockAxiosInstance.get.mockImplementation((url: string) => {
+        if (overrides?.[url] !== undefined) {
+          const v = overrides[url];
+          if (v instanceof Error) return Promise.reject(v);
+          return Promise.resolve(v);
+        }
+        if (url === '/projects/my-project.json') {
+          return Promise.resolve({ data: { project: scopedProject } });
+        }
+        if (url === `/issues/${inScopeIssue.id}.json`) {
+          return Promise.resolve({ data: { issue: inScopeIssue } });
+        }
+        if (url === `/issues/${outOfScopeIssue.id}.json`) {
+          return Promise.resolve({ data: { issue: outOfScopeIssue } });
+        }
+        return Promise.reject(new Error(`Unexpected GET ${url}`));
+      });
+    }
+
+    // ─── getProjectScope() ───────────────────────────────────────────────
+
+    describe('getProjectScope()', () => {
+      it('should return null when projectConfig is null', () => {
+        const c = new RedmineClient(config, null);
+        expect(c.getProjectScope()).toBeNull();
+      });
+
+      it('should return null when projectConfig has no project_id', () => {
+        const c = new RedmineClient(config, { host_url: 'https://redmine.example.com' });
+        expect(c.getProjectScope()).toBeNull();
+      });
+
+      it('should return null when project_id is empty string', () => {
+        const c = new RedmineClient(config, {
+          host_url: 'https://redmine.example.com',
+          project_id: '',
+        });
+        expect(c.getProjectScope()).toBeNull();
+      });
+
+      it('should return null when project_id is whitespace-only', () => {
+        const c = new RedmineClient(config, {
+          host_url: 'https://redmine.example.com',
+          project_id: '   ',
+        });
+        expect(c.getProjectScope()).toBeNull();
+      });
+
+      it('should return trimmed project_id when set', () => {
+        const c = new RedmineClient(config, {
+          host_url: 'https://redmine.example.com',
+          project_id: ' my-project ',
+        });
+        expect(c.getProjectScope()).toBe('my-project');
+      });
+    });
+
+    // ─── _enforceProjectId() via listIssues() ────────────────────────────
+
+    describe('_enforceProjectId() via listIssues()', () => {
+      it('should throw ProjectScopeError when scoped and project_id mismatches', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        setupScopedGetMock();
+
+        await expect(scopedClient.listIssues({ project_id: 'other-project' })).rejects.toThrow(
+          ProjectScopeError
+        );
+      });
+
+      it('should pass through any project_id when unscoped', async () => {
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { issues: [], total_count: 0 },
+        });
+
+        await client.listIssues({ project_id: 'any-project' });
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issues.json', {
+          params: expect.objectContaining({ project_id: 'any-project' }),
+        });
+      });
+
+      it('should force scope when scoped and project_id is undefined', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { issues: [], total_count: 0 },
+        });
+
+        await scopedClient.listIssues();
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issues.json', {
+          params: expect.objectContaining({ project_id: 'my-project' }),
+        });
+      });
+
+      it('should succeed when scoped and project_id matches', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { issues: [], total_count: 0 },
+        });
+
+        await scopedClient.listIssues({ project_id: 'my-project' });
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issues.json', {
+          params: expect.objectContaining({ project_id: 'my-project' }),
+        });
+      });
+    });
+
+    // ─── _resolveProjectNumericId() cache via showIssue() ────────────────
+
+    describe('_resolveProjectNumericId() cache via showIssue()', () => {
+      it('should cache the numeric ID after the first call', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        setupScopedGetMock();
+
+        await scopedClient.showIssue(1);
+
+        // First call: GET /issues/1.json (showIssue fetch) + GET /projects/my-project.json (resolve numeric ID)
+        expect(mockAxiosInstance.get).toHaveBeenCalledTimes(2);
+        const firstCallUrls = mockAxiosInstance.get.mock.calls.map((c: any[]) => c[0]);
+        expect(firstCallUrls).toContain('/projects/my-project.json');
+        expect(firstCallUrls).toContain('/issues/1.json');
+
+        mockAxiosInstance.get.mockClear();
+        setupScopedGetMock();
+
+        await scopedClient.showIssue(1);
+
+        // Second call: only GET /issues/1.json (cache hit for project numeric ID)
+        expect(mockAxiosInstance.get).toHaveBeenCalledTimes(1);
+        expect(mockAxiosInstance.get.mock.calls[0][0]).toBe('/issues/1.json');
+      });
+
+      it('should throw ProjectScopeError when project returns 404', async () => {
+        const scopedClient = new RedmineClient(config, {
+          host_url: 'https://redmine.example.com',
+          project_id: 'nonexistent',
+        });
+
+        // Create a plain error with response.status to simulate Axios 404
+        const axiosLikeError = Object.assign(new Error('Not Found'), {
+          isAxiosError: true,
+          response: { status: 404, statusText: 'Not Found', headers: {}, config: {}, data: {} },
+        });
+        vi.spyOn(axios, 'isAxiosError').mockReturnValue(true);
+
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/projects/nonexistent.json') {
+            return Promise.reject(axiosLikeError);
+          }
+          if (url === '/issues/1.json') {
+            return Promise.resolve({ data: { issue: inScopeIssue } });
+          }
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+
+        await expect(scopedClient.showIssue(1)).rejects.toThrow(ProjectScopeError);
+        await expect(scopedClient.showIssue(1)).rejects.toThrow('not found');
+      });
+
+      it('should retry after rejection (cache cleared on failure)', async () => {
+        const scopedClient = new RedmineClient(config, {
+          host_url: 'https://redmine.example.com',
+          project_id: 'flaky',
+        });
+
+        const networkError = new Error('Network error');
+
+        // First call: fails
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/projects/flaky.json') {
+            return Promise.reject(networkError);
+          }
+          return Promise.resolve({
+            data: { issue: { ...inScopeIssue, project: { id: 42, name: 'Flaky' } } },
+          });
+        });
+
+        await expect(scopedClient.showIssue(1)).rejects.toThrow('Network error');
+
+        // Second call: succeeds (cache was cleared)
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/projects/flaky.json') {
+            return Promise.resolve({ data: { project: { id: 42, identifier: 'flaky' } } });
+          }
+          return Promise.resolve({
+            data: { issue: { ...inScopeIssue, project: { id: 42, name: 'Flaky' } } },
+          });
+        });
+
+        const issue = await scopedClient.showIssue(1);
+        expect(issue.project.id).toBe(42);
+      });
+    });
+
+    // ─── showProject() scoping ──────────────────────────────────────────
+
+    describe('showProject() scoping', () => {
+      it('should succeed when scoped and identifier matches', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: scopedProject },
+        });
+
+        const result = await scopedClient.showProject('my-project');
+        expect(result.identifier).toBe('my-project');
+      });
+
+      it('should succeed when scoped and numeric ID resolves to matching identifier', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: scopedProject },
+        });
+
+        const result = await scopedClient.showProject(42);
+        expect(result.id).toBe(42);
+      });
+
+      it('should throw when scoped and numeric ID resolves to different identifier', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: {
+            project: { ...scopedProject, id: 42, identifier: 'other-project' },
+          },
+        });
+
+        await expect(scopedClient.showProject(42)).rejects.toThrow(ProjectScopeError);
+      });
+
+      it('should throw when scoped and identifier is different', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: {
+            project: {
+              ...scopedProject,
+              identifier: 'other-project',
+              name: 'Other Project',
+            },
+          },
+        });
+
+        await expect(scopedClient.showProject('other-project')).rejects.toThrow(ProjectScopeError);
+      });
+
+      it('should succeed when Redmine returns lowercase identifier matching scope', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        // Request "My-Project" but Redmine canonicalizes to "my-project"
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: scopedProject },
+        });
+
+        const result = await scopedClient.showProject('My-Project');
+        expect(result.identifier).toBe('my-project');
+      });
+
+      it('should return any project when unscoped', async () => {
+        mockAxiosInstance.get.mockResolvedValue({
+          data: {
+            project: {
+              ...scopedProject,
+              id: 99,
+              identifier: 'any-project',
+              name: 'Any Project',
+            },
+          },
+        });
+
+        const result = await client.showProject('any-project');
+        expect(result.identifier).toBe('any-project');
+      });
+
+      it('should succeed when scope is a numeric string matching project.id', async () => {
+        const numericScopeConfig: RedmineProjectConfig = {
+          host_url: 'https://redmine.example.com',
+          project_id: '42',
+        };
+        const numericScopeClient = new RedmineClient(config, numericScopeConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: scopedProject }, // project.id=42, identifier='my-project'
+        });
+
+        const result = await numericScopeClient.showProject('42');
+        expect(result.id).toBe(42);
+      });
+
+      it('should throw when scope is numeric string not matching project.id', async () => {
+        const numericScopeConfig: RedmineProjectConfig = {
+          host_url: 'https://redmine.example.com',
+          project_id: '99',
+        };
+        const numericScopeClient = new RedmineClient(config, numericScopeConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: scopedProject }, // project.id=42, identifier='my-project'
+        });
+
+        await expect(numericScopeClient.showProject('99')).rejects.toThrow(ProjectScopeError);
+      });
+    });
+
+    // ─── listProjects() scoping ─────────────────────────────────────────
+
+    describe('listProjects() scoping', () => {
+      it('should return only configured project when scoped', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: scopedProject },
+        });
+
+        const result = await scopedClient.listProjects();
+
+        expect(result.projects).toHaveLength(1);
+        expect(result.projects[0].identifier).toBe('my-project');
+        expect(result.total_count).toBe(1);
+      });
+
+      it('should return project when scoped and status filter matches', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: { ...scopedProject, status: 1 } },
+        });
+
+        const result = await scopedClient.listProjects({ status: 'active' });
+
+        expect(result.projects).toHaveLength(1);
+      });
+
+      it('should return empty when scoped and status filter does not match', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: { ...scopedProject, status: 1 } },
+        });
+
+        const result = await scopedClient.listProjects({ status: 'closed' });
+
+        expect(result.projects).toHaveLength(0);
+        expect(result.total_count).toBe(0);
+      });
+
+      it('should still return single project when scoped with limit/offset', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: scopedProject },
+        });
+
+        const result = await scopedClient.listProjects({ limit: 10, offset: 5 });
+
+        expect(result.projects).toHaveLength(1);
+        expect(result.total_count).toBe(1);
+      });
+
+      it('should call /projects.json when unscoped', async () => {
+        mockAxiosInstance.get.mockResolvedValue({
+          data: {
+            projects: [scopedProject],
+            total_count: 1,
+          },
+        });
+
+        await client.listProjects();
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects.json', {
+          params: { limit: 100, offset: 0 },
+        });
+      });
+    });
+
+    // ─── searchProjects() scoping ───────────────────────────────────────
+
+    describe('searchProjects() scoping', () => {
+      it('should return project when scoped and query matches name', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: scopedProject },
+        });
+
+        const result = await scopedClient.searchProjects('My Project');
+
+        expect(result.projects).toHaveLength(1);
+        expect(result.total_count).toBe(1);
+      });
+
+      it('should return project when scoped and query partially matches name', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: scopedProject },
+        });
+
+        const result = await scopedClient.searchProjects('my');
+
+        expect(result.projects).toHaveLength(1);
+      });
+
+      it('should return project when scoped and query matches identifier', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: scopedProject },
+        });
+
+        const result = await scopedClient.searchProjects('my-project');
+
+        expect(result.projects).toHaveLength(1);
+      });
+
+      it('should return project when scoped and query matches description', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: {
+            project: { ...scopedProject, description: 'A sample project for testing' },
+          },
+        });
+
+        const result = await scopedClient.searchProjects('sample');
+
+        expect(result.projects).toHaveLength(1);
+      });
+
+      it('should return empty when scoped and query does not match', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { project: scopedProject },
+        });
+
+        const result = await scopedClient.searchProjects('nonexistent');
+
+        expect(result.projects).toHaveLength(0);
+        expect(result.total_count).toBe(0);
+      });
+
+      it('should handle undefined description without TypeError when scoped', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: {
+            project: { ...scopedProject, description: undefined },
+          },
+        });
+
+        const result = await scopedClient.searchProjects('nonexistent');
+
+        expect(result.projects).toHaveLength(0);
+      });
+
+      it('should search all projects when unscoped', async () => {
+        mockAxiosInstance.get.mockResolvedValue({
+          data: {
+            projects: [
+              { id: 1, identifier: 'alpha', name: 'Alpha', description: '' },
+              { id: 2, identifier: 'beta', name: 'Beta', description: '' },
+            ],
+            total_count: 2,
+          },
+        });
+
+        const result = await client.searchProjects('alpha');
+
+        expect(result.projects).toHaveLength(1);
+        expect(result.projects[0].identifier).toBe('alpha');
+      });
+    });
+
+    // ─── listIssues() / searchIssues() scoping ──────────────────────────
+
+    describe('listIssues() / searchIssues() scoping', () => {
+      it('should force scope in params when scoped and no project_id', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { issues: [], total_count: 0 },
+        });
+
+        await scopedClient.listIssues();
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issues.json', {
+          params: expect.objectContaining({ project_id: 'my-project' }),
+        });
+      });
+
+      it('should succeed when scoped and project_id matches', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { issues: [], total_count: 0 },
+        });
+
+        await scopedClient.listIssues({ project_id: 'my-project' });
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issues.json', {
+          params: expect.objectContaining({ project_id: 'my-project' }),
+        });
+      });
+
+      it('should throw when scoped and project_id differs', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+
+        await expect(scopedClient.listIssues({ project_id: 'other-project' })).rejects.toThrow(
+          ProjectScopeError
+        );
+      });
+
+      it('should force scope in searchIssues when scoped', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { results: [], total_count: 0 },
+        });
+
+        await scopedClient.searchIssues('test query');
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/search.json', {
+          params: expect.objectContaining({ scope: 'project:my-project' }),
+        });
+      });
+
+      it('should throw in searchIssues when scoped and project_id differs', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+
+        await expect(
+          scopedClient.searchIssues('test', { project_id: 'other-project' })
+        ).rejects.toThrow(ProjectScopeError);
+      });
+    });
+
+    // ─── showIssue() scoping ────────────────────────────────────────────
+
+    describe('showIssue() scoping', () => {
+      it('should succeed when scoped and issue.project.id matches', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        setupScopedGetMock();
+
+        const result = await scopedClient.showIssue(1);
+
+        expect(result.id).toBe(1);
+      });
+
+      it('should throw when scoped and issue.project.id differs', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        setupScopedGetMock();
+
+        await expect(scopedClient.showIssue(2)).rejects.toThrow(ProjectScopeError);
+      });
+
+      it('should return any issue when unscoped', async () => {
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { issue: outOfScopeIssue },
+        });
+
+        const result = await client.showIssue(2);
+
+        expect(result.id).toBe(2);
+        expect(result.project.id).toBe(99);
+      });
+    });
+
+    // ─── updateIssue() scoping ──────────────────────────────────────────
+
+    describe('updateIssue() scoping', () => {
+      it('should validate issue scope before PUT when scoped', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        setupScopedGetMock();
+        mockAxiosInstance.put.mockResolvedValue({ data: {} });
+
+        await scopedClient.updateIssue(1, { subject: 'Updated' });
+
+        expect(mockAxiosInstance.put).toHaveBeenCalledWith('/issues/1.json', expect.anything());
+      });
+
+      it('should throw when scoped and issue is out of scope', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        setupScopedGetMock();
+
+        await expect(scopedClient.updateIssue(2, { subject: 'Updated' })).rejects.toThrow(
+          ProjectScopeError
+        );
+      });
+
+      it('should succeed when scoped and options.project_id matches scope', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        setupScopedGetMock();
+        mockAxiosInstance.put.mockResolvedValue({ data: {} });
+
+        await scopedClient.updateIssue(1, { project_id: 'my-project' });
+
+        expect(mockAxiosInstance.put).toHaveBeenCalled();
+      });
+
+      it('should throw when scoped and options.project_id differs', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        setupScopedGetMock();
+
+        await expect(scopedClient.updateIssue(1, { project_id: 'other-project' })).rejects.toThrow(
+          ProjectScopeError
+        );
+      });
+    });
+
+    // ─── listTimeEntries() scoping ──────────────────────────────────────
+
+    describe('listTimeEntries() scoping', () => {
+      it('should force project_id when scoped and no issue_id or project_id', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { time_entries: [], total_count: 0 },
+        });
+
+        await scopedClient.listTimeEntries();
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/time_entries.json', {
+          params: expect.objectContaining({ project_id: 'my-project' }),
+        });
+      });
+
+      it('should validate issue and omit project_id when scoped with issue_id only', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        setupScopedGetMock({
+          '/time_entries.json': { data: { time_entries: [], total_count: 0 } },
+        });
+
+        await scopedClient.listTimeEntries({ issue_id: 1 });
+
+        const getCall = mockAxiosInstance.get.mock.calls.find(
+          (c: any[]) => c[0] === '/time_entries.json'
+        );
+        expect(getCall).toBeDefined();
+        expect(getCall![1].params).not.toHaveProperty('project_id');
+        expect(getCall![1].params).toHaveProperty('issue_id', 1);
+      });
+
+      it('should throw when scoped and project_id mismatches', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+
+        await expect(scopedClient.listTimeEntries({ project_id: 'other-project' })).rejects.toThrow(
+          ProjectScopeError
+        );
+      });
+    });
+
+    // ─── createTimeEntry() scoping ──────────────────────────────────────
+
+    describe('createTimeEntry() scoping', () => {
+      it('should validate issue and omit project_id when scoped with issue_id only', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        setupScopedGetMock();
+        mockAxiosInstance.post.mockResolvedValue({
+          data: {
+            time_entry: {
+              id: 10,
+              hours: 2,
+              project: { id: 42, name: 'My Project' },
+              user: { id: 1, name: 'Test User' },
+              activity: { id: 1, name: 'Development' },
+              spent_on: '2024-01-01',
+              created_on: '2024-01-01T00:00:00Z',
+              updated_on: '2024-01-01T00:00:00Z',
+            },
+          },
+        });
+
+        await scopedClient.createTimeEntry({ issue_id: 1, hours: 2 });
+
+        expect(mockAxiosInstance.post).toHaveBeenCalledWith(
+          '/time_entries.json',
+          expect.objectContaining({
+            time_entry: expect.not.objectContaining({ project_id: expect.anything() }),
+          })
+        );
+      });
+
+      it('should inject scope when scoped and no issue_id or project_id', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.post.mockResolvedValue({
+          data: {
+            time_entry: {
+              id: 10,
+              hours: 2,
+              project: { id: 42, name: 'My Project' },
+              user: { id: 1, name: 'Test User' },
+              activity: { id: 1, name: 'Development' },
+              spent_on: '2024-01-01',
+              created_on: '2024-01-01T00:00:00Z',
+              updated_on: '2024-01-01T00:00:00Z',
+            },
+          },
+        });
+
+        await scopedClient.createTimeEntry({ hours: 2 });
+
+        expect(mockAxiosInstance.post).toHaveBeenCalledWith(
+          '/time_entries.json',
+          expect.objectContaining({
+            time_entry: expect.objectContaining({ project_id: 'my-project' }),
+          })
+        );
+      });
+
+      it('should validate issue and omit project_id when scoped with issue_id + matching project_id', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        setupScopedGetMock();
+        mockAxiosInstance.post.mockResolvedValue({
+          data: {
+            time_entry: {
+              id: 10,
+              hours: 2,
+              project: { id: 42, name: 'My Project' },
+              user: { id: 1, name: 'Test User' },
+              activity: { id: 1, name: 'Development' },
+              spent_on: '2024-01-01',
+              created_on: '2024-01-01T00:00:00Z',
+              updated_on: '2024-01-01T00:00:00Z',
+            },
+          },
+        });
+
+        await scopedClient.createTimeEntry({
+          issue_id: 1,
+          project_id: 'my-project',
+          hours: 2,
+        });
+
+        // issue_id present -> project_id omitted from payload (Redmine derives it)
+        const postPayload = mockAxiosInstance.post.mock.calls[0][1].time_entry;
+        expect(postPayload.issue_id).toBe(1);
+        expect(postPayload).not.toHaveProperty('project_id');
+      });
+    });
+
+    // ─── updateTimeEntry() scoping ──────────────────────────────────────
+
+    describe('updateTimeEntry() scoping', () => {
+      it('should succeed when scoped and time entry belongs to scoped project', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/time_entries/10.json') {
+            return Promise.resolve({
+              data: {
+                time_entry: { id: 10, project: { id: 42, name: 'My Project' }, hours: 2 },
+              },
+            });
+          }
+          if (url === '/projects/my-project.json') {
+            return Promise.resolve({ data: { project: scopedProject } });
+          }
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+        mockAxiosInstance.put.mockResolvedValue({ data: {} });
+
+        await scopedClient.updateTimeEntry(10, { hours: 3 });
+
+        expect(mockAxiosInstance.put).toHaveBeenCalledWith(
+          '/time_entries/10.json',
+          expect.anything()
+        );
+      });
+
+      it('should throw when scoped and time entry belongs to different project', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/time_entries/10.json') {
+            return Promise.resolve({
+              data: {
+                time_entry: { id: 10, project: { id: 99, name: 'Other Project' }, hours: 2 },
+              },
+            });
+          }
+          if (url === '/projects/my-project.json') {
+            return Promise.resolve({ data: { project: scopedProject } });
+          }
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+
+        await expect(scopedClient.updateTimeEntry(10, { hours: 3 })).rejects.toThrow(
+          ProjectScopeError
+        );
+      });
+    });
+
+    // ─── listUsers() scoping ────────────────────────────────────────────
+
+    describe('listUsers() scoping', () => {
+      it('should use memberships endpoint with scope when scoped and no projectId', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: {
+            memberships: [{ user: { id: 1, login: 'user1', firstname: 'U', lastname: 'One' } }],
+          },
+        });
+
+        const result = await scopedClient.listUsers();
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/my-project/memberships.json');
+        expect(result).toHaveLength(1);
+      });
+
+      it('should throw when scoped and projectId mismatches', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+
+        await expect(scopedClient.listUsers('other-project')).rejects.toThrow(ProjectScopeError);
+      });
+
+      it('should use /users.json when unscoped and no projectId', async () => {
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { users: [] },
+        });
+
+        await client.listUsers();
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/users.json');
+      });
+    });
+
+    // ─── createRelation() scoping ───────────────────────────────────────
+
+    describe('createRelation() scoping', () => {
+      it('should succeed when scoped and both issues are in scope', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        const inScopeIssue2 = { ...inScopeIssue, id: 3 };
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/projects/my-project.json') {
+            return Promise.resolve({ data: { project: scopedProject } });
+          }
+          if (url === '/issues/1.json') {
+            return Promise.resolve({ data: { issue: inScopeIssue } });
+          }
+          if (url === '/issues/3.json') {
+            return Promise.resolve({ data: { issue: inScopeIssue2 } });
+          }
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+        mockAxiosInstance.post.mockResolvedValue({
+          data: {
+            relation: {
+              id: 1,
+              issue_id: 1,
+              issue_to_id: 3,
+              relation_type: 'relates',
+            },
+          },
+        });
+
+        const result = await scopedClient.createRelation({
+          issue_id: 1,
+          issue_to_id: 3,
+        });
+
+        expect(result.relation.issue_id).toBe(1);
+        expect(result.relation.issue_to_id).toBe(3);
+      });
+
+      it('should throw when scoped and source issue is out of scope', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        setupScopedGetMock();
+
+        await expect(scopedClient.createRelation({ issue_id: 2, issue_to_id: 1 })).rejects.toThrow(
+          ProjectScopeError
+        );
+      });
+
+      it('should throw when scoped and target issue is out of scope', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        setupScopedGetMock();
+
+        await expect(scopedClient.createRelation({ issue_id: 1, issue_to_id: 2 })).rejects.toThrow(
+          ProjectScopeError
+        );
+      });
+    });
+
+    // ─── deleteRelation() scoping ───────────────────────────────────────
+
+    // ─── createIssue() scoping ──────────────────────────────────────────
+
+    describe('createIssue() scoping', () => {
+      it('should succeed when scoped and project_id matches', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        const createdIssue = { ...inScopeIssue, id: 10, subject: 'New issue' };
+        mockAxiosInstance.post.mockResolvedValue({ data: { issue: createdIssue } });
+
+        const result = await scopedClient.createIssue({
+          project_id: 'my-project',
+          subject: 'New issue',
+        });
+        expect(result.id).toBe(10);
+      });
+
+      it('should throw when scoped and project_id differs', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+
+        await expect(
+          scopedClient.createIssue({ project_id: 'other-project', subject: 'Test' })
+        ).rejects.toThrow(ProjectScopeError);
+        expect(mockAxiosInstance.post).not.toHaveBeenCalled();
+      });
+    });
+
+    // ─── commentIssue() scoping ──────────────────────────────────────────
+
+    describe('commentIssue() scoping', () => {
+      it('should succeed when scoped and issue is in scope', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/projects/my-project.json')
+            return Promise.resolve({ data: { project: scopedProject } });
+          if (url === '/issues/1.json') return Promise.resolve({ data: { issue: inScopeIssue } });
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+        mockAxiosInstance.put.mockResolvedValue({ data: {} });
+
+        await scopedClient.commentIssue(1, 'A comment');
+        expect(mockAxiosInstance.put).toHaveBeenCalledWith('/issues/1.json', {
+          issue: { notes: 'A comment' },
+        });
+      });
+
+      it('should throw when scoped and issue is out of scope', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/projects/my-project.json')
+            return Promise.resolve({ data: { project: scopedProject } });
+          if (url === '/issues/2.json')
+            return Promise.resolve({ data: { issue: outOfScopeIssue } });
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+
+        await expect(scopedClient.commentIssue(2, 'A comment')).rejects.toThrow(ProjectScopeError);
+        expect(mockAxiosInstance.put).not.toHaveBeenCalled();
+      });
+    });
+
+    // ─── listJournals() transitive scoping ───────────────────────────────
+
+    describe('listJournals() transitive scoping', () => {
+      it('should throw when scoped and issue is out of scope', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/projects/my-project.json')
+            return Promise.resolve({ data: { project: scopedProject } });
+          if (url === '/issues/2.json')
+            return Promise.resolve({
+              data: { issue: { ...outOfScopeIssue, journals: [] } },
+            });
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+
+        await expect(scopedClient.listJournals(2)).rejects.toThrow(ProjectScopeError);
+      });
+    });
+
+    // ─── updateJournal()/deleteJournal() scoping ─────────────────────────
+
+    describe('updateJournal()/deleteJournal() scoping', () => {
+      it('should validate issue scope before updating journal', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/projects/my-project.json')
+            return Promise.resolve({ data: { project: scopedProject } });
+          if (url === '/issues/1.json') return Promise.resolve({ data: { issue: inScopeIssue } });
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+        mockAxiosInstance.put.mockResolvedValue({ data: {} });
+
+        await scopedClient.updateJournal(1, 5, 'Updated notes');
+        expect(mockAxiosInstance.put).toHaveBeenCalledWith('/issues/1/journals/5.json', {
+          journal: { notes: 'Updated notes' },
+        });
+      });
+
+      it('should throw when issue is out of scope for updateJournal', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/projects/my-project.json')
+            return Promise.resolve({ data: { project: scopedProject } });
+          if (url === '/issues/2.json')
+            return Promise.resolve({ data: { issue: outOfScopeIssue } });
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+
+        await expect(scopedClient.updateJournal(2, 5, 'notes')).rejects.toThrow(ProjectScopeError);
+        expect(mockAxiosInstance.put).not.toHaveBeenCalled();
+      });
+
+      it('should validate issue scope before deleting journal', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/projects/my-project.json')
+            return Promise.resolve({ data: { project: scopedProject } });
+          if (url === '/issues/1.json') return Promise.resolve({ data: { issue: inScopeIssue } });
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+        mockAxiosInstance.delete.mockResolvedValue({ data: {} });
+
+        await scopedClient.deleteJournal(1, 5);
+        expect(mockAxiosInstance.delete).toHaveBeenCalledWith('/issues/1/journals/5.json');
+      });
+
+      it('should throw when issue is out of scope for deleteJournal', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/projects/my-project.json')
+            return Promise.resolve({ data: { project: scopedProject } });
+          if (url === '/issues/2.json')
+            return Promise.resolve({ data: { issue: outOfScopeIssue } });
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+
+        await expect(scopedClient.deleteJournal(2, 5)).rejects.toThrow(ProjectScopeError);
+        expect(mockAxiosInstance.delete).not.toHaveBeenCalled();
+      });
+
+      it('should return 404 when journal belongs to different issue (Redmine server-side)', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/projects/my-project.json')
+            return Promise.resolve({ data: { project: scopedProject } });
+          if (url === '/issues/1.json') return Promise.resolve({ data: { issue: inScopeIssue } });
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+        // Redmine returns 404 when journalId doesn't belong to issueId
+        const notFoundError = Object.assign(new Error('Not Found'), {
+          response: { status: 404 },
+          isAxiosError: true,
+        });
+        mockAxiosInstance.put.mockRejectedValue(notFoundError);
+
+        await expect(scopedClient.updateJournal(1, 999, 'notes')).rejects.toThrow();
+      });
+    });
+
+    // ─── listRelations() scoping ─────────────────────────────────────────
+
+    describe('listRelations() scoping', () => {
+      it('should validate issue scope before listing relations', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/projects/my-project.json')
+            return Promise.resolve({ data: { project: scopedProject } });
+          if (url === '/issues/1.json') return Promise.resolve({ data: { issue: inScopeIssue } });
+          if (url === '/issues/1/relations.json')
+            return Promise.resolve({ data: { relations: [] } });
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+
+        const result = await scopedClient.listRelations(1);
+        expect(result.relations).toEqual([]);
+      });
+
+      it('should throw when issue is out of scope for listRelations', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/projects/my-project.json')
+            return Promise.resolve({ data: { project: scopedProject } });
+          if (url === '/issues/2.json')
+            return Promise.resolve({ data: { issue: outOfScopeIssue } });
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+
+        await expect(scopedClient.listRelations(2)).rejects.toThrow(ProjectScopeError);
+      });
+    });
+
+    // ─── Additional listTimeEntries() scoping variants ───────────────────
+
+    describe('listTimeEntries() additional scoping', () => {
+      it('should succeed when scoped + matching project_id, no issue_id', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { time_entries: [], total_count: 0 },
+        });
+
+        await scopedClient.listTimeEntries({ project_id: 'my-project' });
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/time_entries.json', {
+          params: { limit: 25, project_id: 'my-project' },
+        });
+      });
+
+      it('should validate both issue and project when both present', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/projects/my-project.json')
+            return Promise.resolve({ data: { project: scopedProject } });
+          if (url === '/issues/1.json') return Promise.resolve({ data: { issue: inScopeIssue } });
+          if (url === '/time_entries.json')
+            return Promise.resolve({ data: { time_entries: [], total_count: 0 } });
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+
+        await scopedClient.listTimeEntries({
+          issue_id: 1,
+          project_id: 'my-project',
+        });
+        // project_id NOT in params when issue_id is present
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/time_entries.json', {
+          params: { limit: 25, issue_id: 1 },
+        });
+      });
+    });
+
+    // ─── Additional createTimeEntry() scoping variants ───────────────────
+
+    describe('createTimeEntry() additional scoping', () => {
+      it('should throw when scoped + mismatching project_id, no issue_id', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+
+        await expect(
+          scopedClient.createTimeEntry({ project_id: 'other-project', hours: 2 })
+        ).rejects.toThrow(ProjectScopeError);
+        expect(mockAxiosInstance.post).not.toHaveBeenCalled();
+      });
+
+      it('should throw when scoped + issue_id from wrong project', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/projects/my-project.json')
+            return Promise.resolve({ data: { project: scopedProject } });
+          if (url === '/issues/2.json')
+            return Promise.resolve({ data: { issue: outOfScopeIssue } });
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+
+        await expect(scopedClient.createTimeEntry({ issue_id: 2, hours: 2 })).rejects.toThrow(
+          ProjectScopeError
+        );
+        expect(mockAxiosInstance.post).not.toHaveBeenCalled();
+      });
+
+      it('should inject scope as project_id when scoped + matching project_id, no issue_id', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        const mockEntry = { id: 1, hours: 2, project: { id: 42, name: 'My Project' } };
+        mockAxiosInstance.post.mockResolvedValue({ data: { time_entry: mockEntry } });
+
+        await scopedClient.createTimeEntry({ project_id: 'my-project', hours: 2 });
+        expect(mockAxiosInstance.post).toHaveBeenCalledWith('/time_entries.json', {
+          time_entry: expect.objectContaining({ project_id: 'my-project', hours: 2 }),
+        });
+      });
+    });
+
+    // ─── updateTimeEntry() unscoped ──────────────────────────────────────
+
+    describe('updateTimeEntry() unscoped', () => {
+      it('should update without validation when unscoped', async () => {
+        // client is unscoped (created in beforeEach without projectConfig)
+        mockAxiosInstance.put.mockResolvedValue({ data: {} });
+
+        await client.updateTimeEntry(1, { hours: 5 });
+        expect(mockAxiosInstance.put).toHaveBeenCalledWith('/time_entries/1.json', {
+          time_entry: { hours: 5 },
+        });
+        // No GET to /time_entries/1.json (no scope validation)
+        expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+      });
+    });
+
+    // ─── listUsers() additional scoping ──────────────────────────────────
+
+    describe('listUsers() additional scoping', () => {
+      it('should succeed when scoped + explicit matching projectId', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { memberships: [{ user: { id: 1, login: 'user1' } }] },
+        });
+
+        await scopedClient.listUsers('my-project');
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/my-project/memberships.json');
+      });
+    });
+
+    // ─── deleteRelation() unscoped ───────────────────────────────────────
+
+    describe('deleteRelation() unscoped', () => {
+      it('should delete without validation when unscoped', async () => {
+        mockAxiosInstance.delete.mockResolvedValue({ data: {} });
+
+        await client.deleteRelation(5);
+        expect(mockAxiosInstance.delete).toHaveBeenCalledWith('/relations/5.json');
+        // No GET to /relations/5.json (no scope validation)
+        expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+      });
+    });
+
+    // ─── _resolveProjectNumericId() concurrent deduplication ─────────────
+
+    describe('_resolveProjectNumericId() concurrent deduplication', () => {
+      it('should share the same promise for concurrent calls', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        let resolveProject: ((value: unknown) => void) | undefined;
+        const projectPromise = new Promise((resolve) => {
+          resolveProject = resolve;
+        });
+
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/projects/my-project.json') return projectPromise;
+          if (url.startsWith('/issues/')) return Promise.resolve({ data: { issue: inScopeIssue } });
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+
+        // Start two concurrent showIssue calls
+        const p1 = scopedClient.showIssue(1);
+        const p2 = scopedClient.showIssue(1);
+
+        // Resolve the project fetch
+        resolveProject!({ data: { project: scopedProject } });
+
+        await Promise.all([p1, p2]);
+
+        // Only ONE GET to /projects/my-project.json despite two concurrent calls
+        const projectCalls = mockAxiosInstance.get.mock.calls.filter(
+          (call: string[]) => call[0] === '/projects/my-project.json'
+        );
+        expect(projectCalls).toHaveLength(1);
+      });
+    });
+
+    describe('deleteRelation() scoping', () => {
+      it('should succeed when scoped and relation source issue is in scope', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/relations/5.json') {
+            return Promise.resolve({
+              data: {
+                relation: {
+                  id: 5,
+                  issue_id: 1,
+                  issue_to_id: 3,
+                  relation_type: 'relates',
+                },
+              },
+            });
+          }
+          if (url === '/projects/my-project.json') {
+            return Promise.resolve({ data: { project: scopedProject } });
+          }
+          if (url === '/issues/1.json') {
+            return Promise.resolve({ data: { issue: inScopeIssue } });
+          }
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+        mockAxiosInstance.delete.mockResolvedValue({ data: {} });
+
+        await scopedClient.deleteRelation(5);
+
+        expect(mockAxiosInstance.delete).toHaveBeenCalledWith('/relations/5.json');
+      });
+
+      it('should throw when scoped and relation source issue is out of scope', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockImplementation((url: string) => {
+          if (url === '/relations/5.json') {
+            return Promise.resolve({
+              data: {
+                relation: {
+                  id: 5,
+                  issue_id: 2,
+                  issue_to_id: 3,
+                  relation_type: 'relates',
+                },
+              },
+            });
+          }
+          if (url === '/projects/my-project.json') {
+            return Promise.resolve({ data: { project: scopedProject } });
+          }
+          if (url === '/issues/2.json') {
+            return Promise.resolve({ data: { issue: outOfScopeIssue } });
+          }
+          return Promise.reject(new Error(`Unexpected GET ${url}`));
+        });
+
+        await expect(scopedClient.deleteRelation(5)).rejects.toThrow(ProjectScopeError);
+      });
     });
   });
 });

@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { createProjectTools } from './project-tools.js';
-import { RedmineClient } from '../client.js';
+import { RedmineClient, ProjectScopeError } from '../client.js';
 
 type MockClient = {
   listProjects: Mock;
@@ -468,6 +468,65 @@ describe('Project Tools', () => {
       expect(result).toEqual({
         isError: true,
         content: [{ type: 'text', text: 'Error: Search failed' }],
+      });
+    });
+  });
+
+  describe('ProjectScopeError propagation', () => {
+    it('should surface ProjectScopeError for listProjectIds', async () => {
+      const scopeError = new ProjectScopeError('my-project');
+      mockClient.listProjects.mockRejectedValue(scopeError);
+
+      const tools = createProjectTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'listProjectIds');
+      const result = await tool!.handler({});
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: Redmine is configured to only access project 'my-project'",
+          },
+        ],
+      });
+    });
+
+    it('should surface ProjectScopeError for getProjectFull', async () => {
+      const scopeError = new ProjectScopeError('my-project', 'other-project');
+      mockClient.showProject.mockRejectedValue(scopeError);
+
+      const tools = createProjectTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'getProjectFull');
+      const result = await tool!.handler({ project_id: 'other-project' });
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: configured project is 'my-project', but requested resource belongs to 'other-project'",
+          },
+        ],
+      });
+    });
+
+    it('should surface ProjectScopeError for searchProjectIds', async () => {
+      const scopeError = new ProjectScopeError('my-project');
+      mockClient.searchProjects.mockRejectedValue(scopeError);
+
+      const tools = createProjectTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'searchProjectIds');
+      const result = await tool!.handler({ query: 'test' });
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: Redmine is configured to only access project 'my-project'",
+          },
+        ],
       });
     });
   });
