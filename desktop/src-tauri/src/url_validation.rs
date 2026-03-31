@@ -5,7 +5,7 @@
 
 /// Returns `true` if the given IP address is loopback, private, link-local,
 /// or otherwise reserved (not globally routable).
-fn is_private_or_reserved(ip: std::net::IpAddr) -> bool {
+pub(crate) fn is_private_or_reserved(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
             v4.is_loopback()       // 127.0.0.0/8
@@ -34,7 +34,7 @@ fn is_private_or_reserved(ip: std::net::IpAddr) -> bool {
 
 /// Validates a URL string: only http/https schemes allowed, no localhost or private IPs.
 /// Uses parsed IP types (not string matching) to prevent IPv6-mapped IPv4 bypasses.
-fn validate_url(url: &str) -> Result<url::Url, String> {
+pub(crate) fn validate_url(url: &str) -> Result<url::Url, String> {
     let parsed: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
     match parsed.scheme() {
         "http" | "https" => {}

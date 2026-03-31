@@ -6,7 +6,7 @@
  * @module mcp-sharepoint
  */
 
-import { createMCPServer, ts } from '@speedwave/mcp-shared';
+import { createMCPServer, ts, notConfiguredMessage, retryAsync } from '@speedwave/mcp-shared';
 import { initializeSharePointClient } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 
@@ -34,15 +34,18 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Initialize SharePoint client
-  const sharepointClient = await initializeSharePointClient();
+  // Initialize SharePoint client (with retry for transient failures)
+  const sharepointClient = await retryAsync(initializeSharePointClient, {
+    maxRetries: 3,
+    baseDelayMs: 2000,
+    label: 'SharePoint client init',
+  });
 
   // SharePoint requires a live client at startup — OAuth token refresh
   // cannot be deferred, so we fail fast rather than starting misconfigured.
   // This differs from Slack/GitLab/Redmine which warn and let tools surface errors.
   if (!sharepointClient) {
-    console.error(`${ts()} ❌ Failed to initialize SharePoint client - tokens not found or empty`);
-    console.error(`${ts()}    Run: speedwave setup sharepoint`);
+    console.error(`${ts()} ❌ ${notConfiguredMessage('SharePoint')}`);
     process.exit(1);
   }
 

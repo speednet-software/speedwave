@@ -170,6 +170,8 @@ pub(crate) fn render_and_save_compose(
         ));
     }
 
+    speedwave_runtime::fs_security::ensure_data_dir_permissions(project)
+        .map_err(|e| e.to_string())?;
     let violations =
         speedwave_runtime::compose::SecurityCheck::run(&yaml, project, &manifests, &expected_paths);
     if !violations.is_empty() {

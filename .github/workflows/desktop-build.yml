@@ -11,6 +11,12 @@ on:
       - ".node-version"
       - ".github/actions/download-nodejs/**"
       - ".github/actions/download-wsl-resources/**"
+      - "mcp-servers/package.json"
+      - "mcp-servers/package-lock.json"
+      - "mcp-servers/shared/**"
+      - "mcp-servers/os/**"
+      - "scripts/bundle-build-context.sh"
+      - "scripts/bundle-build-context.ps1"
   push:
     branches: [main, dev]
     paths:
@@ -21,6 +27,12 @@ on:
       - ".node-version"
       - ".github/actions/download-nodejs/**"
       - ".github/actions/download-wsl-resources/**"
+      - "mcp-servers/package.json"
+      - "mcp-servers/package-lock.json"
+      - "mcp-servers/shared/**"
+      - "mcp-servers/os/**"
+      - "scripts/bundle-build-context.sh"
+      - "scripts/bundle-build-context.ps1"
 
 permissions:
   contents: read
@@ -68,7 +80,7 @@ jobs:
             libssl-dev
 
       - name: Setup Node.js
-        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238  # v6.2.0
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
         with:
           node-version: 24
           cache: npm
@@ -84,7 +96,7 @@ jobs:
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Rust cache
-        uses: swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5  # v2.8.2
+        uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           workspaces: |
             . -> target

@@ -2,7 +2,13 @@
  * Project Tools - 3 tools for Redmine project operations
  */
 
-import { Tool, ToolDefinition, jsonResult, errorResult } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  jsonResult,
+  errorResult,
+  notConfiguredMessage,
+} from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 
 const listProjectIdsTool: Tool = {
@@ -66,8 +72,7 @@ const searchProjectIdsTool: Tool = {
  * @param client - Redmine client instance
  */
 export function createProjectTools(client: RedmineClient | null): ToolDefinition[] {
-  const unconfigured = async () =>
-    errorResult('Redmine not configured. Run: speedwave setup redmine');
+  const unconfigured = async () => errorResult(notConfiguredMessage('Redmine'));
   if (!client) {
     return [
       { tool: listProjectIdsTool, handler: unconfigured },

@@ -18,52 +18,28 @@ import {
   OsIntegrationStatusEntry,
 } from '../models/integration';
 import { ServiceCardComponent, SaveCredentialsEvent } from './service-card/service-card.component';
+import { RedmineConfigComponent } from './redmine-config/redmine-config.component';
 import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
 
 /** Manages MCP service integrations and native OS integration toggles. */
 @Component({
   selector: 'app-integrations',
   standalone: true,
-  imports: [CommonModule, FormsModule, ServiceCardComponent, IdeBridgeComponent],
+  imports: [
+    CommonModule,
+    FormsModule,
+    ServiceCardComponent,
+    RedmineConfigComponent,
+    IdeBridgeComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    @if (needsRestart) {
-      <div
-        class="bg-sw-accent text-white px-5 py-3 rounded-lg flex justify-between items-center mb-5"
-        data-testid="integrations-restart-banner"
-      >
-        <div class="flex flex-col gap-1">
-          <span>Changes require container restart to take effect</span>
-          @if (restarting) {
-            <span class="text-[11px] opacity-80"
-              >This may take a minute while containers are recreated</span
-            >
-          }
-        </div>
-        <button
-          class="bg-white text-sw-accent border-none px-4 py-2 rounded cursor-pointer font-semibold font-mono text-[13px] flex items-center gap-2 whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
-          data-testid="integrations-restart"
-          (click)="restartContainers()"
-          [disabled]="restarting"
-        >
-          @if (restarting) {
-            <span
-              class="inline-block w-3 h-3 border-2 border-sw-accent/30 border-t-sw-accent rounded-full animate-sw-spin"
-            ></span>
-            Restarting...
-          } @else {
-            Restart Now
-          }
-        </button>
-      </div>
-    }
-
     <div>
       <h1 class="text-xl text-sw-accent m-0 mb-6">Integrations</h1>
 
       @if (error) {
         <div
-          class="mb-4 px-3 py-2 bg-sw-error-bg border border-sw-accent rounded text-sw-accent text-[13px]"
+          class="mb-4 px-3 py-2 bg-sw-error-bg border border-sw-accent rounded text-sw-accent text-[13px] whitespace-pre-line"
           data-testid="integrations-error"
         >
           {{ error }}
@@ -75,20 +51,31 @@ import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
       <section class="mb-6" data-testid="integrations-services">
         <h2 class="text-[15px] text-sw-text m-0 mb-3">Services</h2>
         @for (svc of services; track svc.service) {
-          <app-service-card
-            [svc]="svc"
-            [expanded]="expandedService === svc.service"
-            [oauthStatus]="svc.service === 'sharepoint' ? oauthStatus : null"
-            [deviceCodeInfo]="svc.service === 'sharepoint' ? deviceCodeInfo : null"
-            [oauthStatusMessage]="svc.service === 'sharepoint' ? oauthStatusMessage : ''"
-            (toggleExpand)="toggleExpand($event)"
-            (toggleService)="handleToggleService($event)"
-            (saveCredentials)="handleSaveCredentials($event)"
-            (deleteCredentials)="deleteCredentials($event)"
-            (startOAuth)="handleStartOAuth($event)"
-            (cancelOAuth)="handleCancelOAuth()"
-            (openVerificationUrl)="handleOpenVerificationUrl($event)"
-          />
+          @if (svc.service === 'redmine') {
+            <app-redmine-config
+              [svc]="svc"
+              [expanded]="expandedService === svc.service"
+              (toggleExpand)="toggleExpand($event)"
+              (toggleService)="handleToggleService($event)"
+              (saveCredentials)="handleSaveCredentials($event)"
+              (deleteCredentials)="deleteCredentials($event)"
+            />
+          } @else {
+            <app-service-card
+              [svc]="svc"
+              [expanded]="expandedService === svc.service"
+              [oauthStatus]="svc.service === 'sharepoint' ? oauthStatus : null"
+              [deviceCodeInfo]="svc.service === 'sharepoint' ? deviceCodeInfo : null"
+              [oauthStatusMessage]="svc.service === 'sharepoint' ? oauthStatusMessage : ''"
+              (toggleExpand)="toggleExpand($event)"
+              (toggleService)="handleToggleService($event)"
+              (saveCredentials)="handleSaveCredentials($event)"
+              (deleteCredentials)="deleteCredentials($event)"
+              (startOAuth)="handleStartOAuth($event)"
+              (cancelOAuth)="handleCancelOAuth()"
+              (openVerificationUrl)="handleOpenVerificationUrl($event)"
+            />
+          }
         }
       </section>
 
@@ -133,10 +120,6 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   osIntegrations: OsIntegrationStatusEntry[] = [];
   /** Currently expanded service card, or null if none. */
   expandedService: string | null = null;
-  /** Whether pending changes require a container restart. */
-  needsRestart = false;
-  /** Whether a container restart is in progress. */
-  restarting = false;
   /** Error message to display, empty if none. */
   error = '';
   /** Name of the currently active project. */
@@ -182,7 +165,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
             this.activeOAuthRequestId = null;
             this.oauthProjectAtStart = null;
             if (flowProject !== this.activeProject) return;
-            this.needsRestart = true;
+            this.projectState.requestRestart();
             await this.loadIntegrations();
             if (flowProject !== this.activeProject) return;
             await this.autoEnableIfConfigured('sharepoint');
@@ -280,7 +263,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
         });
       }
 
-      this.needsRestart = true;
+      this.projectState.requestRestart();
       await this.loadIntegrations();
       await this.autoEnableIfConfigured(payload.svc.service);
     } catch (e: unknown) {
@@ -415,7 +398,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
         enabled,
       });
       svc.enabled = enabled;
-      this.needsRestart = true;
+      this.projectState.requestRestart();
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
       (event.target as HTMLInputElement).checked = !enabled;
@@ -437,7 +420,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
         enabled,
       });
       os.enabled = enabled;
-      this.needsRestart = true;
+      this.projectState.requestRestart();
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
       (event.target as HTMLInputElement).checked = !enabled;
@@ -456,7 +439,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
         project: this.activeProject,
         service: svc.service,
       });
-      this.needsRestart = true;
+      this.projectState.requestRestart();
 
       const updated = this.services.find((s) => s.service === svc.service);
       if (updated) {
@@ -475,21 +458,6 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
     }
-    this.cdr.markForCheck();
-  }
-
-  /** Restarts containers to apply pending integration changes. */
-  async restartContainers(): Promise<void> {
-    this.restarting = true;
-    this.error = '';
-    this.cdr.markForCheck();
-    try {
-      await this.tauri.invoke('restart_integration_containers', { project: this.activeProject });
-      this.needsRestart = false;
-    } catch (e: unknown) {
-      this.error = e instanceof Error ? e.message : String(e);
-    }
-    this.restarting = false;
     this.cdr.markForCheck();
   }
 }

@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createIssueTools } from './issue-tools.js';
+import { ProjectScopeError } from '../client.js';
 import type { RedmineClient } from '../client.js';
 
 type MockClient = {
@@ -754,11 +756,130 @@ describe('issue-tools', () => {
         const result = await handler({});
         expect(result).toEqual({
           content: [
-            { type: 'text', text: 'Error: Redmine not configured. Run: speedwave setup redmine' },
+            {
+              type: 'text',
+              text: `Error: ${notConfiguredMessage('Redmine')}`,
+            },
           ],
           isError: true,
         });
       }
+    });
+  });
+
+  describe('ProjectScopeError propagation', () => {
+    it('should surface ProjectScopeError for listIssueIds', async () => {
+      const scopeError = new ProjectScopeError('my-project', 'other-project');
+      mockClient.listIssues.mockRejectedValue(scopeError);
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'listIssueIds');
+      const result = await tool!.handler({});
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: configured project is 'my-project', but requested resource belongs to 'other-project'",
+          },
+        ],
+      });
+    });
+
+    it('should surface ProjectScopeError for getIssueFull', async () => {
+      const scopeError = new ProjectScopeError('my-project', 'other-project');
+      mockClient.showIssue.mockRejectedValue(scopeError);
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'getIssueFull');
+      const result = await tool!.handler({ issue_id: 1 });
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: configured project is 'my-project', but requested resource belongs to 'other-project'",
+          },
+        ],
+      });
+    });
+
+    it('should surface ProjectScopeError for searchIssueIds', async () => {
+      const scopeError = new ProjectScopeError('my-project', 'other-project');
+      mockClient.searchIssues.mockRejectedValue(scopeError);
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'searchIssueIds');
+      const result = await tool!.handler({ query: 'test' });
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: configured project is 'my-project', but requested resource belongs to 'other-project'",
+          },
+        ],
+      });
+    });
+
+    it('should surface ProjectScopeError for createIssue', async () => {
+      const scopeError = new ProjectScopeError('my-project', 'other-project');
+      mockClient.createIssue.mockRejectedValue(scopeError);
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'createIssue');
+      const result = await tool!.handler({ project_id: 'other-project', subject: 'Test' });
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: configured project is 'my-project', but requested resource belongs to 'other-project'",
+          },
+        ],
+      });
+    });
+
+    it('should surface ProjectScopeError for updateIssue', async () => {
+      const scopeError = new ProjectScopeError('my-project', 'other-project');
+      mockClient.updateIssue.mockRejectedValue(scopeError);
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'updateIssue');
+      const result = await tool!.handler({ issue_id: 1, subject: 'Updated' });
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: configured project is 'my-project', but requested resource belongs to 'other-project'",
+          },
+        ],
+      });
+    });
+
+    it('should surface ProjectScopeError for commentIssue', async () => {
+      const scopeError = new ProjectScopeError('my-project', 'other-project');
+      mockClient.commentIssue.mockRejectedValue(scopeError);
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'commentIssue');
+      const result = await tool!.handler({ issue_id: 1, notes: 'A comment' });
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: configured project is 'my-project', but requested resource belongs to 'other-project'",
+          },
+        ],
+      });
     });
   });
 });

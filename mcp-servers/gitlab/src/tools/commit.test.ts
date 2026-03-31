@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
 import { createCommitTools } from './commit-tools.js';
 import type { GitLabClient } from '../client.js';
 
@@ -114,7 +115,7 @@ describe('commit-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: Authentication failed. Check your GitLab token. Run: speedwave setup gitlab',
+            text: `Error: ${withSetupGuidance('Authentication failed. Check your GitLab token.')}`,
           },
         ],
         isError: true,
@@ -319,7 +320,7 @@ describe('commit-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: Network error. Check your GitLab URL. Run: speedwave setup gitlab',
+            text: `Error: ${withSetupGuidance('Network error. Check your GitLab URL.')}`,
           },
         ],
         isError: true,
@@ -686,7 +687,10 @@ describe('commit-tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });
@@ -699,7 +703,10 @@ describe('commit-tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });
@@ -712,7 +719,10 @@ describe('commit-tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });
@@ -725,7 +735,10 @@ describe('commit-tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });
