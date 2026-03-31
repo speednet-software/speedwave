@@ -826,6 +826,16 @@ describe('ProjectStateService', () => {
       expect(spy.mock.calls.length).toBe(callsBefore);
     });
 
+    it('dismissRestart does not affect restarting flag', () => {
+      service.needsRestart = true;
+      service.restarting = true;
+
+      service.dismissRestart();
+
+      expect(service.restarting).toBe(true);
+      expect(service.needsRestart).toBe(false);
+    });
+
     it('dismissRestart clears needsRestart and restartError', () => {
       service.needsRestart = true;
       service.restartError = 'some error';

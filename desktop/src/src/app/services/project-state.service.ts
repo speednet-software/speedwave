@@ -245,6 +245,7 @@ export class ProjectStateService {
     }
     this.notifyChange();
   }
+
   /** Marks that pending changes require a container restart. */
   requestRestart(): void {
     this.needsRestart = true;
