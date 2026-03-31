@@ -705,4 +705,150 @@ describe('ProjectStateService', () => {
       expect(cb).not.toHaveBeenCalled();
     });
   });
+
+  describe('restart state', () => {
+    beforeEach(async () => {
+      await service.init();
+    });
+
+    it('requestRestart sets needsRestart and notifies', () => {
+      const cb = vi.fn();
+      service.onChange(cb);
+
+      service.requestRestart();
+
+      expect(service.needsRestart).toBe(true);
+      expect(cb).toHaveBeenCalledTimes(1);
+    });
+
+    it('multiple requestRestart calls are idempotent', () => {
+      service.requestRestart();
+      service.requestRestart();
+      service.requestRestart();
+
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('restartContainers invokes Tauri command and clears needsRestart', async () => {
+      service.requestRestart();
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.restartContainers();
+
+      expect(spy).toHaveBeenCalledWith('restart_integration_containers', { project: 'test' });
+      expect(service.needsRestart).toBe(false);
+      expect(service.restarting).toBe(false);
+      expect(service.restartError).toBe('');
+    });
+
+    it('restartContainers fires notifyChange at each state transition', async () => {
+      service.requestRestart();
+      const states: Array<{ restarting: boolean; needsRestart: boolean }> = [];
+      service.onChange(() => {
+        states.push({ restarting: service.restarting, needsRestart: service.needsRestart });
+      });
+
+      let resolveInvoke!: () => void;
+      mockTauri.invokeHandler = (cmd: string) => {
+        if (cmd === 'restart_integration_containers') {
+          return new Promise<void>((resolve) => {
+            resolveInvoke = resolve;
+          });
+        }
+        return Promise.resolve(undefined);
+      };
+
+      const promise = service.restartContainers();
+
+      expect(states).toHaveLength(1);
+      expect(states[0]).toEqual({ restarting: true, needsRestart: true });
+
+      resolveInvoke();
+      await promise;
+
+      expect(states).toHaveLength(2);
+      expect(states[1]).toEqual({ restarting: false, needsRestart: false });
+    });
+
+    it('restartContainers sets restartError on failure', async () => {
+      service.requestRestart();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'restart_integration_containers') throw new Error('compose failed');
+        return undefined;
+      };
+
+      await service.restartContainers();
+
+      expect(service.restartError).toBe('compose failed');
+      expect(service.restarting).toBe(false);
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('restartContainers recovers after previous failure', async () => {
+      service.requestRestart();
+      let shouldFail = true;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'restart_integration_containers') {
+          if (shouldFail) throw new Error('first attempt failed');
+          return undefined;
+        }
+        return undefined;
+      };
+
+      await service.restartContainers();
+      expect(service.restartError).toBe('first attempt failed');
+
+      shouldFail = false;
+      await service.restartContainers();
+      expect(service.restartError).toBe('');
+      expect(service.needsRestart).toBe(false);
+    });
+
+    it('restartContainers is no-op when already restarting', async () => {
+      service.requestRestart();
+      service.restarting = true;
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      const callsBefore = spy.mock.calls.length;
+
+      await service.restartContainers();
+
+      expect(spy.mock.calls.length).toBe(callsBefore);
+    });
+
+    it('restartContainers is no-op when no active project', async () => {
+      service.activeProject = null;
+      service.requestRestart();
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      const callsBefore = spy.mock.calls.length;
+
+      await service.restartContainers();
+
+      expect(spy.mock.calls.length).toBe(callsBefore);
+    });
+
+    it('dismissRestart clears needsRestart and restartError', () => {
+      service.needsRestart = true;
+      service.restartError = 'some error';
+      const cb = vi.fn();
+      service.onChange(cb);
+
+      service.dismissRestart();
+
+      expect(service.needsRestart).toBe(false);
+      expect(service.restartError).toBe('');
+      expect(cb).toHaveBeenCalledTimes(1);
+    });
+
+    it('project switch clears restart state', () => {
+      service.needsRestart = true;
+      service.restarting = true;
+      service.restartError = 'error';
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+
+      expect(service.needsRestart).toBe(false);
+      expect(service.restarting).toBe(false);
+      expect(service.restartError).toBe('');
+    });
+  });
 });

@@ -33,6 +33,9 @@ export class ProjectStateService {
   targetProject: string | null = null;
   status: ProjectStatus = 'loading';
   error = '';
+  needsRestart = false;
+  restarting = false;
+  restartError = '';
 
   private initialized = false;
   private tauri = inject(TauriService);
@@ -242,6 +245,37 @@ export class ProjectStateService {
     }
     this.notifyChange();
   }
+  /** Marks that pending changes require a container restart. */
+  requestRestart(): void {
+    this.needsRestart = true;
+    this.notifyChange();
+  }
+
+  /** Restarts integration containers to apply pending changes. */
+  async restartContainers(): Promise<void> {
+    if (!this.activeProject || this.restarting) return;
+    this.restarting = true;
+    this.restartError = '';
+    this.notifyChange();
+    try {
+      await this.tauri.invoke('restart_integration_containers', {
+        project: this.activeProject,
+      });
+      this.needsRestart = false;
+    } catch (e: unknown) {
+      this.restartError = e instanceof Error ? e.message : String(e);
+    }
+    this.restarting = false;
+    this.notifyChange();
+  }
+
+  /** Dismisses the restart overlay without restarting. */
+  dismissRestart(): void {
+    this.needsRestart = false;
+    this.restartError = '';
+    this.notifyChange();
+  }
+
   /**
    * The ONLY way to switch projects from the frontend.
    * @param name - The project name to switch to.
@@ -265,6 +299,9 @@ export class ProjectStateService {
         this.targetProject = event.payload.project;
         this.status = 'switching';
         this.error = '';
+        this.needsRestart = false;
+        this.restarting = false;
+        this.restartError = '';
         this.notifyChange();
       });
 
