@@ -2,7 +2,13 @@
  * Branch Tools - 5 tools for GitLab branch operations
  */
 
-import { Tool, ToolDefinition, jsonResult, errorResult } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  jsonResult,
+  errorResult,
+  notConfiguredMessage,
+} from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
 
@@ -209,8 +215,7 @@ const compareBranchesTool: Tool = {
  * @param client - GitLab client instance
  */
 export function createBranchTools(client: GitLabClient | null): ToolDefinition[] {
-  const unconfigured = async () =>
-    errorResult('GitLab not configured. Run: speedwave setup gitlab');
+  const unconfigured = async () => errorResult(notConfiguredMessage('GitLab'));
   if (!client) {
     return [
       { tool: listBranchesTool, handler: unconfigured },

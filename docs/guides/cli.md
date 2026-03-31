@@ -43,7 +43,7 @@ speedwave plugin disable <slug> --project <name>  # disable plugin for a project
   cd ~/projects/acme && speedwave init my-app # registers as "my-app"
   ```
   If the directory is already registered, prints the existing project name and exits.
-- **`speedwave check`** — runs OS prerequisite checks (WSL2 on Windows, uidmap on Linux) and compose security validation (cap_drop, token isolation, port binding, etc.), exits 0 on success or 1 on failure with detailed violation messages and remediation steps
+- **`speedwave check`** — runs OS prerequisite checks (WSL2 on Windows, uidmap on Linux) and compose security validation (cap_drop, token isolation, port binding, etc.), exits 0 on success or 1 on failure with detailed violation messages and remediation steps. Note: `check` is diagnostic-only — it reports permission violations but does NOT auto-fix them. All container start paths (`speedwave`, update, rollback) auto-fix file permissions before running SecurityCheck.
 - **`speedwave update`** — rebuilds the built-in images for the current `bundle_id` and recreates containers with the current bundle manifest
 - **`speedwave self-update`** — downloads the latest CLI binary from GitHub Releases, replaces the current binary, and automatically rebuilds container images if the version changed.
 

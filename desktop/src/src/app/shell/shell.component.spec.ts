@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { RouterModule } from '@angular/router';
+import { Router, RouterModule } from '@angular/router';
 import { ShellComponent } from './shell.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -257,5 +257,159 @@ describe('ShellComponent', () => {
     fixture.detectChanges();
 
     expect(fixture.nativeElement.querySelector('[data-testid="nav-chat"]')).not.toBeNull();
+  });
+
+  describe('restart overlay', () => {
+    beforeEach(async () => {
+      await component.ngOnInit();
+      await fixture.whenStable();
+      projectState.status = 'ready';
+      component['cdr'].markForCheck();
+      fixture.detectChanges();
+    });
+
+    it('shows overlay when needsRestart is true and status is ready', () => {
+      projectState.needsRestart = true;
+      component['cdr'].markForCheck();
+      fixture.detectChanges();
+
+      const overlay = fixture.nativeElement.querySelector('[data-testid="restart-overlay"]');
+      expect(overlay).not.toBeNull();
+      expect(overlay.textContent).toContain('Restart Required');
+      expect(overlay.textContent).toContain('Changes require container restart');
+    });
+
+    it('hides overlay when needsRestart is false', () => {
+      projectState.needsRestart = false;
+      component['cdr'].markForCheck();
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('[data-testid="restart-overlay"]')).toBeNull();
+    });
+
+    it('hides overlay during blocking states', () => {
+      projectState.needsRestart = true;
+      for (const status of [
+        'loading',
+        'switching',
+        'rebuilding',
+        'check_failed',
+        'system_check',
+        'checking',
+        'starting',
+      ] as const) {
+        projectState.status = status;
+        component['cdr'].markForCheck();
+        fixture.detectChanges();
+
+        expect(
+          fixture.nativeElement.querySelector('[data-testid="restart-overlay"]'),
+          `overlay should be hidden for status=${status}`
+        ).toBeNull();
+      }
+    });
+
+    it('hides overlay when status is auth_required', () => {
+      projectState.needsRestart = true;
+      projectState.status = 'auth_required';
+      component['cdr'].markForCheck();
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('[data-testid="restart-overlay"]')).toBeNull();
+    });
+
+    it('hides overlay when status is error', () => {
+      projectState.needsRestart = true;
+      projectState.status = 'error';
+      component['cdr'].markForCheck();
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('[data-testid="restart-overlay"]')).toBeNull();
+    });
+
+    it('Restart Now button calls projectState.restartContainers', () => {
+      projectState.needsRestart = true;
+      component['cdr'].markForCheck();
+      fixture.detectChanges();
+
+      const spy = vi.spyOn(projectState, 'restartContainers').mockResolvedValue();
+      const btn = fixture.nativeElement.querySelector(
+        '[data-testid="restart-now-btn"]'
+      ) as HTMLButtonElement;
+      btn.click();
+
+      expect(spy).toHaveBeenCalled();
+      spy.mockRestore();
+    });
+
+    it('Later button calls projectState.dismissRestart', () => {
+      projectState.needsRestart = true;
+      component['cdr'].markForCheck();
+      fixture.detectChanges();
+
+      const spy = vi.spyOn(projectState, 'dismissRestart');
+      const btn = fixture.nativeElement.querySelector(
+        '[data-testid="restart-later-btn"]'
+      ) as HTMLButtonElement;
+      btn.click();
+
+      expect(spy).toHaveBeenCalled();
+      spy.mockRestore();
+    });
+
+    it('shows spinner during restarting', () => {
+      projectState.needsRestart = true;
+      projectState.restarting = true;
+      component['cdr'].markForCheck();
+      fixture.detectChanges();
+
+      const overlay = fixture.nativeElement.querySelector('[data-testid="restart-overlay"]');
+      expect(overlay).not.toBeNull();
+      expect(overlay.textContent).toContain('Restarting containers...');
+      expect(overlay.textContent).toContain('This may take a minute');
+      expect(overlay.textContent).not.toContain('Restart Required');
+      expect(fixture.nativeElement.querySelector('[data-testid="restart-now-btn"]')).toBeNull();
+      expect(fixture.nativeElement.querySelector('[data-testid="restart-later-btn"]')).toBeNull();
+    });
+
+    it('shows error when restartError is set', () => {
+      projectState.needsRestart = true;
+      projectState.restartError = 'compose failed';
+      component['cdr'].markForCheck();
+      fixture.detectChanges();
+
+      const errorEl = fixture.nativeElement.querySelector('[data-testid="restart-error"]');
+      expect(errorEl).not.toBeNull();
+      expect(errorEl.textContent).toContain('compose failed');
+    });
+
+    it('Restart Now is visible when restartError is set for retry', () => {
+      projectState.needsRestart = true;
+      projectState.restartError = 'compose failed';
+      component['cdr'].markForCheck();
+      fixture.detectChanges();
+
+      const btn = fixture.nativeElement.querySelector('[data-testid="restart-now-btn"]');
+      expect(btn).not.toBeNull();
+
+      const spy = vi.spyOn(projectState, 'restartContainers').mockResolvedValue();
+      btn.click();
+      expect(spy).toHaveBeenCalled();
+      spy.mockRestore();
+    });
+
+    it('overlay persists across route changes', async () => {
+      projectState.needsRestart = true;
+      component['cdr'].markForCheck();
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('[data-testid="restart-overlay"]')).not.toBeNull();
+
+      const router = TestBed.inject(Router);
+      await router.navigate(['/settings']);
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('[data-testid="restart-overlay"]')).not.toBeNull();
+    });
   });
 });

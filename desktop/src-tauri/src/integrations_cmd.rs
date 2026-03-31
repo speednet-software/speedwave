@@ -23,8 +23,8 @@ fn redmine_config_json_fields() -> Vec<&'static str> {
 }
 
 // ---------------------------------------------------------------------------
-// Redmine helpers — Redmine stores host_url, project_id, and project_name
-// inside a single config.json file rather than as individual credential files.
+// Redmine helpers — Redmine stores host_url and project_id inside a single
+// config.json file rather than as individual credential files.
 // These helpers isolate that difference so the generic handlers stay clean.
 // ---------------------------------------------------------------------------
 
@@ -78,7 +78,7 @@ fn read_redmine_current_values(
 }
 
 /// Saves Redmine credentials: secret fields go to individual files,
-/// config fields (host_url, project_id, project_name) go into config.json.
+/// config fields (host_url, project_id) go into config.json.
 fn save_redmine_credentials(
     svc_dir: &std::path::Path,
     credentials: &std::collections::HashMap<String, String>,
@@ -247,7 +247,7 @@ pub(crate) fn is_service_configured(project: &str, service: &str) -> bool {
         serde_json::json!({})
     };
 
-    // Skip optional fields (e.g. Redmine project_id/project_name)
+    // Skip optional fields (e.g. Redmine project_id)
     svc_desc
         .auth_fields
         .iter()
@@ -291,7 +291,7 @@ fn is_service_configured_with_home(home: &std::path::Path, project: &str, servic
         serde_json::json!({})
     };
 
-    // Skip optional fields (e.g. Redmine project_id/project_name)
+    // Skip optional fields (e.g. Redmine project_id)
     svc_desc
         .auth_fields
         .iter()
@@ -346,6 +346,152 @@ pub fn set_integration_enabled(
     .map_err(|e| e.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// macOS permission check — verifies TCC/Automation access before enabling
+// an OS integration. Uses the native Swift CLI binaries (same binaries as
+// mcp-os) with a `check_permission` subcommand.
+// ---------------------------------------------------------------------------
+
+/// Resolves the absolute path to a native macOS CLI binary.
+///
+/// Production: `BUNDLE_RESOURCES_ENV` → `<dir>/<binary-name>`
+/// Dev: `CARGO_MANIFEST_DIR` → `../../native/macos/<pkg>/.build/release/<binary-name>`
+///
+/// No fallback to Resources/ subdir — `BUNDLE_RESOURCES_ENV` is always set by
+/// Desktop `main.rs` in production.
+// SYNC: binary paths must match mcp-servers/os/src/platform-runner.ts::resolveDarwinPaths()
+fn resolve_native_cli_binary(service: &str) -> Result<std::path::PathBuf, String> {
+    let (binary_name, pkg_dir) = match service {
+        "reminders" => ("reminders-cli", "reminders"),
+        "calendar" => ("calendar-cli", "calendar"),
+        "mail" => ("mail-cli", "mail"),
+        "notes" => ("notes-cli", "notes"),
+        _ => return Err(format!("unknown OS service: {service}")),
+    };
+
+    // Production: env var set by main.rs via resolve_resources_dir()
+    if let Ok(resources_dir) = std::env::var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV) {
+        return Ok(std::path::PathBuf::from(resources_dir).join(binary_name));
+    }
+
+    // Dev fallback: compile-time path from CARGO_MANIFEST_DIR (desktop/src-tauri/)
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    Ok(std::path::PathBuf::from(manifest_dir)
+        .join("../../native/macos")
+        .join(pkg_dir)
+        .join(".build/release")
+        .join(binary_name))
+}
+
+/// Parses the JSON output from a `check_permission` CLI command.
+///
+/// Expected format: `{"granted": true}` or `{"granted": false, "error": "..."}`
+/// Returns `Ok(())` if `granted` is boolean `true`.
+/// Returns `Err(message)` if `granted` is `false`, missing, or non-boolean.
+fn parse_permission_output(stdout: &str) -> Result<(), String> {
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("Failed to parse permission check output: {e}"))?;
+
+    let granted = parsed
+        .get("granted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if granted {
+        Ok(())
+    } else {
+        let error_detail = parsed
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Permission denied");
+        Err(error_detail.to_string())
+    }
+}
+
+/// Checks macOS TCC/Automation permission for the given OS service.
+///
+/// Spawns the native CLI binary with `check_permission` and parses the JSON
+/// output. Uses a spawn + try_wait polling loop with timeout (same pattern as
+/// `speedwave_runtime::binary::run_with_timeout` but with stdout/stderr capture).
+///
+/// Pipe-buffer deadlock is not a risk: `check_permission` output is <200 bytes,
+/// well within the OS pipe buffer of 64KB. Stdout is read after child exits.
+fn check_os_permission(service: &str) -> Result<(), String> {
+    check_os_permission_with_timeout(service, std::time::Duration::from_secs(60))
+}
+
+/// Inner implementation with configurable timeout for testability.
+fn check_os_permission_with_timeout(
+    service: &str,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    let binary_path = resolve_native_cli_binary(service)?;
+
+    let mut child = std::process::Command::new(&binary_path)
+        .arg("check_permission")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "Failed to run permission check for {service}: {e}. Binary: {}",
+                binary_path.display()
+            )
+        })?;
+
+    // Poll try_wait() every 200ms until exit or timeout
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "Permission check timed out after {}s. Try again.",
+                        timeout.as_secs()
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(e) => return Err(format!("Permission check failed: {e}")),
+        }
+    };
+
+    // Read stdout/stderr AFTER child exits — avoids pipe-buffer deadlock
+    let stdout = child
+        .stdout
+        .take()
+        .map(|mut s| {
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut s, &mut buf).ok();
+            buf
+        })
+        .unwrap_or_default();
+
+    let stderr = child
+        .stderr
+        .take()
+        .map(|mut s| {
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut s, &mut buf).ok();
+            buf
+        })
+        .unwrap_or_default();
+
+    if !status.success() {
+        let detail = if stderr.trim().is_empty() {
+            format!("exit code {}", status.code().unwrap_or(-1))
+        } else {
+            stderr.trim().to_string()
+        };
+        return Err(format!("Permission check failed: {detail}"));
+    }
+
+    parse_permission_output(&stdout)
+}
+
 #[tauri::command]
 pub fn set_os_integration_enabled(
     project: String,
@@ -357,6 +503,11 @@ pub fn set_os_integration_enabled(
     }
     check_project(&project)?;
     log::info!("set_os_integration_enabled: project={project} service={service} enabled={enabled}");
+
+    // When enabling, check macOS permission first
+    if enabled {
+        check_os_permission(&service)?;
+    }
 
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
@@ -565,6 +716,7 @@ pub async fn restart_integration_containers(project: String) -> Result<(), Strin
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     // -- IntegrationsConfig::set_service tests --
 
@@ -723,13 +875,7 @@ mod tests {
         creds.insert("project_id".to_string(), "proj1".to_string());
         creds.insert("api_key".to_string(), "secret123".to_string());
 
-        let allowed = &[
-            "api_key",
-            "host_url",
-            "project_id",
-            "project_name",
-            "config.json",
-        ];
+        let allowed = &["api_key", "host_url", "project_id", "config.json"];
         save_redmine_credentials(svc_dir, &creds, allowed).unwrap();
 
         // api_key should be written as a file
@@ -765,13 +911,7 @@ mod tests {
         let mut creds = std::collections::HashMap::new();
         creds.insert("api_key".to_string(), "secret123".to_string());
 
-        let allowed = &[
-            "api_key",
-            "host_url",
-            "project_id",
-            "project_name",
-            "config.json",
-        ];
+        let allowed = &["api_key", "host_url", "project_id", "config.json"];
         save_redmine_credentials(svc_dir, &creds, allowed).unwrap();
 
         // api_key should be written as a file
@@ -882,7 +1022,7 @@ mod tests {
     #[test]
     fn is_service_configured_checks_stored_in_config_json_for_redmine() {
         // Redmine: api_key (file) + host_url (config.json, required) +
-        // project_id/project_name (config.json, optional)
+        // project_id (config.json, optional)
         let tmp = tempfile::tempdir().unwrap();
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "redmine");
 
@@ -910,8 +1050,7 @@ mod tests {
         // Add all fields including optional → also true
         let config = serde_json::json!({
             "host_url": "https://redmine.example.com",
-            "project_id": "my-proj",
-            "project_name": "My Project"
+            "project_id": "my-proj"
         });
         std::fs::write(
             svc_dir.join("config.json"),
@@ -955,8 +1094,7 @@ mod tests {
         std::fs::write(svc_dir.join("api_key"), "secret").unwrap();
         let config = serde_json::json!({
             "host_url": "",
-            "project_id": "proj",
-            "project_name": "Proj"
+            "project_id": "proj"
         });
         std::fs::write(
             svc_dir.join("config.json"),
@@ -976,5 +1114,294 @@ mod tests {
         let nonexistent = tmp.path().join("does-not-exist");
         let result = read_service_config(&nonexistent);
         assert_eq!(result, serde_json::json!({}));
+    }
+
+    // -- parse_permission_output tests --
+
+    #[test]
+    fn parse_permission_output_granted() {
+        assert!(parse_permission_output(r#"{"granted": true}"#).is_ok());
+    }
+
+    #[test]
+    fn parse_permission_output_denied() {
+        let result = parse_permission_output(r#"{"granted": false, "error": "denied"}"#);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("denied"));
+    }
+
+    #[test]
+    fn parse_permission_output_denied_no_error_field() {
+        let result = parse_permission_output(r#"{"granted": false}"#);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Permission denied"));
+    }
+
+    #[test]
+    fn parse_permission_output_malformed_json() {
+        let result = parse_permission_output("not json");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to parse"));
+    }
+
+    #[test]
+    fn parse_permission_output_empty() {
+        let result = parse_permission_output("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to parse"));
+    }
+
+    #[test]
+    fn parse_permission_output_missing_granted_key() {
+        // Missing "granted" key treated as denial, not a "default to false"
+        let result = parse_permission_output(r#"{"error": "something"}"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_permission_output_granted_wrong_type_string() {
+        let result = parse_permission_output(r#"{"granted": "yes"}"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_permission_output_granted_wrong_type_number() {
+        let result = parse_permission_output(r#"{"granted": 1}"#);
+        assert!(result.is_err());
+    }
+
+    // -- resolve_native_cli_binary tests --
+
+    #[test]
+    fn resolve_native_cli_binary_maps_known_services() {
+        for (service, expected_binary) in [
+            ("reminders", "reminders-cli"),
+            ("calendar", "calendar-cli"),
+            ("mail", "mail-cli"),
+            ("notes", "notes-cli"),
+        ] {
+            let path = resolve_native_cli_binary(service).unwrap();
+            assert!(
+                path.to_string_lossy().contains(expected_binary),
+                "path for {service} should contain {expected_binary}, got: {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_native_cli_binary_rejects_unknown() {
+        assert!(resolve_native_cli_binary("unknown").is_err());
+    }
+
+    #[test]
+    fn resolve_native_cli_binary_covers_all_os_services() {
+        // Cross-language consistency with platform-runner.ts must be verified
+        // manually when changing binary names
+        let os_services: std::collections::HashSet<&str> =
+            speedwave_runtime::consts::TOGGLEABLE_OS_SERVICES
+                .iter()
+                .map(|s| s.config_key)
+                .collect();
+
+        for service in &os_services {
+            assert!(
+                resolve_native_cli_binary(service).is_ok(),
+                "resolve_native_cli_binary must handle OS service '{service}'"
+            );
+        }
+
+        // Verify the match arms exactly cover TOGGLEABLE_OS_SERVICES
+        let known = ["reminders", "calendar", "mail", "notes"]
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<&str>>();
+        assert_eq!(
+            os_services, known,
+            "TOGGLEABLE_OS_SERVICES must match the known services in resolve_native_cli_binary"
+        );
+    }
+
+    #[test]
+    fn resolve_native_cli_binary_dev_fallback_path_exists() {
+        // Verify the dev fallback path structure is plausible from CARGO_MANIFEST_DIR
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let native_dir = std::path::Path::new(manifest_dir).join("../../native/macos/reminders");
+        assert!(
+            native_dir.exists(),
+            "dev fallback path ../../native/macos/reminders from CARGO_MANIFEST_DIR should exist: {}",
+            native_dir.display()
+        );
+    }
+
+    // -- check_os_permission tests (macOS-only) --
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn check_os_permission_handles_binary_not_found() {
+        std::env::set_var(
+            speedwave_runtime::consts::BUNDLE_RESOURCES_ENV,
+            "/nonexistent/path",
+        );
+        let result = check_os_permission("reminders");
+        std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Failed to run") || err.contains("No such file"),
+            "expected 'Failed to run' or 'No such file', got: {err}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn check_os_permission_handles_non_executable_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let binary_path = tmp.path().join("reminders-cli");
+        std::fs::write(&binary_path, "not executable").unwrap();
+        // chmod 0o644 — not executable
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, tmp.path());
+        let result = check_os_permission("reminders");
+        std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Permission denied") || err.contains("Failed to run"),
+            "expected permission error, got: {err}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn check_os_permission_handles_nonzero_exit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("reminders-cli");
+        std::fs::write(&script, "#!/bin/sh\necho 'crash info' >&2\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, tmp.path());
+        let result = check_os_permission("reminders");
+        std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("crash info"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn check_os_permission_handles_exit_0_garbage_stdout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("reminders-cli");
+        std::fs::write(&script, "#!/bin/sh\necho 'debug line'\necho 'not json'\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, tmp.path());
+        let result = check_os_permission("reminders");
+        std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to parse"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn check_os_permission_timeout_kills_child() {
+        // Intentionally slow test (~5s) — spawns a script that sleeps 60s,
+        // but we set a 2s timeout so it gets killed quickly.
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("reminders-cli");
+        std::fs::write(&script, "#!/bin/sh\nsleep 60\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, tmp.path());
+        let result =
+            check_os_permission_with_timeout("reminders", std::time::Duration::from_secs(2));
+        std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("timed out"),
+            "should report timeout"
+        );
+    }
+
+    // -- set_os_integration_enabled permission check structural tests --
+
+    #[test]
+    fn set_os_integration_enabled_calls_check_before_config_lock() {
+        let source = include_str!("integrations_cmd.rs");
+        let fn_start = source
+            .find("fn set_os_integration_enabled(")
+            .expect("set_os_integration_enabled function must exist");
+        let fn_body = &source[fn_start..];
+
+        let check_pos = fn_body
+            .find("check_os_permission")
+            .expect("check_os_permission call must exist in set_os_integration_enabled");
+        let lock_pos = fn_body
+            .find("with_config_lock")
+            .expect("with_config_lock call must exist in set_os_integration_enabled");
+
+        assert!(
+            check_pos < lock_pos,
+            "check_os_permission (offset {check_pos}) must appear before with_config_lock (offset {lock_pos})"
+        );
+    }
+
+    #[test]
+    fn credential_files_allowlist_covers_legacy_project_name_file() {
+        // project_name was removed from auth_fields (UI no longer shows it),
+        // but credential_files still includes it so delete_integration_credentials
+        // can clean up legacy installations that have a project_name file on disk.
+        let svc = speedwave_runtime::consts::find_mcp_service("redmine").unwrap();
+
+        assert!(
+            svc.credential_files.contains(&"project_name"),
+            "credential_files must still contain 'project_name' for backward compat"
+        );
+        assert!(
+            !svc.auth_fields.iter().any(|f| f.key == "project_name"),
+            "project_name must not appear in auth_fields (removed from UI)"
+        );
+
+        // Simulate legacy cleanup: create a temp dir with a project_name file,
+        // then iterate credential_files to delete — mirrors delete_integration_credentials logic.
+        let tmp = tempfile::tempdir().unwrap();
+        let svc_dir = tmp.path();
+        std::fs::write(svc_dir.join("project_name"), "Legacy Project").unwrap();
+        std::fs::write(svc_dir.join("api_key"), "secret").unwrap();
+        std::fs::write(
+            svc_dir.join("config.json"),
+            r#"{"host_url":"https://r.test"}"#,
+        )
+        .unwrap();
+
+        for &field in svc.credential_files {
+            let path = svc_dir.join(field);
+            if path.exists() {
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+
+        assert!(
+            !svc_dir.join("project_name").exists(),
+            "legacy project_name file should be cleaned up via credential_files allowlist"
+        );
+        assert!(
+            !svc_dir.join("api_key").exists(),
+            "api_key should also be cleaned up"
+        );
+        assert!(
+            !svc_dir.join("config.json").exists(),
+            "config.json should also be cleaned up"
+        );
     }
 }

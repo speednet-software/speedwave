@@ -2,7 +2,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 #![allow(missing_docs)]
 
-use speedwave_runtime::compose::{self, SecurityCheck};
+use speedwave_runtime::compose::{self, SecurityCheck, SecurityRule};
 use speedwave_runtime::config;
 use speedwave_runtime::consts;
 use speedwave_runtime::plugin;
@@ -555,18 +555,43 @@ fn main() -> anyhow::Result<()> {
             eprintln!("  WARNING: {w}\n");
         }
 
+        // ANSI color codes (only when stderr is a terminal)
+        let use_color = std::io::IsTerminal::is_terminal(&std::io::stderr());
+        let green = if use_color { "\x1b[32m" } else { "" };
+        let red = if use_color { "\x1b[31m" } else { "" };
+        let reset = if use_color { "\x1b[0m" } else { "" };
+
         if prereq_violations.is_empty() && security_violations.is_empty() {
             println!("speedwave check OK -- all system checks passed");
+            eprintln!();
+            for rule in SecurityRule::ALL_RULES {
+                eprintln!("  {green}OK{reset}    {}  {}", rule, rule.description());
+            }
             std::process::exit(0);
         } else {
             eprintln!("speedwave check FAILED -- containers NOT started\n");
-            for v in &prereq_violations {
-                eprintln!("  {} -- {}", v.rule, v.message);
-                eprintln!("  Fix: {}\n", v.remediation);
+            let failed_rules: std::collections::HashSet<SecurityRule> =
+                security_violations.iter().map(|v| v.rule).collect();
+            for rule in SecurityRule::ALL_RULES {
+                if failed_rules.contains(rule) {
+                    eprintln!("  {red}FAIL{reset}  {}  {}", rule, rule.description());
+                } else {
+                    eprintln!("  {green}OK{reset}    {}  {}", rule, rule.description());
+                }
             }
-            for v in &security_violations {
-                eprintln!("  [{}] {} -- {}", v.container, v.rule, v.message);
-                eprintln!("  Fix: {}\n", v.remediation);
+            if !prereq_violations.is_empty() {
+                eprintln!();
+                for v in &prereq_violations {
+                    eprintln!("  {} -- {}", v.rule, v.message);
+                    eprintln!("  Fix: {}\n", v.remediation);
+                }
+            }
+            if !security_violations.is_empty() {
+                eprintln!();
+                for v in &security_violations {
+                    eprintln!("  [{}] {} -- {}", v.container, v.rule, v.message);
+                    eprintln!("  Fix: {}\n", v.remediation);
+                }
             }
             std::process::exit(1);
         }
@@ -581,6 +606,7 @@ fn main() -> anyhow::Result<()> {
         }
         std::process::exit(1);
     }
+    speedwave_runtime::fs_security::ensure_data_dir_permissions(&project_name)?;
     let violations = SecurityCheck::run(&compose_yml, &project_name, &manifests, &expected_paths);
     if !violations.is_empty() {
         eprintln!("speedwave check FAILED -- containers NOT started\n");
@@ -1213,6 +1239,35 @@ mod tests {
         assert!(
             gate_body.contains("prereq_violations.is_empty()"),
             "pre-compose gate must check prereq_violations"
+        );
+    }
+
+    #[test]
+    fn test_check_does_not_autofix_permissions() {
+        // Structural test: `speedwave check` must NOT call ensure_data_dir_permissions.
+        // Check is diagnostic-only — it reports violations without fixing them.
+        // Behavioral coverage: see
+        // fs_security::tests::test_ensure_roundtrip_fixes_then_check_passes
+        let source = include_str!("main.rs");
+        let check_start = source
+            .find("if action == CliAction::Check")
+            .expect("CliAction::Check handler must exist in main.rs");
+        // Delimit the check handler by finding the next CliAction:: reference
+        // after it (marks the start of subsequent handler code).
+        let after_check = &source[check_start..];
+        let check_end = after_check[1..]
+            .find("CliAction::")
+            .map(|pos| pos + 1)
+            .expect(
+                "there must be another CliAction:: reference after the Check handler \
+                 — if this fails, the source structure has changed significantly",
+            );
+        let check_block = &after_check[..check_end];
+
+        assert!(
+            !check_block.contains("ensure_data_dir_permissions"),
+            "speedwave check must NOT call ensure_data_dir_permissions — \
+             check is diagnostic-only, it reports violations without fixing them"
         );
     }
 

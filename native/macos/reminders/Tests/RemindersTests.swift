@@ -1,3 +1,4 @@
+import EventKit
 import XCTest
 @testable import reminders_cli
 
@@ -66,10 +67,7 @@ final class RemindersTests: XCTestCase {
 
     // MARK: - Reminder Dict Conversion
 
-    func testReminderToDictIncludesRequiredFields() {
-        // This test verifies the dict structure without needing a real EKReminder
-        // (EKReminder requires an EKEventStore which needs entitlements)
-        // We verify the error path instead
+    func testCLIErrorMissingFieldHasDescription() {
         let error = CLIError.missingField("id")
         XCTAssertNotNil(error.errorDescription)
     }
@@ -107,5 +105,125 @@ final class RemindersTests: XCTestCase {
         // Default limit should be used when not specified
         let limit = parsed?["limit"] as? Int ?? 20
         XCTAssertEqual(limit, 20)
+    }
+
+    // MARK: - Tag Extraction from Notes
+
+    func testExtractTagsSingleTag() {
+        let tags = extractTags(from: "[#work] Some notes")
+        XCTAssertEqual(tags, ["work"])
+    }
+
+    func testExtractTagsMultipleTags() {
+        let tags = extractTags(from: "[#work] [#urgent]\nDo this soon")
+        XCTAssertEqual(tags, ["work", "urgent"])
+    }
+
+    func testExtractTagsNoTags() {
+        let tags = extractTags(from: "Just plain notes")
+        XCTAssertEqual(tags, [])
+    }
+
+    func testExtractTagsEmptyString() {
+        let tags = extractTags(from: "")
+        XCTAssertEqual(tags, [])
+    }
+
+    func testExtractTagsDeduplicates() {
+        let tags = extractTags(from: "[#work] [#Work] [#WORK]")
+        XCTAssertEqual(tags, ["work"])
+    }
+
+    // MARK: - Strip Tags from Notes
+
+    func testStripTagsSingleTag() {
+        let clean = stripTags(from: "[#work] Some notes")
+        XCTAssertEqual(clean, "Some notes")
+    }
+
+    func testStripTagsMultipleTags() {
+        let clean = stripTags(from: "[#work] [#urgent]\nDo this soon")
+        XCTAssertEqual(clean, "Do this soon")
+    }
+
+    func testStripTagsNoTags() {
+        let clean = stripTags(from: "Just plain notes")
+        XCTAssertEqual(clean, "Just plain notes")
+    }
+
+    func testStripTagsOnlyTags() {
+        let clean = stripTags(from: "[#work] [#urgent]")
+        XCTAssertEqual(clean, "")
+    }
+
+    // MARK: - Combine Tags with Notes
+
+    func testCombineTagsWithNotes() {
+        let result = combineTags(["work", "urgent"], with: "Some notes")
+        XCTAssertEqual(result, "[#work] [#urgent]\nSome notes")
+    }
+
+    func testCombineTagsWithoutNotes() {
+        let result = combineTags(["work"], with: nil)
+        XCTAssertEqual(result, "[#work]")
+    }
+
+    func testCombineEmptyTagsWithNotes() {
+        let result = combineTags([], with: "Some notes")
+        XCTAssertEqual(result, "Some notes")
+    }
+
+    func testCombineEmptyTagsEmptyNotes() {
+        let result = combineTags([], with: nil)
+        XCTAssertNil(result)
+    }
+
+    func testCombineTagsNormalizesToLowercase() {
+        let result = combineTags(["Work", "URGENT"], with: nil)
+        XCTAssertEqual(result, "[#work] [#urgent]")
+    }
+
+    func testCombineTagsTrimsWhitespace() {
+        let result = combineTags(["  work  ", "urgent"], with: "  notes  ")
+        XCTAssertEqual(result, "[#work] [#urgent]\nnotes")
+    }
+
+    func testCombineTagsFiltersEmpty() {
+        let result = combineTags(["work", "", "  "], with: nil)
+        XCTAssertEqual(result, "[#work]")
+    }
+
+    func testCombineTagsDeduplicates() {
+        let result = combineTags(["Work", "work", "WORK"], with: nil)
+        XCTAssertEqual(result, "[#work]")
+    }
+
+    // MARK: - Permission Check (formatPermissionResult)
+
+    func testFormatPermissionResultGranted() {
+        let json = formatPermissionResult(granted: true, error: nil)
+        let data = json.data(using: .utf8)!
+        let parsed = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertTrue(parsed["granted"] is Bool)
+        XCTAssertEqual(parsed["granted"] as? Bool, true)
+        XCTAssertNil(parsed["error"])
+    }
+
+    func testFormatPermissionResultDenied() {
+        let json = formatPermissionResult(granted: false, error: "access denied")
+        let data = json.data(using: .utf8)!
+        let parsed = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertTrue(parsed["granted"] is Bool)
+        XCTAssertEqual(parsed["granted"] as? Bool, false)
+        XCTAssertTrue(parsed["error"] is String)
+        XCTAssertEqual(parsed["error"] as? String, "access denied")
+    }
+
+    func testRequestReminderAccessReturnsTuple() {
+        // Compile-time check: requestReminderAccess returns (granted: Bool, error: Error?)
+        let store = EKEventStore()
+        let result: (granted: Bool, error: Error?) = requestReminderAccess(store: store, timeout: 0.001)
+        // With a near-zero timeout, we just verify the return type
+        XCTAssertNotNil(result)
     }
 }

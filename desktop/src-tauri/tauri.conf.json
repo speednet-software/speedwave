@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri-docs/v2/packages/api/config-schema.json",
   "productName": "Speedwave",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "identifier": "pl.speedwave.desktop",
   "build": {
     "frontendDist": "../src/dist/browser",

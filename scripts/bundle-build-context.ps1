@@ -45,11 +45,13 @@ foreach ($svc in $services) {
 New-Item -ItemType Directory -Path "$dest\mcp-os\os","$dest\mcp-os\shared" -Force | Out-Null
 Copy-Item -Recurse mcp-servers\os\dist "$dest\mcp-os\os\dist"
 Copy-Item -Recurse mcp-servers\shared\dist "$dest\mcp-os\shared\dist"
-# Always install production deps (workspace hoisting means
-# mcp-servers\shared\node_modules\ is empty, so copying it never worked)
+# Install production deps only. Cannot use the workspace-scoped
+# package-lock.json directly — it contains workspace-relative entries
+# that don't resolve in isolation. Two-step: generate standalone lockfile,
+# then install deterministically with npm ci.
 Copy-Item mcp-servers\shared\package.json "$dest\mcp-os\shared\"
-Copy-Item mcp-servers\package-lock.json "$dest\mcp-os\shared\"
 Push-Location "$dest\mcp-os\shared"
+npm install --package-lock-only --ignore-scripts
 npm ci --omit=dev --ignore-scripts
 Pop-Location
 

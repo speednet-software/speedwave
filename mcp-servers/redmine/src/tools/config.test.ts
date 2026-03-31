@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createConfigTools } from './config-tools.js';
 import { RedmineClient, RedmineMappings } from '../client.js';
 
@@ -37,7 +38,10 @@ describe('Config Tools', () => {
       expect(result).toEqual({
         isError: true,
         content: [
-          { type: 'text', text: 'Error: Redmine not configured. Run: speedwave setup redmine' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('Redmine')}`,
+          },
         ],
       });
     });
@@ -51,7 +55,10 @@ describe('Config Tools', () => {
       expect(result).toEqual({
         isError: true,
         content: [
-          { type: 'text', text: 'Error: Redmine not configured. Run: speedwave setup redmine' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('Redmine')}`,
+          },
         ],
       });
     });
@@ -370,6 +377,28 @@ describe('Config Tools', () => {
         isError: true,
         content: [{ type: 'text', text: 'Error: Unexpected error occurred' }],
       });
+    });
+
+    it('should return project_name fetched at init (getConfig remains sync)', async () => {
+      const config = {
+        project_id: 'my-project',
+        project_name: 'Auto-Fetched Name',
+        url: 'https://redmine.example.com',
+      };
+      mockClient.getConfig.mockReturnValue(config);
+
+      const tools = createConfigTools(mockClient as unknown as RedmineClient);
+      const getConfigTool = tools.find((t) => t.tool.name === 'getConfig');
+
+      const result = await getConfigTool!.handler({});
+
+      expect(mockClient.getConfig).toHaveBeenCalledWith();
+      expect(result).toEqual({
+        content: [{ type: 'text', text: JSON.stringify(config, null, 2) }],
+      });
+
+      const parsed = JSON.parse((result as any).content[0].text);
+      expect(parsed.project_name).toBe('Auto-Fetched Name');
     });
   });
 });

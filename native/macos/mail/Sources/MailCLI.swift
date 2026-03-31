@@ -3,16 +3,32 @@ import Foundation
 // MARK: - CLI Entry Point
 
 /// mail-cli <command> [json-args]
-/// Commands: detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email
+/// Commands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email
 @main
 struct MailCLI {
     static func main() {
         let args = CommandLine.arguments
         guard args.count >= 2 else {
-            exitWithError("Usage: mail-cli <command> [json-args]\nCommands: detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email")
+            exitWithError("Usage: mail-cli <command> [json-args]\nCommands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email")
         }
 
         let command = args[1]
+
+        // check_permission: verify macOS Automation access for Apple Mail.
+        // Returns JSON {"granted": true/false} on stdout, always exits 0.
+        // Uses error.errorDescription for user-friendly messages from ScriptError.
+        // check_permission validates Apple Mail automation; Outlook availability is checked separately by resolveClient()
+        // Pattern: see also notes/Sources/NotesCLI.swift check_permission
+        if command == "check_permission" {
+            do {
+                _ = try ScriptRunner.run("tell application \"Mail\" to name")
+                print(formatPermissionResult(granted: true, error: nil))
+            } catch {
+                print(formatPermissionResult(granted: false, error: error.localizedDescription))
+            }
+            return
+        }
+
         let jsonArgs = args.count >= 3 ? args[2] : "{}"
 
         guard let argsData = jsonArgs.data(using: .utf8),
@@ -39,7 +55,7 @@ struct MailCLI {
             case "reply_to_email":
                 result = try replyToEmail(params: params)
             default:
-                exitWithError("Unknown command: \(command)\nAvailable: detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email")
+                exitWithError("Unknown command: \(command)\nAvailable: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email")
             }
 
             let data = try JSONSerialization.data(
@@ -221,4 +237,21 @@ enum MailError: LocalizedError {
 func exitWithError(_ message: String) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
     exit(1)
+}
+
+// MARK: - Permission Helpers
+
+/// Serializes a permission check result as JSON.
+/// Output contract: {"granted": true} or {"granted": false, "error": "..."}
+// SYNC: formatPermissionResult must match notes/Sources/NotesCLI.swift
+func formatPermissionResult(granted: Bool, error: String?) -> String {
+    var dict: [String: Any] = ["granted": granted]
+    if let error = error {
+        dict["error"] = error
+    }
+    guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
+          let json = String(data: data, encoding: .utf8) else {
+        return #"{"granted": false, "error": "Failed to serialize permission result"}"#
+    }
+    return json
 }
