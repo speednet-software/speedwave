@@ -606,6 +606,7 @@ fn main() -> anyhow::Result<()> {
         }
         std::process::exit(1);
     }
+    speedwave_runtime::fs_security::ensure_data_dir_permissions(&project_name)?;
     let violations = SecurityCheck::run(&compose_yml, &project_name, &manifests, &expected_paths);
     if !violations.is_empty() {
         eprintln!("speedwave check FAILED -- containers NOT started\n");
@@ -1238,6 +1239,35 @@ mod tests {
         assert!(
             gate_body.contains("prereq_violations.is_empty()"),
             "pre-compose gate must check prereq_violations"
+        );
+    }
+
+    #[test]
+    fn test_check_does_not_autofix_permissions() {
+        // Structural test: `speedwave check` must NOT call ensure_data_dir_permissions.
+        // Check is diagnostic-only — it reports violations without fixing them.
+        // Behavioral coverage: see
+        // fs_security::tests::test_ensure_roundtrip_fixes_then_check_passes
+        let source = include_str!("main.rs");
+        let check_start = source
+            .find("if action == CliAction::Check")
+            .expect("CliAction::Check handler must exist in main.rs");
+        // Delimit the check handler by finding the next CliAction:: reference
+        // after it (marks the start of subsequent handler code).
+        let after_check = &source[check_start..];
+        let check_end = after_check[1..]
+            .find("CliAction::")
+            .map(|pos| pos + 1)
+            .expect(
+                "there must be another CliAction:: reference after the Check handler \
+                 — if this fails, the source structure has changed significantly",
+            );
+        let check_block = &after_check[..check_end];
+
+        assert!(
+            !check_block.contains("ensure_data_dir_permissions"),
+            "speedwave check must NOT call ensure_data_dir_permissions — \
+             check is diagnostic-only, it reports violations without fixing them"
         );
     }
 

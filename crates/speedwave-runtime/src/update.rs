@@ -65,10 +65,16 @@ fn save_snapshot_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result
     let dir = data_dir.join("snapshots").join(project);
     std::fs::create_dir_all(&dir)?;
 
+    // See also: save_snapshot() — identical permission block (2 of 3, Rule of Three)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        let mode_700 = std::fs::Permissions::from_mode(0o700);
+        std::fs::set_permissions(&dir, mode_700.clone())?;
+        if let Some(parent) = dir.parent() {
+            // parent = data_dir/snapshots/ — stop here
+            std::fs::set_permissions(parent, mode_700)?;
+        }
     }
 
     let snapshot = UpdateSnapshot {
@@ -115,10 +121,16 @@ pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
     let dir = snapshot_dir(project)?;
     std::fs::create_dir_all(&dir)?;
 
+    // See also: save_snapshot_in() — identical permission block (2 of 3, Rule of Three)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        let mode_700 = std::fs::Permissions::from_mode(0o700);
+        std::fs::set_permissions(&dir, mode_700.clone())?;
+        if let Some(parent) = dir.parent() {
+            // parent = data_dir/snapshots/ — stop here
+            std::fs::set_permissions(parent, mode_700)?;
+        }
     }
 
     let plugin_manifests = crate::plugin::list_installed_plugins().unwrap_or_else(|e| {
@@ -190,7 +202,10 @@ pub fn update_containers(
         );
     }
 
-    // 3b. Mandatory security gate — BEFORE saving anything
+    // 3b. Fix host filesystem permissions before security gate
+    crate::fs_security::ensure_data_dir_permissions(project)?;
+
+    // 3c. Mandatory security gate — BEFORE saving anything
     let manifests = crate::plugin::list_installed_plugins().unwrap_or_else(|e| {
         log::warn!("Failed to list installed plugins for security check: {e}");
         Vec::new()
@@ -284,6 +299,9 @@ pub fn rollback_containers(runtime: &dyn ContainerRuntime, project: &str) -> any
             msgs.join("\n\n")
         );
     }
+
+    // Fix host filesystem permissions before security gate.
+    crate::fs_security::ensure_data_dir_permissions(project)?;
 
     // Security check on the snapshot compose.yml before applying.
     // Use manifests from the snapshot (live state may differ post-uninstall).
@@ -569,6 +587,127 @@ mod tests {
             prereq_pos < security_pos,
             "OS prerequisite check (at byte offset {prereq_pos}) must appear before \
              SecurityCheck::run (at byte offset {security_pos}) in rollback_containers",
+        );
+    }
+
+    #[test]
+    fn test_update_calls_ensure_before_security_check() {
+        // Structural test: ensure_data_dir_permissions must run BEFORE SecurityCheck::run
+        // in update_containers. Behavioral coverage: see
+        // fs_security::tests::test_ensure_roundtrip_fixes_then_check_passes
+        let source = include_str!("update.rs");
+
+        let fn_start = source
+            .find("fn update_containers(")
+            .expect("update_containers function must exist in update.rs");
+        let fn_body = &source[fn_start..];
+
+        let ensure_pos = fn_body
+            .find("ensure_data_dir_permissions(")
+            .expect("ensure_data_dir_permissions call must exist in update_containers");
+        let security_pos = fn_body
+            .find("SecurityCheck::run(")
+            .expect("SecurityCheck::run() call must exist in update_containers");
+
+        assert!(
+            ensure_pos < security_pos,
+            "ensure_data_dir_permissions (at byte offset {ensure_pos}) must appear before \
+             SecurityCheck::run (at byte offset {security_pos}) in update_containers",
+        );
+    }
+
+    #[test]
+    fn test_rollback_calls_ensure_before_security_check() {
+        // Structural test: ensure_data_dir_permissions must run BEFORE SecurityCheck::run
+        // in rollback_containers. Behavioral coverage: see
+        // fs_security::tests::test_ensure_roundtrip_fixes_then_check_passes
+        let source = include_str!("update.rs");
+
+        let fn_start = source
+            .find("fn rollback_containers(")
+            .expect("rollback_containers function must exist in update.rs");
+        let fn_body = &source[fn_start..];
+
+        let ensure_pos = fn_body
+            .find("ensure_data_dir_permissions(")
+            .expect("ensure_data_dir_permissions call must exist in rollback_containers");
+        let security_pos = fn_body
+            .find("SecurityCheck::run(")
+            .expect("SecurityCheck::run() call must exist in rollback_containers");
+
+        assert!(
+            ensure_pos < security_pos,
+            "ensure_data_dir_permissions (at byte offset {ensure_pos}) must appear before \
+             SecurityCheck::run (at byte offset {security_pos}) in rollback_containers",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_snapshot_secures_parent_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let original_mode = std::fs::metadata(data_dir).unwrap().permissions().mode() & 0o777;
+
+        // Setup: create compose dir with a compose file (save_snapshot_in reads it)
+        let compose_dir = data_dir.join("compose").join("proj");
+        std::fs::create_dir_all(&compose_dir).unwrap();
+        std::fs::write(compose_dir.join("compose.yml"), "version: '3'").unwrap();
+
+        save_snapshot_in(data_dir, "proj").unwrap();
+
+        assert_eq!(
+            std::fs::metadata(data_dir.join("snapshots/proj"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "snapshots/proj should be 0o700"
+        );
+        assert_eq!(
+            std::fs::metadata(data_dir.join("snapshots"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "snapshots should be 0o700"
+        );
+        assert_eq!(
+            std::fs::metadata(data_dir).unwrap().permissions().mode() & 0o777,
+            original_mode,
+            "data_dir should not have been changed"
+        );
+    }
+
+    #[test]
+    fn test_save_snapshot_sets_parent_permissions() {
+        // Structural test: verify save_snapshot() (production, not _in) sets permissions
+        // on both dir and parent. Protects against divergence between production and test helper.
+        let source = include_str!("update.rs");
+
+        // Find the production save_snapshot function (not save_snapshot_in)
+        let fn_start = source
+            .find("pub fn save_snapshot(")
+            .expect("save_snapshot function must exist in update.rs");
+        // Limit scope to just this function (up to the next pub fn)
+        let fn_body = &source[fn_start..];
+        let fn_end = fn_body[1..]
+            .find("\npub fn ")
+            .or_else(|| fn_body[1..].find("\nfn "))
+            .unwrap_or(fn_body.len());
+        let fn_body = &fn_body[..fn_end];
+
+        assert!(
+            fn_body.contains("set_permissions(&dir"),
+            "save_snapshot must set_permissions on dir"
+        );
+        assert!(
+            fn_body.contains("set_permissions(parent"),
+            "save_snapshot must set_permissions on parent dir"
         );
     }
 

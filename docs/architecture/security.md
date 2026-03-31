@@ -181,6 +181,8 @@ Sensitive files must be `0o600` (owner rw only):
 
 **Limitations:** Validates Unix mode bits and UID only — not ACLs, xattrs, or Windows DACLs. On Windows, this check is a no-op. Symlinks within scanned directories are skipped (not followed) to prevent traversal attacks. Missing paths are silently skipped — they may not exist for fresh projects or unused integrations.
 
+**Auto-fix on startup:** Before running SecurityCheck, all container start paths (CLI, Desktop, update, rollback) call `ensure_data_dir_permissions()` which automatically fixes incorrect mode bits on security-sensitive directories (→ `0o700`) and files (→ `0o600`). Errors from `set_permissions` are propagated as startup failures. The `speedwave check` command does NOT auto-fix — it reports violations for diagnostic purposes. Ownership (UID) mismatches are NOT auto-fixed (requires root); SecurityCheck reports them with remediation instructions.
+
 ### Workspace Path Protection
 
 Because the full project directory is mounted as `/workspace:rw`, the `path-validator.ts` denylist blocks MCP workers from accessing sensitive paths within the workspace: `.git/`, `.env`, and `.speedwave/`. This provides defense-in-depth — even if an MCP worker is compromised, it cannot exfiltrate repository history, environment secrets, or Speedwave configuration.

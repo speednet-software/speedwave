@@ -101,6 +101,11 @@ pub fn render_compose(
     // Mount it as /home/speedwave/.claude/ide/ — no copying needed.
     let ide_lock_dir = data_dir.join("ide-bridge");
     std::fs::create_dir_all(&ide_lock_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ide_lock_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
     yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
     yaml = yaml.replace("${HOST_GATEWAY}", host_gateway_ip());
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
@@ -147,18 +152,33 @@ pub fn render_compose(
     Ok(yaml)
 }
 
-/// Creates project directories under ~/.speedwave/
 /// Creates the secrets directory for a project with restrictive permissions (chmod 700).
-/// Path: ~/.speedwave/secrets/<project>/
+/// Path: `~/.speedwave/secrets/<project>/`
+///
+/// Also sets `0o700` on the parent `secrets/` directory.
 pub fn init_secrets_dir(project: &str) -> anyhow::Result<PathBuf> {
+    init_secrets_dir_in(consts::data_dir(), project)
+}
+
+/// Testable variant: accepts explicit data_dir.
+pub(crate) fn init_secrets_dir_in(
+    data_dir: &std::path::Path,
+    project: &str,
+) -> anyhow::Result<PathBuf> {
     crate::validation::validate_project_name(project)?;
-    let secrets_dir = consts::data_dir().join("secrets").join(project);
+    let secrets_dir = data_dir.join("secrets").join(project);
     std::fs::create_dir_all(&secrets_dir)?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o700))?;
+        let mode_700 = std::fs::Permissions::from_mode(0o700);
+        // secrets_dir = data_dir/secrets/<project>
+        std::fs::set_permissions(&secrets_dir, mode_700.clone())?;
+        if let Some(secrets_parent) = secrets_dir.parent() {
+            // secrets_parent = data_dir/secrets/ — one level above, stop here
+            std::fs::set_permissions(secrets_parent, mode_700)?;
+        }
     }
 
     Ok(secrets_dir)
@@ -1813,107 +1833,14 @@ impl SecurityCheck {
         project: &str,
         expected_uid: u32,
     ) -> Vec<SecurityViolation> {
+        let (dirs, files) = crate::fs_security::collect_security_paths(data_dir, project);
         let mut violations = Vec::new();
 
-        // --- Directories that must be 0o700 ---
-        let mut required_dirs: Vec<std::path::PathBuf> = vec![
-            // Top-level directories (prevent project name enumeration)
-            data_dir.join("secrets"),
-            data_dir.join("snapshots"),
-            data_dir.join("tokens"),
-            // Per-project directories
-            data_dir.join("secrets").join(project),
-            data_dir.join("snapshots").join(project),
-            data_dir.join("ide-bridge"),
-            data_dir.join("tokens").join(project),
-        ];
-
-        // Scan tokens/<project>/<service>/ subdirectories — single read_dir pass
-        // collects both directory paths (for 0o700 check) and file paths (for 0o600 check).
-        let tokens_project_dir = data_dir.join("tokens").join(project);
-        let mut token_credential_files: Vec<std::path::PathBuf> = Vec::new();
-        if let Ok(services) = std::fs::read_dir(&tokens_project_dir) {
-            for entry in services.flatten() {
-                if let Ok(ft) = entry.file_type() {
-                    if ft.is_dir() {
-                        required_dirs.push(entry.path());
-                        // Scan files inside service dir
-                        if let Ok(files) = std::fs::read_dir(entry.path()) {
-                            for file_entry in files.flatten() {
-                                if let Ok(fft) = file_entry.file_type() {
-                                    if fft.is_file() {
-                                        token_credential_files.push(file_entry.path());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        for dir in &required_dirs {
+        for dir in &dirs {
             violations.extend(Self::verify_path(dir, 0o700, true, expected_uid));
         }
-
-        // --- Files at data_dir root that must be 0o600 ---
-        let root_files = [data_dir.join("bundle-state.json")];
-        for file in &root_files {
+        for file in &files {
             violations.extend(Self::verify_path(file, 0o600, false, expected_uid));
-        }
-
-        // --- Files in subdirectories that must be 0o600 ---
-
-        // secrets/<project>/*  (worker auth tokens)
-        let secrets_dir = data_dir.join("secrets").join(project);
-        if let Ok(entries) = std::fs::read_dir(&secrets_dir) {
-            for entry in entries.flatten() {
-                if let Ok(ft) = entry.file_type() {
-                    if ft.is_file() {
-                        violations.extend(Self::verify_path(
-                            &entry.path(),
-                            0o600,
-                            false,
-                            expected_uid,
-                        ));
-                    }
-                }
-            }
-        }
-
-        // tokens/<project>/<service>/<key>  (plugin credentials, collected above)
-        for file in &token_credential_files {
-            violations.extend(Self::verify_path(file, 0o600, false, expected_uid));
-        }
-
-        // snapshots/<project>/*.json
-        let snapshots_dir = data_dir.join("snapshots").join(project);
-        if let Ok(entries) = std::fs::read_dir(&snapshots_dir) {
-            for entry in entries.flatten() {
-                if let Ok(ft) = entry.file_type() {
-                    if ft.is_file() {
-                        violations.extend(Self::verify_path(
-                            &entry.path(),
-                            0o600,
-                            false,
-                            expected_uid,
-                        ));
-                    }
-                }
-            }
-        }
-
-        // ide-bridge/*.lock  (IDE auth tokens)
-        let ide_dir = data_dir.join("ide-bridge");
-        if let Ok(entries) = std::fs::read_dir(&ide_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Ok(ft) = entry.file_type() {
-                    if ft.is_file() && path.extension().is_some_and(|e| e == "lock") {
-                        violations.extend(Self::verify_path(&path, 0o600, false, expected_uid));
-                    }
-                }
-            }
         }
 
         violations
@@ -3916,6 +3843,42 @@ services:
         assert!(init_secrets_dir("").is_err());
         assert!(init_secrets_dir("../evil").is_err());
         assert!(init_secrets_dir(&"a".repeat(64)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_init_secrets_dir_secures_parent_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        let original_mode = std::fs::metadata(data_dir).unwrap().permissions().mode() & 0o777;
+
+        let secrets_dir = init_secrets_dir_in(data_dir, "proj").unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&secrets_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "secrets/<project> should be 0o700"
+        );
+        assert_eq!(
+            std::fs::metadata(data_dir.join("secrets"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "secrets/ parent should be 0o700"
+        );
+        assert_eq!(
+            std::fs::metadata(data_dir).unwrap().permissions().mode() & 0o777,
+            original_mode,
+            "data_dir itself should not have been changed"
+        );
     }
 
     #[test]
