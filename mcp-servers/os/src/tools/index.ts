@@ -14,10 +14,16 @@ export {
   validateStringFields,
   validateNumberFields,
   validateBooleanFields,
+  validateStringArrayFields,
   validateAll,
   validateDateFields,
 } from './validation.js';
-export type { StringFieldSpec, NumberFieldSpec, ValidationSpec } from './validation.js';
+export type {
+  StringFieldSpec,
+  NumberFieldSpec,
+  StringArrayFieldSpec,
+  ValidationSpec,
+} from './validation.js';
 
 import { createReminderTools } from './reminder-tools.js';
 import { createCalendarTools } from './calendar-tools.js';

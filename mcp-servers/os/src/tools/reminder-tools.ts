@@ -41,6 +41,8 @@ interface CreateReminderParams {
   priority?: number;
   /** Additional notes. */
   notes?: string;
+  /** Tags to assign (stored as [#tag] markers in the notes field). */
+  tags?: string[];
 }
 
 /** Input parameters for the completeReminder tool. */
@@ -92,7 +94,7 @@ const listRemindersTool: Tool = {
   description: 'List reminders, optionally filtered by list',
   category: 'read',
   keywords: ['os', 'reminders', 'list', 'tasks', 'todo', 'due'],
-  example: 'const { reminders } = await os.listReminders({ completed: false, limit: 20 })',
+  example: 'const { reminders } = await os.listReminders({ show_completed: false, limit: 20 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -117,6 +119,12 @@ const listRemindersTool: Tool = {
             due_date: { type: 'string', description: 'ISO8601 date' },
             completed: { type: 'boolean' },
             priority: { type: 'number', description: '0=none, 1=high, 5=medium, 9=low' },
+            notes: { type: 'string', description: 'Reminder notes/body' },
+            tags: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Tags extracted from [#tag] markers in the notes. Absent when no tags.',
+            },
             list_id: { type: 'string' },
           },
         },
@@ -126,11 +134,11 @@ const listRemindersTool: Tool = {
   inputExamples: [
     {
       description: 'Minimal: list all incomplete reminders',
-      input: { completed: false },
+      input: { show_completed: false },
     },
     {
       description: 'Full: list from specific list with limit',
-      input: { list_id: 'abc-123', completed: false, limit: 10 },
+      input: { list_id: 'abc-123', show_completed: false, limit: 10 },
     },
   ],
 };
@@ -158,6 +166,11 @@ const getReminderTool: Tool = {
       completed: { type: 'boolean' },
       completed_date: { type: 'string', description: 'ISO8601 date' },
       priority: { type: 'number' },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Tags extracted from [#tag] markers in the notes. Absent when no tags.',
+      },
       list_id: { type: 'string' },
       list_name: { type: 'string' },
     },
@@ -188,6 +201,11 @@ const createReminderTool: Tool = {
       due_date: { type: 'string', description: 'Due date in ISO8601 format' },
       priority: { type: 'number', description: 'Priority (0=none, 1=high, 5=medium, 9=low)' },
       notes: { type: 'string', description: 'Additional notes' },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Tags to assign (stored as [#tag] markers in the notes field)',
+      },
     },
     required: ['name'],
   },
@@ -211,6 +229,7 @@ const createReminderTool: Tool = {
         due_date: '2025-01-15T10:00:00Z',
         priority: 1,
         notes: 'Check test coverage',
+        tags: ['work', 'code-review'],
       },
     },
   ],
@@ -304,8 +323,22 @@ export async function handleCreateReminder(params: CreateReminderParams): Promis
     ],
     numbers: [['priority', 0, 9]],
     dates: ['due_date'],
+    stringArrays: [['tags', 50, MAX_LENGTHS.short]],
   });
   if (!v.valid) return v.error;
+  const tags = p.tags as string[] | undefined;
+  if (tags) {
+    const badIdx = tags.findIndex((t) => /[[\]#]/.test(t));
+    if (badIdx !== -1) {
+      return {
+        success: false,
+        error: {
+          code: 'INVALID_CHARACTERS',
+          message: `tags[${badIdx}] must not contain [, ], or # characters`,
+        },
+      };
+    }
+  }
   const result = await runCommand('reminders', 'create_reminder', p);
   return { success: true, data: result.parsed };
 }
