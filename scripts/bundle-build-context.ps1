@@ -45,12 +45,12 @@ foreach ($svc in $services) {
 New-Item -ItemType Directory -Path "$dest\mcp-os\os","$dest\mcp-os\shared" -Force | Out-Null
 Copy-Item -Recurse mcp-servers\os\dist "$dest\mcp-os\os\dist"
 Copy-Item -Recurse mcp-servers\shared\dist "$dest\mcp-os\shared\dist"
-# Always install production deps (workspace hoisting means
-# mcp-servers\shared\node_modules\ is empty, so copying it never worked)
+# Install production deps only. Uses npm install (not npm ci) because the
+# workspace-scoped package-lock.json has workspace-relative entries that
+# don't resolve in this isolated context.
 Copy-Item mcp-servers\shared\package.json "$dest\mcp-os\shared\"
-Copy-Item mcp-servers\package-lock.json "$dest\mcp-os\shared\"
 Push-Location "$dest\mcp-os\shared"
-npm ci --omit=dev --ignore-scripts
+npm install --omit=dev --ignore-scripts
 Pop-Location
 
 # Copy @speedwave/mcp-shared so Node.js resolves it from os/dist/index.js.

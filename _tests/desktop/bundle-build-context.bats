@@ -158,6 +158,21 @@ teardown() {
     done < <(grep -E '^\s+cp ' "$SCRIPT" | grep -v '\$DEST' | grep -oE '"?\$REPO_ROOT/[^"[:space:]]+"?' | sort -u)
 }
 
+@test "mcp-os/shared standalone lockfile resolves without workspace context" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    # Verify npm install produced a standalone lockfile
+    [ -f "$DEST/mcp-os/shared/package-lock.json" ]
+    # Verify the lockfile can be consumed standalone (npm ci in clean dir succeeds)
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' RETURN
+    cp "$DEST/mcp-os/shared/package.json" "$tmpdir/"
+    cp "$DEST/mcp-os/shared/package-lock.json" "$tmpdir/"
+    (cd "$tmpdir" && npm ci --omit=dev --ignore-scripts)
+    [ -d "$tmpdir/node_modules/express" ]
+}
+
 @test "bundle script --ci works without pre-built dist directories" {
     REPO_ROOT="$BATS_TEST_DIRNAME/../.."
     # Simulate a clean checkout by temporarily renaming dist directories
