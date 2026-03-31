@@ -1,3 +1,4 @@
+import EventKit
 import XCTest
 @testable import calendar_cli
 
@@ -117,5 +118,33 @@ final class CalendarTests: XCTestCase {
         let params: [String: Any] = [:]
         let limit = params["limit"] as? Int ?? 20
         XCTAssertEqual(limit, 20)
+    }
+
+    // MARK: - Permission Check (formatPermissionResult)
+
+    func testFormatPermissionResultGranted() {
+        let json = formatPermissionResult(granted: true, error: nil)
+        let data = json.data(using: .utf8)!
+        let parsed = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertTrue(parsed["granted"] is Bool)
+        XCTAssertEqual(parsed["granted"] as? Bool, true)
+        XCTAssertNil(parsed["error"])
+    }
+
+    func testFormatPermissionResultDenied() {
+        let json = formatPermissionResult(granted: false, error: "access denied")
+        let data = json.data(using: .utf8)!
+        let parsed = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertTrue(parsed["granted"] is Bool)
+        XCTAssertEqual(parsed["granted"] as? Bool, false)
+        XCTAssertTrue(parsed["error"] is String)
+        XCTAssertEqual(parsed["error"] as? String, "access denied")
+    }
+
+    func testRequestCalendarAccessReturnsTuple() {
+        // Compile-time check: requestCalendarAccess returns (granted: Bool, error: Error?)
+        let store = EKEventStore()
+        let result: (granted: Bool, error: Error?) = requestCalendarAccess(store: store, timeout: 0.001)
+        XCTAssertNotNil(result)
     }
 }

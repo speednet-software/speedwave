@@ -309,6 +309,31 @@ describe('IntegrationsComponent', () => {
       expect(target.checked).toBe(true);
       expect(component.error).toBe('denied');
     });
+
+    it('error div has whitespace-pre-line class for multiline display', async () => {
+      await component.ngOnInit();
+      const permissionError =
+        'Reminders access denied: Access was denied\nGrant access in System Settings > Privacy & Security > Reminders';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'set_os_integration_enabled') throw new Error(permissionError);
+        return undefined;
+      };
+      const target = { checked: true };
+      const event = { target } as unknown as Event;
+      await component.toggleOsService(component.osIntegrations[0], event);
+
+      expect(component.error).toBe(permissionError);
+      expect(target.checked).toBe(false);
+
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+
+      const errorDiv = fixture.nativeElement.querySelector('[data-testid="integrations-error"]');
+      expect(errorDiv).not.toBeNull();
+      expect(errorDiv.classList.contains('whitespace-pre-line')).toBe(true);
+      expect(errorDiv.textContent).toContain('System Settings');
+      expect(errorDiv.innerHTML).toContain('\n');
+    });
   });
 
   describe('handleSaveCredentials()', () => {
