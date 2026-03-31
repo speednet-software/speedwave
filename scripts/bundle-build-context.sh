@@ -54,11 +54,13 @@ mkdir -p "$DEST/mcp-os/os" "$DEST/mcp-os/shared"
 cp -r "$REPO_ROOT/mcp-servers/os/dist" "$DEST/mcp-os/os/"
 cp -r "$REPO_ROOT/mcp-servers/shared/dist" "$DEST/mcp-os/shared/"
 
-# Always install production deps (works in both dev and CI — workspace hoisting
-# means mcp-servers/shared/node_modules/ is empty, so copying it never worked)
+# Install production deps only. Cannot use the workspace-scoped
+# package-lock.json directly — it contains workspace-relative entries
+# (e.g. "shared/node_modules/vitest") that don't resolve in isolation.
+# Two-step approach: generate a standalone lockfile, then install from it
+# deterministically with npm ci.
 cp "$REPO_ROOT/mcp-servers/shared/package.json" "$DEST/mcp-os/shared/"
-cp "$REPO_ROOT/mcp-servers/package-lock.json" "$DEST/mcp-os/shared/"
-(cd "$DEST/mcp-os/shared" && npm ci --omit=dev --ignore-scripts)
+(cd "$DEST/mcp-os/shared" && npm install --package-lock-only --ignore-scripts && npm ci --omit=dev --ignore-scripts)
 
 # Copy @speedwave/mcp-shared so Node.js resolves it from os/dist/index.js.
 # Uses cp -r instead of ln -s because Tauri's resource bundler does not

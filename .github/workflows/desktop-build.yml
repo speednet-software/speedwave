@@ -11,6 +11,12 @@ on:
       - ".node-version"
       - ".github/actions/download-nodejs/**"
       - ".github/actions/download-wsl-resources/**"
+      - "mcp-servers/package.json"
+      - "mcp-servers/package-lock.json"
+      - "mcp-servers/shared/**"
+      - "mcp-servers/os/**"
+      - "scripts/bundle-build-context.sh"
+      - "scripts/bundle-build-context.ps1"
   push:
     branches: [main, dev]
     paths:
@@ -21,6 +27,12 @@ on:
       - ".node-version"
       - ".github/actions/download-nodejs/**"
       - ".github/actions/download-wsl-resources/**"
+      - "mcp-servers/package.json"
+      - "mcp-servers/package-lock.json"
+      - "mcp-servers/shared/**"
+      - "mcp-servers/os/**"
+      - "scripts/bundle-build-context.sh"
+      - "scripts/bundle-build-context.ps1"
 
 permissions:
   contents: read
