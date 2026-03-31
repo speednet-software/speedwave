@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createJournalTools } from './journal-tools.js';
+import { ProjectScopeError } from '../client.js';
 import type { RedmineClient } from '../client.js';
 
 type MockClient = {
@@ -491,6 +492,46 @@ describe('journal-tools', () => {
           },
         ],
         isError: true,
+      });
+    });
+  });
+
+  describe('ProjectScopeError propagation', () => {
+    it('should surface ProjectScopeError for updateJournal', async () => {
+      const scopeError = new ProjectScopeError('my-project', 'other-project');
+      mockClient.updateJournal.mockRejectedValue(scopeError);
+
+      const tools = createJournalTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'updateJournal');
+      const result = await tool!.handler({ issue_id: 10, journal_id: 5, notes: 'Updated' });
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: configured project is 'my-project', but requested resource belongs to 'other-project'",
+          },
+        ],
+      });
+    });
+
+    it('should surface ProjectScopeError for deleteJournal', async () => {
+      const scopeError = new ProjectScopeError('my-project', 'other-project');
+      mockClient.deleteJournal.mockRejectedValue(scopeError);
+
+      const tools = createJournalTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'deleteJournal');
+      const result = await tool!.handler({ issue_id: 10, journal_id: 5 });
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: configured project is 'my-project', but requested resource belongs to 'other-project'",
+          },
+        ],
       });
     });
   });

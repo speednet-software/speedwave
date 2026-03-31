@@ -63,5 +63,7 @@ Auto-applying `chmod 0o600`/`0o700` without explicit user consent is safe becaus
 - The autofix adds ~5ms of filesystem I/O to every container start (negligible compared to container startup time)
 
 [^1]: https://doc.rust-lang.org/std/fs/fn.create_dir_all.html — `create_dir_all` creates directories with permissions modified by the process umask
+
 [^2]: https://man7.org/linux/man-pages/man2/chown.2.html — `chown` requires `CAP_CHOWN` capability (root) to change file ownership
+
 [^3]: https://man7.org/linux/man-pages/man2/lstat.2.html — `lstat` (used by Rust's `symlink_metadata`) does not follow symbolic links

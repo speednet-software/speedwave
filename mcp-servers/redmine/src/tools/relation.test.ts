@@ -5,7 +5,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createRelationTools } from './relation-tools.js';
-import { RedmineClient } from '../client.js';
+import { RedmineClient, ProjectScopeError } from '../client.js';
 
 type MockClient = {
   listRelations: Mock;
@@ -379,6 +379,65 @@ describe('Relation Tools', () => {
       expect(result).toEqual({
         isError: true,
         content: [{ type: 'text', text: 'Error: Permission denied' }],
+      });
+    });
+  });
+
+  describe('ProjectScopeError propagation', () => {
+    it('should surface ProjectScopeError for listRelations', async () => {
+      const scopeError = new ProjectScopeError('my-project', 'other-project');
+      mockClient.listRelations.mockRejectedValue(scopeError);
+
+      const tools = createRelationTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'listRelations');
+      const result = await tool!.handler({ issue_id: 10 });
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: configured project is 'my-project', but requested resource belongs to 'other-project'",
+          },
+        ],
+      });
+    });
+
+    it('should surface ProjectScopeError for createRelation', async () => {
+      const scopeError = new ProjectScopeError('my-project', 'other-project');
+      mockClient.createRelation.mockRejectedValue(scopeError);
+
+      const tools = createRelationTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'createRelation');
+      const result = await tool!.handler({ issue_id: 10, issue_to_id: 20 });
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: configured project is 'my-project', but requested resource belongs to 'other-project'",
+          },
+        ],
+      });
+    });
+
+    it('should surface ProjectScopeError for deleteRelation', async () => {
+      const scopeError = new ProjectScopeError('my-project', 'other-project');
+      mockClient.deleteRelation.mockRejectedValue(scopeError);
+
+      const tools = createRelationTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'deleteRelation');
+      const result = await tool!.handler({ relation_id: 1 });
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: configured project is 'my-project', but requested resource belongs to 'other-project'",
+          },
+        ],
       });
     });
   });

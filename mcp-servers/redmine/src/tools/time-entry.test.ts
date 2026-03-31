@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createTimeEntryTools } from './time-entry-tools.js';
+import { ProjectScopeError } from '../client.js';
 import type { RedmineClient } from '../client.js';
 
 type MockClient = {
@@ -490,6 +491,65 @@ describe('time-entry-tools', () => {
           isError: true,
         });
       }
+    });
+  });
+
+  describe('ProjectScopeError propagation', () => {
+    it('should surface ProjectScopeError for listTimeEntries', async () => {
+      const scopeError = new ProjectScopeError('my-project', 'other-project');
+      mockClient.listTimeEntries.mockRejectedValue(scopeError);
+
+      const tools = createTimeEntryTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'listTimeEntries');
+      const result = await tool!.handler({});
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: configured project is 'my-project', but requested resource belongs to 'other-project'",
+          },
+        ],
+      });
+    });
+
+    it('should surface ProjectScopeError for createTimeEntry', async () => {
+      const scopeError = new ProjectScopeError('my-project', 'other-project');
+      mockClient.createTimeEntry.mockRejectedValue(scopeError);
+
+      const tools = createTimeEntryTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'createTimeEntry');
+      const result = await tool!.handler({ issue_id: 10, hours: 1.5 });
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: configured project is 'my-project', but requested resource belongs to 'other-project'",
+          },
+        ],
+      });
+    });
+
+    it('should surface ProjectScopeError for updateTimeEntry', async () => {
+      const scopeError = new ProjectScopeError('my-project', 'other-project');
+      mockClient.updateTimeEntry.mockRejectedValue(scopeError);
+
+      const tools = createTimeEntryTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'updateTimeEntry');
+      const result = await tool!.handler({ time_entry_id: 1, hours: 2.0 });
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: configured project is 'my-project', but requested resource belongs to 'other-project'",
+          },
+        ],
+      });
     });
   });
 });
