@@ -1252,12 +1252,16 @@ mod tests {
         let check_start = source
             .find("if action == CliAction::Check")
             .expect("CliAction::Check handler must exist in main.rs");
-        // The check handler ends at the closing brace of the if block.
-        // Scan forward to find the next top-level statement after the check block.
+        // Delimit the check handler by finding the next CliAction:: reference
+        // after it (marks the start of subsequent handler code).
         let after_check = &source[check_start..];
-        let check_end = after_check
-            .find("// Mandatory prereq + security gate")
-            .unwrap_or(after_check.len());
+        let check_end = after_check[1..]
+            .find("CliAction::")
+            .map(|pos| pos + 1)
+            .expect(
+                "there must be another CliAction:: reference after the Check handler \
+                 — if this fails, the source structure has changed significantly",
+            );
         let check_block = &after_check[..check_end];
 
         assert!(
