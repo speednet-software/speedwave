@@ -412,6 +412,27 @@ describe('reminder-tools', () => {
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('FIELD_TOO_LONG');
       });
+
+      it('rejects tag containing ] to prevent marker injection', async () => {
+        const result = await handleCreateReminder({
+          name: 'Test',
+          tags: ['work][#injected'],
+        });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_CHARACTERS');
+      });
+
+      it('rejects tag containing [ character', async () => {
+        const result = await handleCreateReminder({ name: 'Test', tags: ['[bad'] });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_CHARACTERS');
+      });
+
+      it('rejects tag containing # character', async () => {
+        const result = await handleCreateReminder({ name: 'Test', tags: ['#bad'] });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_CHARACTERS');
+      });
     });
 
     describe('handleCompleteReminder', () => {

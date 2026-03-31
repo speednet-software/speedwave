@@ -123,7 +123,7 @@ const listRemindersTool: Tool = {
             tags: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Tags extracted from [#tag] markers in the notes',
+              description: 'Tags extracted from [#tag] markers in the notes. Absent when no tags.',
             },
             list_id: { type: 'string' },
           },
@@ -134,11 +134,11 @@ const listRemindersTool: Tool = {
   inputExamples: [
     {
       description: 'Minimal: list all incomplete reminders',
-      input: { completed: false },
+      input: { show_completed: false },
     },
     {
       description: 'Full: list from specific list with limit',
-      input: { list_id: 'abc-123', completed: false, limit: 10 },
+      input: { list_id: 'abc-123', show_completed: false, limit: 10 },
     },
   ],
 };
@@ -169,7 +169,7 @@ const getReminderTool: Tool = {
       tags: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Tags extracted from [#tag] markers in the notes',
+        description: 'Tags extracted from [#tag] markers in the notes. Absent when no tags.',
       },
       list_id: { type: 'string' },
       list_name: { type: 'string' },
@@ -326,6 +326,19 @@ export async function handleCreateReminder(params: CreateReminderParams): Promis
     stringArrays: [['tags', 50, MAX_LENGTHS.short]],
   });
   if (!v.valid) return v.error;
+  const tags = p.tags as string[] | undefined;
+  if (tags) {
+    const bad = tags.find((t) => /[[\]#]/.test(t));
+    if (bad !== undefined) {
+      return {
+        success: false,
+        error: {
+          code: 'INVALID_CHARACTERS',
+          message: 'Tag names must not contain [, ], or # characters',
+        },
+      };
+    }
+  }
   const result = await runCommand('reminders', 'create_reminder', p);
   return { success: true, data: result.parsed };
 }

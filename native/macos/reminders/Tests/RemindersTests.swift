@@ -66,10 +66,7 @@ final class RemindersTests: XCTestCase {
 
     // MARK: - Reminder Dict Conversion
 
-    func testReminderToDictIncludesRequiredFields() {
-        // This test verifies the dict structure without needing a real EKReminder
-        // (EKReminder requires an EKEventStore which needs entitlements)
-        // We verify the error path instead
+    func testCLIErrorMissingFieldHasDescription() {
         let error = CLIError.missingField("id")
         XCTAssertNotNil(error.errorDescription)
     }
