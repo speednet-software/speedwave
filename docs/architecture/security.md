@@ -203,6 +203,31 @@ Both OS prereq failures and `SecurityCheck` compose violations block the applica
 
 Additionally, `check_os_warnings()` provides non-blocking diagnostic warnings (e.g. nested virtualization detected) logged via `log::warn!` during system checks. These warnings do not block container operations but appear in `speedwave check` output and Desktop log files.
 
+## Redmine API Proxy Commands
+
+The Desktop app includes two Tauri commands that make HTTP requests to external Redmine instances during integration configuration: `validate_redmine_credentials` and `fetch_redmine_enumerations`. These run on the Desktop host process, not inside containers, because the MCP Redmine worker doesn't exist during configuration — the user hasn't saved credentials yet.
+
+**SSRF mitigations:**
+
+- Reuses `url_validation::validate_url()` core logic (scheme, host, and IP validation with 50+ tests)
+- **Blocked:** loopback IPs (127.0.0.0/8, ::1), link-local/metadata IPs (169.254.0.0/16 including cloud metadata endpoint 169.254.169.254)
+- **Allowed with warning:** RFC1918 private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) — self-hosted Redmine on private networks is the primary use case
+- Redirects blocked via `reqwest::redirect::Policy::none()`
+- Only fixed Redmine API paths requested (not arbitrary URLs)
+- Response shape validated via typed deserialization (non-Redmine JSON rejected)
+- Custom `User-Agent` header, no cookie jar, no auth headers beyond `X-Redmine-API-Key`
+- 5-15s request timeouts
+
+**RFC1918 divergence from MCP Hub:** MCP Hub blocks ALL private IPs because it runs in a container with no legitimate private targets. Desktop Redmine proxy allows RFC1918 because: (1) Desktop runs on the host, not in a container; (2) self-hosted Redmine on RFC1918 is the primary use case; (3) loopback and metadata IPs remain blocked. This divergence is intentional — the security postures serve different threat models.
+
+**SecurityCheck scope:** These commands run on the Desktop host process, not inside containers — they are outside SecurityCheck's compose validation scope. SSRF protection is implemented directly in the command handlers via `validate_redmine_host_url()`.
+
+**Known limitations (pre-existing, shared with SharePoint OAuth):**
+
+- `rustls-tls` uses bundled CA roots, not the OS certificate store. Corporate users with custom CAs may see TLS errors.
+- No automatic system proxy detection (`default-features = false` in reqwest). Corporate users behind HTTP proxies may see connection timeouts.
+- HTTP cleartext warning logged when `http://` scheme is used (credentials transmitted without encryption).
+
 ## Authentication Gate
 
 Claude Code must be authenticated (OAuth or API key) before the app allows

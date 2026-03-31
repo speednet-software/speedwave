@@ -18,12 +18,26 @@ OS sub-integrations (Reminders, Calendar, Mail, Notes) run via mcp-os on the hos
 
 Each MCP integration requires specific credentials to function. Fields marked as optional do not block the "Configured" status — the integration works without them.
 
-| Integration | Required Fields                                                 | Optional Fields                                                      |
-| ----------- | --------------------------------------------------------------- | -------------------------------------------------------------------- |
-| Slack       | `bot_token`, `user_token`                                       | —                                                                    |
-| SharePoint  | `client_id`, `tenant_id`, `site_id`, `base_path` + OAuth tokens | —                                                                    |
-| GitLab      | `token`, `host_url`                                             | —                                                                    |
-| Redmine     | `api_key`, `host_url`                                           | `project_id`, `project_name` (scope operations to a default project) |
+| Integration | Required Fields                                                 | Optional Fields                                      |
+| ----------- | --------------------------------------------------------------- | ---------------------------------------------------- |
+| Slack       | `bot_token`, `user_token`                                       | —                                                    |
+| SharePoint  | `client_id`, `tenant_id`, `site_id`, `base_path` + OAuth tokens | —                                                    |
+| GitLab      | `token`, `host_url`                                             | —                                                    |
+| Redmine     | `api_key`, `host_url`                                           | `project_id` (scope operations to a default project) |
+
+### Redmine Configuration Wizard
+
+The Desktop app provides an auto-configuration wizard for Redmine:
+
+1. **Enter credentials** — provide `host_url` and `api_key`, then click Validate. The Desktop app verifies the credentials against the Redmine API (`GET /users/current.json`).
+2. **Select project and mappings** — on success, the wizard fetches available projects, statuses, trackers, priorities, and activities from the Redmine API. Select a project from the dropdown (or "All projects" to work with all projects), then confirm ID mappings for each category. Mappings are auto-matched by comparing English names (e.g., a Redmine status named "In Progress" auto-matches the `status_in_progress` mapping key). Non-English Redmine instances require manual selection from the dropdowns.
+3. **Save** — credentials and mappings are saved. Restart containers to apply.
+
+The wizard shows up to 100 projects. For Redmine instances with more projects, find the project slug in the Redmine web UI (visible in the project URL) and set `project_id` directly in `~/.speedwave/tokens/<project>/redmine/config.json`.
+
+Existing configurations with `project_name` in `config.json` continue to work — the MCP server reads it if present and auto-fetches it from the API when absent. Manual `config.json` editing remains supported for power users.
+
+**Troubleshooting:** Corporate environments with custom certificate authorities or HTTP proxies may see TLS or connection errors during credential validation. This is a known limitation shared with SharePoint OAuth — the Desktop app uses bundled CA roots (`rustls-tls`), not the OS certificate store, and does not auto-detect system proxy settings.
 
 ## MCP Hub Architecture
 
