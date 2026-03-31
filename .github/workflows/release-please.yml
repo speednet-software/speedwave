@@ -18,7 +18,7 @@ jobs:
       tag_name: ${{ steps.release.outputs.tag_name }}
       version: ${{ steps.release.outputs.version }}
     steps:
-      - uses: googleapis/release-please-action@8bb7a2ed0f90c9802c83129a9488d235a1f31a7c  # v4 main (release-please 17.3.0 — fixes force-tag-creation with draft releases)
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071  # v4 main (release-please 17.3.0 — fixes force-tag-creation with draft releases)
         id: release
         with:
           token: ${{ secrets.RELEASE_TOKEN }}
