@@ -77,6 +77,7 @@ describe('PluginsComponent', () => {
   let component: PluginsComponent;
   let fixture: ComponentFixture<PluginsComponent>;
   let mockTauri: MockTauriService;
+  let projectState: ProjectStateService;
 
   beforeEach(async () => {
     mockTauri = new MockTauriService();
@@ -87,8 +88,7 @@ describe('PluginsComponent', () => {
       providers: [{ provide: TauriService, useValue: mockTauri }, provideRouter([])],
     }).compileComponents();
 
-    // Set activeProject on the SSOT so loadActiveProject() picks it up
-    const projectState = TestBed.inject(ProjectStateService);
+    projectState = TestBed.inject(ProjectStateService);
     projectState.activeProject = 'test-project';
 
     fixture = TestBed.createComponent(PluginsComponent);
@@ -152,7 +152,7 @@ describe('PluginsComponent', () => {
       const event = { target: { checked: false } } as unknown as Event;
       await component.handleTogglePlugin({ plugin: component.plugins[0], event });
       expect(component.plugins[0].enabled).toBe(false);
-      expect(component.needsRestart).toBe(true);
+      expect(projectState.needsRestart).toBe(true);
     });
 
     it('invokes set_plugin_enabled', async () => {
@@ -207,7 +207,7 @@ describe('PluginsComponent', () => {
         slug: 'presale',
         credentials: { api_key: 'secret-123' },
       });
-      expect(component.needsRestart).toBe(true);
+      expect(projectState.needsRestart).toBe(true);
     });
 
     it('auto-enables plugin after save when configured and not enabled', async () => {
@@ -267,7 +267,7 @@ describe('PluginsComponent', () => {
         project: 'test-project',
         slug: 'presale',
       });
-      expect(component.needsRestart).toBe(true);
+      expect(projectState.needsRestart).toBe(true);
     });
 
     it('sets error on failure', async () => {
@@ -288,7 +288,7 @@ describe('PluginsComponent', () => {
       await component.handleRemovePlugin(component.plugins[0]);
       expect(invokeSpy).toHaveBeenCalledWith('remove_plugin', { slug: 'presale' });
       expect(component.success).toContain('Presale CRM');
-      expect(component.needsRestart).toBe(true);
+      expect(projectState.needsRestart).toBe(true);
     });
 
     it('sets error on failure', async () => {
@@ -322,7 +322,7 @@ describe('PluginsComponent', () => {
         zipPath: '/tmp/presale-1.0.0.zip',
       });
       expect(component.success).toBe('Plugin installed');
-      expect(component.needsRestart).toBe(true);
+      expect(projectState.needsRestart).toBe(true);
     });
 
     it('does nothing when dialog is cancelled', async () => {
@@ -407,46 +407,6 @@ describe('PluginsComponent', () => {
         '[data-testid="plugins-install-overlay"]'
       );
       expect(overlay).toBeNull();
-    });
-  });
-
-  describe('restartContainers()', () => {
-    it('invokes restart_integration_containers and clears needsRestart', async () => {
-      await component.ngOnInit();
-      component.needsRestart = true;
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      await component.restartContainers();
-      expect(invokeSpy).toHaveBeenCalledWith('restart_integration_containers', {
-        project: 'test-project',
-      });
-      expect(component.needsRestart).toBe(false);
-      expect(component.restarting).toBe(false);
-    });
-
-    it('sets restarting during operation', async () => {
-      await component.ngOnInit();
-      let resolveFn!: () => void;
-      mockTauri.invokeHandler = (cmd: string) =>
-        new Promise<void>((resolve) => {
-          if (cmd === 'restart_integration_containers') resolveFn = resolve;
-          else resolve();
-        });
-      const promise = component.restartContainers();
-      expect(component.restarting).toBe(true);
-      resolveFn();
-      await promise;
-      expect(component.restarting).toBe(false);
-    });
-
-    it('sets error on failure', async () => {
-      await component.ngOnInit();
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'restart_integration_containers') throw new Error('restart failed');
-        return undefined;
-      };
-      await component.restartContainers();
-      expect(component.error).toBe('restart failed');
-      expect(component.restarting).toBe(false);
     });
   });
 

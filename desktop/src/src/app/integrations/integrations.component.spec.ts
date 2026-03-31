@@ -142,6 +142,7 @@ describe('IntegrationsComponent', () => {
   let component: IntegrationsComponent;
   let fixture: ComponentFixture<IntegrationsComponent>;
   let mockTauri: MockTauriService;
+  let projectState: ProjectStateService;
 
   beforeEach(async () => {
     mockTauri = new MockTauriService();
@@ -152,8 +153,7 @@ describe('IntegrationsComponent', () => {
       providers: [{ provide: TauriService, useValue: mockTauri }],
     }).compileComponents();
 
-    // Set activeProject on the SSOT so loadActiveProject() picks it up
-    const projectState = TestBed.inject(ProjectStateService);
+    projectState = TestBed.inject(ProjectStateService);
     projectState.activeProject = 'test-project';
 
     fixture = TestBed.createComponent(IntegrationsComponent);
@@ -259,7 +259,7 @@ describe('IntegrationsComponent', () => {
       const event = { target: { checked: false } } as unknown as Event;
       await component.toggleService(component.services[0], event);
       expect(component.services[0].enabled).toBe(false);
-      expect(component.needsRestart).toBe(true);
+      expect(projectState.needsRestart).toBe(true);
     });
 
     it('invokes set_integration_enabled', async () => {
@@ -294,7 +294,7 @@ describe('IntegrationsComponent', () => {
       const event = { target: { checked: false } } as unknown as Event;
       await component.toggleOsService(component.osIntegrations[0], event);
       expect(component.osIntegrations[0].enabled).toBe(false);
-      expect(component.needsRestart).toBe(true);
+      expect(projectState.needsRestart).toBe(true);
     });
 
     it('reverts checkbox on error', async () => {
@@ -325,7 +325,7 @@ describe('IntegrationsComponent', () => {
         service: 'gitlab',
         credentials: { token: 'glpat-test' },
       });
-      expect(component.needsRestart).toBe(true);
+      expect(projectState.needsRestart).toBe(true);
     });
 
     it('saves redmine mappings alongside credentials', async () => {
@@ -399,7 +399,7 @@ describe('IntegrationsComponent', () => {
         project: 'test-project',
         service: 'gitlab',
       });
-      expect(component.needsRestart).toBe(true);
+      expect(projectState.needsRestart).toBe(true);
     });
 
     it('sets error on failure', async () => {
@@ -423,46 +423,6 @@ describe('IntegrationsComponent', () => {
         service: 'gitlab',
         enabled: false,
       });
-    });
-  });
-
-  describe('restartContainers()', () => {
-    it('invokes restart_integration_containers and clears needsRestart', async () => {
-      await component.ngOnInit();
-      component.needsRestart = true;
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      await component.restartContainers();
-      expect(invokeSpy).toHaveBeenCalledWith('restart_integration_containers', {
-        project: 'test-project',
-      });
-      expect(component.needsRestart).toBe(false);
-      expect(component.restarting).toBe(false);
-    });
-
-    it('sets restarting during operation', async () => {
-      await component.ngOnInit();
-      let resolveFn!: () => void;
-      mockTauri.invokeHandler = (cmd: string) =>
-        new Promise<void>((resolve) => {
-          if (cmd === 'restart_integration_containers') resolveFn = resolve;
-          else resolve();
-        });
-      const promise = component.restartContainers();
-      expect(component.restarting).toBe(true);
-      resolveFn();
-      await promise;
-      expect(component.restarting).toBe(false);
-    });
-
-    it('sets error on failure', async () => {
-      await component.ngOnInit();
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'restart_integration_containers') throw new Error('restart failed');
-        return undefined;
-      };
-      await component.restartContainers();
-      expect(component.error).toBe('restart failed');
-      expect(component.restarting).toBe(false);
     });
   });
 
