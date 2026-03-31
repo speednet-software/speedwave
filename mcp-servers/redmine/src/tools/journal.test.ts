@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createJournalTools } from './journal-tools.js';
 import type { RedmineClient } from '../client.js';
 
@@ -427,7 +428,7 @@ describe('journal-tools', () => {
           content: [
             {
               type: 'text',
-              text: 'Error: Redmine not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+              text: `Error: ${notConfiguredMessage('Redmine')}`,
             },
           ],
           isError: true,
@@ -445,7 +446,7 @@ describe('journal-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: Redmine not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('Redmine')}`,
           },
         ],
         isError: true,
@@ -466,7 +467,7 @@ describe('journal-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: Redmine not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('Redmine')}`,
           },
         ],
         isError: true,
@@ -486,7 +487,7 @@ describe('journal-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: Redmine not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('Redmine')}`,
           },
         ],
         isError: true,

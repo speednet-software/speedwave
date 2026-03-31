@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createArtifactTools } from './artifact-tools.js';
 import type { GitLabClient } from '../client.js';
 
@@ -338,7 +339,7 @@ describe('artifact-tools', () => {
           content: [
             {
               type: 'text',
-              text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+              text: `Error: ${notConfiguredMessage('GitLab')}`,
             },
           ],
           isError: true,
@@ -356,7 +357,7 @@ describe('artifact-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
           },
         ],
         isError: true,
@@ -373,7 +374,7 @@ describe('artifact-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
           },
         ],
         isError: true,
@@ -390,7 +391,7 @@ describe('artifact-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
           },
         ],
         isError: true,

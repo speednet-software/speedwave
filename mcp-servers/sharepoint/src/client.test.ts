@@ -4,6 +4,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { withSetupGuidance } from '@speedwave/mcp-shared';
 import { SharePointClient, initializeSharePointClient, SharePointConfig } from './client.js';
 import fs from 'fs/promises';
 import path from 'path';
@@ -128,7 +129,9 @@ describe('SharePointClient', () => {
       const error = new Error('401 Unauthorized');
       const formatted = SharePointClient.formatError(error);
       expect(formatted).toContain('Authentication failed');
-      expect(formatted).toContain('Speedwave Desktop app');
+      expect(formatted).toBe(
+        withSetupGuidance('Authentication failed. Your SharePoint token may have expired.')
+      );
     });
 
     it('should format 403 forbidden errors', () => {

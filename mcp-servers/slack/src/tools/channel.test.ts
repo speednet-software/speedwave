@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { withSetupGuidance } from '@speedwave/mcp-shared';
 import {
   handleSendChannel,
   handleGetChannelMessages,
@@ -111,7 +112,7 @@ describe('channel-tools', () => {
       const error = new Error('invalid_auth');
       vi.mocked(client.sendChannel).mockRejectedValue(error);
       vi.mocked(client.formatSlackError).mockReturnValue(
-        'Authentication failed. Check your Slack tokens. Configure this integration in the Speedwave Desktop app (Integrations tab).'
+        withSetupGuidance('Authentication failed. Check your Slack tokens.')
       );
 
       const result = await handleSendChannel(mockClients, {
@@ -298,7 +299,7 @@ describe('channel-tools', () => {
       const error = new Error('invalid_auth');
       vi.mocked(client.getChannels).mockRejectedValue(error);
       vi.mocked(client.formatSlackError).mockReturnValue(
-        'Authentication failed. Check your Slack tokens. Configure this integration in the Speedwave Desktop app (Integrations tab).'
+        withSetupGuidance('Authentication failed. Check your Slack tokens.')
       );
 
       const result = await handleListChannelIds(mockClients, {});
@@ -306,8 +307,7 @@ describe('channel-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error).toEqual({
         code: 'LIST_FAILED',
-        message:
-          'Authentication failed. Check your Slack tokens. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+        message: withSetupGuidance('Authentication failed. Check your Slack tokens.'),
       });
     });
 

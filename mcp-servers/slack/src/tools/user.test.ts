@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { withSetupGuidance } from '@speedwave/mcp-shared';
 import { handleGetUsers } from './user-tools.js';
 import type { SlackClients } from '../client.js';
 
@@ -93,7 +94,7 @@ describe('user-tools', () => {
       const error = new Error('invalid_auth');
       vi.mocked(client.getUsers).mockRejectedValue(error);
       vi.mocked(client.formatSlackError).mockReturnValue(
-        'Authentication failed. Check your Slack tokens. Configure this integration in the Speedwave Desktop app (Integrations tab).'
+        withSetupGuidance('Authentication failed. Check your Slack tokens.')
       );
 
       const result = await handleGetUsers(mockClients, {
@@ -103,8 +104,7 @@ describe('user-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error).toEqual({
         code: 'LOOKUP_FAILED',
-        message:
-          'Authentication failed. Check your Slack tokens. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+        message: withSetupGuidance('Authentication failed. Check your Slack tokens.'),
       });
     });
 

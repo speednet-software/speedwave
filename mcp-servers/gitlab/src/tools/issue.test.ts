@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
 import { createIssueTools } from './issue-tools.js';
 import type { GitLabClient } from '../client.js';
 
@@ -175,7 +176,7 @@ describe('issue-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: Network error. Check your GitLab URL. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${withSetupGuidance('Network error. Check your GitLab URL.')}`,
           },
         ],
         isError: true,
@@ -844,7 +845,7 @@ describe('issue-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: Network error. Check your GitLab URL. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${withSetupGuidance('Network error. Check your GitLab URL.')}`,
           },
         ],
         isError: true,
@@ -862,7 +863,7 @@ describe('issue-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
           },
         ],
         isError: true,

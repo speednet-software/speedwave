@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
 import { createCommitTools } from './commit-tools.js';
 import type { GitLabClient } from '../client.js';
 
@@ -114,7 +115,7 @@ describe('commit-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: Authentication failed. Check your GitLab token. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${withSetupGuidance('Authentication failed. Check your GitLab token.')}`,
           },
         ],
         isError: true,
@@ -319,7 +320,7 @@ describe('commit-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: Network error. Check your GitLab URL. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${withSetupGuidance('Network error. Check your GitLab URL.')}`,
           },
         ],
         isError: true,
@@ -688,7 +689,7 @@ describe('commit-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
           },
         ],
         isError: true,
@@ -704,7 +705,7 @@ describe('commit-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
           },
         ],
         isError: true,
@@ -720,7 +721,7 @@ describe('commit-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
           },
         ],
         isError: true,
@@ -736,7 +737,7 @@ describe('commit-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
           },
         ],
         isError: true,

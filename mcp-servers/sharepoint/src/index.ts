@@ -6,7 +6,7 @@
  * @module mcp-sharepoint
  */
 
-import { createMCPServer, ts, SETUP_GUIDANCE, retryAsync } from '@speedwave/mcp-shared';
+import { createMCPServer, ts, notConfiguredMessage, retryAsync } from '@speedwave/mcp-shared';
 import { initializeSharePointClient } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 
@@ -45,8 +45,7 @@ async function main(): Promise<void> {
   // cannot be deferred, so we fail fast rather than starting misconfigured.
   // This differs from Slack/GitLab/Redmine which warn and let tools surface errors.
   if (!sharepointClient) {
-    console.error(`${ts()} ❌ Failed to initialize SharePoint client - tokens not found or empty`);
-    console.error(`${ts()}    ${SETUP_GUIDANCE}`);
+    console.error(`${ts()} ❌ ${notConfiguredMessage('SharePoint')}`);
     process.exit(1);
   }
 

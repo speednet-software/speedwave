@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { withSetupGuidance } from '@speedwave/mcp-shared';
 import axios, { AxiosError } from 'axios';
 import { RedmineClient, initializeRedmineClient } from './client.js';
 import type {
@@ -1476,7 +1477,7 @@ describe('RedmineClient', () => {
 
       const result = RedmineClient.formatError(error);
       expect(result).toContain('Authentication failed');
-      expect(result).toContain('Speedwave Desktop app');
+      expect(result).toBe(withSetupGuidance('Authentication failed. Check your Redmine API key.'));
     });
 
     it('should format 403 permission error', () => {

@@ -9,7 +9,7 @@ import path from 'path';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import { Mutex } from 'async-mutex';
-import { loadToken, TIMEOUTS, ts, withSetupGuidance, SETUP_GUIDANCE } from '@speedwave/mcp-shared';
+import { loadToken, TIMEOUTS, ts, withSetupGuidance } from '@speedwave/mcp-shared';
 import { TokenManager } from './token-manager.js';
 import { PathValidator } from './path-validator.js';
 import { splitPath } from './path-utils.js';
@@ -786,7 +786,7 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
 
     if (missingTokens.length > 0) {
       console.warn(
-        `${ts()} SharePoint tokens are empty or incomplete. Missing: ${missingTokens.join(', ')}. ${SETUP_GUIDANCE}`
+        `${ts()} ${withSetupGuidance(`SharePoint tokens are empty or incomplete. Missing: ${missingTokens.join(', ')}.`)}`
       );
       // Graceful degradation: log warning, return null, let server start
       // DO NOT throw here - see JSDoc above for rationale

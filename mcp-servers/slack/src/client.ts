@@ -25,7 +25,7 @@ import {
 } from '@slack/web-api';
 import fs from 'fs/promises';
 import path from 'path';
-import { ts, SETUP_GUIDANCE, withSetupGuidance } from '@speedwave/mcp-shared';
+import { ts, withSetupGuidance } from '@speedwave/mcp-shared';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Types
@@ -140,7 +140,7 @@ export async function initializeSlackClients(): Promise<SlackClients | null> {
 
     if (missingTokens.length > 0) {
       console.warn(
-        `${ts()} Slack tokens are empty or missing. Missing: ${missingTokens.join(', ')}. ${SETUP_GUIDANCE}`
+        `${ts()} ${withSetupGuidance(`Slack tokens are empty or missing. Missing: ${missingTokens.join(', ')}.`)}`
       );
       // Graceful degradation: log warning, return null, let server start
       // DO NOT throw here - see JSDoc above for rationale
@@ -155,7 +155,7 @@ export async function initializeSlackClients(): Promise<SlackClients | null> {
     };
   } catch (error) {
     console.warn(
-      `${ts()} Failed to load Slack tokens: ${error instanceof Error ? error.message : 'Unknown error'}. ${SETUP_GUIDANCE}`
+      `${ts()} ${withSetupGuidance(`Failed to load Slack tokens: ${error instanceof Error ? error.message : 'Unknown error'}.`)}`
     );
     // Graceful degradation: log warning, return null, let server start
     // DO NOT throw here - see JSDoc above for rationale

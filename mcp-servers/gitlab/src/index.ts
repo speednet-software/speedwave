@@ -6,7 +6,7 @@
  * @module mcp-gitlab
  */
 
-import { createMCPServer, ts, SETUP_GUIDANCE, retryAsync } from '@speedwave/mcp-shared';
+import { createMCPServer, ts, notConfiguredMessage, retryAsync } from '@speedwave/mcp-shared';
 import { initializeGitLabClient } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 
@@ -32,8 +32,7 @@ async function main(): Promise<void> {
   });
 
   if (!gitlabClient) {
-    console.warn(`${ts()} ⚠️  GitLab not configured (no token or host URL)`);
-    console.warn(`${ts()}    ${SETUP_GUIDANCE}`);
+    console.warn(`${ts()} ⚠️  ${notConfiguredMessage('GitLab')}`);
     console.warn(`${ts()}    Server will start but tools will return errors until configured.`);
   } else {
     console.log(`${ts()} ✅ GitLab client initialized`);

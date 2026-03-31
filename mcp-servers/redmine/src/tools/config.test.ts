@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createConfigTools } from './config-tools.js';
 import { RedmineClient, RedmineMappings } from '../client.js';
 
@@ -39,7 +40,7 @@ describe('Config Tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: Redmine not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('Redmine')}`,
           },
         ],
       });
@@ -56,7 +57,7 @@ describe('Config Tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: Redmine not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('Redmine')}`,
           },
         ],
       });

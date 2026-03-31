@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createMrTools } from './mr-tools.js';
 import { GitLabClient } from '../client.js';
 
@@ -692,7 +693,7 @@ describe('MR Tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
           },
         ],
         isError: true,
@@ -708,7 +709,7 @@ describe('MR Tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
           },
         ],
         isError: true,
@@ -729,7 +730,7 @@ describe('MR Tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
           },
         ],
         isError: true,
@@ -745,7 +746,7 @@ describe('MR Tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
           },
         ],
         isError: true,
@@ -761,7 +762,7 @@ describe('MR Tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
           },
         ],
         isError: true,
@@ -781,7 +782,7 @@ describe('MR Tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
           },
         ],
         isError: true,
@@ -797,7 +798,7 @@ describe('MR Tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
           },
         ],
         isError: true,

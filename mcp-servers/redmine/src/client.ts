@@ -17,7 +17,7 @@
 import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import fs from 'fs/promises';
 import path from 'path';
-import { TIMEOUTS, ts, withSetupGuidance, SETUP_GUIDANCE } from '@speedwave/mcp-shared';
+import { TIMEOUTS, ts, withSetupGuidance } from '@speedwave/mcp-shared';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Axios Retry Config Extension
@@ -1467,7 +1467,7 @@ export async function initializeRedmineClient(): Promise<RedmineClient | null> {
     if (!apiKey) {
       // Graceful degradation: log warning, return null, let server start
       // DO NOT throw here - see JSDoc above for rationale
-      console.warn(`${ts()} Redmine API key is empty. ${SETUP_GUIDANCE}`);
+      console.warn(`${ts()} ${withSetupGuidance('Redmine API key is empty.')}`);
       return null;
     }
 

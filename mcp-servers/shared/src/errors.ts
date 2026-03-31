@@ -4,8 +4,8 @@
  * @module shared/errors
  */
 
-/** Guidance shown when a service is not configured. */
-export const SETUP_GUIDANCE =
+/** Guidance shown when a service is not configured. Private — use helpers below. */
+const SETUP_GUIDANCE =
   'Configure this integration in the Speedwave Desktop app (Integrations tab).';
 
 /**

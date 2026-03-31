@@ -44,6 +44,9 @@ vi.mock('fs/promises', () => ({
   },
 }));
 
+// Import helpers after mocks are set up (dynamic import avoids hoisting conflict)
+const { withSetupGuidance } = await import('@speedwave/mcp-shared');
+
 // Type for mock GitLab instance endpoints
 interface MockGitlabEndpoints {
   Users: { showCurrentUser: Mock };
@@ -194,7 +197,7 @@ describe('GitLabClient', () => {
       const error = { response: { status: 401 } };
       const message = GitLabClientClass.formatError(error);
       expect(message).toContain('Authentication failed');
-      expect(message).toContain('Speedwave Desktop app');
+      expect(message).toBe(withSetupGuidance('Authentication failed. Check your GitLab token.'));
     });
 
     it('should format 401 errors from cause.response', () => {
@@ -237,7 +240,7 @@ describe('GitLabClient', () => {
       const error = { message: 'getaddrinfo ENOTFOUND gitlab.example.com' };
       const message = GitLabClientClass.formatError(error);
       expect(message).toContain('Network error');
-      expect(message).toContain('Speedwave Desktop app');
+      expect(message).toBe(withSetupGuidance('Network error. Check your GitLab URL.'));
     });
 
     it('should format network errors with ECONNREFUSED', () => {

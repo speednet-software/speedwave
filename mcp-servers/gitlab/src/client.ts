@@ -13,7 +13,7 @@
  */
 
 import { Gitlab } from '@gitbeaker/rest';
-import { loadToken, ts, withSetupGuidance, SETUP_GUIDANCE } from '@speedwave/mcp-shared';
+import { loadToken, ts, withSetupGuidance } from '@speedwave/mcp-shared';
 import fs from 'fs/promises';
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -220,14 +220,14 @@ export class GitLabClient {
    * Handles various error types including authentication failures, permission denials,
    * network errors, and provides specific instructions for remediation.
    * @param error - The error object from GitLab API (typically from `@gitbeaker/rest`)
-   * @returns Human-readable error message with recovery suggestions (uses shared SETUP_GUIDANCE)
+   * @returns Human-readable error message with recovery suggestions (uses shared error helpers)
    * @example
    * ```typescript
    * try {
    *   await client.listProjects();
    * } catch (error) {
    *   console.error(GitLabClient.formatError(error));
-   *   // Output: "Authentication failed. Check your GitLab token. Configure this integration in the Speedwave Desktop app (Integrations tab)."
+   *   // Output: "Authentication failed. Check your GitLab token. <setup guidance>"
    * }
    * ```
    */
@@ -1490,7 +1490,7 @@ export async function initializeGitLabClient(): Promise<GitLabClient | null> {
     if (!token) {
       // Graceful degradation: log warning, return null, let server start
       // DO NOT throw here - see JSDoc above for rationale
-      console.warn(`${ts()} GitLab token is empty or not found. ${SETUP_GUIDANCE}`);
+      console.warn(`${ts()} ${withSetupGuidance('GitLab token is empty or not found.')}`);
       return null;
     }
 
