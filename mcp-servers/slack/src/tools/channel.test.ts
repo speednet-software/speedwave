@@ -111,7 +111,7 @@ describe('channel-tools', () => {
       const error = new Error('invalid_auth');
       vi.mocked(client.sendChannel).mockRejectedValue(error);
       vi.mocked(client.formatSlackError).mockReturnValue(
-        'Authentication failed. Check your Slack tokens. Run: speedwave setup slack'
+        'Authentication failed. Check your Slack tokens. Configure this integration in the Speedwave Desktop app (Integrations tab).'
       );
 
       const result = await handleSendChannel(mockClients, {
@@ -298,7 +298,7 @@ describe('channel-tools', () => {
       const error = new Error('invalid_auth');
       vi.mocked(client.getChannels).mockRejectedValue(error);
       vi.mocked(client.formatSlackError).mockReturnValue(
-        'Authentication failed. Check your Slack tokens. Run: speedwave setup slack'
+        'Authentication failed. Check your Slack tokens. Configure this integration in the Speedwave Desktop app (Integrations tab).'
       );
 
       const result = await handleListChannelIds(mockClients, {});
@@ -306,7 +306,8 @@ describe('channel-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error).toEqual({
         code: 'LIST_FAILED',
-        message: 'Authentication failed. Check your Slack tokens. Run: speedwave setup slack',
+        message:
+          'Authentication failed. Check your Slack tokens. Configure this integration in the Speedwave Desktop app (Integrations tab).',
       });
     });
 

@@ -10,21 +10,14 @@ import path from 'path';
 
 // Mock dependencies
 vi.mock('fs/promises');
-vi.mock('@speedwave/mcp-shared', () => ({
-  loadToken: vi.fn(),
-  ts: () => '[00:00:00]',
-  TIMEOUTS: {
-    BASE_MS: 120000,
-    API_CALL_MS: 30000,
-    TOKEN_REFRESH_MS: 30000,
-    HEALTH_CHECK_MS: 5000,
-    MIN_MS: 1000,
-    EXECUTION_MS: 120000,
-    WORKER_REQUEST_MS: 120000,
-    LONG_OPERATION_MS: 300000,
-    ASYNC_JOB_MS: 900000,
-  },
-}));
+vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@speedwave/mcp-shared')>();
+  return {
+    ...actual,
+    loadToken: vi.fn(),
+    ts: () => '[00:00:00]',
+  };
+});
 
 const mockFs = vi.mocked(fs);
 const { loadToken } = await import('@speedwave/mcp-shared');
@@ -135,7 +128,7 @@ describe('SharePointClient', () => {
       const error = new Error('401 Unauthorized');
       const formatted = SharePointClient.formatError(error);
       expect(formatted).toContain('Authentication failed');
-      expect(formatted).toContain('speedwave setup sharepoint');
+      expect(formatted).toContain('Speedwave Desktop app');
     });
 
     it('should format 403 forbidden errors', () => {

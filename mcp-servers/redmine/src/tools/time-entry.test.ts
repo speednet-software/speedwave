@@ -481,7 +481,10 @@ describe('time-entry-tools', () => {
         const result = await handler({});
         expect(result).toEqual({
           content: [
-            { type: 'text', text: 'Error: Redmine not configured. Run: speedwave setup redmine' },
+            {
+              type: 'text',
+              text: 'Error: Redmine not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+            },
           ],
           isError: true,
         });

@@ -2,7 +2,13 @@
  * Release Tools - 3 tools for GitLab tags and releases
  */
 
-import { Tool, ToolDefinition, jsonResult, errorResult } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  jsonResult,
+  errorResult,
+  notConfiguredMessage,
+} from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
 
@@ -156,8 +162,7 @@ const createReleaseTool: Tool = {
  * @param client - GitLab client instance
  */
 export function createReleaseTools(client: GitLabClient | null): ToolDefinition[] {
-  const unconfigured = async () =>
-    errorResult('GitLab not configured. Run: speedwave setup gitlab');
+  const unconfigured = async () => errorResult(notConfiguredMessage('GitLab'));
   if (!client) {
     return [
       { tool: createTagTool, handler: unconfigured },

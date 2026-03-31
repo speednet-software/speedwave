@@ -93,7 +93,7 @@ describe('user-tools', () => {
       const error = new Error('invalid_auth');
       vi.mocked(client.getUsers).mockRejectedValue(error);
       vi.mocked(client.formatSlackError).mockReturnValue(
-        'Authentication failed. Check your Slack tokens. Run: speedwave setup slack'
+        'Authentication failed. Check your Slack tokens. Configure this integration in the Speedwave Desktop app (Integrations tab).'
       );
 
       const result = await handleGetUsers(mockClients, {
@@ -103,7 +103,8 @@ describe('user-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error).toEqual({
         code: 'LOOKUP_FAILED',
-        message: 'Authentication failed. Check your Slack tokens. Run: speedwave setup slack',
+        message:
+          'Authentication failed. Check your Slack tokens. Configure this integration in the Speedwave Desktop app (Integrations tab).',
       });
     });
 

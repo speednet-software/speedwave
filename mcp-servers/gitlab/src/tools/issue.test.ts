@@ -175,7 +175,7 @@ describe('issue-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: Network error. Check your GitLab URL. Run: speedwave setup gitlab',
+            text: 'Error: Network error. Check your GitLab URL. Configure this integration in the Speedwave Desktop app (Integrations tab).',
           },
         ],
         isError: true,
@@ -844,7 +844,7 @@ describe('issue-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: Network error. Check your GitLab URL. Run: speedwave setup gitlab',
+            text: 'Error: Network error. Check your GitLab URL. Configure this integration in the Speedwave Desktop app (Integrations tab).',
           },
         ],
         isError: true,
@@ -862,7 +862,7 @@ describe('issue-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: GitLab not configured. Run: speedwave setup gitlab',
+            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
           },
         ],
         isError: true,

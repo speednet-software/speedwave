@@ -1476,7 +1476,7 @@ describe('RedmineClient', () => {
 
       const result = RedmineClient.formatError(error);
       expect(result).toContain('Authentication failed');
-      expect(result).toContain('speedwave setup redmine');
+      expect(result).toContain('Speedwave Desktop app');
     });
 
     it('should format 403 permission error', () => {

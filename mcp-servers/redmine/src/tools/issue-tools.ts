@@ -2,7 +2,13 @@
  * Issue Tools - 6 tools for Redmine issue operations
  */
 
-import { Tool, ToolDefinition, jsonResult, errorResult } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  jsonResult,
+  errorResult,
+  notConfiguredMessage,
+} from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 import { resolveParams } from './helpers.js';
 
@@ -405,8 +411,7 @@ const commentIssueTool: Tool = {
  * @param client - Redmine client instance
  */
 export function createIssueTools(client: RedmineClient | null): ToolDefinition[] {
-  const unconfigured = async () =>
-    errorResult('Redmine not configured. Run: speedwave setup redmine');
+  const unconfigured = async () => errorResult(notConfiguredMessage('Redmine'));
   if (!client) {
     return [
       { tool: listIssueIdsTool, handler: unconfigured },

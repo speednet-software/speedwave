@@ -13,7 +13,7 @@
  */
 
 import { Gitlab } from '@gitbeaker/rest';
-import { loadToken, ts } from '@speedwave/mcp-shared';
+import { loadToken, ts, withSetupGuidance, SETUP_GUIDANCE } from '@speedwave/mcp-shared';
 import fs from 'fs/promises';
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -220,14 +220,14 @@ export class GitLabClient {
    * Handles various error types including authentication failures, permission denials,
    * network errors, and provides specific instructions for remediation.
    * @param error - The error object from GitLab API (typically from `@gitbeaker/rest`)
-   * @returns Human-readable error message with recovery suggestions (e.g., "Run: speedwave setup gitlab")
+   * @returns Human-readable error message with recovery suggestions (uses shared SETUP_GUIDANCE)
    * @example
    * ```typescript
    * try {
    *   await client.listProjects();
    * } catch (error) {
    *   console.error(GitLabClient.formatError(error));
-   *   // Output: "Authentication failed. Check your GitLab token. Run: speedwave setup gitlab"
+   *   // Output: "Authentication failed. Check your GitLab token. Configure this integration in the Speedwave Desktop app (Integrations tab)."
    * }
    * ```
    */
@@ -242,7 +242,7 @@ export class GitLabClient {
     const message = err.message || '';
 
     if (status === 401 || message.includes('401') || message.includes('Unauthorized')) {
-      return 'Authentication failed. Check your GitLab token. Run: speedwave setup gitlab';
+      return withSetupGuidance('Authentication failed. Check your GitLab token.');
     }
 
     if (status === 403 || message.includes('403') || message.includes('Forbidden')) {
@@ -269,7 +269,7 @@ export class GitLabClient {
       message.includes('ENOTFOUND') ||
       /network\s+(error|failed|timeout)/i.test(message)
     ) {
-      return 'Network error. Check your GitLab URL. Run: speedwave setup gitlab';
+      return withSetupGuidance('Network error. Check your GitLab URL.');
     }
 
     // Extract meaningful part from gitbeaker errors
@@ -1490,7 +1490,7 @@ export async function initializeGitLabClient(): Promise<GitLabClient | null> {
     if (!token) {
       // Graceful degradation: log warning, return null, let server start
       // DO NOT throw here - see JSDoc above for rationale
-      console.warn(`${ts()} GitLab token is empty or not found. Run: speedwave setup gitlab`);
+      console.warn(`${ts()} GitLab token is empty or not found. ${SETUP_GUIDANCE}`);
       return null;
     }
 

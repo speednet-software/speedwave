@@ -37,7 +37,10 @@ describe('Config Tools', () => {
       expect(result).toEqual({
         isError: true,
         content: [
-          { type: 'text', text: 'Error: Redmine not configured. Run: speedwave setup redmine' },
+          {
+            type: 'text',
+            text: 'Error: Redmine not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+          },
         ],
       });
     });
@@ -51,7 +54,10 @@ describe('Config Tools', () => {
       expect(result).toEqual({
         isError: true,
         content: [
-          { type: 'text', text: 'Error: Redmine not configured. Run: speedwave setup redmine' },
+          {
+            type: 'text',
+            text: 'Error: Redmine not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+          },
         ],
       });
     });

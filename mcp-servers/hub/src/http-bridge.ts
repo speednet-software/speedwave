@@ -431,7 +431,7 @@ export async function callWorker<T = unknown>(
     if (content && content.length > 0 && content[0].text) {
       const text = content[0].text;
 
-      // Check if worker returned an error (e.g., "Redmine not configured. Run: speedwave setup redmine")
+      // Check if worker returned an error (e.g., "Redmine not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).")
       // errorResult() sets isError: true and wraps message in "Error: " prefix
       if (result.result?.isError) {
         throw new Error(text);

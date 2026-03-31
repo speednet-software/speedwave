@@ -6,7 +6,7 @@
  * @module mcp-redmine
  */
 
-import { createMCPServer, ts } from '@speedwave/mcp-shared';
+import { createMCPServer, ts, SETUP_GUIDANCE, retryAsync } from '@speedwave/mcp-shared';
 import { initializeRedmineClient } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 
@@ -25,11 +25,15 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const redmineClient = await initializeRedmineClient();
+  const redmineClient = await retryAsync(initializeRedmineClient, {
+    maxRetries: 3,
+    baseDelayMs: 2000,
+    label: 'Redmine client init',
+  });
 
   if (!redmineClient) {
     console.warn(`${ts()} ⚠️  Redmine not configured (no API key or config)`);
-    console.warn(`${ts()}    Run: speedwave setup redmine`);
+    console.warn(`${ts()}    ${SETUP_GUIDANCE}`);
     console.warn(`${ts()}    Server will start but tools will return errors until configured.`);
   } else {
     console.log(`${ts()} ✅ Redmine client initialized`);

@@ -17,7 +17,7 @@
 import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import fs from 'fs/promises';
 import path from 'path';
-import { TIMEOUTS, ts } from '@speedwave/mcp-shared';
+import { TIMEOUTS, ts, withSetupGuidance, SETUP_GUIDANCE } from '@speedwave/mcp-shared';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Axios Retry Config Extension
@@ -1422,7 +1422,7 @@ export class RedmineClient {
         const data = axiosError.response.data as { errors?: unknown };
 
         if (status === 401)
-          return 'Authentication failed. Check your Redmine API key. Run: speedwave setup redmine';
+          return withSetupGuidance('Authentication failed. Check your Redmine API key.');
         if (status === 403)
           return 'Permission denied. Your Redmine API key may not have sufficient permissions.';
         if (status === 404) return 'Resource not found in Redmine.';
@@ -1467,7 +1467,7 @@ export async function initializeRedmineClient(): Promise<RedmineClient | null> {
     if (!apiKey) {
       // Graceful degradation: log warning, return null, let server start
       // DO NOT throw here - see JSDoc above for rationale
-      console.warn(`${ts()} Redmine API key is empty. Run: speedwave setup redmine`);
+      console.warn(`${ts()} Redmine API key is empty. ${SETUP_GUIDANCE}`);
       return null;
     }
 

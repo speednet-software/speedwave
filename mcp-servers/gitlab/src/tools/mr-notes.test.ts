@@ -147,7 +147,7 @@ describe('createMrNotesTools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: Authentication failed. Check your GitLab token. Run: speedwave setup gitlab',
+            text: 'Error: Authentication failed. Check your GitLab token. Configure this integration in the Speedwave Desktop app (Integrations tab).',
           },
         ],
         isError: true,
@@ -258,7 +258,7 @@ describe('createMrNotesTools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: Network error. Check your GitLab URL. Run: speedwave setup gitlab',
+            text: 'Error: Network error. Check your GitLab URL. Configure this integration in the Speedwave Desktop app (Integrations tab).',
           },
         ],
         isError: true,
@@ -592,7 +592,7 @@ describe('createMrNotesTools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: Network error. Check your GitLab URL. Run: speedwave setup gitlab',
+            text: 'Error: Network error. Check your GitLab URL. Configure this integration in the Speedwave Desktop app (Integrations tab).',
           },
         ],
         isError: true,
@@ -608,7 +608,10 @@ describe('createMrNotesTools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+          },
         ],
         isError: true,
       });
@@ -621,7 +624,10 @@ describe('createMrNotesTools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+          },
         ],
         isError: true,
       });
@@ -634,7 +640,10 @@ describe('createMrNotesTools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+          },
         ],
         isError: true,
       });
@@ -647,7 +656,10 @@ describe('createMrNotesTools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+          },
         ],
         isError: true,
       });

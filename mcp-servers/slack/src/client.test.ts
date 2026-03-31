@@ -53,7 +53,7 @@ describe('slack client', () => {
       for (const error of errors) {
         const message = formatSlackError(error);
         expect(message).toContain('Authentication failed');
-        expect(message).toContain('speedwave setup slack');
+        expect(message).toContain('Speedwave Desktop app');
       }
     });
 

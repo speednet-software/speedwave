@@ -28,10 +28,14 @@ vi.mock('@gitbeaker/rest', () => {
 });
 
 // Mock shared module
-vi.mock('@speedwave/mcp-shared', () => ({
-  loadToken: mockLoadToken,
-  ts: () => '[00:00:00]',
-}));
+vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@speedwave/mcp-shared')>();
+  return {
+    ...actual,
+    loadToken: mockLoadToken,
+    ts: () => '[00:00:00]',
+  };
+});
 
 // Mock fs/promises
 vi.mock('fs/promises', () => ({
@@ -190,7 +194,7 @@ describe('GitLabClient', () => {
       const error = { response: { status: 401 } };
       const message = GitLabClientClass.formatError(error);
       expect(message).toContain('Authentication failed');
-      expect(message).toContain('speedwave setup gitlab');
+      expect(message).toContain('Speedwave Desktop app');
     });
 
     it('should format 401 errors from cause.response', () => {
@@ -233,7 +237,7 @@ describe('GitLabClient', () => {
       const error = { message: 'getaddrinfo ENOTFOUND gitlab.example.com' };
       const message = GitLabClientClass.formatError(error);
       expect(message).toContain('Network error');
-      expect(message).toContain('speedwave setup gitlab');
+      expect(message).toContain('Speedwave Desktop app');
     });
 
     it('should format network errors with ECONNREFUSED', () => {

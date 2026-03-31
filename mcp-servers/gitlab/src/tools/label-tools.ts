@@ -2,7 +2,13 @@
  * Label Tools - 2 tools for GitLab project labels
  */
 
-import { Tool, ToolDefinition, jsonResult, errorResult } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  jsonResult,
+  errorResult,
+  notConfiguredMessage,
+} from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
 
@@ -108,8 +114,7 @@ const createLabelTool: Tool = {
  * @param client - GitLab client instance
  */
 export function createLabelTools(client: GitLabClient | null): ToolDefinition[] {
-  const unconfigured = async () =>
-    errorResult('GitLab not configured. Run: speedwave setup gitlab');
+  const unconfigured = async () => errorResult(notConfiguredMessage('GitLab'));
   if (!client) {
     return [
       { tool: listLabelsTool, handler: unconfigured },

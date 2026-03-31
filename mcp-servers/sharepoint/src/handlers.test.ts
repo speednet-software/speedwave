@@ -43,7 +43,7 @@ function createMockClient(): MockClient {
       const e = error as { message?: string };
       const message = e.message || '';
       if (message.includes('401') || message.includes('Unauthorized')) {
-        return 'Authentication failed. Your SharePoint token may have expired. Run: speedwave setup sharepoint';
+        return 'Authentication failed. Your SharePoint token may have expired. Configure this integration in the Speedwave Desktop app (Integrations tab).';
       }
       if (message.includes('403') || message.includes('Forbidden')) {
         return 'Permission denied. Your SharePoint token may not have sufficient permissions.';
@@ -55,7 +55,7 @@ function createMockClient(): MockClient {
         return 'Invalid path: security check failed (path traversal not allowed).';
       }
       if (message.includes('refresh') || message.includes('token')) {
-        return 'Token refresh failed. Run: speedwave setup sharepoint';
+        return 'Token refresh failed. Configure this integration in the Speedwave Desktop app (Integrations tab).';
       }
       return message || 'SharePoint API error';
     }),
@@ -118,7 +118,7 @@ describe('SharePoint handler integration', () => {
 
       expect(result.isError).toBe(true);
       expect(parsed.code).toBe('NOT_CONFIGURED');
-      expect(parsed.message).toContain('speedwave setup sharepoint');
+      expect(parsed.message).toContain('Speedwave Desktop app');
     });
 
     it('getFileFull returns NOT_CONFIGURED error', async () => {

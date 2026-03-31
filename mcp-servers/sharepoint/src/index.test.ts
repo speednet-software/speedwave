@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { createMCPServerMock, initializeSharePointClientMock } = vi.hoisted(() => ({
+const { createMCPServerMock, initializeSharePointClientMock, retryAsyncMock } = vi.hoisted(() => ({
   createMCPServerMock: vi.fn(),
   initializeSharePointClientMock: vi.fn(),
+  retryAsyncMock: vi.fn(),
 }));
 
 vi.mock('@speedwave/mcp-shared', async () => {
@@ -11,6 +12,7 @@ vi.mock('@speedwave/mcp-shared', async () => {
   return {
     ...actual,
     createMCPServer: createMCPServerMock,
+    retryAsync: retryAsyncMock,
   };
 });
 
@@ -33,6 +35,8 @@ describe('MCP SharePoint Server', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    // Default: retryAsync passes through to the fn it receives (simulates immediate success)
+    retryAsyncMock.mockImplementation(async (fn: () => Promise<unknown>) => fn());
   });
 
   afterEach(() => {
@@ -70,5 +74,19 @@ describe('MCP SharePoint Server', () => {
 
     const config = createMCPServerMock.mock.calls[0][0];
     await expect(config.healthCheck()).rejects.toThrow('Token refresh failed');
+  });
+
+  it('calls process.exit(1) when retryAsync exhausts and client is null', async () => {
+    // retryAsync returns null after exhaustion -> SharePoint fail-fast triggers process.exit(1)
+    retryAsyncMock.mockResolvedValue(null);
+
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => {}) as unknown as typeof process.exit);
+
+    await import('./index.js');
+    await flushPromises();
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
   });
 });

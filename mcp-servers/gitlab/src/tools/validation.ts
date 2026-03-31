@@ -2,7 +2,13 @@
  * Validation Helpers for GitLab Tool Parameters
  */
 
-import { ToolsCallResult, jsonResult, textResult, errorResult } from '@speedwave/mcp-shared';
+import {
+  ToolsCallResult,
+  jsonResult,
+  textResult,
+  errorResult,
+  notConfiguredMessage,
+} from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 
 /**
@@ -20,7 +26,7 @@ export function withValidation<T>(
 ): (params: T) => Promise<ToolsCallResult> {
   return async (params: T) => {
     if (!client) {
-      return errorResult('GitLab not configured. Run: speedwave setup gitlab');
+      return errorResult(notConfiguredMessage('GitLab'));
     }
     try {
       return await handler(client, params);

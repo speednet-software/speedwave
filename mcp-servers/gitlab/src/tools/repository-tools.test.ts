@@ -552,7 +552,10 @@ describe('createRepositoryTools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+          },
         ],
         isError: true,
       });
@@ -567,7 +570,10 @@ describe('createRepositoryTools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+          },
         ],
         isError: true,
       });
@@ -582,7 +588,10 @@ describe('createRepositoryTools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: 'Error: GitLab not configured. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+          },
         ],
         isError: true,
       });
