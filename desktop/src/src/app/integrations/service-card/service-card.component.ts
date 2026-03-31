@@ -173,43 +173,6 @@ export interface SaveCredentialsEvent {
               </div>
             }
 
-            @if (svc.service === 'redmine') {
-              <div class="mt-4" data-testid="mappings-section">
-                <h4 class="text-sw-text-dim text-[13px] mb-2">ID Mappings</h4>
-                @for (entry of getMappingEntries(); track entry.key) {
-                  <div class="flex gap-2 mb-2 items-center">
-                    <input
-                      class="flex-[2] p-2 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-[13px] font-mono"
-                      [value]="entry.key"
-                      (input)="onUpdateMappingKey(entry.key, $event)"
-                      placeholder="Key"
-                    />
-                    <input
-                      class="flex-1 p-2 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-[13px] font-mono"
-                      type="number"
-                      [value]="entry.value"
-                      (input)="onUpdateMappingValue(entry.key, $event)"
-                      placeholder="ID"
-                    />
-                    <button
-                      type="button"
-                      class="px-2.5 py-1.5 text-xs bg-transparent text-sw-error-text border border-sw-error-text rounded cursor-pointer font-mono"
-                      (click)="onRemoveMapping(entry.key)"
-                    >
-                      x
-                    </button>
-                  </div>
-                }
-                <button
-                  type="button"
-                  class="bg-transparent text-sw-accent border border-dashed border-sw-accent px-3 py-1.5 rounded cursor-pointer text-xs font-mono"
-                  (click)="onAddMapping()"
-                >
-                  + Add Mapping
-                </button>
-              </div>
-            }
-
             <div class="flex gap-3 mt-4">
               <button
                 type="submit"
@@ -252,8 +215,6 @@ export class ServiceCardComponent {
   @Output() openVerificationUrl = new EventEmitter<string>();
 
   editedValues: Record<string, string> = {};
-  editedMappings: Record<string, number> | null = null;
-  private nextMappingId = 0;
 
   /**
    * Returns whether any auth fields use the OAuth flow.
@@ -327,63 +288,9 @@ export class ServiceCardComponent {
     this.saveCredentials.emit({
       svc: this.svc,
       credentials,
-      mappings: this.svc.service === 'redmine' ? this.editedMappings : null,
+      mappings: null,
     });
 
     this.editedValues = {};
-  }
-
-  /** Returns the current Redmine mapping entries as key-value pairs. */
-  getMappingEntries(): { key: string; value: number }[] {
-    const source = this.editedMappings ?? (this.svc.mappings as Record<string, number>) ?? {};
-    return Object.entries(source).map(([key, value]) => ({ key, value: Number(value) }));
-  }
-
-  /**
-   * Renames a mapping key while preserving its value.
-   * @param oldKey - the current key name
-   * @param event - the DOM input event with the new key name
-   */
-  onUpdateMappingKey(oldKey: string, event: Event): void {
-    const newKey = (event.target as HTMLInputElement).value;
-    this.ensureEditedMappings();
-    const value = this.editedMappings![oldKey];
-    delete this.editedMappings![oldKey];
-    this.editedMappings![newKey] = value;
-  }
-
-  /**
-   * Updates the numeric value for a mapping key.
-   * @param key - the mapping key to update
-   * @param event - the DOM input event with the new value
-   */
-  onUpdateMappingValue(key: string, event: Event): void {
-    const value = parseInt((event.target as HTMLInputElement).value, 10);
-    this.ensureEditedMappings();
-    this.editedMappings![key] = value;
-  }
-
-  /** Adds a new empty mapping entry. */
-  onAddMapping(): void {
-    this.ensureEditedMappings();
-    this.editedMappings![`mapping_${++this.nextMappingId}`] = 0;
-  }
-
-  /**
-   * Removes a mapping entry by key.
-   * @param key - the mapping key to remove
-   */
-  onRemoveMapping(key: string): void {
-    this.ensureEditedMappings();
-    delete this.editedMappings![key];
-  }
-
-  /** Initializes editedMappings from the service mappings if not yet set. */
-  private ensureEditedMappings(): void {
-    if (!this.editedMappings) {
-      this.editedMappings = {
-        ...((this.svc.mappings as Record<string, number>) ?? {}),
-      };
-    }
   }
 }

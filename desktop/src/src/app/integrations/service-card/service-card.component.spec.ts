@@ -65,17 +65,9 @@ function makeRedmineSvc(): IntegrationStatusEntry {
         oauth_flow: false,
         optional: true,
       },
-      {
-        key: 'project_name',
-        label: 'Project Name',
-        field_type: 'text',
-        placeholder: 'My Project',
-        oauth_flow: false,
-        optional: true,
-      },
     ],
     current_values: {},
-    mappings: { tracker: 1 },
+    mappings: undefined,
   };
 }
 
@@ -280,20 +272,6 @@ describe('ServiceCardComponent', () => {
       component.onSave(event);
       expect(component.editedValues).toEqual({});
     });
-
-    it('includes redmine mappings when service is redmine', () => {
-      component.svc = makeRedmineSvc();
-      component.editedValues = { host_url: 'https://redmine.test' };
-      component.editedMappings = { tracker: 2, status: 5 };
-      const spy = vi.spyOn(component.saveCredentials, 'emit');
-      const event = { preventDefault: vi.fn() } as unknown as Event;
-      component.onSave(event);
-      expect(spy).toHaveBeenCalledWith({
-        svc: component.svc,
-        credentials: { host_url: 'https://redmine.test' },
-        mappings: { tracker: 2, status: 5 },
-      });
-    });
   });
 
   it('should emit deleteCredentials when remove button is clicked', () => {
@@ -305,69 +283,6 @@ describe('ServiceCardComponent', () => {
     );
     removeBtn.click();
     expect(spy).toHaveBeenCalledWith(component.svc);
-  });
-
-  describe('mapping helpers', () => {
-    beforeEach(() => {
-      component.svc = makeRedmineSvc();
-    });
-
-    it('getMappingEntries returns entries from service mappings', () => {
-      const entries = component.getMappingEntries();
-      expect(entries).toEqual([{ key: 'tracker', value: 1 }]);
-    });
-
-    it('getMappingEntries returns edited mappings when present', () => {
-      component.editedMappings = { status: 3 };
-      const entries = component.getMappingEntries();
-      expect(entries).toEqual([{ key: 'status', value: 3 }]);
-    });
-
-    it('onAddMapping creates a new entry', () => {
-      component.onAddMapping();
-      expect(component.editedMappings).not.toBeNull();
-      const keys = Object.keys(component.editedMappings!);
-      expect(keys.length).toBeGreaterThan(1);
-    });
-
-    it('onRemoveMapping deletes an entry', () => {
-      component.editedMappings = { tracker: 1, status: 2 };
-      component.onRemoveMapping('tracker');
-      expect(component.editedMappings!['tracker']).toBeUndefined();
-      expect(component.editedMappings!['status']).toBe(2);
-    });
-
-    it('onUpdateMappingKey renames a key', () => {
-      component.editedMappings = { tracker: 1 };
-      const event = { target: { value: 'category' } } as unknown as Event;
-      component.onUpdateMappingKey('tracker', event);
-      expect(component.editedMappings!['tracker']).toBeUndefined();
-      expect(component.editedMappings!['category']).toBe(1);
-    });
-
-    it('onUpdateMappingValue updates the value', () => {
-      component.editedMappings = { tracker: 1 };
-      const event = { target: { value: '99' } } as unknown as Event;
-      component.onUpdateMappingValue('tracker', event);
-      expect(component.editedMappings!['tracker']).toBe(99);
-    });
-  });
-
-  describe('redmine-specific template', () => {
-    it('shows mappings section for redmine when expanded', () => {
-      component.svc = makeRedmineSvc();
-      component.expanded = true;
-      fixture.detectChanges();
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="mappings-section"]')
-      ).not.toBeNull();
-    });
-
-    it('does not show mappings section for non-redmine services', () => {
-      component.expanded = true;
-      fixture.detectChanges();
-      expect(fixture.nativeElement.querySelector('[data-testid="mappings-section"]')).toBeNull();
-    });
   });
 
   it('should set correct data-testid attribute', () => {
@@ -567,9 +482,6 @@ describe('ServiceCardComponent', () => {
       expect(el.querySelector('label[for="redmine-project_id"]').textContent).toContain(
         '(optional)'
       );
-      expect(el.querySelector('label[for="redmine-project_name"]').textContent).toContain(
-        '(optional)'
-      );
     });
 
     it('does not mark optional fields as required', () => {
@@ -581,7 +493,6 @@ describe('ServiceCardComponent', () => {
       expect(el.querySelector('#redmine-api_key').required).toBe(true);
       expect(el.querySelector('#redmine-host_url').required).toBe(true);
       expect(el.querySelector('#redmine-project_id').required).toBe(false);
-      expect(el.querySelector('#redmine-project_name').required).toBe(false);
     });
 
     it('onSave sends empty string for cleared optional fields', () => {
