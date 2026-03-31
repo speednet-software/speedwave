@@ -2,7 +2,14 @@
  * Pipeline Tools - 5 tools for GitLab CI/CD pipelines
  */
 
-import { Tool, ToolDefinition, jsonResult, textResult, errorResult } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  jsonResult,
+  textResult,
+  errorResult,
+  notConfiguredMessage,
+} from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
 
@@ -299,8 +306,7 @@ await gitlab.triggerPipeline({
  * @param client - GitLab client instance
  */
 export function createPipelineTools(client: GitLabClient | null): ToolDefinition[] {
-  const unconfigured = async () =>
-    errorResult('GitLab not configured. Run: speedwave setup gitlab');
+  const unconfigured = async () => errorResult(notConfiguredMessage('GitLab'));
   if (!client) {
     return [
       { tool: listPipelineIdsTool, handler: unconfigured },

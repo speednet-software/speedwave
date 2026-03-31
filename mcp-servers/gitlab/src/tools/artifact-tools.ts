@@ -2,7 +2,13 @@
  * Artifact Tools - 3 tools for GitLab CI/CD artifacts
  */
 
-import { Tool, ToolDefinition, jsonResult, errorResult } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  jsonResult,
+  errorResult,
+  notConfiguredMessage,
+} from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
 
@@ -122,8 +128,7 @@ const deleteArtifactsTool: Tool = {
  * @param client - GitLab client instance
  */
 export function createArtifactTools(client: GitLabClient | null): ToolDefinition[] {
-  const unconfigured = async () =>
-    errorResult('GitLab not configured. Run: speedwave setup gitlab');
+  const unconfigured = async () => errorResult(notConfiguredMessage('GitLab'));
   if (!client) {
     return [
       { tool: listArtifactsTool, handler: unconfigured },

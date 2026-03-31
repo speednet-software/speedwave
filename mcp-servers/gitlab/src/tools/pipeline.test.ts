@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
 import { createPipelineTools } from './pipeline-tools.js';
 import type { GitLabClient } from '../client.js';
 
@@ -154,7 +155,7 @@ describe('pipeline-tools', () => {
         content: [
           {
             type: 'text',
-            text: 'Error: Network error. Check your GitLab URL. Run: speedwave setup gitlab',
+            text: `Error: ${withSetupGuidance('Network error. Check your GitLab URL.')}`,
           },
         ],
         isError: true,
@@ -559,7 +560,10 @@ describe('pipeline-tools', () => {
         const result = await handler({});
         expect(result).toEqual({
           content: [
-            { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+            {
+              type: 'text',
+              text: `Error: ${notConfiguredMessage('GitLab')}`,
+            },
           ],
           isError: true,
         });
@@ -574,7 +578,10 @@ describe('pipeline-tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });
@@ -588,7 +595,10 @@ describe('pipeline-tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });
@@ -602,7 +612,10 @@ describe('pipeline-tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });
@@ -616,7 +629,10 @@ describe('pipeline-tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });
@@ -630,7 +646,10 @@ describe('pipeline-tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });

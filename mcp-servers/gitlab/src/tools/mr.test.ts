@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createMrTools } from './mr-tools.js';
 import { GitLabClient } from '../client.js';
 
@@ -690,7 +691,10 @@ describe('MR Tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });
@@ -703,7 +707,10 @@ describe('MR Tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });
@@ -721,7 +728,10 @@ describe('MR Tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });
@@ -734,7 +744,10 @@ describe('MR Tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });
@@ -747,7 +760,10 @@ describe('MR Tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });
@@ -764,7 +780,10 @@ describe('MR Tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });
@@ -777,7 +796,10 @@ describe('MR Tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });

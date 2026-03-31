@@ -10,6 +10,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
 import { createToolDefinitions } from './tools/index.js';
 import {
   handleListFileIds,
@@ -43,7 +44,7 @@ function createMockClient(): MockClient {
       const e = error as { message?: string };
       const message = e.message || '';
       if (message.includes('401') || message.includes('Unauthorized')) {
-        return 'Authentication failed. Your SharePoint token may have expired. Run: speedwave setup sharepoint';
+        return withSetupGuidance('Authentication failed. Your SharePoint token may have expired.');
       }
       if (message.includes('403') || message.includes('Forbidden')) {
         return 'Permission denied. Your SharePoint token may not have sufficient permissions.';
@@ -55,7 +56,7 @@ function createMockClient(): MockClient {
         return 'Invalid path: security check failed (path traversal not allowed).';
       }
       if (message.includes('refresh') || message.includes('token')) {
-        return 'Token refresh failed. Run: speedwave setup sharepoint';
+        return withSetupGuidance('Token refresh failed.');
       }
       return message || 'SharePoint API error';
     }),
@@ -118,7 +119,7 @@ describe('SharePoint handler integration', () => {
 
       expect(result.isError).toBe(true);
       expect(parsed.code).toBe('NOT_CONFIGURED');
-      expect(parsed.message).toContain('speedwave setup sharepoint');
+      expect(parsed.message).toBe(notConfiguredMessage('SharePoint'));
     });
 
     it('getFileFull returns NOT_CONFIGURED error', async () => {

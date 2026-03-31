@@ -9,7 +9,13 @@
  */
 
 import { WebClient } from '@slack/web-api';
-import { ToolHandler, ToolsCallResult, loadToken, ts } from '@speedwave/mcp-shared';
+import {
+  ToolHandler,
+  ToolsCallResult,
+  loadToken,
+  ts,
+  notConfiguredMessage,
+} from '@speedwave/mcp-shared';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Helper Functions & Types
@@ -276,7 +282,7 @@ export function createSlackHandlers(slackClients: { bot: WebClient; user: WebCli
       content: [
         {
           type: 'text',
-          text: '❌ Slack integration not configured. Run: speedwave setup slack',
+          text: notConfiguredMessage('Slack'),
         },
       ],
       isError: true,
