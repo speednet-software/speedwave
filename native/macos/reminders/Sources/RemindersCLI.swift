@@ -171,15 +171,9 @@ func createReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
         reminder.priority = priority
     }
 
-    if let notes = params["notes"] as? String {
-        reminder.notes = notes
-    }
-
-    if #available(macOS 15.0, *) {
-        if let tags = params["tags"] as? [String], !tags.isEmpty {
-            reminder.tags = tags
-        }
-    }
+    let userNotes = params["notes"] as? String
+    let tags = params["tags"] as? [String] ?? []
+    reminder.notes = combineTags(tags, with: userNotes)
 
     try store.save(reminder, commit: true)
 
@@ -209,6 +203,10 @@ func completeReminder(store: EKEventStore, params: [String: Any]) throws -> [Str
 // MARK: - Helpers
 
 func reminderToDict(_ r: EKReminder) -> [String: Any] {
+    let rawNotes = r.notes ?? ""
+    let tags = extractTags(from: rawNotes)
+    let cleanNotes = stripTags(from: rawNotes)
+
     var dict: [String: Any] = [
         "id": r.calendarItemIdentifier,
         "name": r.title ?? "",
@@ -216,6 +214,10 @@ func reminderToDict(_ r: EKReminder) -> [String: Any] {
         "priority": r.priority,
         "list": r.calendar?.title ?? "",
     ]
+
+    if !tags.isEmpty {
+        dict["tags"] = tags
+    }
 
     if let dueDate = r.dueDateComponents?.date {
         dict["due_date"] = iso8601String(from: dueDate)
@@ -225,18 +227,55 @@ func reminderToDict(_ r: EKReminder) -> [String: Any] {
         dict["completion_date"] = iso8601String(from: completionDate)
     }
 
-    if let notes = r.notes, !notes.isEmpty {
-        dict["notes"] = notes
-    }
-
-    if #available(macOS 15.0, *) {
-        let tags = r.tags
-        if !tags.isEmpty {
-            dict["tags"] = tags
-        }
+    if !cleanNotes.isEmpty {
+        dict["notes"] = cleanNotes
     }
 
     return dict
+}
+
+// MARK: - Tag Helpers
+
+/// Tags are stored in the notes field using `[#tag]` format, e.g. `[#work] [#urgent]\nActual notes`.
+private let tagRegex = try! NSRegularExpression(pattern: #"\[#([^\]]+)\]"#)
+
+/// Extract tag names from notes content.
+func extractTags(from notes: String) -> [String] {
+    let range = NSRange(notes.startIndex..., in: notes)
+    let matches = tagRegex.matches(in: notes, range: range)
+    var tags: [String] = []
+    for match in matches {
+        if let tagRange = Range(match.range(at: 1), in: notes) {
+            let tag = String(notes[tagRange]).trimmingCharacters(in: .whitespaces).lowercased()
+            if !tag.isEmpty && !tags.contains(tag) {
+                tags.append(tag)
+            }
+        }
+    }
+    return tags
+}
+
+/// Remove `[#tag]` markers from notes, returning clean content.
+func stripTags(from notes: String) -> String {
+    let range = NSRange(notes.startIndex..., in: notes)
+    return tagRegex.stringByReplacingMatches(in: notes, range: range, withTemplate: "")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+}
+
+/// Format tags as `[#tag]` markers and combine with notes.
+func combineTags(_ tags: [String], with notes: String?) -> String? {
+    let formatted = tags
+        .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+        .filter { !$0.isEmpty }
+        .map { "[#\($0)]" }
+        .joined(separator: " ")
+    let clean = notes?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+    if formatted.isEmpty && clean.isEmpty { return nil }
+    if formatted.isEmpty { return clean }
+    if clean.isEmpty { return formatted }
+    return "\(formatted)\n\(clean)"
 }
 
 func parseISO8601(_ string: String) -> Date? {

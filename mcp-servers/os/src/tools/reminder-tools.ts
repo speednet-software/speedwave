@@ -41,7 +41,7 @@ interface CreateReminderParams {
   priority?: number;
   /** Additional notes. */
   notes?: string;
-  /** Tags to assign (macOS 15+; silently ignored on older macOS). */
+  /** Tags to assign (stored as [#tag] markers in the notes field). */
   tags?: string[];
 }
 
@@ -120,7 +120,11 @@ const listRemindersTool: Tool = {
             completed: { type: 'boolean' },
             priority: { type: 'number', description: '0=none, 1=high, 5=medium, 9=low' },
             notes: { type: 'string', description: 'Reminder notes/body' },
-            tags: { type: 'array', items: { type: 'string' }, description: 'Tags (macOS 15+)' },
+            tags: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Tags extracted from [#tag] markers in the notes',
+            },
             list_id: { type: 'string' },
           },
         },
@@ -162,7 +166,11 @@ const getReminderTool: Tool = {
       completed: { type: 'boolean' },
       completed_date: { type: 'string', description: 'ISO8601 date' },
       priority: { type: 'number' },
-      tags: { type: 'array', items: { type: 'string' }, description: 'Tags (macOS 15+)' },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Tags extracted from [#tag] markers in the notes',
+      },
       list_id: { type: 'string' },
       list_name: { type: 'string' },
     },
@@ -196,7 +204,7 @@ const createReminderTool: Tool = {
       tags: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Tags to assign (macOS 15+; silently ignored on older macOS)',
+        description: 'Tags to assign (stored as [#tag] markers in the notes field)',
       },
     },
     required: ['name'],
