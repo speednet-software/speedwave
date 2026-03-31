@@ -39,7 +39,7 @@ import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
 
       @if (error) {
         <div
-          class="mb-4 px-3 py-2 bg-sw-error-bg border border-sw-accent rounded text-sw-accent text-[13px]"
+          class="mb-4 px-3 py-2 bg-sw-error-bg border border-sw-accent rounded text-sw-accent text-[13px] whitespace-pre-line"
           data-testid="integrations-error"
         >
           {{ error }}

@@ -72,6 +72,7 @@ function resolveProjectRoot(): string {
 
 /**
  * Resolve native CLI binary paths for macOS (Swift binaries).
+ * SYNC: binary paths must match desktop/src-tauri/src/integrations_cmd.rs::resolve_native_cli_binary()
  */
 function resolveDarwinPaths(): PlatformPaths {
   if (isDevMode()) {
