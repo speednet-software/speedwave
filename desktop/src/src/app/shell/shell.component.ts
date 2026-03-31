@@ -81,6 +81,54 @@ import { ProjectStateService } from '../services/project-state.service';
           </div>
         }
       }
+      @if (projectState.needsRestart && projectState.status === 'ready') {
+        <div
+          class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-sw-bg-darkest/[0.92]"
+          role="alertdialog"
+          aria-modal="true"
+          aria-label="Container restart required"
+          data-testid="restart-overlay"
+        >
+          @if (projectState.restarting) {
+            <div
+              class="w-8 h-8 border-[3px] border-sw-border-dark border-t-sw-accent rounded-full animate-sw-spin"
+            ></div>
+            <p class="mt-4 font-mono text-sm text-sw-text">Restarting containers...</p>
+            <p class="mt-2 font-mono text-[11px] text-sw-text-faint">
+              This may take a minute while containers are recreated
+            </p>
+          } @else {
+            <span class="text-sw-accent text-lg font-mono font-bold">Restart Required</span>
+            <p class="mt-3 max-w-md text-center font-mono text-sm text-sw-text-muted">
+              Changes require container restart to take effect.
+            </p>
+            @if (projectState.restartError) {
+              <div
+                class="mt-3 px-3 py-2 bg-sw-error-bg border border-sw-accent rounded text-sw-accent text-[13px] max-w-md text-center"
+                data-testid="restart-error"
+              >
+                {{ projectState.restartError }}
+              </div>
+            }
+            <div class="mt-6 flex gap-3">
+              <button
+                class="px-6 py-2.5 rounded text-sm font-semibold font-mono border-none cursor-pointer transition-colors bg-sw-accent text-white hover:bg-sw-accent-hover"
+                data-testid="restart-now-btn"
+                (click)="restartContainers()"
+              >
+                Restart Now
+              </button>
+              <button
+                class="px-6 py-2.5 rounded text-sm font-semibold font-mono border border-sw-border bg-transparent text-sw-text cursor-pointer transition-colors hover:bg-sw-bg-dark"
+                data-testid="restart-later-btn"
+                (click)="dismissRestart()"
+              >
+                Later
+              </button>
+            </div>
+          }
+        </div>
+      }
       <app-update-notification />
       <header
         class="flex items-center justify-between px-4 py-2 bg-sw-bg-dark border-b border-sw-border"
@@ -169,6 +217,16 @@ export class ShellComponent implements OnInit, OnDestroy {
   /** Retries system check (prereqs + security). */
   retryCheck(): void {
     this.projectState.ensureContainersRunning();
+  }
+
+  /** Triggers a container restart from the overlay. */
+  restartContainers(): void {
+    this.projectState.restartContainers();
+  }
+
+  /** Dismisses the restart overlay. */
+  dismissRestart(): void {
+    this.projectState.dismissRestart();
   }
 
   /** Dismisses the error banner. */

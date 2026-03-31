@@ -433,6 +433,11 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
           } else {
             resolved = resolveParams(p, client.getMappings());
           }
+          if (resolved.assigned_to && !resolved.assigned_to_id) {
+            const userId = await client.resolveUser(resolved.assigned_to as string);
+            if (userId) resolved.assigned_to_id = userId;
+            delete resolved.assigned_to;
+          }
           const result = await client.listIssues(
             resolved as Parameters<typeof client.listIssues>[0]
           );

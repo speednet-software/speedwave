@@ -48,6 +48,8 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
             r"(?i)([?&](?:api_key|apikey|key|token|secret|password|access_token)=)[^&\s]+",
             "${1}***REDACTED***",
         ),
+        // Redmine API key header: X-Redmine-API-Key: <value>
+        (r"(?i)(X-Redmine-API-Key:\s*)\S+", "${1}***REDACTED***"),
         // Generic secret assignments: password=<value>, secret=<value>, api_key=<value>
         // Matches key=value, key="value", and key='value' patterns (not in URLs — no ? or & prefix).
         // The trailing `"?` catches a lone closing quote that follows an unquoted value
@@ -112,7 +114,7 @@ mod tests {
     /// The definitions vec contains exactly this many rules. If a new rule is
     /// added to the vec but fails to compile, RULES.len() will be less than
     /// this constant and the test will fail, catching the silent drop.
-    const EXPECTED_RULE_COUNT: usize = 15;
+    const EXPECTED_RULE_COUNT: usize = 16;
 
     #[test]
     fn test_rules_count() {
@@ -147,6 +149,7 @@ mod tests {
             r"sk-ant-[A-Za-z0-9_-]+",
             r"(://[^:/@\s]+:)[^@\s]+(@)",
             r"(?i)([?&](?:api_key|apikey|key|token|secret|password|access_token)=)[^&\s]+",
+            r"(?i)(X-Redmine-API-Key:\s*)\S+",
             r#"(?i)((?:password|passwd|secret|api_key|apikey|api_secret|access_token|private_key)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s"',;&]+)"?"#,
         ];
 
@@ -883,6 +886,37 @@ mod tests {
         assert!(
             !output.contains("MIIEvAIBADANBg"),
             "PKCS#8 PEM key content should not appear: {output}"
+        );
+    }
+
+    // ── Redmine API key header tests ──────────────────────────────────────
+
+    #[test]
+    fn test_redmine_api_key_header_redaction() {
+        let input = "X-Redmine-API-Key: abc123";
+        let output = sanitize(input);
+        assert!(
+            !output.contains("abc123"),
+            "Redmine API key should be redacted: {output}"
+        );
+        assert!(
+            output.contains("X-Redmine-API-Key: ***REDACTED***"),
+            "Redmine API key header should show redacted marker: {output}"
+        );
+    }
+
+    #[test]
+    fn test_redmine_api_key_header_false_positive() {
+        // "X-Redmine-API-Key-Length: 40" — not a key value, just a header name
+        // containing the prefix. The regex matches `\S+` after the colon, so
+        // "40" will be redacted. This is acceptable (security > false negatives).
+        let input = "X-Redmine-API-Key-Length: 40";
+        let output = sanitize(input);
+        // The regex pattern `X-Redmine-API-Key:\s*` won't match because the
+        // header name is "X-Redmine-API-Key-Length" (no colon after "Key").
+        assert_eq!(
+            output, input,
+            "X-Redmine-API-Key-Length should not be redacted (different header name)"
         );
     }
 

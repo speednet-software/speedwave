@@ -128,6 +128,23 @@ fn configure_plugin_tokens_with_base(
 fn write_token_files(token_dir: &Path, tokens: &HashMap<String, String>) -> anyhow::Result<()> {
     std::fs::create_dir_all(token_dir)?;
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode_700 = std::fs::Permissions::from_mode(0o700);
+        // token_dir = <data_dir>/tokens/<project>/<service>
+        // See also: setup_wizard.rs:write_tokens() — identical pattern (2 of 3, Rule of Three)
+        std::fs::set_permissions(token_dir, mode_700.clone())?;
+        if let Some(project_dir) = token_dir.parent() {
+            // project_dir = <data_dir>/tokens/<project>
+            std::fs::set_permissions(project_dir, mode_700.clone())?;
+            if let Some(tokens_dir) = project_dir.parent() {
+                // tokens_dir = <data_dir>/tokens — stop here, don't go to data_dir
+                std::fs::set_permissions(tokens_dir, mode_700)?;
+            }
+        }
+    }
+
     for (key, value) in tokens {
         let file_path = token_dir.join(key);
         std::fs::write(&file_path, value)?;
@@ -2746,6 +2763,63 @@ mod tests {
         assert!(
             result.is_ok(),
             "nonexistent plugins dir should return Ok(())"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_token_files_secures_token_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let original_mode = std::fs::metadata(data_dir).unwrap().permissions().mode() & 0o777;
+
+        let token_dir = data_dir.join("tokens").join("proj").join("slack");
+        let tokens = HashMap::from([("token.txt".to_string(), "secret".to_string())]);
+        write_token_files(&token_dir, &tokens).unwrap();
+
+        // All 3 levels should be 0o700
+        assert_eq!(
+            std::fs::metadata(&token_dir).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "tokens/proj/slack should be 0o700"
+        );
+        assert_eq!(
+            std::fs::metadata(token_dir.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "tokens/proj should be 0o700"
+        );
+        assert_eq!(
+            std::fs::metadata(token_dir.parent().unwrap().parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "tokens should be 0o700"
+        );
+
+        // data_dir itself should NOT have been changed
+        assert_eq!(
+            std::fs::metadata(data_dir).unwrap().permissions().mode() & 0o777,
+            original_mode,
+            "data_dir should not have been changed"
+        );
+
+        // Token file should be 0o600
+        assert_eq!(
+            std::fs::metadata(token_dir.join("token.txt"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "token file should be 0o600"
         );
     }
 }

@@ -39,37 +39,6 @@ import { open } from '@tauri-apps/plugin-dialog';
       </div>
     }
 
-    @if (needsRestart) {
-      <div
-        class="bg-sw-accent text-white px-5 py-3 rounded-lg flex justify-between items-center mb-5"
-        data-testid="plugins-restart-banner"
-      >
-        <div class="flex flex-col gap-1">
-          <span>Changes require container restart to take effect</span>
-          @if (restarting) {
-            <span class="text-[11px] opacity-80"
-              >This may take a minute while containers are recreated</span
-            >
-          }
-        </div>
-        <button
-          class="bg-white text-sw-accent border-none px-4 py-2 rounded font-semibold font-mono text-[13px] flex items-center gap-2 whitespace-nowrap cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
-          data-testid="plugins-restart"
-          (click)="restartContainers()"
-          [disabled]="restarting"
-        >
-          @if (restarting) {
-            <span
-              class="inline-block w-3 h-3 border-2 border-sw-accent/30 border-t-sw-accent rounded-full animate-sw-spin"
-            ></span>
-            Restarting...
-          } @else {
-            Restart Now
-          }
-        </button>
-      </div>
-    }
-
     <div>
       <h1 class="text-xl text-sw-accent m-0 mb-6">Plugins</h1>
 
@@ -134,8 +103,6 @@ import { open } from '@tauri-apps/plugin-dialog';
 export class PluginsComponent implements OnInit, OnDestroy {
   plugins: PluginStatusEntry[] = [];
   expandedPlugin: string | null = null;
-  needsRestart = false;
-  restarting = false;
   installing = false;
   error = '';
   success = '';
@@ -228,7 +195,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
         zipPath: selected,
       });
       this.success = msg;
-      this.needsRestart = true;
+      this.projectState.requestRestart();
       await this.loadPlugins();
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
@@ -256,7 +223,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
         enabled,
       });
       plugin.enabled = enabled;
-      this.needsRestart = true;
+      this.projectState.requestRestart();
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
       (event.target as HTMLInputElement).checked = !enabled;
@@ -278,7 +245,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
         credentials: payload.credentials,
       });
 
-      this.needsRestart = true;
+      this.projectState.requestRestart();
       await this.loadPlugins();
 
       const updated = this.plugins.find((p) => p.slug === payload.plugin.slug);
@@ -309,7 +276,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
         project: this.activeProject,
         slug: plugin.slug,
       });
-      this.needsRestart = true;
+      this.projectState.requestRestart();
       await this.loadPlugins();
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
@@ -327,29 +294,11 @@ export class PluginsComponent implements OnInit, OnDestroy {
     try {
       await this.tauri.invoke('remove_plugin', { slug: plugin.slug });
       this.success = `Plugin '${plugin.name}' removed`;
-      this.needsRestart = true;
+      this.projectState.requestRestart();
       await this.loadPlugins();
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
     }
-    this.cdr.markForCheck();
-  }
-
-  /** Restarts containers to apply pending plugin changes. */
-  async restartContainers(): Promise<void> {
-    this.restarting = true;
-    this.error = '';
-    this.success = '';
-    this.cdr.markForCheck();
-    try {
-      await this.tauri.invoke('restart_integration_containers', {
-        project: this.activeProject,
-      });
-      this.needsRestart = false;
-    } catch (e: unknown) {
-      this.error = e instanceof Error ? e.message : String(e);
-    }
-    this.restarting = false;
     this.cdr.markForCheck();
   }
 }

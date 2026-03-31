@@ -1954,4 +1954,289 @@ describe('initializeRedmineClient', () => {
     expect(client).not.toBeNull();
     expect(client?.getMappings()).toEqual({});
   });
+
+  //═══════════════════════════════════════════════════════════════════════════════
+  // Eager project_name fetch
+  //═══════════════════════════════════════════════════════════════════════════════
+
+  describe('eager project_name fetch', () => {
+    it('should fetch project_name when project_id is set but project_name is absent', async () => {
+      mockedFs.readFile.mockImplementation(async (path: any) => {
+        if (path.includes('api_key')) {
+          return 'valid-api-key-123';
+        }
+        if (path.includes('config.json')) {
+          return JSON.stringify({
+            host_url: 'https://redmine.example.com',
+            project_id: 'my-project',
+          });
+        }
+        throw new Error('File not found');
+      });
+
+      mockAxiosInstance.get.mockResolvedValue({
+        data: { project: { id: 42, name: 'My Project', identifier: 'my-project' } },
+      });
+
+      const client = await initializeRedmineClient();
+
+      expect(client).not.toBeNull();
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/my-project.json', {
+        params: {},
+      });
+      expect(client?.getConfig().project_name).toBe('My Project');
+      expect(console.log).toHaveBeenCalledWith(
+        expect.stringContaining('project name fetched: "My Project"')
+      );
+    });
+
+    it('should use existing project_name when both project_id and project_name are present', async () => {
+      mockedFs.readFile.mockImplementation(async (path: any) => {
+        if (path.includes('api_key')) {
+          return 'valid-api-key-123';
+        }
+        if (path.includes('config.json')) {
+          return JSON.stringify({
+            host_url: 'https://redmine.example.com',
+            project_id: 'my-project',
+            project_name: 'Existing Name',
+          });
+        }
+        throw new Error('File not found');
+      });
+
+      const client = await initializeRedmineClient();
+
+      expect(client).not.toBeNull();
+      expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+      expect(client?.getConfig().project_name).toBe('Existing Name');
+    });
+
+    it('should handle network error from showProject gracefully', async () => {
+      mockedFs.readFile.mockImplementation(async (path: any) => {
+        if (path.includes('api_key')) {
+          return 'valid-api-key-123';
+        }
+        if (path.includes('config.json')) {
+          return JSON.stringify({
+            host_url: 'https://redmine.example.com',
+            project_id: 'my-project',
+          });
+        }
+        throw new Error('File not found');
+      });
+
+      mockAxiosInstance.get.mockRejectedValue(new Error('Network error'));
+
+      const client = await initializeRedmineClient();
+
+      expect(client).not.toBeNull();
+      expect(client?.getConfig().project_name).toBeUndefined();
+      expect(console.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Could not fetch project name')
+      );
+    });
+
+    it('should handle 404 from showProject gracefully', async () => {
+      mockedFs.readFile.mockImplementation(async (path: any) => {
+        if (path.includes('api_key')) {
+          return 'valid-api-key-123';
+        }
+        if (path.includes('config.json')) {
+          return JSON.stringify({
+            host_url: 'https://redmine.example.com',
+            project_id: 'nonexistent-project',
+          });
+        }
+        throw new Error('File not found');
+      });
+
+      const axiosError = new AxiosError('Not Found', '404', undefined, undefined, {
+        status: 404,
+        statusText: 'Not Found',
+        headers: {},
+        config: {} as any,
+        data: {},
+      });
+      mockAxiosInstance.get.mockRejectedValue(axiosError);
+
+      const client = await initializeRedmineClient();
+
+      expect(client).not.toBeNull();
+      expect(client?.getConfig().project_name).toBeUndefined();
+      expect(console.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Could not fetch project name')
+      );
+    });
+
+    it('should handle non-Error thrown by showProject gracefully', async () => {
+      mockedFs.readFile.mockImplementation(async (path: any) => {
+        if (path.includes('api_key')) {
+          return 'valid-api-key-123';
+        }
+        if (path.includes('config.json')) {
+          return JSON.stringify({
+            host_url: 'https://redmine.example.com',
+            project_id: 'my-project',
+          });
+        }
+        throw new Error('File not found');
+      });
+
+      mockAxiosInstance.get.mockRejectedValue('string error');
+
+      const client = await initializeRedmineClient();
+
+      expect(client).not.toBeNull();
+      expect(client?.getConfig().project_name).toBeUndefined();
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('string error'));
+    });
+
+    it('should not fetch when project_id is absent and project_name is absent', async () => {
+      mockedFs.readFile.mockImplementation(async (path: any) => {
+        if (path.includes('api_key')) {
+          return 'valid-api-key-123';
+        }
+        if (path.includes('config.json')) {
+          return JSON.stringify({
+            host_url: 'https://redmine.example.com',
+          });
+        }
+        throw new Error('File not found');
+      });
+
+      const client = await initializeRedmineClient();
+
+      expect(client).not.toBeNull();
+      expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+      expect(client?.getConfig().project_name).toBeUndefined();
+    });
+
+    it('should not fetch when project_id is empty string', async () => {
+      mockedFs.readFile.mockImplementation(async (path: any) => {
+        if (path.includes('api_key')) {
+          return 'valid-api-key-123';
+        }
+        if (path.includes('config.json')) {
+          return JSON.stringify({
+            host_url: 'https://redmine.example.com',
+            project_id: '',
+          });
+        }
+        throw new Error('File not found');
+      });
+
+      const client = await initializeRedmineClient();
+
+      expect(client).not.toBeNull();
+      expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+    });
+
+    it('should not fetch when project_id is null', async () => {
+      mockedFs.readFile.mockImplementation(async (path: any) => {
+        if (path.includes('api_key')) {
+          return 'valid-api-key-123';
+        }
+        if (path.includes('config.json')) {
+          return JSON.stringify({
+            host_url: 'https://redmine.example.com',
+            project_id: null,
+          });
+        }
+        throw new Error('File not found');
+      });
+
+      const client = await initializeRedmineClient();
+
+      expect(client).not.toBeNull();
+      expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+    });
+
+    it('should fetch when project_id is "0" (valid slug, falsy in JS)', async () => {
+      mockedFs.readFile.mockImplementation(async (path: any) => {
+        if (path.includes('api_key')) {
+          return 'valid-api-key-123';
+        }
+        if (path.includes('config.json')) {
+          return JSON.stringify({
+            host_url: 'https://redmine.example.com',
+            project_id: '0',
+          });
+        }
+        throw new Error('File not found');
+      });
+
+      mockAxiosInstance.get.mockResolvedValue({
+        data: { project: { id: 0, name: 'Zero Project', identifier: '0' } },
+      });
+
+      const client = await initializeRedmineClient();
+
+      expect(client).not.toBeNull();
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/0.json', { params: {} });
+      expect(client?.getConfig().project_name).toBe('Zero Project');
+    });
+
+    it('should pass project_id with special characters to showProject as-is', async () => {
+      mockedFs.readFile.mockImplementation(async (path: any) => {
+        if (path.includes('api_key')) {
+          return 'valid-api-key-123';
+        }
+        if (path.includes('config.json')) {
+          return JSON.stringify({
+            host_url: 'https://redmine.example.com',
+            project_id: 'proj/with&special chars',
+          });
+        }
+        throw new Error('File not found');
+      });
+
+      mockAxiosInstance.get.mockResolvedValue({
+        data: {
+          project: {
+            id: 99,
+            name: 'Special Project',
+            identifier: 'proj/with&special chars',
+          },
+        },
+      });
+
+      const client = await initializeRedmineClient();
+
+      expect(client).not.toBeNull();
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/proj/with&special chars.json', {
+        params: {},
+      });
+      expect(client?.getConfig().project_name).toBe('Special Project');
+    });
+
+    it('should pass project_id with Unicode to showProject as-is', async () => {
+      mockedFs.readFile.mockImplementation(async (path: any) => {
+        if (path.includes('api_key')) {
+          return 'valid-api-key-123';
+        }
+        if (path.includes('config.json')) {
+          return JSON.stringify({
+            host_url: 'https://redmine.example.com',
+            project_id: 'проект-юникод',
+          });
+        }
+        throw new Error('File not found');
+      });
+
+      mockAxiosInstance.get.mockResolvedValue({
+        data: {
+          project: { id: 100, name: 'Unicode Project', identifier: 'проект-юникод' },
+        },
+      });
+
+      const client = await initializeRedmineClient();
+
+      expect(client).not.toBeNull();
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/проект-юникод.json', {
+        params: {},
+      });
+      expect(client?.getConfig().project_name).toBe('Unicode Project');
+    });
+  });
 });

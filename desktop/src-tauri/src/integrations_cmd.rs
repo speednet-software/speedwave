@@ -23,8 +23,8 @@ fn redmine_config_json_fields() -> Vec<&'static str> {
 }
 
 // ---------------------------------------------------------------------------
-// Redmine helpers — Redmine stores host_url, project_id, and project_name
-// inside a single config.json file rather than as individual credential files.
+// Redmine helpers — Redmine stores host_url and project_id inside a single
+// config.json file rather than as individual credential files.
 // These helpers isolate that difference so the generic handlers stay clean.
 // ---------------------------------------------------------------------------
 
@@ -78,7 +78,7 @@ fn read_redmine_current_values(
 }
 
 /// Saves Redmine credentials: secret fields go to individual files,
-/// config fields (host_url, project_id, project_name) go into config.json.
+/// config fields (host_url, project_id) go into config.json.
 fn save_redmine_credentials(
     svc_dir: &std::path::Path,
     credentials: &std::collections::HashMap<String, String>,
@@ -247,7 +247,7 @@ pub(crate) fn is_service_configured(project: &str, service: &str) -> bool {
         serde_json::json!({})
     };
 
-    // Skip optional fields (e.g. Redmine project_id/project_name)
+    // Skip optional fields (e.g. Redmine project_id)
     svc_desc
         .auth_fields
         .iter()
@@ -291,7 +291,7 @@ fn is_service_configured_with_home(home: &std::path::Path, project: &str, servic
         serde_json::json!({})
     };
 
-    // Skip optional fields (e.g. Redmine project_id/project_name)
+    // Skip optional fields (e.g. Redmine project_id)
     svc_desc
         .auth_fields
         .iter()
@@ -723,13 +723,7 @@ mod tests {
         creds.insert("project_id".to_string(), "proj1".to_string());
         creds.insert("api_key".to_string(), "secret123".to_string());
 
-        let allowed = &[
-            "api_key",
-            "host_url",
-            "project_id",
-            "project_name",
-            "config.json",
-        ];
+        let allowed = &["api_key", "host_url", "project_id", "config.json"];
         save_redmine_credentials(svc_dir, &creds, allowed).unwrap();
 
         // api_key should be written as a file
@@ -765,13 +759,7 @@ mod tests {
         let mut creds = std::collections::HashMap::new();
         creds.insert("api_key".to_string(), "secret123".to_string());
 
-        let allowed = &[
-            "api_key",
-            "host_url",
-            "project_id",
-            "project_name",
-            "config.json",
-        ];
+        let allowed = &["api_key", "host_url", "project_id", "config.json"];
         save_redmine_credentials(svc_dir, &creds, allowed).unwrap();
 
         // api_key should be written as a file
@@ -882,7 +870,7 @@ mod tests {
     #[test]
     fn is_service_configured_checks_stored_in_config_json_for_redmine() {
         // Redmine: api_key (file) + host_url (config.json, required) +
-        // project_id/project_name (config.json, optional)
+        // project_id (config.json, optional)
         let tmp = tempfile::tempdir().unwrap();
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "redmine");
 
@@ -910,8 +898,7 @@ mod tests {
         // Add all fields including optional → also true
         let config = serde_json::json!({
             "host_url": "https://redmine.example.com",
-            "project_id": "my-proj",
-            "project_name": "My Project"
+            "project_id": "my-proj"
         });
         std::fs::write(
             svc_dir.join("config.json"),
@@ -955,8 +942,7 @@ mod tests {
         std::fs::write(svc_dir.join("api_key"), "secret").unwrap();
         let config = serde_json::json!({
             "host_url": "",
-            "project_id": "proj",
-            "project_name": "Proj"
+            "project_id": "proj"
         });
         std::fs::write(
             svc_dir.join("config.json"),
@@ -976,5 +962,54 @@ mod tests {
         let nonexistent = tmp.path().join("does-not-exist");
         let result = read_service_config(&nonexistent);
         assert_eq!(result, serde_json::json!({}));
+    }
+
+    #[test]
+    fn credential_files_allowlist_covers_legacy_project_name_file() {
+        // project_name was removed from auth_fields (UI no longer shows it),
+        // but credential_files still includes it so delete_integration_credentials
+        // can clean up legacy installations that have a project_name file on disk.
+        let svc = speedwave_runtime::consts::find_mcp_service("redmine").unwrap();
+
+        assert!(
+            svc.credential_files.contains(&"project_name"),
+            "credential_files must still contain 'project_name' for backward compat"
+        );
+        assert!(
+            !svc.auth_fields.iter().any(|f| f.key == "project_name"),
+            "project_name must not appear in auth_fields (removed from UI)"
+        );
+
+        // Simulate legacy cleanup: create a temp dir with a project_name file,
+        // then iterate credential_files to delete — mirrors delete_integration_credentials logic.
+        let tmp = tempfile::tempdir().unwrap();
+        let svc_dir = tmp.path();
+        std::fs::write(svc_dir.join("project_name"), "Legacy Project").unwrap();
+        std::fs::write(svc_dir.join("api_key"), "secret").unwrap();
+        std::fs::write(
+            svc_dir.join("config.json"),
+            r#"{"host_url":"https://r.test"}"#,
+        )
+        .unwrap();
+
+        for &field in svc.credential_files {
+            let path = svc_dir.join(field);
+            if path.exists() {
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+
+        assert!(
+            !svc_dir.join("project_name").exists(),
+            "legacy project_name file should be cleaned up via credential_files allowlist"
+        );
+        assert!(
+            !svc_dir.join("api_key").exists(),
+            "api_key should also be cleaned up"
+        );
+        assert!(
+            !svc_dir.join("config.json").exists(),
+            "config.json should also be cleaned up"
+        );
     }
 }

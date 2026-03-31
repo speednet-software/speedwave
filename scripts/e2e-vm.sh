@@ -376,10 +376,11 @@ if ($bridges) {
     }
 }
 
-# Remove install dir, user data
+# Remove install dir, user data, build cache
 Remove-Item -Recurse -Force "C:\Speedwave" -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force "$env:USERPROFILE\.speedwave" -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force "C:\speedwave-e2e" -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force "C:\cargo-build" -ErrorAction SilentlyContinue
 Remove-Item -Force "C:\speedwave-setup.exe" -ErrorAction SilentlyContinue
 
 # Remove WSL-side staging dir (in the build distro, not Speedwave distro).

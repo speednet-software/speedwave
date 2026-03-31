@@ -1495,13 +1495,37 @@ export async function initializeRedmineClient(): Promise<RedmineClient | null> {
 
     console.log(`${ts()} ✅ Redmine: URL configured: ${host}`);
 
-    return new RedmineClient(
+    const client = new RedmineClient(
       {
         url: host,
         apiKey,
       },
       projectConfig
     );
+
+    // Eager fetch: if project_id is set but project_name is absent, fetch it from the API.
+    // This keeps getConfig() synchronous — no caller changes needed.
+    // Uses != null check (not truthiness) because "0" is a valid Redmine project slug.
+    if (
+      projectConfig != null &&
+      projectConfig.project_id != null &&
+      projectConfig.project_id !== '' &&
+      projectConfig.project_name == null
+    ) {
+      try {
+        const project = await client.showProject(projectConfig.project_id);
+        projectConfig.project_name = project.name;
+        console.log(
+          `${ts()} ✅ Redmine: project name fetched: "${project.name}" (id: ${projectConfig.project_id})`
+        );
+      } catch (fetchError) {
+        console.warn(
+          `${ts()} Could not fetch project name for "${projectConfig.project_id}": ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`
+        );
+      }
+    }
+
+    return client;
   } catch (error) {
     // Graceful degradation: log warning, return null, let server start
     // DO NOT throw here - see JSDoc above for rationale

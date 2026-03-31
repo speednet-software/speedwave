@@ -283,10 +283,11 @@ SCRIPT
 
     echo "[macos] Installing Homebrew and Node.js..."
     macos_ssh bash <<'SCRIPT'
+set -euo pipefail
 if command -v brew >/dev/null 2>&1; then
     echo "Homebrew already installed: $(brew --version | head -1)"
 else
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 fi
 eval "$(/opt/homebrew/bin/brew shellenv)"
 brew install node@24

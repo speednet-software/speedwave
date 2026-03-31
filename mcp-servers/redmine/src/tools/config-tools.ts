@@ -61,7 +61,8 @@ const getMappingsTool: Tool = {
 
 const getConfigTool: Tool = {
   name: 'getConfig',
-  description: 'Get project configuration (default project_id, project_name, Redmine URL)',
+  description:
+    'Get project configuration (default project_id, project_name, Redmine URL). project_name is auto-fetched from the Redmine API at startup when absent from config.',
   category: 'read',
   keywords: ['redmine', 'config', 'configuration', 'project', 'url', 'settings'],
   example: `const config = await redmine.getConfig()`,

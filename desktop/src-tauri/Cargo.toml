@@ -1,6 +1,6 @@
 [package]
 name = "speedwave-desktop"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 publish = false
 description = "Speedwave desktop application — Tauri backend"
@@ -49,6 +49,7 @@ windows-sys = { version = "0.61", features = [
 e2e = ["dep:tauri-plugin-webdriver"]
 
 [dev-dependencies]
+mockito = "1"
 serial_test = "3"
 
 [build-dependencies]

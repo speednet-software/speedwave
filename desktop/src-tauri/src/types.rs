@@ -288,10 +288,9 @@ mod tests {
         let fields = get_auth_fields("redmine");
         let project_id = fields.iter().find(|f| f.key == "project_id").unwrap();
         assert!(project_id.optional, "project_id must have optional=true");
-        let project_name = fields.iter().find(|f| f.key == "project_name").unwrap();
         assert!(
-            project_name.optional,
-            "project_name must have optional=true"
+            fields.iter().all(|f| f.key != "project_name"),
+            "project_name must not appear in auth_fields (removed from UI)"
         );
         let api_key = fields.iter().find(|f| f.key == "api_key").unwrap();
         assert!(!api_key.optional, "api_key must have optional=false");
