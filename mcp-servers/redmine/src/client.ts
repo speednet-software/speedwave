@@ -183,6 +183,25 @@ export interface RedmineProjectConfig {
 }
 
 /**
+ * Error thrown when an operation violates the configured project scope.
+ * Extends Error so formatError() handles it via the existing instanceof chain.
+ */
+export class ProjectScopeError extends Error {
+  /**
+   * Create a ProjectScopeError.
+   * @param configuredProject - The project identifier from the configuration.
+   * @param requestedResource - Description of the resource that violated scope.
+   */
+  constructor(configuredProject: string, requestedResource?: string) {
+    const msg = requestedResource
+      ? `Project scope violation: configured project is '${configuredProject}', but requested resource belongs to '${requestedResource}'`
+      : `Project scope violation: Redmine is configured to only access project '${configuredProject}'`;
+    super(msg);
+    this.name = 'ProjectScopeError';
+  }
+}
+
+/**
  * Redmine issue object.
  * @interface RedmineIssue
  */
@@ -833,6 +852,83 @@ export class RedmineClient {
   }
 
   //═════════════════════════════════════════════════════════════════════════════
+  // Project Scope Enforcement
+  //═════════════════════════════════════════════════════════════════════════════
+
+  private _scopedProjectIdPromise: Promise<number> | null = null;
+
+  /**
+   * Get the configured project scope.
+   * @returns The configured project_id (trimmed) if set and non-empty, or null (unscoped).
+   */
+  getProjectScope(): string | null {
+    const pid = this.projectConfig?.project_id;
+    return pid && pid.trim() ? pid.trim() : null;
+  }
+
+  /**
+   * Resolve the configured project's numeric ID with promise deduplication.
+   * Caches the result — Redmine project numeric IDs are immutable.
+   * On failure, clears the cache so the next call retries.
+   * @param scope - The configured project identifier.
+   * @returns The numeric project ID.
+   * @throws {ProjectScopeError} When the configured project doesn't exist (404).
+   */
+  private _resolveProjectNumericId(scope: string): Promise<number> {
+    if (this._scopedProjectIdPromise) {
+      return this._scopedProjectIdPromise;
+    }
+
+    const fetchPromise = this.client
+      .get(`/projects/${scope}.json`)
+      .then((response) => response.data.project.id as number)
+      .catch((err) => {
+        this._scopedProjectIdPromise = null;
+        if (axios.isAxiosError(err) && err.response?.status === 404) {
+          throw new ProjectScopeError(
+            scope,
+            `project not found — check your project_id in settings`
+          );
+        }
+        throw err;
+      });
+
+    this._scopedProjectIdPromise = fetchPromise;
+    return fetchPromise;
+  }
+
+  /**
+   * Enforce project_id matches the configured scope.
+   * SSOT for the "reject mismatch, force scope" pattern (6 callers).
+   * @param callerProjectId - The caller-provided project_id (may be undefined).
+   * @returns The project_id to use (scope if scoped, callerProjectId if unscoped).
+   * @throws {ProjectScopeError} When callerProjectId doesn't match scope.
+   */
+  private _enforceProjectId(callerProjectId?: string): string | undefined {
+    const scope = this.getProjectScope();
+    if (!scope) {
+      return callerProjectId;
+    }
+    if (callerProjectId && callerProjectId !== scope) {
+      throw new ProjectScopeError(scope, callerProjectId);
+    }
+    return scope;
+  }
+
+  /**
+   * Validate that an issue belongs to the scoped project before mutation.
+   * SSOT for the "validate issue before mutation" pattern (5+ callers).
+   * @param issueId - The issue ID to validate.
+   * @returns The issue (for callers that need it).
+   * @throws {ProjectScopeError} When the issue belongs to a different project.
+   */
+  private async _ensureIssueInScope(issueId: number): Promise<RedmineIssue | void> {
+    if (this.getProjectScope()) {
+      return this.showIssue(issueId);
+    }
+  }
+
+  //═════════════════════════════════════════════════════════════════════════════
   // Issue Operations
   //═════════════════════════════════════════════════════════════════════════════
 
@@ -858,12 +954,14 @@ export class RedmineClient {
       offset?: number;
     } = {}
   ): Promise<{ issues: RedmineIssue[]; total_count: number }> {
+    const enforcedProjectId = this._enforceProjectId(options.project_id);
+
     const params: Record<string, string | number> = {
       limit: options.limit || 25,
       offset: options.offset || 0,
     };
 
-    if (options.project_id) params.project_id = options.project_id;
+    if (enforcedProjectId) params.project_id = enforcedProjectId;
     if (options.assigned_to_id) params.assigned_to_id = options.assigned_to_id;
     if (options.status_id) params.status_id = options.status_id;
     if (options.parent_id) params.parent_id = options.parent_id;
@@ -887,7 +985,18 @@ export class RedmineClient {
     }
 
     const response = await this.client.get(`/issues/${issueId}.json`, { params });
-    return response.data.issue;
+    const issue = response.data.issue;
+
+    // Inline scope validation: compare issue.project.id against cached numeric project ID
+    const scope = this.getProjectScope();
+    if (scope) {
+      const scopedNumericId = await this._resolveProjectNumericId(scope);
+      if (issue.project.id !== scopedNumericId) {
+        throw new ProjectScopeError(scope, `project_id=${issue.project.id}`);
+      }
+    }
+
+    return issue;
   }
 
   /**
@@ -906,14 +1015,16 @@ export class RedmineClient {
       limit?: number;
     } = {}
   ): Promise<{ results: Array<{ id: number; type: string; title: string }>; total_count: number }> {
+    const enforcedProjectId = this._enforceProjectId(options.project_id);
+
     const params: Record<string, string | number> = {
       q: query,
       issues: 1,
       limit: options.limit || 25,
     };
 
-    if (options.project_id) {
-      params.scope = `project:${options.project_id}`;
+    if (enforcedProjectId) {
+      params.scope = `project:${enforcedProjectId}`;
     }
 
     const response = await this.client.get('/search.json', { params });
@@ -946,6 +1057,8 @@ export class RedmineClient {
     parent_issue_id?: number;
     estimated_hours?: number;
   }): Promise<RedmineIssue> {
+    this._enforceProjectId(options.project_id);
+
     const trimmedSubject = options.subject.trim();
     if (!trimmedSubject) {
       throw new Error('Subject cannot be empty');
@@ -1002,6 +1115,13 @@ export class RedmineClient {
       notes?: string;
     }
   ): Promise<RedmineIssue> {
+    // Validate scope BEFORE the PUT — prevent modifying out-of-scope issues
+    await this._ensureIssueInScope(issueId);
+    // Block moving issues out of scoped project
+    if (options.project_id) {
+      this._enforceProjectId(options.project_id);
+    }
+
     const issue: Partial<IssuePayload> = {};
 
     if (options.project_id) issue.project_id = options.project_id;
@@ -1035,6 +1155,7 @@ export class RedmineClient {
    * @throws {Error} When API request fails.
    */
   async commentIssue(issueId: number, comment: string): Promise<void> {
+    await this._ensureIssueInScope(issueId);
     await this.client.put(`/issues/${issueId}.json`, {
       issue: { notes: sanitizeTextile(comment) },
     });
@@ -1066,12 +1187,20 @@ export class RedmineClient {
       limit?: number;
     } = {}
   ): Promise<{ time_entries: RedmineTimeEntry[]; total_count: number }> {
+    // Always validate explicit project_id against scope
+    const enforcedProjectId = this._enforceProjectId(options.project_id);
+    // If issue_id is present, validate it belongs to scoped project
+    if (options.issue_id && this.getProjectScope()) {
+      await this._ensureIssueInScope(options.issue_id);
+    }
+
     const params: Record<string, string | number> = {
       limit: options.limit || 25,
     };
 
     if (options.issue_id) params.issue_id = options.issue_id;
-    if (options.project_id) params.project_id = options.project_id;
+    // Only inject project_id when issue_id is absent (issue_id filter is sufficient)
+    if (!options.issue_id && enforcedProjectId) params.project_id = enforcedProjectId;
     if (options.user_id) params.user_id = options.user_id;
     if (options.from) params.from = options.from;
     if (options.to) params.to = options.to;
@@ -1100,10 +1229,18 @@ export class RedmineClient {
     comments?: string;
     spent_on?: string;
   }): Promise<RedmineTimeEntry> {
+    // Always validate explicit project_id against scope
+    const enforcedProjectId = this._enforceProjectId(options.project_id);
+    // If issue_id is present, validate it belongs to scoped project
+    if (options.issue_id && this.getProjectScope()) {
+      await this._ensureIssueInScope(options.issue_id);
+    }
+
     const time_entry: TimeEntryPayload = { hours: options.hours };
 
     if (options.issue_id) time_entry.issue_id = options.issue_id;
-    if (options.project_id) time_entry.project_id = options.project_id;
+    // Only inject project_id when issue_id is absent (Redmine derives project from issue)
+    if (!options.issue_id && enforcedProjectId) time_entry.project_id = enforcedProjectId;
     if (options.activity_id) time_entry.activity_id = options.activity_id;
     if (options.comments) time_entry.comments = options.comments;
     if (options.spent_on) time_entry.spent_on = options.spent_on;
@@ -1130,6 +1267,17 @@ export class RedmineClient {
       comments?: string;
     }
   ): Promise<void> {
+    // Fetch-then-validate: check time entry belongs to scoped project before mutation
+    const scope = this.getProjectScope();
+    if (scope) {
+      const response = await this.client.get(`/time_entries/${timeEntryId}.json`);
+      const entry = response.data.time_entry as RedmineTimeEntry;
+      const scopedNumericId = await this._resolveProjectNumericId(scope);
+      if (entry.project.id !== scopedNumericId) {
+        throw new ProjectScopeError(scope, `project_id=${entry.project.id}`);
+      }
+    }
+
     const time_entry: Partial<TimeEntryPayload> = {};
 
     if (options.hours !== undefined) time_entry.hours = options.hours;
@@ -1163,6 +1311,7 @@ export class RedmineClient {
    * @throws {Error} When API request fails.
    */
   async updateJournal(issueId: number, journalId: number, notes: string): Promise<void> {
+    await this._ensureIssueInScope(issueId);
     await this.client.put(`/issues/${issueId}/journals/${journalId}.json`, {
       journal: { notes: sanitizeTextile(notes) },
     });
@@ -1176,6 +1325,7 @@ export class RedmineClient {
    * @throws {Error} When API request fails.
    */
   async deleteJournal(issueId: number, journalId: number): Promise<void> {
+    await this._ensureIssueInScope(issueId);
     await this.client.delete(`/issues/${issueId}/journals/${journalId}.json`);
   }
 
@@ -1200,8 +1350,10 @@ export class RedmineClient {
    * @throws {Error} When API request fails.
    */
   async listUsers(projectId?: string): Promise<RedmineUser[]> {
-    if (projectId) {
-      const response = await this.client.get(`/projects/${projectId}/memberships.json`);
+    // When scoped, forces projectId = scope → always uses memberships endpoint
+    const enforcedProjectId = this._enforceProjectId(projectId);
+    if (enforcedProjectId) {
+      const response = await this.client.get(`/projects/${enforcedProjectId}/memberships.json`);
       return response.data.memberships.map((m: { user: RedmineUser }) => m.user);
     }
     const response = await this.client.get('/users.json');
@@ -1256,6 +1408,22 @@ export class RedmineClient {
       offset?: number;
     } = {}
   ): Promise<{ projects: RedmineProject[]; total_count: number }> {
+    const scope = this.getProjectScope();
+
+    if (scope) {
+      // When scoped, return only the configured project (ignore limit/offset — single project)
+      const project = await this.showProject(scope);
+      // Apply status filter using the same statusMap as the unscoped path
+      if (options.status && options.status !== 'all') {
+        const statusMap: Record<string, number> = { active: 1, closed: 9, archived: 5 };
+        const statusValue = statusMap[options.status];
+        if (statusValue !== undefined && project.status !== statusValue) {
+          return { projects: [], total_count: 0 };
+        }
+      }
+      return { projects: [project], total_count: 1 };
+    }
+
     const params: Record<string, number> = {
       limit: options.limit || 100,
       offset: options.offset || 0,
@@ -1297,7 +1465,17 @@ export class RedmineClient {
     }
 
     const response = await this.client.get(`/projects/${projectId}.json`, { params });
-    return response.data.project;
+    const project = response.data.project;
+
+    // Post-fetch scope validation: compare Redmine's canonical identifier against config.
+    // showProject validates via identifier (has full project object),
+    // while showIssue validates via numeric project.id (issues only expose project.id).
+    const scope = this.getProjectScope();
+    if (scope && project.identifier !== scope) {
+      throw new ProjectScopeError(scope, project.identifier);
+    }
+
+    return project;
   }
 
   /**
@@ -1318,6 +1496,23 @@ export class RedmineClient {
     total_count: number;
   }> {
     const queryLower = query.toLowerCase();
+    const scope = this.getProjectScope();
+
+    if (scope) {
+      // When scoped, only search within the configured project
+      const project = await this.showProject(scope);
+      const matches =
+        project.name.toLowerCase().includes(queryLower) ||
+        project.identifier.toLowerCase().includes(queryLower) ||
+        (project.description && project.description.toLowerCase().includes(queryLower));
+      if (matches) {
+        return {
+          projects: [{ id: project.id, identifier: project.identifier, name: project.name }],
+          total_count: 1,
+        };
+      }
+      return { projects: [], total_count: 0 };
+    }
 
     const response = await this.client.get('/projects.json', {
       params: { limit: 100 },
@@ -1356,6 +1551,7 @@ export class RedmineClient {
    * @throws {Error} When API request fails.
    */
   async listRelations(issueId: number): Promise<{ relations: IssueRelation[] }> {
+    await this._ensureIssueInScope(issueId);
     const response = await this.client.get(`/issues/${issueId}/relations.json`);
     return { relations: response.data.relations || [] };
   }
@@ -1376,6 +1572,10 @@ export class RedmineClient {
     relation_type?: RelationType;
     delay?: number;
   }): Promise<{ relation: IssueRelation }> {
+    // Validate both ends belong to scoped project
+    await this._ensureIssueInScope(options.issue_id);
+    await this._ensureIssueInScope(options.issue_to_id);
+
     const relation: { issue_to_id: number; relation_type?: string; delay?: number } = {
       issue_to_id: options.issue_to_id,
     };
@@ -1400,6 +1600,13 @@ export class RedmineClient {
    * @throws {Error} When API request fails or relation not found.
    */
   async deleteRelation(relationId: number): Promise<void> {
+    // Fetch-then-validate: check relation's source issue belongs to scoped project
+    const scope = this.getProjectScope();
+    if (scope) {
+      const response = await this.client.get(`/relations/${relationId}.json`);
+      const rel = response.data.relation as IssueRelation;
+      await this._ensureIssueInScope(rel.issue_id);
+    }
     await this.client.delete(`/relations/${relationId}.json`);
   }
 
