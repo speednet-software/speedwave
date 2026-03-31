@@ -94,7 +94,7 @@ const listRemindersTool: Tool = {
   description: 'List reminders, optionally filtered by list',
   category: 'read',
   keywords: ['os', 'reminders', 'list', 'tasks', 'todo', 'due'],
-  example: 'const { reminders } = await os.listReminders({ completed: false, limit: 20 })',
+  example: 'const { reminders } = await os.listReminders({ show_completed: false, limit: 20 })',
   inputSchema: {
     type: 'object',
     properties: {
