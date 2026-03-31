@@ -282,7 +282,7 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
                       <option [ngValue]="proj.id">{{ proj.name }}</option>
                     }
                   </select>
-                  @if ((enumerations?.projects?.length ?? 0) > 100) {
+                  @if ((enumerations?.projects?.length ?? 0) >= 100) {
                     <p
                       class="text-sw-text-faint text-[11px] mt-1"
                       data-testid="redmine-projects-note"
@@ -562,10 +562,6 @@ export class RedmineConfigComponent implements OnChanges, OnDestroy {
 
     if (this.selectedProjectId !== null) {
       credentials['project_id'] = String(this.selectedProjectId);
-      const proj = this.enumerations?.projects?.find((p) => p.id === this.selectedProjectId);
-      if (proj) {
-        credentials['project_name'] = proj.name;
-      }
     }
 
     const mappings: Record<string, number> = {};
@@ -598,7 +594,7 @@ export class RedmineConfigComponent implements OnChanges, OnDestroy {
       const proj = this.enumerations.projects.find((p) => p.id === this.selectedProjectId);
       if (proj) return proj.name;
     }
-    return this.svc.current_values['project_name'] || null;
+    return null;
   }
 
   /** Returns the count of configured (non-null) mappings. */

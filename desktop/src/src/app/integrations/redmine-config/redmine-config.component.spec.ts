@@ -526,19 +526,19 @@ describe('RedmineConfigComponent', () => {
       }
     });
 
-    it('shows note when more than 100 projects', () => {
-      const manyProjects = Array.from({ length: 105 }, (_, i) => ({
+    it('shows note when 100 or more projects (API limit reached)', () => {
+      const limitProjects = Array.from({ length: 100 }, (_, i) => ({
         id: i + 1,
         name: `Project ${i + 1}`,
       }));
-      component.enumerations = makeEnumerations({ projects: manyProjects });
+      component.enumerations = makeEnumerations({ projects: limitProjects });
       fixture.detectChanges();
       expect(
         fixture.nativeElement.querySelector('[data-testid="redmine-projects-note"]')
       ).not.toBeNull();
     });
 
-    it('does not show note when 100 or fewer projects', () => {
+    it('does not show note when fewer than 100 projects', () => {
       expect(
         fixture.nativeElement.querySelector('[data-testid="redmine-projects-note"]')
       ).toBeNull();
@@ -561,7 +561,7 @@ describe('RedmineConfigComponent', () => {
       expect(payload.credentials['host_url']).toBe('https://redmine.test');
       expect(payload.credentials['api_key']).toBe('key123');
       expect(payload.credentials['project_id']).toBe('1');
-      expect(payload.credentials['project_name']).toBe('Alpha');
+      expect(payload.credentials['project_name']).toBeUndefined();
       expect(payload.mappings).toEqual({ status_new: 1, tracker_bug: 1 });
     });
 

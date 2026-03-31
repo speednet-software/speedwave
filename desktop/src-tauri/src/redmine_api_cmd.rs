@@ -49,58 +49,43 @@ struct RedmineCurrentUserWrapper {
 }
 
 #[derive(Deserialize)]
-struct RedmineProjectEntry {
+struct RawEnumEntry {
     id: u32,
     name: String,
+}
+
+impl From<RawEnumEntry> for RedmineEnumEntry {
+    fn from(e: RawEnumEntry) -> Self {
+        Self {
+            id: e.id,
+            name: e.name,
+        }
+    }
 }
 
 #[derive(Deserialize)]
 struct RedmineProjectsResponse {
-    projects: Vec<RedmineProjectEntry>,
-}
-
-#[derive(Deserialize)]
-struct RedmineStatusEntry {
-    id: u32,
-    name: String,
+    projects: Vec<RawEnumEntry>,
 }
 
 #[derive(Deserialize)]
 struct RedmineStatusesResponse {
-    issue_statuses: Vec<RedmineStatusEntry>,
-}
-
-#[derive(Deserialize)]
-struct RedmineTrackerEntry {
-    id: u32,
-    name: String,
+    issue_statuses: Vec<RawEnumEntry>,
 }
 
 #[derive(Deserialize)]
 struct RedmineTrackersResponse {
-    trackers: Vec<RedmineTrackerEntry>,
-}
-
-#[derive(Deserialize)]
-struct RedminePriorityEntry {
-    id: u32,
-    name: String,
+    trackers: Vec<RawEnumEntry>,
 }
 
 #[derive(Deserialize)]
 struct RedminePrioritiesResponse {
-    issue_priorities: Vec<RedminePriorityEntry>,
-}
-
-#[derive(Deserialize)]
-struct RedmineActivityEntry {
-    id: u32,
-    name: String,
+    issue_priorities: Vec<RawEnumEntry>,
 }
 
 #[derive(Deserialize)]
 struct RedmineActivitiesResponse {
-    time_entry_activities: Vec<RedmineActivityEntry>,
+    time_entry_activities: Vec<RawEnumEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -119,28 +104,32 @@ fn validate_redmine_host_url(url: &str) -> Result<String, String> {
         return Err("URL must not contain backslashes".to_string());
     }
 
-    // Delegate to base validation
-    let parsed = match crate::url_validation::validate_url(url) {
-        Ok(u) => u,
-        Err(e) => {
-            // If the error is about a private IP, check if it's RFC1918 (allowed for Redmine)
-            if e.contains("private") {
-                let candidate: url::Url = url
-                    .parse()
-                    .map_err(|parse_err: url::ParseError| parse_err.to_string())?;
-                if is_rfc1918_private(&candidate) {
-                    log::warn!(
-                        "Allowing RFC1918 private IP for Redmine: {}",
-                        candidate.host_str().unwrap_or("unknown")
-                    );
-                    candidate
-                } else {
-                    return Err(e);
-                }
-            } else {
-                return Err(e);
+    // Parse URL first to check for RFC1918 before delegating to base validation
+    let candidate: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
+
+    // If RFC1918, skip base validation (which blocks all private IPs) and validate ourselves
+    let parsed = if is_rfc1918_private(&candidate) {
+        // RFC1918 allowed for on-premise Redmine — validate scheme/host only
+        match candidate.scheme() {
+            "http" | "https" => {}
+            scheme => {
+                return Err(format!(
+                    "Blocked URL scheme '{}': only http and https are allowed",
+                    scheme
+                ))
             }
         }
+        if candidate.host().is_none() {
+            return Err("URL has no host".to_string());
+        }
+        log::warn!(
+            "Allowing RFC1918 private IP for Redmine: {}",
+            candidate.host_str().unwrap_or("unknown")
+        );
+        candidate
+    } else {
+        // Non-RFC1918: delegate to base validation (blocks loopback, link-local, metadata)
+        crate::url_validation::validate_url(url)?
     };
 
     // Reject embedded credentials
@@ -273,106 +262,81 @@ async fn do_validate_credentials(
 }
 
 /// Core enumeration fetch logic. Accepts a pre-validated base URL string.
+/// Fetches all 5 endpoints in parallel with `tokio::join!` — each endpoint
+/// handles its own errors independently (404/500 → empty vec).
 async fn do_fetch_enumerations(
     base_url: &str,
     api_key: &str,
 ) -> Result<RedmineEnumerations, String> {
     let client = build_redmine_client()?;
 
-    let projects = fetch_enum_endpoint::<RedmineProjectsResponse>(
-        &client,
-        base_url,
-        "/projects.json?limit=100",
-        api_key,
-        "projects",
-    )
-    .await
-    .map(|r| {
-        r.projects
-            .into_iter()
-            .map(|p| RedmineEnumEntry {
-                id: p.id,
-                name: p.name,
+    let (projects, statuses, trackers, priorities, activities) = tokio::join!(
+        async {
+            fetch_enum_endpoint::<RedmineProjectsResponse>(
+                &client,
+                base_url,
+                "/projects.json?limit=100",
+                api_key,
+                "projects",
+            )
+            .await
+            .map(|r| r.projects.into_iter().map(Into::into).collect())
+            .unwrap_or_default()
+        },
+        async {
+            fetch_enum_endpoint::<RedmineStatusesResponse>(
+                &client,
+                base_url,
+                "/issue_statuses.json",
+                api_key,
+                "statuses",
+            )
+            .await
+            .map(|r| r.issue_statuses.into_iter().map(Into::into).collect())
+            .unwrap_or_default()
+        },
+        async {
+            fetch_enum_endpoint::<RedmineTrackersResponse>(
+                &client,
+                base_url,
+                "/trackers.json",
+                api_key,
+                "trackers",
+            )
+            .await
+            .map(|r| r.trackers.into_iter().map(Into::into).collect())
+            .unwrap_or_default()
+        },
+        async {
+            fetch_enum_endpoint::<RedminePrioritiesResponse>(
+                &client,
+                base_url,
+                "/enumerations/issue_priorities.json",
+                api_key,
+                "priorities",
+            )
+            .await
+            .map(|r| r.issue_priorities.into_iter().map(Into::into).collect())
+            .unwrap_or_default()
+        },
+        async {
+            fetch_enum_endpoint::<RedmineActivitiesResponse>(
+                &client,
+                base_url,
+                "/enumerations/time_entry_activities.json",
+                api_key,
+                "activities",
+            )
+            .await
+            .map(|r| {
+                r.time_entry_activities
+                    .into_iter()
+                    .map(Into::into)
+                    .collect()
             })
-            .collect()
-    })
-    .unwrap_or_default();
-
-    let statuses = fetch_enum_endpoint::<RedmineStatusesResponse>(
-        &client,
-        base_url,
-        "/issue_statuses.json",
-        api_key,
-        "statuses",
-    )
-    .await
-    .map(|r| {
-        r.issue_statuses
-            .into_iter()
-            .map(|s| RedmineEnumEntry {
-                id: s.id,
-                name: s.name,
-            })
-            .collect()
-    })
-    .unwrap_or_default();
-
-    let trackers = fetch_enum_endpoint::<RedmineTrackersResponse>(
-        &client,
-        base_url,
-        "/trackers.json",
-        api_key,
-        "trackers",
-    )
-    .await
-    .map(|r| {
-        r.trackers
-            .into_iter()
-            .map(|t| RedmineEnumEntry {
-                id: t.id,
-                name: t.name,
-            })
-            .collect()
-    })
-    .unwrap_or_default();
-
-    let priorities = fetch_enum_endpoint::<RedminePrioritiesResponse>(
-        &client,
-        base_url,
-        "/enumerations/issue_priorities.json",
-        api_key,
-        "priorities",
-    )
-    .await
-    .map(|r| {
-        r.issue_priorities
-            .into_iter()
-            .map(|p| RedmineEnumEntry {
-                id: p.id,
-                name: p.name,
-            })
-            .collect()
-    })
-    .unwrap_or_default();
-
-    let activities = fetch_enum_endpoint::<RedmineActivitiesResponse>(
-        &client,
-        base_url,
-        "/enumerations/time_entry_activities.json",
-        api_key,
-        "activities",
-    )
-    .await
-    .map(|r| {
-        r.time_entry_activities
-            .into_iter()
-            .map(|a| RedmineEnumEntry {
-                id: a.id,
-                name: a.name,
-            })
-            .collect()
-    })
-    .unwrap_or_default();
+            .unwrap_or_default()
+        },
+    );
 
     Ok(RedmineEnumerations {
         projects,
