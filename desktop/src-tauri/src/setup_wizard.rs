@@ -1173,6 +1173,7 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         Vec::new()
     });
     let expected_paths = compose::SecurityExpectedPaths::compute(project, project_dir)?;
+    speedwave_runtime::fs_security::ensure_data_dir_permissions(project)?;
     let violations = compose::SecurityCheck::run(&yaml, project, &manifests, &expected_paths);
     if !violations.is_empty() {
         anyhow::bail!(
@@ -1887,6 +1888,20 @@ mod tests {
         let token_dir = data_dir.join("tokens").join(project).join(service);
         std::fs::create_dir_all(&token_dir)?;
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode_700 = std::fs::Permissions::from_mode(0o700);
+            // See also: plugin.rs:write_token_files() — identical pattern (2 of 3, Rule of Three)
+            std::fs::set_permissions(&token_dir, mode_700.clone())?;
+            if let Some(project_dir) = token_dir.parent() {
+                std::fs::set_permissions(project_dir, mode_700.clone())?;
+                if let Some(tokens_dir) = project_dir.parent() {
+                    std::fs::set_permissions(tokens_dir, mode_700)?;
+                }
+            }
+        }
+
         for (key, value) in tokens {
             let token_path = token_dir.join(key);
 
@@ -2306,16 +2321,55 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().expect("tempdir");
+        let data_dir = tmp.path();
+        let original_mode = std::fs::metadata(data_dir).unwrap().permissions().mode() & 0o777;
+
         let tokens = HashMap::from([("secret".to_string(), "value".to_string())]);
 
-        write_tokens(tmp.path(), "proj", "svc", &tokens).expect("write_tokens");
+        write_tokens(data_dir, "proj", "svc", &tokens).expect("write_tokens");
 
-        let path = tmp.path().join("tokens/proj/svc/secret");
+        let path = data_dir.join("tokens/proj/svc/secret");
         let mode = std::fs::metadata(&path)
             .expect("metadata")
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600, "token file should be chmod 600");
+
+        // Directory permissions (3-level set_permissions pattern)
+        assert_eq!(
+            std::fs::metadata(data_dir.join("tokens/proj/svc"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "tokens/proj/svc should be 0o700"
+        );
+        assert_eq!(
+            std::fs::metadata(data_dir.join("tokens/proj"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "tokens/proj should be 0o700"
+        );
+        assert_eq!(
+            std::fs::metadata(data_dir.join("tokens"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "tokens should be 0o700"
+        );
+
+        // data_dir itself should NOT have been changed
+        assert_eq!(
+            std::fs::metadata(data_dir).unwrap().permissions().mode() & 0o777,
+            original_mode,
+            "data_dir should not have been changed"
+        );
     }
 
     #[test]

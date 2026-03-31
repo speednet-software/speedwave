@@ -5,6 +5,7 @@ pub mod build;
 pub mod bundle;
 pub mod compose;
 pub mod config;
+pub mod fs_security;
 pub mod consts;
 pub mod defaults;
 pub mod log_sanitizer;

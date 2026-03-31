@@ -323,6 +323,11 @@ fn save_bundle_state_to(state: &BundleState, path: &Path) -> anyhow::Result<()> 
     let json = serde_json::to_string_pretty(state)?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -780,5 +785,19 @@ mod tests {
         assert!(err
             .to_string()
             .contains("mcp-os/os/node_modules/@speedwave/mcp-shared"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_bundle_state_sets_chmod_600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bundle-state.json");
+        let state = BundleState::default();
+        save_bundle_state_to(&state, &path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "bundle-state.json should be 0o600, got {mode:#05o}");
     }
 }

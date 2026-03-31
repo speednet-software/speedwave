@@ -205,6 +205,7 @@ ifeq ($(OS),Windows_NT)
 	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
 else
 	cp target/debug/speedwave desktop/src-tauri/cli/speedwave
+	chmod +x desktop/src-tauri/cli/speedwave
 endif
 	@$(MAKE) verify-bundled-assets
 	cd desktop/src-tauri && cargo tauri build
@@ -373,7 +374,8 @@ test-e2e-desktop-build: build-cli build-mcp build-os-cli
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
 	@mkdir -p desktop/src-tauri/cli
 	@cargo build -p speedwave-cli --release
-	@cp target/release/speedwave desktop/src-tauri/cli/speedwave 2>/dev/null || \
+	@cp target/release/speedwave desktop/src-tauri/cli/speedwave 2>/dev/null && \
+	  chmod +x desktop/src-tauri/cli/speedwave 2>/dev/null || \
 	  cp target/release/speedwave.exe desktop/src-tauri/cli/speedwave.exe 2>/dev/null || true
 	@$(MAKE) verify-bundled-assets
 	@echo "── Building release binary with bundle (e2e feature = WebDriver on :4445)..."
@@ -715,6 +717,7 @@ ifeq ($(OS),Windows_NT)
 	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
 else
 	cp target/debug/speedwave desktop/src-tauri/cli/speedwave
+	chmod +x desktop/src-tauri/cli/speedwave
 endif
 	@$(MAKE) verify-bundled-assets
 	cd desktop/src-tauri && SPEEDWAVE_ALLOW_UNSIGNED=1 cargo tauri dev
