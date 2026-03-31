@@ -18,13 +18,20 @@ import {
   OsIntegrationStatusEntry,
 } from '../models/integration';
 import { ServiceCardComponent, SaveCredentialsEvent } from './service-card/service-card.component';
+import { RedmineConfigComponent } from './redmine-config/redmine-config.component';
 import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
 
 /** Manages MCP service integrations and native OS integration toggles. */
 @Component({
   selector: 'app-integrations',
   standalone: true,
-  imports: [CommonModule, FormsModule, ServiceCardComponent, IdeBridgeComponent],
+  imports: [
+    CommonModule,
+    FormsModule,
+    ServiceCardComponent,
+    RedmineConfigComponent,
+    IdeBridgeComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (needsRestart) {
@@ -75,20 +82,31 @@ import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
       <section class="mb-6" data-testid="integrations-services">
         <h2 class="text-[15px] text-sw-text m-0 mb-3">Services</h2>
         @for (svc of services; track svc.service) {
-          <app-service-card
-            [svc]="svc"
-            [expanded]="expandedService === svc.service"
-            [oauthStatus]="svc.service === 'sharepoint' ? oauthStatus : null"
-            [deviceCodeInfo]="svc.service === 'sharepoint' ? deviceCodeInfo : null"
-            [oauthStatusMessage]="svc.service === 'sharepoint' ? oauthStatusMessage : ''"
-            (toggleExpand)="toggleExpand($event)"
-            (toggleService)="handleToggleService($event)"
-            (saveCredentials)="handleSaveCredentials($event)"
-            (deleteCredentials)="deleteCredentials($event)"
-            (startOAuth)="handleStartOAuth($event)"
-            (cancelOAuth)="handleCancelOAuth()"
-            (openVerificationUrl)="handleOpenVerificationUrl($event)"
-          />
+          @if (svc.service === 'redmine') {
+            <app-redmine-config
+              [svc]="svc"
+              [expanded]="expandedService === svc.service"
+              (toggleExpand)="toggleExpand($event)"
+              (toggleService)="handleToggleService($event)"
+              (saveCredentials)="handleSaveCredentials($event)"
+              (deleteCredentials)="deleteCredentials($event)"
+            />
+          } @else {
+            <app-service-card
+              [svc]="svc"
+              [expanded]="expandedService === svc.service"
+              [oauthStatus]="svc.service === 'sharepoint' ? oauthStatus : null"
+              [deviceCodeInfo]="svc.service === 'sharepoint' ? deviceCodeInfo : null"
+              [oauthStatusMessage]="svc.service === 'sharepoint' ? oauthStatusMessage : ''"
+              (toggleExpand)="toggleExpand($event)"
+              (toggleService)="handleToggleService($event)"
+              (saveCredentials)="handleSaveCredentials($event)"
+              (deleteCredentials)="deleteCredentials($event)"
+              (startOAuth)="handleStartOAuth($event)"
+              (cancelOAuth)="handleCancelOAuth()"
+              (openVerificationUrl)="handleOpenVerificationUrl($event)"
+            />
+          }
         }
       </section>
 
