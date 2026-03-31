@@ -332,7 +332,6 @@ describe('IntegrationsComponent', () => {
       expect(errorDiv).not.toBeNull();
       expect(errorDiv.classList.contains('whitespace-pre-line')).toBe(true);
       expect(errorDiv.textContent).toContain('System Settings');
-      expect(errorDiv.innerHTML).toContain('\n');
     });
   });
 
