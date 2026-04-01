@@ -307,6 +307,15 @@ describe('reminder-tools', () => {
       expect(items?.properties?.tags?.type).toBe('array');
     });
 
+    it('listRemindersTool outputSchema includes list_id, list_name and completed_date', () => {
+      const tools = createReminderTools();
+      const listTool = tools.find((t) => t.tool.name === 'listReminders')!;
+      const items = (listTool.tool.outputSchema as any)?.properties?.reminders?.items;
+      expect(items?.properties?.list_id).toBeDefined();
+      expect(items?.properties?.list_name).toBeDefined();
+      expect(items?.properties?.completed_date).toBeDefined();
+    });
+
     it('getReminderTool outputSchema includes tags', () => {
       const tools = createReminderTools();
       const getTool = tools.find((t) => t.tool.name === 'getReminder')!;

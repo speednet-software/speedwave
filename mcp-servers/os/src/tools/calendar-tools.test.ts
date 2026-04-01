@@ -236,6 +236,58 @@ describe('calendar-tools', () => {
         expect(t.handler).toBeTypeOf('function');
       }
     });
+
+    it('listCalendarsTool outputSchema includes allows_modifications', () => {
+      const tools = createCalendarTools();
+      const listTool = tools.find((t) => t.tool.name === 'listCalendars')!;
+      const items = (listTool.tool.outputSchema as any)?.properties?.calendars?.items;
+      expect(items?.properties?.allows_modifications).toBeDefined();
+    });
+
+    it('listEventsTool outputSchema includes calendar_name and notes', () => {
+      const tools = createCalendarTools();
+      const listTool = tools.find((t) => t.tool.name === 'listEvents')!;
+      const items = (listTool.tool.outputSchema as any)?.properties?.events?.items;
+      expect(items?.properties?.calendar_id).toBeDefined();
+      expect(items?.properties?.calendar_name).toBeDefined();
+      expect(items?.properties?.notes).toBeDefined();
+    });
+  });
+
+  describe('parameter forwarding', () => {
+    it('forwards calendar_id and description to createEvent runCommand', async () => {
+      vi.mocked(runCommand).mockResolvedValue({
+        stdout: '',
+        parsed: { id: 'e-1', status: 'created' },
+      });
+      await handleCreateEvent({
+        summary: 'Lunch',
+        start: '2026-02-20T12:00:00Z',
+        end: '2026-02-20T13:00:00Z',
+        calendar_id: 'cal-work',
+        description: 'Team lunch',
+      });
+      expect(runCommand).toHaveBeenCalledWith(
+        'calendar',
+        'create_event',
+        expect.objectContaining({
+          calendar_id: 'cal-work',
+          description: 'Team lunch',
+        })
+      );
+    });
+
+    it('forwards description to updateEvent runCommand', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'updated' } });
+      await handleUpdateEvent({ id: 'e-1', description: 'Updated notes' });
+      expect(runCommand).toHaveBeenCalledWith(
+        'calendar',
+        'update_event',
+        expect.objectContaining({
+          description: 'Updated notes',
+        })
+      );
+    });
   });
 
   describe('input validation (SEC-012)', () => {

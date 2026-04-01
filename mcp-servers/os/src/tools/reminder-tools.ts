@@ -99,7 +99,7 @@ const listRemindersTool: Tool = {
     type: 'object',
     properties: {
       list_id: { type: 'string', description: 'Filter by reminder list ID' },
-      limit: { type: 'number', description: 'Max reminders to return (default 50)' },
+      limit: { type: 'number', description: 'Max reminders to return (default 20)' },
       show_completed: {
         type: 'boolean',
         description: 'Include completed reminders (default false)',
@@ -126,6 +126,8 @@ const listRemindersTool: Tool = {
               description: 'Tags extracted from [#tag] markers in the notes. Absent when no tags.',
             },
             list_id: { type: 'string' },
+            list_name: { type: 'string' },
+            completed_date: { type: 'string', description: 'ISO8601 date' },
           },
         },
       },
