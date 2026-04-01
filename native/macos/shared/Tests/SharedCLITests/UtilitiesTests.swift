@@ -60,6 +60,16 @@ final class SharedCLITests: XCTestCase {
         XCTAssertNil(result)
     }
 
+    func testHexColorClampsWideGamutValues() {
+        // Display P3 components can exceed 1.0; verify clamping to [0, 255]
+        let wideGamut = CGColor(
+            colorSpace: CGColorSpace(name: CGColorSpace.displayP3)!,
+            components: [1.3, -0.1, 0.5, 1.0]
+        )!
+        let result = hexColor(from: wideGamut)
+        XCTAssertEqual(result, "#ff007f")
+    }
+
     // MARK: - CLIError
 
     func testCLIErrorMissingField() {
