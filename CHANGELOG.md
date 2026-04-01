@@ -1,6 +1,14 @@
 # Changelog
 
 
+## [0.6.1](https://github.com/speednet-software/speedwave/compare/v0.6.0...v0.6.1) (2026-04-01)
+
+
+### Bug Fixes
+
+* **config:** simplify severity headings in review-plan skill ([186fd35](https://github.com/speednet-software/speedwave/commit/186fd35d254148b53cf4c2d55e1b5e54cfd653a0))
+* **docs:** trigger release ([5efe385](https://github.com/speednet-software/speedwave/commit/5efe38552c701bf4e9259e06f2e2c6d1ce622af5))
+
 ## [0.6.0](https://github.com/speednet-software/speedwave/compare/v0.5.1...v0.6.0) (2026-03-30)
 
 
