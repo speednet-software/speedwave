@@ -61,51 +61,74 @@ static WATCHDOG_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-fn start_chat(
+async fn start_chat(
     project: String,
     app_handle: tauri::AppHandle,
-    state: tauri::State<SharedChatSession>,
+    state: tauri::State<'_, SharedChatSession>,
 ) -> Result<(), String> {
     check_project(&project)?;
+    let session_arc = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        // Pre-flight: verify Claude is authenticated before spawning an
+        // interactive session.  `claude auth status` exits quickly with a
+        // non-zero code when not authed — no hang risk.
+        let authed = setup_wizard::check_claude_auth(&project).map_err(|e| e.to_string())?;
+        if !authed {
+            return Err("Claude is not authenticated. Please authenticate first.".to_string());
+        }
 
-    // Pre-flight: verify Claude is authenticated before spawning an
-    // interactive session.  `claude auth status` exits quickly with a
-    // non-zero code when not authed — no hang risk.
-    let authed = setup_wizard::check_claude_auth(&project).map_err(|e| e.to_string())?;
-    if !authed {
-        return Err("Claude is not authenticated. Please authenticate first.".to_string());
-    }
-
-    let mut session = state.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    // Stop any existing session before starting a new one
-    session.stop().map_err(|e| e.to_string())?;
-    // Replace with a fresh session for the requested project
-    *session = ChatSession::new(&project);
-    session.start(app_handle, None).map_err(|e| e.to_string())
+        let mut session = session_arc
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {e}"))?;
+        // Stop any existing session before starting a new one
+        session.stop().map_err(|e| e.to_string())?;
+        // Replace with a fresh session for the requested project
+        *session = ChatSession::new(&project);
+        session.start(app_handle, None).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn send_message(message: String, state: tauri::State<SharedChatSession>) -> Result<(), String> {
+async fn send_message(
+    message: String,
+    state: tauri::State<'_, SharedChatSession>,
+) -> Result<(), String> {
     if message.len() > 1_000_000 {
         return Err("Message too long".to_string());
     }
-    let mut session = state.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    session.send_message(&message).map_err(|e| e.to_string())
+    let session_arc = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let mut session = session_arc
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {e}"))?;
+        session.send_message(&message).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn answer_question(
+async fn answer_question(
     tool_use_id: String,
     answer: String,
-    state: tauri::State<SharedChatSession>,
+    state: tauri::State<'_, SharedChatSession>,
 ) -> Result<(), String> {
     if answer.len() > 1_000_000 {
         return Err("Answer too long".to_string());
     }
-    let mut session = state.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    session
-        .answer_question(&tool_use_id, &answer)
-        .map_err(|e| e.to_string())
+    let session_arc = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let mut session = session_arc
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {e}"))?;
+        session
+            .answer_question(&tool_use_id, &answer)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ---------------------------------------------------------------------------
@@ -1231,6 +1254,11 @@ mod tests {
 
     /// Extracts the body of a function from source code by matching `{`/`}`
     /// counting braces.  Used by structural tests to assert on function contents.
+    ///
+    /// NOTE: uses `split(fn_signature)` which matches the first occurrence of
+    /// the literal string in the entire file.  Signatures must be unique —
+    /// avoid naming test helpers with substrings that collide with real command
+    /// signatures (e.g. don't name a test `fn test_async_fn_start_chat_…`).
     fn extract_fn_body<'a>(source: &'a str, fn_signature: &str) -> &'a str {
         let after_sig = source
             .split(fn_signature)
@@ -1262,7 +1290,7 @@ mod tests {
     #[test]
     fn start_chat_checks_auth_before_session_start() {
         let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "fn start_chat(");
+        let body = extract_fn_body(source, "async fn start_chat(");
 
         let auth_pos = body
             .find("check_claude_auth")
@@ -1294,6 +1322,188 @@ mod tests {
             "check_claude_auth must come BEFORE session.start()"
         );
     }
+
+    // -- spawn_blocking guard-rail tests --
+    //
+    // Chat commands must never acquire the SharedChatSession Mutex on the main
+    // thread.  These structural tests enforce that every command wrapping the
+    // mutex uses `spawn_blocking` and acquires `.lock()` inside it.
+
+    #[test]
+    fn start_chat_uses_spawn_blocking() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "async fn start_chat(");
+        assert!(
+            body.contains("spawn_blocking"),
+            "start_chat must use spawn_blocking to avoid blocking the main thread"
+        );
+    }
+
+    #[test]
+    fn send_message_uses_spawn_blocking() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "async fn send_message(");
+        assert!(
+            body.contains("spawn_blocking"),
+            "send_message must use spawn_blocking to avoid blocking the main thread"
+        );
+    }
+
+    #[test]
+    fn answer_question_uses_spawn_blocking() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "async fn answer_question(");
+        assert!(
+            body.contains("spawn_blocking"),
+            "answer_question must use spawn_blocking to avoid blocking the main thread"
+        );
+    }
+
+    #[test]
+    fn start_chat_acquires_lock_inside_spawn_blocking() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "async fn start_chat(");
+        let spawn_pos = body
+            .find("spawn_blocking")
+            .expect("start_chat must use spawn_blocking");
+        let lock_pos = body
+            .find(".lock()")
+            .expect("start_chat must acquire the session lock");
+        assert!(
+            lock_pos > spawn_pos,
+            "session lock must be acquired INSIDE spawn_blocking, not before it"
+        );
+    }
+
+    #[test]
+    fn send_message_acquires_lock_inside_spawn_blocking() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "async fn send_message(");
+        let spawn_pos = body
+            .find("spawn_blocking")
+            .expect("send_message must use spawn_blocking");
+        let lock_pos = body
+            .find(".lock()")
+            .expect("send_message must acquire the session lock");
+        assert!(
+            lock_pos > spawn_pos,
+            "session lock must be acquired INSIDE spawn_blocking, not before it"
+        );
+    }
+
+    #[test]
+    fn answer_question_acquires_lock_inside_spawn_blocking() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "async fn answer_question(");
+        let spawn_pos = body
+            .find("spawn_blocking")
+            .expect("answer_question must use spawn_blocking");
+        let lock_pos = body
+            .find(".lock()")
+            .expect("answer_question must acquire the session lock");
+        assert!(
+            lock_pos > spawn_pos,
+            "session lock must be acquired INSIDE spawn_blocking, not before it"
+        );
+    }
+
+    // -- validation-before-spawn tests --
+    //
+    // Fast validations (check_project, length checks) must run BEFORE
+    // spawn_blocking so invalid requests fail immediately without entering
+    // the thread pool.
+
+    #[test]
+    fn start_chat_validates_project_before_spawn_blocking() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "async fn start_chat(");
+        let check_pos = body
+            .find("check_project")
+            .expect("start_chat must call check_project");
+        let spawn_pos = body
+            .find("spawn_blocking")
+            .expect("start_chat must use spawn_blocking");
+        assert!(
+            check_pos < spawn_pos,
+            "check_project must come BEFORE spawn_blocking for fail-fast validation"
+        );
+    }
+
+    #[test]
+    fn send_message_validates_length_before_spawn_blocking() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "async fn send_message(");
+        let len_pos = body
+            .find("message.len()")
+            .expect("send_message must check message length");
+        let spawn_pos = body
+            .find("spawn_blocking")
+            .expect("send_message must use spawn_blocking");
+        assert!(
+            len_pos < spawn_pos,
+            "message length check must come BEFORE spawn_blocking for fail-fast validation"
+        );
+    }
+
+    #[test]
+    fn answer_question_validates_length_before_spawn_blocking() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "async fn answer_question(");
+        let len_pos = body
+            .find("answer.len()")
+            .expect("answer_question must check answer length");
+        let spawn_pos = body
+            .find("spawn_blocking")
+            .expect("answer_question must use spawn_blocking");
+        assert!(
+            len_pos < spawn_pos,
+            "answer length check must come BEFORE spawn_blocking for fail-fast validation"
+        );
+    }
+
+    // -- JoinError handling tests --
+    //
+    // spawn_blocking returns JoinHandle which can fail with JoinError (e.g.
+    // if the spawned task panics).  The outer .await.map_err(…) must convert
+    // this to a String for the Tauri IPC error channel.
+
+    #[test]
+    fn start_chat_handles_join_error() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "async fn start_chat(");
+        assert!(
+            body.contains(".await")
+                && body.contains("map_err(|e| e.to_string())")
+                && body.matches("map_err").count() >= 2,
+            "start_chat must handle JoinError from spawn_blocking via .await.map_err"
+        );
+    }
+
+    #[test]
+    fn send_message_handles_join_error() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "async fn send_message(");
+        assert!(
+            body.contains(".await")
+                && body.contains("map_err(|e| e.to_string())")
+                && body.matches("map_err").count() >= 2,
+            "send_message must handle JoinError from spawn_blocking via .await.map_err"
+        );
+    }
+
+    #[test]
+    fn answer_question_handles_join_error() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "async fn answer_question(");
+        assert!(
+            body.contains(".await")
+                && body.contains("map_err(|e| e.to_string())")
+                && body.matches("map_err").count() >= 2,
+            "answer_question must handle JoinError from spawn_blocking via .await.map_err"
+        );
+    }
+
+    // -- apply_switch_project tests --
 
     fn make_config_with_projects() -> SpeedwaveUserConfig {
         SpeedwaveUserConfig {
