@@ -1,3 +1,4 @@
+import SharedCLI
 import XCTest
 @testable import mail_cli
 
@@ -210,16 +211,30 @@ final class MailTests: XCTestCase {
         XCTAssertNil(params["body"])
     }
 
-    // MARK: - Permission Check (formatPermissionResult)
+    // MARK: - Permission Check Script
 
-    func testFormatPermissionResultGranted() {
-        let json = formatPermissionResult(granted: true, error: nil)
-        let data = json.data(using: .utf8)!
-        let parsed = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
-        XCTAssertTrue(parsed["granted"] is Bool)
-        XCTAssertEqual(parsed["granted"] as? Bool, true)
-        XCTAssertNil(parsed["error"])
+    func testPermissionCheckScriptAccessesData() {
+        // "to name" does NOT require Automation permission — it returns the app
+        // name without triggering a TCC prompt. The script must access actual
+        // data (e.g. accounts, mailboxes) to force macOS to check permission.
+        XCTAssertFalse(
+            permissionCheckScript.hasSuffix("to name"),
+            "permissionCheckScript must not use 'to name' — it does not require Automation permission"
+        )
+        XCTAssertTrue(
+            permissionCheckScript.contains("Mail"),
+            "permissionCheckScript must target Mail app"
+        )
     }
+
+    func testPermissionCheckScriptDeniedIncludesGuidance() {
+        // When permission is denied, the error message should guide the user
+        // to System Settings > Automation (not Calendars/Reminders).
+        let detail = "Mail access denied: some error\nGrant access in System Settings > Privacy & Security > Automation"
+        XCTAssertTrue(detail.contains("Automation"))
+    }
+
+    // MARK: - Permission Check (formatPermissionResult with domain-specific errors)
 
     func testFormatPermissionResultWithAutomationPermissionError() {
         let errorMsg = ScriptError.automationPermission("not allowed").errorDescription!

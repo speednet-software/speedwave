@@ -123,6 +123,9 @@ describe('reminder-tools', () => {
 
       expect(result.success).toBe(true);
       expect(result.data).toEqual(mockData);
+      // Verify flat response — no wrapping under "reminder" key (wrapping removed to match outputSchema)
+      expect((result.data as any).reminder).toBeUndefined();
+      expect((result.data as any).id).toBe('r-1');
       expect(runCommand).toHaveBeenCalledWith('reminders', 'get_reminder', { id: 'r-1' });
     });
 
@@ -305,6 +308,15 @@ describe('reminder-tools', () => {
       expect(items?.properties?.notes).toBeDefined();
       expect(items?.properties?.tags).toBeDefined();
       expect(items?.properties?.tags?.type).toBe('array');
+    });
+
+    it('listRemindersTool outputSchema includes list_id, list_name and completed_date', () => {
+      const tools = createReminderTools();
+      const listTool = tools.find((t) => t.tool.name === 'listReminders')!;
+      const items = (listTool.tool.outputSchema as any)?.properties?.reminders?.items;
+      expect(items?.properties?.list_id).toBeDefined();
+      expect(items?.properties?.list_name).toBeDefined();
+      expect(items?.properties?.completed_date).toBeDefined();
     });
 
     it('getReminderTool outputSchema includes tags', () => {

@@ -1,5 +1,6 @@
 import EventKit
 import Foundation
+import SharedCLI
 
 // MARK: - CLI Entry Point
 
@@ -115,21 +116,6 @@ func requestReminderAccess(store: EKEventStore, timeout: TimeInterval? = nil) ->
     return (accessGranted, accessError)
 }
 
-/// Serializes a permission check result as JSON.
-/// Output contract: {"granted": true} or {"granted": false, "error": "..."}
-// SYNC: formatPermissionResult must match calendar/Sources/CalendarCLI.swift
-func formatPermissionResult(granted: Bool, error: String?) -> String {
-    var dict: [String: Any] = ["granted": granted]
-    if let error = error {
-        dict["error"] = error
-    }
-    guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
-          let json = String(data: data, encoding: .utf8) else {
-        return #"{"granted": false, "error": "Failed to serialize permission result"}"#
-    }
-    return json
-}
-
 // MARK: - Commands
 
 func listLists(store: EKEventStore) throws -> [String: Any] {
@@ -146,31 +132,58 @@ func listLists(store: EKEventStore) throws -> [String: Any] {
 
 func listReminders(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {
     let limit = params["limit"] as? Int ?? 20
-    let listName = params["list"] as? String
-
     var calendars: [EKCalendar]?
-    if let name = listName {
-        calendars = store.calendars(for: .reminder).filter { $0.title == name }
-        if calendars?.isEmpty == true {
-            throw CLIError.notFound("Reminder list '\(name)' not found")
-        }
+    if let filter = params["list_id"] as? String {
+        calendars = try resolveCalendars(for: .reminder, filter: filter, store: store)
     }
 
-    let predicate = store.predicateForIncompleteReminders(
-        withDueDateStarting: nil,
-        ending: nil,
-        calendars: calendars
-    )
+    // TCC-gated: show_completed dual-fetch path cannot be unit-tested without Reminders permission
+    let showCompleted = params["show_completed"] as? Bool ?? false
 
-    let semaphore = DispatchSemaphore(value: 0)
     var fetchedReminders: [EKReminder]?
 
-    store.fetchReminders(matching: predicate) { reminders in
-        fetchedReminders = reminders
-        semaphore.signal()
-    }
+    if showCompleted {
+        let group = DispatchGroup()
+        var incompleteResults: [EKReminder]?
+        var completedResults: [EKReminder]?
 
-    semaphore.wait()
+        let incompletePred = store.predicateForIncompleteReminders(
+            withDueDateStarting: nil, ending: nil, calendars: calendars
+        )
+        group.enter()
+        store.fetchReminders(matching: incompletePred) { reminders in
+            incompleteResults = reminders
+            group.leave()
+        }
+
+        let completedPred = store.predicateForCompletedReminders(
+            withCompletionDateStarting: nil, ending: nil, calendars: calendars
+        )
+        group.enter()
+        store.fetchReminders(matching: completedPred) { reminders in
+            completedResults = reminders
+            group.leave()
+        }
+
+        let result = group.wait(timeout: .now() + 10)
+        if result == .timedOut {
+            exitWithError("Timed out fetching reminders after 10s")
+        }
+        fetchedReminders = (incompleteResults ?? []) + (completedResults ?? [])
+    } else {
+        let semaphore = DispatchSemaphore(value: 0)
+        let predicate = store.predicateForIncompleteReminders(
+            withDueDateStarting: nil, ending: nil, calendars: calendars
+        )
+        store.fetchReminders(matching: predicate) { reminders in
+            fetchedReminders = reminders
+            semaphore.signal()
+        }
+        let waitResult = semaphore.wait(timeout: .now() + 10)
+        if waitResult == .timedOut {
+            exitWithError("Timed out fetching reminders after 10s")
+        }
+    }
 
     let reminders = (fetchedReminders ?? []).prefix(limit).map { r in
         reminderToDict(r)
@@ -188,7 +201,7 @@ func getReminder(store: EKEventStore, params: [String: Any]) throws -> [String: 
         throw CLIError.notFound("Reminder with id '\(id)' not found")
     }
 
-    return ["reminder": reminderToDict(item)]
+    return reminderToDict(item)
 }
 
 func createReminder(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {
@@ -199,11 +212,9 @@ func createReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
     let reminder = EKReminder(eventStore: store)
     reminder.title = name
 
-    if let listName = params["list"] as? String {
-        guard let calendar = store.calendars(for: .reminder).first(where: { $0.title == listName }) else {
-            throw CLIError.notFound("Reminder list '\(listName)' not found")
-        }
-        reminder.calendar = calendar
+    if let filter = params["list_id"] as? String {
+        let matches = try resolveCalendars(for: .reminder, filter: filter, store: store)
+        reminder.calendar = matches[0]
     } else {
         reminder.calendar = store.defaultCalendarForNewReminders()
     }
@@ -263,7 +274,8 @@ func reminderToDict(_ r: EKReminder) -> [String: Any] {
         "name": r.title ?? "",
         "completed": r.isCompleted,
         "priority": r.priority,
-        "list": r.calendar?.title ?? "",
+        "list_id": r.calendar?.calendarIdentifier ?? "",
+        "list_name": r.calendar?.title ?? "",
     ]
 
     if !tags.isEmpty {
@@ -275,7 +287,7 @@ func reminderToDict(_ r: EKReminder) -> [String: Any] {
     }
 
     if let completionDate = r.completionDate {
-        dict["completion_date"] = iso8601String(from: completionDate)
+        dict["completed_date"] = iso8601String(from: completionDate)
     }
 
     if !cleanNotes.isEmpty {
@@ -331,57 +343,3 @@ func combineTags(_ tags: [String], with notes: String?) -> String? {
     return "\(formatted)\n\(clean)"
 }
 
-func parseISO8601(_ string: String) -> Date? {
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let date = formatter.date(from: string) {
-        return date
-    }
-    formatter.formatOptions = [.withInternetDateTime]
-    if let date = formatter.date(from: string) {
-        return date
-    }
-    // Try date-only format
-    formatter.formatOptions = [.withFullDate]
-    return formatter.date(from: string)
-}
-
-func iso8601String(from date: Date) -> String {
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime]
-    return formatter.string(from: date)
-}
-
-func hexColor(from cgColor: CGColor) -> String? {
-    guard let components = cgColor.components, components.count >= 3 else {
-        return nil
-    }
-    let r = Int(components[0] * 255)
-    let g = Int(components[1] * 255)
-    let b = Int(components[2] * 255)
-    return String(format: "#%02x%02x%02x", r, g, b)
-}
-
-// MARK: - Error Handling
-
-enum CLIError: LocalizedError {
-    case missingField(String)
-    case notFound(String)
-    case invalidDate(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .missingField(let field):
-            return "Missing required field: \(field)"
-        case .notFound(let msg):
-            return msg
-        case .invalidDate(let date):
-            return "Invalid ISO8601 date: \(date). Expected format: 2025-03-01T10:00:00Z"
-        }
-    }
-}
-
-func exitWithError(_ message: String) -> Never {
-    FileHandle.standardError.write(Data((message + "\n").utf8))
-    exit(1)
-}

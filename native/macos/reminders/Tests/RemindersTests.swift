@@ -4,74 +4,6 @@ import XCTest
 
 final class RemindersTests: XCTestCase {
 
-    // MARK: - ISO8601 Parsing
-
-    func testParseISO8601WithTimezone() {
-        let date = parseISO8601("2025-03-01T10:00:00Z")
-        XCTAssertNotNil(date)
-    }
-
-    func testParseISO8601WithFractionalSeconds() {
-        let date = parseISO8601("2025-03-01T10:00:00.123Z")
-        XCTAssertNotNil(date)
-    }
-
-    func testParseISO8601DateOnly() {
-        let date = parseISO8601("2025-03-01")
-        XCTAssertNotNil(date)
-    }
-
-    func testParseISO8601Invalid() {
-        let date = parseISO8601("not-a-date")
-        XCTAssertNil(date)
-    }
-
-    func testISO8601Roundtrip() {
-        let original = "2025-06-15T14:30:00Z"
-        guard let date = parseISO8601(original) else {
-            XCTFail("Failed to parse ISO8601 date")
-            return
-        }
-        let result = iso8601String(from: date)
-        XCTAssertEqual(result, original)
-    }
-
-    // MARK: - Hex Color
-
-    func testHexColorFromComponents() {
-        // We can't easily create a CGColor in test without CoreGraphics context,
-        // so we test nil path
-        let result = hexColor(from: CGColor(gray: 0.5, alpha: 1.0))
-        // Gray colorspace has 2 components (gray + alpha), not 3 (RGB)
-        // So this should return nil
-        XCTAssertNil(result)
-    }
-
-    // MARK: - CLI Error Messages
-
-    func testCLIErrorMissingField() {
-        let error = CLIError.missingField("name")
-        XCTAssertEqual(error.errorDescription, "Missing required field: name")
-    }
-
-    func testCLIErrorNotFound() {
-        let error = CLIError.notFound("Reminder with id 'abc' not found")
-        XCTAssertEqual(error.errorDescription, "Reminder with id 'abc' not found")
-    }
-
-    func testCLIErrorInvalidDate() {
-        let error = CLIError.invalidDate("bad-date")
-        XCTAssertTrue(error.errorDescription!.contains("Invalid ISO8601 date"))
-        XCTAssertTrue(error.errorDescription!.contains("bad-date"))
-    }
-
-    // MARK: - Reminder Dict Conversion
-
-    func testCLIErrorMissingFieldHasDescription() {
-        let error = CLIError.missingField("id")
-        XCTAssertNotNil(error.errorDescription)
-    }
-
     // MARK: - CLI Argument Parsing
 
     func testUnknownCommandExits() {
@@ -89,12 +21,12 @@ final class RemindersTests: XCTestCase {
     }
 
     func testValidJSONIsParsed() {
-        let validJSON = "{\"name\": \"test\", \"list\": \"Work\"}"
+        let validJSON = "{\"name\": \"test\", \"list_id\": \"Work\"}"
         let data = validJSON.data(using: .utf8)!
         let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         XCTAssertNotNil(parsed)
         XCTAssertEqual(parsed?["name"] as? String, "test")
-        XCTAssertEqual(parsed?["list"] as? String, "Work")
+        XCTAssertEqual(parsed?["list_id"] as? String, "Work")
     }
 
     func testEmptyJSONDefaultsWork() {
@@ -198,26 +130,7 @@ final class RemindersTests: XCTestCase {
         XCTAssertEqual(result, "[#work]")
     }
 
-    // MARK: - Permission Check (formatPermissionResult)
-
-    func testFormatPermissionResultGranted() {
-        let json = formatPermissionResult(granted: true, error: nil)
-        let data = json.data(using: .utf8)!
-        let parsed = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
-        XCTAssertTrue(parsed["granted"] is Bool)
-        XCTAssertEqual(parsed["granted"] as? Bool, true)
-        XCTAssertNil(parsed["error"])
-    }
-
-    func testFormatPermissionResultDenied() {
-        let json = formatPermissionResult(granted: false, error: "access denied")
-        let data = json.data(using: .utf8)!
-        let parsed = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
-        XCTAssertTrue(parsed["granted"] is Bool)
-        XCTAssertEqual(parsed["granted"] as? Bool, false)
-        XCTAssertTrue(parsed["error"] is String)
-        XCTAssertEqual(parsed["error"] as? String, "access denied")
-    }
+    // MARK: - Permission Access
 
     func testRequestReminderAccessReturnsTuple() {
         // Compile-time check: requestReminderAccess returns (granted: Bool, error: Error?)
@@ -225,5 +138,52 @@ final class RemindersTests: XCTestCase {
         let result: (granted: Bool, error: Error?) = requestReminderAccess(store: store, timeout: 0.001)
         // With a near-zero timeout, we just verify the return type
         XCTAssertNotNil(result)
+    }
+
+    // MARK: - reminderToDict Output Keys
+
+    func testReminderToDictOutputContainsListIdAndListName() throws {
+        let store = EKEventStore()
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = "Test"
+        let cal = store.defaultCalendarForNewReminders()
+        try XCTSkipIf(cal == nil, "No default reminder list available on this machine")
+        reminder.calendar = cal
+        let dict = reminderToDict(reminder)
+        XCTAssertNotNil(dict["list_id"], "reminderToDict must emit list_id")
+        XCTAssertNotNil(dict["list_name"], "reminderToDict must emit list_name")
+        XCTAssertNil(dict["list"], "reminderToDict must not emit bare 'list' key")
+    }
+
+    func testReminderToDictListIdIsIdentifier() throws {
+        let store = EKEventStore()
+        let reminder = EKReminder(eventStore: store)
+        let cal = store.defaultCalendarForNewReminders()
+        try XCTSkipIf(cal == nil, "No default reminder list available on this machine")
+        reminder.calendar = cal
+        let dict = reminderToDict(reminder)
+        let listId = dict["list_id"] as? String ?? ""
+        XCTAssertFalse(listId.isEmpty, "list_id should be a non-empty identifier")
+    }
+
+    func testReminderToDictNilCalendarEmitsEmptyStrings() {
+        let store = EKEventStore()
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = "Orphan"
+        let dict = reminderToDict(reminder)
+        XCTAssertEqual(dict["list_id"] as? String, "", "nil calendar -> empty list_id")
+        XCTAssertEqual(dict["list_name"] as? String, "", "nil calendar -> empty list_name")
+    }
+
+    func testReminderToDictCompletedDateKey() {
+        let store = EKEventStore()
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = "Done"
+        reminder.calendar = store.defaultCalendarForNewReminders()
+        reminder.isCompleted = true
+        reminder.completionDate = Date()
+        let dict = reminderToDict(reminder)
+        XCTAssertNotNil(dict["completed_date"], "reminderToDict must emit completed_date (not completion_date)")
+        XCTAssertNil(dict["completion_date"], "reminderToDict must not emit old completion_date key")
     }
 }
