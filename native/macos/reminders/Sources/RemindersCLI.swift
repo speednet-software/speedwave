@@ -137,10 +137,9 @@ func listReminders(store: EKEventStore, params: [String: Any]) throws -> [String
         calendars = try resolveCalendars(for: .reminder, filter: filter, store: store)
     }
 
-    // show_completed: verified only by manual testing (TCC-dependent, see Task 9 Step 4 item 4)
+    // TCC-gated: show_completed dual-fetch path cannot be unit-tested without Reminders permission
     let showCompleted = params["show_completed"] as? Bool ?? false
 
-    let semaphore = DispatchSemaphore(value: 0)
     var fetchedReminders: [EKReminder]?
 
     if showCompleted {
@@ -172,6 +171,7 @@ func listReminders(store: EKEventStore, params: [String: Any]) throws -> [String
         }
         fetchedReminders = (incompleteResults ?? []) + (completedResults ?? [])
     } else {
+        let semaphore = DispatchSemaphore(value: 0)
         let predicate = store.predicateForIncompleteReminders(
             withDueDateStarting: nil, ending: nil, calendars: calendars
         )
@@ -179,7 +179,10 @@ func listReminders(store: EKEventStore, params: [String: Any]) throws -> [String
             fetchedReminders = reminders
             semaphore.signal()
         }
-        semaphore.wait()
+        let waitResult = semaphore.wait(timeout: .now() + 10)
+        if waitResult == .timedOut {
+            exitWithError("Timed out fetching reminders after 10s")
+        }
     }
 
     let reminders = (fetchedReminders ?? []).prefix(limit).map { r in

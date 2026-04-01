@@ -142,21 +142,25 @@ final class RemindersTests: XCTestCase {
 
     // MARK: - reminderToDict Output Keys
 
-    func testReminderToDictOutputContainsListIdAndListName() {
+    func testReminderToDictOutputContainsListIdAndListName() throws {
         let store = EKEventStore()
         let reminder = EKReminder(eventStore: store)
         reminder.title = "Test"
-        reminder.calendar = store.defaultCalendarForNewReminders()
+        let cal = store.defaultCalendarForNewReminders()
+        try XCTSkipIf(cal == nil, "No default reminder list available on this machine")
+        reminder.calendar = cal
         let dict = reminderToDict(reminder)
         XCTAssertNotNil(dict["list_id"], "reminderToDict must emit list_id")
         XCTAssertNotNil(dict["list_name"], "reminderToDict must emit list_name")
         XCTAssertNil(dict["list"], "reminderToDict must not emit bare 'list' key")
     }
 
-    func testReminderToDictListIdIsIdentifier() {
+    func testReminderToDictListIdIsIdentifier() throws {
         let store = EKEventStore()
         let reminder = EKReminder(eventStore: store)
-        reminder.calendar = store.defaultCalendarForNewReminders()
+        let cal = store.defaultCalendarForNewReminders()
+        try XCTSkipIf(cal == nil, "No default reminder list available on this machine")
+        reminder.calendar = cal
         let dict = reminderToDict(reminder)
         let listId = dict["list_id"] as? String ?? ""
         XCTAssertFalse(listId.isEmpty, "list_id should be a non-empty identifier")
