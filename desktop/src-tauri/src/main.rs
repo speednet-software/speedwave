@@ -304,8 +304,16 @@ async fn switch_project(
         return Err(full_error);
     }
 
-    // Rebind chat session
-    if let Err(e) = rebind_chat(&name, &app, &chat_state) {
+    // Rebind chat session (spawn_blocking: rebind_chat acquires Mutex and calls session.start)
+    let rebind_name = name.clone();
+    let rebind_app = app.clone();
+    let rebind_state = chat_state.inner().clone();
+    let rebind_result: Result<(), String> =
+        tokio::task::spawn_blocking(move || rebind_chat(&rebind_name, &rebind_app, &rebind_state))
+            .await
+            .map_err(|e| e.to_string())?;
+
+    if let Err(e) = rebind_result {
         // Restore previous project containers + chat
         let mut cleanup_parts: Vec<String> = Vec::new();
 
@@ -334,7 +342,15 @@ async fn switch_project(
 
         if let Some(ref prev) = previous {
             if restore_result.is_ok() {
-                if let Err(re) = rebind_chat(prev, &app, &chat_state) {
+                let rb_prev = prev.clone();
+                let rb_app = app.clone();
+                let rb_state = chat_state.inner().clone();
+                let rb_result: Result<(), String> =
+                    tokio::task::spawn_blocking(move || rebind_chat(&rb_prev, &rb_app, &rb_state))
+                        .await
+                        .unwrap_or_else(|je| Err(format!("join error: {je}")));
+
+                if let Err(re) = rb_result {
                     cleanup_parts.push(format!(
                         "Containers restored but chat rebind to '{prev}' failed: {re}"
                     ));
@@ -363,7 +379,7 @@ async fn switch_project(
 fn rebind_chat(
     project: &str,
     app: &tauri::AppHandle,
-    chat_state: &tauri::State<'_, SharedChatSession>,
+    chat_state: &SharedChatSession,
 ) -> Result<(), String> {
     check_project(project)?;
     let mut session = chat_state
