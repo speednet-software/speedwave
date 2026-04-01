@@ -132,6 +132,26 @@ func formatPermissionResult(granted: Bool, error: String?) -> String {
     return json
 }
 
+// MARK: - Calendar Resolution
+
+/// Resolves calendars by ID first, falling back to name match.
+/// Returns all matches — caller decides usage (filter predicate vs single pick).
+/// If multiple calendars share the same name, all are returned; createEvent uses [0].
+/// Throws CLIError.notFound if filter matches nothing.
+func resolveCalendars(
+    for entityType: EKEntityType,
+    filter: String,
+    store: EKEventStore
+) throws -> [EKCalendar] {
+    let all = store.calendars(for: entityType)
+    let byId = all.filter { $0.calendarIdentifier == filter }
+    if !byId.isEmpty { return byId }
+    let byName = all.filter { $0.title == filter }
+    if !byName.isEmpty { return byName }
+    let label = entityType == .reminder ? "Reminder list" : "Calendar"
+    throw CLIError.notFound("\(label) '\(filter)' not found")
+}
+
 // MARK: - Commands
 
 func listCalendars(store: EKEventStore) throws -> [String: Any] {
@@ -175,11 +195,8 @@ func listEvents(store: EKEventStore, params: [String: Any]) throws -> [String: A
     }
 
     var calendars: [EKCalendar]?
-    if let calendarName = params["calendar"] as? String {
-        calendars = store.calendars(for: .event).filter { $0.title == calendarName }
-        if calendars?.isEmpty == true {
-            throw CLIError.notFound("Calendar '\(calendarName)' not found")
-        }
+    if let filter = params["calendar_id"] as? String {
+        calendars = try resolveCalendars(for: .event, filter: filter, store: store)
     }
 
     let predicate = store.predicateForEvents(withStart: startDate, end: endDate, calendars: calendars)
@@ -225,11 +242,9 @@ func createEvent(store: EKEventStore, params: [String: Any]) throws -> [String: 
     event.startDate = startDate
     event.endDate = endDate
 
-    if let calendarName = params["calendar"] as? String {
-        guard let calendar = store.calendars(for: .event).first(where: { $0.title == calendarName }) else {
-            throw CLIError.notFound("Calendar '\(calendarName)' not found")
-        }
-        event.calendar = calendar
+    if let filter = params["calendar_id"] as? String {
+        let matches = try resolveCalendars(for: .event, filter: filter, store: store)
+        event.calendar = matches[0]
     } else {
         event.calendar = store.defaultCalendarForNewEvents
     }
@@ -238,8 +253,8 @@ func createEvent(store: EKEventStore, params: [String: Any]) throws -> [String: 
         event.location = location
     }
 
-    if let notes = params["notes"] as? String {
-        event.notes = notes
+    if let description = params["description"] as? String {
+        event.notes = description
     }
 
     if let allDay = params["all_day"] as? Bool {
@@ -285,8 +300,8 @@ func updateEvent(store: EKEventStore, params: [String: Any]) throws -> [String: 
         event.location = location
     }
 
-    if let notes = params["notes"] as? String {
-        event.notes = notes
+    if let description = params["description"] as? String {
+        event.notes = description
     }
 
     if let allDay = params["all_day"] as? Bool {
@@ -321,7 +336,8 @@ func eventToDict(_ e: EKEvent) -> [String: Any] {
         "start": iso8601String(from: e.startDate),
         "end": iso8601String(from: e.endDate),
         "all_day": e.isAllDay,
-        "calendar": e.calendar?.title ?? "",
+        "calendar_id": e.calendar?.calendarIdentifier ?? "",
+        "calendar_name": e.calendar?.title ?? "",
     ]
 
     if let location = e.location, !location.isEmpty {

@@ -84,12 +84,14 @@ final class CalendarTests: XCTestCase {
             "summary": "Team Standup",
             "start": "2025-03-01T09:00:00Z",
             "end": "2025-03-01T09:30:00Z",
-            "calendar": "Work",
+            "calendar_id": "Work",
             "location": "Room 42",
-            "notes": "Discuss sprint progress",
+            "description": "Discuss sprint progress",
             "all_day": false,
         ]
         XCTAssertEqual(params["summary"] as? String, "Team Standup")
+        XCTAssertEqual(params["calendar_id"] as? String, "Work")
+        XCTAssertEqual(params["description"] as? String, "Discuss sprint progress")
         XCTAssertNotNil(parseISO8601(params["start"] as! String))
         XCTAssertNotNil(parseISO8601(params["end"] as! String))
     }
@@ -146,5 +148,84 @@ final class CalendarTests: XCTestCase {
         let store = EKEventStore()
         let result: (granted: Bool, error: Error?) = requestCalendarAccess(store: store, timeout: 0.001)
         XCTAssertNotNil(result)
+    }
+
+    // MARK: - eventToDict Output Keys
+
+    func testEventToDictOutputContainsCalendarIdAndCalendarName() {
+        let store = EKEventStore()
+        let event = EKEvent(eventStore: store)
+        event.title = "Test"
+        event.startDate = Date()
+        event.endDate = Date().addingTimeInterval(3600)
+        event.calendar = store.defaultCalendarForNewEvents
+        let dict = eventToDict(event)
+        XCTAssertNotNil(dict["calendar_id"], "eventToDict must emit calendar_id")
+        XCTAssertNotNil(dict["calendar_name"], "eventToDict must emit calendar_name")
+        XCTAssertNil(dict["calendar"], "eventToDict must not emit bare 'calendar' key")
+    }
+
+    func testEventToDictNilCalendarEmitsEmptyStrings() {
+        let store = EKEventStore()
+        let event = EKEvent(eventStore: store)
+        event.title = "Orphan"
+        event.startDate = Date()
+        event.endDate = Date().addingTimeInterval(3600)
+        let dict = eventToDict(event)
+        XCTAssertEqual(dict["calendar_id"] as? String, "", "nil calendar -> empty calendar_id")
+        XCTAssertEqual(dict["calendar_name"] as? String, "", "nil calendar -> empty calendar_name")
+    }
+
+    func testEventToDictNotesFieldPreserved() {
+        let store = EKEventStore()
+        let event = EKEvent(eventStore: store)
+        event.title = "Test"
+        event.startDate = Date()
+        event.endDate = Date().addingTimeInterval(3600)
+        event.calendar = store.defaultCalendarForNewEvents
+        event.notes = "Some notes"
+        let dict = eventToDict(event)
+        XCTAssertEqual(dict["notes"] as? String, "Some notes", "eventToDict must emit notes field")
+    }
+
+    func testEventToDictNotesAbsentWhenNil() {
+        let store = EKEventStore()
+        let event = EKEvent(eventStore: store)
+        event.title = "Test"
+        event.startDate = Date()
+        event.endDate = Date().addingTimeInterval(3600)
+        event.calendar = store.defaultCalendarForNewEvents
+        let dict = eventToDict(event)
+        XCTAssertNil(dict["notes"], "eventToDict should omit notes when nil")
+    }
+
+    // MARK: - resolveCalendars Helper
+
+    func testResolveCalendarsByIdMatchesFirst() throws {
+        let store = EKEventStore()
+        let allCals = store.calendars(for: .event)
+        try XCTSkipIf(allCals.isEmpty, "No calendars available on this machine")
+        let first = allCals[0]
+        let result = try resolveCalendars(for: .event, filter: first.calendarIdentifier, store: store)
+        XCTAssertEqual(result.first?.calendarIdentifier, first.calendarIdentifier)
+    }
+
+    func testResolveCalendarsByNameFallback() throws {
+        let store = EKEventStore()
+        let allCals = store.calendars(for: .event)
+        try XCTSkipIf(allCals.isEmpty, "No calendars available on this machine")
+        let first = allCals[0]
+        let result = try resolveCalendars(for: .event, filter: first.title, store: store)
+        XCTAssertEqual(result.first?.title, first.title)
+    }
+
+    func testResolveCalendarsNotFoundThrows() {
+        let store = EKEventStore()
+        let bogus = "NONEXISTENT-\(UUID())"
+        XCTAssertThrowsError(try resolveCalendars(for: .event, filter: bogus, store: store)) { error in
+            XCTAssertTrue(error is CLIError, "Should throw CLIError")
+            XCTAssertTrue(error.localizedDescription.contains("not found"))
+            XCTAssertTrue(error.localizedDescription.contains(bogus))
+        }
     }
 }
