@@ -2,7 +2,7 @@
  * File Tools - Tools for SharePoint file operations
  */
 
-import { Tool, ToolDefinition } from '@speedwave/mcp-shared';
+import { Tool, ToolDefinition, notConfiguredMessage } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
 import { SharePointClient } from '../client.js';
 
@@ -394,7 +394,7 @@ export function createFileTools(client: SharePointClient | null): ToolDefinition
           success: false,
           error: {
             code: 'NOT_CONFIGURED',
-            message: 'SharePoint not configured. Run: speedwave setup sharepoint',
+            message: notConfiguredMessage('SharePoint'),
           },
         };
       }

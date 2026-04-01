@@ -2,7 +2,13 @@
  * Journal Tools - 3 tools for Redmine journal/comments
  */
 
-import { Tool, ToolDefinition, jsonResult, errorResult } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  jsonResult,
+  errorResult,
+  notConfiguredMessage,
+} from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 
 const listJournalsTool: Tool = {
@@ -151,8 +157,7 @@ const deleteJournalTool: Tool = {
  * @param client - Redmine client instance
  */
 export function createJournalTools(client: RedmineClient | null): ToolDefinition[] {
-  const unconfigured = async () =>
-    errorResult('Redmine not configured. Run: speedwave setup redmine');
+  const unconfigured = async () => errorResult(notConfiguredMessage('Redmine'));
   if (!client) {
     return [
       { tool: listJournalsTool, handler: unconfigured },

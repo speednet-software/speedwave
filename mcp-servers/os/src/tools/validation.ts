@@ -113,6 +113,9 @@ export type StringFieldSpec = [name: string, maxLength: number, allowNewlines: b
 /** Spec for a number field: [name, min, max]. */
 export type NumberFieldSpec = [name: string, min: number, max: number];
 
+/** Spec for a string-array field: [name, maxItems, maxItemLength]. */
+export type StringArrayFieldSpec = [name: string, maxItems: number, maxItemLength: number];
+
 /** Regex matching control characters \x00-\x1f EXCEPT \t(\x09), \n(\x0a), \r(\x0d). */
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS_BODY = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
@@ -239,6 +242,91 @@ export function validateBooleanFields(
   return { valid: true };
 }
 
+/**
+ * Validate string-array fields for type, item count, item length, and control characters.
+ * Uses strict mode (no newlines) — array items are short labels, not multi-line content.
+ * Skips fields that are `undefined` (optional not provided).
+ * Note: `null` is NOT skipped — it returns INVALID_TYPE, matching validateStringFields behavior.
+ * @param params - Tool input parameters to validate.
+ * @param specs - Array of string-array field specs [name, maxItems, maxItemLength].
+ */
+export function validateStringArrayFields(
+  params: Record<string, unknown>,
+  specs: StringArrayFieldSpec[]
+): { valid: true } | { valid: false; error: ToolResult } {
+  for (const [name, maxItems, maxItemLength] of specs) {
+    const value = params[name];
+    if (value === undefined) continue;
+    if (!Array.isArray(value)) {
+      return {
+        valid: false,
+        error: {
+          success: false,
+          error: { code: 'INVALID_TYPE', message: `${name} must be an array` },
+        },
+      };
+    }
+    if (value.length > maxItems) {
+      return {
+        valid: false,
+        error: {
+          success: false,
+          error: {
+            code: 'ARRAY_TOO_LONG',
+            message: `${name} exceeds maximum of ${maxItems} items`,
+          },
+        },
+      };
+    }
+    for (let i = 0; i < value.length; i++) {
+      const item = value[i];
+      if (typeof item !== 'string') {
+        return {
+          valid: false,
+          error: {
+            success: false,
+            error: { code: 'INVALID_TYPE', message: `${name}[${i}] must be a string` },
+          },
+        };
+      }
+      if (item.trim() === '') {
+        return {
+          valid: false,
+          error: {
+            success: false,
+            error: { code: 'EMPTY_FIELDS', message: `${name}[${i}] must not be empty` },
+          },
+        };
+      }
+      if (item.length > maxItemLength) {
+        return {
+          valid: false,
+          error: {
+            success: false,
+            error: {
+              code: 'FIELD_TOO_LONG',
+              message: `${name}[${i}] exceeds maximum length of ${maxItemLength}`,
+            },
+          },
+        };
+      }
+      if (CONTROL_CHARS_STRICT.test(item)) {
+        return {
+          valid: false,
+          error: {
+            success: false,
+            error: {
+              code: 'INVALID_CHARACTERS',
+              message: `${name}[${i}] contains invalid control characters`,
+            },
+          },
+        };
+      }
+    }
+  }
+  return { valid: true };
+}
+
 /** Spec describing which fields to validate in a single `validateAll` call. */
 export interface ValidationSpec {
   required?: string[];
@@ -246,11 +334,12 @@ export interface ValidationSpec {
   numbers?: NumberFieldSpec[];
   booleans?: string[];
   dates?: string[];
+  stringArrays?: StringArrayFieldSpec[];
 }
 
 /**
  * Combine all validation steps in one call.
- * Order: required → booleans → strings → numbers → dates.
+ * Order: required → booleans → strings → numbers → dates → stringArrays.
  * Returns `{ valid: true }` only when every enabled step passes.
  * Note: `required` validates presence of non-empty string fields only (delegates to `requireFields`).
  * @param params - Tool input parameters to validate.
@@ -279,6 +368,10 @@ export function validateAll(
   if (spec.dates) {
     const d = validateDateFields(params, spec.dates);
     if (!d.valid) return d;
+  }
+  if (spec.stringArrays) {
+    const sa = validateStringArrayFields(params, spec.stringArrays);
+    if (!sa.valid) return sa;
   }
   return { valid: true };
 }

@@ -85,3 +85,10 @@ export { TIMEOUTS } from './timeouts.js';
 
 // Logger
 export { ts } from './logger.js';
+
+// Errors (SSOT for user-facing messages)
+export { notConfiguredMessage, withSetupGuidance } from './errors.js';
+
+// Retry
+export { retryAsync } from './retry.js';
+export type { RetryOptions } from './retry.js';

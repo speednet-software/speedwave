@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createReleaseTools } from './release-tools.js';
 import type { GitLabClient } from '../client.js';
 
@@ -654,7 +655,10 @@ describe('release-tools', () => {
         const result = await handler({});
         expect(result).toEqual({
           content: [
-            { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+            {
+              type: 'text',
+              text: `Error: ${notConfiguredMessage('GitLab')}`,
+            },
           ],
           isError: true,
         });
@@ -673,7 +677,10 @@ describe('release-tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });
@@ -690,7 +697,10 @@ describe('release-tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });
@@ -708,7 +718,10 @@ describe('release-tools', () => {
 
       expect(result).toEqual({
         content: [
-          { type: 'text', text: 'Error: GitLab not configured. Run: speedwave setup gitlab' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('GitLab')}`,
+          },
         ],
         isError: true,
       });

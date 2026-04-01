@@ -2,7 +2,7 @@
  * Channel Tools - Tools for Slack channel operations
  */
 
-import { Tool, ToolDefinition } from '@speedwave/mcp-shared';
+import { Tool, ToolDefinition, notConfiguredMessage } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
 import {
   SlackClients,
@@ -246,7 +246,7 @@ export function createChannelTools(clients: SlackClients | null): ToolDefinition
           success: false,
           error: {
             code: 'NOT_CONFIGURED',
-            message: 'Slack not configured. Run: speedwave setup slack',
+            message: notConfiguredMessage('Slack'),
           },
         };
       }

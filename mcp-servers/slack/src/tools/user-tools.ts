@@ -2,7 +2,7 @@
  * User Tools - Tools for Slack user operations
  */
 
-import { Tool, ToolDefinition } from '@speedwave/mcp-shared';
+import { Tool, ToolDefinition, notConfiguredMessage } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
 import { SlackClients, getUsers, formatSlackError } from '../client.js';
 
@@ -78,7 +78,7 @@ export function createUserTools(clients: SlackClients | null): ToolDefinition[] 
           success: false,
           error: {
             code: 'NOT_CONFIGURED',
-            message: 'Slack not configured. Run: speedwave setup slack',
+            message: notConfiguredMessage('Slack'),
           },
         };
       }

@@ -1,19 +1,37 @@
 import EventKit
 import Foundation
+import SharedCLI
 
 // MARK: - CLI Entry Point
 
 /// calendar-cli <command> [json-args]
-/// Commands: list_calendars, list_events, get_event, create_event, update_event, delete_event
+/// Commands: check_permission, list_calendars, list_events, get_event, create_event, update_event, delete_event
 @main
 struct CalendarCLI {
     static func main() {
         let args = CommandLine.arguments
         guard args.count >= 2 else {
-            exitWithError("Usage: calendar-cli <command> [json-args]\nCommands: list_calendars, list_events, get_event, create_event, update_event, delete_event")
+            exitWithError("Usage: calendar-cli <command> [json-args]\nCommands: check_permission, list_calendars, list_events, get_event, create_event, update_event, delete_event")
         }
 
         let command = args[1]
+
+        // check_permission: verify macOS TCC access without performing any operation.
+        // Returns JSON {"granted": true/false} on stdout, always exits 0.
+        // Pattern: see also reminders/Sources/RemindersCLI.swift check_permission
+        if command == "check_permission" {
+            let store = EKEventStore()
+            let (granted, error) = requestCalendarAccess(store: store, timeout: 65)
+            if granted {
+                print(formatPermissionResult(granted: true, error: nil))
+            } else {
+                let msg = error?.localizedDescription ?? "Unknown error"
+                let detail = "Calendar access denied: \(msg)\nGrant access in System Settings > Privacy & Security > Calendars"
+                print(formatPermissionResult(granted: false, error: detail))
+            }
+            return
+        }
+
         let jsonArgs = args.count >= 3 ? args[2] : "{}"
 
         guard let argsData = jsonArgs.data(using: .utf8),
@@ -23,26 +41,7 @@ struct CalendarCLI {
         }
 
         let store = EKEventStore()
-
-        let semaphore = DispatchSemaphore(value: 0)
-        var accessGranted = false
-        var accessError: Error?
-
-        if #available(macOS 14.0, *) {
-            store.requestFullAccessToEvents { granted, error in
-                accessGranted = granted
-                accessError = error
-                semaphore.signal()
-            }
-        } else {
-            store.requestAccess(to: .event) { granted, error in
-                accessGranted = granted
-                accessError = error
-                semaphore.signal()
-            }
-        }
-
-        semaphore.wait()
+        let (accessGranted, accessError) = requestCalendarAccess(store: store)
 
         guard accessGranted else {
             let msg = accessError?.localizedDescription ?? "Unknown error"
@@ -65,7 +64,7 @@ struct CalendarCLI {
             case "delete_event":
                 result = try deleteEvent(store: store, params: params)
             default:
-                exitWithError("Unknown command: \(command)\nAvailable: list_calendars, list_events, get_event, create_event, update_event, delete_event")
+                exitWithError("Unknown command: \(command)\nAvailable: check_permission, list_calendars, list_events, get_event, create_event, update_event, delete_event")
             }
 
             let data = try JSONSerialization.data(
@@ -79,6 +78,44 @@ struct CalendarCLI {
             exitWithError(error.localizedDescription)
         }
     }
+}
+
+// MARK: - Permission Helpers
+
+/// Requests Calendar access from EventKit. Uses the macOS 14+ full-access API
+/// when available, falling back to the legacy requestAccess(to:) API.
+/// The optional timeout (default: unbounded) is a safety net for check_permission.
+func requestCalendarAccess(store: EKEventStore, timeout: TimeInterval? = nil) -> (granted: Bool, error: Error?) {
+    let semaphore = DispatchSemaphore(value: 0)
+    var accessGranted = false
+    var accessError: Error?
+
+    if #available(macOS 14.0, *) {
+        store.requestFullAccessToEvents { granted, error in
+            accessGranted = granted
+            accessError = error
+            semaphore.signal()
+        }
+    } else {
+        store.requestAccess(to: .event) { granted, error in
+            accessGranted = granted
+            accessError = error
+            semaphore.signal()
+        }
+    }
+
+    if let timeout = timeout {
+        let result = semaphore.wait(timeout: .now() + timeout)
+        if result == .timedOut {
+            return (false, NSError(domain: "CalendarCLI", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Permission dialog timed out after \(Int(timeout))s",
+            ]))
+        }
+    } else {
+        semaphore.wait()
+    }
+
+    return (accessGranted, accessError)
 }
 
 // MARK: - Commands
@@ -124,11 +161,8 @@ func listEvents(store: EKEventStore, params: [String: Any]) throws -> [String: A
     }
 
     var calendars: [EKCalendar]?
-    if let calendarName = params["calendar"] as? String {
-        calendars = store.calendars(for: .event).filter { $0.title == calendarName }
-        if calendars?.isEmpty == true {
-            throw CLIError.notFound("Calendar '\(calendarName)' not found")
-        }
+    if let filter = params["calendar_id"] as? String {
+        calendars = try resolveCalendars(for: .event, filter: filter, store: store)
     }
 
     let predicate = store.predicateForEvents(withStart: startDate, end: endDate, calendars: calendars)
@@ -148,7 +182,7 @@ func getEvent(store: EKEventStore, params: [String: Any]) throws -> [String: Any
         throw CLIError.notFound("Event with id '\(id)' not found")
     }
 
-    return ["event": eventToDict(event)]
+    return eventToDict(event)
 }
 
 func createEvent(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {
@@ -174,11 +208,9 @@ func createEvent(store: EKEventStore, params: [String: Any]) throws -> [String: 
     event.startDate = startDate
     event.endDate = endDate
 
-    if let calendarName = params["calendar"] as? String {
-        guard let calendar = store.calendars(for: .event).first(where: { $0.title == calendarName }) else {
-            throw CLIError.notFound("Calendar '\(calendarName)' not found")
-        }
-        event.calendar = calendar
+    if let filter = params["calendar_id"] as? String {
+        let matches = try resolveCalendars(for: .event, filter: filter, store: store)
+        event.calendar = matches[0]
     } else {
         event.calendar = store.defaultCalendarForNewEvents
     }
@@ -187,8 +219,8 @@ func createEvent(store: EKEventStore, params: [String: Any]) throws -> [String: 
         event.location = location
     }
 
-    if let notes = params["notes"] as? String {
-        event.notes = notes
+    if let description = params["description"] as? String {
+        event.notes = description
     }
 
     if let allDay = params["all_day"] as? Bool {
@@ -234,8 +266,8 @@ func updateEvent(store: EKEventStore, params: [String: Any]) throws -> [String: 
         event.location = location
     }
 
-    if let notes = params["notes"] as? String {
-        event.notes = notes
+    if let description = params["description"] as? String {
+        event.notes = description
     }
 
     if let allDay = params["all_day"] as? Bool {
@@ -270,7 +302,8 @@ func eventToDict(_ e: EKEvent) -> [String: Any] {
         "start": iso8601String(from: e.startDate),
         "end": iso8601String(from: e.endDate),
         "all_day": e.isAllDay,
-        "calendar": e.calendar?.title ?? "",
+        "calendar_id": e.calendar?.calendarIdentifier ?? "",
+        "calendar_name": e.calendar?.title ?? "",
     ]
 
     if let location = e.location, !location.isEmpty {
@@ -299,56 +332,3 @@ func calendarTypeString(_ type: EKCalendarType) -> String {
     }
 }
 
-func parseISO8601(_ string: String) -> Date? {
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let date = formatter.date(from: string) {
-        return date
-    }
-    formatter.formatOptions = [.withInternetDateTime]
-    if let date = formatter.date(from: string) {
-        return date
-    }
-    formatter.formatOptions = [.withFullDate]
-    return formatter.date(from: string)
-}
-
-func iso8601String(from date: Date) -> String {
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime]
-    return formatter.string(from: date)
-}
-
-func hexColor(from cgColor: CGColor) -> String? {
-    guard let components = cgColor.components, components.count >= 3 else {
-        return nil
-    }
-    let r = Int(components[0] * 255)
-    let g = Int(components[1] * 255)
-    let b = Int(components[2] * 255)
-    return String(format: "#%02x%02x%02x", r, g, b)
-}
-
-// MARK: - Error Handling
-
-enum CLIError: LocalizedError {
-    case missingField(String)
-    case notFound(String)
-    case invalidDate(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .missingField(let field):
-            return "Missing required field: \(field)"
-        case .notFound(let msg):
-            return msg
-        case .invalidDate(let date):
-            return "Invalid ISO8601 date: \(date). Expected format: 2025-03-01T10:00:00Z"
-        }
-    }
-}
-
-func exitWithError(_ message: String) -> Never {
-    FileHandle.standardError.write(Data((message + "\n").utf8))
-    exit(1)
-}

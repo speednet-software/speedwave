@@ -1,18 +1,36 @@
 import Foundation
+import SharedCLI
 
 // MARK: - CLI Entry Point
 
 /// notes-cli <command> [json-args]
-/// Commands: list_folders, list_notes, get_note, search_notes, create_note, update_note, delete_note
+/// Commands: check_permission, list_folders, list_notes, get_note, search_notes, create_note, update_note, delete_note
 @main
 struct NotesCLI {
     static func main() {
         let args = CommandLine.arguments
         guard args.count >= 2 else {
-            exitWithError("Usage: notes-cli <command> [json-args]\nCommands: list_folders, list_notes, get_note, search_notes, create_note, update_note, delete_note")
+            exitWithError("Usage: notes-cli <command> [json-args]\nCommands: check_permission, list_folders, list_notes, get_note, search_notes, create_note, update_note, delete_note")
         }
 
         let command = args[1]
+
+        // check_permission: verify macOS Automation access without performing any operation.
+        // Returns JSON {"granted": true/false} on stdout, always exits 0.
+        // Uses error.errorDescription for user-friendly messages from ScriptError.
+        // NOTE: "to name" does NOT trigger macOS Automation prompt — must access data (e.g. notes).
+        // Pattern: see also mail/Sources/MailCLI.swift check_permission
+        if command == "check_permission" {
+            do {
+                _ = try ScriptRunner.run(permissionCheckScript)
+                print(formatPermissionResult(granted: true, error: nil))
+            } catch {
+                let detail = "Notes access denied: \(error.localizedDescription)\nGrant access in System Settings > Privacy & Security > Automation"
+                print(formatPermissionResult(granted: false, error: detail))
+            }
+            return
+        }
+
         let jsonArgs = args.count >= 3 ? args[2] : "{}"
 
         guard let argsData = jsonArgs.data(using: .utf8),
@@ -61,7 +79,7 @@ struct NotesCLI {
                 }
                 result = try NotesClient.deleteNote(id: id)
             default:
-                exitWithError("Unknown command: \(command)\nAvailable: list_folders, list_notes, get_note, search_notes, create_note, update_note, delete_note")
+                exitWithError("Unknown command: \(command)\nAvailable: check_permission, list_folders, list_notes, get_note, search_notes, create_note, update_note, delete_note")
             }
 
             let data = try JSONSerialization.data(
@@ -90,7 +108,10 @@ enum NotesCLIError: LocalizedError {
     }
 }
 
-func exitWithError(_ message: String) -> Never {
-    FileHandle.standardError.write(Data((message + "\n").utf8))
-    exit(1)
-}
+// MARK: - Permission Helpers
+
+/// AppleScript command used by check_permission to verify Automation access.
+/// Must access actual data (not just app metadata like `name`) to trigger the
+/// macOS Automation permission prompt. `to name` does NOT require permission.
+// SYNC: permissionCheckScript rationale must match mail/Sources/MailCLI.swift
+let permissionCheckScript = "tell application \"Notes\" to count of notes"

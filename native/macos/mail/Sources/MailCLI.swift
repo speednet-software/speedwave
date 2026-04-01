@@ -1,18 +1,37 @@
 import Foundation
+import SharedCLI
 
 // MARK: - CLI Entry Point
 
 /// mail-cli <command> [json-args]
-/// Commands: detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email
+/// Commands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email
 @main
 struct MailCLI {
     static func main() {
         let args = CommandLine.arguments
         guard args.count >= 2 else {
-            exitWithError("Usage: mail-cli <command> [json-args]\nCommands: detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email")
+            exitWithError("Usage: mail-cli <command> [json-args]\nCommands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email")
         }
 
         let command = args[1]
+
+        // check_permission: verify macOS Automation access for Apple Mail.
+        // Returns JSON {"granted": true/false} on stdout, always exits 0.
+        // Uses error.errorDescription for user-friendly messages from ScriptError.
+        // check_permission validates Apple Mail automation; Outlook availability is checked separately by resolveClient()
+        // NOTE: "to name" does NOT trigger macOS Automation prompt — must access data (e.g. accounts).
+        // Pattern: see also notes/Sources/NotesCLI.swift check_permission
+        if command == "check_permission" {
+            do {
+                _ = try ScriptRunner.run(permissionCheckScript)
+                print(formatPermissionResult(granted: true, error: nil))
+            } catch {
+                let detail = "Mail access denied: \(error.localizedDescription)\nGrant access in System Settings > Privacy & Security > Automation"
+                print(formatPermissionResult(granted: false, error: detail))
+            }
+            return
+        }
+
         let jsonArgs = args.count >= 3 ? args[2] : "{}"
 
         guard let argsData = jsonArgs.data(using: .utf8),
@@ -39,7 +58,7 @@ struct MailCLI {
             case "reply_to_email":
                 result = try replyToEmail(params: params)
             default:
-                exitWithError("Unknown command: \(command)\nAvailable: detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email")
+                exitWithError("Unknown command: \(command)\nAvailable: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email")
             }
 
             let data = try JSONSerialization.data(
@@ -218,7 +237,10 @@ enum MailError: LocalizedError {
     }
 }
 
-func exitWithError(_ message: String) -> Never {
-    FileHandle.standardError.write(Data((message + "\n").utf8))
-    exit(1)
-}
+// MARK: - Permission Helpers
+
+/// AppleScript command used by check_permission to verify Automation access.
+/// Must access actual data (not just app metadata like `name`) to trigger the
+/// macOS Automation permission prompt. `to name` does NOT require permission.
+// SYNC: permissionCheckScript rationale must match notes/Sources/NotesCLI.swift
+let permissionCheckScript = "tell application \"Mail\" to count of accounts"

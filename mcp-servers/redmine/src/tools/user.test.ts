@@ -3,8 +3,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createUserTools } from './user-tools.js';
-import { RedmineClient } from '../client.js';
+import { RedmineClient, ProjectScopeError } from '../client.js';
 
 type MockClient = {
   listUsers: Mock;
@@ -39,7 +40,10 @@ describe('User Tools', () => {
       expect(result).toEqual({
         isError: true,
         content: [
-          { type: 'text', text: 'Error: Redmine not configured. Run: speedwave setup redmine' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('Redmine')}`,
+          },
         ],
       });
     });
@@ -53,7 +57,10 @@ describe('User Tools', () => {
       expect(result).toEqual({
         isError: true,
         content: [
-          { type: 'text', text: 'Error: Redmine not configured. Run: speedwave setup redmine' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('Redmine')}`,
+          },
         ],
       });
     });
@@ -67,7 +74,10 @@ describe('User Tools', () => {
       expect(result).toEqual({
         isError: true,
         content: [
-          { type: 'text', text: 'Error: Redmine not configured. Run: speedwave setup redmine' },
+          {
+            type: 'text',
+            text: `Error: ${notConfiguredMessage('Redmine')}`,
+          },
         ],
       });
     });
@@ -281,6 +291,27 @@ describe('User Tools', () => {
       expect(result).toEqual({
         isError: true,
         content: [{ type: 'text', text: 'Error: 401 Unauthorized' }],
+      });
+    });
+  });
+
+  describe('ProjectScopeError propagation', () => {
+    it('should surface ProjectScopeError for listUsers', async () => {
+      const scopeError = new ProjectScopeError('my-project', 'other-project');
+      mockClient.listUsers.mockRejectedValue(scopeError);
+
+      const tools = createUserTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'listUsers');
+      const result = await tool!.handler({});
+
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "Error: Project scope violation: configured project is 'my-project', but requested resource belongs to 'other-project'",
+          },
+        ],
       });
     });
   });
