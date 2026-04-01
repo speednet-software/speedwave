@@ -1,5 +1,6 @@
 import EventKit
 import Foundation
+import SharedCLI
 
 // MARK: - CLI Entry Point
 
@@ -115,41 +116,6 @@ func requestCalendarAccess(store: EKEventStore, timeout: TimeInterval? = nil) ->
     }
 
     return (accessGranted, accessError)
-}
-
-/// Serializes a permission check result as JSON.
-/// Output contract: {"granted": true} or {"granted": false, "error": "..."}
-// SYNC: formatPermissionResult must match reminders/Sources/RemindersCLI.swift
-func formatPermissionResult(granted: Bool, error: String?) -> String {
-    var dict: [String: Any] = ["granted": granted]
-    if let error = error {
-        dict["error"] = error
-    }
-    guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
-          let json = String(data: data, encoding: .utf8) else {
-        return #"{"granted": false, "error": "Failed to serialize permission result"}"#
-    }
-    return json
-}
-
-// MARK: - Calendar Resolution
-
-/// Resolves calendars by ID first, falling back to name match.
-/// Returns all matches — caller decides usage (filter predicate vs single pick).
-/// If multiple calendars share the same name, all are returned; createEvent uses [0].
-/// Throws CLIError.notFound if filter matches nothing.
-func resolveCalendars(
-    for entityType: EKEntityType,
-    filter: String,
-    store: EKEventStore
-) throws -> [EKCalendar] {
-    let all = store.calendars(for: entityType)
-    let byId = all.filter { $0.calendarIdentifier == filter }
-    if !byId.isEmpty { return byId }
-    let byName = all.filter { $0.title == filter }
-    if !byName.isEmpty { return byName }
-    let label = entityType == .reminder ? "Reminder list" : "Calendar"
-    throw CLIError.notFound("\(label) '\(filter)' not found")
 }
 
 // MARK: - Commands
@@ -366,56 +332,3 @@ func calendarTypeString(_ type: EKCalendarType) -> String {
     }
 }
 
-func parseISO8601(_ string: String) -> Date? {
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let date = formatter.date(from: string) {
-        return date
-    }
-    formatter.formatOptions = [.withInternetDateTime]
-    if let date = formatter.date(from: string) {
-        return date
-    }
-    formatter.formatOptions = [.withFullDate]
-    return formatter.date(from: string)
-}
-
-func iso8601String(from date: Date) -> String {
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime]
-    return formatter.string(from: date)
-}
-
-func hexColor(from cgColor: CGColor) -> String? {
-    guard let components = cgColor.components, components.count >= 3 else {
-        return nil
-    }
-    let r = Int(components[0] * 255)
-    let g = Int(components[1] * 255)
-    let b = Int(components[2] * 255)
-    return String(format: "#%02x%02x%02x", r, g, b)
-}
-
-// MARK: - Error Handling
-
-enum CLIError: LocalizedError {
-    case missingField(String)
-    case notFound(String)
-    case invalidDate(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .missingField(let field):
-            return "Missing required field: \(field)"
-        case .notFound(let msg):
-            return msg
-        case .invalidDate(let date):
-            return "Invalid ISO8601 date: \(date). Expected format: 2025-03-01T10:00:00Z"
-        }
-    }
-}
-
-func exitWithError(_ message: String) -> Never {
-    FileHandle.standardError.write(Data((message + "\n").utf8))
-    exit(1)
-}

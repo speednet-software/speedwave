@@ -231,7 +231,7 @@ test-swift:
 	@if [ "$$(uname)" != "Darwin" ]; then \
 		echo "⬚  Skipping Swift tests (not macOS)"; \
 	else \
-		for pkg in reminders calendar mail notes; do \
+		for pkg in shared reminders calendar mail notes; do \
 			echo "Testing $$pkg..." && \
 			(cd $(CURDIR)/native/macos/$$pkg && swift test) || exit 1; \
 		done && \

@@ -20,6 +20,7 @@ Move all platform-specific native OS CLI binaries under a `native/` directory, o
 ```
 native/
 ├── macos/
+│   ├── shared/       # SharedCLI library — common utilities for all macOS CLIs
 │   ├── reminders/    # was swift-reminders/
 │   ├── calendar/     # was swift-calendar/
 │   ├── mail/         # was swift-mail/
@@ -36,6 +37,8 @@ native/
 | `swift-calendar/`  | `native/macos/calendar/`  |
 | `swift-mail/`      | `native/macos/mail/`      |
 | `swift-notes/`     | `native/macos/notes/`     |
+
+The `shared/` directory is a Swift library package (`SharedCLI`) containing utilities common to all macOS CLIs: `exitWithError`, `formatPermissionResult`, `parseISO8601`, `iso8601String`, `hexColor`, `CLIError`, and `resolveCalendars`. Unlike the other packages, `shared/` produces a library (not an executable). Each CLI package depends on it via `.package(path: "../shared")`.
 
 ### Build target rename
 

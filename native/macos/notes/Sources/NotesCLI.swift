@@ -1,4 +1,5 @@
 import Foundation
+import SharedCLI
 
 // MARK: - CLI Entry Point
 
@@ -17,13 +18,15 @@ struct NotesCLI {
         // check_permission: verify macOS Automation access without performing any operation.
         // Returns JSON {"granted": true/false} on stdout, always exits 0.
         // Uses error.errorDescription for user-friendly messages from ScriptError.
+        // NOTE: "to name" does NOT trigger macOS Automation prompt — must access data (e.g. notes).
         // Pattern: see also mail/Sources/MailCLI.swift check_permission
         if command == "check_permission" {
             do {
-                _ = try ScriptRunner.run("tell application \"Notes\" to name")
+                _ = try ScriptRunner.run(permissionCheckScript)
                 print(formatPermissionResult(granted: true, error: nil))
             } catch {
-                print(formatPermissionResult(granted: false, error: error.localizedDescription))
+                let detail = "Notes access denied: \(error.localizedDescription)\nGrant access in System Settings > Privacy & Security > Automation"
+                print(formatPermissionResult(granted: false, error: detail))
             }
             return
         }
@@ -105,24 +108,10 @@ enum NotesCLIError: LocalizedError {
     }
 }
 
-func exitWithError(_ message: String) -> Never {
-    FileHandle.standardError.write(Data((message + "\n").utf8))
-    exit(1)
-}
-
 // MARK: - Permission Helpers
 
-/// Serializes a permission check result as JSON.
-/// Output contract: {"granted": true} or {"granted": false, "error": "..."}
-// SYNC: formatPermissionResult must match mail/Sources/MailCLI.swift
-func formatPermissionResult(granted: Bool, error: String?) -> String {
-    var dict: [String: Any] = ["granted": granted]
-    if let error = error {
-        dict["error"] = error
-    }
-    guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
-          let json = String(data: data, encoding: .utf8) else {
-        return #"{"granted": false, "error": "Failed to serialize permission result"}"#
-    }
-    return json
-}
+/// AppleScript command used by check_permission to verify Automation access.
+/// Must access actual data (not just app metadata like `name`) to trigger the
+/// macOS Automation permission prompt. `to name` does NOT require permission.
+// SYNC: permissionCheckScript rationale must match mail/Sources/MailCLI.swift
+let permissionCheckScript = "tell application \"Notes\" to count of notes"
