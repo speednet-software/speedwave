@@ -25,6 +25,54 @@ If you deny the permission, the toggle reverts and an error message explains how
 
 The Reminders integration supports tags stored as `[#tag]` markers in the notes field. Use `tags: ["idea", "work"]` in `createReminder` to assign tags; `listReminders` and `getReminder` extract tags from notes and return them separately in the `tags` field. Apple's EventKit API does not expose a dedicated tags property, so tags are persisted in notes using the `[#tag]` convention.
 
+### OS Tools Parameter Reference
+
+#### Reminders
+
+| Tool                | Parameter        | Type     | Default | Description                                      |
+| ------------------- | ---------------- | -------- | ------- | ------------------------------------------------ |
+| `listReminderLists` | _(none)_         |          |         | Lists all reminder lists — no parameters         |
+| `listReminders`     | `list_id`        | string   | —       | Filter by reminder list ID or name               |
+| `listReminders`     | `show_completed` | boolean  | false   | Include completed reminders                      |
+| `listReminders`     | `limit`          | number   | 20      | Max reminders to return                          |
+| `getReminder`       | `id`             | string   | —       | Reminder ID (**required**)                       |
+| `createReminder`    | `name`           | string   | —       | Reminder title (**required**)                    |
+| `createReminder`    | `list_id`        | string   | —       | Target list ID or name (default list if omitted) |
+| `createReminder`    | `due_date`       | string   | —       | ISO 8601 date                                    |
+| `createReminder`    | `priority`       | number   | 0       | 0=none, 1=high, 5=medium, 9=low                  |
+| `createReminder`    | `notes`          | string   | —       | Additional notes                                 |
+| `createReminder`    | `tags`           | string[] | —       | Tags (stored as `[#tag]` in notes)               |
+| `completeReminder`  | `id`             | string   | —       | Reminder ID (**required**)                       |
+
+#### Calendar
+
+| Tool            | Parameter     | Type    | Default | Description                                     |
+| --------------- | ------------- | ------- | ------- | ----------------------------------------------- |
+| `listCalendars` | _(none)_      |         |         | Lists all calendars — no parameters             |
+| `listEvents`    | `calendar_id` | string  | —       | Filter by calendar ID or name                   |
+| `listEvents`    | `start`       | string  | now     | Start date (ISO 8601)                           |
+| `listEvents`    | `end`         | string  | +7 days | End date (ISO 8601)                             |
+| `listEvents`    | `limit`       | number  | 20      | Max events to return                            |
+| `getEvent`      | `id`          | string  | —       | Event ID (**required**)                         |
+| `createEvent`   | `summary`     | string  | —       | Event title (**required**)                      |
+| `createEvent`   | `start`       | string  | —       | Start time ISO 8601 (**required**)              |
+| `createEvent`   | `end`         | string  | —       | End time ISO 8601 (**required**)                |
+| `createEvent`   | `calendar_id` | string  | —       | Target calendar ID or name (default if omitted) |
+| `createEvent`   | `location`    | string  | —       | Event location                                  |
+| `createEvent`   | `description` | string  | —       | Event description (stored as notes in EventKit) |
+| `createEvent`   | `all_day`     | boolean | false   | All-day event                                   |
+| `updateEvent`   | `id`          | string  | —       | Event ID (**required**)                         |
+| `updateEvent`   | `summary`     | string  | —       | New event title                                 |
+| `updateEvent`   | `start`       | string  | —       | New start time (ISO 8601)                       |
+| `updateEvent`   | `end`         | string  | —       | New end time (ISO 8601)                         |
+| `updateEvent`   | `location`    | string  | —       | New location                                    |
+| `updateEvent`   | `description` | string  | —       | New description                                 |
+| `deleteEvent`   | `id`          | string  | —       | Event ID (**required**)                         |
+
+`list_id` and `calendar_id` accept either an identifier (UUID) or a display name. The CLI resolves by ID first, falling back to name match.
+
+Mail and Notes tools use AppleScript-based automation and have different parameter conventions — see the tool `inputSchema` via MCP `search_tools` for details.
+
 ### Credential Requirements
 
 Each MCP integration requires specific credentials to function. Fields marked as optional do not block the "Configured" status — the integration works without them.
