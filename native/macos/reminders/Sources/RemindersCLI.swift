@@ -232,7 +232,7 @@ func getReminder(store: EKEventStore, params: [String: Any]) throws -> [String: 
         throw CLIError.notFound("Reminder with id '\(id)' not found")
     }
 
-    return ["reminder": reminderToDict(item)]
+    return reminderToDict(item)
 }
 
 func createReminder(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {

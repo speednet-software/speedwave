@@ -216,7 +216,7 @@ func getEvent(store: EKEventStore, params: [String: Any]) throws -> [String: Any
         throw CLIError.notFound("Event with id '\(id)' not found")
     }
 
-    return ["event": eventToDict(event)]
+    return eventToDict(event)
 }
 
 func createEvent(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {

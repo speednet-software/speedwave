@@ -123,6 +123,9 @@ describe('reminder-tools', () => {
 
       expect(result.success).toBe(true);
       expect(result.data).toEqual(mockData);
+      // Verify flat response — no wrapping under "reminder" key (wrapping removed to match outputSchema)
+      expect((result.data as any).reminder).toBeUndefined();
+      expect((result.data as any).id).toBe('r-1');
       expect(runCommand).toHaveBeenCalledWith('reminders', 'get_reminder', { id: 'r-1' });
     });
 
