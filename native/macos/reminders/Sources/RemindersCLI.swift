@@ -171,21 +171,50 @@ func listReminders(store: EKEventStore, params: [String: Any]) throws -> [String
         calendars = try resolveCalendars(for: .reminder, filter: filter, store: store)
     }
 
-    let predicate = store.predicateForIncompleteReminders(
-        withDueDateStarting: nil,
-        ending: nil,
-        calendars: calendars
-    )
+    // show_completed: verified only by manual testing (TCC-dependent, see Task 9 Step 4 item 4)
+    let showCompleted = params["show_completed"] as? Bool ?? false
 
     let semaphore = DispatchSemaphore(value: 0)
     var fetchedReminders: [EKReminder]?
 
-    store.fetchReminders(matching: predicate) { reminders in
-        fetchedReminders = reminders
-        semaphore.signal()
-    }
+    if showCompleted {
+        let group = DispatchGroup()
+        var incompleteResults: [EKReminder]?
+        var completedResults: [EKReminder]?
 
-    semaphore.wait()
+        let incompletePred = store.predicateForIncompleteReminders(
+            withDueDateStarting: nil, ending: nil, calendars: calendars
+        )
+        group.enter()
+        store.fetchReminders(matching: incompletePred) { reminders in
+            incompleteResults = reminders
+            group.leave()
+        }
+
+        let completedPred = store.predicateForCompletedReminders(
+            withCompletionDateStarting: nil, ending: nil, calendars: calendars
+        )
+        group.enter()
+        store.fetchReminders(matching: completedPred) { reminders in
+            completedResults = reminders
+            group.leave()
+        }
+
+        let result = group.wait(timeout: .now() + 10)
+        if result == .timedOut {
+            exitWithError("Timed out fetching reminders after 10s")
+        }
+        fetchedReminders = (incompleteResults ?? []) + (completedResults ?? [])
+    } else {
+        let predicate = store.predicateForIncompleteReminders(
+            withDueDateStarting: nil, ending: nil, calendars: calendars
+        )
+        store.fetchReminders(matching: predicate) { reminders in
+            fetchedReminders = reminders
+            semaphore.signal()
+        }
+        semaphore.wait()
+    }
 
     let reminders = (fetchedReminders ?? []).prefix(limit).map { r in
         reminderToDict(r)
