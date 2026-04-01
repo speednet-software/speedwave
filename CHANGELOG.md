@@ -1,5 +1,6 @@
 # Changelog
 
+
 ## [0.6.0](https://github.com/speednet-software/speedwave/compare/v0.5.1...v0.6.0) (2026-03-30)
 
 
