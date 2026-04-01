@@ -548,15 +548,15 @@ For each blocker:
 
 - **Fix:** specific action required to resolve
 
-### HIGH SEVERITY (significant risk, should fix before implementation)
+### HIGH SEVERITY
 
 Same format as blockers.
 
-### MEDIUM SEVERITY (moderate risk, fix during implementation)
+### MEDIUM SEVERITY
 
 Same format as blockers.
 
-### LOW SEVERITY (minor, fix if time allows)
+### LOW SEVERITY
 
 Same format as blockers.
 
