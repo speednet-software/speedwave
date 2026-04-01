@@ -89,12 +89,12 @@ final class RemindersTests: XCTestCase {
     }
 
     func testValidJSONIsParsed() {
-        let validJSON = "{\"name\": \"test\", \"list\": \"Work\"}"
+        let validJSON = "{\"name\": \"test\", \"list_id\": \"Work\"}"
         let data = validJSON.data(using: .utf8)!
         let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         XCTAssertNotNil(parsed)
         XCTAssertEqual(parsed?["name"] as? String, "test")
-        XCTAssertEqual(parsed?["list"] as? String, "Work")
+        XCTAssertEqual(parsed?["list_id"] as? String, "Work")
     }
 
     func testEmptyJSONDefaultsWork() {
@@ -225,5 +225,78 @@ final class RemindersTests: XCTestCase {
         let result: (granted: Bool, error: Error?) = requestReminderAccess(store: store, timeout: 0.001)
         // With a near-zero timeout, we just verify the return type
         XCTAssertNotNil(result)
+    }
+
+    // MARK: - reminderToDict Output Keys
+
+    func testReminderToDictOutputContainsListIdAndListName() {
+        let store = EKEventStore()
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = "Test"
+        reminder.calendar = store.defaultCalendarForNewReminders()
+        let dict = reminderToDict(reminder)
+        XCTAssertNotNil(dict["list_id"], "reminderToDict must emit list_id")
+        XCTAssertNotNil(dict["list_name"], "reminderToDict must emit list_name")
+        XCTAssertNil(dict["list"], "reminderToDict must not emit bare 'list' key")
+    }
+
+    func testReminderToDictListIdIsIdentifier() {
+        let store = EKEventStore()
+        let reminder = EKReminder(eventStore: store)
+        reminder.calendar = store.defaultCalendarForNewReminders()
+        let dict = reminderToDict(reminder)
+        let listId = dict["list_id"] as? String ?? ""
+        XCTAssertFalse(listId.isEmpty, "list_id should be a non-empty identifier")
+    }
+
+    func testReminderToDictNilCalendarEmitsEmptyStrings() {
+        let store = EKEventStore()
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = "Orphan"
+        let dict = reminderToDict(reminder)
+        XCTAssertEqual(dict["list_id"] as? String, "", "nil calendar -> empty list_id")
+        XCTAssertEqual(dict["list_name"] as? String, "", "nil calendar -> empty list_name")
+    }
+
+    func testReminderToDictCompletedDateKey() {
+        let store = EKEventStore()
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = "Done"
+        reminder.calendar = store.defaultCalendarForNewReminders()
+        reminder.isCompleted = true
+        reminder.completionDate = Date()
+        let dict = reminderToDict(reminder)
+        XCTAssertNotNil(dict["completed_date"], "reminderToDict must emit completed_date (not completion_date)")
+        XCTAssertNil(dict["completion_date"], "reminderToDict must not emit old completion_date key")
+    }
+
+    // MARK: - resolveCalendars Helper
+
+    func testResolveCalendarsByIdMatchesFirst() throws {
+        let store = EKEventStore()
+        let allLists = store.calendars(for: .reminder)
+        try XCTSkipIf(allLists.isEmpty, "No reminder lists available on this machine")
+        let first = allLists[0]
+        let result = try resolveCalendars(for: .reminder, filter: first.calendarIdentifier, store: store)
+        XCTAssertEqual(result.first?.calendarIdentifier, first.calendarIdentifier)
+    }
+
+    func testResolveCalendarsByNameFallback() throws {
+        let store = EKEventStore()
+        let allLists = store.calendars(for: .reminder)
+        try XCTSkipIf(allLists.isEmpty, "No reminder lists available on this machine")
+        let first = allLists[0]
+        let result = try resolveCalendars(for: .reminder, filter: first.title, store: store)
+        XCTAssertEqual(result.first?.title, first.title)
+    }
+
+    func testResolveCalendarsNotFoundThrows() {
+        let store = EKEventStore()
+        let bogus = "NONEXISTENT-\(UUID())"
+        XCTAssertThrowsError(try resolveCalendars(for: .reminder, filter: bogus, store: store)) { error in
+            XCTAssertTrue(error is CLIError, "Should throw CLIError")
+            XCTAssertTrue(error.localizedDescription.contains("not found"))
+            XCTAssertTrue(error.localizedDescription.contains(bogus))
+        }
     }
 }

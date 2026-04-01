@@ -130,6 +130,26 @@ func formatPermissionResult(granted: Bool, error: String?) -> String {
     return json
 }
 
+// MARK: - Calendar Resolution
+
+/// Resolves calendars by ID first, falling back to name match.
+/// Returns all matches — caller decides usage (filter predicate vs single pick).
+/// If multiple calendars share the same name, all are returned; createReminder uses [0].
+/// Throws CLIError.notFound if filter matches nothing.
+func resolveCalendars(
+    for entityType: EKEntityType,
+    filter: String,
+    store: EKEventStore
+) throws -> [EKCalendar] {
+    let all = store.calendars(for: entityType)
+    let byId = all.filter { $0.calendarIdentifier == filter }
+    if !byId.isEmpty { return byId }
+    let byName = all.filter { $0.title == filter }
+    if !byName.isEmpty { return byName }
+    let label = entityType == .reminder ? "Reminder list" : "Calendar"
+    throw CLIError.notFound("\(label) '\(filter)' not found")
+}
+
 // MARK: - Commands
 
 func listLists(store: EKEventStore) throws -> [String: Any] {
@@ -146,14 +166,9 @@ func listLists(store: EKEventStore) throws -> [String: Any] {
 
 func listReminders(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {
     let limit = params["limit"] as? Int ?? 20
-    let listName = params["list"] as? String
-
     var calendars: [EKCalendar]?
-    if let name = listName {
-        calendars = store.calendars(for: .reminder).filter { $0.title == name }
-        if calendars?.isEmpty == true {
-            throw CLIError.notFound("Reminder list '\(name)' not found")
-        }
+    if let filter = params["list_id"] as? String {
+        calendars = try resolveCalendars(for: .reminder, filter: filter, store: store)
     }
 
     let predicate = store.predicateForIncompleteReminders(
@@ -199,11 +214,9 @@ func createReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
     let reminder = EKReminder(eventStore: store)
     reminder.title = name
 
-    if let listName = params["list"] as? String {
-        guard let calendar = store.calendars(for: .reminder).first(where: { $0.title == listName }) else {
-            throw CLIError.notFound("Reminder list '\(listName)' not found")
-        }
-        reminder.calendar = calendar
+    if let filter = params["list_id"] as? String {
+        let matches = try resolveCalendars(for: .reminder, filter: filter, store: store)
+        reminder.calendar = matches[0]
     } else {
         reminder.calendar = store.defaultCalendarForNewReminders()
     }
@@ -263,7 +276,8 @@ func reminderToDict(_ r: EKReminder) -> [String: Any] {
         "name": r.title ?? "",
         "completed": r.isCompleted,
         "priority": r.priority,
-        "list": r.calendar?.title ?? "",
+        "list_id": r.calendar?.calendarIdentifier ?? "",
+        "list_name": r.calendar?.title ?? "",
     ]
 
     if !tags.isEmpty {
@@ -275,7 +289,7 @@ func reminderToDict(_ r: EKReminder) -> [String: Any] {
     }
 
     if let completionDate = r.completionDate {
-        dict["completion_date"] = iso8601String(from: completionDate)
+        dict["completed_date"] = iso8601String(from: completionDate)
     }
 
     if !cleanNotes.isEmpty {
