@@ -54,7 +54,7 @@ MAX_ITER="${MAX_ITERATIONS:-12}"
 MAX_IMPL_ITER="${MAX_IMPL_ITERATIONS:-5}"
 PLAN_NAME="${PLAN_NAME:-$(date +%Y-%m-%d-%H%M%S)-plan}"
 BRANCH_NAME="${BRANCH_NAME:-feat/${PLAN_NAME}}"
-PLAN_DIR="${TMPDIR:-/tmp}/speedwave-plans"
+PLAN_DIR="${HOME}/.speedwave/plans"
 PLAN_PATH="${IMPL_ONLY:-${PLAN_DIR}/${PLAN_NAME}.md}"
 
 # Resolve PROJECT_ROOT and SCRIPT_DIR from the original repo (before worktree)
