@@ -201,7 +201,7 @@ async fn read_body_limited(resp: reqwest::Response, label: &str) -> Result<Vec<u
     while let Some(chunk) = stream.chunk().await.map_err(|e| {
         format!("Failed to read {label} response chunk: {e}")
     })? {
-        if buf.len() + chunk.len() > MAX_RESPONSE_BODY_BYTES {
+        if buf.len().saturating_add(chunk.len()) > MAX_RESPONSE_BODY_BYTES {
             return Err(format!(
                 "{label} response too large (exceeded {MAX_RESPONSE_BODY_BYTES} byte limit)"
             ));
@@ -1346,10 +1346,12 @@ mod tests {
     // ── read_body_limited: error paths ──────────────────────────────────
 
     #[tokio::test]
-    async fn body_too_large_content_length_rejected() {
-        // reqwest::Response::from(http::Response) sets content_length() from the
-        // Content-Length header, allowing us to fake an oversized response without
-        // actually allocating that much memory.
+    async fn body_too_large_via_http_response_rejected() {
+        // Exercises read_body_limited with an oversized body constructed via
+        // http::Response (no network). The Content-Length pre-flight check
+        // cannot be tested independently because reqwest::Response::from()
+        // computes content_length() from the body, ignoring the header.
+        // This test exercises the streaming size guard instead.
         let oversized_len = MAX_RESPONSE_BODY_BYTES + 1;
         let big_body = vec![b'x'; oversized_len];
         let http_resp = http::Response::builder()
@@ -1359,7 +1361,7 @@ mod tests {
         let resp: reqwest::Response = http_resp.into();
 
         let result = read_body_limited(resp, "test").await;
-        assert!(result.is_err(), "Should reject oversized Content-Length");
+        assert!(result.is_err(), "Should reject oversized body");
         let err = result.unwrap_err();
         assert!(
             err.contains("too large"),
