@@ -65,7 +65,6 @@ fn save_snapshot_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result
     let dir = data_dir.join("snapshots").join(project);
     std::fs::create_dir_all(&dir)?;
 
-    // See also: save_snapshot() — identical permission block (2 of 3, Rule of Three)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -121,7 +120,6 @@ pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
     let dir = snapshot_dir(project)?;
     std::fs::create_dir_all(&dir)?;
 
-    // See also: save_snapshot_in() — identical permission block (2 of 3, Rule of Three)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
