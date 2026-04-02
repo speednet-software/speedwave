@@ -54,7 +54,7 @@ MAX_ITER="${MAX_ITERATIONS:-12}"
 MAX_IMPL_ITER="${MAX_IMPL_ITERATIONS:-5}"
 PLAN_NAME="${PLAN_NAME:-$(date +%Y-%m-%d-%H%M%S)-plan}"
 BRANCH_NAME="${BRANCH_NAME:-feat/${PLAN_NAME}}"
-PLAN_DIR="${HOME}/.speedwave/plans"
+PLAN_DIR="${TMPDIR:-/tmp}/speedwave-plans"
 PLAN_PATH="${IMPL_ONLY:-${PLAN_DIR}/${PLAN_NAME}.md}"
 
 # Resolve PROJECT_ROOT and SCRIPT_DIR from the original repo (before worktree)
@@ -177,24 +177,31 @@ run_claude_stream() {
     while [[ $attempt -le $MAX_RETRY ]]; do
         start_spinner "working"
 
-        claude "$@" --output-format stream-json --verbose 2>/dev/null | while IFS= read -r line; do
-            local msg_type
-            msg_type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null) || continue
-
-            case "$msg_type" in
-                result)
-                    echo "$line" > "$output_file"
+        claude "$@" --output-format stream-json --verbose 2>/dev/null \
+          | jq -r --unbuffered '
+              if .type == "result" then "RESULT\t" + (. | tojson)
+              elif .type == "assistant" then
+                (.message.content[]? | select(.type == "tool_use") |
+                  "TOOL\t" + .name + "\t" + (
+                    .input |
+                    if .file_path then .file_path
+                    elif .pattern then .pattern
+                    elif .command then (.command | split("\n") | .[0] | .[0:80])
+                    else (tostring | .[0:80])
+                    end
+                  )
+                ) // empty
+              else empty end
+            ' 2>/dev/null \
+          | while IFS=$'\t' read -r ev_type ev_data ev_extra; do
+            case "$ev_type" in
+                RESULT)
+                    echo "$ev_data" > "$output_file"
                     ;;
-                assistant)
-                    local tool_name
-                    tool_name=$(echo "$line" | jq -r '.message.content[]? | select(.type == "tool_use") | .name // empty' 2>/dev/null) || true
-                    if [[ -n "$tool_name" ]]; then
-                        local tool_input
-                        tool_input=$(echo "$line" | jq -r '.message.content[]? | select(.type == "tool_use") | .input | if .file_path then .file_path elif .pattern then .pattern elif .command then (.command | split("\n") | .[0] | .[0:80]) else (tostring | .[0:80]) end // empty' 2>/dev/null) || true
-                        stop_spinner
-                        printf "    ${DIM}▸ %s %s${NC}\n" "$tool_name" "$tool_input"
-                        start_spinner "working"
-                    fi
+                TOOL)
+                    stop_spinner
+                    printf "    ${DIM}▸ %s %s${NC}\n" "$ev_data" "$ev_extra"
+                    start_spinner "working"
                     ;;
             esac
         done
