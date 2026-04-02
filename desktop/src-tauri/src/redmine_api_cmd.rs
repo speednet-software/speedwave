@@ -1345,26 +1345,25 @@ mod tests {
 
     // ── read_body_limited: error paths ──────────────────────────────────
 
-    #[test]
-    fn body_too_large_content_length_rejected() {
-        // The Content-Length pre-check in read_body_limited fires when
-        // resp.content_length() > MAX_RESPONSE_BODY_BYTES. Because reqwest
-        // validates that the body length matches the Content-Length header
-        // (returning IncompleteMessage otherwise), we cannot test this path
-        // with a mockito server and a small body. Instead we verify the guard
-        // logic directly: given a Content-Length value above the limit, the
-        // guard produces the correct error message.
-        let len = MAX_RESPONSE_BODY_BYTES as u64 + 1;
-        let err = format!(
-            "test response too large ({len} bytes, limit {MAX_RESPONSE_BODY_BYTES})"
-        );
+    #[tokio::test]
+    async fn body_too_large_content_length_rejected() {
+        // reqwest::Response::from(http::Response) sets content_length() from the
+        // Content-Length header, allowing us to fake an oversized response without
+        // actually allocating that much memory.
+        let oversized_len = MAX_RESPONSE_BODY_BYTES + 1;
+        let big_body = vec![b'x'; oversized_len];
+        let http_resp = http::Response::builder()
+            .status(200)
+            .body(big_body)
+            .unwrap();
+        let resp: reqwest::Response = http_resp.into();
+
+        let result = read_body_limited(resp, "test").await;
+        assert!(result.is_err(), "Should reject oversized Content-Length");
+        let err = result.unwrap_err();
         assert!(
             err.contains("too large"),
-            "Content-Length guard should produce 'too large' error: {err}"
-        );
-        assert!(
-            len > MAX_RESPONSE_BODY_BYTES as u64,
-            "Sanity: len is above the limit"
+            "Error should mention 'too large': {err}"
         );
     }
 
