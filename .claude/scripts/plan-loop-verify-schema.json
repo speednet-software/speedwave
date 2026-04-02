@@ -31,5 +31,6 @@
     "make_check_passed",
     "make_test_passed",
     "gaps_summary"
-  ]
+  ],
+  "additionalProperties": false
 }

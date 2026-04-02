@@ -34,5 +34,6 @@
     "low_count",
     "findings_summary",
     "verdict_table"
-  ]
+  ],
+  "additionalProperties": false
 }

@@ -52,9 +52,9 @@ fi
 
 MAX_ITER="${MAX_ITERATIONS:-12}"
 MAX_IMPL_ITER="${MAX_IMPL_ITERATIONS:-5}"
-PLAN_NAME="${PLAN_NAME:-$(date +%Y-%m-%d)-plan}"
+PLAN_NAME="${PLAN_NAME:-$(date +%Y-%m-%d-%H%M%S)-plan}"
 BRANCH_NAME="${BRANCH_NAME:-feat/${PLAN_NAME}}"
-PLAN_DIR="/tmp/speedwave-plans"
+PLAN_DIR="${TMPDIR:-/tmp}/speedwave-plans"
 PLAN_PATH="${IMPL_ONLY:-${PLAN_DIR}/${PLAN_NAME}.md}"
 
 # Resolve PROJECT_ROOT and SCRIPT_DIR from the original repo (before worktree)
@@ -68,13 +68,14 @@ REVIEWER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-review-plan"
 IMPLEMENTER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-implement-plan"
 VERIFIER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-verify-plan"
 
-WORKTREE_DIR="/tmp/speedwave-loop-${PLAN_NAME}"
+WORKTREE_DIR="${TMPDIR:-/tmp}/speedwave-loop-${PLAN_NAME}"
 WORKTREE_CREATED=false
 
 MAX_RETRY=2
 RETRY_WAIT=60
 
-READONLY_TOOLS='Bash(git *),Bash(make *),Read,Glob,Grep,Agent'
+PLANNING_TOOLS='Bash(git *),Bash(make *),Read,Glob,Grep,Agent'
+VERIFIER_TOOLS='Bash(git *),Bash(make *),Read,Glob,Grep,Agent'
 
 # --- Colors ---
 
@@ -138,7 +139,7 @@ extract_prompt() {
             /^---$/ { dc++; next }
             dc >= 2 { print }
         ' "$skill_file"
-    fi | sed "s|\\\$ARGUMENTS|$task_text|g"
+    fi | awk -v rep="$task_text" '{ gsub(/\$ARGUMENTS/, rep); print }'
 }
 
 SPINNER_PID=""
@@ -216,7 +217,7 @@ run_claude_stream() {
 }
 
 get_session_id() { jq -r '.session_id // empty' "$1" 2>/dev/null; }
-get_result_text() { jq -r '.result // empty' "$1" 2>/dev/null | sed -n '/^# /,$p'; }
+get_result_text() { jq -r '.result // empty' "$1" 2>/dev/null | sed -n '/^#/,$p'; }
 
 # --- System prompts ---
 
@@ -254,18 +255,10 @@ Do NOT use AskUserQuestion — it is unavailable.
 Your output will be captured as structured JSON via --json-schema.
 The gaps_summary field MUST be specific enough for the implementer to fix every gap WITHOUT reading your full analysis."
 
-IMPLEMENTER_BODY="$(extract_prompt "$IMPLEMENTER_SKILL_DIR" "$PLAN_PATH")"
-VERIFIER_BODY="$(extract_prompt "$VERIFIER_SKILL_DIR" "$PLAN_PATH")"
-
-IMPLEMENTER_SYSTEM_PROMPT="${IMPLEMENTER_PREAMBLE}
-
-${IMPLEMENTER_BODY}"
-
-VERIFIER_SYSTEM_PROMPT="${VERIFIER_PREAMBLE}
-
-${VERIFIER_BODY}"
-
 VERIFY_SCHEMA="$(cat "$VERIFY_SCHEMA_FILE" 2>/dev/null || echo '{}')"
+
+# NOTE: IMPLEMENTER_BODY and VERIFIER_BODY are computed after Phase 0
+# (worktree setup) so they read from the correct skill paths.
 
 # --- Temp files & cleanup ---
 
@@ -278,7 +271,6 @@ IMPL_SESSION_ID=""
 cleanup() {
     stop_spinner
     pkill -P $$ 2>/dev/null || true
-    pkill -f "claude.*--output-format stream-json" 2>/dev/null || true
     rm -rf "$TMPDIR_LOOP"
     printf "\n"
     echo "Interrupted. Plan: $PLAN_PATH"
@@ -318,8 +310,13 @@ if [[ "$NO_WORKTREE" != "true" && -z "$IMPL_ONLY" ]]; then
 
     # Delete branch if it exists (leftover from previous run)
     if git -C "$PROJECT_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH_NAME" 2>/dev/null; then
-        printf "  ${YELLOW}Deleting existing branch $BRANCH_NAME${NC}\n"
-        git -C "$PROJECT_ROOT" branch -D "$BRANCH_NAME" 2>/dev/null || true
+        if git -C "$PROJECT_ROOT" merge-base --is-ancestor "$BRANCH_NAME" "$BASE_BRANCH" 2>/dev/null; then
+            printf "  ${YELLOW}Deleting existing branch $BRANCH_NAME (already merged)${NC}\n"
+            git -C "$PROJECT_ROOT" branch -D "$BRANCH_NAME" 2>/dev/null || true
+        else
+            printf "  ${RED}ERROR: Branch $BRANCH_NAME exists with unmerged commits. Use --branch to pick a different name.${NC}\n" >&2
+            exit 1
+        fi
     fi
 
     # Create worktree with new branch
@@ -349,6 +346,16 @@ else
     fi
 fi
 
+# Re-extract prompts after worktree may have changed PROJECT_ROOT
+IMPLEMENTER_BODY="$(extract_prompt "$IMPLEMENTER_SKILL_DIR" "$PLAN_PATH")"
+VERIFIER_BODY="$(extract_prompt "$VERIFIER_SKILL_DIR" "$PLAN_PATH")"
+IMPLEMENTER_SYSTEM_PROMPT="${IMPLEMENTER_PREAMBLE}
+
+${IMPLEMENTER_BODY}"
+VERIFIER_SYSTEM_PROMPT="${VERIFIER_PREAMBLE}
+
+${VERIFIER_BODY}"
+
 cd "$PROJECT_ROOT"
 
 # ═══════════════════════════════════════════════════════════════
@@ -367,6 +374,7 @@ echo "  Max iter:   $MAX_ITER"
 echo ""
 
 iteration=0
+verdict="UNKNOWN"
 REVIEW_FEEDBACK=""
 
 while [[ $iteration -lt $MAX_ITER ]]; do
@@ -390,7 +398,7 @@ while [[ $iteration -lt $MAX_ITER ]]; do
 Task: $TASK" \
             --model opus \
             --effort max \
-            --allowed-tools "$READONLY_TOOLS" \
+            --allowed-tools "$PLANNING_TOOLS" \
             --append-system-prompt "$WRITER_SYSTEM_PROMPT" || {
             printf "  ${RED}[writer] FAILED${NC}\n" >&2
             rm -rf "$TMPDIR_LOOP"; exit 1
@@ -410,7 +418,7 @@ $REVIEW_FEEDBACK" \
                 --model opus \
                 --effort max \
                 --resume "$WRITER_SESSION_ID" \
-                --allowed-tools "$READONLY_TOOLS"; then
+                --allowed-tools "$PLANNING_TOOLS"; then
                 local_ok=true
             else
                 printf "  ${YELLOW}Resume failed, falling back to new session${NC}\n"
@@ -427,7 +435,7 @@ Review findings:
 $REVIEW_FEEDBACK" \
                 --model opus \
                 --effort max \
-                --allowed-tools "$READONLY_TOOLS" \
+                --allowed-tools "$PLANNING_TOOLS" \
                 --append-system-prompt "$WRITER_SYSTEM_PROMPT" || {
                 printf "  ${RED}[writer] FAILED${NC}\n" >&2
                 rm -rf "$TMPDIR_LOOP"; exit 1
@@ -460,7 +468,7 @@ $REVIEW_FEEDBACK" \
         --model opus \
         --effort max \
         --no-session-persistence \
-        --allowed-tools "$READONLY_TOOLS" \
+        --allowed-tools "$PLANNING_TOOLS" \
         --append-system-prompt "$REVIEWER_SYSTEM_PROMPT" \
         --json-schema "$REVIEW_SCHEMA" || {
         printf "  ${RED}[reviewer] FAILED${NC}\n" >&2
@@ -537,6 +545,11 @@ echo "  Max impl iter:  $MAX_IMPL_ITER"
 echo ""
 
 impl_iteration=0
+v_verdict="UNKNOWN"
+v_steps=0
+v_total=0
+v_check=false
+v_test=false
 IMPL_FEEDBACK=""
 
 while [[ $impl_iteration -lt $MAX_IMPL_ITER ]]; do
@@ -576,7 +589,7 @@ Follow every step exactly. After implementing all steps, run \`make check\` and 
                 -p "The verifier found gaps in your implementation. Fix ALL of the following issues, then run \`make check\` and \`make test\` again:
 
 $IMPL_FEEDBACK" \
-                --model opus \
+                --model sonnet \
                 --effort high \
                 --resume "$IMPL_SESSION_ID" \
                 --dangerously-skip-permissions; then
@@ -593,7 +606,7 @@ $IMPL_FEEDBACK" \
                 -p "The plan at $PLAN_PATH was partially implemented but has gaps. Fix ALL of the following issues, then run \`make check\` and \`make test\`:
 
 $IMPL_FEEDBACK" \
-                --model opus \
+                --model sonnet \
                 --effort high \
                 --dangerously-skip-permissions \
                 --append-system-prompt "$IMPLEMENTER_SYSTEM_PROMPT" || {
@@ -619,7 +632,7 @@ $IMPL_FEEDBACK" \
         --model opus \
         --effort max \
         --no-session-persistence \
-        --dangerously-skip-permissions \
+        --allowed-tools "$VERIFIER_TOOLS" \
         --append-system-prompt "$VERIFIER_SYSTEM_PROMPT" \
         --json-schema "$VERIFY_SCHEMA" || {
         printf "  ${RED}[verifier] FAILED${NC}\n" >&2
