@@ -90,30 +90,30 @@ Speedwave uses [release-please](https://github.com/googleapis/release-please) to
   └──────────────────────────┬──────────────────────────────────┘
                              │
                              ▼
-  ┌─────────────── desktop-release.yml ────────────────────────┐
-  │                                                             │
-  │  [job: resolve]  validate inputs, look up draft release ID  │
-  │        │                                                    │
-  │        ▼                                                    │
-  │  [job: publish-tauri]  matrix build (4 runners in parallel) │
-  │    ├─ macOS arm64    ─► macOS_Apple_Silicon .dmg + .app.tar.gz + .sig  (3)  │
-  │    ├─ macOS x86_64   ─► macOS_Intel .dmg + .app.tar.gz + .sig  (3)         │
-  │    ├─ Linux x86_64   ─► .deb + .sig                  (3)     │
-  │    └─ Windows x86_64 ─► .msi + .nsis.zip + .sig    (3)     │
-  │        │                                                    │
-  │        ▼                                                    │
-  │  [job: cli]  cross-compile CLI binary (4 targets)           │
-  │    ├─ aarch64-apple-darwin     ─► .tar.gz                   │
-  │    ├─ x86_64-apple-darwin      ─► .tar.gz                   │
-  │    ├─ x86_64-unknown-linux-gnu ─► .tar.gz                   │
-  │    └─ x86_64-pc-windows-msvc   ─► .zip                     │
-  │        │                                                    │
-  │        ▼                                                    │
-  │  [job: publish-release]                                     │
-  │    validate 17+ assets + latest.json version                │
-  │    draft ─► live                                            │
-  │                                                             │
-  └──────────────────────────┬──────────────────────────────────┘
+  ┌──────────────────────── desktop-release.yml ──────────────────────────────────┐
+  │                                                                               │
+  │  [job: resolve]  validate inputs, look up draft release ID                    │
+  │        │                                                                      │
+  │        ▼                                                                      │
+  │  [job: publish-tauri]  matrix build (4 runners in parallel)                   │
+  │    ├─ macOS arm64    ─► macOS_Apple_Silicon .dmg + .app.tar.gz + .sig  (3)    │
+  │    ├─ macOS x86_64   ─► macOS_Intel .dmg + .app.tar.gz + .sig  (3)           │
+  │    ├─ Linux x86_64   ─► .deb + .sig  (3)                                     │
+  │    └─ Windows x86_64 ─► .msi + .nsis.zip + .sig  (3)                         │
+  │        │                                                                      │
+  │        ▼                                                                      │
+  │  [job: cli]  cross-compile CLI binary (4 targets)                             │
+  │    ├─ aarch64-apple-darwin     ─► .tar.gz                                     │
+  │    ├─ x86_64-apple-darwin      ─► .tar.gz                                     │
+  │    ├─ x86_64-unknown-linux-gnu ─► .tar.gz                                     │
+  │    └─ x86_64-pc-windows-msvc   ─► .zip                                       │
+  │        │                                                                      │
+  │        ▼                                                                      │
+  │  [job: publish-release]                                                       │
+  │    validate 17+ assets + latest.json version                                  │
+  │    draft ─► live                                                              │
+  │                                                                               │
+  └──────────────────────────┬────────────────────────────────────────────────────┘
                              │
                              ▼
   ┌──────────────── backmerge.yml ───────────────────────────────┐
