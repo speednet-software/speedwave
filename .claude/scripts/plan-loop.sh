@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # Automated plan → review → implement → verify loop.
 #
+# Creates an isolated git worktree + branch, then:
 # Phase 1: Writer creates plan, hostile reviewer iterates until READY_TO_IMPLEMENT.
 # Phase 2: Implementer codes from plan, verifier checks 100% implementation + tests.
 #
 # Usage: plan-loop.sh <task description> [options]
 #   --max-iter N          Phase 1: max write→review iterations (default 12)
 #   --max-impl-iter N     Phase 2: max implement→verify iterations (default 5)
-#   --plan-name NAME      Plan filename stem (default: YYYY-MM-DD-plan)
+#   --plan-name NAME      Plan filename stem and branch suffix (default: YYYY-MM-DD-plan)
 #   --plan-only           Run Phase 1 only (no implementation)
 #   --impl-only <path>    Run Phase 2 only (plan already exists at <path>)
+#   --no-worktree         Skip worktree creation, work in current directory
+#   --branch NAME         Branch name (default: feat/<plan-name>)
+#   --base BRANCH         Base branch for worktree (default: origin/dev)
 #
-# Requires: claude (Claude Code CLI), jq
+# Requires: claude (Claude Code CLI), jq, git
 
 set -euo pipefail
 
@@ -20,6 +24,9 @@ set -euo pipefail
 TASK=""
 PLAN_ONLY=false
 IMPL_ONLY=""
+NO_WORKTREE=false
+BRANCH_NAME=""
+BASE_BRANCH="origin/dev"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --max-iter)        MAX_ITERATIONS="$2"; shift 2 ;;
@@ -27,6 +34,9 @@ while [[ $# -gt 0 ]]; do
         --plan-name)       PLAN_NAME="$2"; shift 2 ;;
         --plan-only)       PLAN_ONLY=true; shift ;;
         --impl-only)       IMPL_ONLY="$2"; shift 2 ;;
+        --no-worktree)     NO_WORKTREE=true; shift ;;
+        --branch)          BRANCH_NAME="$2"; shift 2 ;;
+        --base)            BASE_BRANCH="$2"; shift 2 ;;
         *)
             if [[ -z "$TASK" ]]; then TASK="$1"; else TASK="$TASK $1"; fi
             shift ;;
@@ -34,16 +44,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$TASK" && -z "$IMPL_ONLY" ]]; then
-    echo "Usage: plan-loop.sh <task> [--max-iter N] [--max-impl-iter N] [--plan-name NAME] [--plan-only] [--impl-only <path>]" >&2
+    echo "Usage: plan-loop.sh <task> [options]" >&2
+    echo "Options: --max-iter N, --max-impl-iter N, --plan-name NAME, --plan-only," >&2
+    echo "         --impl-only <path>, --no-worktree, --branch NAME, --base BRANCH" >&2
     exit 1
 fi
 
 MAX_ITER="${MAX_ITERATIONS:-12}"
 MAX_IMPL_ITER="${MAX_IMPL_ITERATIONS:-5}"
 PLAN_NAME="${PLAN_NAME:-$(date +%Y-%m-%d)-plan}"
+BRANCH_NAME="${BRANCH_NAME:-feat/${PLAN_NAME}}"
 PLAN_DIR="/tmp/speedwave-plans"
 PLAN_PATH="${IMPL_ONLY:-${PLAN_DIR}/${PLAN_NAME}.md}"
 
+# Resolve PROJECT_ROOT and SCRIPT_DIR from the original repo (before worktree)
 PROJECT_ROOT="$(git rev-parse --show-toplevel)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REVIEW_SCHEMA_FILE="$SCRIPT_DIR/plan-loop-review-schema.json"
@@ -53,6 +67,9 @@ WRITER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-write-plan"
 REVIEWER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-review-plan"
 IMPLEMENTER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-implement-plan"
 VERIFIER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-verify-plan"
+
+WORKTREE_DIR="/tmp/speedwave-loop-${PLAN_NAME}"
+WORKTREE_CREATED=false
 
 MAX_RETRY=2
 RETRY_WAIT=60
@@ -259,24 +276,80 @@ WRITER_SESSION_ID=""
 IMPL_SESSION_ID=""
 
 cleanup() {
-    # Kill spinner first (visible annoyance)
     stop_spinner
-    # Kill all child processes of this script
     pkill -P $$ 2>/dev/null || true
-    # Kill any claude processes we spawned
     pkill -f "claude.*--output-format stream-json" 2>/dev/null || true
     rm -rf "$TMPDIR_LOOP"
     printf "\n"
     echo "Interrupted. Plan: $PLAN_PATH"
     [[ -n "$WRITER_SESSION_ID" ]] && echo "Writer session: $WRITER_SESSION_ID"
     [[ -n "$IMPL_SESSION_ID" ]] && echo "Implementer session: $IMPL_SESSION_ID"
+    if [[ "$WORKTREE_CREATED" == "true" ]]; then
+        echo "Worktree: $WORKTREE_DIR (branch: $BRANCH_NAME)"
+        echo "To resume: cd $WORKTREE_DIR"
+        echo "To cleanup: git -C $PROJECT_ROOT worktree remove $WORKTREE_DIR"
+    fi
     exit 130
 }
 trap cleanup INT TERM
 trap stop_spinner EXIT
 
-cd "$PROJECT_ROOT"
 mkdir -p "$(dirname "$PLAN_PATH")"
+
+# ═══════════════════════════════════════════════════════════════
+# PHASE 0: WORKTREE SETUP
+# ═══════════════════════════════════════════════════════════════
+
+if [[ "$NO_WORKTREE" != "true" && -z "$IMPL_ONLY" ]]; then
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║  PHASE 0: WORKTREE SETUP                                    ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+
+    # Fetch latest base
+    printf "  ${DIM}Fetching $BASE_BRANCH...${NC}\n"
+    git -C "$PROJECT_ROOT" fetch origin 2>/dev/null || true
+
+    # Remove stale worktree if exists
+    if [[ -d "$WORKTREE_DIR" ]]; then
+        printf "  ${YELLOW}Removing stale worktree at $WORKTREE_DIR${NC}\n"
+        git -C "$PROJECT_ROOT" worktree remove --force "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"
+    fi
+
+    # Delete branch if it exists (leftover from previous run)
+    if git -C "$PROJECT_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH_NAME" 2>/dev/null; then
+        printf "  ${YELLOW}Deleting existing branch $BRANCH_NAME${NC}\n"
+        git -C "$PROJECT_ROOT" branch -D "$BRANCH_NAME" 2>/dev/null || true
+    fi
+
+    # Create worktree with new branch
+    printf "  ${CYAN}Creating worktree:${NC} $WORKTREE_DIR\n"
+    printf "  ${CYAN}Branch:${NC} $BRANCH_NAME (from $BASE_BRANCH)\n"
+    git -C "$PROJECT_ROOT" worktree add -b "$BRANCH_NAME" "$WORKTREE_DIR" "$BASE_BRANCH" 2>&1 | sed 's/^/  /'
+
+    WORKTREE_CREATED=true
+
+    # Update PROJECT_ROOT to worktree — all subsequent work happens there
+    PROJECT_ROOT="$WORKTREE_DIR"
+
+    # Re-resolve skill dirs relative to new worktree
+    WRITER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-write-plan"
+    REVIEWER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-review-plan"
+    IMPLEMENTER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-implement-plan"
+    VERIFIER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-verify-plan"
+
+    echo ""
+    printf "  ${GREEN}Worktree ready${NC}\n"
+    echo ""
+else
+    if [[ -n "$IMPL_ONLY" ]]; then
+        printf "  ${DIM}Skipping worktree (--impl-only mode)${NC}\n"
+    elif [[ "$NO_WORKTREE" == "true" ]]; then
+        printf "  ${DIM}Skipping worktree (--no-worktree)${NC}\n"
+    fi
+fi
+
+cd "$PROJECT_ROOT"
 
 # ═══════════════════════════════════════════════════════════════
 # PHASE 1: WRITE → REVIEW
@@ -575,6 +648,15 @@ $IMPL_FEEDBACK" \
         printf "${GREEN}║  IMPLEMENTATION VERIFIED after $impl_iteration iteration(s)${NC}\n"
         printf "${GREEN}║  Steps: $v_steps/$v_total  check: PASS  test: PASS${NC}\n"
         printf "${GREEN}║  Plan: $PLAN_PATH${NC}\n"
+        if [[ "$WORKTREE_CREATED" == "true" ]]; then
+        printf "${GREEN}║  Worktree: $WORKTREE_DIR${NC}\n"
+        printf "${GREEN}║  Branch: $BRANCH_NAME${NC}\n"
+        printf "${GREEN}║${NC}\n"
+        printf "${GREEN}║  Next steps:${NC}\n"
+        printf "${GREEN}║    cd $WORKTREE_DIR${NC}\n"
+        printf "${GREEN}║    git push -u origin $BRANCH_NAME${NC}\n"
+        printf "${GREEN}║    gh pr create --base dev${NC}\n"
+        fi
         printf "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}\n"
         rm -rf "$TMPDIR_LOOP"
         exit 0
