@@ -1,0 +1,36 @@
+{
+  "type": "object",
+  "properties": {
+    "overall_verdict": {
+      "type": "string",
+      "enum": ["VERIFIED", "GAPS_FOUND"]
+    },
+    "steps_verified": {
+      "type": "integer",
+      "description": "Number of plan steps fully implemented"
+    },
+    "steps_total": {
+      "type": "integer",
+      "description": "Total number of plan steps"
+    },
+    "make_check_passed": {
+      "type": "boolean"
+    },
+    "make_test_passed": {
+      "type": "boolean"
+    },
+    "gaps_summary": {
+      "type": "string",
+      "description": "Detailed description of all gaps, missing implementations, and test failures. Passed directly to the implementer as fix instructions."
+    }
+  },
+  "required": [
+    "overall_verdict",
+    "steps_verified",
+    "steps_total",
+    "make_check_passed",
+    "make_test_passed",
+    "gaps_summary"
+  ],
+  "additionalProperties": false
+}

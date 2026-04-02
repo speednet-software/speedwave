@@ -1,0 +1,39 @@
+{
+  "type": "object",
+  "properties": {
+    "overall_verdict": {
+      "type": "string",
+      "enum": ["READY_TO_IMPLEMENT", "NEEDS_REVISION", "REJECT"]
+    },
+    "blocker_count": {
+      "type": "integer"
+    },
+    "high_count": {
+      "type": "integer"
+    },
+    "medium_count": {
+      "type": "integer"
+    },
+    "low_count": {
+      "type": "integer"
+    },
+    "findings_summary": {
+      "type": "string",
+      "description": "Compact summary of ALL findings (BLOCKER, HIGH, MEDIUM) with specific fix instructions for each. This text is passed directly to the plan writer as revision instructions."
+    },
+    "verdict_table": {
+      "type": "string",
+      "description": "Markdown table with 12 axes: axis name, PASS/FAIL, issue count"
+    }
+  },
+  "required": [
+    "overall_verdict",
+    "blocker_count",
+    "high_count",
+    "medium_count",
+    "low_count",
+    "findings_summary",
+    "verdict_table"
+  ],
+  "additionalProperties": false
+}
