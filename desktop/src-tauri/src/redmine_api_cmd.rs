@@ -1348,10 +1348,15 @@ mod tests {
     #[tokio::test]
     async fn body_too_large_via_http_response_rejected() {
         // Exercises read_body_limited with an oversized body constructed via
-        // http::Response (no network). The Content-Length pre-flight check
-        // cannot be tested independently because reqwest::Response::from()
-        // computes content_length() from the body, ignoring the header.
-        // This test exercises the streaming size guard instead.
+        // http::Response (no network round-trip).
+        //
+        // Note: the Content-Length pre-flight guard (lines 185–190) cannot be
+        // tested via http::Response because reqwest::Response::content_length()
+        // uses hyper::Body::size_hint().exact() — which returns the actual body
+        // size, not the Content-Length header value. Setting a fake header has
+        // no effect. The pre-flight is exercised indirectly via mockito tests
+        // (validate_credentials_large_body_returns_error, etc.) where the real
+        // HTTP stack sets content_length from the wire.
         let oversized_len = MAX_RESPONSE_BODY_BYTES + 1;
         let big_body = vec![b'x'; oversized_len];
         let http_resp = http::Response::builder()
