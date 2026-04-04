@@ -2,11 +2,11 @@
 # Automated plan → review → implement → verify loop.
 #
 # Creates an isolated git worktree + branch, then:
-# Phase 1: Writer creates plan, hostile reviewer iterates until READY_TO_IMPLEMENT.
+# Phase 1: Writer creates plan, reviewer iterates until READY_TO_IMPLEMENT.
 # Phase 2: Implementer codes from plan, verifier checks 100% implementation + tests.
 #
 # Usage: plan-loop.sh <task description> [options]
-#   --max-iter N          Phase 1: max write→review iterations (default 12)
+#   --max-iter N          Phase 1: max write→review iterations (default 8)
 #   --max-impl-iter N     Phase 2: max implement→verify iterations (default 5)
 #   --plan-name NAME      Plan filename stem and branch suffix (default: YYYY-MM-DD-plan)
 #   --plan-only           Run Phase 1 only (no implementation)
@@ -15,7 +15,7 @@
 #   --branch NAME         Branch name (default: feat/<plan-name>)
 #   --base BRANCH         Base branch for worktree (default: origin/dev)
 #
-# Requires: claude (Claude Code CLI), jq, git
+# Requires: claude (Claude Code CLI), jq, perl, git
 
 set -euo pipefail
 
@@ -89,7 +89,7 @@ NC='\033[0m'
 
 # --- Validate prerequisites ---
 
-for cmd in claude jq; do
+for cmd in claude jq perl; do
     if ! command -v "$cmd" &>/dev/null; then
         echo "ERROR: '$cmd' not found in PATH" >&2
         exit 1
@@ -338,7 +338,7 @@ cd "$PROJECT_ROOT"
 if [[ -z "$IMPL_ONLY" ]]; then
 
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  PHASE 1: PLAN — write → hostile review                     ║"
+echo "║  PHASE 1: PLAN — write → review                              ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "  Task:       $TASK"
@@ -481,6 +481,8 @@ Only report NEW issues if they are BLOCKER or HIGH severity."
     findings=$(jq -r '.structured_output.findings_summary // ""' "$RESULT_FILE" 2>/dev/null)
     verdict_table=$(jq -r '.structured_output.verdict_table // ""' "$RESULT_FILE" 2>/dev/null)
     full_review=$(jq -r '.result // ""' "$RESULT_FILE" 2>/dev/null)
+    # Fallback -1 = "unknown/parse error". The convergence check uses -eq 0,
+    # so -1 correctly prevents premature acceptance when extraction fails.
     new_issue_count=$(jq -r '.structured_output.new_issue_count // -1' "$RESULT_FILE" 2>/dev/null)
 
     printf "  ${GREEN}[reviewer] Done${NC} ($((review_end - review_start))s)\n"
@@ -493,17 +495,21 @@ Only report NEW issues if they are BLOCKER or HIGH severity."
     review_file="${PLAN_PATH%.md}.review-${iteration}.md"
     [[ -n "$full_review" && "$full_review" != "null" ]] && echo "$full_review" > "$review_file" && printf "\n  ${DIM}Review saved: $review_file${NC}\n"
 
-    # Convergence: after iteration 4, accept if no new issues and not getting worse
+    # Convergence: after iteration 4, accept if no new issues, HIGH count stable and <= 2.
+    # Prevents accepting plans that stabilised at many unresolved HIGH issues.
     if [[ $iteration -ge 4 && "$verdict" != "READY_TO_IMPLEMENT" && "$blocker_count" -eq 0 ]]; then
-        if [[ "$new_issue_count" -eq 0 && "$high_count" -le "$PREV_HIGH_COUNT" ]]; then
-            printf "\n  ${YELLOW}[convergence] No new issues, high_count stable — accepting plan${NC}\n"
+        if [[ "$new_issue_count" -eq 0 && "$high_count" -le "$PREV_HIGH_COUNT" && "$high_count" -le 2 ]]; then
+            printf "\n  ${YELLOW}[convergence] No new issues, high_count stable (≤2) — accepting plan${NC}\n"
             verdict="READY_TO_IMPLEMENT"
         fi
     fi
 
-    # Hard safety cap: accept with warnings if no blockers
-    if [[ $iteration -ge 6 && "$verdict" != "READY_TO_IMPLEMENT" && "$blocker_count" -eq 0 ]]; then
-        printf "\n  ${YELLOW}[convergence] Safety cap at iteration $iteration — accepting with $high_count remaining HIGH issues${NC}\n"
+    # Hard safety cap: accept with warnings if no blockers.
+    # Fires at MAX_ITER - 2 (e.g. iter 6 when MAX_ITER=8) to allow a final pass
+    # before the hard iteration limit would reject the plan.
+    SAFETY_CAP=$((MAX_ITER - 2))
+    if [[ $iteration -ge $SAFETY_CAP && "$verdict" != "READY_TO_IMPLEMENT" && "$blocker_count" -eq 0 ]]; then
+        printf "\n  ${YELLOW}[convergence] Safety cap at iteration $iteration/$MAX_ITER — accepting with $high_count remaining HIGH issues${NC}\n"
         verdict="READY_TO_IMPLEMENT"
     fi
 

@@ -60,8 +60,8 @@ Read the plan file at path `$ARGUMENTS` using the Read tool. If the file does no
 If the user prompt includes a "PREVIOUS FINDINGS" section, this is a FOLLOW-UP review. The plan has been revised to address previously-identified issues. In this mode:
 
 1. **Primary task:** Verify each previously-identified issue. Report whether it is RESOLVED or STILL PRESENT.
-2. **New issues:** Only report NEW findings if they are BLOCKER or HIGH severity. Suppress new MEDIUM and LOW findings.
-3. **new_issue_count:** Set this to the number of issues that are genuinely NEW (not carried over from the previous review). A previously-reported issue that is STILL PRESENT does NOT count as new.
+2. **New issues:** Only report NEW findings in detail if they are BLOCKER or HIGH severity. Suppress new MEDIUM and LOW finding details from the output.
+3. **new_issue_count:** Set this to the number of ALL genuinely NEW issues (including suppressed MEDIUM/LOW ones). This counter drives convergence logic — undercounting causes premature acceptance. A previously-reported issue that is STILL PRESENT does NOT count as new.
 4. **Convergence bias:** If all previously-identified HIGH and BLOCKER issues have been resolved, and you only have MEDIUM or LOW new findings, return READY_TO_IMPLEMENT.
 
 If the user prompt does NOT include previous findings, this is a FIRST review. Run the full scan as described below.
