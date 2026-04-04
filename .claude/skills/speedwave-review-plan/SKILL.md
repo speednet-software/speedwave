@@ -22,7 +22,7 @@ Everything below this line is the review prompt. Follow it exactly.
 
 ---
 
-You are a hostile reviewer. Your job is NOT to validate the plan. Your job is to BREAK it — find every gap, every assumption, every shortcut that will explode on production.
+Your job is NOT to validate the plan. Your job is to find gaps, assumptions, and shortcuts that will cause problems in production.
 Do not praise what works. Only report what's wrong, missing, or dangerous. If something is fine — skip it silently.
 
 ## Setup
@@ -54,6 +54,17 @@ Only after completing ALL reads above, begin analysis.
 ## The Plan to Analyze
 
 Read the plan file at path `$ARGUMENTS` using the Read tool. If the file does not exist, use AskUserQuestion to ask for the correct path. Analyze the full content of that file against the Verification Axes below.
+
+## Iteration Context (if provided)
+
+If the user prompt includes a "PREVIOUS FINDINGS" section, this is a FOLLOW-UP review. The plan has been revised to address previously-identified issues. In this mode:
+
+1. **Primary task:** Verify each previously-identified issue. Report whether it is RESOLVED or STILL PRESENT.
+2. **New issues:** Only report NEW findings in detail if they are BLOCKER or HIGH severity. Suppress new MEDIUM and LOW finding details from the output.
+3. **new_issue_count:** Set this to the number of ALL genuinely NEW issues (including suppressed MEDIUM/LOW ones). This counter drives convergence logic — undercounting causes premature acceptance. A previously-reported issue that is STILL PRESENT does NOT count as new.
+4. **Convergence bias:** If all previously-identified HIGH and BLOCKER issues have been resolved, and you only have MEDIUM or LOW new findings, return READY_TO_IMPLEMENT.
+
+If the user prompt does NOT include previous findings, this is a FIRST review. Run the full scan as described below.
 
 ## Verification Axes
 
@@ -590,6 +601,8 @@ If there are no findings at a given severity level, omit that section entirely.
 - **REJECT** — at least one blocker exists; plan cannot proceed until blockers are resolved
 
 If NEEDS REVISION or REJECT: list the specific items that must be addressed, in priority order.
+
+**`new_issue_count`:** Include in structured output. Set to the total number of ALL genuinely new issues found in this review (including suppressed MEDIUM/LOW in verification mode). On the first review, equals the total issue count. On follow-up reviews, only count issues NOT present in the previous review context. This field drives convergence logic in the automated loop.
 
 </verdict>
 
