@@ -353,6 +353,14 @@ PREV_VERDICT_TABLE=""
 PREV_FINDINGS=""
 PREV_HIGH_COUNT=0
 
+# Safety cap: accept with warnings when stuck near MAX_ITER.
+# Floor at 4 so that low --max-iter values (3, 4) don't trigger on the first iterations.
+if [[ $MAX_ITER -gt 4 ]]; then
+    SAFETY_CAP=$((MAX_ITER - 2))
+else
+    SAFETY_CAP=$MAX_ITER
+fi
+
 while [[ $iteration -lt $MAX_ITER ]]; do
     iteration=$((iteration + 1))
 
@@ -504,11 +512,10 @@ Only report NEW issues if they are BLOCKER or HIGH severity."
         fi
     fi
 
-    # Hard safety cap: accept with warnings if no blockers.
-    # Fires at MAX_ITER - 2 (e.g. iter 6 when MAX_ITER=8) to allow a final pass
-    # before the hard iteration limit would reject the plan.
-    SAFETY_CAP=$((MAX_ITER - 2))
-    if [[ $iteration -ge $SAFETY_CAP && "$verdict" != "READY_TO_IMPLEMENT" && "$blocker_count" -eq 0 ]]; then
+    # Hard safety cap: accept with warnings if no blockers and HIGH issues bounded.
+    # SAFETY_CAP is computed before the loop (MAX_ITER - 2, floor 4).
+    # Plans with >5 HIGH issues are NOT accepted — they exit with failure at MAX_ITER.
+    if [[ $iteration -ge $SAFETY_CAP && "$verdict" != "READY_TO_IMPLEMENT" && "$blocker_count" -eq 0 && "$high_count" -le 5 ]]; then
         printf "\n  ${YELLOW}[convergence] Safety cap at iteration $iteration/$MAX_ITER — accepting with $high_count remaining HIGH issues${NC}\n"
         verdict="READY_TO_IMPLEMENT"
     fi
