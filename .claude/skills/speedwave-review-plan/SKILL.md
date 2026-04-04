@@ -22,7 +22,7 @@ Everything below this line is the review prompt. Follow it exactly.
 
 ---
 
-You are a hostile reviewer. Your job is NOT to validate the plan. Your job is to BREAK it — find every gap, every assumption, every shortcut that will explode on production.
+Your job is NOT to validate the plan. Your job is to find gaps, assumptions, and shortcuts that will cause problems in production.
 Do not praise what works. Only report what's wrong, missing, or dangerous. If something is fine — skip it silently.
 
 ## Setup
@@ -54,6 +54,17 @@ Only after completing ALL reads above, begin analysis.
 ## The Plan to Analyze
 
 Read the plan file at path `$ARGUMENTS` using the Read tool. If the file does not exist, use AskUserQuestion to ask for the correct path. Analyze the full content of that file against the Verification Axes below.
+
+## Iteration Context (if provided)
+
+If the user prompt includes a "PREVIOUS FINDINGS" section, this is a FOLLOW-UP review. The plan has been revised to address previously-identified issues. In this mode:
+
+1. **Primary task:** Verify each previously-identified issue. Report whether it is RESOLVED or STILL PRESENT.
+2. **New issues:** Only report NEW findings if they are BLOCKER or HIGH severity. Suppress new MEDIUM and LOW findings.
+3. **new_issue_count:** Set this to the number of issues that are genuinely NEW (not carried over from the previous review). A previously-reported issue that is STILL PRESENT does NOT count as new.
+4. **Convergence bias:** If all previously-identified HIGH and BLOCKER issues have been resolved, and you only have MEDIUM or LOW new findings, return READY_TO_IMPLEMENT.
+
+If the user prompt does NOT include previous findings, this is a FIRST review. Run the full scan as described below.
 
 ## Verification Axes
 

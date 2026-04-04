@@ -50,7 +50,7 @@ if [[ -z "$TASK" && -z "$IMPL_ONLY" ]]; then
     exit 1
 fi
 
-MAX_ITER="${MAX_ITERATIONS:-12}"
+MAX_ITER="${MAX_ITERATIONS:-8}"
 MAX_IMPL_ITER="${MAX_IMPL_ITERATIONS:-5}"
 PLAN_NAME="${PLAN_NAME:-$(date +%Y-%m-%d-%H%M%S)-plan}"
 BRANCH_NAME="${BRANCH_NAME:-feat/${PLAN_NAME}}"
@@ -74,8 +74,8 @@ WORKTREE_CREATED=false
 MAX_RETRY=2
 RETRY_WAIT=60
 
-PLANNING_TOOLS='Bash(git *),Bash(make *),Read,Glob,Grep,Agent'
-VERIFIER_TOOLS='Bash(git *),Bash(make *),Read,Glob,Grep,Agent'
+PLANNING_TOOLS='Bash(git *),Bash(make *),Bash(gh *),Read,Glob,Grep,Agent'
+VERIFIER_TOOLS='Bash(git *),Bash(make *),Bash(gh *),Read,Glob,Grep,Agent'
 
 # --- Colors ---
 
@@ -139,34 +139,7 @@ extract_prompt() {
             /^---$/ { dc++; next }
             dc >= 2 { print }
         ' "$skill_file"
-    fi | awk -v rep="$task_text" '{ gsub(/\$ARGUMENTS/, rep); print }'
-}
-
-SPINNER_PID=""
-start_spinner() {
-    local label="$1"
-    (
-        local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-        local start=$SECONDS
-        local i=0
-        while true; do
-            local elapsed=$(( SECONDS - start ))
-            local min=$(( elapsed / 60 ))
-            local sec=$(( elapsed % 60 ))
-            printf "\r    ${DIM}%s %s (%d:%02d)${NC}  " "${chars:i%10:1}" "$label" "$min" "$sec"
-            i=$(( i + 1 ))
-            sleep 0.2
-        done
-    ) &
-    SPINNER_PID=$!
-}
-stop_spinner() {
-    if [[ -n "$SPINNER_PID" ]]; then
-        kill "$SPINNER_PID" 2>/dev/null
-        wait "$SPINNER_PID" 2>/dev/null
-        SPINNER_PID=""
-        printf "\r\033[K"
-    fi
+    fi | TASK_TEXT="$task_text" perl -pe 's/\$ARGUMENTS/$ENV{TASK_TEXT}/g'
 }
 
 run_claude_stream() {
@@ -175,8 +148,6 @@ run_claude_stream() {
     local attempt=0
 
     while [[ $attempt -le $MAX_RETRY ]]; do
-        start_spinner "working"
-
         claude "$@" --output-format stream-json --verbose 2>/dev/null \
           | jq -r --unbuffered '
               if .type == "result" then "RESULT\t" + (. | tojson)
@@ -199,14 +170,10 @@ run_claude_stream() {
                     echo "$ev_data" > "$output_file"
                     ;;
                 TOOL)
-                    stop_spinner
                     printf "    ${DIM}▸ %s %s${NC}\n" "$ev_data" "$ev_extra"
-                    start_spinner "working"
                     ;;
             esac
         done
-
-        stop_spinner
 
         if [[ -f "$output_file" ]] && [[ -s "$output_file" ]]; then
             return 0
@@ -241,7 +208,8 @@ Do NOT output anything before or after the plan — no preamble, no summary, jus
 Do NOT use EnterPlanMode, ExitPlanMode, or AskUserQuestion.
 Read the plan from the file path specified in the user prompt.
 Your output will be captured as structured JSON via --json-schema.
-The findings_summary field MUST be detailed enough for the plan writer to fix every issue WITHOUT reading your full analysis. Include specific fix instructions for each finding."
+The findings_summary field MUST be detailed enough for the plan writer to fix every issue WITHOUT reading your full analysis. Include specific fix instructions for each finding.
+The new_issue_count field must reflect how many issues you are reporting that were NOT mentioned in any previous review context provided in the user prompt. If this is the first review (no previous context), set it equal to the total number of findings."
 
     WRITER_BODY="$(extract_prompt "$WRITER_SKILL_DIR" "$TASK")"
     REVIEWER_BODY="$(extract_prompt "$REVIEWER_SKILL_DIR" "$TASK")"
@@ -276,7 +244,6 @@ WRITER_SESSION_ID=""
 IMPL_SESSION_ID=""
 
 cleanup() {
-    stop_spinner
     pkill -P $$ 2>/dev/null || true
     rm -rf "$TMPDIR_LOOP"
     printf "\n"
@@ -291,7 +258,6 @@ cleanup() {
     exit 130
 }
 trap cleanup INT TERM
-trap stop_spinner EXIT
 
 mkdir -p "$(dirname "$PLAN_PATH")"
 
@@ -383,6 +349,9 @@ echo ""
 iteration=0
 verdict="UNKNOWN"
 REVIEW_FEEDBACK=""
+PREV_VERDICT_TABLE=""
+PREV_FINDINGS=""
+PREV_HIGH_COUNT=0
 
 while [[ $iteration -lt $MAX_ITER ]]; do
     iteration=$((iteration + 1))
@@ -465,13 +434,33 @@ $REVIEW_FEEDBACK" \
 
     # ===================== REVIEWER =====================
     echo ""
-    printf "  ${CYAN}[reviewer]${NC} Reviewing plan (fresh context)...\n"
+
+    # Build reviewer prompt: verification mode for iteration 3+
+    if [[ $iteration -le 2 || -z "$PREV_FINDINGS" ]]; then
+        REVIEWER_PROMPT="Review the implementation plan at: $PLAN_PATH"
+        printf "  ${CYAN}[reviewer]${NC} Reviewing plan (full scan)...\n"
+    else
+        REVIEWER_PROMPT="Review the implementation plan at: $PLAN_PATH
+
+IMPORTANT — VERIFICATION MODE (iteration $iteration):
+This plan has been reviewed $((iteration - 1)) times. The previous review found these issues:
+
+--- PREVIOUS FINDINGS ---
+$PREV_FINDINGS
+--- PREVIOUS VERDICT TABLE ---
+$PREV_VERDICT_TABLE
+---
+
+Primary task: verify whether the issues above have been FIXED.
+Only report NEW issues if they are BLOCKER or HIGH severity."
+        printf "  ${CYAN}[reviewer]${NC} Reviewing plan (verification mode)...\n"
+    fi
 
     rm -f "$RESULT_FILE"
     review_start=$(date +%s)
 
     run_claude_stream "$RESULT_FILE" \
-        -p "Review the implementation plan at: $PLAN_PATH" \
+        -p "$REVIEWER_PROMPT" \
         --model opus \
         --effort max \
         --no-session-persistence \
@@ -492,23 +481,50 @@ $REVIEW_FEEDBACK" \
     findings=$(jq -r '.structured_output.findings_summary // ""' "$RESULT_FILE" 2>/dev/null)
     verdict_table=$(jq -r '.structured_output.verdict_table // ""' "$RESULT_FILE" 2>/dev/null)
     full_review=$(jq -r '.result // ""' "$RESULT_FILE" 2>/dev/null)
+    new_issue_count=$(jq -r '.structured_output.new_issue_count // -1' "$RESULT_FILE" 2>/dev/null)
 
     printf "  ${GREEN}[reviewer] Done${NC} ($((review_end - review_start))s)\n"
     echo ""
     printf "  ${BOLD}Verdict:  $verdict${NC}\n"
-    echo "  Issues:   blockers=$blocker_count  high=$high_count  medium=$medium_count  low=$low_count"
+    echo "  Issues:   blockers=$blocker_count  high=$high_count  medium=$medium_count  low=$low_count  new=$new_issue_count"
 
     [[ -n "$verdict_table" && "$verdict_table" != "null" ]] && echo "" && echo "$verdict_table"
 
     review_file="${PLAN_PATH%.md}.review-${iteration}.md"
     [[ -n "$full_review" && "$full_review" != "null" ]] && echo "$full_review" > "$review_file" && printf "\n  ${DIM}Review saved: $review_file${NC}\n"
 
+    # Convergence: after iteration 4, accept if no new issues and not getting worse
+    if [[ $iteration -ge 4 && "$verdict" != "READY_TO_IMPLEMENT" && "$blocker_count" -eq 0 ]]; then
+        if [[ "$new_issue_count" -eq 0 && "$high_count" -le "$PREV_HIGH_COUNT" ]]; then
+            printf "\n  ${YELLOW}[convergence] No new issues, high_count stable — accepting plan${NC}\n"
+            verdict="READY_TO_IMPLEMENT"
+        fi
+    fi
+
+    # Hard safety cap: accept with warnings if no blockers
+    if [[ $iteration -ge 6 && "$verdict" != "READY_TO_IMPLEMENT" && "$blocker_count" -eq 0 ]]; then
+        printf "\n  ${YELLOW}[convergence] Safety cap at iteration $iteration — accepting with $high_count remaining HIGH issues${NC}\n"
+        verdict="READY_TO_IMPLEMENT"
+    fi
+
+    # Store review context for next iteration
+    PREV_VERDICT_TABLE="$verdict_table"
+    PREV_FINDINGS="$findings"
+    PREV_HIGH_COUNT="$high_count"
+
     if [[ "$verdict" == "READY_TO_IMPLEMENT" ]]; then
         echo ""
-        printf "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}\n"
-        printf "${GREEN}║  PLAN APPROVED after $iteration iteration(s)${NC}\n"
-        printf "${GREEN}║  Plan: $PLAN_PATH${NC}\n"
-        printf "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}\n"
+        if [[ "$high_count" -gt 0 ]]; then
+            printf "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}\n"
+            printf "${YELLOW}║  PLAN ACCEPTED after $iteration iteration(s) ($high_count HIGH remaining)${NC}\n"
+            printf "${YELLOW}║  Plan: $PLAN_PATH${NC}\n"
+            printf "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}\n"
+        else
+            printf "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}\n"
+            printf "${GREEN}║  PLAN APPROVED after $iteration iteration(s)${NC}\n"
+            printf "${GREEN}║  Plan: $PLAN_PATH${NC}\n"
+            printf "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}\n"
+        fi
         break
     fi
 

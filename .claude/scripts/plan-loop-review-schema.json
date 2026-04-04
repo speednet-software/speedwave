@@ -24,6 +24,10 @@
     "verdict_table": {
       "type": "string",
       "description": "Markdown table with 12 axes: axis name, PASS/FAIL, issue count"
+    },
+    "new_issue_count": {
+      "type": "integer",
+      "description": "Number of issues in this review that are NEW (not present in any previous review context). On the first review, equals the total issue count."
     }
   },
   "required": [
@@ -33,7 +37,8 @@
     "medium_count",
     "low_count",
     "findings_summary",
-    "verdict_table"
+    "verdict_table",
+    "new_issue_count"
   ],
   "additionalProperties": false
 }
