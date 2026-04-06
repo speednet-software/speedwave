@@ -218,17 +218,16 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         bundle_changed,
     );
 
+    let rt = speedwave_runtime::runtime::detect_runtime();
+
     // Even when bundle_id matches, verify images actually exist.
     // They may have been lost after containerd reinstall or VM recreation.
     if !bundle_changed {
-        let rt = speedwave_runtime::runtime::detect_runtime();
-        if rt.is_available() {
-            if let Err(e) = rt.ensure_ready() {
-                log::warn!("reconcile: runtime not ready, skipping image check: {e}");
-            } else if !build::images_exist(&*rt) {
-                log::warn!("reconcile: bundle unchanged but images missing, forcing rebuild");
-                bundle_changed = true;
-            }
+        if let Err(e) = rt.ensure_ready() {
+            log::warn!("reconcile: runtime not ready, skipping image check: {e}");
+        } else if !build::images_exist(&*rt) {
+            log::warn!("reconcile: bundle unchanged but images missing, forcing rebuild");
+            bundle_changed = true;
         }
     }
 
@@ -268,13 +267,6 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
     set_image_readiness(ImageReadiness::Building);
     emit_bundle_status(app_handle);
 
-    let rt = speedwave_runtime::runtime::detect_runtime();
-    if !rt.is_available() {
-        return Err(set_bundle_error(
-            &mut state,
-            "Runtime not available while applying the new bundle".to_string(),
-        ));
-    }
     rt.ensure_ready().map_err(|e| {
         set_bundle_error(
             &mut state,
@@ -1376,6 +1368,35 @@ mod tests {
         assert!(
             images_pos < ready_pos,
             "images_exist check must come before set_image_readiness(Ready)"
+        );
+    }
+
+    /// Structural test: `is_available()` must NOT gate `ensure_ready()` inside
+    /// `reconcile_bundle_update_inner`. A stopped Lima VM returns
+    /// `is_available() == false` but `ensure_ready()` can start it; gating
+    /// one behind the other silently skips VM auto-start.
+    #[test]
+    fn reconcile_does_not_gate_ensure_ready_behind_is_available() {
+        let source = include_str!("reconcile.rs");
+        let after_sig = source
+            .split("fn reconcile_bundle_update_inner(")
+            .nth(1)
+            .expect("reconcile_bundle_update_inner function should exist");
+        // Limit scope to just this function body — stop at the next
+        // top-level function (any visibility prefix + `fn `).
+        let inner_fn = after_sig
+            .split("\npub(crate) fn ")
+            .next()
+            .unwrap_or(after_sig);
+        assert!(
+            !inner_fn.contains("if !rt.is_available()"),
+            "ensure_ready() must not be gated behind !is_available() — \
+             stopped VMs are startable via ensure_ready()"
+        );
+        assert!(
+            !inner_fn.contains("if rt.is_available() {"),
+            "ensure_ready() must not be nested inside is_available() — \
+             stopped VMs are startable via ensure_ready()"
         );
     }
 }
