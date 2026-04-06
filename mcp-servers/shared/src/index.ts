@@ -59,6 +59,7 @@ export { JSONRPCErrorCode } from './types.js';
 export {
   loadToken,
   validateJSONRPCMessage,
+  validateOrigin,
   validateParams,
   validateSessionId,
   validateToolName,
