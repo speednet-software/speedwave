@@ -14,7 +14,6 @@ import { RedmineClient } from '../client.js';
 const listJournalsTool: Tool = {
   name: 'listJournals',
   description: 'List all journals (comments/updates) for an issue',
-  category: 'read',
   keywords: ['redmine', 'journals', 'history', 'comments', 'audit', 'changelog'],
   example: `const journals = await redmine.listJournals({ issue_id: 12345 })`,
   inputSchema: {
@@ -74,7 +73,6 @@ const listJournalsTool: Tool = {
 const updateJournalTool: Tool = {
   name: 'updateJournal',
   description: 'Update an existing journal entry',
-  category: 'write',
   keywords: ['redmine', 'journal', 'update', 'comment', 'edit', 'modify'],
   example: `await redmine.updateJournal({ issue_id: 12345, journal_id: 67890, notes: "Updated comment with more details" })`,
   inputSchema: {
@@ -120,7 +118,6 @@ const updateJournalTool: Tool = {
 const deleteJournalTool: Tool = {
   name: 'deleteJournal',
   description: 'Delete a journal entry',
-  category: 'delete',
   keywords: ['redmine', 'journal', 'delete', 'remove', 'comment'],
   example: `await redmine.deleteJournal({ issue_id: 12345, journal_id: 67890 })`,
   inputSchema: {

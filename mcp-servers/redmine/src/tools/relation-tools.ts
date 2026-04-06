@@ -14,7 +14,6 @@ import { RedmineClient } from '../client.js';
 const listRelationsTool: Tool = {
   name: 'listRelations',
   description: 'List all relations for an issue (blocks, precedes, duplicates, etc.)',
-  category: 'read',
   keywords: ['redmine', 'relation', 'link', 'dependency', 'blocks', 'precedes', 'follows', 'list'],
   example: `const { relations } = await redmine.listRelations({ issue_id: 12345 })`,
   inputSchema: {
@@ -71,7 +70,6 @@ const listRelationsTool: Tool = {
 const createRelationTool: Tool = {
   name: 'createRelation',
   description: 'Create a relation between two issues',
-  category: 'write',
   keywords: ['redmine', 'relation', 'create', 'link', 'dependency', 'blocks', 'precedes'],
   example: `await redmine.createRelation({ issue_id: 100, issue_to_id: 101, relation_type: 'blocks' })`,
   inputSchema: {
@@ -150,7 +148,6 @@ const createRelationTool: Tool = {
 const deleteRelationTool: Tool = {
   name: 'deleteRelation',
   description: 'Delete a relation between issues',
-  category: 'delete',
   keywords: ['redmine', 'relation', 'delete', 'remove', 'unlink'],
   example: `await redmine.deleteRelation({ relation_id: 456 })`,
   inputSchema: {

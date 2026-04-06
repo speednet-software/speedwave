@@ -14,7 +14,6 @@ import { RedmineClient } from '../client.js';
 const listProjectIdsTool: Tool = {
   name: 'listProjectIds',
   description: 'List project IDs with optional filters. Returns only IDs for efficiency.',
-  category: 'read',
   keywords: ['redmine', 'projects', 'list', 'ids', 'filter', 'active', 'closed'],
   example: `const { ids } = await redmine.listProjectIds({ status: 'active' })`,
   inputSchema: {
@@ -34,7 +33,6 @@ const listProjectIdsTool: Tool = {
 const getProjectFullTool: Tool = {
   name: 'getProjectFull',
   description: 'Get complete project data including trackers, categories, modules. No truncation.',
-  category: 'read',
   keywords: ['redmine', 'project', 'details', 'full', 'trackers', 'categories', 'modules'],
   example: `const project = await redmine.getProjectFull({ project_id: 'my-project' })`,
   inputSchema: {
@@ -54,7 +52,6 @@ const getProjectFullTool: Tool = {
 const searchProjectIdsTool: Tool = {
   name: 'searchProjectIds',
   description: 'Search projects by name, identifier or description. Returns matching IDs only.',
-  category: 'read',
   keywords: ['redmine', 'projects', 'search', 'find', 'query', 'name'],
   example: `const { ids } = await redmine.searchProjectIds({ query: 'mobile' })`,
   inputSchema: {

@@ -10,7 +10,6 @@ import {
   SERVICE_NAMES,
   getToolMetadata,
   getServiceMethods,
-  getToolCategory,
   getLongTimeoutTools,
   getRequiredTimeoutClass,
   getExecutionTimeout,
@@ -58,7 +57,6 @@ describe('tool-registry', () => {
       expect(meta).toBeDefined();
       expect(meta?.name).toBe('createIssue');
       expect(meta?.service).toBe('redmine');
-      expect(meta?.category).toBe('write');
     });
 
     it('should return undefined for non-existing tool', () => {
@@ -77,18 +75,6 @@ describe('tool-registry', () => {
 
     it('should return empty array for non-existing service', () => {
       expect(getServiceMethods('nonExistentService')).toEqual([]);
-    });
-  });
-
-  describe('getToolCategory', () => {
-    it('should return correct category for tools', () => {
-      expect(getToolCategory('redmine', 'listIssueIds')).toBe('read');
-      expect(getToolCategory('redmine', 'createIssue')).toBe('write');
-      expect(getToolCategory('redmine', 'deleteJournal')).toBe('delete');
-    });
-
-    it('should return "read" as default for unknown tools', () => {
-      expect(getToolCategory('redmine', 'nonExistent')).toBe('read');
     });
   });
 
@@ -220,7 +206,7 @@ describe('tool-registry', () => {
       for (const m of slackMethods) {
         mockBridge[m] = vi.fn();
       }
-      const mockWrapWithAudit = vi.fn((cat, svc, tool, fn) => fn);
+      const mockWrapWithAudit = vi.fn((svc, tool, fn) => fn);
       const mockPrepareParams = vi.fn((p) => p);
       const mockWrapBridgeCall = vi.fn((fn) => fn());
 
@@ -236,39 +222,35 @@ describe('tool-registry', () => {
       expect(Object.keys(wrappers)).toContain('listChannelIds');
     });
 
-    it('should use category from metadata', () => {
-      const redmineMethods = getServiceMethods('redmine');
+    it('should pass service and tool name to wrapWithAudit', () => {
+      const slackMethods = getServiceMethods('slack');
       const mockBridge: Record<string, ReturnType<typeof vi.fn>> = {};
-      for (const m of redmineMethods) {
+      for (const m of slackMethods) {
         mockBridge[m] = vi.fn();
       }
-      const wrapWithAuditCalls: Array<{ category: string; service: string; tool: string }> = [];
-      const mockWrapWithAudit = vi.fn((cat, svc, tool, fn) => {
-        wrapWithAuditCalls.push({ category: cat, service: svc, tool });
+      const wrapWithAuditCalls: Array<{ service: string; tool: string }> = [];
+      const mockWrapWithAudit = vi.fn((svc, tool, fn) => {
+        wrapWithAuditCalls.push({ service: svc, tool });
         return fn;
       });
       const mockPrepareParams = vi.fn((p) => p);
       const mockWrapBridgeCall = vi.fn((fn) => fn());
 
       buildExecutorWrappers(
-        'redmine',
+        'slack',
         mockBridge,
         mockWrapWithAudit,
         mockPrepareParams,
         mockWrapBridgeCall
       );
 
-      const createIssueCall = wrapWithAuditCalls.find((c) => c.tool === 'createIssue');
-      expect(createIssueCall?.category).toBe('write');
-      const listCall = wrapWithAuditCalls.find((c) => c.tool === 'listIssueIds');
-      expect(listCall?.category).toBe('read');
-      const deleteCall = wrapWithAuditCalls.find((c) => c.tool === 'deleteJournal');
-      expect(deleteCall?.category).toBe('delete');
+      const sendCall = wrapWithAuditCalls.find((c) => c.tool === 'sendChannel');
+      expect(sendCall?.service).toBe('slack');
     });
 
     it('should throw when bridge method is missing', () => {
       const incompleteBridge = { sendChannel: vi.fn() };
-      const mockWrapWithAudit = vi.fn((cat, svc, tool, fn) => fn);
+      const mockWrapWithAudit = vi.fn((svc, tool, fn) => fn);
       const mockPrepareParams = vi.fn((p) => p);
       const mockWrapBridgeCall = vi.fn((fn) => fn());
 
@@ -295,7 +277,6 @@ describe('tool-registry', () => {
         for (const [methodName, metadata] of Object.entries(tools)) {
           expect(metadata.name).toBe(methodName);
           expect(metadata.service).toBe(service);
-          expect(['read', 'write', 'delete']).toContain(metadata.category);
           expect(metadata.description).toBeTruthy();
           expect(metadata.inputSchema).toBeDefined();
         }
@@ -448,12 +429,7 @@ describe('tool-registry', () => {
 
   describe('buildExecutorWrappers with disabledOsCategories', () => {
     const mockWrapWithAudit = vi.fn(
-      (
-        _cat: string,
-        _svc: string,
-        _tool: string,
-        fn: (p?: Record<string, unknown>) => Promise<unknown>
-      ) => fn
+      (_svc: string, _tool: string, fn: (p?: Record<string, unknown>) => Promise<unknown>) => fn
     );
     const mockPrepareParams = vi.fn(<T>(p: T) => p);
     const mockWrapBridgeCall = vi.fn(<T>(fn: () => Promise<T>) => fn());

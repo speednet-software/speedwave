@@ -176,7 +176,6 @@ describe('searchTools', () => {
       // Should have basic fields
       expect(match.tool).toBeDefined();
       expect(match.service).toBeDefined();
-      expect(match.category).toBeDefined();
       expect(typeof match.deferLoading).toBe('boolean');
 
       // Should NOT have detailed fields
@@ -295,16 +294,17 @@ describe('searchTools', () => {
       expect(result.matches[0].tool).toMatch(/^slack\/.+$/);
     });
 
-    it('category is valid enum value', async () => {
+    it('matches have required fields', async () => {
       const result = await searchTools({
         query: '*',
         detailLevel: 'names_only',
       });
 
-      const validCategories = ['read', 'write', 'delete'];
-      expect(result.matches.every((m) => m.category && validCategories.includes(m.category))).toBe(
-        true
-      );
+      for (const match of result.matches) {
+        expect(match.tool).toBeDefined();
+        expect(match.service).toBeDefined();
+        expect(typeof match.deferLoading).toBe('boolean');
+      }
     });
   });
 });
@@ -364,7 +364,6 @@ describe('getServiceTools', () => {
     expect(tool).toHaveProperty('keywords');
     expect(tool).toHaveProperty('inputSchema');
     expect(tool).toHaveProperty('service');
-    expect(tool).toHaveProperty('category');
   });
 });
 
@@ -398,7 +397,6 @@ describe('getToolMetadata', () => {
     expect(metadata).toHaveProperty('keywords');
     expect(metadata).toHaveProperty('inputSchema');
     expect(metadata).toHaveProperty('service');
-    expect(metadata).toHaveProperty('category');
   });
 
   it('tool metadata keywords is an array', () => {

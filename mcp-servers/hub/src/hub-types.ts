@@ -43,15 +43,6 @@ export interface IToolResult<T = unknown> {
     executionMs: number;
     /** Service that handled the request */
     service: string;
-    /** Audit summary: count of read/write/delete operations */
-    operations?: {
-      /** Number of read operations */
-      read: number;
-      /** Number of write operations */
-      write: number;
-      /** Number of delete operations */
-      delete: number;
-    };
   };
 }
 
@@ -115,14 +106,6 @@ export interface ToolInputExample {
 }
 
 /**
- * Tool category for audit logging
- * - read: Safe read operations (list*, show*, get*, search*)
- * - write: State-changing operations (create*, update*, send*)
- * - delete: Destructive operations (delete*, remove*)
- */
-export type ToolCategory = 'read' | 'write' | 'delete';
-
-/**
  * Timeout class for operations - used to determine execution timeout
  * - standard: Normal operations (default) - uses EXECUTION_MS
  * - long: Long-running operations (sync, extract, AI generation) - uses LONG_OPERATION_MS
@@ -151,8 +134,6 @@ export interface ToolMetadata {
   service: string;
   /** Defer loading: true = on-demand discovery, false = always loaded (core tool) */
   deferLoading?: boolean;
-  /** Tool category for audit logging */
-  category: ToolCategory;
   /** Timeout class: 'standard' (default) or 'long' for slow operations */
   timeoutClass?: TimeoutClass;
   /** Custom timeout in milliseconds for long-running operations (overrides WORKER_REQUEST_MS) */
@@ -169,8 +150,6 @@ export interface ToolSearchResult {
   tool: string;
   /** Service name */
   service: string;
-  /** Tool category for audit logging */
-  category?: ToolCategory;
   /** Tool description (included with with_descriptions level) */
   description?: string;
   /** Input schema (included with full_schema level) */

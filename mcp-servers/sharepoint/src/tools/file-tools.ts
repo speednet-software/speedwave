@@ -58,7 +58,6 @@ const listFileIdsTool: Tool = {
       path: { type: 'string', description: 'Folder path (default: /)' },
     },
   },
-  category: 'read',
   keywords: ['sharepoint', 'files', 'list', 'directory', 'folder'],
   example: 'const files = await sharepoint.listFileIds({ path: "documents" })',
   outputSchema: {
@@ -103,7 +102,6 @@ const getFileFullTool: Tool = {
     },
     required: ['file_id'],
   },
-  category: 'read',
   keywords: ['sharepoint', 'file', 'get', 'detail', 'download', 'metadata'],
   example: 'const file = await sharepoint.getFileFull({ file_id: "abc123", include: ["content"] })',
   outputSchema: {
@@ -151,7 +149,6 @@ const downloadFileTool: Tool = {
       local_path: { type: 'string', description: 'Destination local path (alias for localPath)' },
     },
   },
-  category: 'write',
   keywords: ['sharepoint', 'download', 'file', 'get', 'fetch'],
   example:
     'await sharepoint.downloadFile({ sharepoint_path: "docs/report.pdf", local_path: "/workspace/report.pdf" })',
@@ -195,7 +192,6 @@ const uploadFileTool: Tool = {
       overwrite: { type: 'boolean', description: 'Overwrite without ETag check' },
     },
   },
-  category: 'write',
   keywords: ['sharepoint', 'upload', 'file', 'put', 'write', 'sync'],
   example:
     'await sharepoint.uploadFile({ local_path: "/workspace/report.pdf", sharepoint_path: "docs/report.pdf" })',

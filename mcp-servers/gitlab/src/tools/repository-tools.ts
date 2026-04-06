@@ -15,7 +15,6 @@ import { withValidation } from './validation.js';
 const getTreeTool: Tool = {
   name: 'getTree',
   description: 'Get repository file tree',
-  category: 'read',
   keywords: ['gitlab', 'tree', 'files', 'repository', 'ls'],
   example: 'const tree = await gitlab.getTree({ project_id: "speedwave/core", path: "src" })',
   inputSchema: {
@@ -65,7 +64,6 @@ const getTreeTool: Tool = {
 const getFileTool: Tool = {
   name: 'getFile',
   description: 'Get file content from repository',
-  category: 'read',
   keywords: ['gitlab', 'file', 'content', 'read', 'cat'],
   example:
     'const file = await gitlab.getFile({ project_id: "speedwave/core", file_path: "README.md" })',
@@ -116,7 +114,6 @@ const getFileTool: Tool = {
 const getBlameTool: Tool = {
   name: 'getBlame',
   description: 'Get git blame for a file',
-  category: 'read',
   keywords: ['gitlab', 'blame', 'annotate', 'history', 'git'],
   example:
     'const blame = await gitlab.getBlame({ project_id: "speedwave/core", file_path: "src/index.ts" })',

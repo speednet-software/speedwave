@@ -58,7 +58,6 @@ interface CompleteReminderParams {
 const listReminderListsTool: Tool = {
   name: 'listReminderLists',
   description: 'List all reminder lists/groups available on this device',
-  category: 'read',
   keywords: ['os', 'reminders', 'lists', 'calendars', 'groups', 'categories'],
   example: 'const lists = await os.listReminderLists()',
   inputSchema: {
@@ -92,7 +91,6 @@ const listReminderListsTool: Tool = {
 const listRemindersTool: Tool = {
   name: 'listReminders',
   description: 'List reminders, optionally filtered by list',
-  category: 'read',
   keywords: ['os', 'reminders', 'list', 'tasks', 'todo', 'due'],
   example: 'const { reminders } = await os.listReminders({ show_completed: false, limit: 20 })',
   inputSchema: {
@@ -148,7 +146,6 @@ const listRemindersTool: Tool = {
 const getReminderTool: Tool = {
   name: 'getReminder',
   description: 'Get a specific reminder by ID',
-  category: 'read',
   keywords: ['os', 'reminder', 'get', 'detail', 'show'],
   example: 'const reminder = await os.getReminder({ id: "abc-123" })',
   inputSchema: {
@@ -188,7 +185,6 @@ const getReminderTool: Tool = {
 const createReminderTool: Tool = {
   name: 'createReminder',
   description: 'Create a new reminder',
-  category: 'write',
   keywords: ['os', 'reminder', 'create', 'new', 'add', 'task', 'todo'],
   example:
     'const { id } = await os.createReminder({ name: "Review PR #42", due_date: "2025-01-15T10:00:00Z", priority: 1 })',
@@ -240,7 +236,6 @@ const createReminderTool: Tool = {
 const completeReminderTool: Tool = {
   name: 'completeReminder',
   description: 'Mark a reminder as completed',
-  category: 'write',
   keywords: ['os', 'reminder', 'complete', 'done', 'finish', 'check'],
   example: 'await os.completeReminder({ id: "abc-123" })',
   inputSchema: {

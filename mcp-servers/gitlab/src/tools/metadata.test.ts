@@ -1,6 +1,6 @@
 /**
  * Metadata validation test — ensures every GitLab worker tool
- * has the required metadata fields: category, keywords, example.
+ * has the required metadata fields: annotations, keywords, example.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -22,11 +22,6 @@ describe('GitLab tool metadata', () => {
   });
 
   describe.each(ALL_TOOLS.map((t) => [t.name, t]))('%s', (_name, tool) => {
-    it('has category (read | write | delete)', () => {
-      expect(tool.category).toBeDefined();
-      expect(['read', 'write', 'delete']).toContain(tool.category);
-    });
-
     it('has non-empty keywords array', () => {
       expect(tool.keywords).toBeDefined();
       expect(Array.isArray(tool.keywords)).toBe(true);

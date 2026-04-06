@@ -53,7 +53,6 @@ describe('createCodeExecutorHandlers', () => {
           {
             tool: 'slack/sendChannel',
             service: 'slack',
-            category: 'write' as const,
             deferLoading: false,
           },
         ],
@@ -87,7 +86,6 @@ describe('createCodeExecutorHandlers', () => {
           {
             tool: 'slack/sendChannel',
             service: 'slack',
-            category: 'write' as const,
             deferLoading: false,
             description: 'Send a message to a Slack channel',
             inputSchema: { type: 'object', properties: {} },
@@ -126,7 +124,6 @@ describe('createCodeExecutorHandlers', () => {
           {
             tool: 'slack/sendChannel',
             service: 'slack',
-            category: 'write' as const,
             deferLoading: false,
             description: 'Send a message to a Slack channel',
           },
@@ -159,13 +156,11 @@ describe('createCodeExecutorHandlers', () => {
           {
             tool: 'slack/sendChannel',
             service: 'slack',
-            category: 'write' as const,
             deferLoading: false,
           },
           {
             tool: 'redmine/listIssueIds',
             service: 'redmine',
-            category: 'read' as const,
             deferLoading: false,
           },
         ],

@@ -1,6 +1,6 @@
 /**
  * MCP Protocol TypeScript Types
- * Based on: Model Context Protocol Specification 2025-03-26
+ * Based on: Model Context Protocol Specification 2025-11-25
  *
  * Security: Strongly typed to prevent injection attacks
  */
@@ -189,8 +189,50 @@ export interface ServerCapabilities {
     /** Whether server can notify client of prompt list changes */
     listChanged?: boolean;
   };
+  /** Logging capability — empty object signals support (spec 2025-11-25) */
+  logging?: Record<string, never>;
   /** Experimental features provided by server */
   experimental?: Record<string, unknown>;
+}
+
+//═══════════════════════════════════════════════════════════════════════════════
+// Tool Annotations
+//═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Hints describing a tool's behavior and side effects.
+ * Clients may use these to make UI/safety decisions (e.g., auto-approve read-only tools).
+ * All fields are optional; the defaults listed are those specified by the MCP spec.
+ * @interface ToolAnnotations
+ * @see https://modelcontextprotocol.io/docs/specification/tools#annotations
+ */
+export interface ToolAnnotations {
+  /** Human-readable title for display in client UIs */
+  title?: string;
+  /** If true, the tool does not modify its environment (default: false) */
+  readOnlyHint?: boolean;
+  /** If true, the tool may perform destructive updates (default: true) */
+  destructiveHint?: boolean;
+  /** If true, calling the tool repeatedly with the same args has no additional effect (default: false) */
+  idempotentHint?: boolean;
+  /** If true, the tool may interact with external entities beyond its host (default: true) */
+  openWorldHint?: boolean;
+}
+
+//═══════════════════════════════════════════════════════════════════════════════
+// Request Processing Types
+//═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Result of processing an incoming JSON-RPC request.
+ * Contains the response to send back (or null for notifications) and an optional session ID.
+ * @interface ProcessRequestResult
+ */
+export interface ProcessRequestResult {
+  /** JSON-RPC response to send back, or null for notifications that require no response */
+  response: JSONRPCResponse | null;
+  /** Session ID associated with this request (set during initialization) */
+  sessionId?: string;
 }
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -208,6 +250,8 @@ export interface Tool {
   name: string;
   /** Human-readable description of what the tool does */
   description: string;
+  /** Human-readable title for display in client UIs */
+  title?: string;
   /** JSON Schema defining the tool's input parameters */
   inputSchema: {
     /** Schema type, always "object" for MCP tools */
@@ -224,14 +268,30 @@ export interface Tool {
     /** Example input parameters */
     input: Record<string, unknown>;
   }>;
-  /** Tool category for audit logging: read, write, or delete */
-  category?: 'read' | 'write' | 'delete';
   /** Search keywords for tool discovery */
   keywords?: string[];
   /** Usage example showing how to call the tool */
   example?: string;
   /** JSON Schema describing the tool's output structure */
   outputSchema?: Record<string, unknown>;
+  /** Icons representing the tool for client UIs */
+  icons?: Array<{
+    /** URI of the icon resource */
+    src: string;
+    /** MIME type of the icon (e.g., "image/svg+xml") */
+    mimeType?: string;
+    /** Available icon sizes (e.g., ["32x32", "64x64"]) */
+    sizes?: string[];
+  }>;
+  /** Execution behavior configuration */
+  execution?: {
+    /** Whether the tool supports long-running task mode */
+    taskSupport?: 'forbidden' | 'optional' | 'required';
+  };
+  /** Behavioral annotations for the tool (hints about side effects) */
+  annotations?: ToolAnnotations;
+  /** Extension metadata for vendor-specific or experimental fields */
+  _meta?: Record<string, unknown>;
 }
 
 /**
@@ -298,16 +358,18 @@ export interface ToolsCallResult {
   /** Array of content items returned by the tool */
   content: Array<{
     /** Content type discriminator */
-    type: 'text' | 'image' | 'resource';
+    type: 'text' | 'image' | 'resource' | 'audio' | 'resource_link';
     /** Text content (for type: 'text') */
     text?: string;
-    /** Base64-encoded data (for type: 'image') */
+    /** Base64-encoded data (for type: 'image' or 'audio') */
     data?: string;
     /** MIME type of the content */
     mimeType?: string;
   }>;
   /** Whether the tool execution resulted in an error */
   isError?: boolean;
+  /** Structured content conforming to the tool's outputSchema (spec 2025-11-25) */
+  structuredContent?: Record<string, unknown>;
 }
 
 //═══════════════════════════════════════════════════════════════════════════════

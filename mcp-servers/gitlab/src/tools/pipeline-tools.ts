@@ -16,7 +16,6 @@ import { withValidation } from './validation.js';
 const listPipelineIdsTool: Tool = {
   name: 'listPipelineIds',
   description: 'List pipeline IDs. Use get_pipeline_full for details.',
-  category: 'read',
   keywords: ['gitlab', 'pipeline', 'ci', 'cd', 'list', 'build', 'ids'],
   example:
     'const { pipelines, count } = await gitlab.listPipelineIds({ project_id: "speedwave/core", status: "failed" })',
@@ -74,7 +73,6 @@ const listPipelineIdsTool: Tool = {
 const getPipelineFullTool: Tool = {
   name: 'getPipelineFull',
   description: 'Get complete pipeline data. No truncation.',
-  category: 'read',
   keywords: ['gitlab', 'pipeline', 'ci', 'details', 'jobs', 'status', 'full'],
   example:
     'const pipeline = await gitlab.getPipelineFull({ project_id: "speedwave/core", pipeline_id: 123456 })',
@@ -138,7 +136,6 @@ const getPipelineFullTool: Tool = {
 const getJobLogTool: Tool = {
   name: 'getJobLog',
   description: 'Get log output of a pipeline job',
-  category: 'read',
   keywords: ['gitlab', 'job', 'log', 'ci', 'build', 'debug'],
   example:
     'const log = await gitlab.getJobLog({ project_id: "speedwave/core", job_id: 12345, tail_lines: 50 })',
@@ -183,7 +180,6 @@ const getJobLogTool: Tool = {
 const retryPipelineTool: Tool = {
   name: 'retryPipeline',
   description: 'Retry a failed pipeline',
-  category: 'write',
   keywords: ['gitlab', 'pipeline', 'retry', 'rerun', 'ci', 'build'],
   example: 'await gitlab.retryPipeline({ project_id: "speedwave/core", pipeline_id: 123456 })',
   inputSchema: {
@@ -229,7 +225,6 @@ const retryPipelineTool: Tool = {
 const triggerPipelineTool: Tool = {
   name: 'triggerPipeline',
   description: 'Trigger a new pipeline with optional variables',
-  category: 'write',
   keywords: ['gitlab', 'pipeline', 'trigger', 'create', 'run', 'ci', 'release', 'variables'],
   example: `// Trigger pipeline with CI variable
 await gitlab.triggerPipeline({

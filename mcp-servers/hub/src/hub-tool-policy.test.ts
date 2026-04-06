@@ -1,5 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import type { Tool } from '@speedwave/mcp-shared';
 import {
   TOOL_POLICIES,
   SUPPORTED_SERVICES,
@@ -31,20 +30,16 @@ describe('hub-tool-policy', () => {
       expect(Object.keys(TOOL_POLICIES['os']).length).toBe(25);
     });
 
-    it('every tool has a valid category', () => {
-      const validCategories = ['read', 'write', 'delete'];
-      for (const [service, tools] of Object.entries(TOOL_POLICIES)) {
-        for (const [name, policy] of Object.entries(tools)) {
-          expect(validCategories).toContain(policy.category);
+    it('every tool has a boolean deferLoading', () => {
+      for (const [_service, tools] of Object.entries(TOOL_POLICIES)) {
+        for (const [_name, policy] of Object.entries(tools)) {
           expect(typeof policy.deferLoading).toBe('boolean');
-          // Validate no undefined category
-          expect(policy.category).toBeTruthy();
         }
       }
     });
 
     it('no duplicate tool names within a service', () => {
-      for (const [service, tools] of Object.entries(TOOL_POLICIES)) {
+      for (const [_service, tools] of Object.entries(TOOL_POLICIES)) {
         const names = Object.keys(tools);
         const unique = new Set(names);
         expect(unique.size).toBe(names.length);
@@ -53,7 +48,7 @@ describe('hub-tool-policy', () => {
 
     it('osCategory only present for os service', () => {
       for (const [service, tools] of Object.entries(TOOL_POLICIES)) {
-        for (const [name, policy] of Object.entries(tools)) {
+        for (const [_name, policy] of Object.entries(tools)) {
           if (service === 'os') {
             expect(policy.osCategory).toBeDefined();
             expect(['reminders', 'calendar', 'mail', 'notes']).toContain(policy.osCategory);
@@ -65,7 +60,7 @@ describe('hub-tool-policy', () => {
     });
 
     it('all OS tools have timeoutMs: 30_000', () => {
-      for (const [name, policy] of Object.entries(TOOL_POLICIES['os'])) {
+      for (const [_name, policy] of Object.entries(TOOL_POLICIES['os'])) {
         expect(policy.timeoutMs).toBe(30_000);
       }
     });
@@ -84,7 +79,6 @@ describe('hub-tool-policy', () => {
     it('returns policy for existing tool', () => {
       const policy = getToolPolicy('redmine', 'createIssue');
       expect(policy).toBeDefined();
-      expect(policy?.category).toBe('write');
       expect(policy?.deferLoading).toBe(false);
     });
 
@@ -99,11 +93,11 @@ describe('hub-tool-policy', () => {
     it('handles name collisions correctly (getCurrentUser in both redmine and sharepoint)', () => {
       const redminePolicy = getToolPolicy('redmine', 'getCurrentUser');
       expect(redminePolicy).toBeDefined();
-      expect(redminePolicy?.category).toBe('read');
+      expect(redminePolicy?.deferLoading).toBe(true);
 
       const sharepointPolicy = getToolPolicy('sharepoint', 'getCurrentUser');
       expect(sharepointPolicy).toBeDefined();
-      expect(sharepointPolicy?.category).toBe('read');
+      expect(sharepointPolicy?.deferLoading).toBe(true);
     });
   });
 
@@ -121,64 +115,14 @@ describe('hub-tool-policy', () => {
   });
 
   describe('getPluginToolPolicy', () => {
-    it('defaults to read category when no worker tool provided', () => {
+    it('returns policy with deferLoading false', () => {
       const policy = getPluginToolPolicy();
-      expect(policy.category).toBe('read');
       expect(policy.deferLoading).toBe(false);
     });
 
-    it('defaults to read when worker tool has no category', () => {
-      const tool: Tool = {
-        name: 'search_customers',
-        description: 'Search CRM customers',
-        inputSchema: { type: 'object', properties: {} },
-      };
-      const policy = getPluginToolPolicy(tool);
-      expect(policy.category).toBe('read');
-    });
-
-    it('uses worker tool category when provided as read', () => {
-      const tool: Tool = {
-        name: 'list_orders',
-        description: 'List orders',
-        inputSchema: { type: 'object', properties: {} },
-        category: 'read',
-      };
-      const policy = getPluginToolPolicy(tool);
-      expect(policy.category).toBe('read');
-    });
-
-    it('uses worker tool category when provided as write', () => {
-      const tool: Tool = {
-        name: 'create_order',
-        description: 'Create an order',
-        inputSchema: { type: 'object', properties: {} },
-        category: 'write',
-      };
-      const policy = getPluginToolPolicy(tool);
-      expect(policy.category).toBe('write');
-    });
-
-    it('uses worker tool category when provided as delete', () => {
-      const tool: Tool = {
-        name: 'delete_order',
-        description: 'Delete an order',
-        inputSchema: { type: 'object', properties: {} },
-        category: 'delete',
-      };
-      const policy = getPluginToolPolicy(tool);
-      expect(policy.category).toBe('delete');
-    });
-
-    it('always sets deferLoading to false for plugin tools', () => {
-      const tool: Tool = {
-        name: 'test_tool',
-        description: 'Test tool',
-        inputSchema: { type: 'object', properties: {} },
-        category: 'write',
-      };
-      const policy = getPluginToolPolicy(tool);
-      expect(policy.deferLoading).toBe(false);
+    it('does not include a category field', () => {
+      const policy = getPluginToolPolicy();
+      expect('category' in policy).toBe(false);
     });
   });
 });

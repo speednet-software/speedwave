@@ -13,13 +13,8 @@
  * 4. All existing consumers (search-tools, executor, handlers) use the same API
  */
 
-import { ToolMetadata, ToolCategory, TimeoutClass } from './hub-types.js';
-import {
-  TOOL_POLICIES,
-  SUPPORTED_SERVICES,
-  getToolPolicy,
-  getServicePolicies,
-} from './hub-tool-policy.js';
+import { ToolMetadata, TimeoutClass } from './hub-types.js';
+import { TOOL_POLICIES, SUPPORTED_SERVICES, getServicePolicies } from './hub-tool-policy.js';
 import { getAllServiceNames } from './service-list.js';
 import { discoverAndMergeService, buildSkeletonFromPolicy } from './tool-discovery.js';
 import { ts, TIMEOUTS } from '@speedwave/mcp-shared';
@@ -236,24 +231,6 @@ export function getServiceMethods(service: string): string[] {
   return tools ? Object.keys(tools) : [];
 }
 
-/**
- * Get tool category for audit logging
- * @param service - Service name
- * @param method - camelCase method name
- */
-export function getToolCategory(service: string, method: string): ToolCategory {
-  const meta = getToolMetadata(service, method);
-  if (!meta) {
-    // Fall back to policy if registry entry not found
-    const policy = getToolPolicy(service, method);
-    if (policy) return policy.category;
-    console.warn(
-      `${ts()} [tool-registry] No metadata for ${service}.${method}, defaulting to 'read'`
-    );
-  }
-  return meta?.category ?? 'read';
-}
-
 //═══════════════════════════════════════════════════════════════════════════════
 // Timeout Detection (SSOT - based on tool policy)
 //═══════════════════════════════════════════════════════════════════════════════
@@ -452,7 +429,6 @@ export function buildServiceBridge(
  * Function type for wrapping tool calls with audit logging.
  */
 export type WrapWithAuditFn = <TParams, TResult>(
-  category: ToolCategory,
   service: string,
   tool: string,
   fn: (params: TParams) => Promise<TResult>
@@ -510,7 +486,6 @@ export function buildExecutorWrappers(
     }
 
     wrappers[methodName] = wrapWithAudit(
-      metadata.category,
       service,
       methodName,
       async (params?: Record<string, unknown>) => {
@@ -532,7 +507,6 @@ export function buildExecutorWrappers(
  */
 export function validateRegistry(): string[] {
   const errors: string[] = [];
-  const validCategories = ['read', 'write', 'delete'];
 
   for (const [service, tools] of Object.entries(_registry)) {
     for (const [methodName, metadata] of Object.entries(tools)) {
@@ -544,11 +518,6 @@ export function validateRegistry(): string[] {
       if (metadata.service !== service) {
         errors.push(
           `${service}.${methodName}: metadata.service ('${metadata.service}') does not match service`
-        );
-      }
-      if (!validCategories.includes(metadata.category)) {
-        errors.push(
-          `${service}.${methodName}: invalid category '${metadata.category}' (expected: ${validCategories.join('/')})`
         );
       }
       if (!metadata.description) {

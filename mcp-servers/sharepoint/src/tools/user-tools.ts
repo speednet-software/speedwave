@@ -13,7 +13,6 @@ const getCurrentUserTool: Tool = {
     type: 'object',
     properties: {},
   },
-  category: 'read',
   keywords: ['sharepoint', 'user', 'current', 'me', 'auth'],
   example: 'const user = await sharepoint.getCurrentUser()',
   outputSchema: {

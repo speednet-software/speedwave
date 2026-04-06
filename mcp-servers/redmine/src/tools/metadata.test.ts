@@ -47,11 +47,6 @@ describe('Redmine tool metadata', () => {
   });
 
   describe.each(ALL_TOOLS.map((t) => [t.name, t] as const))('%s', (_name, tool) => {
-    it('has category defined', () => {
-      expect(tool.category).toBeDefined();
-      expect(['read', 'write', 'delete']).toContain(tool.category);
-    });
-
     it('has keywords with at least 1 entry', () => {
       expect(tool.keywords).toBeDefined();
       expect(Array.isArray(tool.keywords)).toBe(true);

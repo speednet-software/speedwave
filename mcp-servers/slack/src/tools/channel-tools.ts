@@ -46,7 +46,6 @@ const sendChannelTool: Tool = {
     },
     required: ['channel', 'message'],
   },
-  category: 'write',
   keywords: ['slack', 'send', 'message', 'channel', 'post', 'write'],
   example: 'await slack.sendChannel({ channel: "#general", message: "Hello!" })',
   outputSchema: {
@@ -84,7 +83,6 @@ const getChannelMessagesTool: Tool = {
     },
     required: ['channel'],
   },
-  category: 'read',
   keywords: ['slack', 'read', 'message', 'history', 'channel', 'get'],
   example: 'const messages = await slack.getChannelMessages({ channel: "#general", limit: 10 })',
   outputSchema: {
@@ -135,7 +133,6 @@ const listChannelIdsTool: Tool = {
       },
     },
   },
-  category: 'read',
   keywords: ['slack', 'channels', 'list', 'get', 'member'],
   example: 'const channels = await slack.listChannelIds()',
   outputSchema: {

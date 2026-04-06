@@ -15,7 +15,6 @@ import { withValidation } from './validation.js';
 const listBranchCommitsTool: Tool = {
   name: 'listBranchCommits',
   description: 'List commits on a specific branch',
-  category: 'read',
   keywords: ['gitlab', 'commits', 'branch', 'history', 'log', 'git'],
   example:
     'const commits = await gitlab.listBranchCommits({ project_id: "speedwave/core", branch: "main" })',
@@ -71,7 +70,6 @@ const listBranchCommitsTool: Tool = {
 const listCommitsTool: Tool = {
   name: 'listCommits',
   description: 'List commits with filters',
-  category: 'read',
   keywords: ['gitlab', 'commits', 'history', 'log', 'git'],
   example:
     'const commits = await gitlab.listCommits({ project_id: "speedwave/core", ref: "main", limit: 10 })',
@@ -127,7 +125,6 @@ const listCommitsTool: Tool = {
 const searchCommitsTool: Tool = {
   name: 'searchCommits',
   description: 'Search commits by message',
-  category: 'read',
   keywords: ['gitlab', 'commits', 'search', 'find', 'git'],
   example:
     'const commits = await gitlab.searchCommits({ project_id: "speedwave/core", query: "fix bug" })',
@@ -172,7 +169,6 @@ const searchCommitsTool: Tool = {
 const getCommitDiffTool: Tool = {
   name: 'getCommitDiff',
   description: 'Get diff of a specific commit',
-  category: 'read',
   keywords: ['gitlab', 'commit', 'diff', 'changes', 'files', 'git'],
   example:
     'const diff = await gitlab.getCommitDiff({ project_id: "speedwave/core", commit_sha: "abc123" })',

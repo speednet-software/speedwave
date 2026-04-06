@@ -2,7 +2,7 @@
  * Metadata Validation Tests
  *
  * Validates that every OS worker tool has required metadata fields:
- * category, keywords, and example.
+ * annotations, keywords, and example.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -23,19 +23,12 @@ const ALL_TOOLS = [
   ...createNoteTools(),
 ];
 
-const VALID_CATEGORIES = ['read', 'write', 'delete'] as const;
-
 describe('OS tool metadata', () => {
   it('registers exactly 25 tools', () => {
     expect(ALL_TOOLS).toHaveLength(25);
   });
 
   describe.each(ALL_TOOLS.map((td) => [td.tool.name, td] as const))('%s', (_name, td) => {
-    it('has a category field set to read, write, or delete', () => {
-      expect(td.tool.category).toBeDefined();
-      expect(VALID_CATEGORIES).toContain(td.tool.category);
-    });
-
     it('has a non-empty keywords array', () => {
       expect(td.tool.keywords).toBeDefined();
       expect(Array.isArray(td.tool.keywords)).toBe(true);
@@ -75,7 +68,7 @@ describe('OS tool metadata', () => {
     expect(new Set(names).size).toBe(names.length);
   });
 
-  it('write/delete tools have appropriate categories', () => {
+  it('has expected write and delete tool names', () => {
     const writeTools = [
       'createReminder',
       'completeReminder',
@@ -87,14 +80,10 @@ describe('OS tool metadata', () => {
       'updateNote',
     ];
     const deleteTools = ['deleteEvent', 'deleteNote'];
+    const toolNames = ALL_TOOLS.map((td) => td.tool.name);
 
-    for (const td of ALL_TOOLS) {
-      if (writeTools.includes(td.tool.name)) {
-        expect(td.tool.category).toBe('write');
-      }
-      if (deleteTools.includes(td.tool.name)) {
-        expect(td.tool.category).toBe('delete');
-      }
+    for (const name of [...writeTools, ...deleteTools]) {
+      expect(toolNames).toContain(name);
     }
   });
 });

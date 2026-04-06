@@ -6,9 +6,9 @@
  * Merges worker tool data with hub policy to produce ToolMetadata.
  *
  * Workers are the SSOT for: name, description, inputSchema, inputExamples,
- * keywords, example, outputSchema.
+ * keywords, example, outputSchema, annotations.
  *
- * Hub policy is authoritative for: category (audit), deferLoading, timeoutClass,
+ * Hub policy is authoritative for: deferLoading, timeoutClass,
  * timeoutMs, osCategory, service.
  */
 
@@ -127,7 +127,6 @@ export function mergeToolWithPolicy(
     inputExamples: tool.inputExamples,
     service,
     deferLoading: policy.deferLoading,
-    category: policy.category,
     timeoutClass: policy.timeoutClass,
     timeoutMs: policy.timeoutMs,
     osCategory: policy.osCategory,
@@ -136,7 +135,7 @@ export function mergeToolWithPolicy(
 
 /**
  * Build a skeleton ToolMetadata from policy alone when worker is unavailable.
- * This allows the hub to start and serve basic tool info (names, categories)
+ * This allows the hub to start and serve basic tool info (names)
  * even if workers haven't started yet.
  * @param service - Service name (e.g., 'redmine')
  * @param methodName - camelCase method name (e.g., 'listIssueIds')
@@ -155,7 +154,6 @@ export function buildSkeletonFromPolicy(
     example: '',
     service,
     deferLoading: policy.deferLoading,
-    category: policy.category,
     timeoutClass: policy.timeoutClass,
     timeoutMs: policy.timeoutMs,
     osCategory: policy.osCategory,
@@ -195,10 +193,6 @@ export function validateMergeResult(
   if (metadata.service !== service) {
     errors.push(`${prefix}: service mismatch (got '${metadata.service}')`);
   }
-  const validCategories = ['read', 'write', 'delete'];
-  if (!validCategories.includes(metadata.category)) {
-    errors.push(`${prefix}: invalid category '${metadata.category}'`);
-  }
 
   return errors;
 }
@@ -222,7 +216,7 @@ export async function discoverAndMergeService(
   if (isPluginService(service)) {
     for (const tool of workerTools) {
       const methodName = toCamelCase(tool.name);
-      const policy = getPluginToolPolicy(tool);
+      const policy = getPluginToolPolicy();
       const merged = mergeToolWithPolicy(tool, policy, service, methodName);
       const errors = validateMergeResult(service, methodName, merged);
       if (errors.length > 0) {

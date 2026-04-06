@@ -109,7 +109,6 @@ export async function searchTools(params: SearchToolsParams): Promise<SearchTool
         const result: ToolSearchResult = {
           tool: `${svc}/${tool.name}`,
           service: svc,
-          category: tool.category,
           deferLoading: tool.deferLoading ?? true,
         };
 

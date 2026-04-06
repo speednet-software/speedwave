@@ -67,7 +67,7 @@ describe('tool-discovery', () => {
           name: 'send_channel',
           description: 'Send a message',
           inputSchema: { type: 'object', properties: { channel: { type: 'string' } } },
-          category: 'write',
+          annotations: { readOnlyHint: false, destructiveHint: false },
           keywords: ['slack', 'send'],
         },
       ];
@@ -164,7 +164,7 @@ describe('tool-discovery', () => {
         },
         required: ['project_id', 'subject'],
       },
-      category: 'write',
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
       keywords: ['redmine', 'issue', 'create'],
       example: 'await redmine.createIssue({ project_id: "foo", subject: "bar" })',
       outputSchema: { type: 'object', properties: { id: { type: 'number' } } },
@@ -172,7 +172,6 @@ describe('tool-discovery', () => {
     };
 
     const basePolicy: ToolPolicy = {
-      category: 'write',
       deferLoading: false,
     };
 
@@ -182,7 +181,6 @@ describe('tool-discovery', () => {
       expect(result.name).toBe('createIssue');
       expect(result.description).toBe('Create a new Redmine issue');
       expect(result.service).toBe('redmine');
-      expect(result.category).toBe('write');
       expect(result.deferLoading).toBe(false);
       expect(result.keywords).toEqual(['redmine', 'issue', 'create']);
       expect(result.example).toBe(baseTool.example);
@@ -191,21 +189,8 @@ describe('tool-discovery', () => {
       expect(result.inputSchema).toEqual(baseTool.inputSchema);
     });
 
-    it('uses policy category (hub-authoritative) regardless of worker category', () => {
-      const tool: Tool = { ...baseTool, category: 'delete' };
-      const result = mergeToolWithPolicy(tool, basePolicy, 'redmine', 'createIssue');
-      expect(result.category).toBe('write'); // policy.category, not tool.category
-    });
-
-    it('uses policy category when worker has none', () => {
-      const tool: Tool = { ...baseTool, category: undefined };
-      const result = mergeToolWithPolicy(tool, basePolicy, 'redmine', 'createIssue');
-      expect(result.category).toBe('write');
-    });
-
     it('includes policy-only fields (timeoutClass, timeoutMs, osCategory)', () => {
       const policy: ToolPolicy = {
-        category: 'read',
         deferLoading: false,
         timeoutClass: 'long',
         timeoutMs: 600_000,
@@ -232,12 +217,11 @@ describe('tool-discovery', () => {
 
   describe('buildSkeletonFromPolicy', () => {
     it('creates minimal metadata from policy', () => {
-      const policy: ToolPolicy = { category: 'read', deferLoading: true };
+      const policy: ToolPolicy = { deferLoading: true };
       const result = buildSkeletonFromPolicy('redmine', 'listIssueIds', policy);
 
       expect(result.name).toBe('listIssueIds');
       expect(result.service).toBe('redmine');
-      expect(result.category).toBe('read');
       expect(result.deferLoading).toBe(true);
       expect(result.description).toContain('listIssueIds');
       expect(result.description).not.toContain('not yet available');
@@ -247,7 +231,6 @@ describe('tool-discovery', () => {
 
     it('preserves osCategory from policy', () => {
       const policy: ToolPolicy = {
-        category: 'write',
         deferLoading: false,
         timeoutMs: 30_000,
         osCategory: 'calendar',
@@ -277,7 +260,7 @@ describe('tool-discovery', () => {
           name: 'search_customers',
           description: 'Search CRM customers',
           inputSchema: { type: 'object', properties: { query: { type: 'string' } } },
-          category: 'read',
+          annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
           keywords: ['crm', 'customer'],
         },
         {
@@ -288,7 +271,7 @@ describe('tool-discovery', () => {
             properties: { customer_id: { type: 'string' } },
             required: ['customer_id'],
           },
-          category: 'write',
+          annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
         },
       ];
 
@@ -307,10 +290,9 @@ describe('tool-discovery', () => {
 
       expect(Object.keys(result)).toHaveLength(2);
       expect(result['searchCustomers']).toBeDefined();
-      expect(result['searchCustomers'].category).toBe('read');
       expect(result['searchCustomers'].service).toBe('presale');
       expect(result['createOrder']).toBeDefined();
-      expect(result['createOrder'].category).toBe('write');
+      expect(result['createOrder'].service).toBe('presale');
     });
 
     it('returns empty result for plugin with no worker tools', async () => {
@@ -331,7 +313,7 @@ describe('tool-discovery', () => {
       expect(Object.keys(result)).toHaveLength(0);
     });
 
-    it('defaults plugin tool category to read when not set', async () => {
+    it('accepts plugin tools without annotations', async () => {
       process.env.WORKER_PRESALE_URL = 'http://mcp-presale:4010';
 
       const mockTools: Tool[] = [
@@ -339,7 +321,6 @@ describe('tool-discovery', () => {
           name: 'get_status',
           description: 'Get status',
           inputSchema: { type: 'object', properties: {} },
-          // no category
         },
       ];
 
@@ -355,7 +336,8 @@ describe('tool-discovery', () => {
       vi.stubGlobal('fetch', mockFetch);
 
       const result = await discoverAndMergeService('presale');
-      expect(result['getStatus'].category).toBe('read');
+      expect(result['getStatus']).toBeDefined();
+      expect(result['getStatus'].service).toBe('presale');
     });
   });
 
@@ -367,7 +349,6 @@ describe('tool-discovery', () => {
       inputSchema: { type: 'object', properties: {} },
       example: '',
       service: 'redmine',
-      category: 'write',
       deferLoading: false,
     };
 
@@ -405,14 +386,6 @@ describe('tool-discovery', () => {
         service: 'gitlab',
       });
       expect(errors.some((e) => e.includes('service mismatch'))).toBe(true);
-    });
-
-    it('detects invalid category', () => {
-      const errors = validateMergeResult('redmine', 'createIssue', {
-        ...validMetadata,
-        category: 'invalid' as 'read',
-      });
-      expect(errors.some((e) => e.includes('invalid category'))).toBe(true);
     });
   });
 });

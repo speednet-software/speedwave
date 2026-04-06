@@ -15,7 +15,6 @@ import { withValidation } from './validation.js';
 const listLabelsTool: Tool = {
   name: 'listLabels',
   description: 'List project labels',
-  category: 'read',
   keywords: ['gitlab', 'labels', 'list', 'tags'],
   example: 'const labels = await gitlab.listLabels({ project_id: "speedwave/core" })',
   inputSchema: {
@@ -58,7 +57,6 @@ const listLabelsTool: Tool = {
 const createLabelTool: Tool = {
   name: 'createLabel',
   description: 'Create a project label',
-  category: 'write',
   keywords: ['gitlab', 'label', 'create', 'new', 'tag'],
   example:
     'const label = await gitlab.createLabel({ project_id: "speedwave/core", name: "urgent", color: "#FF0000" })',

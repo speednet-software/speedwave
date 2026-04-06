@@ -558,7 +558,6 @@ describe('executor', () => {
         searchCustomers: {
           name: 'searchCustomers',
           service: 'presale',
-          category: 'read',
           description: 'Search CRM customers',
           inputSchema: { type: 'object', properties: {} },
           keywords: [],

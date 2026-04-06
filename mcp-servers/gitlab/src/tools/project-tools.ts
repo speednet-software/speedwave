@@ -15,7 +15,6 @@ import { withValidation } from './validation.js';
 const listProjectIdsTool: Tool = {
   name: 'listProjectIds',
   description: 'List project IDs and paths. Use get_project_full for details.',
-  category: 'read',
   keywords: ['gitlab', 'projects', 'list', 'repositories', 'repos', 'ids'],
   example: 'const { projects, count } = await gitlab.listProjectIds({ search: "speedwave" })',
   inputSchema: {
@@ -67,7 +66,6 @@ const listProjectIdsTool: Tool = {
 const getProjectFullTool: Tool = {
   name: 'getProjectFull',
   description: 'Get complete project data. No truncation.',
-  category: 'read',
   keywords: ['gitlab', 'project', 'show', 'get', 'detail', 'full'],
   example: 'const project = await gitlab.getProjectFull({ project_id: "speedwave/core" })',
   inputSchema: {
@@ -118,7 +116,6 @@ const getProjectFullTool: Tool = {
 const searchCodeTool: Tool = {
   name: 'searchCode',
   description: 'Search for code in GitLab projects',
-  category: 'read',
   keywords: ['gitlab', 'search', 'code', 'find', 'grep', 'regex'],
   example:
     'const results = await gitlab.searchCode({ query: "function authenticate", project_id: "speedwave/core" })',

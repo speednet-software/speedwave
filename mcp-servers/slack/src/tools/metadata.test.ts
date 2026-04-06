@@ -16,11 +16,6 @@ describe('tool metadata', () => {
 
   for (const { tool } of allTools) {
     describe(tool.name, () => {
-      it('should have category defined', () => {
-        expect(tool.category).toBeDefined();
-        expect(['read', 'write', 'delete']).toContain(tool.category);
-      });
-
       it('should have keywords with at least 1 entry', () => {
         expect(tool.keywords).toBeDefined();
         expect(Array.isArray(tool.keywords)).toBe(true);
