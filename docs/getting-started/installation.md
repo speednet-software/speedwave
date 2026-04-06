@@ -2,6 +2,15 @@
 
 Platform-specific installation instructions for Speedwave.
 
+## System Requirements
+
+|      | Minimum     | Recommended |
+| ---- | ----------- | ----------- |
+| RAM  | 8 GiB       | 16 GiB      |
+| Disk | 10 GiB free | 20 GiB free |
+
+Speedwave warns at startup if the host has less than 8 GiB RAM.
+
 ## macOS
 
 <!-- Content to be written: .dmg installation, Lima VM setup, system requirements -->
