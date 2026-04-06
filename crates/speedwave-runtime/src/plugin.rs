@@ -697,7 +697,7 @@ cap_drop:
 security_opt:
   - no-new-privileges:true
 tmpfs:
-  - /tmp:noexec,nosuid,size=64m
+  - /tmp:noexec,nosuid,size=512m
 volumes:
   - {tokens_path}:/tokens:{token_mount_mode}
   - {workspace_path}:/workspace:rw
@@ -710,7 +710,7 @@ labels:
 deploy:
   resources:
     limits:
-      cpus: '0.5'
+      cpus: '2.0'
       memory: {mem_limit}
 "#,
         tag = tag,
