@@ -16,6 +16,7 @@ const listMrDiscussionsTool: Tool = {
   name: 'listMrDiscussions',
   description: 'List discussion threads on a merge request',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'merge', 'request', 'discussions', 'threads'],
   example:
     'const discussions = await gitlab.listMrDiscussions({ project_id: "speedwave/core", mr_iid: 42 })',
@@ -58,6 +59,7 @@ const createMrDiscussionTool: Tool = {
   name: 'createMrDiscussion',
   description: 'Create a discussion thread on a merge request',
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'merge', 'request', 'discussion', 'thread'],
   example:
     'await gitlab.createMrDiscussion({ project_id: "speedwave/core", mr_iid: 42, body: "What about error handling?" })',

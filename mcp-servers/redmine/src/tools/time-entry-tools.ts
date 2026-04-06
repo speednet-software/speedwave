@@ -16,6 +16,7 @@ const listTimeEntriesTool: Tool = {
   name: 'listTimeEntries',
   description: 'List time entries with optional filters.',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['redmine', 'time', 'entries', 'list', 'hours', 'log'],
   example: `const entries = await redmine.listTimeEntries({ issue_id: 12345 })`,
   inputSchema: {
@@ -79,6 +80,7 @@ const createTimeEntryTool: Tool = {
   name: 'createTimeEntry',
   description: 'Log time on an issue or project',
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['redmine', 'time', 'entry', 'create', 'log', 'hours'],
   example: `await redmine.createTimeEntry({ hours: 2.5, issue_id: 12345, activity: "development", comments: "Code review" })`,
   inputSchema: {
@@ -145,6 +147,7 @@ const updateTimeEntryTool: Tool = {
   name: 'updateTimeEntry',
   description: 'Update an existing time entry',
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['redmine', 'time', 'update', 'modify', 'hours', 'edit'],
   example: `await redmine.updateTimeEntry({ time_entry_id: 789, hours: 3.5 })`,
   inputSchema: {

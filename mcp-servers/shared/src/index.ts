@@ -40,6 +40,7 @@ export type {
   ClientCapabilities,
   ServerCapabilities,
   Tool,
+  ToolAnnotations,
   ToolsListRequest,
   ToolsListResult,
   ToolsCallRequest,

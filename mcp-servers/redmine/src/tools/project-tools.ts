@@ -15,6 +15,7 @@ const listProjectIdsTool: Tool = {
   name: 'listProjectIds',
   description: 'List project IDs with optional filters. Returns only IDs for efficiency.',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['redmine', 'projects', 'list', 'ids', 'filter', 'active', 'closed'],
   example: `const { ids } = await redmine.listProjectIds({ status: 'active' })`,
   inputSchema: {
@@ -35,6 +36,7 @@ const getProjectFullTool: Tool = {
   name: 'getProjectFull',
   description: 'Get complete project data including trackers, categories, modules. No truncation.',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['redmine', 'project', 'details', 'full', 'trackers', 'categories', 'modules'],
   example: `const project = await redmine.getProjectFull({ project_id: 'my-project' })`,
   inputSchema: {
@@ -55,6 +57,7 @@ const searchProjectIdsTool: Tool = {
   name: 'searchProjectIds',
   description: 'Search projects by name, identifier or description. Returns matching IDs only.',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['redmine', 'projects', 'search', 'find', 'query', 'name'],
   example: `const { ids } = await redmine.searchProjectIds({ query: 'mobile' })`,
   inputSchema: {

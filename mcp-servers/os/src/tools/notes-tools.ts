@@ -71,6 +71,7 @@ const listNoteFoldersTool: Tool = {
   name: 'listNoteFolders',
   description: 'List all note folders/notebooks available on this device',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['os', 'notes', 'folders', 'notebooks', 'list', 'categories'],
   example: 'const { folders } = await os.listNoteFolders()',
   inputSchema: {
@@ -106,6 +107,7 @@ const listNotesTool: Tool = {
   name: 'listNotes',
   description: 'List notes, optionally filtered by folder',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['os', 'notes', 'list', 'documents', 'memos'],
   example: 'const { notes } = await os.listNotes({ limit: 20 })',
   inputSchema: {
@@ -149,6 +151,7 @@ const getNoteTool: Tool = {
   name: 'getNote',
   description: 'Get a specific note by ID with full body content',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['os', 'note', 'get', 'read', 'detail', 'content', 'body'],
   example: 'const note = await os.getNote({ id: "note-789" })',
   inputSchema: {
@@ -183,6 +186,7 @@ const searchNotesTool: Tool = {
   name: 'searchNotes',
   description: 'Search notes by query string',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['os', 'notes', 'search', 'find', 'query'],
   example: 'const { notes } = await os.searchNotes({ query: "meeting notes" })',
   inputSchema: {
@@ -229,6 +233,7 @@ const createNoteTool: Tool = {
   name: 'createNote',
   description: 'Create a new note',
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['os', 'note', 'create', 'new', 'add', 'write'],
   example:
     'const { id } = await os.createNote({ title: "Sprint Retro Notes", body: "## What went well\\n- Deployment was smooth" })',
@@ -268,6 +273,7 @@ const updateNoteTool: Tool = {
   name: 'updateNote',
   description: 'Update an existing note',
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['os', 'note', 'update', 'edit', 'modify'],
   example: 'await os.updateNote({ id: "note-789", body: "Updated content here" })',
   inputSchema: {
@@ -301,6 +307,7 @@ const deleteNoteTool: Tool = {
   name: 'deleteNote',
   description: 'Delete a note',
   category: 'delete',
+  annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   keywords: ['os', 'note', 'delete', 'remove'],
   example: 'await os.deleteNote({ id: "note-789" })',
   inputSchema: {

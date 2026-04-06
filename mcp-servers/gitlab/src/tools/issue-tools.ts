@@ -16,6 +16,7 @@ const listIssuesTool: Tool = {
   name: 'listIssues',
   description: 'List project issues',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'issues', 'list', 'bugs', 'tasks'],
   example:
     'const issues = await gitlab.listIssues({ project_id: "speedwave/core", state: "opened" })',
@@ -68,6 +69,7 @@ const getIssueTool: Tool = {
   name: 'getIssue',
   description: 'Get issue details',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'issue', 'get', 'show', 'details'],
   example: 'const issue = await gitlab.getIssue({ project_id: "speedwave/core", issue_iid: 42 })',
   inputSchema: {
@@ -111,6 +113,7 @@ const createIssueTool: Tool = {
   name: 'createIssue',
   description: 'Create a new issue',
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'issue', 'create', 'new', 'bug'],
   example:
     'const issue = await gitlab.createIssue({ project_id: "speedwave/core", title: "Fix login bug", labels: "bug,urgent" })',
@@ -167,6 +170,7 @@ const updateIssueTool: Tool = {
   name: 'updateIssue',
   description: 'Update an issue',
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'issue', 'update', 'edit', 'modify'],
   example:
     'await gitlab.updateIssue({ project_id: "speedwave/core", issue_iid: 42, title: "Updated title", state_event: "close" })',
@@ -223,6 +227,7 @@ const closeIssueTool: Tool = {
   name: 'closeIssue',
   description: 'Close an issue',
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'issue', 'close', 'resolve', 'done'],
   example: 'await gitlab.closeIssue({ project_id: "speedwave/core", issue_iid: 42 })',
   inputSchema: {

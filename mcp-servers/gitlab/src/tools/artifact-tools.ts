@@ -16,6 +16,7 @@ const listArtifactsTool: Tool = {
   name: 'listArtifacts',
   description: 'List artifacts from a pipeline',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'artifacts', 'pipeline', 'ci', 'build'],
   example:
     'const artifacts = await gitlab.listArtifacts({ project_id: "speedwave/core", pipeline_id: 12345 })',
@@ -59,6 +60,7 @@ const downloadArtifactTool: Tool = {
   name: 'downloadArtifact',
   description: 'Download job artifacts',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'artifact', 'download', 'ci', 'build'],
   example:
     'const artifact = await gitlab.downloadArtifact({ project_id: "speedwave/core", job_id: 54321 })',
@@ -97,6 +99,7 @@ const deleteArtifactsTool: Tool = {
   name: 'deleteArtifacts',
   description: 'Delete job artifacts',
   category: 'delete',
+  annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   keywords: ['gitlab', 'artifacts', 'delete', 'remove', 'ci'],
   example: 'await gitlab.deleteArtifacts({ project_id: "speedwave/core", job_id: 54321 })',
   inputSchema: {

@@ -52,6 +52,12 @@ describe('Redmine tool metadata', () => {
       expect(['read', 'write', 'delete']).toContain(tool.category);
     });
 
+    it('has annotations with readOnlyHint and destructiveHint', () => {
+      expect(tool.annotations).toBeDefined();
+      expect(typeof tool.annotations!.readOnlyHint).toBe('boolean');
+      expect(typeof tool.annotations!.destructiveHint).toBe('boolean');
+    });
+
     it('has keywords with at least 1 entry', () => {
       expect(tool.keywords).toBeDefined();
       expect(Array.isArray(tool.keywords)).toBe(true);

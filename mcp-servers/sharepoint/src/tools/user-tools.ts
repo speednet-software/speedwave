@@ -14,6 +14,7 @@ const getCurrentUserTool: Tool = {
     properties: {},
   },
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['sharepoint', 'user', 'current', 'me', 'auth'],
   example: 'const user = await sharepoint.getCurrentUser()',
   outputSchema: {

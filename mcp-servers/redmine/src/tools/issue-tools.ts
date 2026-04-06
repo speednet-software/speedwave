@@ -17,6 +17,7 @@ const listIssueIdsTool: Tool = {
   name: 'listIssueIds',
   description: 'List issue IDs with optional filters. Returns only IDs for efficiency.',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['redmine', 'issues', 'list', 'filter', 'tasks', 'bugs', 'ids'],
   example: `const { ids, total_count } = await redmine.listIssueIds({ status: "open", assigned_to: "me" })`,
   inputSchema: {
@@ -90,6 +91,7 @@ const getIssueFullTool: Tool = {
   name: 'getIssueFull',
   description: 'Get complete issue data including custom_fields, relations. No truncation.',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['redmine', 'issue', 'show', 'get', 'detail', 'single', 'full'],
   example: `const issue = await redmine.getIssueFull({ issue_id: 12345, include: ["journals", "attachments"] })`,
   inputSchema: {
@@ -173,6 +175,7 @@ const searchIssueIdsTool: Tool = {
   name: 'searchIssueIds',
   description: 'Search issues by text query. Returns matching IDs only.',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['redmine', 'issue', 'search', 'find', 'query', 'ids'],
   example: `const { ids, total_count } = await redmine.searchIssueIds({ query: "authentication error", project_id: "my-project" })`,
   inputSchema: {
@@ -225,6 +228,7 @@ const createIssueTool: Tool = {
   name: 'createIssue',
   description: 'Create a new Redmine issue',
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['redmine', 'issue', 'create', 'new', 'task', 'bug', 'add'],
   example: `const issue = await redmine.createIssue({ subject: "Fix bug", project_id: "my-project", tracker: "bug" })`,
   inputSchema: {
@@ -300,6 +304,7 @@ const updateIssueTool: Tool = {
   name: 'updateIssue',
   description: 'Update an existing Redmine issue',
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['redmine', 'issue', 'update', 'modify', 'change', 'edit', 'move', 'project'],
   example: `const updated = await redmine.updateIssue({ issue_id: 12345, assigned_to_id: userId });
 // IMPORTANT: Verify change was applied - Redmine silently ignores some changes for closed issues
@@ -372,6 +377,7 @@ const commentIssueTool: Tool = {
   name: 'commentIssue',
   description: 'Add a comment to an issue',
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['redmine', 'issue', 'comment', 'note', 'add'],
   example: `await redmine.commentIssue({ issue_id: 12345, notes: "Work in progress" })`,
   inputSchema: {

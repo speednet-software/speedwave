@@ -16,6 +16,7 @@ const listMrCommitsTool: Tool = {
   name: 'listMrCommits',
   description: 'List commits in a merge request',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'merge', 'request', 'commits', 'history'],
   example:
     'const commits = await gitlab.listMrCommits({ project_id: "speedwave/core", mr_iid: 42 })',
@@ -60,6 +61,7 @@ const listMrPipelinesTool: Tool = {
   name: 'listMrPipelines',
   description: 'List pipelines associated with a merge request',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'merge', 'request', 'pipelines', 'ci'],
   example:
     'const pipelines = await gitlab.listMrPipelines({ project_id: "speedwave/core", mr_iid: 42 })',
@@ -104,6 +106,7 @@ const listMrNotesTool: Tool = {
   name: 'listMrNotes',
   description: 'List notes/comments on a merge request',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'merge', 'request', 'notes', 'comments'],
   example: 'const notes = await gitlab.listMrNotes({ project_id: "speedwave/core", mr_iid: 42 })',
   inputSchema: {
@@ -147,6 +150,7 @@ const createMrNoteTool: Tool = {
   name: 'createMrNote',
   description: 'Add a comment/note to a merge request',
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'merge', 'request', 'comment', 'note'],
   example: 'await gitlab.createMrNote({ project_id: "speedwave/core", mr_iid: 42, body: "LGTM!" })',
   inputSchema: {

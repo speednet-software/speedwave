@@ -16,6 +16,7 @@ const listLabelsTool: Tool = {
   name: 'listLabels',
   description: 'List project labels',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'labels', 'list', 'tags'],
   example: 'const labels = await gitlab.listLabels({ project_id: "speedwave/core" })',
   inputSchema: {
@@ -59,6 +60,7 @@ const createLabelTool: Tool = {
   name: 'createLabel',
   description: 'Create a project label',
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'label', 'create', 'new', 'tag'],
   example:
     'const label = await gitlab.createLabel({ project_id: "speedwave/core", name: "urgent", color: "#FF0000" })',

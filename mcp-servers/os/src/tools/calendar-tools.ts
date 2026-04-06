@@ -79,6 +79,7 @@ const listCalendarsTool: Tool = {
   name: 'listCalendars',
   description: 'List all calendars available on this device',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['os', 'calendar', 'calendars', 'list', 'schedule'],
   example: 'const { calendars } = await os.listCalendars()',
   inputSchema: {
@@ -115,6 +116,7 @@ const listEventsTool: Tool = {
   name: 'listEvents',
   description: 'List calendar events within a date range',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['os', 'calendar', 'events', 'list', 'schedule', 'meetings', 'appointments'],
   example:
     'const { events } = await os.listEvents({ start: "2025-01-13T00:00:00Z", end: "2025-01-17T23:59:59Z" })',
@@ -170,6 +172,7 @@ const getEventTool: Tool = {
   name: 'getEvent',
   description: 'Get a specific calendar event by ID',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['os', 'calendar', 'event', 'get', 'detail', 'show', 'meeting'],
   example: 'const event = await os.getEvent({ id: "evt-123" })',
   inputSchema: {
@@ -207,6 +210,7 @@ const createEventTool: Tool = {
   name: 'createEvent',
   description: 'Create a new calendar event',
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['os', 'calendar', 'event', 'create', 'new', 'add', 'meeting', 'schedule'],
   example:
     'const { id } = await os.createEvent({ summary: "Team standup", start: "2025-01-15T09:00:00Z", end: "2025-01-15T09:30:00Z" })',
@@ -258,6 +262,7 @@ const updateEventTool: Tool = {
   name: 'updateEvent',
   description: 'Update an existing calendar event',
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['os', 'calendar', 'event', 'update', 'edit', 'modify', 'reschedule'],
   example:
     'await os.updateEvent({ id: "evt-123", summary: "Updated meeting title", start: "2025-01-15T10:00:00Z", end: "2025-01-15T11:00:00Z" })',
@@ -302,6 +307,7 @@ const deleteEventTool: Tool = {
   name: 'deleteEvent',
   description: 'Delete a calendar event',
   category: 'delete',
+  annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   keywords: ['os', 'calendar', 'event', 'delete', 'remove', 'cancel'],
   example: 'await os.deleteEvent({ id: "evt-123" })',
   inputSchema: {

@@ -59,6 +59,7 @@ const listFileIdsTool: Tool = {
     },
   },
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['sharepoint', 'files', 'list', 'directory', 'folder'],
   example: 'const files = await sharepoint.listFileIds({ path: "documents" })',
   outputSchema: {
@@ -104,6 +105,7 @@ const getFileFullTool: Tool = {
     required: ['file_id'],
   },
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['sharepoint', 'file', 'get', 'detail', 'download', 'metadata'],
   example: 'const file = await sharepoint.getFileFull({ file_id: "abc123", include: ["content"] })',
   outputSchema: {
@@ -152,6 +154,7 @@ const downloadFileTool: Tool = {
     },
   },
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['sharepoint', 'download', 'file', 'get', 'fetch'],
   example:
     'await sharepoint.downloadFile({ sharepoint_path: "docs/report.pdf", local_path: "/workspace/report.pdf" })',
@@ -196,6 +199,7 @@ const uploadFileTool: Tool = {
     },
   },
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['sharepoint', 'upload', 'file', 'put', 'write', 'sync'],
   example:
     'await sharepoint.uploadFile({ local_path: "/workspace/report.pdf", sharepoint_path: "docs/report.pdf" })',

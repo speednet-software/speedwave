@@ -59,6 +59,7 @@ const listReminderListsTool: Tool = {
   name: 'listReminderLists',
   description: 'List all reminder lists/groups available on this device',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['os', 'reminders', 'lists', 'calendars', 'groups', 'categories'],
   example: 'const lists = await os.listReminderLists()',
   inputSchema: {
@@ -93,6 +94,7 @@ const listRemindersTool: Tool = {
   name: 'listReminders',
   description: 'List reminders, optionally filtered by list',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['os', 'reminders', 'list', 'tasks', 'todo', 'due'],
   example: 'const { reminders } = await os.listReminders({ show_completed: false, limit: 20 })',
   inputSchema: {
@@ -149,6 +151,7 @@ const getReminderTool: Tool = {
   name: 'getReminder',
   description: 'Get a specific reminder by ID',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['os', 'reminder', 'get', 'detail', 'show'],
   example: 'const reminder = await os.getReminder({ id: "abc-123" })',
   inputSchema: {
@@ -189,6 +192,7 @@ const createReminderTool: Tool = {
   name: 'createReminder',
   description: 'Create a new reminder',
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['os', 'reminder', 'create', 'new', 'add', 'task', 'todo'],
   example:
     'const { id } = await os.createReminder({ name: "Review PR #42", due_date: "2025-01-15T10:00:00Z", priority: 1 })',
@@ -241,6 +245,7 @@ const completeReminderTool: Tool = {
   name: 'completeReminder',
   description: 'Mark a reminder as completed',
   category: 'write',
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   keywords: ['os', 'reminder', 'complete', 'done', 'finish', 'check'],
   example: 'await os.completeReminder({ id: "abc-123" })',
   inputSchema: {

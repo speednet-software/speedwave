@@ -36,6 +36,12 @@ describe('OS tool metadata', () => {
       expect(VALID_CATEGORIES).toContain(td.tool.category);
     });
 
+    it('has annotations with readOnlyHint and destructiveHint', () => {
+      expect(td.tool.annotations).toBeDefined();
+      expect(typeof td.tool.annotations!.readOnlyHint).toBe('boolean');
+      expect(typeof td.tool.annotations!.destructiveHint).toBe('boolean');
+    });
+
     it('has a non-empty keywords array', () => {
       expect(td.tool.keywords).toBeDefined();
       expect(Array.isArray(td.tool.keywords)).toBe(true);

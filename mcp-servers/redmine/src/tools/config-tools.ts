@@ -15,6 +15,7 @@ const getMappingsTool: Tool = {
   name: 'getMappings',
   description: 'Get project-specific Redmine ID mappings (status, priority, tracker, activity)',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['redmine', 'mappings', 'config', 'status', 'priority', 'tracker', 'activity'],
   example: `const mappings = await redmine.getMappings()`,
   inputSchema: {
@@ -70,6 +71,7 @@ const getConfigTool: Tool = {
   description:
     'Get project configuration (default project_id, project_name, Redmine URL). project_name is auto-fetched from the Redmine API at startup when absent from config.',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['redmine', 'config', 'configuration', 'project', 'url', 'settings'],
   example: `const config = await redmine.getConfig()`,
   inputSchema: {

@@ -16,6 +16,7 @@ const getTreeTool: Tool = {
   name: 'getTree',
   description: 'Get repository file tree',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'tree', 'files', 'repository', 'ls'],
   example: 'const tree = await gitlab.getTree({ project_id: "speedwave/core", path: "src" })',
   inputSchema: {
@@ -66,6 +67,7 @@ const getFileTool: Tool = {
   name: 'getFile',
   description: 'Get file content from repository',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'file', 'content', 'read', 'cat'],
   example:
     'const file = await gitlab.getFile({ project_id: "speedwave/core", file_path: "README.md" })',
@@ -117,6 +119,7 @@ const getBlameTool: Tool = {
   name: 'getBlame',
   description: 'Get git blame for a file',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'blame', 'annotate', 'history', 'git'],
   example:
     'const blame = await gitlab.getBlame({ project_id: "speedwave/core", file_path: "src/index.ts" })',

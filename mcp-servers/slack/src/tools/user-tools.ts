@@ -21,6 +21,7 @@ const getUsersTool: Tool = {
     required: ['email'],
   },
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['slack', 'user', 'email', 'lookup', 'find'],
   example: 'const user = await slack.getUsers({ email: "alice@example.com" })',
   outputSchema: {

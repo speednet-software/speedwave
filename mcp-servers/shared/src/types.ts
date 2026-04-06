@@ -198,6 +198,23 @@ export interface ServerCapabilities {
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
+ * Hints describing a tool's behavior per MCP spec 2025-03-26.
+ * Used by clients to make UI/policy decisions without executing the tool.
+ * @interface ToolAnnotations
+ * @see https://modelcontextprotocol.io/docs/specification/tools#annotations
+ */
+export interface ToolAnnotations {
+  /** If true, the tool does not modify any state (default: assumed false). */
+  readOnlyHint?: boolean;
+  /** If true, the tool may perform destructive operations such as deleting data (default: assumed true). */
+  destructiveHint?: boolean;
+  /** If true, the tool may interact with entities outside the user's organization (default: assumed true). */
+  openWorldHint?: boolean;
+  /** If true, repeated calls with the same arguments produce the same result (default: assumed false). */
+  idempotentHint?: boolean;
+}
+
+/**
  * MCP tool definition describing a callable function/operation.
  * Tools are exposed by servers and can be invoked by clients.
  * @interface Tool
@@ -226,6 +243,8 @@ export interface Tool {
   }>;
   /** Tool category for audit logging: read, write, or delete */
   category?: 'read' | 'write' | 'delete';
+  /** MCP spec annotations describing tool behavior hints */
+  annotations?: ToolAnnotations;
   /** Search keywords for tool discovery */
   keywords?: string[];
   /** Usage example showing how to call the tool */

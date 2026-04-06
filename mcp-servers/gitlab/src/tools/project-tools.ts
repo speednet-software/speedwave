@@ -16,6 +16,7 @@ const listProjectIdsTool: Tool = {
   name: 'listProjectIds',
   description: 'List project IDs and paths. Use get_project_full for details.',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'projects', 'list', 'repositories', 'repos', 'ids'],
   example: 'const { projects, count } = await gitlab.listProjectIds({ search: "speedwave" })',
   inputSchema: {
@@ -68,6 +69,7 @@ const getProjectFullTool: Tool = {
   name: 'getProjectFull',
   description: 'Get complete project data. No truncation.',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'project', 'show', 'get', 'detail', 'full'],
   example: 'const project = await gitlab.getProjectFull({ project_id: "speedwave/core" })',
   inputSchema: {
@@ -119,6 +121,7 @@ const searchCodeTool: Tool = {
   name: 'searchCode',
   description: 'Search for code in GitLab projects',
   category: 'read',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   keywords: ['gitlab', 'search', 'code', 'find', 'grep', 'regex'],
   example:
     'const results = await gitlab.searchCode({ query: "function authenticate", project_id: "speedwave/core" })',
