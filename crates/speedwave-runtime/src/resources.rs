@@ -75,13 +75,11 @@ fn host_total_memory_gib_impl() -> Option<u32> {
 
 /// Desired Lima VM memory in GiB based on host RAM.
 ///
-/// Hosts with <16 GiB return 12 (current default) to avoid any regression.
-/// Hosts with ≥16 GiB get adaptive scaling: half of host RAM, clamped 12–32.
+/// Half of host RAM, clamped 4–32. Never takes more than 50% of host RAM.
+/// Floor 4 GiB ensures 8 GiB hosts can run Speedwave; cap 32 GiB preserves
+/// existing behaviour on large machines (64+ GiB).
 pub fn desired_vm_memory_gib(host_ram_gib: u32) -> u32 {
-    if host_ram_gib < 16 {
-        return 12;
-    }
-    (host_ram_gib / 2).clamp(12, 32)
+    (host_ram_gib / 2).clamp(4, 32)
 }
 
 /// Desired Claude container memory in GiB.
@@ -90,14 +88,15 @@ pub fn desired_vm_memory_gib(host_ram_gib: u32) -> u32 {
 /// `overhead_gib` reserves space for kernel/containerd/hub/workers (macOS)
 /// or OS/desktop/browser (Linux).
 pub fn desired_claude_memory_gib(available_gib: u32, overhead_gib: u32) -> u32 {
-    available_gib.saturating_sub(overhead_gib).clamp(6, 28)
+    available_gib.saturating_sub(overhead_gib).clamp(4, 28)
 }
 
 /// SSOT: effective Claude container memory in GiB for the current platform.
 ///
 /// - macOS: VM memory minus VM overhead (kernel, containerd, hub, workers).
 /// - Linux: host RAM minus host overhead (OS, desktop, browser, apps).
-/// - Windows: fixed 8 g (Speedwave does not manage `.wslconfig`).
+/// - Windows: same formula as Linux; falls back to 10 g when RAM detection fails
+///   (`host_total_memory_gib()` returns 16 on failure → 16 − 6 = 10).
 pub fn effective_claude_memory_gib() -> u32 {
     #[cfg(target_os = "macos")]
     {
@@ -110,7 +109,7 @@ pub fn effective_claude_memory_gib() -> u32 {
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        8
+        desired_claude_memory_gib(host_total_memory_gib(), HOST_OVERHEAD_GIB)
     }
 }
 
@@ -194,30 +193,25 @@ mod tests {
     // -- desired_vm_memory_gib ----------------------------------------------
 
     #[test]
-    fn vm_memory_below_16_returns_current_default() {
-        // Hosts <16 GiB are unsupported but must not regress.
-        assert_eq!(desired_vm_memory_gib(8), 12);
-        assert_eq!(desired_vm_memory_gib(12), 12);
-        assert_eq!(desired_vm_memory_gib(15), 12);
+    fn vm_memory_small_hosts() {
+        // floor at 4 GiB — (host/2).clamp(4, 32)
+        assert_eq!(desired_vm_memory_gib(8), 4);
+        assert_eq!(desired_vm_memory_gib(6), 4); // floor
+        assert_eq!(desired_vm_memory_gib(0), 4); // floor
     }
 
     #[test]
-    fn vm_memory_at_16_stays_at_floor() {
-        assert_eq!(desired_vm_memory_gib(16), 12);
-    }
-
-    #[test]
-    fn vm_memory_scales_above_16() {
+    fn vm_memory_medium_hosts() {
+        assert_eq!(desired_vm_memory_gib(16), 8);
         assert_eq!(desired_vm_memory_gib(24), 12);
+    }
+
+    #[test]
+    fn vm_memory_large_hosts() {
         assert_eq!(desired_vm_memory_gib(32), 16);
         assert_eq!(desired_vm_memory_gib(48), 24);
-        assert_eq!(desired_vm_memory_gib(64), 32);
-    }
-
-    #[test]
-    fn vm_memory_capped_at_32() {
-        assert_eq!(desired_vm_memory_gib(128), 32);
-        assert_eq!(desired_vm_memory_gib(256), 32);
+        assert_eq!(desired_vm_memory_gib(64), 32); // cap
+        assert_eq!(desired_vm_memory_gib(128), 32); // cap
     }
 
     // -- desired_claude_memory_gib ------------------------------------------
@@ -237,10 +231,11 @@ mod tests {
     }
 
     #[test]
-    fn claude_memory_floor_at_6() {
-        assert_eq!(desired_claude_memory_gib(6, 4), 6);
-        assert_eq!(desired_claude_memory_gib(4, 6), 6);
-        assert_eq!(desired_claude_memory_gib(0, 4), 6);
+    fn claude_memory_floor_at_4() {
+        // Floor is 4 GiB (Anthropic's official minimum for Claude Code)
+        assert_eq!(desired_claude_memory_gib(6, 4), 4); // was 6 before this change
+        assert_eq!(desired_claude_memory_gib(4, 6), 4); // was 6 before this change
+        assert_eq!(desired_claude_memory_gib(0, 4), 4); // was 6 before this change
     }
 
     #[test]
@@ -251,10 +246,17 @@ mod tests {
     // -- composition (macOS-like: VM overhead = 4) --------------------------
 
     #[test]
+    fn composition_macos_8gib_host() {
+        let vm = desired_vm_memory_gib(8);
+        assert_eq!(vm, 4);
+        assert_eq!(desired_claude_memory_gib(vm, VM_OVERHEAD_GIB), 4); // floor
+    }
+
+    #[test]
     fn composition_macos_16gib_host() {
         let vm = desired_vm_memory_gib(16);
-        assert_eq!(vm, 12);
-        assert_eq!(desired_claude_memory_gib(vm, VM_OVERHEAD_GIB), 8);
+        assert_eq!(vm, 8);
+        assert_eq!(desired_claude_memory_gib(vm, VM_OVERHEAD_GIB), 4);
     }
 
     #[test]
@@ -267,7 +269,7 @@ mod tests {
     #[test]
     fn composition_macos_64gib_host() {
         let vm = desired_vm_memory_gib(64);
-        assert_eq!(vm, 32);
+        assert_eq!(vm, 32); // cap
         assert_eq!(desired_claude_memory_gib(vm, VM_OVERHEAD_GIB), 28);
     }
 
@@ -303,8 +305,8 @@ mod tests {
     // -- effective_claude_memory_gib ----------------------------------------
 
     #[test]
-    fn effective_claude_memory_at_least_6() {
-        assert!(effective_claude_memory_gib() >= 6);
+    fn effective_claude_memory_at_least_4() {
+        assert!(effective_claude_memory_gib() >= 4);
     }
 
     // -- format_oom_message -------------------------------------------------

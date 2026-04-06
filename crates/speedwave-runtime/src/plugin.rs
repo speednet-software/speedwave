@@ -674,7 +674,7 @@ pub fn generate_plugin_service(
 
     let tokens_path = crate::compose::to_engine_path(&tokens_dir.join(sid))?;
     let workspace_path = crate::compose::to_engine_path(Path::new(project_dir))?;
-    let mem_limit = manifest.mem_limit.as_deref().unwrap_or("256m");
+    let mem_limit = manifest.mem_limit.as_deref().unwrap_or("128m");
     let user = container_user();
 
     let mut env_lines = format!("  - PORT={port}");
@@ -1149,7 +1149,7 @@ mod tests {
             "network: {yaml}"
         );
         assert!(yaml.contains("speedwave.plugin-service"), "label: {yaml}");
-        assert!(yaml.contains("memory: 256m"), "mem limit: {yaml}");
+        assert!(yaml.contains("memory: 128m"), "mem limit: {yaml}");
     }
 
     #[test]
