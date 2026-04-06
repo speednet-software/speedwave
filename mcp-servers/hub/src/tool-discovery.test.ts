@@ -9,6 +9,8 @@ import {
   buildSkeletonFromPolicy,
   validateMergeResult,
   discoverAndMergeService,
+  initializeWorker,
+  fetchAllTools,
 } from './tool-discovery.js';
 
 // Mock auth-tokens
@@ -74,6 +76,7 @@ describe('tool-discovery', () => {
 
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: () =>
           Promise.resolve({
             jsonrpc: '2.0',
@@ -113,6 +116,7 @@ describe('tool-discovery', () => {
       process.env.WORKER_SLACK_URL = 'http://mcp-slack:3001';
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: () =>
           Promise.resolve({
             jsonrpc: '2.0',
@@ -132,6 +136,7 @@ describe('tool-discovery', () => {
 
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: () => Promise.resolve({ jsonrpc: '2.0', id: 'x', result: { tools: [] } }),
       });
       vi.stubGlobal('fetch', mockFetch);
@@ -141,10 +146,12 @@ describe('tool-discovery', () => {
       expect(mockFetch).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
-          headers: {
+          headers: expect.objectContaining({
             'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+            'MCP-Protocol-Version': '2025-03-26',
             Authorization: 'Bearer discovery-secret',
-          },
+          }),
         })
       );
 
@@ -294,6 +301,7 @@ describe('tool-discovery', () => {
 
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: () =>
           Promise.resolve({
             jsonrpc: '2.0',
@@ -318,6 +326,7 @@ describe('tool-discovery', () => {
 
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: () =>
           Promise.resolve({
             jsonrpc: '2.0',
@@ -345,6 +354,7 @@ describe('tool-discovery', () => {
 
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: () =>
           Promise.resolve({
             jsonrpc: '2.0',
@@ -413,6 +423,270 @@ describe('tool-discovery', () => {
         category: 'invalid' as 'read',
       });
       expect(errors.some((e) => e.includes('invalid category'))).toBe(true);
+    });
+  });
+
+  describe('initializeWorker', () => {
+    beforeEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('sends initialize request then notifications/initialized', async () => {
+      const fetchCalls: Array<{ url: string; body: string; headers: Record<string, string> }> = [];
+
+      const mockFetch = vi.fn().mockImplementation((url: string, opts: RequestInit) => {
+        fetchCalls.push({
+          url,
+          body: opts.body as string,
+          headers: opts.headers as Record<string, string>,
+        });
+        return Promise.resolve({
+          ok: true,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          json: async () => ({
+            jsonrpc: '2.0',
+            id: '1',
+            result: {
+              protocolVersion: '2025-03-26',
+              capabilities: { tools: {} },
+              serverInfo: { name: 'test-worker', version: '1.0.0' },
+            },
+          }),
+        });
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const headers = {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+      };
+      await initializeWorker('http://mcp-test:3001', headers);
+
+      expect(fetchCalls).toHaveLength(2);
+
+      // First call: initialize request
+      const initBody = JSON.parse(fetchCalls[0].body);
+      expect(initBody.method).toBe('initialize');
+      expect(initBody.params.protocolVersion).toBe('2025-03-26');
+      expect(initBody.params.clientInfo.name).toBe('speedwave-hub');
+      expect(initBody.id).toBeDefined();
+
+      // Second call: notifications/initialized notification (no id)
+      const notifBody = JSON.parse(fetchCalls[1].body);
+      expect(notifBody.method).toBe('notifications/initialized');
+      expect(notifBody.id).toBeUndefined();
+    });
+
+    it('returns session ID from Mcp-Session-Id header', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: new Headers({
+          'content-type': 'application/json',
+          'Mcp-Session-Id': 'session-abc-123',
+        }),
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: '1',
+          result: {
+            protocolVersion: '2025-03-26',
+            capabilities: {},
+            serverInfo: { name: 'test', version: '1.0.0' },
+          },
+        }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const headers = { 'Content-Type': 'application/json' };
+      const sessionId = await initializeWorker('http://mcp-test:3001', headers);
+
+      expect(sessionId).toBe('session-abc-123');
+
+      // Second call should include the session ID
+      const notifHeaders = mockFetch.mock.calls[1][1].headers;
+      expect(notifHeaders['Mcp-Session-Id']).toBe('session-abc-123');
+    });
+
+    it('returns undefined when server does not provide session ID', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: '1',
+          result: {
+            protocolVersion: '2025-03-26',
+            capabilities: {},
+            serverInfo: { name: 'test', version: '1.0.0' },
+          },
+        }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const headers = { 'Content-Type': 'application/json' };
+      const sessionId = await initializeWorker('http://mcp-test:3001', headers);
+
+      expect(sessionId).toBeUndefined();
+
+      // Second call should NOT include Mcp-Session-Id
+      const notifHeaders = mockFetch.mock.calls[1][1].headers;
+      expect(notifHeaders).not.toHaveProperty('Mcp-Session-Id');
+    });
+
+    it('propagates error when initialize request fails', async () => {
+      const mockFetch = vi.fn().mockRejectedValue(new Error('Connection refused'));
+      vi.stubGlobal('fetch', mockFetch);
+
+      const headers = { 'Content-Type': 'application/json' };
+
+      await expect(initializeWorker('http://mcp-test:3001', headers)).rejects.toThrow(
+        'Connection refused'
+      );
+    });
+  });
+
+  describe('fetchAllTools', () => {
+    beforeEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('returns tools from a single page when no nextCursor', async () => {
+      const tools: Tool[] = [
+        {
+          name: 'list_issues',
+          description: 'List issues',
+          inputSchema: { type: 'object', properties: {} },
+        },
+        {
+          name: 'create_issue',
+          description: 'Create issue',
+          inputSchema: { type: 'object', properties: {} },
+        },
+      ];
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ jsonrpc: '2.0', id: '1', result: { tools } }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const headers = { 'Content-Type': 'application/json' };
+      const result = await fetchAllTools('http://mcp-test:3001', headers);
+
+      expect(result).toHaveLength(2);
+      expect(result[0].name).toBe('list_issues');
+      expect(result[1].name).toBe('create_issue');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('follows pagination cursors across multiple pages', async () => {
+      const page1Tools: Tool[] = [
+        {
+          name: 'tool_a',
+          description: 'Tool A',
+          inputSchema: { type: 'object', properties: {} },
+        },
+      ];
+      const page2Tools: Tool[] = [
+        {
+          name: 'tool_b',
+          description: 'Tool B',
+          inputSchema: { type: 'object', properties: {} },
+        },
+      ];
+      const page3Tools: Tool[] = [
+        {
+          name: 'tool_c',
+          description: 'Tool C',
+          inputSchema: { type: 'object', properties: {} },
+        },
+      ];
+
+      let callCount = 0;
+      const mockFetch = vi.fn().mockImplementation((_url: string, opts: RequestInit) => {
+        callCount++;
+        const body = JSON.parse(opts.body as string);
+
+        if (callCount === 1) {
+          expect(body.params).toEqual({});
+          return Promise.resolve({
+            ok: true,
+            headers: new Headers({ 'content-type': 'application/json' }),
+            json: async () => ({
+              jsonrpc: '2.0',
+              id: body.id,
+              result: { tools: page1Tools, nextCursor: 'cursor-page-2' },
+            }),
+          });
+        } else if (callCount === 2) {
+          expect(body.params.cursor).toBe('cursor-page-2');
+          return Promise.resolve({
+            ok: true,
+            headers: new Headers({ 'content-type': 'application/json' }),
+            json: async () => ({
+              jsonrpc: '2.0',
+              id: body.id,
+              result: { tools: page2Tools, nextCursor: 'cursor-page-3' },
+            }),
+          });
+        } else {
+          expect(body.params.cursor).toBe('cursor-page-3');
+          return Promise.resolve({
+            ok: true,
+            headers: new Headers({ 'content-type': 'application/json' }),
+            json: async () => ({
+              jsonrpc: '2.0',
+              id: body.id,
+              result: { tools: page3Tools },
+            }),
+          });
+        }
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const headers = { 'Content-Type': 'application/json' };
+      const result = await fetchAllTools('http://mcp-test:3001', headers);
+
+      expect(result).toHaveLength(3);
+      expect(result.map((t) => t.name)).toEqual(['tool_a', 'tool_b', 'tool_c']);
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+    });
+
+    it('returns empty array when worker returns no tools', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ jsonrpc: '2.0', id: '1', result: { tools: [] } }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const headers = { 'Content-Type': 'application/json' };
+      const result = await fetchAllTools('http://mcp-test:3001', headers);
+
+      expect(result).toEqual([]);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns empty array when result has no tools field', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ jsonrpc: '2.0', id: '1', result: {} }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const headers = { 'Content-Type': 'application/json' };
+      const result = await fetchAllTools('http://mcp-test:3001', headers);
+
+      expect(result).toEqual([]);
+    });
+
+    it('propagates error when fetch fails', async () => {
+      const mockFetch = vi.fn().mockRejectedValue(new Error('Network error'));
+      vi.stubGlobal('fetch', mockFetch);
+
+      const headers = { 'Content-Type': 'application/json' };
+      await expect(fetchAllTools('http://mcp-test:3001', headers)).rejects.toThrow('Network error');
     });
   });
 });

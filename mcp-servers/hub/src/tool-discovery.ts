@@ -21,6 +21,7 @@ import { getServicePolicies, getPluginToolPolicy } from './hub-tool-policy.js';
 import { isPluginService } from './service-list.js';
 import { getAuthToken } from './auth-tokens.js';
 import { validateWorkerUrl } from '@speedwave/mcp-shared';
+import { buildWorkerHeaders, parseResponse, MCP_PROTOCOL_VERSION } from './http-bridge.js';
 
 /**
  * Convert snake_case tool name to camelCase method name.
@@ -29,6 +30,84 @@ import { validateWorkerUrl } from '@speedwave/mcp-shared';
  */
 export function toCamelCase(str: string): string {
   return str.replace(/_([a-zA-Z0-9])/g, (_, c: string) => c.toUpperCase());
+}
+
+/**
+ * Perform MCP initialize handshake with a worker.
+ * Sends `initialize` request followed by `notifications/initialized` notification.
+ * Returns the session ID from the Mcp-Session-Id response header, if present.
+ * @param workerUrl - Worker endpoint URL
+ * @param headers - MCP-compliant headers to use
+ * @returns Session ID string, or undefined if server doesn't provide one
+ */
+export async function initializeWorker(
+  workerUrl: string,
+  headers: Record<string, string>
+): Promise<string | undefined> {
+  const response = await fetch(workerUrl, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: randomUUID(),
+      method: 'initialize',
+      params: {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: 'speedwave-hub', version: '1.0.0' },
+      },
+    }),
+    signal: AbortSignal.timeout(TIMEOUTS.TOOL_DISCOVERY_MS),
+    redirect: 'error',
+  });
+
+  await parseResponse(response);
+  const sessionId = response.headers.get('Mcp-Session-Id') ?? undefined;
+
+  await fetch(workerUrl, {
+    method: 'POST',
+    headers: { ...headers, ...(sessionId ? { 'Mcp-Session-Id': sessionId } : {}) },
+    body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+    signal: AbortSignal.timeout(TIMEOUTS.TOOL_DISCOVERY_MS),
+    redirect: 'error',
+  });
+
+  return sessionId;
+}
+
+/**
+ * Fetch all tools from a worker, following pagination cursors.
+ * Makes repeated `tools/list` requests until no `nextCursor` is returned.
+ * @param workerUrl - Worker endpoint URL
+ * @param headers - MCP-compliant headers to use
+ * @returns Complete array of Tool definitions from all pages
+ */
+export async function fetchAllTools(
+  workerUrl: string,
+  headers: Record<string, string>
+): Promise<Tool[]> {
+  const allTools: Tool[] = [];
+  let cursor: string | undefined;
+  do {
+    const response = await fetch(workerUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: randomUUID(),
+        method: 'tools/list',
+        params: cursor ? { cursor } : {},
+      }),
+      signal: AbortSignal.timeout(TIMEOUTS.TOOL_DISCOVERY_MS),
+      redirect: 'error',
+    });
+
+    const result = await parseResponse(response);
+    const resultData = result.result as { tools?: Tool[]; nextCursor?: string } | undefined;
+    allTools.push(...(resultData?.tools ?? []));
+    cursor = resultData?.nextCursor;
+  } while (cursor);
+  return allTools;
 }
 
 /**
@@ -48,23 +127,19 @@ export async function discoverServiceTools(service: string): Promise<Tool[]> {
     return [];
   }
 
-  const requestId = randomUUID();
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.TOOL_DISCOVERY_MS);
 
   try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     const authToken = getAuthToken(service);
-    if (authToken) {
-      headers['Authorization'] = `Bearer ${authToken}`;
-    }
+    const headers = buildWorkerHeaders(authToken);
 
     const response = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify({
         jsonrpc: '2.0',
-        id: requestId,
+        id: randomUUID(),
         method: 'tools/list',
         params: {},
       }),
@@ -79,19 +154,15 @@ export async function discoverServiceTools(service: string): Promise<Tool[]> {
       return [];
     }
 
-    const result = (await response.json()) as {
-      jsonrpc: '2.0';
-      id: string | number;
-      result?: { tools?: Tool[] };
-      error?: { code: number; message: string };
-    };
+    const result = await parseResponse(response);
+    const resultData = result.result as { tools?: Tool[]; nextCursor?: string } | undefined;
 
     if (result.error) {
       console.error(`${ts()} [tool-discovery] Worker ${service} error: ${result.error.message}`);
       return [];
     }
 
-    const tools = result.result?.tools ?? [];
+    const tools = resultData?.tools ?? [];
     console.log(`${ts()} [tool-discovery] Discovered ${tools.length} tools from ${service}`);
     return tools;
   } catch (error) {

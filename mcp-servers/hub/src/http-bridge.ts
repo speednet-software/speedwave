@@ -107,6 +107,50 @@ export interface JSONRPCResponse {
   };
 }
 
+/** MCP protocol version used for hub-to-worker communication */
+export const MCP_PROTOCOL_VERSION = '2025-03-26';
+
+/**
+ * Build standard MCP-compliant headers for worker requests.
+ * Includes Content-Type, Accept (JSON + SSE), and MCP-Protocol-Version.
+ * Optionally adds Authorization header when an auth token is available.
+ * @param authToken - Optional bearer token for authentication
+ */
+export function buildWorkerHeaders(authToken?: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json, text/event-stream',
+    'MCP-Protocol-Version': MCP_PROTOCOL_VERSION,
+  };
+  if (authToken) {
+    headers['Authorization'] = `Bearer ${authToken}`;
+  }
+  return headers;
+}
+
+/**
+ * Parse a worker HTTP response, handling both JSON and SSE content types.
+ * MCP spec allows servers to respond with either application/json or
+ * text/event-stream. For SSE responses, extracts the first `data:` line
+ * that contains valid JSON.
+ * @param response - HTTP Response from a worker
+ * @returns Parsed JSON-RPC response
+ */
+export async function parseResponse(response: Response): Promise<JSONRPCResponse> {
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.includes('text/event-stream')) {
+    const text = await response.text();
+    for (const line of text.split('\n')) {
+      if (line.startsWith('data: ')) {
+        const json = line.slice(6).trim();
+        if (json) return JSON.parse(json) as JSONRPCResponse;
+      }
+    }
+    throw new Error('No JSON-RPC response in SSE stream');
+  }
+  return response.json() as Promise<JSONRPCResponse>;
+}
+
 //═══════════════════════════════════════════════════════════════════════════════
 // Worker Status Cache
 //═══════════════════════════════════════════════════════════════════════════════
@@ -150,25 +194,44 @@ function classifyHealthError(error: unknown): string {
 }
 
 /**
- * Single health-check fetch (no cache, no retry).
- * Returns true when the worker responds with 2xx.
+ * Single health-check using MCP `ping` method with `/health` endpoint fallback.
+ * First tries a proper MCP JSON-RPC ping request. If that fails (e.g. worker
+ * doesn't support ping), falls back to the legacy /health HTTP endpoint.
+ * Returns true when the worker responds successfully via either method.
  * @param service - Service name to check
  */
 async function checkWorkerHealth(service: string): Promise<boolean> {
   const url = getWorkerUrl(service);
   if (!url) return false;
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.HEALTH_CHECK_MS);
+  // Attempt 1: MCP ping via JSON-RPC POST
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: buildWorkerHeaders(),
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: randomUUID(),
+        method: 'ping',
+      }),
+      signal: AbortSignal.timeout(TIMEOUTS.HEALTH_CHECK_MS),
+      redirect: 'error',
+    });
+    const result = await parseResponse(response);
+    if (!result.error) return true;
+  } catch {
+    // Fall through to /health endpoint
+  }
 
+  // Attempt 2: Legacy /health endpoint
   try {
     const response = await fetch(`${url}/health`, {
-      signal: controller.signal,
+      signal: AbortSignal.timeout(TIMEOUTS.HEALTH_CHECK_MS),
       redirect: 'error',
     });
     return response.ok;
-  } finally {
-    clearTimeout(timeoutId);
+  } catch {
+    return false;
   }
 }
 
@@ -392,11 +455,8 @@ export async function callWorker<T = unknown>(
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     const authToken = getAuthToken(service);
-    if (authToken) {
-      headers['Authorization'] = `Bearer ${authToken}`;
-    }
+    const headers = buildWorkerHeaders(authToken);
 
     const response = await fetch(url, {
       method: 'POST',
@@ -420,7 +480,7 @@ export async function callWorker<T = unknown>(
       throw new Error(`Worker ${service} returned ${response.status}: ${response.statusText}`);
     }
 
-    const result = (await response.json()) as JSONRPCResponse;
+    const result = await parseResponse(response);
 
     if (result.error) {
       throw new Error(`Worker ${service} error: ${result.error.message}`);
