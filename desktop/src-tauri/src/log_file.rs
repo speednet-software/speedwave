@@ -14,19 +14,24 @@ pub fn open_log_file(path: &Path) -> Option<std::fs::File> {
     opts.open(path).ok()
 }
 
+/// Format a DateTime as DD-MM-YYYY HH:MM:SS for log lines.
+fn format_timestamp<Tz: chrono::TimeZone>(dt: &chrono::DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    dt.format("%d-%m-%Y %H:%M:%S").to_string()
+}
+
 /// Write a timestamped line to the log file. Errors are silently ignored.
 /// When `prefix` is empty, writes `[ts] line`; otherwise `[ts] prefix: line`.
 pub fn write_log_line(file: &mut Option<std::fs::File>, prefix: &str, line: &str) {
     use std::io::Write;
     if let Some(ref mut f) = file {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let ts = format_timestamp(&chrono::Local::now());
         if prefix.is_empty() {
-            let _ = writeln!(f, "[{secs}] {line}");
+            let _ = writeln!(f, "[{ts}] {line}");
         } else {
-            let _ = writeln!(f, "[{secs}] {prefix}: {line}");
+            let _ = writeln!(f, "[{ts}] {prefix}: {line}");
         }
     }
 }
@@ -73,6 +78,26 @@ mod tests {
     }
 
     #[test]
+    fn format_timestamp_day_greater_than_12() {
+        use chrono::TimeZone;
+        let dt = chrono::FixedOffset::east_opt(3600)
+            .unwrap()
+            .with_ymd_and_hms(2026, 12, 25, 9, 5, 3)
+            .unwrap();
+        assert_eq!(format_timestamp(&dt), "25-12-2026 09:05:03");
+    }
+
+    #[test]
+    fn format_timestamp_day_less_than_12() {
+        use chrono::TimeZone;
+        let dt = chrono::FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 3, 7, 0, 0, 0)
+            .unwrap();
+        assert_eq!(format_timestamp(&dt), "07-03-2026 00:00:00");
+    }
+
+    #[test]
     fn write_log_line_with_prefix() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("prefixed.log");
@@ -87,8 +112,17 @@ mod tests {
         );
         assert!(
             content.starts_with('['),
-            "should start with timestamp bracket"
+            "should start with bracket: {content}"
         );
+        let close = content.find(']').expect("should have closing bracket");
+        let ts_inner = &content[1..close];
+        assert_eq!(
+            ts_inner.len(),
+            19,
+            "timestamp should be 19 chars (DD-MM-YYYY HH:MM:SS): {content}"
+        );
+        let year: u32 = ts_inner[6..10].parse().expect("year should be numeric");
+        assert!(year >= 2025, "year should be plausible: {year}");
     }
 
     #[test]
@@ -105,6 +139,19 @@ mod tests {
             !content.contains(": bare line"),
             "no colon separator when prefix is empty: {content}"
         );
+        assert!(
+            content.starts_with('['),
+            "should start with bracket: {content}"
+        );
+        let close = content.find(']').expect("should have closing bracket");
+        let ts_inner = &content[1..close];
+        assert_eq!(
+            ts_inner.len(),
+            19,
+            "timestamp should be 19 chars (DD-MM-YYYY HH:MM:SS): {content}"
+        );
+        let year: u32 = ts_inner[6..10].parse().expect("year should be numeric");
+        assert!(year >= 2025, "year should be plausible: {year}");
     }
 
     #[test]

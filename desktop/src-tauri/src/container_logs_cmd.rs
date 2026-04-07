@@ -317,7 +317,7 @@ mod tests {
     fn read_tail_sanitized_reads_and_sanitizes() {
         let tmp = tempfile::tempdir().unwrap();
         let log_content =
-            "[100] SESSION: started\n[101] STDERR: Bearer sk-ant-secret-key-abc\n[102] SESSION: stopped\n";
+            "[07-04-2026 14:30:00] SESSION: started\n[07-04-2026 14:30:01] STDERR: Bearer sk-ant-secret-key-abc\n[07-04-2026 14:30:02] SESSION: stopped\n";
         let log_path = tmp.path().join("claude-session.log");
         std::fs::write(&log_path, log_content).unwrap();
 
