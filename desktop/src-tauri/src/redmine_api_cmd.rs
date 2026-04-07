@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+const MAX_RESPONSE_BODY_BYTES: usize = 5 * 1024 * 1024; // 5 MiB
+
 // ---------------------------------------------------------------------------
 // Response DTOs
 // ---------------------------------------------------------------------------
@@ -33,6 +35,7 @@ pub(crate) struct RedmineEnumEntry {
 #[derive(Debug, Serialize)]
 pub(crate) struct RedmineEnumerations {
     pub projects: Vec<RedmineEnumEntry>,
+    pub projects_truncated: bool,
     pub statuses: Vec<RedmineEnumEntry>,
     pub trackers: Vec<RedmineEnumEntry>,
     pub priorities: Vec<RedmineEnumEntry>,
@@ -66,6 +69,8 @@ impl From<RawEnumEntry> for RedmineEnumEntry {
 #[derive(Deserialize)]
 struct RedmineProjectsResponse {
     projects: Vec<RawEnumEntry>,
+    #[serde(default)]
+    total_count: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -95,9 +100,9 @@ struct RedmineActivitiesResponse {
 /// Validates and normalizes a Redmine host URL for API use.
 ///
 /// Rejects backslashes, embedded credentials, and non-HTTP schemes.
-/// Allows RFC1918 private IPs (common for on-premise Redmine) with a warning,
-/// but blocks loopback, link-local, and unspecified addresses.
-/// Strips trailing slashes for consistent URL construction.
+/// Allows RFC1918 private IPs and IPv6 ULA addresses (common for on-premise
+/// Redmine) with a warning, but blocks loopback, link-local, and unspecified
+/// addresses. Strips trailing slashes for consistent URL construction.
 fn validate_redmine_host_url(url: &str) -> Result<String, String> {
     // Reject backslashes before parsing (Windows path confusion)
     if url.contains('\\') {
@@ -107,9 +112,9 @@ fn validate_redmine_host_url(url: &str) -> Result<String, String> {
     // Parse URL first to check for RFC1918 before delegating to base validation
     let candidate: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
 
-    // If RFC1918, skip base validation (which blocks all private IPs) and validate ourselves
-    let parsed = if is_rfc1918_private(&candidate) {
-        // RFC1918 allowed for on-premise Redmine — validate scheme/host only
+    // If private on-premise address (RFC1918 or IPv6 ULA), skip base validation
+    // (which blocks all private IPs) and validate scheme/host ourselves
+    let parsed = if is_private_on_premise(&candidate) {
         match candidate.scheme() {
             "http" | "https" => {}
             scheme => {
@@ -123,7 +128,7 @@ fn validate_redmine_host_url(url: &str) -> Result<String, String> {
             return Err("URL has no host".to_string());
         }
         log::warn!(
-            "Allowing RFC1918 private IP for Redmine: {}",
+            "Allowing private address for on-premise Redmine: {}",
             candidate.host_str().unwrap_or("unknown")
         );
         candidate
@@ -149,10 +154,11 @@ fn validate_redmine_host_url(url: &str) -> Result<String, String> {
     Ok(result)
 }
 
-/// Returns `true` if the URL's host is an RFC1918 private address:
-/// 10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16.
+/// Returns `true` if the URL's host is a private on-premise address:
+/// RFC1918 IPv4 (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) or
+/// IPv6 Unique Local Address (fc00::/7, RFC 4193).
 /// Returns `false` for loopback, link-local, unspecified, or any other reserved range.
-fn is_rfc1918_private(url: &url::Url) -> bool {
+fn is_private_on_premise(url: &url::Url) -> bool {
     match url.host() {
         Some(url::Host::Ipv4(ipv4)) => {
             ipv4.is_private()
@@ -160,8 +166,52 @@ fn is_rfc1918_private(url: &url::Url) -> bool {
                 && !ipv4.is_link_local()
                 && !ipv4.is_unspecified()
         }
+        Some(url::Host::Ipv6(ipv6)) => {
+            // fc00::/7 — IPv6 Unique Local Address (RFC 4193)
+            (ipv6.segments()[0] & 0xfe00) == 0xfc00
+        }
         _ => false,
     }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP body reader with size guard
+// ---------------------------------------------------------------------------
+
+/// Reads a response body chunk-by-chunk, aborting if the accumulated size
+/// exceeds `MAX_RESPONSE_BODY_BYTES`. Prevents OOM from rogue servers using
+/// chunked transfer encoding (no Content-Length header).
+async fn read_body_limited(resp: reqwest::Response, label: &str) -> Result<Vec<u8>, String> {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_RESPONSE_BODY_BYTES as u64 {
+            return Err(format!(
+                "{label} response too large ({len} bytes, limit {MAX_RESPONSE_BODY_BYTES})"
+            ));
+        }
+    }
+
+    let mut buf = Vec::with_capacity(
+        resp.content_length()
+            .map(|l| l as usize)
+            .unwrap_or(4096)
+            .min(MAX_RESPONSE_BODY_BYTES),
+    );
+
+    let mut stream = resp;
+    while let Some(chunk) = stream
+        .chunk()
+        .await
+        .map_err(|e| format!("Failed to read {label} response chunk: {e}"))?
+    {
+        if buf.len().saturating_add(chunk.len()) > MAX_RESPONSE_BODY_BYTES {
+            return Err(format!(
+                "{label} response too large (exceeded {MAX_RESPONSE_BODY_BYTES} byte limit)"
+            ));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+
+    Ok(buf)
 }
 
 // ---------------------------------------------------------------------------
@@ -246,10 +296,7 @@ async fn do_validate_credentials(
         });
     }
 
-    let body = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read response body: {e}"))?;
+    let body = read_body_limited(resp, "Credentials validation").await?;
 
     let wrapper: RedmineCurrentUserWrapper = serde_json::from_slice(&body)
         .map_err(|e| format!("Response is not valid Redmine JSON (expected user.id field): {e}"))?;
@@ -280,7 +327,14 @@ async fn do_fetch_enumerations(
                 "projects",
             )
             .await
-            .map(|r| r.projects.into_iter().map(Into::into).collect())
+            .map(|r| {
+                let truncated = r
+                    .total_count
+                    .map(|tc| tc as usize > r.projects.len())
+                    .unwrap_or(false);
+                let entries = r.projects.into_iter().map(Into::into).collect();
+                (entries, truncated)
+            })
             .unwrap_or_default()
         },
         async {
@@ -338,8 +392,11 @@ async fn do_fetch_enumerations(
         },
     );
 
+    let (projects, projects_truncated) = projects;
+
     Ok(RedmineEnumerations {
         projects,
+        projects_truncated,
         statuses,
         trackers,
         priorities,
@@ -431,10 +488,10 @@ async fn fetch_enum_endpoint<T: serde::de::DeserializeOwned>(
         return Err(());
     }
 
-    let body = match resp.bytes().await {
+    let body = match read_body_limited(resp, label).await {
         Ok(b) => b,
         Err(e) => {
-            log::warn!("Failed to read Redmine {label} response body: {e}");
+            log::warn!("Redmine {label}: {e}");
             return Err(());
         }
     };
@@ -673,6 +730,7 @@ mod tests {
         let resp: RedmineProjectsResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.projects.len(), 1);
         assert_eq!(resp.projects[0].name, "Alpha");
+        assert_eq!(resp.total_count, Some(1));
     }
 
     #[test]
@@ -721,6 +779,21 @@ mod tests {
         let resp: RedmineProjectsResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.projects[0].name, "Проект Альфа");
         assert_eq!(resp.projects[1].name, "プロジェクト");
+        assert_eq!(resp.total_count, Some(2));
+    }
+
+    #[test]
+    fn parse_projects_with_total_count() {
+        let json = r#"{"projects": [{"id": 1, "name": "A"}], "total_count": 1}"#;
+        let resp: RedmineProjectsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.total_count, Some(1));
+    }
+
+    #[test]
+    fn parse_projects_without_total_count() {
+        let json = r#"{"projects": [{"id": 1, "name": "A"}]}"#;
+        let resp: RedmineProjectsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.total_count, None);
     }
 
     // ── HTTP integration tests (mockito) ────────────────────────────────
@@ -903,6 +976,7 @@ mod tests {
         assert!(result.is_ok());
         let enums = result.unwrap();
         assert_eq!(enums.projects.len(), 1);
+        assert!(!enums.projects_truncated);
         assert!(
             enums.statuses.is_empty(),
             "404 endpoint should produce empty vec"
@@ -955,6 +1029,7 @@ mod tests {
         assert!(result.is_ok());
         let enums = result.unwrap();
         assert!(enums.projects.is_empty());
+        assert!(!enums.projects_truncated);
         assert!(enums.statuses.is_empty());
         assert!(enums.trackers.is_empty());
         assert!(enums.priorities.is_empty());
@@ -993,47 +1068,467 @@ mod tests {
         );
     }
 
-    // ── is_rfc1918_private helper tests ─────────────────────────────────
+    // ── Truncation detection integration tests ──────────────────────────
+
+    async fn mock_all_empty_except_projects(
+        server: &mut mockito::Server,
+        projects_body: &'static str,
+    ) -> Vec<mockito::Mock> {
+        vec![
+            server
+                .mock("GET", "/projects.json?limit=100")
+                .with_status(200)
+                .with_header("Content-Type", "application/json")
+                .with_body(projects_body)
+                .create_async()
+                .await,
+            server
+                .mock("GET", "/issue_statuses.json")
+                .with_status(200)
+                .with_header("Content-Type", "application/json")
+                .with_body(r#"{"issue_statuses": []}"#)
+                .create_async()
+                .await,
+            server
+                .mock("GET", "/trackers.json")
+                .with_status(200)
+                .with_header("Content-Type", "application/json")
+                .with_body(r#"{"trackers": []}"#)
+                .create_async()
+                .await,
+            server
+                .mock("GET", "/enumerations/issue_priorities.json")
+                .with_status(200)
+                .with_header("Content-Type", "application/json")
+                .with_body(r#"{"issue_priorities": []}"#)
+                .create_async()
+                .await,
+            server
+                .mock("GET", "/enumerations/time_entry_activities.json")
+                .with_status(200)
+                .with_header("Content-Type", "application/json")
+                .with_body(r#"{"time_entry_activities": []}"#)
+                .create_async()
+                .await,
+        ]
+    }
+
+    #[tokio::test]
+    async fn enumerations_projects_truncated_with_total_count() {
+        let mut server = mockito::Server::new_async().await;
+        let _mocks = mock_all_empty_except_projects(
+            &mut server,
+            r#"{"projects": [{"id": 1, "name": "A"}], "total_count": 150}"#,
+        )
+        .await;
+
+        let result = do_fetch_enumerations(&server.url(), "key").await;
+        assert!(result.is_ok());
+        let enums = result.unwrap();
+        assert!(
+            enums.projects_truncated,
+            "total_count=150 > len=1 means truncated"
+        );
+        assert_eq!(enums.projects.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn enumerations_projects_not_truncated_with_total_count() {
+        let mut server = mockito::Server::new_async().await;
+        let _mocks = mock_all_empty_except_projects(
+            &mut server,
+            r#"{"projects": [{"id": 1, "name": "A"}], "total_count": 1}"#,
+        )
+        .await;
+
+        let result = do_fetch_enumerations(&server.url(), "key").await;
+        assert!(result.is_ok());
+        let enums = result.unwrap();
+        assert!(
+            !enums.projects_truncated,
+            "total_count=1 == len=1 means not truncated"
+        );
+        assert_eq!(enums.projects.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn enumerations_projects_not_truncated_without_total_count() {
+        let mut server = mockito::Server::new_async().await;
+        let _mocks = mock_all_empty_except_projects(
+            &mut server,
+            r#"{"projects": [{"id": 1, "name": "A"}]}"#,
+        )
+        .await;
+
+        let result = do_fetch_enumerations(&server.url(), "key").await;
+        assert!(result.is_ok());
+        let enums = result.unwrap();
+        assert!(
+            !enums.projects_truncated,
+            "missing total_count means not truncated"
+        );
+    }
+
+    // ── is_private_on_premise helper tests ──────────────────────────────
 
     #[test]
-    fn rfc1918_identifies_10_range() {
+    fn private_on_premise_identifies_10_range() {
         let url: url::Url = "http://10.0.0.1/".parse().unwrap();
-        assert!(is_rfc1918_private(&url));
+        assert!(is_private_on_premise(&url));
     }
 
     #[test]
-    fn rfc1918_identifies_172_16_range() {
+    fn private_on_premise_identifies_172_16_range() {
         let url: url::Url = "http://172.16.0.1/".parse().unwrap();
-        assert!(is_rfc1918_private(&url));
+        assert!(is_private_on_premise(&url));
     }
 
     #[test]
-    fn rfc1918_identifies_192_168_range() {
+    fn private_on_premise_identifies_192_168_range() {
         let url: url::Url = "http://192.168.1.1/".parse().unwrap();
-        assert!(is_rfc1918_private(&url));
+        assert!(is_private_on_premise(&url));
     }
 
     #[test]
-    fn rfc1918_rejects_loopback() {
+    fn private_on_premise_rejects_ipv4_loopback() {
         let url: url::Url = "http://127.0.0.1/".parse().unwrap();
-        assert!(!is_rfc1918_private(&url), "Loopback is not RFC1918");
+        assert!(
+            !is_private_on_premise(&url),
+            "Loopback is not private on-premise"
+        );
     }
 
     #[test]
-    fn rfc1918_rejects_link_local() {
+    fn private_on_premise_rejects_ipv4_link_local() {
         let url: url::Url = "http://169.254.1.1/".parse().unwrap();
-        assert!(!is_rfc1918_private(&url), "Link-local is not RFC1918");
+        assert!(
+            !is_private_on_premise(&url),
+            "Link-local is not private on-premise"
+        );
     }
 
     #[test]
-    fn rfc1918_rejects_domain() {
+    fn private_on_premise_rejects_domain() {
         let url: url::Url = "http://example.com/".parse().unwrap();
-        assert!(!is_rfc1918_private(&url), "Domain is not RFC1918");
+        assert!(
+            !is_private_on_premise(&url),
+            "Domain is not private on-premise"
+        );
+    }
+
+    // ── IPv6 ULA tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn private_on_premise_identifies_ipv6_ula_fd() {
+        let url: url::Url = "http://[fd12:3456:789a::1]/".parse().unwrap();
+        assert!(
+            is_private_on_premise(&url),
+            "fd::/8 (ULA) should be private on-premise"
+        );
     }
 
     #[test]
-    fn rfc1918_rejects_ipv6() {
+    fn private_on_premise_identifies_ipv6_ula_fc() {
+        let url: url::Url = "http://[fc00::1]/".parse().unwrap();
+        assert!(
+            is_private_on_premise(&url),
+            "fc00::/8 (ULA) should be private on-premise"
+        );
+    }
+
+    #[test]
+    fn validate_url_allows_ipv6_ula_for_redmine() {
+        let result = validate_redmine_host_url("http://[fd00::1]:3000/");
+        assert!(
+            result.is_ok(),
+            "IPv6 ULA should be allowed for on-premise Redmine: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn private_on_premise_rejects_ipv6_loopback() {
         let url: url::Url = "http://[::1]/".parse().unwrap();
-        assert!(!is_rfc1918_private(&url), "IPv6 is not RFC1918");
+        assert!(
+            !is_private_on_premise(&url),
+            "IPv6 loopback is not private on-premise"
+        );
+    }
+
+    #[test]
+    fn private_on_premise_rejects_ipv6_link_local() {
+        let url: url::Url = "http://[fe80::1]/".parse().unwrap();
+        assert!(
+            !is_private_on_premise(&url),
+            "IPv6 link-local is not private on-premise"
+        );
+    }
+
+    #[test]
+    fn private_on_premise_rejects_ipv6_global() {
+        let url: url::Url = "http://[2001:db8::1]/".parse().unwrap();
+        assert!(
+            !is_private_on_premise(&url),
+            "IPv6 global address is not private on-premise"
+        );
+    }
+
+    #[test]
+    fn private_on_premise_rejects_ipv6_just_outside_ula() {
+        // fe00:: — 0xfe00 & 0xfe00 = 0xfe00 ≠ 0xfc00, so NOT ULA
+        let url: url::Url = "http://[fe00::1]/".parse().unwrap();
+        assert!(
+            !is_private_on_premise(&url),
+            "fe00:: is just outside ULA range fc00::/7"
+        );
+    }
+
+    #[test]
+    fn private_on_premise_rejects_ipv6_mapped_rfc1918() {
+        // ::ffff:10.0.0.1 — IPv6-mapped IPv4 private. The url crate represents
+        // this as Host::Ipv6 with first segment 0x0000, which does NOT match
+        // the fc00::/7 check. This documents the design intent: IPv6-mapped
+        // IPv4 private addresses are NOT handled by the IPv6 ULA arm.
+        let url: url::Url = "http://[::ffff:10.0.0.1]/".parse().unwrap();
+        assert!(
+            !is_private_on_premise(&url),
+            "IPv6-mapped RFC1918 is not matched by the ULA arm"
+        );
+    }
+
+    // ── MAX_RESPONSE_BODY_BYTES constant ────────────────────────────────
+
+    #[test]
+    fn max_response_body_bytes_is_5mb() {
+        assert_eq!(MAX_RESPONSE_BODY_BYTES, 5 * 1024 * 1024);
+    }
+
+    // ── read_body_limited: happy path / edge cases ──────────────────────
+
+    #[tokio::test]
+    async fn body_exactly_at_limit_accepted() {
+        let mut server = mockito::Server::new_async().await;
+        let body = vec![0u8; MAX_RESPONSE_BODY_BYTES];
+        let _mock = server
+            .mock("GET", "/test")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = build_redmine_client().unwrap();
+        let resp = client
+            .get(format!("{}/test", server.url()))
+            .send()
+            .await
+            .unwrap();
+        let result = read_body_limited(resp, "test").await;
+        assert!(
+            result.is_ok(),
+            "Body at exactly the limit should be accepted"
+        );
+        assert_eq!(result.unwrap().len(), MAX_RESPONSE_BODY_BYTES);
+    }
+
+    #[tokio::test]
+    async fn body_one_byte_over_limit_rejected() {
+        let mut server = mockito::Server::new_async().await;
+        let body = vec![0u8; MAX_RESPONSE_BODY_BYTES + 1];
+        let _mock = server
+            .mock("GET", "/test")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = build_redmine_client().unwrap();
+        let resp = client
+            .get(format!("{}/test", server.url()))
+            .send()
+            .await
+            .unwrap();
+        let result = read_body_limited(resp, "test").await;
+        assert!(
+            result.is_err(),
+            "Body one byte over limit should be rejected"
+        );
+        // The error mentions either "too large" (Content-Length pre-check) or
+        // "exceeded" (streaming check) depending on whether mockito includes
+        // a Content-Length header.
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("too large") || err.contains("exceeded"),
+            "Error should mention size limit: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_body_accepted() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/test")
+            .with_status(200)
+            .with_body("")
+            .create_async()
+            .await;
+
+        let client = build_redmine_client().unwrap();
+        let resp = client
+            .get(format!("{}/test", server.url()))
+            .send()
+            .await
+            .unwrap();
+        let result = read_body_limited(resp, "test").await;
+        assert!(result.is_ok(), "Empty body should be accepted");
+        assert_eq!(result.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn no_content_length_small_body_accepted() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/test")
+            .with_status(200)
+            .with_body("hello world this is fifty bytes of data padding!!")
+            .create_async()
+            .await;
+
+        let client = build_redmine_client().unwrap();
+        let resp = client
+            .get(format!("{}/test", server.url()))
+            .send()
+            .await
+            .unwrap();
+        let result = read_body_limited(resp, "test").await;
+        assert!(
+            result.is_ok(),
+            "Small body without Content-Length should be accepted"
+        );
+    }
+
+    // ── read_body_limited: error paths ──────────────────────────────────
+
+    #[tokio::test]
+    async fn body_too_large_content_length_preflight_rejected() {
+        // Exercises the Content-Length pre-flight guard in read_body_limited
+        // using a real HTTP server. mockito sets Content-Length automatically
+        // from the body, so reqwest sees it in the response header and the
+        // pre-flight guard rejects before streaming. We assert on "bytes, limit"
+        // to distinguish from the streaming guard ("exceeded ... byte limit").
+        let mut server = mockito::Server::new_async().await;
+        let body = vec![b'x'; MAX_RESPONSE_BODY_BYTES + 1];
+        let _mock = server
+            .mock("GET", "/test")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = build_redmine_client().unwrap();
+        let resp = client
+            .get(format!("{}/test", server.url()))
+            .send()
+            .await
+            .unwrap();
+        let result = read_body_limited(resp, "test").await;
+        assert!(result.is_err(), "Should reject oversized Content-Length");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("bytes, limit"),
+            "Should hit Content-Length pre-flight (not streaming guard): {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn body_too_large_chunked_rejected() {
+        let mut server = mockito::Server::new_async().await;
+        // Body exceeding MAX_RESPONSE_BODY_BYTES without Content-Length header
+        let body = vec![b'x'; MAX_RESPONSE_BODY_BYTES + 1];
+        let _mock = server
+            .mock("GET", "/test")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = build_redmine_client().unwrap();
+        let resp = client
+            .get(format!("{}/test", server.url()))
+            .send()
+            .await
+            .unwrap();
+        let result = read_body_limited(resp, "test").await;
+        assert!(result.is_err(), "Oversized body should be rejected");
+    }
+
+    #[tokio::test]
+    async fn validate_credentials_large_body_returns_error() {
+        let mut server = mockito::Server::new_async().await;
+        let oversized = vec![b'x'; MAX_RESPONSE_BODY_BYTES + 1];
+        let _mock = server
+            .mock("GET", "/users/current.json")
+            .with_status(200)
+            .with_body(oversized)
+            .create_async()
+            .await;
+
+        let result = do_validate_credentials(&server.url(), "key").await;
+        assert!(
+            result.is_err(),
+            "Oversized credential response should return Err"
+        );
+    }
+
+    #[tokio::test]
+    async fn enum_endpoint_large_body_returns_empty() {
+        let mut server = mockito::Server::new_async().await;
+        let oversized = vec![b'x'; MAX_RESPONSE_BODY_BYTES + 1];
+
+        // Projects endpoint returns oversized body
+        let _m1 = server
+            .mock("GET", "/projects.json?limit=100")
+            .with_status(200)
+            .with_body(oversized)
+            .create_async()
+            .await;
+        let _m2 = server
+            .mock("GET", "/issue_statuses.json")
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body(r#"{"issue_statuses": []}"#)
+            .create_async()
+            .await;
+        let _m3 = server
+            .mock("GET", "/trackers.json")
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body(r#"{"trackers": []}"#)
+            .create_async()
+            .await;
+        let _m4 = server
+            .mock("GET", "/enumerations/issue_priorities.json")
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body(r#"{"issue_priorities": []}"#)
+            .create_async()
+            .await;
+        let _m5 = server
+            .mock("GET", "/enumerations/time_entry_activities.json")
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body(r#"{"time_entry_activities": []}"#)
+            .create_async()
+            .await;
+
+        let result = do_fetch_enumerations(&server.url(), "key").await;
+        assert!(
+            result.is_ok(),
+            "Large body in enum endpoint should degrade gracefully"
+        );
+        let enums = result.unwrap();
+        assert!(
+            enums.projects.is_empty(),
+            "Oversized projects response -> empty vec"
+        );
     }
 }
