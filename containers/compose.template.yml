@@ -62,7 +62,7 @@ services:
       resources:
         limits:
           cpus: '0.5'
-          memory: 256m
+          memory: 512m
 
   mcp-slack:
     image: ${IMAGE_MCP_SLACK}

@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn claude_memory_floor_at_4() {
-        // Floor is 4 GiB (Anthropic's official minimum for Claude Code)
+        // Floor is 4 GiB — minimum usable for Claude Code workloads in practice
         assert_eq!(desired_claude_memory_gib(6, 4), 4); // was 6 before this change
         assert_eq!(desired_claude_memory_gib(4, 6), 4); // was 6 before this change
         assert_eq!(desired_claude_memory_gib(0, 4), 4); // was 6 before this change
