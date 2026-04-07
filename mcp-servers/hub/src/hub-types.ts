@@ -43,6 +43,8 @@ export interface IToolResult<T = unknown> {
     executionMs: number;
     /** Service that handled the request */
     service: string;
+    /** Syntax warning from auto-return transformation (set when code has parse errors) */
+    warning?: string;
   };
 }
 
