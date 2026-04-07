@@ -213,7 +213,6 @@ export class PluginsComponent implements OnInit, OnDestroy {
    */
   async handleTogglePlugin(payload: { plugin: PluginStatusEntry; event: Event }): Promise<void> {
     const { plugin, event } = payload;
-    if (!plugin.configured) return;
     const enabled = (event.target as HTMLInputElement).checked;
     const sid = plugin.service_id ?? plugin.slug;
     try {
@@ -245,7 +244,6 @@ export class PluginsComponent implements OnInit, OnDestroy {
         credentials: payload.credentials,
       });
 
-      this.projectState.requestRestart();
       await this.loadPlugins();
 
       const updated = this.plugins.find((p) => p.slug === payload.plugin.slug);
@@ -258,6 +256,8 @@ export class PluginsComponent implements OnInit, OnDestroy {
         });
         updated.enabled = true;
       }
+
+      this.projectState.requestRestart();
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
     }

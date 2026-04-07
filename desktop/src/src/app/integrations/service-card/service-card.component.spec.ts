@@ -176,21 +176,41 @@ describe('ServiceCardComponent', () => {
     expect(badge.getAttribute('data-status')).toBe('not-configured');
   });
 
-  it('should disable toggle when service is not configured', () => {
+  it('should NOT disable toggle when service is not configured', () => {
     component.svc = makeRedmineSvc();
     fixture.detectChanges();
     const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
     const toggle = fixture.nativeElement.querySelector('[data-testid="toggle"]');
-    expect(checkbox.disabled).toBe(true);
-    expect(toggle.getAttribute('data-disabled')).toBe('true');
+    expect(checkbox.disabled).toBe(false);
+    expect(toggle.getAttribute('data-disabled')).toBeNull();
   });
 
-  it('should enable toggle when service is configured', () => {
+  it('should NOT disable toggle when service is configured', () => {
     fixture.detectChanges();
     const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
     const toggle = fixture.nativeElement.querySelector('[data-testid="toggle"]');
     expect(checkbox.disabled).toBe(false);
-    expect(toggle.getAttribute('data-disabled')).toBe('false');
+    expect(toggle.getAttribute('data-disabled')).toBeNull();
+  });
+
+  it('should emit toggleExpand (not toggleService) when toggle clicked on unconfigured service', () => {
+    component.svc = makeRedmineSvc();
+    fixture.detectChanges();
+    const expandSpy = vi.spyOn(component.toggleExpand, 'emit');
+    const toggleSpy = vi.spyOn(component.toggleService, 'emit');
+    const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
+    checkbox.dispatchEvent(new Event('change'));
+    expect(expandSpy).toHaveBeenCalledWith('redmine');
+    expect(toggleSpy).not.toHaveBeenCalled();
+  });
+
+  it('should reset checkbox to false when toggle clicked on unconfigured service', () => {
+    component.svc = makeRedmineSvc();
+    fixture.detectChanges();
+    const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event('change'));
+    expect(checkbox.checked).toBe(false);
   });
 
   it('should not show card-body when not expanded', () => {
@@ -514,6 +534,61 @@ describe('ServiceCardComponent', () => {
       const payload = spy.mock.calls[0][0];
       expect(payload.credentials['api_key']).toBeUndefined();
       expect(payload.credentials['host_url']).toBe('https://example.com');
+    });
+  });
+
+  describe('setup-hint', () => {
+    it('shows setup-hint when not configured and not expanded', () => {
+      component.svc = makeRedmineSvc();
+      component.expanded = false;
+      fixture.detectChanges();
+      const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
+      expect(hint).not.toBeNull();
+      expect(hint.textContent).toContain('Click to set up credentials');
+    });
+
+    it('hides setup-hint when configured', () => {
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="setup-hint"]')).toBeNull();
+    });
+
+    it('hides setup-hint when expanded (even if not configured)', () => {
+      component.svc = makeRedmineSvc();
+      component.expanded = true;
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="setup-hint"]')).toBeNull();
+    });
+
+    it('emits toggleExpand with service name when setup-hint is clicked', () => {
+      component.svc = makeRedmineSvc();
+      component.expanded = false;
+      fixture.detectChanges();
+      const spy = vi.spyOn(component.toggleExpand, 'emit');
+      const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
+      hint.click();
+      expect(spy).toHaveBeenCalledWith('redmine');
+    });
+
+    it('emits toggleExpand on Enter key', () => {
+      component.svc = makeRedmineSvc();
+      component.expanded = false;
+      fixture.detectChanges();
+      const spy = vi.spyOn(component.toggleExpand, 'emit');
+      const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
+      hint.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+      expect(spy).toHaveBeenCalledWith('redmine');
+    });
+
+    it('emits toggleExpand on Space key and prevents default', () => {
+      component.svc = makeRedmineSvc();
+      component.expanded = false;
+      fixture.detectChanges();
+      const spy = vi.spyOn(component.toggleExpand, 'emit');
+      const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
+      const event = new KeyboardEvent('keydown', { key: ' ', cancelable: true });
+      hint.dispatchEvent(event);
+      expect(spy).toHaveBeenCalledWith('redmine');
+      expect(event.defaultPrevented).toBe(true);
     });
   });
 
