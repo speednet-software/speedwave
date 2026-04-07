@@ -15,7 +15,6 @@ pub fn open_log_file(path: &Path) -> Option<std::fs::File> {
 }
 
 /// Format a DateTime as DD-MM-YYYY HH:MM:SS for log lines.
-/// Format must match Angular date pipe in system-health.component.ts template.
 fn format_timestamp<Tz: chrono::TimeZone>(dt: &chrono::DateTime<Tz>) -> String
 where
     Tz::Offset: std::fmt::Display,

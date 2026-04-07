@@ -166,7 +166,10 @@ describe('SystemHealthComponent', () => {
       fixture.detectChanges();
 
       const el = fixture.nativeElement.querySelector('[data-testid="last-updated"]');
-      expect(el.textContent).toMatch(/\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}/);
+      const match = el.textContent?.match(/(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2}):(\d{2})/);
+      expect(match).toBeTruthy();
+      const year = parseInt(match![3], 10);
+      expect(year).toBeGreaterThanOrEqual(2025);
     });
 
     it('sets error and nulls report on failure', async () => {

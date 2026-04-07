@@ -370,7 +370,6 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
   report: HealthReport | null = null;
   loading = false;
   error: string | null = null;
-  // Format 'dd-MM-yyyy HH:mm:ss' in template must match chrono format in log_file.rs:write_log_line()
   lastUpdated: Date | null = null;
 
   bridgeStatus: BridgeStatus | null = null;
