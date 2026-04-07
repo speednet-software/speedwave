@@ -356,7 +356,7 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
 
       <div class="text-center text-sw-slider text-xs" data-testid="last-updated">
         @if (lastUpdated) {
-          Last updated: {{ lastUpdated | date: 'HH:mm:ss' }}
+          Last updated: {{ lastUpdated | date: 'dd-MM-yyyy HH:mm:ss' }}
         } @else {
           Waiting for first health check...
         }
@@ -370,6 +370,7 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
   report: HealthReport | null = null;
   loading = false;
   error: string | null = null;
+  // Format 'dd-MM-yyyy HH:mm:ss' in template must match chrono format in log_file.rs:write_log_line()
   lastUpdated: Date | null = null;
 
   bridgeStatus: BridgeStatus | null = null;
