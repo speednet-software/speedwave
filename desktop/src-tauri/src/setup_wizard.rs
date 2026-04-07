@@ -185,7 +185,7 @@ images:
     arch: "aarch64"
 cpus: 4
 memory: "{}"
-disk: "30GiB"
+disk: "50GiB"
 mountType: virtiofs
 networks:
   - vzNAT: true
