@@ -198,9 +198,11 @@ async fn read_body_limited(resp: reqwest::Response, label: &str) -> Result<Vec<u
     );
 
     let mut stream = resp;
-    while let Some(chunk) = stream.chunk().await.map_err(|e| {
-        format!("Failed to read {label} response chunk: {e}")
-    })? {
+    while let Some(chunk) = stream
+        .chunk()
+        .await
+        .map_err(|e| format!("Failed to read {label} response chunk: {e}"))?
+    {
         if buf.len().saturating_add(chunk.len()) > MAX_RESPONSE_BODY_BYTES {
             return Err(format!(
                 "{label} response too large (exceeded {MAX_RESPONSE_BODY_BYTES} byte limit)"
@@ -1123,7 +1125,10 @@ mod tests {
         let result = do_fetch_enumerations(&server.url(), "key").await;
         assert!(result.is_ok());
         let enums = result.unwrap();
-        assert!(enums.projects_truncated, "total_count=150 > len=1 means truncated");
+        assert!(
+            enums.projects_truncated,
+            "total_count=150 > len=1 means truncated"
+        );
         assert_eq!(enums.projects.len(), 1);
     }
 
@@ -1139,7 +1144,10 @@ mod tests {
         let result = do_fetch_enumerations(&server.url(), "key").await;
         assert!(result.is_ok());
         let enums = result.unwrap();
-        assert!(!enums.projects_truncated, "total_count=1 == len=1 means not truncated");
+        assert!(
+            !enums.projects_truncated,
+            "total_count=1 == len=1 means not truncated"
+        );
         assert_eq!(enums.projects.len(), 1);
     }
 
@@ -1155,7 +1163,10 @@ mod tests {
         let result = do_fetch_enumerations(&server.url(), "key").await;
         assert!(result.is_ok());
         let enums = result.unwrap();
-        assert!(!enums.projects_truncated, "missing total_count means not truncated");
+        assert!(
+            !enums.projects_truncated,
+            "missing total_count means not truncated"
+        );
     }
 
     // ── is_private_on_premise helper tests ──────────────────────────────
@@ -1181,19 +1192,28 @@ mod tests {
     #[test]
     fn private_on_premise_rejects_ipv4_loopback() {
         let url: url::Url = "http://127.0.0.1/".parse().unwrap();
-        assert!(!is_private_on_premise(&url), "Loopback is not private on-premise");
+        assert!(
+            !is_private_on_premise(&url),
+            "Loopback is not private on-premise"
+        );
     }
 
     #[test]
     fn private_on_premise_rejects_ipv4_link_local() {
         let url: url::Url = "http://169.254.1.1/".parse().unwrap();
-        assert!(!is_private_on_premise(&url), "Link-local is not private on-premise");
+        assert!(
+            !is_private_on_premise(&url),
+            "Link-local is not private on-premise"
+        );
     }
 
     #[test]
     fn private_on_premise_rejects_domain() {
         let url: url::Url = "http://example.com/".parse().unwrap();
-        assert!(!is_private_on_premise(&url), "Domain is not private on-premise");
+        assert!(
+            !is_private_on_premise(&url),
+            "Domain is not private on-premise"
+        );
     }
 
     // ── IPv6 ULA tests ───────────────────────────────────────────────────
@@ -1201,13 +1221,19 @@ mod tests {
     #[test]
     fn private_on_premise_identifies_ipv6_ula_fd() {
         let url: url::Url = "http://[fd12:3456:789a::1]/".parse().unwrap();
-        assert!(is_private_on_premise(&url), "fd::/8 (ULA) should be private on-premise");
+        assert!(
+            is_private_on_premise(&url),
+            "fd::/8 (ULA) should be private on-premise"
+        );
     }
 
     #[test]
     fn private_on_premise_identifies_ipv6_ula_fc() {
         let url: url::Url = "http://[fc00::1]/".parse().unwrap();
-        assert!(is_private_on_premise(&url), "fc00::/8 (ULA) should be private on-premise");
+        assert!(
+            is_private_on_premise(&url),
+            "fc00::/8 (ULA) should be private on-premise"
+        );
     }
 
     #[test]
@@ -1223,26 +1249,38 @@ mod tests {
     #[test]
     fn private_on_premise_rejects_ipv6_loopback() {
         let url: url::Url = "http://[::1]/".parse().unwrap();
-        assert!(!is_private_on_premise(&url), "IPv6 loopback is not private on-premise");
+        assert!(
+            !is_private_on_premise(&url),
+            "IPv6 loopback is not private on-premise"
+        );
     }
 
     #[test]
     fn private_on_premise_rejects_ipv6_link_local() {
         let url: url::Url = "http://[fe80::1]/".parse().unwrap();
-        assert!(!is_private_on_premise(&url), "IPv6 link-local is not private on-premise");
+        assert!(
+            !is_private_on_premise(&url),
+            "IPv6 link-local is not private on-premise"
+        );
     }
 
     #[test]
     fn private_on_premise_rejects_ipv6_global() {
         let url: url::Url = "http://[2001:db8::1]/".parse().unwrap();
-        assert!(!is_private_on_premise(&url), "IPv6 global address is not private on-premise");
+        assert!(
+            !is_private_on_premise(&url),
+            "IPv6 global address is not private on-premise"
+        );
     }
 
     #[test]
     fn private_on_premise_rejects_ipv6_just_outside_ula() {
         // fe00:: — 0xfe00 & 0xfe00 = 0xfe00 ≠ 0xfc00, so NOT ULA
         let url: url::Url = "http://[fe00::1]/".parse().unwrap();
-        assert!(!is_private_on_premise(&url), "fe00:: is just outside ULA range fc00::/7");
+        assert!(
+            !is_private_on_premise(&url),
+            "fe00:: is just outside ULA range fc00::/7"
+        );
     }
 
     #[test]
@@ -1279,9 +1317,16 @@ mod tests {
             .await;
 
         let client = build_redmine_client().unwrap();
-        let resp = client.get(format!("{}/test", server.url())).send().await.unwrap();
+        let resp = client
+            .get(format!("{}/test", server.url()))
+            .send()
+            .await
+            .unwrap();
         let result = read_body_limited(resp, "test").await;
-        assert!(result.is_ok(), "Body at exactly the limit should be accepted");
+        assert!(
+            result.is_ok(),
+            "Body at exactly the limit should be accepted"
+        );
         assert_eq!(result.unwrap().len(), MAX_RESPONSE_BODY_BYTES);
     }
 
@@ -1297,9 +1342,16 @@ mod tests {
             .await;
 
         let client = build_redmine_client().unwrap();
-        let resp = client.get(format!("{}/test", server.url())).send().await.unwrap();
+        let resp = client
+            .get(format!("{}/test", server.url()))
+            .send()
+            .await
+            .unwrap();
         let result = read_body_limited(resp, "test").await;
-        assert!(result.is_err(), "Body one byte over limit should be rejected");
+        assert!(
+            result.is_err(),
+            "Body one byte over limit should be rejected"
+        );
         // The error mentions either "too large" (Content-Length pre-check) or
         // "exceeded" (streaming check) depending on whether mockito includes
         // a Content-Length header.
@@ -1321,7 +1373,11 @@ mod tests {
             .await;
 
         let client = build_redmine_client().unwrap();
-        let resp = client.get(format!("{}/test", server.url())).send().await.unwrap();
+        let resp = client
+            .get(format!("{}/test", server.url()))
+            .send()
+            .await
+            .unwrap();
         let result = read_body_limited(resp, "test").await;
         assert!(result.is_ok(), "Empty body should be accepted");
         assert_eq!(result.unwrap().len(), 0);
@@ -1338,29 +1394,42 @@ mod tests {
             .await;
 
         let client = build_redmine_client().unwrap();
-        let resp = client.get(format!("{}/test", server.url())).send().await.unwrap();
+        let resp = client
+            .get(format!("{}/test", server.url()))
+            .send()
+            .await
+            .unwrap();
         let result = read_body_limited(resp, "test").await;
-        assert!(result.is_ok(), "Small body without Content-Length should be accepted");
+        assert!(
+            result.is_ok(),
+            "Small body without Content-Length should be accepted"
+        );
     }
 
     // ── read_body_limited: error paths ──────────────────────────────────
 
     #[tokio::test]
     async fn body_too_large_content_length_preflight_rejected() {
-        // Exercises the Content-Length pre-flight guard in read_body_limited.
-        // reqwest::Response::content_length() uses Body::size_hint().exact(),
-        // so passing a real oversized body makes size_hint return the actual
-        // size, which triggers the pre-flight check. We assert on "bytes, limit"
-        // to distinguish the pre-flight error format from the streaming guard
-        // ("exceeded ... byte limit").
-        let oversized_len = MAX_RESPONSE_BODY_BYTES + 1;
-        let big_body = vec![b'x'; oversized_len];
-        let http_resp = http::Response::builder()
-            .status(200)
-            .body(big_body)
-            .unwrap();
-        let resp: reqwest::Response = http_resp.into();
+        // Exercises the Content-Length pre-flight guard in read_body_limited
+        // using a real HTTP server. mockito sets Content-Length automatically
+        // from the body, so reqwest sees it in the response header and the
+        // pre-flight guard rejects before streaming. We assert on "bytes, limit"
+        // to distinguish from the streaming guard ("exceeded ... byte limit").
+        let mut server = mockito::Server::new_async().await;
+        let body = vec![b'x'; MAX_RESPONSE_BODY_BYTES + 1];
+        let _mock = server
+            .mock("GET", "/test")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
 
+        let client = build_redmine_client().unwrap();
+        let resp = client
+            .get(format!("{}/test", server.url()))
+            .send()
+            .await
+            .unwrap();
         let result = read_body_limited(resp, "test").await;
         assert!(result.is_err(), "Should reject oversized Content-Length");
         let err = result.unwrap_err();
@@ -1383,7 +1452,11 @@ mod tests {
             .await;
 
         let client = build_redmine_client().unwrap();
-        let resp = client.get(format!("{}/test", server.url())).send().await.unwrap();
+        let resp = client
+            .get(format!("{}/test", server.url()))
+            .send()
+            .await
+            .unwrap();
         let result = read_body_limited(resp, "test").await;
         assert!(result.is_err(), "Oversized body should be rejected");
     }
@@ -1400,7 +1473,10 @@ mod tests {
             .await;
 
         let result = do_validate_credentials(&server.url(), "key").await;
-        assert!(result.is_err(), "Oversized credential response should return Err");
+        assert!(
+            result.is_err(),
+            "Oversized credential response should return Err"
+        );
     }
 
     #[tokio::test]
@@ -1445,8 +1521,14 @@ mod tests {
             .await;
 
         let result = do_fetch_enumerations(&server.url(), "key").await;
-        assert!(result.is_ok(), "Large body in enum endpoint should degrade gracefully");
+        assert!(
+            result.is_ok(),
+            "Large body in enum endpoint should degrade gracefully"
+        );
         let enums = result.unwrap();
-        assert!(enums.projects.is_empty(), "Oversized projects response -> empty vec");
+        assert!(
+            enums.projects.is_empty(),
+            "Oversized projects response -> empty vec"
+        );
     }
 }
