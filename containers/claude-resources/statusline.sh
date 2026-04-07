@@ -3,8 +3,9 @@
 # rate limits, and cost. Reads JSON from stdin (Claude Code pipes
 # conversation state). Outputs a single line for the status bar.
 #
-# Security: no network calls, no token access, no file reads — safe for the
-# Speedwave container (cap_drop: ALL, no-new-privileges, no credentials).
+# Security: no network calls, no token access, no credentials — safe for the
+# Speedwave container (cap_drop: ALL, no-new-privileges). Reads .git for
+# branch name only (no secrets in .git/HEAD).
 #
 # JSON parsing: regex-based, no jq dependency. Handles flat and 2-level
 # nested keys. Input is collapsed to a single line before extraction
@@ -185,6 +186,21 @@ if [[ -z "$total_cost" ]]; then
     total_cost="$(extract_json_float "$INPUT" "total_cost_usd")"
 fi
 
+# ── Git branch ───────────────────────────────────────────────────────────────
+# Read current branch from workspace if it's a git repo. Graceful fallback:
+# no git, no repo, detached HEAD — all handled silently.
+# STATUSLINE_WORKSPACE_DIR allows tests to override the workspace path.
+
+WORKSPACE="${STATUSLINE_WORKSPACE_DIR:-/workspace}"
+git_branch=""
+if command -v git >/dev/null 2>&1 && [ -d "$WORKSPACE/.git" ]; then
+    git_branch="$(git -C "$WORKSPACE" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    # Detached HEAD returns "HEAD" — show short SHA instead
+    if [[ "$git_branch" == "HEAD" ]]; then
+        git_branch="$(git -C "$WORKSPACE" rev-parse --short HEAD 2>/dev/null)"
+    fi
+fi
+
 # ── Build output ─────────────────────────────────────────────────────────────
 
 parts=()
@@ -192,7 +208,12 @@ parts=()
 # Part 1: Model — bold cyan (display_name already includes context info)
 parts+=("$(printf '%b%b%s%b' "$BOLD" "$CYAN" "$model_name" "$RESET")")
 
-# Part 2: CTX — context usage bar and percentage (same color as bar)
+# Part 2: Git branch — dim white (omitted if not in a git repo)
+if [[ -n "$git_branch" ]]; then
+    parts+=("$(printf '%b%s%b' "$DIM" "$git_branch" "$RESET")")
+fi
+
+# Part 3: CTX — context usage bar and percentage (same color as bar)
 if (( used_pct > 0 || context_window_size > 0 )); then
     ctx_bar="$(build_bar "$used_pct")"
     parts+=("$(printf '%bCTX%b %s %b%s%%%b' "$DIM" "$RESET" "$ctx_bar" "$BAR_COLOR" "$used_pct" "$RESET")")
@@ -201,7 +222,7 @@ fi
 # Determine mode — use has_rl_key so seven_day-only input is still rate-limit mode
 has_rate_limits="$has_rl_key"
 
-# Part 3: 5h rate limit — only when data available
+# Part 4: 5h rate limit — only when data available
 if [[ "$has_rate_limits" == true ]] && [[ -n "$five_hour_pct" ]]; then
     five_bar="$(build_bar "$five_hour_pct")"
     reset_str=""
@@ -214,7 +235,7 @@ if [[ "$has_rate_limits" == true ]] && [[ -n "$five_hour_pct" ]]; then
     parts+=("$(printf '%b5h%b %s %b%s%%%b%s' "$DIM" "$RESET" "$five_bar" "$BAR_COLOR" "$five_hour_pct" "$RESET" "$reset_str")")
 fi
 
-# Part 4: 7d rate limit — only when data available
+# Part 5: 7d rate limit — only when data available
 if [[ "$has_rate_limits" == true ]] && [[ -n "$seven_day_pct" ]]; then
     seven_bar="$(build_bar "$seven_day_pct")"
     reset_str=""
@@ -227,7 +248,7 @@ if [[ "$has_rate_limits" == true ]] && [[ -n "$seven_day_pct" ]]; then
     parts+=("$(printf '%b7d%b %s %b%s%%%b%s' "$DIM" "$RESET" "$seven_bar" "$BAR_COLOR" "$seven_day_pct" "$RESET" "$reset_str")")
 fi
 
-# Part 5: Cost — only in API key mode (no rate limits), only when > 0
+# Part 6: Cost — only in API key mode (no rate limits), only when > 0
 # Cost is zero if it matches 0, 0.0, 0.00, etc.
 cost_is_zero=true
 if [[ -n "$total_cost" ]]; then
