@@ -33,7 +33,7 @@ speedwave_<project>_network
 Container memory limits are defined in `containers/compose.template.yml`. The Claude container memory is **adaptive** based on host RAM; other services use fixed limits:
 
 - **Claude container:** adaptive (`${CLAUDE_MEMORY}` — see scaling below)
-- **MCP Hub:** 256 MiB (fixed)
+- **MCP Hub:** 512 MiB (fixed)
 - **MCP workers:** 128 MiB each (fixed)
 
 **Minimum requirement:** 8 GiB RAM. Speedwave warns at startup if the host has less than 8 GiB.
