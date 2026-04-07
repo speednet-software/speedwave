@@ -198,14 +198,11 @@ if (( used_pct > 0 || context_window_size > 0 )); then
     parts+=("$(printf '%bCTX%b %s %b%s%%%b' "$DIM" "$RESET" "$ctx_bar" "$BAR_COLOR" "$used_pct" "$RESET")")
 fi
 
-# Determine mode
-has_rate_limits=false
-if [[ -n "$five_hour_pct" ]]; then
-    has_rate_limits=true
-fi
+# Determine mode — use has_rl_key so seven_day-only input is still rate-limit mode
+has_rate_limits="$has_rl_key"
 
-# Part 3: 5h rate limit
-if [[ "$has_rate_limits" == true ]]; then
+# Part 3: 5h rate limit — only when data available
+if [[ "$has_rate_limits" == true ]] && [[ -n "$five_hour_pct" ]]; then
     five_bar="$(build_bar "$five_hour_pct")"
     reset_str=""
     if [[ -n "$five_hour_resets_at" ]]; then
@@ -231,19 +228,26 @@ if [[ "$has_rate_limits" == true ]] && [[ -n "$seven_day_pct" ]]; then
 fi
 
 # Part 5: Cost — only in API key mode (no rate limits), only when > 0
-if [[ "$has_rate_limits" == false ]] && [[ -n "$total_cost" ]] && [[ "$total_cost" != "0" ]]; then
+# Cost is zero if it matches 0, 0.0, 0.00, etc.
+cost_is_zero=true
+if [[ -n "$total_cost" ]]; then
+    cost_check="${total_cost//0/}"
+    cost_check="${cost_check/./}"
+    if [[ -n "$cost_check" ]]; then
+        cost_is_zero=false
+    fi
+fi
+if [[ "$has_rate_limits" == false ]] && [[ "$cost_is_zero" == false ]]; then
     parts+=("$(printf '%b$%s%b' "$DIM" "$total_cost" "$RESET")")
 fi
 
 # Join with dim │ separator
-OLD_IFS="$IFS"
-IFS=''; output=""
+output=""
 for (( i=0; i<${#parts[@]}; i++ )); do
     if (( i > 0 )); then
         output+="$(printf ' %b│%b ' "$DIM" "$RESET")"
     fi
     output+="${parts[$i]}"
 done
-IFS="$OLD_IFS"
 
 printf '%s\n' "$output"

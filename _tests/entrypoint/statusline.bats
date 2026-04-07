@@ -235,6 +235,20 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" != *'$'* ]]
 }
 
+@test "cost hidden when total_cost_usd is 0.0" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000,"cost":{"total_cost_usd":0.0}}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'$'* ]]
+}
+
+@test "cost hidden when total_cost_usd is 0.00" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000,"cost":{"total_cost_usd":0.00}}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'$'* ]]
+}
+
 @test "cost hidden when rate limits present" {
     local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000,"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1775580120}},"cost":{"total_cost_usd":0.42}}'
     run bash -c "echo '$input' | bash $STATUSLINE"
@@ -309,11 +323,13 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [ "$status" -eq 0 ]
 }
 
-@test "empty rate_limits object handled" {
-    run bash -c "echo '{\"rate_limits\":{}}' | bash $STATUSLINE"
+@test "empty rate_limits object handled — no bars but cost suppressed" {
+    run bash -c "echo '{\"rate_limits\":{},\"cost\":{\"total_cost_usd\":1.0}}' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
     [[ "$output" != *"5h"* ]]
     [[ "$output" != *"7d"* ]]
+    # rate_limits key present = subscription mode, so cost is hidden
+    [[ "$output" != *'$'* ]]
 }
 
 @test "JSON with only cost block, no rate_limits key" {
