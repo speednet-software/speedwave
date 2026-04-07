@@ -602,6 +602,8 @@ If there are no findings at a given severity level, omit that section entirely.
 
 If NEEDS REVISION or REJECT: list the specific items that must be addressed, in priority order.
 
+**`new_issue_count`:** Include in structured output. Set to the total number of ALL genuinely new issues found in this review (including suppressed MEDIUM/LOW in verification mode). On the first review, equals the total issue count. On follow-up reviews, only count issues NOT present in the previous review context. This field drives convergence logic in the automated loop.
+
 </verdict>
 
 ---
