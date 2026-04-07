@@ -271,9 +271,14 @@ describe('tool-discovery', () => {
       expect(result.osCategory).toBe('reminders');
     });
 
-    it('defaults deferLoading to true when _meta is absent', () => {
+    it('defaults deferLoading to true when _meta is absent and warns', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const result = mergeToolWithMeta(baseTool, 'redmine', 'createIssue');
       expect(result.deferLoading).toBe(true);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('redmine.createIssue: no _meta')
+      );
+      warnSpy.mockRestore();
     });
 
     it('defaults deferLoading to true when _meta has no deferLoading', () => {
@@ -292,6 +297,26 @@ describe('tool-discovery', () => {
       const tool: Tool = { ...baseTool, example: undefined };
       const result = mergeToolWithMeta(tool, 'redmine', 'createIssue');
       expect(result.example).toBe('');
+    });
+
+    it('carries annotations through to ToolMetadata', () => {
+      const tool: Tool = {
+        ...baseTool,
+        annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+        _meta: { deferLoading: false },
+      };
+      const result = mergeToolWithMeta(tool, 'redmine', 'createIssue');
+      expect(result.annotations).toEqual({
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: true,
+      });
+    });
+
+    it('sets annotations to undefined when worker has none', () => {
+      const tool: Tool = { ...baseTool, annotations: undefined, _meta: { deferLoading: false } };
+      const result = mergeToolWithMeta(tool, 'redmine', 'createIssue');
+      expect(result.annotations).toBeUndefined();
     });
 
     it('ignores invalid _meta types and uses defaults', () => {

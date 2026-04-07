@@ -126,7 +126,7 @@ export class JSONRPCHandler {
 
     this.tools.set(tool.name, tool);
     this.toolHandlers.set(tool.name, handler);
-    console.log(`${ts()} 🔧 Tool registered: ${tool.name}`);
+    console.debug(`${ts()} 🔧 Tool registered: ${tool.name}`);
   }
 
   /**

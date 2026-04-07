@@ -183,6 +183,8 @@ export function stopBackgroundRefresh(): void {
 
 /**
  * Reset registry state (for testing only).
+ * Import via `test-helpers.ts`, not directly from this module.
+ * @internal
  */
 export function _resetRegistryForTesting(): void {
   for (const key of Object.keys(_registry)) {
@@ -197,6 +199,8 @@ export function _resetRegistryForTesting(): void {
 
 /**
  * Set SERVICE_NAMES from test helpers (for testing only).
+ * Import via `test-helpers.ts`, not directly from this module.
+ * @internal
  * @param names - Array of service names
  */
 export function _setServiceNamesForTesting(names: string[]): void {

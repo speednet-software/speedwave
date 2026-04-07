@@ -184,6 +184,11 @@ export async function discoverServiceTools(service: string): Promise<Tool[]> {
  * @param methodName - camelCase method name (e.g., 'createIssue')
  */
 export function mergeToolWithMeta(tool: Tool, service: string, methodName: string): ToolMetadata {
+  if (!tool._meta) {
+    console.warn(
+      `${ts()} [tool-discovery] ${service}.${methodName}: no _meta — defaulting to deferLoading:true`
+    );
+  }
   const meta = tool._meta ?? {};
   const validOsCategories = ['reminders', 'calendar', 'mail', 'notes'] as const;
   const rawOsCategory = typeof meta.osCategory === 'string' ? meta.osCategory : undefined;
@@ -209,6 +214,7 @@ export function mergeToolWithMeta(tool: Tool, service: string, methodName: strin
       rawOsCategory && (validOsCategories as readonly string[]).includes(rawOsCategory)
         ? (rawOsCategory as ToolMetadata['osCategory'])
         : undefined,
+    annotations: tool.annotations,
   };
 }
 

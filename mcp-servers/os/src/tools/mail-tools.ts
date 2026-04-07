@@ -352,6 +352,8 @@ const sendEmailTool: Tool = {
   ],
 };
 
+// DESTRUCTIVE_ANNOTATIONS: sending an email reply is irreversible — once delivered,
+// it cannot be unsent or retracted, matching MCP spec's destructiveHint definition.
 const replyToEmailTool: Tool = {
   name: 'replyToEmail',
   description: 'Reply to an existing email. Requires confirm_send=true as safety check.',

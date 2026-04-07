@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
-import { executeCode, _setBridgesForTesting, _formatErrorMessage } from './executor.js';
-import { resetServiceCaches, stopBackgroundRefresh } from './tool-registry.js';
+import {
+  executeCode,
+  _setBridgesForTesting,
+  _formatErrorMessage,
+  _deriveAuditCategory,
+} from './executor.js';
+import { TOOL_REGISTRY, resetServiceCaches, stopBackgroundRefresh } from './tool-registry.js';
 import {
   populateRegistryWithMockTools,
   _resetRegistryForTesting,
@@ -722,6 +727,72 @@ describe('executor', () => {
       const result = await executeCode({ code, timeoutMs: 5000 });
       expect(result.success).toBe(true);
       expect(result.data).toBeUndefined();
+    });
+  });
+
+  describe('deriveAuditCategory', () => {
+    it('returns READ for readOnlyHint tools', () => {
+      const mutableRegistry = TOOL_REGISTRY as Record<
+        string,
+        Record<string, Record<string, unknown>>
+      >;
+      mutableRegistry['testSvc'] = {
+        listItems: {
+          name: 'listItems',
+          service: 'testSvc',
+          description: 'List items',
+          inputSchema: { type: 'object', properties: {} },
+          keywords: [],
+          example: '',
+          annotations: { readOnlyHint: true, destructiveHint: false },
+        },
+      };
+      expect(_deriveAuditCategory('testSvc', 'listItems')).toBe('READ');
+      delete mutableRegistry['testSvc'];
+    });
+
+    it('returns DELETE for destructiveHint tools', () => {
+      const mutableRegistry = TOOL_REGISTRY as Record<
+        string,
+        Record<string, Record<string, unknown>>
+      >;
+      mutableRegistry['testSvc'] = {
+        deleteItem: {
+          name: 'deleteItem',
+          service: 'testSvc',
+          description: 'Delete item',
+          inputSchema: { type: 'object', properties: {} },
+          keywords: [],
+          example: '',
+          annotations: { readOnlyHint: false, destructiveHint: true },
+        },
+      };
+      expect(_deriveAuditCategory('testSvc', 'deleteItem')).toBe('DELETE');
+      delete mutableRegistry['testSvc'];
+    });
+
+    it('returns WRITE for non-readonly non-destructive tools', () => {
+      const mutableRegistry = TOOL_REGISTRY as Record<
+        string,
+        Record<string, Record<string, unknown>>
+      >;
+      mutableRegistry['testSvc'] = {
+        createItem: {
+          name: 'createItem',
+          service: 'testSvc',
+          description: 'Create item',
+          inputSchema: { type: 'object', properties: {} },
+          keywords: [],
+          example: '',
+          annotations: { readOnlyHint: false, destructiveHint: false },
+        },
+      };
+      expect(_deriveAuditCategory('testSvc', 'createItem')).toBe('WRITE');
+      delete mutableRegistry['testSvc'];
+    });
+
+    it('returns WRITE when annotations are absent (safe default)', () => {
+      expect(_deriveAuditCategory('nonexistent', 'noMethod')).toBe('WRITE');
     });
   });
 });

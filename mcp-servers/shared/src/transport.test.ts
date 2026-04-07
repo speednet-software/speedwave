@@ -342,14 +342,9 @@ describe('transport', () => {
       await handleMCPPost(handler, req as Request, res as unknown as Response);
 
       expect(res.status).toHaveBeenCalledWith(406);
-      expect(res.json).toHaveBeenCalledWith(
-        expect.objectContaining({
-          error: expect.objectContaining({
-            code: -32000,
-            message: expect.stringContaining('Not Acceptable'),
-          }),
-        })
-      );
+      expect(res.json).toHaveBeenCalledWith({
+        error: expect.stringContaining('Not Acceptable'),
+      });
     });
 
     it('returns 406 when Accept has application/json but missing text/event-stream', async () => {
@@ -362,14 +357,9 @@ describe('transport', () => {
       await handleMCPPost(handler, req as Request, res as unknown as Response);
 
       expect(res.status).toHaveBeenCalledWith(406);
-      expect(res.json).toHaveBeenCalledWith(
-        expect.objectContaining({
-          error: expect.objectContaining({
-            code: -32000,
-            message: expect.stringContaining('Not Acceptable'),
-          }),
-        })
-      );
+      expect(res.json).toHaveBeenCalledWith({
+        error: expect.stringContaining('Not Acceptable'),
+      });
     });
 
     it('passes when Accept is */* (wildcard matches per RFC 9110)', async () => {

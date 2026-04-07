@@ -46,6 +46,7 @@ import {
   SERVICE_NAMES,
   getEnabledServices,
   getDisabledOsCategories,
+  getToolMetadata,
   WrapWithAuditFn,
   PrepareParamsFn,
   WrapBridgeCallFn,
@@ -136,12 +137,32 @@ const FORBIDDEN_PATTERNS = [
 // Audit Logging
 //═══════════════════════════════════════════════════════════════════════════════
 
+/** Operation category derived from tool annotations */
+type AuditCategory = 'READ' | 'WRITE' | 'DELETE';
+
+/**
+ * Derive audit category from a tool's annotations in the registry.
+ * Falls back to 'WRITE' when annotations are unavailable (safe default).
+ * @param service - Service name (e.g., 'redmine', 'gitlab')
+ * @param tool - camelCase tool method name (e.g., 'createIssue')
+ */
+function deriveAuditCategory(service: string, tool: string): AuditCategory {
+  const meta = getToolMetadata(service, tool);
+  const ann = meta?.annotations;
+  if (!ann) return 'WRITE';
+  if (ann.readOnlyHint) return 'READ';
+  if (ann.destructiveHint) return 'DELETE';
+  return 'WRITE';
+}
+
 /**
  * Single audit log entry
  */
 interface AuditEntry {
   /** ISO timestamp when the tool was called */
   timestamp: string;
+  /** Operation category derived from tool annotations (READ, WRITE, DELETE) */
+  category: AuditCategory;
   /** Service name (redmine, gitlab, slack, etc.) */
   service: string;
   /** Tool name that was called */
@@ -171,15 +192,19 @@ function createAuditContext(): AuditContext {
   const entries: AuditEntry[] = [];
   return {
     log: (service, tool, params) => {
+      const category = deriveAuditCategory(service, tool);
       const entry: AuditEntry = {
         timestamp: new Date().toISOString(),
+        category,
         service,
         tool,
         params: (params ?? {}) as Record<string, unknown>,
       };
       entries.push(entry);
       const auditTs = entry.timestamp.replace('T', ' ').substring(0, 19);
-      console.log(`${ts()} [${auditTs}] ${service}.${tool}(${JSON.stringify(params ?? {})})`);
+      console.log(
+        `${ts()} [${auditTs}] [${category}] ${service}.${tool}(${JSON.stringify(params ?? {})})`
+      );
     },
     getSummary: () => ({
       total: entries.length,
@@ -630,3 +655,9 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
  * @internal
  */
 export { formatErrorMessage as _formatErrorMessage };
+
+/**
+ * Export deriveAuditCategory for testing purposes only.
+ * @internal
+ */
+export { deriveAuditCategory as _deriveAuditCategory };

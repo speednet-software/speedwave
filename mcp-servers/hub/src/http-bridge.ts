@@ -460,9 +460,6 @@ export async function callWorker<T = unknown>(
   const requestId = randomUUID();
   const timeout = options?.timeoutMs ?? TIMEOUTS.WORKER_REQUEST_MS;
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
-
   try {
     const authToken = getAuthToken(service);
     const headers = buildWorkerHeaders(authToken);
@@ -479,11 +476,9 @@ export async function callWorker<T = unknown>(
           arguments: params,
         },
       }),
-      signal: controller.signal,
+      signal: AbortSignal.timeout(timeout),
       redirect: 'error',
     });
-
-    clearTimeout(timeoutId);
 
     if (!response.ok) {
       throw new Error(`Worker ${service} returned ${response.status}: ${response.statusText}`);
@@ -524,9 +519,7 @@ export async function callWorker<T = unknown>(
 
     return result.result as T;
   } catch (error: unknown) {
-    clearTimeout(timeoutId);
-
-    if (error instanceof Error && error.name === 'AbortError') {
+    if (error instanceof Error && error.name === 'TimeoutError') {
       throw new Error(`Worker ${service} timeout after ${timeout}ms`);
     }
 

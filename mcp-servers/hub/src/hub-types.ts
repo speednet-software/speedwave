@@ -140,6 +140,8 @@ export interface ToolMetadata {
   timeoutMs?: number;
   /** OS sub-integration category (only for os service): 'reminders', 'calendar', 'mail', 'notes' */
   osCategory?: 'reminders' | 'calendar' | 'mail' | 'notes';
+  /** Behavioral annotations from the worker (readOnlyHint, destructiveHint, etc.) */
+  annotations?: import('@speedwave/mcp-shared').ToolAnnotations;
 }
 
 /**

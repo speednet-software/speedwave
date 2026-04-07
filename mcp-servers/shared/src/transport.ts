@@ -100,12 +100,7 @@ async function handleMCPPostInner(
       (!acceptHeader.includes('application/json') || !acceptHeader.includes('text/event-stream'))
     ) {
       res.status(406).json({
-        jsonrpc: '2.0',
-        id: null,
-        error: {
-          code: -32000,
-          message: 'Not Acceptable: Client must accept both application/json and text/event-stream',
-        },
+        error: 'Not Acceptable: Client must accept both application/json and text/event-stream',
       });
       return;
     }

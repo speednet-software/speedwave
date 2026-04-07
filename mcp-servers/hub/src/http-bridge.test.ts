@@ -167,13 +167,12 @@ describe('http-bridge', () => {
     });
 
     it('should handle timeout', async () => {
-      // Mock fetch to listen to abort signal (like real fetch does)
+      // Mock fetch to listen to abort signal (like real fetch does with AbortSignal.timeout())
       fetchMock.mockImplementation((_url: string, options?: { signal?: AbortSignal }) => {
         return new Promise((_, reject) => {
           if (options?.signal) {
             options.signal.addEventListener('abort', () => {
-              const error = new Error('The operation was aborted');
-              error.name = 'AbortError';
+              const error = new DOMException('The operation was aborted', 'TimeoutError');
               reject(error);
             });
           }
@@ -209,13 +208,12 @@ describe('http-bridge', () => {
       const fetchMock = vi.fn();
       global.fetch = fetchMock as unknown as typeof fetch;
 
-      // Mock fetch to listen to abort signal
+      // Mock fetch to listen to abort signal (AbortSignal.timeout() throws TimeoutError)
       fetchMock.mockImplementation((_url: string, options?: { signal?: AbortSignal }) => {
         return new Promise((_, reject) => {
           if (options?.signal) {
             options.signal.addEventListener('abort', () => {
-              const error = new Error('The operation was aborted');
-              error.name = 'AbortError';
+              const error = new DOMException('The operation was aborted', 'TimeoutError');
               reject(error);
             });
           }
@@ -911,8 +909,7 @@ describe('http-bridge', () => {
         return new Promise((_, reject) => {
           if (options?.signal) {
             options.signal.addEventListener('abort', () => {
-              const error = new Error('The operation was aborted');
-              error.name = 'AbortError';
+              const error = new DOMException('The operation was aborted', 'TimeoutError');
               reject(error);
             });
           }
@@ -950,9 +947,7 @@ describe('http-bridge', () => {
       expect(result).toEqual(complexData);
     });
 
-    it('should clear timeout on successful response', async () => {
-      const clearTimeoutSpy = vi.spyOn(global, 'clearTimeout');
-
+    it('should resolve without timeout interference on successful response', async () => {
       fetchMock.mockResolvedValue({
         ok: true,
         headers: new Headers({ 'content-type': 'application/json' }),
@@ -960,15 +955,13 @@ describe('http-bridge', () => {
           jsonrpc: '2.0',
           id: '123',
           result: {
-            content: [{ type: 'text', text: '{}' }],
+            content: [{ type: 'text', text: '{"ok":true}' }],
           },
         }),
       });
 
-      await callWorker('slack', 'test', {});
-      expect(clearTimeoutSpy).toHaveBeenCalled();
-
-      clearTimeoutSpy.mockRestore();
+      const result = await callWorker('slack', 'test', {});
+      expect(result).toEqual({ ok: true });
     });
 
     it('should log error message on failure', async () => {
