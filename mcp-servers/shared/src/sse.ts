@@ -138,11 +138,15 @@ export function createSSEStream(res: Response): SSEStream {
 }
 
 /**
- * Send a standard JSON response (non-SSE)
+ * Send a standard JSON response (non-SSE).
+ * Accepts a single response or an array (batch).
  * @param res Express response object
- * @param response JSON-RPC response
+ * @param response JSON-RPC response or array of responses
  */
-export function sendJSONResponse(res: Response, response: JSONRPCResponse): void {
+export function sendJSONResponse(
+  res: Response,
+  response: JSONRPCResponse | JSONRPCResponse[]
+): void {
   res.setHeader('Content-Type', 'application/json');
   res.json(response);
 }

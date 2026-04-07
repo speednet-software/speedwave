@@ -10,7 +10,6 @@ import {
   SERVICE_NAMES,
   getToolMetadata,
   getServiceMethods,
-  getToolCategory,
   getLongTimeoutTools,
   getRequiredTimeoutClass,
   getExecutionTimeout,
@@ -23,15 +22,24 @@ import {
   getRegistryStats,
   stopBackgroundRefresh,
   initializeRegistry,
+  refreshServiceTools,
 } from './tool-registry.js';
-import { TOOL_POLICIES, SUPPORTED_SERVICES } from './hub-tool-policy.js';
 import { TIMEOUTS } from '@speedwave/mcp-shared';
-import { populateRegistryFromPolicies, _resetRegistryForTesting } from './test-helpers.js';
+import type { ToolMetadata } from './hub-types.js';
+import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
+
+vi.mock('./tool-discovery.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./tool-discovery.js')>();
+  return {
+    ...original,
+    discoverAndMergeService: vi.fn().mockResolvedValue({}),
+  };
+});
 
 describe('tool-registry', () => {
   beforeEach(() => {
     _resetRegistryForTesting();
-    populateRegistryFromPolicies();
+    populateRegistryWithMockTools();
   });
 
   afterEach(() => {
@@ -47,8 +55,9 @@ describe('tool-registry', () => {
       }
     });
 
-    it('should have SERVICE_NAMES matching SUPPORTED_SERVICES after reset', () => {
-      expect([...SERVICE_NAMES].sort()).toEqual([...SUPPORTED_SERVICES].sort());
+    it('should have SERVICE_NAMES matching mock services after populate', () => {
+      const expected = ['slack', 'sharepoint', 'redmine', 'gitlab', 'os'];
+      expect([...SERVICE_NAMES].sort()).toEqual(expected.sort());
     });
   });
 
@@ -58,7 +67,6 @@ describe('tool-registry', () => {
       expect(meta).toBeDefined();
       expect(meta?.name).toBe('createIssue');
       expect(meta?.service).toBe('redmine');
-      expect(meta?.category).toBe('write');
     });
 
     it('should return undefined for non-existing tool', () => {
@@ -77,18 +85,6 @@ describe('tool-registry', () => {
 
     it('should return empty array for non-existing service', () => {
       expect(getServiceMethods('nonExistentService')).toEqual([]);
-    });
-  });
-
-  describe('getToolCategory', () => {
-    it('should return correct category for tools', () => {
-      expect(getToolCategory('redmine', 'listIssueIds')).toBe('read');
-      expect(getToolCategory('redmine', 'createIssue')).toBe('write');
-      expect(getToolCategory('redmine', 'deleteJournal')).toBe('delete');
-    });
-
-    it('should return "read" as default for unknown tools', () => {
-      expect(getToolCategory('redmine', 'nonExistent')).toBe('read');
     });
   });
 
@@ -220,7 +216,7 @@ describe('tool-registry', () => {
       for (const m of slackMethods) {
         mockBridge[m] = vi.fn();
       }
-      const mockWrapWithAudit = vi.fn((cat, svc, tool, fn) => fn);
+      const mockWrapWithAudit = vi.fn((svc, tool, fn) => fn);
       const mockPrepareParams = vi.fn((p) => p);
       const mockWrapBridgeCall = vi.fn((fn) => fn());
 
@@ -236,39 +232,35 @@ describe('tool-registry', () => {
       expect(Object.keys(wrappers)).toContain('listChannelIds');
     });
 
-    it('should use category from metadata', () => {
-      const redmineMethods = getServiceMethods('redmine');
+    it('should pass service and tool name to wrapWithAudit', () => {
+      const slackMethods = getServiceMethods('slack');
       const mockBridge: Record<string, ReturnType<typeof vi.fn>> = {};
-      for (const m of redmineMethods) {
+      for (const m of slackMethods) {
         mockBridge[m] = vi.fn();
       }
-      const wrapWithAuditCalls: Array<{ category: string; service: string; tool: string }> = [];
-      const mockWrapWithAudit = vi.fn((cat, svc, tool, fn) => {
-        wrapWithAuditCalls.push({ category: cat, service: svc, tool });
+      const wrapWithAuditCalls: Array<{ service: string; tool: string }> = [];
+      const mockWrapWithAudit = vi.fn((svc, tool, fn) => {
+        wrapWithAuditCalls.push({ service: svc, tool });
         return fn;
       });
       const mockPrepareParams = vi.fn((p) => p);
       const mockWrapBridgeCall = vi.fn((fn) => fn());
 
       buildExecutorWrappers(
-        'redmine',
+        'slack',
         mockBridge,
         mockWrapWithAudit,
         mockPrepareParams,
         mockWrapBridgeCall
       );
 
-      const createIssueCall = wrapWithAuditCalls.find((c) => c.tool === 'createIssue');
-      expect(createIssueCall?.category).toBe('write');
-      const listCall = wrapWithAuditCalls.find((c) => c.tool === 'listIssueIds');
-      expect(listCall?.category).toBe('read');
-      const deleteCall = wrapWithAuditCalls.find((c) => c.tool === 'deleteJournal');
-      expect(deleteCall?.category).toBe('delete');
+      const sendCall = wrapWithAuditCalls.find((c) => c.tool === 'sendChannel');
+      expect(sendCall?.service).toBe('slack');
     });
 
     it('should throw when bridge method is missing', () => {
       const incompleteBridge = { sendChannel: vi.fn() };
-      const mockWrapWithAudit = vi.fn((cat, svc, tool, fn) => fn);
+      const mockWrapWithAudit = vi.fn((svc, tool, fn) => fn);
       const mockPrepareParams = vi.fn((p) => p);
       const mockWrapBridgeCall = vi.fn((fn) => fn());
 
@@ -295,7 +287,6 @@ describe('tool-registry', () => {
         for (const [methodName, metadata] of Object.entries(tools)) {
           expect(metadata.name).toBe(methodName);
           expect(metadata.service).toBe(service);
-          expect(['read', 'write', 'delete']).toContain(metadata.category);
           expect(metadata.description).toBeTruthy();
           expect(metadata.inputSchema).toBeDefined();
         }
@@ -326,7 +317,7 @@ describe('tool-registry', () => {
       }
       resetServiceCaches();
       _resetRegistryForTesting();
-      populateRegistryFromPolicies();
+      populateRegistryWithMockTools();
     });
 
     it('should include plugin services after initializeRegistry', async () => {
@@ -338,13 +329,11 @@ describe('tool-registry', () => {
 
       expect([...SERVICE_NAMES]).toContain('presale');
       expect([...SERVICE_NAMES]).toContain('slack');
-      expect([...SERVICE_NAMES]).toContain('sharepoint');
     });
 
-    it('should reset SERVICE_NAMES to built-in on _resetRegistryForTesting', () => {
-      // After the above test, reset should restore to built-in
+    it('should reset SERVICE_NAMES to empty on _resetRegistryForTesting', () => {
       _resetRegistryForTesting();
-      expect([...SERVICE_NAMES]).toEqual([...SUPPORTED_SERVICES]);
+      expect([...SERVICE_NAMES]).toEqual([]);
     });
   });
 
@@ -448,12 +437,7 @@ describe('tool-registry', () => {
 
   describe('buildExecutorWrappers with disabledOsCategories', () => {
     const mockWrapWithAudit = vi.fn(
-      (
-        _cat: string,
-        _svc: string,
-        _tool: string,
-        fn: (p?: Record<string, unknown>) => Promise<unknown>
-      ) => fn
+      (_svc: string, _tool: string, fn: (p?: Record<string, unknown>) => Promise<unknown>) => fn
     );
     const mockPrepareParams = vi.fn(<T>(p: T) => p);
     const mockWrapBridgeCall = vi.fn(<T>(fn: () => Promise<T>) => fn());
@@ -476,7 +460,8 @@ describe('tool-registry', () => {
       );
 
       // Reminder tools should be excluded
-      const reminderTools = Object.entries(TOOL_POLICIES['os'])
+      const osTools = TOOL_REGISTRY['os'];
+      const reminderTools = Object.entries(osTools)
         .filter(([, meta]) => meta.osCategory === 'reminders')
         .map(([name]) => name);
 
@@ -485,7 +470,7 @@ describe('tool-registry', () => {
       }
 
       // Calendar tools should remain
-      const calendarTools = Object.entries(TOOL_POLICIES['os'])
+      const calendarTools = Object.entries(osTools)
         .filter(([, meta]) => meta.osCategory === 'calendar')
         .map(([name]) => name);
 
@@ -511,6 +496,88 @@ describe('tool-registry', () => {
       );
 
       expect(Object.keys(wrappers).length).toBe(osMethods.length);
+    });
+  });
+
+  describe('graceful degradation', () => {
+    const mockTool: ToolMetadata = {
+      name: 'listItems',
+      description: 'List items',
+      keywords: ['list'],
+      inputSchema: { type: 'object', properties: {} },
+      example: '',
+      service: 'redmine',
+      deferLoading: false,
+    };
+
+    it('worker unavailable at startup → empty registry for that service', async () => {
+      _resetRegistryForTesting();
+
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      vi.mocked(discoverAndMergeService).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+      process.env.ENABLED_SERVICES = 'redmine';
+      await initializeRegistry();
+
+      expect(TOOL_REGISTRY['redmine']).toBeDefined();
+      expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(0);
+    });
+
+    it('worker returns after refresh → tools populated', async () => {
+      _resetRegistryForTesting();
+
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      // Startup: fail
+      vi.mocked(discoverAndMergeService).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+      process.env.ENABLED_SERVICES = 'redmine';
+      await initializeRegistry();
+      expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(0);
+
+      // Refresh: succeed
+      vi.mocked(discoverAndMergeService).mockResolvedValueOnce({ listItems: mockTool });
+      await refreshServiceTools('redmine');
+      expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(1);
+      expect(TOOL_REGISTRY['redmine']['listItems'].name).toBe('listItems');
+    });
+
+    it('worker fails during operation → keeps last known tools', async () => {
+      _resetRegistryForTesting();
+
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      // Startup: succeed
+      vi.mocked(discoverAndMergeService).mockResolvedValueOnce({ listItems: mockTool });
+
+      process.env.ENABLED_SERVICES = 'redmine';
+      await initializeRegistry();
+      expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(1);
+
+      // Refresh: fail
+      vi.mocked(discoverAndMergeService).mockRejectedValueOnce(new Error('worker crashed'));
+      await refreshServiceTools('redmine');
+
+      // Should keep last known tools
+      expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(1);
+      expect(TOOL_REGISTRY['redmine']['listItems'].name).toBe('listItems');
+    });
+
+    it('worker returns with different tools → registry replaced', async () => {
+      _resetRegistryForTesting();
+
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      vi.mocked(discoverAndMergeService).mockResolvedValueOnce({ listItems: mockTool });
+
+      process.env.ENABLED_SERVICES = 'redmine';
+      await initializeRegistry();
+      expect(TOOL_REGISTRY['redmine']['listItems']).toBeDefined();
+
+      // Refresh: different tool set
+      const newTool: ToolMetadata = { ...mockTool, name: 'createItem', service: 'redmine' };
+      vi.mocked(discoverAndMergeService).mockResolvedValueOnce({ createItem: newTool });
+      await refreshServiceTools('redmine');
+
+      expect(TOOL_REGISTRY['redmine']['createItem']).toBeDefined();
+      expect(TOOL_REGISTRY['redmine']['listItems']).toBeUndefined();
     });
   });
 });

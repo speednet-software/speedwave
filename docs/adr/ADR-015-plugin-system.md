@@ -82,7 +82,7 @@ presale-1.2.0/
   "settings_schema": null,
   "speedwave_compat": ">=2.0.0",
   "extra_env": null,
-  "mem_limit": "256m"
+  "mem_limit": "128m"
 }
 ```
 
@@ -115,7 +115,7 @@ presale-1.2.0/
 | `settings_schema`       | JSON?    | No       | JSON Schema for per-project plugin settings                                           |
 | `speedwave_compat`      | string?  | No       | Required Speedwave version range                                                      |
 | `extra_env`             | map?     | No       | Additional environment variables for the container                                    |
-| `mem_limit`             | string?  | No       | Container memory limit (default: `256m`)                                              |
+| `mem_limit`             | string?  | No       | Container memory limit (default: `128m`)                                              |
 | `requires_integrations` | string[] | No       | Core integrations the plugin depends on (e.g. `["sharepoint"]`)                       |
 
 ### auth_fields entry
@@ -258,9 +258,10 @@ mcp-presale:
   security_opt:
     - no-new-privileges:true
   tmpfs:
-    - /tmp:noexec,nosuid,size=64m
+    - /tmp:noexec,nosuid,size=512m
   volumes:
     - /home/user/.speedwave/tokens/acme/presale:/tokens:ro
+    - /path/to/project:/workspace:rw
   environment:
     - PORT=4010
   networks:
@@ -270,8 +271,8 @@ mcp-presale:
   deploy:
     resources:
       limits:
-        cpus: '0.5'
-        memory: 256m
+        cpus: '2.0'
+        memory: 128m
 ```
 
 ### Environment injection
@@ -376,7 +377,7 @@ tool-discovery.ts    http-bridge.ts
 2. `tool-registry.ts` sets `SERVICE_NAMES` dynamically during `initializeRegistry()` (includes plugins)
 3. Registry calls `tools/list` on each worker (including plugin workers)
 4. `tool-discovery.ts`: for plugin services (`isPluginService()`), accepts ALL worker tools — no policy-gating
-5. `hub-tool-policy.ts`: `getPluginToolPolicy()` reads `Tool.category`[^9] (`read`/`write`/`delete`), defaults to `read`
+5. `hub-tool-policy.ts`: `getPluginToolPolicy()` returns a default policy (`deferLoading: false`) for all plugin tools
 6. `http-bridge.ts`, `auth-tokens.ts` iterate `getAllServiceNames()` dynamically
 
 ---
@@ -508,7 +509,5 @@ Tauri commands: `get_plugins`, `install_plugin`, `remove_plugin`, `set_plugin_en
 [^7]: [OWASP Docker Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Docker_Security_Cheat_Sheet.html)
 
 [^8]: [Microsoft identity platform — OAuth 2.0 token refresh](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow#refresh-the-access-token)
-
-[^9]: [MCP specification — Tool definition](https://spec.modelcontextprotocol.io/specification/2025-03-26/server/tools/)
 
 [^10]: [OCI Image Format Specification — Containerfile](https://github.com/containers/common/blob/main/docs/Containerfile.5.md)

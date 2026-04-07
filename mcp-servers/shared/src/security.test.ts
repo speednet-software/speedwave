@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   validateJSONRPCMessage,
+  validateOrigin,
   validateParams,
   validateSessionId,
   validateToolName,
@@ -460,6 +461,51 @@ describe('security', () => {
 
     it('rejects URL with fragment', () => {
       expect(validateWorkerUrl('http://mcp-slack:4001#frag')).toBe(false);
+    });
+  });
+
+  describe('validateOrigin', () => {
+    it('allows missing origin (non-browser client)', () => {
+      expect(validateOrigin(undefined, ['http://localhost:3000'])).toBe(true);
+    });
+
+    it('allows valid origin in allowlist', () => {
+      expect(validateOrigin('http://localhost:3000', ['http://localhost:3000'])).toBe(true);
+    });
+
+    it('rejects origin not in allowlist', () => {
+      expect(validateOrigin('http://evil.com', ['http://localhost:3000'])).toBe(false);
+    });
+
+    it('rejects origin when allowlist is empty', () => {
+      expect(validateOrigin('http://localhost:3000', [])).toBe(false);
+    });
+
+    it('matches second origin in allowlist', () => {
+      expect(
+        validateOrigin('http://localhost:4000', ['http://localhost:3000', 'http://localhost:4000'])
+      ).toBe(true);
+    });
+
+    it('requires exact match (trailing slash matters)', () => {
+      expect(validateOrigin('http://localhost:3000/', ['http://localhost:3000'])).toBe(false);
+      expect(validateOrigin('http://localhost:3000', ['http://localhost:3000/'])).toBe(false);
+    });
+
+    it('allows null origin (treated as falsy, same as missing)', () => {
+      expect(validateOrigin(null as unknown as undefined, ['http://localhost:3000'])).toBe(true);
+    });
+
+    it('rejects empty string origin (present but empty)', () => {
+      expect(validateOrigin('', ['http://localhost:3000'])).toBe(false);
+    });
+
+    it('rejects origin when allowedOrigins is undefined', () => {
+      expect(validateOrigin('http://localhost:3000')).toBe(false);
+    });
+
+    it('allows missing origin when allowedOrigins is undefined', () => {
+      expect(validateOrigin(undefined)).toBe(true);
     });
   });
 });

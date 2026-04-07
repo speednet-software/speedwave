@@ -8,6 +8,7 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  READ_ONLY_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
@@ -15,7 +16,8 @@ import { withValidation } from './validation.js';
 const listProjectIdsTool: Tool = {
   name: 'listProjectIds',
   description: 'List project IDs and paths. Use get_project_full for details.',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'projects', 'list', 'repositories', 'repos', 'ids'],
   example: 'const { projects, count } = await gitlab.listProjectIds({ search: "speedwave" })',
   inputSchema: {
@@ -67,7 +69,8 @@ const listProjectIdsTool: Tool = {
 const getProjectFullTool: Tool = {
   name: 'getProjectFull',
   description: 'Get complete project data. No truncation.',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'project', 'show', 'get', 'detail', 'full'],
   example: 'const project = await gitlab.getProjectFull({ project_id: "speedwave/core" })',
   inputSchema: {
@@ -118,7 +121,8 @@ const getProjectFullTool: Tool = {
 const searchCodeTool: Tool = {
   name: 'searchCode',
   description: 'Search for code in GitLab projects',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'search', 'code', 'find', 'grep', 'regex'],
   example:
     'const results = await gitlab.searchCode({ query: "function authenticate", project_id: "speedwave/core" })',

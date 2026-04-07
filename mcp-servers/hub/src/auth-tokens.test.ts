@@ -5,7 +5,6 @@ import { tmpdir } from 'os';
 
 // Mock service-list before importing auth-tokens
 vi.mock('./service-list.js', () => ({
-  BUILT_IN_SERVICES: ['slack', 'gitlab'],
   getAllServiceNames: () => ['slack', 'gitlab'],
 }));
 

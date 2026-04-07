@@ -527,6 +527,12 @@ impl ContainerRuntime for WslRuntime {
     }
 
     fn ensure_ready(&self) -> anyhow::Result<()> {
+        super::with_ensure_ready_lock(|| self.ensure_ready_inner())
+    }
+}
+
+impl WslRuntime {
+    fn ensure_ready_inner(&self) -> anyhow::Result<()> {
         // OS prerequisite check (SSOT: os_prereqs module)
         let violations = crate::os_prereqs::check_os_prereqs();
         if let Some(v) = violations.first() {

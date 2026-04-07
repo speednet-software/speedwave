@@ -8,6 +8,9 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  READ_ONLY_ANNOTATIONS,
+  WRITE_ANNOTATIONS,
+  DESTRUCTIVE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
@@ -15,7 +18,8 @@ import { withValidation } from './validation.js';
 const listMrIdsTool: Tool = {
   name: 'listMrIds',
   description: 'List merge request IIDs. Use get_mr_full for details.',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: false },
   keywords: ['gitlab', 'merge', 'request', 'mr', 'list', 'pull', 'ids'],
   example:
     'const { mrs, count } = await gitlab.listMrIds({ project_id: "speedwave/core", state: "opened" })',
@@ -81,7 +85,8 @@ const listMrIdsTool: Tool = {
 const getMrFullTool: Tool = {
   name: 'getMrFull',
   description: 'Get complete merge request data. No truncation.',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'merge', 'request', 'mr', 'show', 'detail', 'full'],
   example: 'const mr = await gitlab.getMrFull({ project_id: "speedwave/core", mr_iid: 123 })',
   inputSchema: {
@@ -145,7 +150,8 @@ const getMrFullTool: Tool = {
 const createMergeRequestTool: Tool = {
   name: 'createMergeRequest',
   description: 'Create a new merge request',
-  category: 'write',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'merge', 'request', 'mr', 'create', 'new', 'pull'],
   example:
     'const mr = await gitlab.createMergeRequest({ project_id: "speedwave/core", source_branch: "feature/x", target_branch: "main", title: "Add feature X" })',
@@ -208,7 +214,8 @@ const createMergeRequestTool: Tool = {
 const approveMergeRequestTool: Tool = {
   name: 'approveMergeRequest',
   description: 'Approve a merge request',
-  category: 'write',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'merge', 'request', 'approve', 'review', 'accept'],
   example: 'await gitlab.approveMergeRequest({ project_id: "speedwave/core", mr_iid: 42 })',
   inputSchema: {
@@ -248,7 +255,8 @@ const approveMergeRequestTool: Tool = {
 const mergeMergeRequestTool: Tool = {
   name: 'mergeMergeRequest',
   description: 'Merge a merge request',
-  category: 'write',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'merge', 'request', 'accept', 'complete', 'finish'],
   example:
     'await gitlab.mergeMergeRequest({ project_id: "speedwave/core", mr_iid: 42, auto_merge: true })',
@@ -310,7 +318,8 @@ const mergeMergeRequestTool: Tool = {
 const updateMergeRequestTool: Tool = {
   name: 'updateMergeRequest',
   description: 'Update an existing merge request',
-  category: 'write',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'merge', 'request', 'update', 'edit', 'modify'],
   example:
     'await gitlab.updateMergeRequest({ project_id: "speedwave/core", mr_iid: 42, title: "Updated: Add authentication flow", state_event: "close" })',
@@ -375,7 +384,8 @@ const updateMergeRequestTool: Tool = {
 const getMrChangesTool: Tool = {
   name: 'getMrChanges',
   description: 'Get diff/changes of a merge request',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'merge', 'request', 'diff', 'changes', 'files'],
   example:
     'const changes = await gitlab.getMrChanges({ project_id: "speedwave/core", mr_iid: 42 })',

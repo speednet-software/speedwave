@@ -2,7 +2,12 @@
  * User Tools - Tools for SharePoint user operations
  */
 
-import { Tool, ToolDefinition, notConfiguredMessage } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  notConfiguredMessage,
+  READ_ONLY_ANNOTATIONS,
+} from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
 import { SharePointClient } from '../client.js';
 
@@ -13,7 +18,8 @@ const getCurrentUserTool: Tool = {
     type: 'object',
     properties: {},
   },
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['sharepoint', 'user', 'current', 'me', 'auth'],
   example: 'const user = await sharepoint.getCurrentUser()',
   outputSchema: {
