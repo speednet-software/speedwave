@@ -71,7 +71,7 @@ export interface SaveCredentialsEvent {
           tabindex="0"
           (click)="toggleExpand.emit(svc.service)"
           (keydown.enter)="toggleExpand.emit(svc.service)"
-          (keydown.space)="toggleExpand.emit(svc.service)"
+          (keydown.space)="$event.preventDefault(); toggleExpand.emit(svc.service)"
         >
           Click to set up credentials
         </p>

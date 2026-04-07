@@ -81,7 +81,7 @@ export interface SavePluginCredentialsEvent {
           tabindex="0"
           (click)="toggleExpand.emit(plugin.slug)"
           (keydown.enter)="toggleExpand.emit(plugin.slug)"
-          (keydown.space)="toggleExpand.emit(plugin.slug)"
+          (keydown.space)="$event.preventDefault(); toggleExpand.emit(plugin.slug)"
         >
           Click to set up credentials
         </p>

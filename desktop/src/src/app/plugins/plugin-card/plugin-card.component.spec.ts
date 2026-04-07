@@ -319,6 +319,28 @@ describe('PluginCardComponent', () => {
       hint.click();
       expect(spy).toHaveBeenCalledWith('presale');
     });
+
+    it('emits toggleExpand on Enter key', () => {
+      component.plugin = { ...makeMcpPlugin(), configured: false };
+      component.expanded = false;
+      fixture.detectChanges();
+      const spy = vi.spyOn(component.toggleExpand, 'emit');
+      const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
+      hint.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+      expect(spy).toHaveBeenCalledWith('presale');
+    });
+
+    it('emits toggleExpand on Space key and prevents default', () => {
+      component.plugin = { ...makeMcpPlugin(), configured: false };
+      component.expanded = false;
+      fixture.detectChanges();
+      const spy = vi.spyOn(component.toggleExpand, 'emit');
+      const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
+      const event = new KeyboardEvent('keydown', { key: ' ', cancelable: true });
+      hint.dispatchEvent(event);
+      expect(spy).toHaveBeenCalledWith('presale');
+      expect(event.defaultPrevented).toBe(true);
+    });
   });
 
   it('should emit deleteCredentials when remove credentials button is clicked', () => {

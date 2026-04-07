@@ -568,6 +568,28 @@ describe('ServiceCardComponent', () => {
       hint.click();
       expect(spy).toHaveBeenCalledWith('redmine');
     });
+
+    it('emits toggleExpand on Enter key', () => {
+      component.svc = makeRedmineSvc();
+      component.expanded = false;
+      fixture.detectChanges();
+      const spy = vi.spyOn(component.toggleExpand, 'emit');
+      const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
+      hint.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+      expect(spy).toHaveBeenCalledWith('redmine');
+    });
+
+    it('emits toggleExpand on Space key and prevents default', () => {
+      component.svc = makeRedmineSvc();
+      component.expanded = false;
+      fixture.detectChanges();
+      const spy = vi.spyOn(component.toggleExpand, 'emit');
+      const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
+      const event = new KeyboardEvent('keydown', { key: ' ', cancelable: true });
+      hint.dispatchEvent(event);
+      expect(spy).toHaveBeenCalledWith('redmine');
+      expect(event.defaultPrevented).toBe(true);
+    });
   });
 
   describe('success/error messages', () => {
