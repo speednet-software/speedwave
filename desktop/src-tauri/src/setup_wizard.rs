@@ -153,8 +153,7 @@ pub fn install_runtime() -> anyhow::Result<()> {
 /// Desired Lima VM memory as a Lima-compatible string (e.g. `"16GiB"`).
 ///
 /// Uses adaptive scaling from [`speedwave_runtime::resources`]:
-/// - Hosts <16 GiB → 12 GiB (current default, zero regression).
-/// - Hosts ≥16 GiB → host_ram / 2, clamped 12–32 GiB.
+/// VM = host_ram / 2, clamped 4–32 GiB (never more than 50% of host RAM).
 ///
 /// Older installs with lower values are auto-migrated by
 /// [`ensure_lima_vm_config`].
@@ -1224,12 +1223,12 @@ pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
 // Lima VM config migration — upgrade memory from older installs
 // ---------------------------------------------------------------------------
 
-/// Returns `true` if the Lima config needs a memory upgrade.
+/// Returns `true` if the Lima config memory differs from the desired value.
 ///
 /// Compares the `memory: "XGiB"` line against the desired value from
-/// [`desired_lima_vm_memory`]. Returns `false` if current memory >= desired
-/// (don't downgrade users who manually set higher values) or if the value
-/// is unparseable (safety).
+/// [`desired_lima_vm_memory`]. Returns `false` if current memory equals desired
+/// (no-op) or if the value is unparseable (safety). Supports both upgrades and
+/// downgrades so that a reduced VM formula is applied on next startup.
 #[cfg(any(target_os = "macos", test))]
 fn lima_vm_config_needs_update(config_content: &str) -> bool {
     let desired_str = desired_lima_vm_memory();
@@ -1254,7 +1253,7 @@ fn lima_vm_config_needs_update_with(config_content: &str, desired_gib: u32) -> b
                 .strip_suffix("GiB")
                 .and_then(|s| s.parse::<u32>().ok())
             {
-                Some(current) => current < desired_gib,
+                Some(current) => current != desired_gib,
                 None => false, // unparseable — don't touch
             };
         }
@@ -1265,12 +1264,12 @@ fn lima_vm_config_needs_update_with(config_content: &str, desired_gib: u32) -> b
 /// Migrates the Lima VM memory allocation on existing installs.
 ///
 /// Reads the source template at `{data_dir()}/lima.yaml` and, if the memory
-/// value is below [`desired_lima_vm_memory`], updates both the source template and the
+/// value differs from [`desired_lima_vm_memory`], updates both the source template and the
 /// Lima instance config. Stops and restarts the VM if it was running.
 ///
 /// No-op when:
 /// - Source template doesn't exist (fresh install — `init_vm_macos` creates it)
-/// - Memory is already at or above the desired value
+/// - Memory already equals the desired value
 #[cfg(target_os = "macos")]
 pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
     use speedwave_runtime::binary;
@@ -1288,7 +1287,22 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
     }
 
     let desired_mem = desired_lima_vm_memory();
-    log::info!("Lima VM config migration: updating memory to {desired_mem}");
+
+    // Extract current memory for informative logging.
+    let current_mem: Option<String> = content.lines().find_map(|line| {
+        let trimmed = line.trim();
+        trimmed
+            .strip_prefix("memory:")
+            .map(|rest| rest.trim().trim_matches('"').to_string())
+    });
+
+    if let Some(ref current) = current_mem {
+        log::info!(
+            "Lima VM config migration: {current} → {desired_mem} (formula: host_ram/2, clamped 4–32 GiB)"
+        );
+    } else {
+        log::info!("Lima VM config migration: updating memory to {desired_mem}");
+    }
 
     // Check if VM exists
     let list_output = limactl_command()
@@ -4057,9 +4071,11 @@ networks:
     }
 
     #[test]
-    fn lima_vm_config_higher_memory_no_downgrade() {
+    fn lima_vm_config_higher_memory_triggers_downgrade() {
+        // After the VM formula was reduced, existing VMs with more RAM than
+        // desired must be migrated down to reclaim host memory.
         let config = "vmType: vz\ncpus: 4\nmemory: \"16GiB\"\ndisk: \"30GiB\"\n";
-        assert!(!lima_vm_config_needs_update_with(config, 12));
+        assert!(lima_vm_config_needs_update_with(config, 12));
     }
 
     #[test]
@@ -4082,10 +4098,18 @@ networks:
     }
 
     #[test]
-    fn lima_vm_config_user_manual_increase_no_downgrade() {
-        // User manually set 24 GiB on a 32 GiB host (desired=16) → no downgrade
-        let config = "vmType: vz\ncpus: 4\nmemory: \"24GiB\"\ndisk: \"30GiB\"\n";
-        assert!(!lima_vm_config_needs_update_with(config, 16));
+    fn lima_vm_config_downgrade_from_12_to_8() {
+        // 16 GiB host: old formula gave 12 GiB VM, new formula gives 8 GiB.
+        // The migration must trigger to reclaim 4 GiB for the host.
+        let config = "vmType: vz\ncpus: 4\nmemory: \"12GiB\"\ndisk: \"30GiB\"\n";
+        assert!(lima_vm_config_needs_update_with(config, 8));
+    }
+
+    #[test]
+    fn lima_vm_config_no_op_when_current_equals_desired() {
+        // Already at the desired value — migration must not trigger (idempotent).
+        let config = "vmType: vz\ncpus: 4\nmemory: \"8GiB\"\ndisk: \"30GiB\"\n";
+        assert!(!lima_vm_config_needs_update_with(config, 8));
     }
 
     #[test]

@@ -4,18 +4,13 @@
 
 STATUSLINE="$BATS_TEST_DIRNAME/../../containers/claude-resources/statusline.sh"
 
-setup() {
-    TEST_HOME="$(mktemp -d)"
-    export HOME="$TEST_HOME"
-    mkdir -p "$HOME/.claude"
-}
-
-teardown() {
-    rm -rf "$TEST_HOME"
-}
+# Full rate-limited JSON for reuse across multiple tests.
+# resets_at values are Unix epoch seconds (not ISO strings).
+# 1775580120 = some future timestamp, 1776186000 = ~7 days later.
+FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":"claude-opus-4-6"},"used_percentage":38,"context_window_size":1000000,"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1775580120},"seven_day":{"used_percentage":82,"resets_at":1776186000}}}'
 
 # ---------------------------------------------------------------------------
-# Empty stdin — fallback to defaults
+# Happy path tests
 # ---------------------------------------------------------------------------
 
 @test "empty stdin outputs default model name 'Claude'" {
@@ -24,162 +19,193 @@ teardown() {
     [[ "$output" == *"Claude"* ]]
 }
 
-@test "empty stdin shows thinking status" {
+@test "empty stdin does not crash" {
     run bash "$STATUSLINE" < /dev/null
     [ "$status" -eq 0 ]
-    [[ "$output" == *"thinking"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# Valid JSON input — model name extraction
-# ---------------------------------------------------------------------------
+@test "full rate-limited JSON produces correct format" {
+    run bash -c "echo '$FULL_RATE_LIMITED_JSON' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Opus 4.6 (1M context)"* ]]
+    [[ "$output" == *"CTX"* ]]
+    [[ "$output" == *"38%"* ]]
+    [[ "$output" == *"5h"* ]]
+    [[ "$output" == *"12%"* ]]
+    [[ "$output" == *"reset"* ]]
+    [[ "$output" == *"7d"* ]]
+    [[ "$output" == *"82%"* ]]
+}
 
-@test "extracts display_name from JSON" {
-    local input='{"model":{"display_name":"Opus 4"},"tokens_used":1000,"tokens_max":200000}'
+@test "API key mode shows cost instead of rate limits" {
+    local input='{"model":{"display_name":"Opus 4.6 (1M context)"},"used_percentage":38,"context_window_size":1000000,"cost":{"total_cost_usd":0.42}}'
     run bash -c "echo '$input' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Opus 4"* ]]
+    [[ "$output" == *'$0.42'* ]]
+    [[ "$output" != *"5h"* ]]
+    [[ "$output" != *"7d"* ]]
+}
+
+@test "API key mode with top-level total_cost_usd" {
+    local input='{"model":{"display_name":"Opus"},"used_percentage":38,"context_window_size":1000000,"total_cost_usd":1.23}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'$1.23'* ]]
+}
+
+@test "extracts display_name from JSON" {
+    local input='{"model":{"display_name":"Sonnet 4.6 (200K context)"},"used_percentage":10,"context_window_size":200000}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Sonnet 4.6 (200K context)"* ]]
 }
 
 @test "falls back to name when display_name absent" {
-    local input='{"model":{"name":"claude-sonnet-4-6"},"tokens_used":500,"tokens_max":100000}'
+    local input='{"model":{"name":"claude-sonnet-4-6"},"used_percentage":10,"context_window_size":200000}'
     run bash -c "echo '$input' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
     [[ "$output" == *"claude-sonnet-4-6"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# Token usage display
-# ---------------------------------------------------------------------------
-
-@test "shows token usage with progress bar" {
-    local input='{"display_name":"Opus","tokens_used":50000,"tokens_max":200000}'
+@test "CTX label with percentage" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":38,"context_window_size":1000000}'
     run bash -c "echo '$input' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
-    # Should show formatted tokens and percentage
-    [[ "$output" == *"50.0K"* ]] || [[ "$output" == *"50"* ]]
-    [[ "$output" == *"200.0K"* ]] || [[ "$output" == *"200"* ]]
+    [[ "$output" == *"CTX"* ]]
+    [[ "$output" == *"38%"* ]]
 }
 
-@test "shows only used tokens when max is zero" {
-    local input='{"display_name":"Opus","tokens_used":12345,"tokens_max":0}'
+@test "5h reset time formatted from epoch" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000,"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1775580120}}}'
     run bash -c "echo '$input' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"12,345"* ]]
+    [[ "$output" == *"5h"* ]]
+    [[ "$output" == *"reset"* ]]
+    # Reset time should be HH:MM format
+    [[ "$output" =~ [0-9]{2}:[0-9]{2} ]]
 }
 
-@test "no token section when both used and max are zero" {
-    local input='{"display_name":"Opus","tokens_used":0,"tokens_max":0}'
+@test "7d reset date formatted from epoch" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000,"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1775580120},"seven_day":{"used_percentage":82,"resets_at":1776186000}}}'
     run bash -c "echo '$input' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
-    # Should NOT contain "tokens" or progress bar characters
-    [[ "$output" != *"tokens:"* ]]
+    [[ "$output" == *"7d"* ]]
+    [[ "$output" == *"reset"* ]]
+    # Reset date should be dd.mm format
+    [[ "$output" =~ [0-9]{2}\.[0-9]{2} ]]
+}
+
+@test "sections separated by dim │" {
+    run bash -c "echo '$FULL_RATE_LIMITED_JSON' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"│"* ]]
 }
 
 # ---------------------------------------------------------------------------
-# Thinking status from settings.json
+# Color threshold tests
 # ---------------------------------------------------------------------------
 
-@test "thinking shows 'on' by default" {
-    run bash "$STATUSLINE" < /dev/null
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"thinking"* ]]
-    [[ "$output" != *"thinking off"* ]]
-}
-
-@test "thinking shows 'off' when disabled in user-level settings" {
-    cat > "$HOME/.claude/settings.json" << 'EOF'
-{
-  "thinking": false
-}
-EOF
-    run bash "$STATUSLINE" < /dev/null
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"thinking off"* ]]
-}
-
-@test "thinking shows 'on' when explicitly enabled in user-level settings" {
-    cat > "$HOME/.claude/settings.json" << 'EOF'
-{
-  "thinking": true
-}
-EOF
-    run bash "$STATUSLINE" < /dev/null
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"thinking"* ]]
-    [[ "$output" != *"thinking off"* ]]
-}
-
-@test "thinking shows 'off' when disabled in project-level settings" {
-    local workspace="$TEST_HOME/workspace"
-    mkdir -p "$workspace/.claude"
-    cat > "$workspace/.claude/settings.json" << 'EOF'
-{
-  "thinking": false
-}
-EOF
-    # Patch script to use temp workspace path (cleaned by teardown via $TEST_HOME)
-    local patched
-    patched="$(mktemp "$TEST_HOME/patched.XXXXXX")"
-    sed "s|/workspace/.claude/settings.json|$workspace/.claude/settings.json|" "$STATUSLINE" > "$patched"
-    run bash "$patched" < /dev/null
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"thinking off"* ]]
-}
-
-@test "project-level thinking setting takes precedence over user-level" {
-    # User-level has no thinking key (bundled settings.json)
-    cat > "$HOME/.claude/settings.json" << 'EOF'
-{
-  "statusLine": {"type": "command", "command": "~/.claude/statusline.sh"}
-}
-EOF
-    # Project-level disables thinking
-    local workspace="$TEST_HOME/workspace"
-    mkdir -p "$workspace/.claude"
-    cat > "$workspace/.claude/settings.json" << 'EOF'
-{
-  "thinking": false
-}
-EOF
-    local patched
-    patched="$(mktemp "$TEST_HOME/patched.XXXXXX")"
-    sed "s|/workspace/.claude/settings.json|$workspace/.claude/settings.json|" "$STATUSLINE" > "$patched"
-    run bash "$patched" < /dev/null
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"thinking off"* ]]
-}
-
-@test "thinking defaults to 'on' when bundled settings.json has no thinking key" {
-    # Simulate the real bundled settings.json (statusLine only, no thinking key)
-    cat > "$HOME/.claude/settings.json" << 'EOF'
-{
-  "statusLine": {"type": "command", "command": "~/.claude/statusline.sh"}
-}
-EOF
-    run bash "$STATUSLINE" < /dev/null
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"thinking"* ]]
-    [[ "$output" != *"thinking off"* ]]
-}
-
-# ---------------------------------------------------------------------------
-# Missing / partial JSON fields — graceful fallback
-# ---------------------------------------------------------------------------
-
-@test "missing tokens_max defaults to zero gracefully" {
-    local input='{"display_name":"Opus","tokens_used":500}'
+@test "green below 50%" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":25,"context_window_size":1000000}'
     run bash -c "echo '$input' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Opus"* ]]
+    [[ "$output" == *$'\033[32m'* ]]
 }
 
-@test "missing model name defaults to Claude" {
-    local input='{"tokens_used":1000,"tokens_max":200000}'
+@test "green at 49%" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":49,"context_window_size":1000000}'
     run bash -c "echo '$input' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Claude"* ]]
+    [[ "$output" == *$'\033[32m'* ]]
 }
+
+@test "yellow at 50%" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":50,"context_window_size":1000000}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'\033[33m'* ]]
+}
+
+@test "yellow at 75%" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":75,"context_window_size":1000000}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'\033[33m'* ]]
+}
+
+@test "red at 76%" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":76,"context_window_size":1000000}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'\033[31m'* ]]
+}
+
+@test "red at 89%" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":89,"context_window_size":1000000}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'\033[31m'* ]]
+}
+
+@test "bold red at 90%" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":90,"context_window_size":1000000}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'\033[1m'* ]]
+    [[ "$output" == *$'\033[31m'* ]]
+}
+
+@test "bold red at 95%" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":95,"context_window_size":1000000}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'\033[1m'* ]]
+    [[ "$output" == *$'\033[31m'* ]]
+}
+
+@test "5h rate limit bar uses correct color at 60%" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000,"rate_limits":{"five_hour":{"used_percentage":60,"resets_at":1775580120}}}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'\033[33m'* ]]
+}
+
+@test "7d rate limit bar uses correct color at 85%" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000,"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":1775580120},"seven_day":{"used_percentage":85,"resets_at":1776186000}}}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'\033[31m'* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Bar width tests
+# ---------------------------------------------------------------------------
+
+@test "CTX bar 40% has 2 filled, 3 empty" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":40,"context_window_size":1000000}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"██░░░"* ]]
+}
+
+@test "CTX bar 100% is fully filled" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":100,"context_window_size":1000000}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"█████"* ]]
+    [[ "$output" == *"100%"* ]]
+}
+
+@test "CTX bar 0% is fully empty" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":0,"context_window_size":1000000}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"░░░░░"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Edge cases
+# ---------------------------------------------------------------------------
 
 @test "completely empty JSON object does not crash" {
     run bash -c "echo '{}' | bash $STATUSLINE"
@@ -187,69 +213,231 @@ EOF
     [[ "$output" == *"Claude"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# format_tokens — verified via full script with specific token values
-# ---------------------------------------------------------------------------
-
-@test "format_tokens renders millions correctly" {
-    local input='{"display_name":"Test","tokens_used":1234567,"tokens_max":5000000}'
+@test "missing model name defaults to Claude" {
+    local input='{"used_percentage":50,"context_window_size":1000000}'
     run bash -c "echo '$input' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"1.2M"* ]]
-    [[ "$output" == *"5.0M"* ]]
+    [[ "$output" == *"Claude"* ]]
 }
 
-@test "format_tokens renders thousands correctly" {
-    local input='{"display_name":"Test","tokens_used":45600,"tokens_max":200000}'
+@test "7d section hidden when seven_day data absent" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000,"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1775580120}}}'
     run bash -c "echo '$input' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"45.6K"* ]]
-    [[ "$output" == *"200.0K"* ]]
+    [[ "$output" == *"5h"* ]]
+    [[ "$output" != *"7d"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# build_bar color thresholds
-# ---------------------------------------------------------------------------
-
-@test "progress bar is yellow at 75% usage" {
-    # 150000/200000 = 75%
-    local input='{"display_name":"Test","tokens_used":150000,"tokens_max":200000}'
+@test "cost hidden when total_cost_usd is 0" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000,"cost":{"total_cost_usd":0}}'
     run bash -c "echo '$input' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
-    # Yellow ANSI escape: \033[33m
-    [[ "$output" == *$'\033[33m'* ]]
-    [[ "$output" == *"25%"* ]]
+    [[ "$output" != *'$'* ]]
 }
 
-@test "progress bar is red at 90% usage" {
-    # 180000/200000 = 90%
-    local input='{"display_name":"Test","tokens_used":180000,"tokens_max":200000}'
+@test "cost hidden when total_cost_usd is 0.0" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000,"cost":{"total_cost_usd":0.0}}'
     run bash -c "echo '$input' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
-    # Red ANSI escape: \033[31m
-    [[ "$output" == *$'\033[31m'* ]]
-    [[ "$output" == *"10%"* ]]
+    [[ "$output" != *'$'* ]]
 }
 
-@test "progress bar is green below 75% usage" {
-    # 50000/200000 = 25%
-    local input='{"display_name":"Test","tokens_used":50000,"tokens_max":200000}'
+@test "cost hidden when total_cost_usd is 0.00" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000,"cost":{"total_cost_usd":0.00}}'
     run bash -c "echo '$input' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
-    # Green ANSI escape: \033[32m — appears in the bar (not just thinking)
-    [[ "$output" == *$'\033[32m'* ]]
-    [[ "$output" == *"75%"* ]]
+    [[ "$output" != *'$'* ]]
 }
 
-@test "format_commas used for small token counts without max" {
-    local input='{"display_name":"Test","tokens_used":999,"tokens_max":0}'
+@test "cost hidden when rate limits present" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000,"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1775580120}},"cost":{"total_cost_usd":0.42}}'
     run bash -c "echo '$input' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"999"* ]]
+    [[ "$output" != *'$'* ]]
+    [[ "$output" == *"5h"* ]]
+}
+
+@test "no CTX section when used_percentage absent" {
+    local input='{"model":{"display_name":"Test"}}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"CTX"* ]]
+}
+
+@test "cost with decimal places passed through" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000,"cost":{"total_cost_usd":12.345}}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'$12.345'* ]]
 }
 
 # ---------------------------------------------------------------------------
-# Security: no network calls, no credential access
+# Git branch tests
+# ---------------------------------------------------------------------------
+
+@test "shows git branch when workspace is a git repo" {
+    local repo="$(mktemp -d)"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email "test@test.com"
+    git -C "$repo" config user.name "Test"
+    git -C "$repo" commit --allow-empty -m "init" -q
+    git -C "$repo" checkout -b feat/my-feature -q
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000}'
+    export STATUSLINE_WORKSPACE_DIR="$repo"
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    unset STATUSLINE_WORKSPACE_DIR
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"feat/my-feature"* ]]
+}
+
+@test "shows short SHA on detached HEAD" {
+    local repo="$(mktemp -d)"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email "test@test.com"
+    git -C "$repo" config user.name "Test"
+    git -C "$repo" commit --allow-empty -m "init" -q
+    local sha
+    sha="$(git -C "$repo" rev-parse --short HEAD)"
+    git -C "$repo" checkout --detach -q
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000}'
+    export STATUSLINE_WORKSPACE_DIR="$repo"
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    unset STATUSLINE_WORKSPACE_DIR
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$sha"* ]]
+}
+
+@test "no branch shown when workspace is not a git repo" {
+    local repo="$(mktemp -d)"
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000}'
+    export STATUSLINE_WORKSPACE_DIR="$repo"
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    unset STATUSLINE_WORKSPACE_DIR
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Test"* ]]
+}
+
+@test "branch appears between model and CTX in correct order" {
+    local repo="$(mktemp -d)"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email "test@test.com"
+    git -C "$repo" config user.name "Test"
+    git -C "$repo" commit --allow-empty -m "init" -q
+    local branch
+    branch="$(git -C "$repo" rev-parse --abbrev-ref HEAD)"
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000}'
+    export STATUSLINE_WORKSPACE_DIR="$repo"
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    unset STATUSLINE_WORKSPACE_DIR
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    # Branch name must appear between model and CTX
+    [[ "$output" =~ Test.*"$branch".*CTX ]]
+}
+
+# ---------------------------------------------------------------------------
+# Float handling tests
+# ---------------------------------------------------------------------------
+
+@test "used_percentage as float truncated to integer" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":38.7,"context_window_size":1000000}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"38%"* ]]
+    [[ "$output" != *"38.7%"* ]]
+}
+
+@test "used_percentage as integer works" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":38,"context_window_size":1000000}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"38%"* ]]
+}
+
+@test "rate limit percentage as float truncated" {
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000,"rate_limits":{"five_hour":{"used_percentage":12.5,"resets_at":1775580120}}}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"12%"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Malformed / broken JSON error path tests
+# ---------------------------------------------------------------------------
+
+@test "malformed JSON with extra braces does not crash" {
+    run bash -c "echo '{\"rate_limits\":{\"five_hour\":{\"used_percentage\":12}}}}' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Claude"* ]]
+}
+
+@test "truncated JSON does not crash" {
+    run bash -c 'echo "{\"rate_limits\":{\"five_hour\":{\"use" | bash '"$STATUSLINE"
+    [ "$status" -eq 0 ]
+}
+
+@test "deeply nested JSON beyond expected depth does not crash" {
+    local input='{"rate_limits":{"five_hour":{"nested":{"deep":1},"used_percentage":12,"resets_at":1775580120}}}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+}
+
+@test "empty nested objects handled gracefully" {
+    run bash -c "echo '{\"rate_limits\":{\"five_hour\":{}}}' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+}
+
+@test "empty rate_limits object handled — no bars but cost suppressed" {
+    run bash -c "echo '{\"rate_limits\":{},\"cost\":{\"total_cost_usd\":1.0}}' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"5h"* ]]
+    [[ "$output" != *"7d"* ]]
+    # rate_limits key present = subscription mode, so cost is hidden
+    [[ "$output" != *'$'* ]]
+}
+
+@test "JSON with only cost block, no rate_limits key" {
+    run bash -c "echo '{\"cost\":{\"total_cost_usd\":1.50}}' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'$1.50'* ]]
+}
+
+@test "pretty-printed multi-line JSON parses correctly" {
+    run bash "$STATUSLINE" << 'JSON'
+{
+  "model": {
+    "display_name": "Opus 4.6 (1M context)",
+    "name": "claude-opus-4-6"
+  },
+  "used_percentage": 38,
+  "context_window_size": 1000000,
+  "rate_limits": {
+    "five_hour": {
+      "used_percentage": 12,
+      "resets_at": 1775580120
+    },
+    "seven_day": {
+      "used_percentage": 82,
+      "resets_at": 1776186000
+    }
+  }
+}
+JSON
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Opus 4.6 (1M context)"* ]]
+    [[ "$output" == *"CTX"* ]]
+    [[ "$output" == *"38%"* ]]
+    [[ "$output" == *"5h"* ]]
+    [[ "$output" == *"12%"* ]]
+    [[ "$output" == *"7d"* ]]
+    [[ "$output" == *"82%"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Security tests
 # ---------------------------------------------------------------------------
 
 @test "script does not use curl" {
@@ -257,8 +445,7 @@ EOF
 }
 
 @test "script does not access tokens or credentials" {
-    # Strip comments, then check for credential-accessing commands
-    ! grep -v '^\s*#' "$STATUSLINE" | grep -qE 'security |secret-tool|keychain|oauth|/tokens|api\.anthropic\.com'
+    ! grep -v '^\s*#' "$STATUSLINE" | grep -qE '\bsecurity\b|secret-tool|keychain|oauth|/tokens|api\.anthropic\.com'
 }
 
 @test "script does not write to /tmp cache" {
@@ -267,4 +454,12 @@ EOF
 
 @test "script does not use wget or network tools" {
     ! grep -qE 'wget|nc |netcat|fetch ' "$STATUSLINE"
+}
+
+@test "script does not read settings.json" {
+    ! grep -q 'settings.json' "$STATUSLINE"
+}
+
+@test "script does not use jq" {
+    ! grep -v '^\s*#' "$STATUSLINE" | grep -qE '\bjq\b'
 }

@@ -258,6 +258,56 @@ describe('PluginsComponent', () => {
     });
   });
 
+  describe('handleSaveCredentials() ordering', () => {
+    it('calls set_plugin_enabled before requestRestart', async () => {
+      await component.ngOnInit();
+      const callLog: string[] = [];
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        callLog.push(cmd);
+        if (cmd === 'get_plugins')
+          return {
+            plugins: [
+              { ...cloneMockPlugins().plugins[0], configured: true, enabled: false },
+              cloneMockPlugins().plugins[1],
+            ],
+          };
+        return undefined;
+      };
+
+      const originalRequestRestart = projectState.requestRestart.bind(projectState);
+      vi.spyOn(projectState, 'requestRestart').mockImplementation(() => {
+        callLog.push('requestRestart');
+        originalRequestRestart();
+      });
+
+      await component.handleSaveCredentials({
+        plugin: component.plugins[0],
+        credentials: { api_key: 'secret' },
+      });
+
+      const enableIdx = callLog.indexOf('set_plugin_enabled');
+      const restartIdx = callLog.indexOf('requestRestart');
+      expect(enableIdx).toBeGreaterThanOrEqual(0);
+      expect(restartIdx).toBeGreaterThanOrEqual(0);
+      expect(enableIdx).toBeLessThan(restartIdx);
+    });
+
+    it('does not call requestRestart when save_plugin_credentials fails', async () => {
+      await component.ngOnInit();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'save_plugin_credentials') throw new Error('save failed');
+        return undefined;
+      };
+      const restartSpy = vi.spyOn(projectState, 'requestRestart');
+      await component.handleSaveCredentials({
+        plugin: component.plugins[0],
+        credentials: { api_key: 'key' },
+      });
+      expect(restartSpy).not.toHaveBeenCalled();
+    });
+  });
+
   describe('handleDeleteCredentials()', () => {
     it('invokes delete_plugin_credentials and marks needsRestart', async () => {
       await component.ngOnInit();

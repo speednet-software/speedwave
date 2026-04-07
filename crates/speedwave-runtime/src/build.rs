@@ -71,8 +71,9 @@ pub fn image_ref(name: &str, bundle_id: &str) -> String {
 
 /// Returns `true` if all expected built-in container images exist in the runtime.
 ///
-/// Callers should guard with `rt.is_available()` and `rt.ensure_ready()` first —
-/// this function does not check runtime readiness.
+/// Callers should call `rt.ensure_ready()` first — this function does not check
+/// runtime readiness. Do **not** guard with `is_available()`: a stopped VM
+/// returns `false` there but `ensure_ready()` can start it.
 pub fn images_exist(rt: &dyn super::runtime::ContainerRuntime) -> bool {
     let manifest = match crate::bundle::load_current_bundle_manifest() {
         Ok(m) => m,
