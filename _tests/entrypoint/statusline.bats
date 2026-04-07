@@ -378,7 +378,7 @@ JSON
 }
 
 @test "script does not access tokens or credentials" {
-    ! grep -v '^\s*#' "$STATUSLINE" | grep -qE 'security |secret-tool|keychain|oauth|/tokens|api\.anthropic\.com'
+    ! grep -v '^\s*#' "$STATUSLINE" | grep -qE '\bsecurity\b|secret-tool|keychain|oauth|/tokens|api\.anthropic\.com'
 }
 
 @test "script does not write to /tmp cache" {
