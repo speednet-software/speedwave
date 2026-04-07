@@ -414,6 +414,56 @@ describe('IntegrationsComponent', () => {
     });
   });
 
+  describe('handleSaveCredentials() ordering', () => {
+    it('calls autoEnableIfConfigured before requestRestart', async () => {
+      await component.ngOnInit();
+      const callLog: string[] = [];
+
+      const afterSave = cloneMockIntegrations();
+      afterSave.services = afterSave.services.map((s) =>
+        s.service === 'redmine' ? { ...s, configured: true, enabled: false } : s
+      );
+      mockTauri.invokeHandler = async (cmd: string) => {
+        callLog.push(cmd);
+        if (cmd === 'get_integrations') return afterSave;
+        return undefined;
+      };
+
+      const originalRequestRestart = projectState.requestRestart.bind(projectState);
+      vi.spyOn(projectState, 'requestRestart').mockImplementation(() => {
+        callLog.push('requestRestart');
+        originalRequestRestart();
+      });
+
+      await component.handleSaveCredentials({
+        svc: component.services[1],
+        credentials: { api_key: 'key' },
+        mappings: null,
+      });
+
+      const enableIdx = callLog.indexOf('set_integration_enabled');
+      const restartIdx = callLog.indexOf('requestRestart');
+      expect(enableIdx).toBeGreaterThanOrEqual(0);
+      expect(restartIdx).toBeGreaterThanOrEqual(0);
+      expect(enableIdx).toBeLessThan(restartIdx);
+    });
+
+    it('does not call requestRestart when save_integration_credentials fails', async () => {
+      await component.ngOnInit();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'save_integration_credentials') throw new Error('save failed');
+        return undefined;
+      };
+      const restartSpy = vi.spyOn(projectState, 'requestRestart');
+      await component.handleSaveCredentials({
+        svc: component.services[0],
+        credentials: { token: 'tok' },
+        mappings: null,
+      });
+      expect(restartSpy).not.toHaveBeenCalled();
+    });
+  });
+
   describe('deleteCredentials()', () => {
     it('invokes delete_integration_credentials and marks needsRestart', async () => {
       await component.ngOnInit();
@@ -450,14 +500,23 @@ describe('IntegrationsComponent', () => {
     });
   });
 
-  describe('toggleService is a no-op when not configured', () => {
-    it('does not invoke set_integration_enabled', async () => {
+  describe('toggleService for unconfigured service', () => {
+    it('invokes set_integration_enabled (backend validates configuration)', async () => {
       await component.ngOnInit();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'set_integration_enabled') throw new Error('Service not configured');
+        return undefined;
+      };
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       invokeSpy.mockClear();
-      const event = { target: { checked: true } } as unknown as Event;
+      const target = { checked: true };
+      const event = { target } as unknown as Event;
       await component.toggleService(component.services[1], event);
-      expect(invokeSpy).not.toHaveBeenCalledWith('set_integration_enabled', expect.anything());
+      // Frontend no longer blocks — it calls the backend; the backend rejects
+      expect(invokeSpy).toHaveBeenCalledWith('set_integration_enabled', expect.anything());
+      // Checkbox is reverted on error
+      expect(target.checked).toBe(false);
+      expect(component.error).toBe('Service not configured');
     });
   });
 

@@ -108,17 +108,37 @@ describe('PluginCardComponent', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="toggle"]')).not.toBeNull();
   });
 
-  it('should disable toggle when not configured', () => {
+  it('should NOT disable toggle when not configured', () => {
     component.plugin = { ...makeMcpPlugin(), configured: false };
     fixture.detectChanges();
     const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
-    expect(checkbox.disabled).toBe(true);
+    expect(checkbox.disabled).toBe(false);
   });
 
-  it('should enable toggle when configured', () => {
+  it('should NOT disable toggle when configured', () => {
     fixture.detectChanges();
     const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
     expect(checkbox.disabled).toBe(false);
+  });
+
+  it('should emit toggleExpand (not togglePlugin) when toggle clicked on unconfigured plugin', () => {
+    component.plugin = { ...makeMcpPlugin(), configured: false };
+    fixture.detectChanges();
+    const expandSpy = vi.spyOn(component.toggleExpand, 'emit');
+    const toggleSpy = vi.spyOn(component.togglePlugin, 'emit');
+    const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
+    checkbox.dispatchEvent(new Event('change'));
+    expect(expandSpy).toHaveBeenCalledWith('presale');
+    expect(toggleSpy).not.toHaveBeenCalled();
+  });
+
+  it('should reset checkbox to false when toggle clicked on unconfigured plugin', () => {
+    component.plugin = { ...makeMcpPlugin(), configured: false };
+    fixture.detectChanges();
+    const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event('change'));
+    expect(checkbox.checked).toBe(false);
   });
 
   it('should not show card-body when not expanded', () => {
@@ -258,6 +278,46 @@ describe('PluginCardComponent', () => {
       fixture.detectChanges();
       expect(spy).not.toHaveBeenCalled();
       expect(component.confirmingRemove).toBe(false);
+    });
+  });
+
+  describe('setup-hint', () => {
+    it('shows setup-hint for unconfigured MCP plugin when not expanded', () => {
+      component.plugin = { ...makeMcpPlugin(), configured: false };
+      component.expanded = false;
+      fixture.detectChanges();
+      const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
+      expect(hint).not.toBeNull();
+      expect(hint.textContent).toContain('Click to set up credentials');
+    });
+
+    it('hides setup-hint for resource-only plugin (no auth_fields)', () => {
+      component.plugin = makeResourcePlugin();
+      component.expanded = false;
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="setup-hint"]')).toBeNull();
+    });
+
+    it('hides setup-hint when configured', () => {
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="setup-hint"]')).toBeNull();
+    });
+
+    it('hides setup-hint when expanded (even if unconfigured)', () => {
+      component.plugin = { ...makeMcpPlugin(), configured: false };
+      component.expanded = true;
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="setup-hint"]')).toBeNull();
+    });
+
+    it('emits toggleExpand with slug when setup-hint is clicked', () => {
+      component.plugin = { ...makeMcpPlugin(), configured: false };
+      component.expanded = false;
+      fixture.detectChanges();
+      const spy = vi.spyOn(component.toggleExpand, 'emit');
+      const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
+      hint.click();
+      expect(spy).toHaveBeenCalledWith('presale');
     });
   });
 
