@@ -188,12 +188,13 @@ fi
 
 # ── Git branch ───────────────────────────────────────────────────────────────
 # Read current branch from workspace if it's a git repo. Graceful fallback:
-# no git, no repo, detached HEAD — all handled silently.
+# no git, no repo, worktree, detached HEAD — all handled silently.
+# Skips the [ -d .git ] check: in git worktrees .git is a file, not a dir.
 # STATUSLINE_WORKSPACE_DIR allows tests to override the workspace path.
 
 WORKSPACE="${STATUSLINE_WORKSPACE_DIR:-/workspace}"
 git_branch=""
-if command -v git >/dev/null 2>&1 && [ -d "$WORKSPACE/.git" ]; then
+if command -v git >/dev/null 2>&1; then
     git_branch="$(git -C "$WORKSPACE" rev-parse --abbrev-ref HEAD 2>/dev/null)"
     # Detached HEAD returns "HEAD" — show short SHA instead
     if [[ "$git_branch" == "HEAD" ]]; then

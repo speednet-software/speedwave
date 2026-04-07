@@ -316,18 +316,20 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" == *"Test"* ]]
 }
 
-@test "branch appears between model and CTX" {
+@test "branch appears between model and CTX in correct order" {
     local repo="$(mktemp -d)"
     git -C "$repo" init -q
     git -C "$repo" commit --allow-empty -m "init" -q
+    local branch
+    branch="$(git -C "$repo" rev-parse --abbrev-ref HEAD)"
     local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000}'
     export STATUSLINE_WORKSPACE_DIR="$repo"
     run bash -c "echo '$input' | bash $STATUSLINE"
     unset STATUSLINE_WORKSPACE_DIR
     rm -rf "$repo"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Test"* ]]
-    [[ "$output" == *"CTX"* ]]
+    # Branch name must appear between model and CTX
+    [[ "$output" =~ Test.*"$branch".*CTX ]]
 }
 
 # ---------------------------------------------------------------------------
