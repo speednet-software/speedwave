@@ -4348,6 +4348,7 @@ services:
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         }
     }
@@ -4625,6 +4626,7 @@ services:
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
 
@@ -4672,6 +4674,7 @@ services:
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         let svc = plugin::generate_plugin_service(
@@ -4766,6 +4769,7 @@ services:
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
 
@@ -4993,6 +4997,7 @@ services:
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
 
@@ -5619,6 +5624,7 @@ networks:
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         }];
 
@@ -5729,6 +5735,7 @@ services:
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         let violations = SecurityCheck::run(&yaml, "test", &[manifest], &test_expected_paths());
