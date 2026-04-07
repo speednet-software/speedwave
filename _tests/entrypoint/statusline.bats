@@ -278,6 +278,8 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
 @test "shows git branch when workspace is a git repo" {
     local repo="$(mktemp -d)"
     git -C "$repo" init -q
+    git -C "$repo" config user.email "test@test.com"
+    git -C "$repo" config user.name "Test"
     git -C "$repo" commit --allow-empty -m "init" -q
     git -C "$repo" checkout -b feat/my-feature -q
     local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000}'
@@ -292,6 +294,8 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
 @test "shows short SHA on detached HEAD" {
     local repo="$(mktemp -d)"
     git -C "$repo" init -q
+    git -C "$repo" config user.email "test@test.com"
+    git -C "$repo" config user.name "Test"
     git -C "$repo" commit --allow-empty -m "init" -q
     local sha
     sha="$(git -C "$repo" rev-parse --short HEAD)"
@@ -319,6 +323,8 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
 @test "branch appears between model and CTX in correct order" {
     local repo="$(mktemp -d)"
     git -C "$repo" init -q
+    git -C "$repo" config user.email "test@test.com"
+    git -C "$repo" config user.name "Test"
     git -C "$repo" commit --allow-empty -m "init" -q
     local branch
     branch="$(git -C "$repo" rev-parse --abbrev-ref HEAD)"
