@@ -17,16 +17,16 @@ pub const HOST_OVERHEAD_GIB: u32 = 6;
 /// Converts raw bytes to GiB using floor division.
 ///
 /// Floor is intentionally safer than rounding: a 16 GB MacBook with ~15.7 GiB
-/// usable RAM returns 15, keeping the VM at the current 12 GiB default instead
-/// of triggering adaptive scaling prematurely.
+/// usable RAM returns 15, which the adaptive formula (`host/2`) then maps to
+/// 7 GiB VM — avoiding an unexpected jump to 8 GiB.
 fn bytes_to_gib(bytes: u64) -> u32 {
     (bytes / (1024 * 1024 * 1024)) as u32
 }
 
 /// Returns total physical RAM in GiB (floor).
 ///
-/// Falls back to 16 on detection failure — preserves current behaviour
-/// (12 GiB VM, 8 g Claude container).
+/// Falls back to 16 on detection failure — produces 8 GiB VM via the
+/// adaptive formula (`host/2`).
 pub fn host_total_memory_gib() -> u32 {
     host_total_memory_gib_impl().unwrap_or(16)
 }
@@ -65,7 +65,8 @@ fn host_total_memory_gib_impl() -> Option<u32> {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn host_total_memory_gib_impl() -> Option<u32> {
-    // Windows/WSL2: Speedwave does not manage .wslconfig — return fallback.
+    // Windows: RAM detection not implemented — falls back to 16 GiB,
+    // which the adaptive formula maps to 8 GiB VM / 4 g Claude container.
     None
 }
 

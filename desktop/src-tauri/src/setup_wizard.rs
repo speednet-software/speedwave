@@ -1287,7 +1287,22 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
     }
 
     let desired_mem = desired_lima_vm_memory();
-    log::info!("Lima VM config migration: updating memory to {desired_mem}");
+
+    // Extract current memory for informative logging.
+    let current_mem: Option<String> = content.lines().find_map(|line| {
+        let trimmed = line.trim();
+        trimmed
+            .strip_prefix("memory:")
+            .map(|rest| rest.trim().trim_matches('"').to_string())
+    });
+
+    if let Some(ref current) = current_mem {
+        log::info!(
+            "Lima VM config migration: {current} → {desired_mem} (formula: host_ram/2, clamped 4–32 GiB)"
+        );
+    } else {
+        log::info!("Lima VM config migration: updating memory to {desired_mem}");
+    }
 
     // Check if VM exists
     let list_output = limactl_command()
