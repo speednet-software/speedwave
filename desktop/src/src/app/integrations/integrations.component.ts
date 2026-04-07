@@ -165,10 +165,10 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
             this.activeOAuthRequestId = null;
             this.oauthProjectAtStart = null;
             if (flowProject !== this.activeProject) return;
-            this.projectState.requestRestart();
             await this.loadIntegrations();
             if (flowProject !== this.activeProject) return;
             await this.autoEnableIfConfigured('sharepoint');
+            this.projectState.requestRestart();
           }
           if (['error', 'expired', 'cancelled'].includes(payload.status)) {
             this.deviceCodeInfo = null;
@@ -263,9 +263,9 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
         });
       }
 
-      this.projectState.requestRestart();
       await this.loadIntegrations();
       await this.autoEnableIfConfigured(payload.svc.service);
+      this.projectState.requestRestart();
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
     }
@@ -389,7 +389,6 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
    * @param event - the checkbox change event
    */
   async toggleService(svc: IntegrationStatusEntry, event: Event): Promise<void> {
-    if (!svc.configured) return;
     const enabled = (event.target as HTMLInputElement).checked;
     try {
       await this.tauri.invoke('set_integration_enabled', {

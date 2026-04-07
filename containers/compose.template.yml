@@ -86,7 +86,7 @@ services:
       resources:
         limits:
           cpus: '0.5'
-          memory: 256m
+          memory: 128m
 
   mcp-sharepoint:
     image: ${IMAGE_MCP_SHAREPOINT}
@@ -113,7 +113,7 @@ services:
       resources:
         limits:
           cpus: '0.5'
-          memory: 256m
+          memory: 128m
 
   mcp-redmine:
     image: ${IMAGE_MCP_REDMINE}
@@ -137,7 +137,7 @@ services:
       resources:
         limits:
           cpus: '0.5'
-          memory: 256m
+          memory: 128m
 
   mcp-gitlab:
     image: ${IMAGE_MCP_GITLAB}
@@ -161,7 +161,7 @@ services:
       resources:
         limits:
           cpus: '0.5'
-          memory: 256m
+          memory: 128m
 
 networks:
   ${NETWORK_NAME}:

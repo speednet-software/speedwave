@@ -20,7 +20,20 @@ pub trait ContainerRuntime: Send + Sync {
     /// Returns `Result` so implementations can check preconditions (e.g. Lima
     /// VM running) before constructing the command.
     fn container_exec_piped(&self, container: &str, cmd: &[&str]) -> anyhow::Result<Command>;
+    /// Returns `true` only if the runtime is already operational (binary present,
+    /// VM/engine running). This is a lightweight, read-only probe — it does **not**
+    /// attempt to start or repair the runtime.
+    ///
+    /// Use this for status displays and optional optimisations. **Do not** use as a
+    /// gate before [`ensure_ready`] — a stopped Lima VM returns `false` here but
+    /// `ensure_ready()` can start it successfully.
     fn is_available(&self) -> bool;
+
+    /// Brings the runtime to a fully operational state, or returns a descriptive error.
+    ///
+    /// Safe to call unconditionally before any runtime operation. Implementations
+    /// may start a stopped VM, verify engine health, etc. Prefer this over
+    /// [`is_available`] whenever you need the runtime to become operational.
     fn ensure_ready(&self) -> anyhow::Result<()>;
     fn build_image(
         &self,

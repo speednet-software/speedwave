@@ -55,20 +55,13 @@ export interface SavePluginCredentialsEvent {
           >
             Open
           </button>
-          <label
-            class="relative inline-block w-[44px] h-[24px]"
-            data-testid="toggle"
-            [ngClass]="!plugin.configured ? 'opacity-40 cursor-not-allowed' : ''"
-            [title]="plugin.configured ? '' : 'Configure credentials to enable'"
-          >
+          <label class="relative inline-block w-[44px] h-[24px]" data-testid="toggle">
             <input
               type="checkbox"
               class="peer sr-only"
               [checked]="plugin.enabled"
-              [disabled]="!plugin.configured"
               (change)="onToggle($event)"
               [attr.data-testid]="'plugin-toggle-' + plugin.slug"
-              [ngClass]="!plugin.configured ? 'cursor-not-allowed' : ''"
             />
             <span
               class="absolute inset-0 bg-sw-slider rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-sw-accent before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
@@ -79,6 +72,20 @@ export interface SavePluginCredentialsEvent {
       <p class="px-5 pb-3 text-sw-text-muted text-[13px] m-0" data-testid="card-description">
         {{ plugin.description }}
       </p>
+
+      @if (plugin.auth_fields.length > 0 && !plugin.configured && !expanded) {
+        <p
+          class="px-5 pb-3 text-sw-accent text-[12px] m-0 cursor-pointer"
+          data-testid="setup-hint"
+          role="button"
+          tabindex="0"
+          (click)="toggleExpand.emit(plugin.slug)"
+          (keydown.enter)="toggleExpand.emit(plugin.slug)"
+          (keydown.space)="$event.preventDefault(); toggleExpand.emit(plugin.slug)"
+        >
+          Click to set up credentials
+        </p>
+      }
 
       @if (expanded) {
         <div class="px-5 pb-5 border-t border-sw-border" data-testid="card-body">
@@ -201,9 +208,15 @@ export class PluginCardComponent {
 
   /**
    * Emits the togglePlugin event with the plugin and DOM event.
+   * If the plugin is not configured, expands the form instead.
    * @param event - the checkbox change event
    */
   onToggle(event: Event): void {
+    if (!this.plugin.configured) {
+      (event.target as HTMLInputElement).checked = false;
+      this.toggleExpand.emit(this.plugin.slug);
+      return;
+    }
     this.togglePlugin.emit({ plugin: this.plugin, event });
   }
 
