@@ -8,6 +8,7 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  READ_ONLY_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
@@ -15,6 +16,8 @@ import { withValidation } from './validation.js';
 const getTreeTool: Tool = {
   name: 'getTree',
   description: 'Get repository file tree',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'tree', 'files', 'repository', 'ls'],
   example: 'const tree = await gitlab.getTree({ project_id: "speedwave/core", path: "src" })',
   inputSchema: {
@@ -64,6 +67,8 @@ const getTreeTool: Tool = {
 const getFileTool: Tool = {
   name: 'getFile',
   description: 'Get file content from repository',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'file', 'content', 'read', 'cat'],
   example:
     'const file = await gitlab.getFile({ project_id: "speedwave/core", file_path: "README.md" })',
@@ -114,6 +119,8 @@ const getFileTool: Tool = {
 const getBlameTool: Tool = {
   name: 'getBlame',
   description: 'Get git blame for a file',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'blame', 'annotate', 'history', 'git'],
   example:
     'const blame = await gitlab.getBlame({ project_id: "speedwave/core", file_path: "src/index.ts" })',

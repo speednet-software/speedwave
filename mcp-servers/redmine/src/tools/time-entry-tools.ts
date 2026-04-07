@@ -8,6 +8,8 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  READ_ONLY_ANNOTATIONS,
+  WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 import { resolveParams } from './helpers.js';
@@ -15,6 +17,8 @@ import { resolveParams } from './helpers.js';
 const listTimeEntriesTool: Tool = {
   name: 'listTimeEntries',
   description: 'List time entries with optional filters.',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['redmine', 'time', 'entries', 'list', 'hours', 'log'],
   example: `const entries = await redmine.listTimeEntries({ issue_id: 12345 })`,
   inputSchema: {
@@ -77,6 +81,8 @@ const listTimeEntriesTool: Tool = {
 const createTimeEntryTool: Tool = {
   name: 'createTimeEntry',
   description: 'Log time on an issue or project',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['redmine', 'time', 'entry', 'create', 'log', 'hours'],
   example: `await redmine.createTimeEntry({ hours: 2.5, issue_id: 12345, activity: "development", comments: "Code review" })`,
   inputSchema: {
@@ -142,6 +148,8 @@ const createTimeEntryTool: Tool = {
 const updateTimeEntryTool: Tool = {
   name: 'updateTimeEntry',
   description: 'Update an existing time entry',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['redmine', 'time', 'update', 'modify', 'hours', 'edit'],
   example: `await redmine.updateTimeEntry({ time_entry_id: 789, hours: 3.5 })`,
   inputSchema: {

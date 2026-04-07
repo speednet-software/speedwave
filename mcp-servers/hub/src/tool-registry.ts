@@ -1,22 +1,20 @@
 /**
- * Tool Registry - Dynamic Discovery with Policy
+ * Tool Registry - Dynamic Discovery
  * @module tool-registry
  *
- * Central registry that merges worker-fetched tool metadata with hub policies.
- * Workers are the SSOT for tool contracts (name, description, inputSchema, etc.).
- * Hub policies control operational behavior (deferLoading, timeoutClass, etc.).
+ * Central registry of tool metadata fetched from workers.
+ * Workers are the SSOT for ALL tool metadata (contract + policy via _meta).
  *
  * Lifecycle:
  * 1. At startup, initializeRegistry() populates the registry from workers
- * 2. If a worker is unavailable, skeleton entries are used (from policy data)
+ * 2. If a worker is unavailable, its service has an empty registry entry
  * 3. Background refresh periodically updates tools from workers
- * 4. All existing consumers (search-tools, executor, handlers) use the same API
+ * 4. All consumers (search-tools, executor, handlers) use the same API
  */
 
 import { ToolMetadata, TimeoutClass } from './hub-types.js';
-import { TOOL_POLICIES, SUPPORTED_SERVICES, getServicePolicies } from './hub-tool-policy.js';
 import { getAllServiceNames } from './service-list.js';
-import { discoverAndMergeService, buildSkeletonFromPolicy } from './tool-discovery.js';
+import { discoverAndMergeService } from './tool-discovery.js';
 import { ts, TIMEOUTS } from '@speedwave/mcp-shared';
 
 /**
@@ -65,23 +63,22 @@ export const TOOL_REGISTRY: Readonly<Record<string, Readonly<Record<string, Tool
 
 /**
  * List of all service names in the registry.
- * Initially set to built-in services; updated during initializeRegistry()
- * to include plugin services from ENABLED_SERVICES env var.
+ * Empty until initializeRegistry() reads ENABLED_SERVICES env var.
  */
-export let SERVICE_NAMES: readonly string[] = [...SUPPORTED_SERVICES];
+export let SERVICE_NAMES: readonly string[] = [];
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Initialization
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Initialize the registry from workers + policies.
+ * Initialize the registry from workers.
  * Called once at startup before initializeBridges().
  *
  * For each service:
  * 1. Try to discover tools from worker (JSON-RPC tools/list)
- * 2. Merge with hub policy
- * 3. Fall back to skeleton entries if worker unavailable
+ * 2. Merge tool data including _meta fields
+ * 3. If worker unavailable, service gets empty registry entry
  */
 export async function initializeRegistry(): Promise<void> {
   if (_initialized) return;
@@ -96,8 +93,7 @@ export async function initializeRegistry(): Promise<void> {
 
   for (const service of SERVICE_NAMES) {
     if (!enabledServices.has(service)) {
-      // Still populate skeleton so bridge generation works (built-in only)
-      _populateSkeletons(service);
+      _registry[service] = {};
       continue;
     }
 
@@ -107,10 +103,10 @@ export async function initializeRegistry(): Promise<void> {
       console.log(`${ts()} [tool-registry] ${service}: ${Object.keys(tools).length} tools loaded`);
     } catch (error) {
       console.warn(
-        `${ts()} [tool-registry] ${service}: discovery failed, using skeletons`,
+        `${ts()} [tool-registry] ${service}: discovery failed, empty registry`,
         error instanceof Error ? error.message : error
       );
-      _populateSkeletons(service);
+      _registry[service] = {};
     }
   }
 
@@ -124,18 +120,6 @@ export async function initializeRegistry(): Promise<void> {
 }
 
 /**
- * Populate registry with skeleton entries for a service (from policy only).
- * @param service - Service name
- */
-function _populateSkeletons(service: string): void {
-  const policies = getServicePolicies(service);
-  _registry[service] = {};
-  for (const [methodName, policy] of Object.entries(policies)) {
-    _registry[service][methodName] = buildSkeletonFromPolicy(service, methodName, policy);
-  }
-}
-
-/**
  * Refresh tools for a specific service from its worker.
  * Called by background refresh or on-demand.
  * @param service - Service name to refresh
@@ -144,6 +128,7 @@ export async function refreshServiceTools(service: string): Promise<void> {
   try {
     const tools = await discoverAndMergeService(service);
     _registry[service] = tools;
+    cachedLongTimeoutTools = null; // Invalidate cache after update
   } catch (error) {
     console.warn(
       `${ts()} [tool-registry] Refresh failed for ${service}:`,
@@ -205,8 +190,17 @@ export function _resetRegistryForTesting(): void {
   }
   _initialized = false;
   _refreshInProgress = false;
-  SERVICE_NAMES = [...SUPPORTED_SERVICES];
+  SERVICE_NAMES = [];
+  cachedLongTimeoutTools = null;
   stopBackgroundRefresh();
+}
+
+/**
+ * Set SERVICE_NAMES from test helpers (for testing only).
+ * @param names - Array of service names
+ */
+export function _setServiceNamesForTesting(names: string[]): void {
+  SERVICE_NAMES = names;
 }
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -236,13 +230,14 @@ export function getServiceMethods(service: string): string[] {
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Cached result for getLongTimeoutTools()
+ * Cached result for getLongTimeoutTools().
+ * Invalidated on registry reset and rebuilt on next call.
  */
 let cachedLongTimeoutTools: Array<{ service: string; method: string }> | null = null;
 
 /**
  * Get list of all tools with 'long' timeout class.
- * Uses TOOL_POLICIES as the source since this is a hub-side concern.
+ * Reads from the live registry so it reflects the latest discovery state.
  */
 export function getLongTimeoutTools(): Array<{ service: string; method: string }> {
   if (cachedLongTimeoutTools !== null) {
@@ -250,9 +245,9 @@ export function getLongTimeoutTools(): Array<{ service: string; method: string }
   }
 
   cachedLongTimeoutTools = [];
-  for (const [service, tools] of Object.entries(TOOL_POLICIES)) {
-    for (const [method, policy] of Object.entries(tools)) {
-      if (policy.timeoutClass === 'long') {
+  for (const [service, tools] of Object.entries(_registry)) {
+    for (const [method, metadata] of Object.entries(tools)) {
+      if (metadata.timeoutClass === 'long') {
         cachedLongTimeoutTools.push({ service, method });
       }
     }

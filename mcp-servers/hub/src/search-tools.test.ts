@@ -11,14 +11,14 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { searchTools, getServiceTools, getToolMetadata } from './search-tools.js';
 import { resetServiceCaches } from './tool-registry.js';
-import { populateRegistryFromPolicies, _resetRegistryForTesting } from './test-helpers.js';
+import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
 
 describe('searchTools', () => {
   const savedEnabledServices = process.env.ENABLED_SERVICES;
 
   beforeEach(() => {
     _resetRegistryForTesting();
-    populateRegistryFromPolicies();
+    populateRegistryWithMockTools();
     resetServiceCaches();
     process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,gitlab,os';
   });
@@ -53,14 +53,14 @@ describe('searchTools', () => {
     });
 
     it('matches by description', async () => {
-      // Skeleton descriptions contain the method name, so search by a known method name
+      // Mock descriptions contain "Slack channel", so search for that
       const result = await searchTools({
-        query: 'sendChannel',
+        query: 'Slack channel',
         detailLevel: 'with_descriptions',
       });
 
       expect(result.matches.length).toBeGreaterThan(0);
-      expect(result.matches.some((m) => m.description?.includes('sendChannel'))).toBe(true);
+      expect(result.matches.some((m) => m.description?.includes('Slack channel'))).toBe(true);
     });
 
     it('matches by name substring', async () => {
@@ -214,10 +214,8 @@ describe('searchTools', () => {
       expect(result.matches.length).toBeGreaterThan(0);
       const match = result.matches[0];
 
-      // Should have all fields (may be empty for skeleton entries)
       expect(match.description).toBeDefined();
       expect(match.inputSchema).toBeDefined();
-      // example and outputSchema may be empty/undefined for skeleton entries
       expect('example' in match).toBe(true);
     });
   });
@@ -447,7 +445,7 @@ describe('searchTools ENABLED_SERVICES filtering', () => {
 
   beforeEach(() => {
     _resetRegistryForTesting();
-    populateRegistryFromPolicies();
+    populateRegistryWithMockTools();
     resetServiceCaches();
   });
 

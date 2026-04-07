@@ -47,6 +47,12 @@ describe('Redmine tool metadata', () => {
   });
 
   describe.each(ALL_TOOLS.map((t) => [t.name, t] as const))('%s', (_name, tool) => {
+    it('has annotations with readOnlyHint and destructiveHint', () => {
+      expect(tool.annotations).toBeDefined();
+      expect(typeof tool.annotations!.readOnlyHint).toBe('boolean');
+      expect(typeof tool.annotations!.destructiveHint).toBe('boolean');
+    });
+
     it('has keywords with at least 1 entry', () => {
       expect(tool.keywords).toBeDefined();
       expect(Array.isArray(tool.keywords)).toBe(true);
@@ -61,6 +67,14 @@ describe('Redmine tool metadata', () => {
       expect(tool.example).toBeDefined();
       expect(typeof tool.example).toBe('string');
       expect(tool.example!.trim().length).toBeGreaterThan(0);
+    });
+
+    it('has _meta with deferLoading', () => {
+      expect(tool._meta, `${tool.name} missing _meta`).toBeDefined();
+      expect(
+        typeof (tool._meta as Record<string, unknown>).deferLoading,
+        `${tool.name} missing deferLoading`
+      ).toBe('boolean');
     });
   });
 });

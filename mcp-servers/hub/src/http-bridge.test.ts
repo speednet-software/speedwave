@@ -16,16 +16,16 @@ import {
   STARTUP_RETRY_DELAYS_MS,
   parseResponse,
   buildWorkerHeaders,
-  MCP_PROTOCOL_VERSION,
 } from './http-bridge.js';
+import { LATEST_PROTOCOL_VERSION } from '@speedwave/mcp-shared';
 import {
   getServiceMethods,
   stopBackgroundRefresh,
   TOOL_REGISTRY,
   buildServiceBridge,
+  resetServiceCaches,
 } from './tool-registry.js';
-import { SERVICES } from './http-bridge.js';
-import { populateRegistryFromPolicies, _resetRegistryForTesting } from './test-helpers.js';
+import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
 import * as authTokens from './auth-tokens.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -40,7 +40,7 @@ import * as authTokens from './auth-tokens.js';
 describe('http-bridge', () => {
   beforeAll(() => {
     _resetRegistryForTesting();
-    populateRegistryFromPolicies();
+    populateRegistryWithMockTools();
   });
 
   afterAll(() => {
@@ -50,10 +50,12 @@ describe('http-bridge', () => {
   const savedEnv: Record<string, string | undefined> = {};
 
   beforeEach(() => {
-    for (const svc of SERVICES) {
+    const builtInServices = ['slack', 'sharepoint', 'redmine', 'gitlab', 'os'];
+    for (let i = 0; i < builtInServices.length; i++) {
+      const svc = builtInServices[i];
       const key = `WORKER_${svc.toUpperCase()}_URL`;
       savedEnv[key] = process.env[key];
-      process.env[key] = `http://mcp-${svc}:${3001 + SERVICES.indexOf(svc)}`;
+      process.env[key] = `http://mcp-${svc}:${3001 + i}`;
     }
   });
 
@@ -102,7 +104,7 @@ describe('http-bridge', () => {
           headers: expect.objectContaining({
             'Content-Type': 'application/json',
             Accept: 'application/json, text/event-stream',
-            'MCP-Protocol-Version': MCP_PROTOCOL_VERSION,
+            'MCP-Protocol-Version': LATEST_PROTOCOL_VERSION,
           }),
           body: expect.stringContaining('list_branches'),
         })
@@ -324,15 +326,24 @@ describe('http-bridge', () => {
 
   describe('getAvailableServices', () => {
     let fetchMock: ReturnType<typeof vi.fn>;
+    const origEnabled = process.env.ENABLED_SERVICES;
 
     beforeEach(() => {
       clearWorkerCache();
       fetchMock = vi.fn();
       global.fetch = fetchMock as unknown as typeof fetch;
+      process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,gitlab,os';
+      resetServiceCaches();
     });
 
     afterEach(() => {
       vi.restoreAllMocks();
+      if (origEnabled === undefined) {
+        delete process.env.ENABLED_SERVICES;
+      } else {
+        process.env.ENABLED_SERVICES = origEnabled;
+      }
+      resetServiceCaches();
     });
 
     it('should return list of available services', async () => {
@@ -1015,7 +1026,7 @@ describe('http-bridge', () => {
           headers: expect.objectContaining({
             'Content-Type': 'application/json',
             Accept: 'application/json, text/event-stream',
-            'MCP-Protocol-Version': MCP_PROTOCOL_VERSION,
+            'MCP-Protocol-Version': LATEST_PROTOCOL_VERSION,
             Authorization: 'Bearer test-secret-token',
           }),
         })
@@ -1040,7 +1051,7 @@ describe('http-bridge', () => {
       const calledHeaders = fetchMock.mock.calls[0][1].headers;
       expect(calledHeaders['Content-Type']).toBe('application/json');
       expect(calledHeaders['Accept']).toBe('application/json, text/event-stream');
-      expect(calledHeaders['MCP-Protocol-Version']).toBe(MCP_PROTOCOL_VERSION);
+      expect(calledHeaders['MCP-Protocol-Version']).toBe(LATEST_PROTOCOL_VERSION);
       expect(calledHeaders).not.toHaveProperty('Authorization');
     });
   });
@@ -1389,7 +1400,7 @@ describe('http-bridge', () => {
       const headers = buildWorkerHeaders();
       expect(headers['Content-Type']).toBe('application/json');
       expect(headers['Accept']).toBe('application/json, text/event-stream');
-      expect(headers['MCP-Protocol-Version']).toBe(MCP_PROTOCOL_VERSION);
+      expect(headers['MCP-Protocol-Version']).toBe(LATEST_PROTOCOL_VERSION);
     });
 
     it('adds Authorization header when auth token is provided', () => {
@@ -1484,6 +1495,56 @@ describe('http-bridge', () => {
       const result = await parseResponse(mockResponse);
       expect(result).toEqual({ jsonrpc: '2.0', id: '1', result: { ok: true } });
     });
+
+    it('throws with context when JSON body is malformed', async () => {
+      const mockResponse = {
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => {
+          throw new SyntaxError('Unexpected token < in JSON at position 0');
+        },
+      } as unknown as Response;
+
+      await expect(parseResponse(mockResponse)).rejects.toThrow(
+        /Failed to parse JSON response \(status 200\)/
+      );
+    });
+
+    it('throws with context when SSE data line contains invalid JSON', async () => {
+      const sseText = 'data: not-valid-json\n';
+      const mockResponse = {
+        status: 200,
+        headers: new Headers({ 'content-type': 'text/event-stream' }),
+        text: async () => sseText,
+      } as unknown as Response;
+
+      await expect(parseResponse(mockResponse)).rejects.toThrow(
+        /Failed to parse SSE JSON-RPC response \(status 200\)/
+      );
+    });
+
+    it('includes response status in JSON parse error message', async () => {
+      const mockResponse = {
+        status: 502,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => {
+          throw new SyntaxError('Unexpected end of JSON input');
+        },
+      } as unknown as Response;
+
+      await expect(parseResponse(mockResponse)).rejects.toThrow('status 502');
+    });
+
+    it('includes data preview in SSE parse error message', async () => {
+      const sseText = 'data: <html>Bad Gateway</html>\n';
+      const mockResponse = {
+        status: 502,
+        headers: new Headers({ 'content-type': 'text/event-stream' }),
+        text: async () => sseText,
+      } as unknown as Response;
+
+      await expect(parseResponse(mockResponse)).rejects.toThrow('Data: "<html>Bad Gateway</html>"');
+    });
   });
 
   describe('MCP ping health check', () => {
@@ -1513,6 +1574,30 @@ describe('http-bridge', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const body = JSON.parse(fetchMock.mock.calls[0][1].body);
       expect(body.method).toBe('ping');
+    });
+
+    it('logs warning when ping fails before falling back to /health', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      let callCount = 0;
+      fetchMock.mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) {
+          return Promise.reject(new Error('Connection error'));
+        }
+        return Promise.resolve({ ok: true });
+      });
+
+      const result = await isWorkerAvailable('gitlab');
+      expect(result).toBe(true);
+
+      const pingWarns = warnSpy.mock.calls
+        .map((c) => c.join(' '))
+        .filter((msg) => msg.includes('MCP ping failed for gitlab'));
+      expect(pingWarns).toHaveLength(1);
+      expect(pingWarns[0]).toContain('Connection error');
+
+      warnSpy.mockRestore();
     });
 
     it('falls back to /health when ping fails, returns true if /health succeeds', async () => {

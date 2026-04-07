@@ -3,12 +3,13 @@
  * Testing all MCP handler functions with 90%+ coverage
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 import { createCodeExecutorHandlers } from './handlers.js';
 import * as searchToolsModule from './search-tools.js';
 import * as executorModule from './executor.js';
 import * as toolRegistryModule from './tool-registry.js';
 import { TIMEOUTS } from '@speedwave/mcp-shared';
+import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
 
 // Helper factory for mock execute results
 function createMockExecuteResult(data: unknown, executionMs = 100) {
@@ -41,6 +42,15 @@ describe('createCodeExecutorHandlers', () => {
   const mockConfig = {
     timeoutMs: 10000,
   };
+
+  beforeAll(() => {
+    _resetRegistryForTesting();
+    populateRegistryWithMockTools();
+  });
+
+  afterAll(() => {
+    toolRegistryModule.stopBackgroundRefresh();
+  });
 
   beforeEach(() => {
     vi.clearAllMocks();

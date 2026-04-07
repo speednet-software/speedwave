@@ -2,7 +2,12 @@
  * Mail Tools — OS Mail integration
  */
 
-import { Tool, ToolDefinition } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  READ_ONLY_ANNOTATIONS,
+  DESTRUCTIVE_ANNOTATIONS,
+} from '@speedwave/mcp-shared';
 import { withValidation, ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
 import { runCommand } from '../platform-runner.js';
 
@@ -82,6 +87,8 @@ interface ReplyToEmailParams {
 const detectMailClientsTool: Tool = {
   name: 'detectMailClients',
   description: 'Detect available mail clients on this device (Apple Mail, Outlook, etc.)',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'mail' },
   keywords: ['os', 'mail', 'email', 'detect', 'clients', 'outlook', 'thunderbird'],
   example: 'const { clients } = await os.detectMailClients()',
   inputSchema: {
@@ -114,6 +121,8 @@ const detectMailClientsTool: Tool = {
 const listMailboxesTool: Tool = {
   name: 'listMailboxes',
   description: 'List mail accounts and mailboxes/folders',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'mail' },
   keywords: ['os', 'mail', 'email', 'mailboxes', 'accounts', 'inbox', 'folders'],
   example: 'const { mailboxes } = await os.listMailboxes()',
   inputSchema: {
@@ -154,6 +163,8 @@ const listMailboxesTool: Tool = {
 const listEmailsTool: Tool = {
   name: 'listEmails',
   description: 'List emails in a mailbox',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'mail' },
   keywords: ['os', 'mail', 'email', 'list', 'inbox', 'messages'],
   example: 'const { emails } = await os.listEmails({ limit: 10 })',
   inputSchema: {
@@ -199,6 +210,8 @@ const listEmailsTool: Tool = {
 const getEmailTool: Tool = {
   name: 'getEmail',
   description: 'Get a specific email by ID with full body',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'mail' },
   keywords: ['os', 'mail', 'email', 'get', 'read', 'detail', 'body', 'content'],
   example: 'const email = await os.getEmail({ id: "msg-456" })',
   inputSchema: {
@@ -242,6 +255,8 @@ const getEmailTool: Tool = {
 const searchEmailsTool: Tool = {
   name: 'searchEmails',
   description: 'Search emails by query string',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'mail' },
   keywords: ['os', 'mail', 'email', 'search', 'find', 'query'],
   example: 'const { emails } = await os.searchEmails({ query: "quarterly report" })',
   inputSchema: {
@@ -287,6 +302,8 @@ const searchEmailsTool: Tool = {
 const sendEmailTool: Tool = {
   name: 'sendEmail',
   description: 'Send a new email. Requires confirm_send=true as safety check.',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'mail' },
   keywords: ['os', 'mail', 'email', 'send', 'compose', 'write', 'new'],
   example:
     'await os.sendEmail({ to: ["alice@example.com"], subject: "Meeting notes", body: "See attached.", confirm_send: true })',
@@ -338,6 +355,8 @@ const sendEmailTool: Tool = {
 const replyToEmailTool: Tool = {
   name: 'replyToEmail',
   description: 'Reply to an existing email. Requires confirm_send=true as safety check.',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'mail' },
   keywords: ['os', 'mail', 'email', 'reply', 'respond', 'answer'],
   example:
     'await os.replyToEmail({ id: "msg-456", body: "Sounds good, let\'s proceed.", confirm_send: true })',

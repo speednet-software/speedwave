@@ -2,7 +2,14 @@
  * File Tools - Tools for SharePoint file operations
  */
 
-import { Tool, ToolDefinition, notConfiguredMessage } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  notConfiguredMessage,
+  READ_ONLY_ANNOTATIONS,
+  WRITE_ANNOTATIONS,
+  TIMEOUTS,
+} from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
 import { SharePointClient } from '../client.js';
 
@@ -58,6 +65,8 @@ const listFileIdsTool: Tool = {
       path: { type: 'string', description: 'Folder path (default: /)' },
     },
   },
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: false },
   keywords: ['sharepoint', 'files', 'list', 'directory', 'folder'],
   example: 'const files = await sharepoint.listFileIds({ path: "documents" })',
   outputSchema: {
@@ -102,6 +111,8 @@ const getFileFullTool: Tool = {
     },
     required: ['file_id'],
   },
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true, timeoutMs: TIMEOUTS.LONG_OPERATION_MS },
   keywords: ['sharepoint', 'file', 'get', 'detail', 'download', 'metadata'],
   example: 'const file = await sharepoint.getFileFull({ file_id: "abc123", include: ["content"] })',
   outputSchema: {
@@ -149,6 +160,8 @@ const downloadFileTool: Tool = {
       local_path: { type: 'string', description: 'Destination local path (alias for localPath)' },
     },
   },
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: true, timeoutClass: 'long' as const },
   keywords: ['sharepoint', 'download', 'file', 'get', 'fetch'],
   example:
     'await sharepoint.downloadFile({ sharepoint_path: "docs/report.pdf", local_path: "/workspace/report.pdf" })',
@@ -192,6 +205,8 @@ const uploadFileTool: Tool = {
       overwrite: { type: 'boolean', description: 'Overwrite without ETag check' },
     },
   },
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: true, timeoutClass: 'long' as const },
   keywords: ['sharepoint', 'upload', 'file', 'put', 'write', 'sync'],
   example:
     'await sharepoint.uploadFile({ local_path: "/workspace/report.pdf", sharepoint_path: "docs/report.pdf" })',

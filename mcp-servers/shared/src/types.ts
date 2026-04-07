@@ -6,6 +6,28 @@
  */
 
 //═══════════════════════════════════════════════════════════════════════════════
+// Protocol Version Constants
+//═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Protocol versions supported by this MCP implementation.
+ * SSOT — imported by jsonrpc.ts, transport.ts, and hub tool-discovery.ts.
+ * @see https://modelcontextprotocol.io/docs/specification/protocol
+ */
+export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = Object.freeze([
+  '2024-11-05',
+  '2025-03-26',
+  '2025-11-25',
+]);
+
+/**
+ * The latest (most recent) protocol version supported by this implementation.
+ * Used when the hub initiates connections to workers.
+ */
+export const LATEST_PROTOCOL_VERSION: string =
+  SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.length - 1];
+
+//═══════════════════════════════════════════════════════════════════════════════
 // JSON-RPC 2.0 Base Types
 //═══════════════════════════════════════════════════════════════════════════════
 
@@ -218,6 +240,31 @@ export interface ToolAnnotations {
   /** If true, the tool may interact with external entities beyond its host (default: true) */
   openWorldHint?: boolean;
 }
+
+//═══════════════════════════════════════════════════════════════════════════════
+// Annotation Constants
+//═══════════════════════════════════════════════════════════════════════════════
+
+/** Annotations for tools that only read data without side effects. */
+export const READ_ONLY_ANNOTATIONS: ToolAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  openWorldHint: true,
+};
+
+/** Annotations for tools that create or update data non-destructively. */
+export const WRITE_ANNOTATIONS: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  openWorldHint: true,
+};
+
+/** Annotations for tools that may perform irreversible or destructive changes. */
+export const DESTRUCTIVE_ANNOTATIONS: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  openWorldHint: true,
+};
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Request Processing Types

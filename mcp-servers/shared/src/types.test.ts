@@ -6,6 +6,7 @@ import type {
   ProcessRequestResult,
   ServerCapabilities,
 } from './types.js';
+import { READ_ONLY_ANNOTATIONS, WRITE_ANNOTATIONS, DESTRUCTIVE_ANNOTATIONS } from './types.js';
 
 describe('Tool interface', () => {
   it('supports base fields only (backward compatible)', () => {
@@ -382,5 +383,74 @@ describe('ServerCapabilities', () => {
     expect(capabilities.prompts!.listChanged).toBe(false);
     expect(capabilities.logging).toEqual({});
     expect(capabilities.experimental!['customFeature']).toBe(true);
+  });
+});
+
+describe('Annotation constants', () => {
+  it('READ_ONLY_ANNOTATIONS marks tool as read-only and non-destructive', () => {
+    expect(READ_ONLY_ANNOTATIONS).toEqual({
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: true,
+    });
+  });
+
+  it('WRITE_ANNOTATIONS marks tool as non-read-only and non-destructive', () => {
+    expect(WRITE_ANNOTATIONS).toEqual({
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: true,
+    });
+  });
+
+  it('DESTRUCTIVE_ANNOTATIONS marks tool as non-read-only and destructive', () => {
+    expect(DESTRUCTIVE_ANNOTATIONS).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: true,
+    });
+  });
+
+  it('all three constants are distinct objects', () => {
+    expect(READ_ONLY_ANNOTATIONS).not.toBe(WRITE_ANNOTATIONS);
+    expect(WRITE_ANNOTATIONS).not.toBe(DESTRUCTIVE_ANNOTATIONS);
+    expect(READ_ONLY_ANNOTATIONS).not.toBe(DESTRUCTIVE_ANNOTATIONS);
+  });
+
+  it('constants are assignable to ToolAnnotations', () => {
+    const ro: ToolAnnotations = READ_ONLY_ANNOTATIONS;
+    const wr: ToolAnnotations = WRITE_ANNOTATIONS;
+    const de: ToolAnnotations = DESTRUCTIVE_ANNOTATIONS;
+    expect(ro.readOnlyHint).toBe(true);
+    expect(wr.readOnlyHint).toBe(false);
+    expect(de.destructiveHint).toBe(true);
+  });
+
+  it('constants can be used in Tool definitions', () => {
+    const readTool: Tool = {
+      name: 'readTool',
+      description: 'Read-only tool',
+      inputSchema: { type: 'object', properties: {} },
+      annotations: READ_ONLY_ANNOTATIONS,
+    };
+    const writeTool: Tool = {
+      name: 'writeTool',
+      description: 'Write tool',
+      inputSchema: { type: 'object', properties: {} },
+      annotations: WRITE_ANNOTATIONS,
+    };
+    const destructiveTool: Tool = {
+      name: 'destructiveTool',
+      description: 'Destructive tool',
+      inputSchema: { type: 'object', properties: {} },
+      annotations: DESTRUCTIVE_ANNOTATIONS,
+    };
+
+    expect(readTool.annotations!.readOnlyHint).toBe(true);
+    expect(readTool.annotations!.destructiveHint).toBe(false);
+    expect(writeTool.annotations!.readOnlyHint).toBe(false);
+    expect(writeTool.annotations!.destructiveHint).toBe(false);
+    expect(destructiveTool.annotations!.readOnlyHint).toBe(false);
+    expect(destructiveTool.annotations!.destructiveHint).toBe(true);
   });
 });

@@ -3,24 +3,20 @@
  * @module tool-discovery
  *
  * Fetches tool definitions from workers via JSON-RPC `tools/list`.
- * Merges worker tool data with hub policy to produce ToolMetadata.
+ * Merges worker tool data with _meta metadata to produce ToolMetadata.
  *
- * Workers are the SSOT for: name, description, inputSchema, inputExamples,
- * keywords, example, outputSchema, annotations.
- *
- * Hub policy is authoritative for: deferLoading, timeoutClass,
- * timeoutMs, osCategory, service.
+ * Workers are the SSOT for ALL tool metadata:
+ * - Contract: name, description, inputSchema, inputExamples, keywords, example, outputSchema, annotations
+ * - Policy: deferLoading, timeoutClass, timeoutMs, osCategory (via _meta field)
  */
 
 import { randomUUID } from 'crypto';
 import type { Tool } from '@speedwave/mcp-shared';
-import { TIMEOUTS, ts } from '@speedwave/mcp-shared';
+import { TIMEOUTS, LATEST_PROTOCOL_VERSION, ts } from '@speedwave/mcp-shared';
 import type { ToolMetadata } from './hub-types.js';
-import type { ToolPolicy } from './hub-tool-policy.js';
-import { getServicePolicies, getPluginToolPolicy } from './hub-tool-policy.js';
-import { isPluginService } from './service-list.js';
 import { getAuthToken } from './auth-tokens.js';
 import { validateWorkerUrl } from '@speedwave/mcp-shared';
+import { parseResponse, buildWorkerHeaders } from './http-bridge.js';
 
 /**
  * Convert snake_case tool name to camelCase method name.
@@ -32,7 +28,120 @@ export function toCamelCase(str: string): string {
 }
 
 /**
- * Fetch tool list from a worker service via JSON-RPC tools/list.
+ * Perform MCP initialize handshake with a worker.
+ * Sends `initialize` request followed by `notifications/initialized` notification.
+ * Returns the Mcp-Session-Id if the worker set one, or undefined.
+ * @param workerUrl - Worker base URL
+ * @param headers - Request headers (Content-Type, Accept, auth, etc.)
+ * @returns Session ID from the worker, or undefined
+ */
+export async function initializeWorker(
+  workerUrl: string,
+  headers: Record<string, string>
+): Promise<string | undefined> {
+  const response = await fetch(workerUrl, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: randomUUID(),
+      method: 'initialize',
+      params: {
+        protocolVersion: LATEST_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: 'speedwave-hub', version: '1.0.0' },
+      },
+    }),
+    signal: AbortSignal.timeout(TIMEOUTS.TOOL_DISCOVERY_MS),
+    redirect: 'error',
+  });
+
+  const initResult = await parseResponse(response);
+  if (initResult.error) {
+    throw new Error(
+      `Worker initialize failed: [${initResult.error.code}] ${initResult.error.message}`
+    );
+  }
+  const sessionId = response.headers.get('Mcp-Session-Id') ?? undefined;
+
+  // Send notifications/initialized (no id = notification, no response expected)
+  const notifResponse = await fetch(workerUrl, {
+    method: 'POST',
+    headers: { ...headers, ...(sessionId ? { 'Mcp-Session-Id': sessionId } : {}) },
+    body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+    signal: AbortSignal.timeout(TIMEOUTS.TOOL_DISCOVERY_MS),
+    redirect: 'error',
+  });
+
+  if (!notifResponse.ok) {
+    console.warn(
+      `${ts()} [tool-discovery] notifications/initialized returned ${notifResponse.status} for ${workerUrl}`
+    );
+  }
+
+  return sessionId;
+}
+
+/** Maximum number of pagination pages to fetch before breaking to prevent infinite loops. */
+export const MAX_PAGINATION_PAGES = 50;
+
+/**
+ * Fetch all tools from a worker with cursor-based pagination.
+ * Iterates `tools/list` until no `nextCursor` is returned or
+ * MAX_PAGINATION_PAGES is reached.
+ * @param workerUrl - Worker base URL
+ * @param headers - Request headers (Content-Type, Accept, auth, session, etc.)
+ * @returns Array of all Tool definitions from the worker
+ */
+export async function fetchAllTools(
+  workerUrl: string,
+  headers: Record<string, string>
+): Promise<Tool[]> {
+  const allTools: Tool[] = [];
+  let cursor: string | undefined;
+  let page = 0;
+
+  do {
+    if (page >= MAX_PAGINATION_PAGES) {
+      console.warn(
+        `${ts()} [tool-discovery] Pagination limit reached (${MAX_PAGINATION_PAGES} pages, ${allTools.length} tools) for ${workerUrl} — returning partial results`
+      );
+      break;
+    }
+
+    const response = await fetch(workerUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: randomUUID(),
+        method: 'tools/list',
+        params: cursor ? { cursor } : {},
+      }),
+      signal: AbortSignal.timeout(TIMEOUTS.TOOL_DISCOVERY_MS),
+      redirect: 'error',
+    });
+
+    if (!response.ok) {
+      throw new Error(`Worker returned ${response.status}`);
+    }
+
+    const result = await parseResponse(response);
+    if (result.error) {
+      throw new Error(result.error.message);
+    }
+
+    const resultObj = result.result as { tools?: Tool[]; nextCursor?: string } | undefined;
+    allTools.push(...(resultObj?.tools ?? []));
+    cursor = resultObj?.nextCursor;
+    page++;
+  } while (cursor);
+
+  return allTools;
+}
+
+/**
+ * Fetch tool list from a worker service via MCP initialize handshake + paginated tools/list.
  * @param service - Service name (e.g., 'redmine', 'gitlab')
  * @returns Array of Tool definitions from the worker, or empty array on failure
  */
@@ -48,54 +157,19 @@ export async function discoverServiceTools(service: string): Promise<Tool[]> {
     return [];
   }
 
-  const requestId = randomUUID();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.TOOL_DISCOVERY_MS);
-
   try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     const authToken = getAuthToken(service);
-    if (authToken) {
-      headers['Authorization'] = `Bearer ${authToken}`;
-    }
+    const headers = buildWorkerHeaders(authToken);
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: requestId,
-        method: 'tools/list',
-        params: {},
-      }),
-      signal: controller.signal,
-      redirect: 'error',
-    });
+    // Perform MCP initialize handshake
+    const sessionId = await initializeWorker(url, headers);
+    const toolHeaders = sessionId ? { ...headers, 'Mcp-Session-Id': sessionId } : headers;
 
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      console.error(`${ts()} [tool-discovery] Worker ${service} returned ${response.status}`);
-      return [];
-    }
-
-    const result = (await response.json()) as {
-      jsonrpc: '2.0';
-      id: string | number;
-      result?: { tools?: Tool[] };
-      error?: { code: number; message: string };
-    };
-
-    if (result.error) {
-      console.error(`${ts()} [tool-discovery] Worker ${service} error: ${result.error.message}`);
-      return [];
-    }
-
-    const tools = result.result?.tools ?? [];
+    // Fetch all tools with pagination
+    const tools = await fetchAllTools(url, toolHeaders);
     console.log(`${ts()} [tool-discovery] Discovered ${tools.length} tools from ${service}`);
     return tools;
   } catch (error) {
-    clearTimeout(timeoutId);
     const msg = error instanceof Error ? error.message : String(error);
     console.warn(`${ts()} [tool-discovery] Failed to discover ${service}: ${msg}`);
     return [];
@@ -103,20 +177,16 @@ export async function discoverServiceTools(service: string): Promise<Tool[]> {
 }
 
 /**
- * Merge a worker Tool definition with hub ToolPolicy to produce ToolMetadata.
- * Worker fields take precedence for the tool contract.
- * Hub policy provides operational fields.
- * @param tool - Worker Tool definition
- * @param policy - Hub-side policy for this tool
+ * Merge a worker Tool definition with its _meta to produce ToolMetadata.
+ * Workers are the SSOT for all fields — both contract and policy (via _meta).
+ * @param tool - Worker Tool definition (including _meta with policy fields)
  * @param service - Service name (e.g., 'redmine')
  * @param methodName - camelCase method name (e.g., 'createIssue')
  */
-export function mergeToolWithPolicy(
-  tool: Tool,
-  policy: ToolPolicy,
-  service: string,
-  methodName: string
-): ToolMetadata {
+export function mergeToolWithMeta(tool: Tool, service: string, methodName: string): ToolMetadata {
+  const meta = tool._meta ?? {};
+  const validOsCategories = ['reminders', 'calendar', 'mail', 'notes'] as const;
+  const rawOsCategory = typeof meta.osCategory === 'string' ? meta.osCategory : undefined;
   return {
     name: methodName,
     description: tool.description,
@@ -126,37 +196,19 @@ export function mergeToolWithPolicy(
     example: tool.example ?? '',
     inputExamples: tool.inputExamples,
     service,
-    deferLoading: policy.deferLoading,
-    timeoutClass: policy.timeoutClass,
-    timeoutMs: policy.timeoutMs,
-    osCategory: policy.osCategory,
-  };
-}
-
-/**
- * Build a skeleton ToolMetadata from policy alone when worker is unavailable.
- * This allows the hub to start and serve basic tool info (names)
- * even if workers haven't started yet.
- * @param service - Service name (e.g., 'redmine')
- * @param methodName - camelCase method name (e.g., 'listIssueIds')
- * @param policy - Hub-side policy for this tool
- */
-export function buildSkeletonFromPolicy(
-  service: string,
-  methodName: string,
-  policy: ToolPolicy
-): ToolMetadata {
-  return {
-    name: methodName,
-    description: `${methodName} — use search_tools for full schema`,
-    keywords: [],
-    inputSchema: { type: 'object', properties: {} },
-    example: '',
-    service,
-    deferLoading: policy.deferLoading,
-    timeoutClass: policy.timeoutClass,
-    timeoutMs: policy.timeoutMs,
-    osCategory: policy.osCategory,
+    deferLoading: typeof meta.deferLoading === 'boolean' ? meta.deferLoading : true,
+    timeoutClass:
+      meta.timeoutClass === 'long'
+        ? 'long'
+        : meta.timeoutClass === 'standard'
+          ? 'standard'
+          : undefined,
+    timeoutMs:
+      typeof meta.timeoutMs === 'number' && meta.timeoutMs > 0 ? meta.timeoutMs : undefined,
+    osCategory:
+      rawOsCategory && (validOsCategories as readonly string[]).includes(rawOsCategory)
+        ? (rawOsCategory as ToolMetadata['osCategory'])
+        : undefined,
   };
 }
 
@@ -199,8 +251,8 @@ export function validateMergeResult(
 
 /**
  * Discover and merge tools for a service.
- * Fetches tool list from worker, merges with hub policy, validates.
- * Falls back to skeleton entries for tools not found in worker response.
+ * Fetches tool list from worker, merges with _meta, validates.
+ * Single unified path for all services (built-in and plugin).
  * @param service - Service name
  * @returns Record of camelCase method names to ToolMetadata
  */
@@ -208,67 +260,18 @@ export async function discoverAndMergeService(
   service: string
 ): Promise<Record<string, ToolMetadata>> {
   const result: Record<string, ToolMetadata> = {};
-
-  // Fetch from worker
   const workerTools = await discoverServiceTools(service);
 
-  // Plugin services: accept ALL worker tools, no policy-gating
-  if (isPluginService(service)) {
-    for (const tool of workerTools) {
-      const methodName = toCamelCase(tool.name);
-      const policy = getPluginToolPolicy();
-      const merged = mergeToolWithPolicy(tool, policy, service, methodName);
-      const errors = validateMergeResult(service, methodName, merged);
-      if (errors.length > 0) {
-        console.warn(
-          `${ts()} [tool-discovery] Validation errors for plugin ${service}.${methodName}: ${errors.join('; ')} — skipping`
-        );
-      } else {
-        result[methodName] = merged;
-      }
-    }
-    return result;
-  }
-
-  // Built-in services: merge with hub policy
-  const policies = getServicePolicies(service);
-
-  // Index worker tools by camelCase name
-  const toolsByMethod = new Map<string, Tool>();
   for (const tool of workerTools) {
     const methodName = toCamelCase(tool.name);
-    toolsByMethod.set(methodName, tool);
-  }
-
-  // Merge each policy entry with worker data (or build skeleton)
-  for (const [methodName, policy] of Object.entries(policies)) {
-    const workerTool = toolsByMethod.get(methodName);
-
-    if (workerTool) {
-      const merged = mergeToolWithPolicy(workerTool, policy, service, methodName);
-      const errors = validateMergeResult(service, methodName, merged);
-      if (errors.length > 0) {
-        console.warn(
-          `${ts()} [tool-discovery] Validation errors for ${service}.${methodName}: ${errors.join('; ')} — using skeleton`
-        );
-        result[methodName] = buildSkeletonFromPolicy(service, methodName, policy);
-      } else {
-        result[methodName] = merged;
-      }
+    const merged = mergeToolWithMeta(tool, service, methodName);
+    const errors = validateMergeResult(service, methodName, merged);
+    if (errors.length > 0) {
+      console.warn(
+        `${ts()} [tool-discovery] Validation errors for ${service}.${methodName}: ${errors.join('; ')} — skipping`
+      );
     } else {
-      console.warn(
-        `${ts()} [tool-discovery] Tool ${service}.${methodName} not found in worker, using skeleton`
-      );
-      result[methodName] = buildSkeletonFromPolicy(service, methodName, policy);
-    }
-  }
-
-  // Warn about tools in worker but not in policy (new tools not yet registered)
-  for (const [methodName] of toolsByMethod) {
-    if (!policies[methodName]) {
-      console.warn(
-        `${ts()} [tool-discovery] Worker ${service} has tool '${methodName}' not in policy — ignoring`
-      );
+      result[methodName] = merged;
     }
   }
 

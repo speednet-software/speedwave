@@ -29,6 +29,12 @@ describe('OS tool metadata', () => {
   });
 
   describe.each(ALL_TOOLS.map((td) => [td.tool.name, td] as const))('%s', (_name, td) => {
+    it('has annotations with readOnlyHint and destructiveHint', () => {
+      expect(td.tool.annotations).toBeDefined();
+      expect(typeof td.tool.annotations!.readOnlyHint).toBe('boolean');
+      expect(typeof td.tool.annotations!.destructiveHint).toBe('boolean');
+    });
+
     it('has a non-empty keywords array', () => {
       expect(td.tool.keywords).toBeDefined();
       expect(Array.isArray(td.tool.keywords)).toBe(true);
@@ -61,6 +67,14 @@ describe('OS tool metadata', () => {
         expect(typeof ex.input).toBe('object');
       }
     });
+
+    it('has _meta with deferLoading', () => {
+      expect(td.tool._meta, `${td.tool.name} missing _meta`).toBeDefined();
+      expect(
+        typeof (td.tool._meta as Record<string, unknown>).deferLoading,
+        `${td.tool.name} missing deferLoading`
+      ).toBe('boolean');
+    });
   });
 
   it('all tool names are unique', () => {
@@ -68,22 +82,26 @@ describe('OS tool metadata', () => {
     expect(new Set(names).size).toBe(names.length);
   });
 
-  it('has expected write and delete tool names', () => {
+  it('write/delete tools have appropriate categories', () => {
     const writeTools = [
       'createReminder',
       'completeReminder',
       'createEvent',
       'updateEvent',
-      'sendEmail',
-      'replyToEmail',
       'createNote',
       'updateNote',
     ];
-    const deleteTools = ['deleteEvent', 'deleteNote'];
-    const toolNames = ALL_TOOLS.map((td) => td.tool.name);
+    const deleteTools = ['deleteEvent', 'deleteNote', 'sendEmail', 'replyToEmail'];
 
-    for (const name of [...writeTools, ...deleteTools]) {
-      expect(toolNames).toContain(name);
+    for (const td of ALL_TOOLS) {
+      if (writeTools.includes(td.tool.name)) {
+        expect(td.tool.annotations?.readOnlyHint).toBe(false);
+        expect(td.tool.annotations?.destructiveHint).toBe(false);
+      }
+      if (deleteTools.includes(td.tool.name)) {
+        expect(td.tool.annotations?.readOnlyHint).toBe(false);
+        expect(td.tool.annotations?.destructiveHint).toBe(true);
+      }
     }
   });
 });

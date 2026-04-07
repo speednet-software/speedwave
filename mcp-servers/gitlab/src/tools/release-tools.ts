@@ -8,6 +8,8 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  WRITE_ANNOTATIONS,
+  DESTRUCTIVE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
@@ -15,6 +17,8 @@ import { withValidation } from './validation.js';
 const createTagTool: Tool = {
   name: 'createTag',
   description: 'Create a new Git tag',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'tag', 'create', 'release', 'version', 'git'],
   example:
     'const tag = await gitlab.createTag({ project_id: "speedwave/core", tag_name: "v1.0.0", ref: "main", message: "Release v1.0.0 - Initial stable release" })',
@@ -68,6 +72,8 @@ const createTagTool: Tool = {
 const deleteTagTool: Tool = {
   name: 'deleteTag',
   description: 'Delete a Git tag from the repository',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'tag', 'delete', 'remove', 'git', 'version', 'release'],
   example: 'await gitlab.deleteTag({ project_id: "speedwave/core", tag_name: "v1.0.0" })',
   inputSchema: {
@@ -102,6 +108,8 @@ const deleteTagTool: Tool = {
 const createReleaseTool: Tool = {
   name: 'createRelease',
   description: 'Create a new release from a tag',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'release', 'create', 'changelog', 'version', 'publish'],
   example:
     'const release = await gitlab.createRelease({ project_id: "speedwave/core", tag_name: "v1.0.0", name: "Initial Release", description: "## Changelog\\n- Feature: Authentication\\n- Feature: MCP integration" })',

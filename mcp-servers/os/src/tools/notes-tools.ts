@@ -2,7 +2,13 @@
  * Notes Tools — OS Notes integration
  */
 
-import { Tool, ToolDefinition } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  READ_ONLY_ANNOTATIONS,
+  WRITE_ANNOTATIONS,
+  DESTRUCTIVE_ANNOTATIONS,
+} from '@speedwave/mcp-shared';
 import { withValidation, ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
 import { runCommand } from '../platform-runner.js';
 
@@ -70,6 +76,8 @@ interface DeleteNoteParams {
 const listNoteFoldersTool: Tool = {
   name: 'listNoteFolders',
   description: 'List all note folders/notebooks available on this device',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'notes' },
   keywords: ['os', 'notes', 'folders', 'notebooks', 'list', 'categories'],
   example: 'const { folders } = await os.listNoteFolders()',
   inputSchema: {
@@ -104,6 +112,8 @@ const listNoteFoldersTool: Tool = {
 const listNotesTool: Tool = {
   name: 'listNotes',
   description: 'List notes, optionally filtered by folder',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'notes' },
   keywords: ['os', 'notes', 'list', 'documents', 'memos'],
   example: 'const { notes } = await os.listNotes({ limit: 20 })',
   inputSchema: {
@@ -146,6 +156,8 @@ const listNotesTool: Tool = {
 const getNoteTool: Tool = {
   name: 'getNote',
   description: 'Get a specific note by ID with full body content',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'notes' },
   keywords: ['os', 'note', 'get', 'read', 'detail', 'content', 'body'],
   example: 'const note = await os.getNote({ id: "note-789" })',
   inputSchema: {
@@ -179,6 +191,8 @@ const getNoteTool: Tool = {
 const searchNotesTool: Tool = {
   name: 'searchNotes',
   description: 'Search notes by query string',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'notes' },
   keywords: ['os', 'notes', 'search', 'find', 'query'],
   example: 'const { notes } = await os.searchNotes({ query: "meeting notes" })',
   inputSchema: {
@@ -224,6 +238,8 @@ const searchNotesTool: Tool = {
 const createNoteTool: Tool = {
   name: 'createNote',
   description: 'Create a new note',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'notes' },
   keywords: ['os', 'note', 'create', 'new', 'add', 'write'],
   example:
     'const { id } = await os.createNote({ title: "Sprint Retro Notes", body: "## What went well\\n- Deployment was smooth" })',
@@ -262,6 +278,8 @@ const createNoteTool: Tool = {
 const updateNoteTool: Tool = {
   name: 'updateNote',
   description: 'Update an existing note',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'notes' },
   keywords: ['os', 'note', 'update', 'edit', 'modify'],
   example: 'await os.updateNote({ id: "note-789", body: "Updated content here" })',
   inputSchema: {
@@ -294,6 +312,8 @@ const updateNoteTool: Tool = {
 const deleteNoteTool: Tool = {
   name: 'deleteNote',
   description: 'Delete a note',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'notes' },
   keywords: ['os', 'note', 'delete', 'remove'],
   example: 'await os.deleteNote({ id: "note-789" })',
   inputSchema: {

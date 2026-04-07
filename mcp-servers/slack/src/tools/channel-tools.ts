@@ -2,7 +2,13 @@
  * Channel Tools - Tools for Slack channel operations
  */
 
-import { Tool, ToolDefinition, notConfiguredMessage } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  notConfiguredMessage,
+  READ_ONLY_ANNOTATIONS,
+  WRITE_ANNOTATIONS,
+} from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
 import {
   SlackClients,
@@ -46,6 +52,8 @@ const sendChannelTool: Tool = {
     },
     required: ['channel', 'message'],
   },
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: false },
   keywords: ['slack', 'send', 'message', 'channel', 'post', 'write'],
   example: 'await slack.sendChannel({ channel: "#general", message: "Hello!" })',
   outputSchema: {
@@ -83,6 +91,8 @@ const getChannelMessagesTool: Tool = {
     },
     required: ['channel'],
   },
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['slack', 'read', 'message', 'history', 'channel', 'get'],
   example: 'const messages = await slack.getChannelMessages({ channel: "#general", limit: 10 })',
   outputSchema: {
@@ -133,6 +143,8 @@ const listChannelIdsTool: Tool = {
       },
     },
   },
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: false },
   keywords: ['slack', 'channels', 'list', 'get', 'member'],
   example: 'const channels = await slack.listChannelIds()',
   outputSchema: {

@@ -8,6 +8,8 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  READ_ONLY_ANNOTATIONS,
+  DESTRUCTIVE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
@@ -15,6 +17,8 @@ import { withValidation } from './validation.js';
 const listArtifactsTool: Tool = {
   name: 'listArtifacts',
   description: 'List artifacts from a pipeline',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'artifacts', 'pipeline', 'ci', 'build'],
   example:
     'const artifacts = await gitlab.listArtifacts({ project_id: "speedwave/core", pipeline_id: 12345 })',
@@ -57,6 +61,8 @@ const listArtifactsTool: Tool = {
 const downloadArtifactTool: Tool = {
   name: 'downloadArtifact',
   description: 'Download job artifacts',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'artifact', 'download', 'ci', 'build'],
   example:
     'const artifact = await gitlab.downloadArtifact({ project_id: "speedwave/core", job_id: 54321 })',
@@ -94,6 +100,8 @@ const downloadArtifactTool: Tool = {
 const deleteArtifactsTool: Tool = {
   name: 'deleteArtifacts',
   description: 'Delete job artifacts',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'artifacts', 'delete', 'remove', 'ci'],
   example: 'await gitlab.deleteArtifacts({ project_id: "speedwave/core", job_id: 54321 })',
   inputSchema: {

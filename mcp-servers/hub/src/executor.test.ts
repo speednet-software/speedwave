@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } 
 import { executeCode, _setBridgesForTesting, _formatErrorMessage } from './executor.js';
 import { resetServiceCaches, stopBackgroundRefresh } from './tool-registry.js';
 import {
-  populateRegistryFromPolicies,
+  populateRegistryWithMockTools,
   _resetRegistryForTesting,
   createMockBridges,
 } from './test-helpers.js';
@@ -22,7 +22,7 @@ import {
 describe('executor', () => {
   beforeAll(() => {
     _resetRegistryForTesting();
-    populateRegistryFromPolicies();
+    populateRegistryWithMockTools();
   });
 
   afterAll(() => {

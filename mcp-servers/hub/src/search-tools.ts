@@ -89,8 +89,8 @@ export async function searchTools(params: SearchToolsParams): Promise<SearchTool
         continue;
       }
 
-      // Skip OS tools whose category is disabled
-      if (svc === 'os' && tool.osCategory && disabledOs.has(tool.osCategory)) {
+      // Skip tools whose OS category is disabled
+      if (tool.osCategory && disabledOs.has(tool.osCategory)) {
         continue;
       }
 

@@ -8,6 +8,8 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  READ_ONLY_ANNOTATIONS,
+  WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
@@ -15,6 +17,8 @@ import { withValidation } from './validation.js';
 const listMrDiscussionsTool: Tool = {
   name: 'listMrDiscussions',
   description: 'List discussion threads on a merge request',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'merge', 'request', 'discussions', 'threads'],
   example:
     'const discussions = await gitlab.listMrDiscussions({ project_id: "speedwave/core", mr_iid: 42 })',
@@ -56,6 +60,8 @@ const listMrDiscussionsTool: Tool = {
 const createMrDiscussionTool: Tool = {
   name: 'createMrDiscussion',
   description: 'Create a discussion thread on a merge request',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'merge', 'request', 'discussion', 'thread'],
   example:
     'await gitlab.createMrDiscussion({ project_id: "speedwave/core", mr_iid: 42, body: "What about error handling?" })',

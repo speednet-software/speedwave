@@ -8,6 +8,8 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  READ_ONLY_ANNOTATIONS,
+  WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
@@ -15,6 +17,8 @@ import { withValidation } from './validation.js';
 const listLabelsTool: Tool = {
   name: 'listLabels',
   description: 'List project labels',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'labels', 'list', 'tags'],
   example: 'const labels = await gitlab.listLabels({ project_id: "speedwave/core" })',
   inputSchema: {
@@ -57,6 +61,8 @@ const listLabelsTool: Tool = {
 const createLabelTool: Tool = {
   name: 'createLabel',
   description: 'Create a project label',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'label', 'create', 'new', 'tag'],
   example:
     'const label = await gitlab.createLabel({ project_id: "speedwave/core", name: "urgent", color: "#FF0000" })',

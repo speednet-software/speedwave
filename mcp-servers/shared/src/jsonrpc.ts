@@ -11,13 +11,15 @@ import type {
   ToolsListResult,
   Tool,
   ToolHandler,
+  ProcessRequestResult,
 } from './types.js';
-import { JSONRPCErrorCode } from './types.js';
+import { JSONRPCErrorCode, SUPPORTED_PROTOCOL_VERSIONS, LATEST_PROTOCOL_VERSION } from './types.js';
 import { validateJSONRPCMessage, validateToolName } from './security.js';
 import { sessionManager } from './session.js';
 import { ts } from './logger.js';
 
-const SUPPORTED_PROTOCOL_VERSIONS = ['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25'];
+/** Page size for tools/list pagination */
+const TOOLS_LIST_PAGE_SIZE = 100;
 
 /**
  * JSON-RPC Error Builder
@@ -89,6 +91,8 @@ export interface JSONRPCHandlerOptions {
   name: string;
   /** Server version */
   version: string;
+  /** Optional human-readable instructions for the client (included in initialize result) */
+  instructions?: string;
 }
 
 /**
@@ -99,6 +103,7 @@ export class JSONRPCHandler {
   private tools: Map<string, Tool> = new Map();
   private toolHandlers: Map<string, ToolHandler> = new Map();
   private serverInfo: { name: string; version: string };
+  private instructions?: string;
 
   /**
    * Creates a new JSON-RPC handler instance with server identification
@@ -106,6 +111,7 @@ export class JSONRPCHandler {
    */
   constructor(options: JSONRPCHandlerOptions) {
     this.serverInfo = { name: options.name, version: options.version };
+    this.instructions = options.instructions;
   }
 
   /**
@@ -124,14 +130,28 @@ export class JSONRPCHandler {
   }
 
   /**
-   * Process a JSON-RPC request
+   * Process a JSON-RPC request or notification
    * @param body Request body
    * @param sessionId Session ID (or null for new session)
-   * @returns JSON-RPC response
+   * @returns ProcessRequestResult with response (null for notifications) and optional sessionId
    */
-  public async processRequest(body: unknown, sessionId: string | null): Promise<JSONRPCResponse> {
+  public async processRequest(
+    body: unknown,
+    sessionId: string | null
+  ): Promise<ProcessRequestResult> {
+    // Check for notification before full validation (notifications have no id)
+    const message = body as Record<string, unknown>;
+    if (
+      typeof message === 'object' &&
+      message !== null &&
+      typeof message.method === 'string' &&
+      !('id' in message)
+    ) {
+      return this.handleNotification(message.method, message.params as Record<string, unknown>);
+    }
+
     if (!validateJSONRPCMessage(body)) {
-      return this.buildErrorResponse(null, JSONRPCErrorBuilder.invalidRequest());
+      return { response: this.buildErrorResponse(null, JSONRPCErrorBuilder.invalidRequest()) };
     }
 
     const request = body as JSONRPCRequest;
@@ -141,47 +161,88 @@ export class JSONRPCHandler {
         case 'initialize':
           return await this.handleInitialize(request);
 
-        case 'notifications/initialized':
-          console.log(`${ts()} ✅ Client initialized`);
-          return { jsonrpc: '2.0', id: request.id, result: {} };
+        case 'ping':
+          return { response: { jsonrpc: '2.0', id: request.id, result: {} } };
+
+        case 'logging/setLevel':
+          return { response: { jsonrpc: '2.0', id: request.id, result: {} } };
 
         case 'tools/list':
-          return await this.handleToolsList(request, sessionId);
+          return { response: await this.handleToolsList(request, sessionId) };
 
         case 'tools/call':
-          return await this.handleToolsCall(request, sessionId);
+          return { response: await this.handleToolsCall(request, sessionId) };
 
         default:
-          return this.buildErrorResponse(
-            request.id,
-            JSONRPCErrorBuilder.methodNotFound(request.method)
-          );
+          return {
+            response: this.buildErrorResponse(
+              request.id,
+              JSONRPCErrorBuilder.methodNotFound(request.method)
+            ),
+          };
       }
     } catch (error) {
-      return this.buildErrorResponse(request.id, JSONRPCErrorBuilder.internalError(error));
+      return {
+        response: this.buildErrorResponse(request.id, JSONRPCErrorBuilder.internalError(error)),
+      };
+    }
+  }
+
+  /**
+   * Handle JSON-RPC notifications (messages without id).
+   * Per JSON-RPC spec, notifications produce no response.
+   * @param method - Notification method name
+   * @param params - Optional notification parameters
+   */
+  private handleNotification(
+    method: string,
+    params?: Record<string, unknown>
+  ): ProcessRequestResult {
+    switch (method) {
+      case 'notifications/initialized':
+        console.log(`${ts()} Client initialized`);
+        return { response: null };
+
+      case 'notifications/cancelled': {
+        const requestId = params?.requestId ?? 'unknown';
+        console.log(`${ts()} Client cancelled request: ${requestId}`);
+        return { response: null };
+      }
+
+      default:
+        if (method.startsWith('notifications/')) {
+          console.warn(`${ts()} Unknown notification: ${method}`);
+        } else {
+          console.warn(`${ts()} Ignoring notification for non-notification method: ${method}`);
+        }
+        return { response: null };
     }
   }
 
   /**
    * Handle initialize request
    * @param request - The initialization request from the client
-   * @returns JSON-RPC response with server capabilities and session ID
+   * @returns ProcessRequestResult with server capabilities and sessionId
    */
-  private async handleInitialize(request: JSONRPCRequest): Promise<JSONRPCResponse> {
+  private async handleInitialize(request: JSONRPCRequest): Promise<ProcessRequestResult> {
     const params = request.params;
 
     if (!params || typeof params !== 'object') {
-      return this.buildErrorResponse(
-        request.id,
-        JSONRPCErrorBuilder.invalidParams('initialize requires params object')
-      );
+      return {
+        response: this.buildErrorResponse(
+          request.id,
+          JSONRPCErrorBuilder.invalidParams('initialize requires params object')
+        ),
+      };
     }
 
     if (typeof params.protocolVersion !== 'string') {
-      return this.buildErrorResponse(
-        request.id,
-        JSONRPCErrorBuilder.invalidParams('initialize requires params.protocolVersion as string')
-      );
+      return {
+        response: this.buildErrorResponse(
+          request.id,
+          JSONRPCErrorBuilder.invalidParams('initialize requires params.protocolVersion as string')
+        ),
+      };
     }
 
     const clientInfo = params.clientInfo as Record<string, unknown> | undefined;
@@ -191,46 +252,51 @@ export class JSONRPCHandler {
       typeof clientInfo.name !== 'string' ||
       typeof clientInfo.version !== 'string'
     ) {
-      return this.buildErrorResponse(
-        request.id,
-        JSONRPCErrorBuilder.invalidParams(
-          'initialize requires params.clientInfo with name and version as strings'
-        )
-      );
+      return {
+        response: this.buildErrorResponse(
+          request.id,
+          JSONRPCErrorBuilder.invalidParams(
+            'initialize requires params.clientInfo with name and version as strings'
+          )
+        ),
+      };
     }
 
-    if (!SUPPORTED_PROTOCOL_VERSIONS.includes(params.protocolVersion)) {
-      console.warn(`${ts()} ⚠️  Unsupported protocol version: ${params.protocolVersion}`);
-      return this.buildErrorResponse(
-        request.id,
-        JSONRPCErrorBuilder.invalidParams(
-          `Unsupported protocol version: ${params.protocolVersion}. Supported: ${SUPPORTED_PROTOCOL_VERSIONS.join(', ')}`
-        )
-      );
-    }
+    const negotiated = SUPPORTED_PROTOCOL_VERSIONS.includes(params.protocolVersion)
+      ? params.protocolVersion
+      : LATEST_PROTOCOL_VERSION;
 
     const validatedClientInfo = {
       name: clientInfo.name as string,
       version: clientInfo.version as string,
     };
-    const sessionId = sessionManager.createSession(validatedClientInfo);
+    const newSessionId = sessionManager.createSession(validatedClientInfo);
 
     console.log(
-      `${ts()} 🤝 Initialize from ${validatedClientInfo.name} v${validatedClientInfo.version}`
+      `${ts()} Initialize from ${validatedClientInfo.name} v${validatedClientInfo.version}`
     );
 
     const result: InitializeResult = {
-      protocolVersion: params.protocolVersion,
+      protocolVersion: negotiated,
       capabilities: {
+        logging: {},
         tools: { listChanged: false },
       },
       serverInfo: this.serverInfo,
     };
 
+    const responseResult: Record<string, unknown> = { ...result };
+    if (this.instructions) {
+      responseResult.instructions = this.instructions;
+    }
+
     return {
-      jsonrpc: '2.0',
-      id: request.id,
-      result: { ...result, _meta: { sessionId } },
+      response: {
+        jsonrpc: '2.0',
+        id: request.id,
+        result: responseResult,
+      },
+      sessionId: newSessionId,
     };
   }
 
@@ -248,8 +314,28 @@ export class JSONRPCHandler {
       sessionManager.createSession({ name: 'auto-reconnect', version: '1.0' });
     }
 
+    const allTools = Array.from(this.tools.values());
+    const cursor = request.params?.cursor as string | undefined;
+    let startIndex = 0;
+    if (cursor) {
+      const parsed = parseInt(Buffer.from(cursor, 'base64').toString(), 10);
+      if (Number.isNaN(parsed) || parsed < 0) {
+        return this.buildErrorResponse(
+          request.id,
+          JSONRPCErrorBuilder.invalidParams('Invalid cursor: must encode a non-negative integer')
+        );
+      }
+      startIndex = parsed;
+    }
+    const page = allTools.slice(startIndex, startIndex + TOOLS_LIST_PAGE_SIZE);
+    const nextCursor =
+      startIndex + TOOLS_LIST_PAGE_SIZE < allTools.length
+        ? Buffer.from(String(startIndex + TOOLS_LIST_PAGE_SIZE)).toString('base64')
+        : undefined;
+
     const result: ToolsListResult = {
-      tools: Array.from(this.tools.values()),
+      tools: page,
+      ...(nextCursor && { nextCursor }),
     };
 
     return { jsonrpc: '2.0', id: request.id, result };

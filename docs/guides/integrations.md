@@ -129,7 +129,28 @@ Speedwave supports extending integrations via the plugin system:
 - `compose.rs` generates plugin service containers via `apply_plugins()`
 - Plugin services get injected `WORKER_<PLUGIN>_URL` in the hub environment
 
-See [ADR-015](../adr/ADR-015-plugin-system.md) for the plugin system design.
+See [ADR-015](../adr/ADR-015-plugin-system.md) for the plugin system design and [ADR-036](../adr/ADR-036-self-declaring-worker-policy.md) for the tool policy model.
+
+### Tool Policy via `_meta`
+
+Workers (both built-in and plugins) control how the hub presents their tools by declaring a `_meta` field on each tool definition:
+
+```typescript
+const myTool: Tool = {
+  name: 'myTool',
+  description: '...',
+  inputSchema: { type: 'object', properties: { ... } },
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: {
+    deferLoading: false,    // show this tool to Claude immediately (default: true)
+    timeoutMs: 60000,       // custom timeout in ms (default: global WORKER_REQUEST_MS)
+    timeoutClass: 'long',   // 'standard' or 'long' (default: 'standard')
+    osCategory: 'calendar', // OS sub-integration routing (only for mcp-os)
+  },
+};
+```
+
+**Default behavior**: tools without `_meta` default to `deferLoading: true` — they are discoverable via `search_tools` but not shown upfront to Claude. This keeps token usage low when many tools are registered. To make a tool visible immediately, set `_meta: { deferLoading: false }`.
 
 When a bundle update triggers image rebuilds, container restart operations (including plugin containers) automatically wait for builds to complete before proceeding.
 
@@ -140,3 +161,4 @@ Plugins that declare `requires_integrations` (e.g. `["sharepoint"]`) display the
 - [ADR-010: mcp-os as Host Process Per Platform](../adr/ADR-010-mcp-os-as-host-process-per-platform.md)
 - [ADR-013: mcp-os as Host Process — Implementation Details](../adr/ADR-013-mcp-os-as-host-process-implementation.md)
 - [ADR-015: Plugin System](../adr/ADR-015-plugin-system.md)
+- [ADR-036: Self-Declaring Worker Policy](../adr/ADR-036-self-declaring-worker-policy.md)
