@@ -34,24 +34,25 @@ Container memory limits are defined in `containers/compose.template.yml`. The Cl
 
 - **Claude container:** adaptive (`${CLAUDE_MEMORY}` — see scaling below)
 - **MCP Hub:** 512 MiB (fixed)
-- **MCP workers:** 256 MiB each (fixed)
+- **MCP workers:** 128 MiB each (fixed)
+
+**Minimum requirement:** 8 GiB RAM. Speedwave warns at startup if the host has less than 8 GiB.
 
 All resource formulas live in `crates/speedwave-runtime/src/resources.rs` (SSOT).
 
 ### Adaptive scaling (macOS — Lima VM)
 
-The Lima VM and Claude container memory scale based on host RAM:
+The Lima VM and Claude container memory scale based on host RAM. The VM never takes more than 50% of host RAM (capped at 32 GiB):
 
-| Host RAM | Lima VM | Claude container |
-| -------- | ------- | ---------------- |
-| ≤15 GiB  | 12 GiB  | 8 g (default)    |
-| 16 GiB   | 12 GiB  | 8 g              |
-| 24 GiB   | 12 GiB  | 8 g              |
-| 32 GiB   | 16 GiB  | 12 g             |
-| 64 GiB   | 32 GiB  | 28 g             |
-| 128 GiB  | 32 GiB  | 28 g (cap)       |
+| Host RAM | Lima VM      | Claude container |
+| -------- | ------------ | ---------------- |
+| 8 GiB    | 4 GiB        | 4 g (floor)      |
+| 16 GiB   | 8 GiB        | 4 g              |
+| 24 GiB   | 12 GiB       | 8 g              |
+| 32 GiB   | 16 GiB       | 12 g             |
+| 64 GiB   | 32 GiB (cap) | 28 g (cap)       |
 
-Formulas: VM = `(host_ram / 2).clamp(12, 32)`, Claude = `(vm_mem - 4).clamp(6, 28)`. Hosts <16 GiB always get 12 GiB VM (no regression).
+Formulas: VM = `(host_ram / 2).clamp(4, 32)`, Claude = `(vm_mem - 4).clamp(4, 28)`.
 
 ### Adaptive scaling (Linux — native nerdctl)
 
@@ -59,17 +60,18 @@ No VM layer. Claude container memory scales directly from host RAM with 6 GiB re
 
 | Host RAM | Claude container |
 | -------- | ---------------- |
+| 8 GiB    | 4 g (floor)      |
 | 16 GiB   | 10 g             |
 | 32 GiB   | 26 g             |
 | 64 GiB   | 28 g (cap)       |
 
 ### Windows (WSL2)
 
-Speedwave does not manage `.wslconfig`. The Claude container uses a fixed 8 g default.
+Same adaptive formula as Linux. Falls back to 10 g when RAM detection fails (`host_total_memory_gib()` returns 16 on failure → 16 − 6 = 10).
 
 ### Migration
 
-On upgrade from older versions, `ensure_lima_vm_config()` automatically migrates the VM memory on startup. The migration stops the VM, edits both the source template and instance config, and restarts — no VM recreation needed. User customizations (manually increased memory) are preserved — the migration never downgrades.
+On upgrade from older versions, `ensure_lima_vm_config()` automatically migrates the VM memory on startup. The migration stops the VM, edits both the source template and instance config, and restarts — no VM recreation needed. The migration applies both upgrades and downgrades so that a reduced VM formula takes effect immediately (triggers when `current != desired`).
 
 Existing projects receive the new Claude container memory limit on next container start (when `render_compose()` generates a fresh compose.yml), not immediately on upgrade.
 

@@ -658,6 +658,153 @@ describe('SystemHealthComponent', () => {
     });
   });
 
+  describe('loading vs error display', () => {
+    it('shows Checking... on all cards and containers when report is null and no error', async () => {
+      component.report = null;
+      component.error = null;
+      fixture.detectChanges();
+
+      const overall = fixture.nativeElement.querySelector('[data-testid="status-card-overall"]');
+      expect(overall.textContent).toContain('Checking...');
+
+      const vm = fixture.nativeElement.querySelector('[data-testid="status-card-vm"]');
+      expect(vm.textContent).toContain('Checking...');
+
+      const mcpOs = fixture.nativeElement.querySelector('[data-testid="status-card-mcp-os"]');
+      expect(mcpOs.textContent).toContain('Checking...');
+
+      const ideBridge = fixture.nativeElement.querySelector(
+        '[data-testid="status-card-ide-bridge"]'
+      );
+      expect(ideBridge.textContent).toContain('Checking...');
+
+      const noData = fixture.nativeElement.querySelector('[data-testid="no-data"]');
+      expect(noData.textContent).toContain('Checking container status...');
+
+      component.selectedContainer = 'test';
+      fixture.detectChanges();
+      const logTabs = fixture.nativeElement.querySelector('[data-testid="log-tabs"]');
+      const logTabButtons = logTabs ? logTabs.querySelectorAll('[data-testid="log-tab"]') : [];
+      expect(logTabButtons.length).toBe(0);
+    });
+
+    it('shows Not connected on all cards and containers when report is null and error is set', async () => {
+      vi.spyOn(component, 'refresh').mockResolvedValue();
+      component.report = null;
+      component.error = 'Not connected — connection refused';
+      fixture.detectChanges();
+
+      const overall = fixture.nativeElement.querySelector('[data-testid="status-card-overall"]');
+      expect(overall.textContent).toContain('Not connected');
+
+      const vm = fixture.nativeElement.querySelector('[data-testid="status-card-vm"]');
+      expect(vm.textContent).toContain('Not connected');
+
+      const mcpOs = fixture.nativeElement.querySelector('[data-testid="status-card-mcp-os"]');
+      expect(mcpOs.textContent).toContain('Not connected');
+
+      const ideBridge = fixture.nativeElement.querySelector(
+        '[data-testid="status-card-ide-bridge"]'
+      );
+      expect(ideBridge.textContent).toContain('Not connected');
+
+      const noData = fixture.nativeElement.querySelector('[data-testid="no-data"]');
+      expect(noData.textContent).toContain('Not connected — unable to fetch container status.');
+
+      component.selectedContainer = 'test';
+      fixture.detectChanges();
+      const logTabs = fixture.nativeElement.querySelector('[data-testid="log-tabs"]');
+      const logTabButtons = logTabs ? logTabs.querySelectorAll('[data-testid="log-tab"]') : [];
+      expect(logTabButtons.length).toBe(0);
+    });
+
+    it('shows healthy state with container tabs when report is present', async () => {
+      component.report = makeHealthReport();
+      component.error = null;
+      component.selectedContainer = 'speedwave_test_claude';
+      fixture.detectChanges();
+
+      const overall = fixture.nativeElement.querySelector('[data-testid="status-card-overall"]');
+      expect(overall.textContent).toContain('Healthy');
+
+      const vm = fixture.nativeElement.querySelector('[data-testid="status-card-vm"]');
+      expect(vm.textContent).toContain('Running');
+
+      const mcpOs = fixture.nativeElement.querySelector('[data-testid="status-card-mcp-os"]');
+      expect(mcpOs.textContent).toContain('Running');
+
+      const noData = fixture.nativeElement.querySelector('[data-testid="no-data"]');
+      expect(noData).toBeNull();
+
+      const logTabs = fixture.nativeElement.querySelector('[data-testid="log-tabs"]');
+      const logTabButtons = logTabs ? logTabs.querySelectorAll('[data-testid="log-tab"]') : [];
+      expect(logTabButtons.length).toBe(2);
+    });
+
+    it('shows unhealthy state when report has unhealthy overall', async () => {
+      component.report = makeHealthReport({ overall_healthy: false });
+      component.error = null;
+      fixture.detectChanges();
+
+      const overall = fixture.nativeElement.querySelector('[data-testid="status-card-overall"]');
+      expect(overall.textContent).toContain('Unhealthy');
+    });
+
+    it('transitions from Checking... to healthy state after successful refresh', async () => {
+      component.report = null;
+      component.error = null;
+      fixture.detectChanges();
+
+      const overall = fixture.nativeElement.querySelector('[data-testid="status-card-overall"]');
+      expect(overall.textContent).toContain('Checking...');
+      const noData = fixture.nativeElement.querySelector('[data-testid="no-data"]');
+      expect(noData.textContent).toContain('Checking container status...');
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_health') return makeHealthReport();
+        if (cmd === 'get_bridge_status') return null;
+        return undefined;
+      };
+
+      await component.refresh();
+      fixture.detectChanges();
+
+      expect(overall.textContent).toContain('Healthy');
+      const noDataAfter = fixture.nativeElement.querySelector('[data-testid="no-data"]');
+      expect(noDataAfter).toBeNull();
+    });
+
+    it('transitions from error to healthy state after successful retry', async () => {
+      // Initialize the component with a failing health check to reach the error state
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_health') throw new Error('timeout');
+        if (cmd === 'get_bridge_status') return null;
+        return undefined;
+      };
+      fixture.detectChanges();
+      await component.refresh();
+      fixture.detectChanges();
+
+      const overall = fixture.nativeElement.querySelector('[data-testid="status-card-overall"]');
+      expect(overall.textContent).toContain('Not connected');
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_health') return makeHealthReport();
+        if (cmd === 'get_bridge_status') return null;
+        return undefined;
+      };
+
+      await component.refresh();
+      fixture.detectChanges();
+
+      expect(overall.textContent).toContain('Healthy');
+      const errorBanner = fixture.nativeElement.querySelector('[data-testid="error-banner"]');
+      expect(errorBanner).toBeNull();
+      const noDataAfter = fixture.nativeElement.querySelector('[data-testid="no-data"]');
+      expect(noDataAfter).toBeNull();
+    });
+  });
+
   describe('containers_reconciled event', () => {
     it('triggers refresh when containers_reconciled event fires', async () => {
       const refreshSpy = vi.spyOn(component, 'refresh').mockResolvedValue();

@@ -303,7 +303,6 @@ impl ContainerRuntime for LimaRuntime {
         if !limactl_ok {
             return false;
         }
-        // Check if VM is running
         self.runner
             .run(
                 "limactl",
@@ -645,6 +644,24 @@ mod tests {
     }
 
     #[test]
+    fn test_is_available_stopped_vm() {
+        let runner = MockRunner::new()
+            .with_response("limactl --version", "limactl version 1.0.0")
+            .with_response(
+                &format!(
+                    "limactl list --format {{{{.Status}}}} {}",
+                    consts::LIMA_VM_NAME
+                ),
+                "Stopped",
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(
+            !rt.is_available(),
+            "is_available() must return false when VM is Stopped"
+        );
+    }
+
+    #[test]
     fn test_ensure_ready_version_too_old() {
         let runner = MockRunner::new().with_response("limactl --version", "limactl version 0.10.0");
         let rt = LimaRuntime::with_runner(Box::new(runner));
@@ -933,6 +950,9 @@ mod tests {
         );
     }
 
+    /// A Stopped VM returns `is_available() == false`, but `ensure_ready()`
+    /// must succeed by starting it. Callers must use `ensure_ready()`, not
+    /// `is_available()`, when they need the runtime to be operational.
     #[test]
     fn test_ensure_ready_stopped_vm_starts_it() {
         let runner = MockRunner::new()
@@ -946,6 +966,10 @@ mod tests {
             )
             .with_response(&format!("limactl start {}", consts::LIMA_VM_NAME), "");
         let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(
+            !rt.is_available(),
+            "precondition: is_available() must be false for a Stopped VM"
+        );
         assert!(
             rt.ensure_ready().is_ok(),
             "ensure_ready should start a stopped VM"

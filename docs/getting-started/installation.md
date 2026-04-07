@@ -2,6 +2,21 @@
 
 Platform-specific installation instructions for Speedwave.
 
+## System Requirements
+
+|      | Minimum     | Recommended |
+| ---- | ----------- | ----------- |
+| RAM  | 8 GiB       | 16 GiB      |
+| Disk | 10 GiB free | 20 GiB free |
+
+Speedwave warns at startup if the host has less than 8 GiB RAM.
+
+> **Upgrading from ≤ 0.6.0 on a 16 GiB host?** The new adaptive formula
+> (`host_ram / 2`) reduces the Lima VM from 12 GiB to 8 GiB, which lowers
+> Claude's working memory from 8 g to 4 g. This trade-off frees host RAM
+> for the browser and other apps. There is currently no persistent override
+> — the migration runs automatically on each launch.
+
 ## macOS
 
 <!-- Content to be written: .dmg installation, Lima VM setup, system requirements -->
