@@ -2,7 +2,7 @@
  * Metadata Validation Tests
  *
  * Validates that every OS worker tool has required metadata fields:
- * category, keywords, and example.
+ * annotations, keywords, and example.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -23,17 +23,16 @@ const ALL_TOOLS = [
   ...createNoteTools(),
 ];
 
-const VALID_CATEGORIES = ['read', 'write', 'delete'] as const;
-
 describe('OS tool metadata', () => {
   it('registers exactly 25 tools', () => {
     expect(ALL_TOOLS).toHaveLength(25);
   });
 
   describe.each(ALL_TOOLS.map((td) => [td.tool.name, td] as const))('%s', (_name, td) => {
-    it('has a category field set to read, write, or delete', () => {
-      expect(td.tool.category).toBeDefined();
-      expect(VALID_CATEGORIES).toContain(td.tool.category);
+    it('has annotations with readOnlyHint and destructiveHint', () => {
+      expect(td.tool.annotations).toBeDefined();
+      expect(typeof td.tool.annotations!.readOnlyHint).toBe('boolean');
+      expect(typeof td.tool.annotations!.destructiveHint).toBe('boolean');
     });
 
     it('has a non-empty keywords array', () => {
@@ -68,6 +67,14 @@ describe('OS tool metadata', () => {
         expect(typeof ex.input).toBe('object');
       }
     });
+
+    it('has _meta with deferLoading', () => {
+      expect(td.tool._meta, `${td.tool.name} missing _meta`).toBeDefined();
+      expect(
+        typeof (td.tool._meta as Record<string, unknown>).deferLoading,
+        `${td.tool.name} missing deferLoading`
+      ).toBe('boolean');
+    });
   });
 
   it('all tool names are unique', () => {
@@ -81,19 +88,19 @@ describe('OS tool metadata', () => {
       'completeReminder',
       'createEvent',
       'updateEvent',
-      'sendEmail',
-      'replyToEmail',
       'createNote',
       'updateNote',
     ];
-    const deleteTools = ['deleteEvent', 'deleteNote'];
+    const deleteTools = ['deleteEvent', 'deleteNote', 'sendEmail', 'replyToEmail'];
 
     for (const td of ALL_TOOLS) {
       if (writeTools.includes(td.tool.name)) {
-        expect(td.tool.category).toBe('write');
+        expect(td.tool.annotations?.readOnlyHint).toBe(false);
+        expect(td.tool.annotations?.destructiveHint).toBe(false);
       }
       if (deleteTools.includes(td.tool.name)) {
-        expect(td.tool.category).toBe('delete');
+        expect(td.tool.annotations?.readOnlyHint).toBe(false);
+        expect(td.tool.annotations?.destructiveHint).toBe(true);
       }
     }
   });

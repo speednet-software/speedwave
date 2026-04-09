@@ -356,7 +356,7 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
 
       <div class="text-center text-sw-slider text-xs" data-testid="last-updated">
         @if (lastUpdated) {
-          Last updated: {{ lastUpdated | date: 'HH:mm:ss' }}
+          Last updated: {{ lastUpdated | date: 'dd-MM-yyyy HH:mm:ss' }}
         } @else {
           Waiting for first health check...
         }

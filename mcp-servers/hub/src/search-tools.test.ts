@@ -11,14 +11,14 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { searchTools, getServiceTools, getToolMetadata } from './search-tools.js';
 import { resetServiceCaches } from './tool-registry.js';
-import { populateRegistryFromPolicies, _resetRegistryForTesting } from './test-helpers.js';
+import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
 
 describe('searchTools', () => {
   const savedEnabledServices = process.env.ENABLED_SERVICES;
 
   beforeEach(() => {
     _resetRegistryForTesting();
-    populateRegistryFromPolicies();
+    populateRegistryWithMockTools();
     resetServiceCaches();
     process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,gitlab,os';
   });
@@ -53,14 +53,14 @@ describe('searchTools', () => {
     });
 
     it('matches by description', async () => {
-      // Skeleton descriptions contain the method name, so search by a known method name
+      // Mock descriptions contain "Slack channel", so search for that
       const result = await searchTools({
-        query: 'sendChannel',
+        query: 'Slack channel',
         detailLevel: 'with_descriptions',
       });
 
       expect(result.matches.length).toBeGreaterThan(0);
-      expect(result.matches.some((m) => m.description?.includes('sendChannel'))).toBe(true);
+      expect(result.matches.some((m) => m.description?.includes('Slack channel'))).toBe(true);
     });
 
     it('matches by name substring', async () => {
@@ -176,7 +176,6 @@ describe('searchTools', () => {
       // Should have basic fields
       expect(match.tool).toBeDefined();
       expect(match.service).toBeDefined();
-      expect(match.category).toBeDefined();
       expect(typeof match.deferLoading).toBe('boolean');
 
       // Should NOT have detailed fields
@@ -215,10 +214,8 @@ describe('searchTools', () => {
       expect(result.matches.length).toBeGreaterThan(0);
       const match = result.matches[0];
 
-      // Should have all fields (may be empty for skeleton entries)
       expect(match.description).toBeDefined();
       expect(match.inputSchema).toBeDefined();
-      // example and outputSchema may be empty/undefined for skeleton entries
       expect('example' in match).toBe(true);
     });
   });
@@ -295,16 +292,17 @@ describe('searchTools', () => {
       expect(result.matches[0].tool).toMatch(/^slack\/.+$/);
     });
 
-    it('category is valid enum value', async () => {
+    it('matches have required fields', async () => {
       const result = await searchTools({
         query: '*',
         detailLevel: 'names_only',
       });
 
-      const validCategories = ['read', 'write', 'delete'];
-      expect(result.matches.every((m) => m.category && validCategories.includes(m.category))).toBe(
-        true
-      );
+      for (const match of result.matches) {
+        expect(match.tool).toBeDefined();
+        expect(match.service).toBeDefined();
+        expect(typeof match.deferLoading).toBe('boolean');
+      }
     });
   });
 });
@@ -364,7 +362,6 @@ describe('getServiceTools', () => {
     expect(tool).toHaveProperty('keywords');
     expect(tool).toHaveProperty('inputSchema');
     expect(tool).toHaveProperty('service');
-    expect(tool).toHaveProperty('category');
   });
 });
 
@@ -398,7 +395,6 @@ describe('getToolMetadata', () => {
     expect(metadata).toHaveProperty('keywords');
     expect(metadata).toHaveProperty('inputSchema');
     expect(metadata).toHaveProperty('service');
-    expect(metadata).toHaveProperty('category');
   });
 
   it('tool metadata keywords is an array', () => {
@@ -449,7 +445,7 @@ describe('searchTools ENABLED_SERVICES filtering', () => {
 
   beforeEach(() => {
     _resetRegistryForTesting();
-    populateRegistryFromPolicies();
+    populateRegistryWithMockTools();
     resetServiceCaches();
   });
 

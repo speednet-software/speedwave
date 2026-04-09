@@ -213,14 +213,14 @@ The Desktop app includes two Tauri commands that make HTTP requests to external 
 
 - Reuses `url_validation::validate_url()` core logic (scheme, host, and IP validation with 50+ tests)
 - **Blocked:** loopback IPs (127.0.0.0/8, ::1), link-local/metadata IPs (169.254.0.0/16 including cloud metadata endpoint 169.254.169.254)
-- **Allowed with warning:** RFC1918 private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) — self-hosted Redmine on private networks is the primary use case
+- **Allowed with warning:** RFC1918 private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) and IPv6 Unique Local Addresses (fc00::/7, RFC 4193) — self-hosted Redmine on private networks is the primary use case
 - Redirects blocked via `reqwest::redirect::Policy::none()`
 - Only fixed Redmine API paths requested (not arbitrary URLs)
 - Response shape validated via typed deserialization (non-Redmine JSON rejected)
 - Custom `User-Agent` header, no cookie jar, no auth headers beyond `X-Redmine-API-Key`
 - 5-15s request timeouts
 
-**RFC1918 divergence from MCP Hub:** MCP Hub blocks ALL private IPs because it runs in a container with no legitimate private targets. Desktop Redmine proxy allows RFC1918 because: (1) Desktop runs on the host, not in a container; (2) self-hosted Redmine on RFC1918 is the primary use case; (3) loopback and metadata IPs remain blocked. This divergence is intentional — the security postures serve different threat models.
+**RFC1918 and IPv6 ULA divergence from MCP Hub:** MCP Hub blocks ALL private IPs because it runs in a container with no legitimate private targets. Desktop Redmine proxy allows RFC1918 and IPv6 ULA (fc00::/7) because: (1) Desktop runs on the host, not in a container; (2) self-hosted Redmine on private networks is the primary use case; (3) loopback, link-local, and metadata IPs remain blocked. IPv6 ULA is the direct analog of RFC1918 for IPv6 networks. This divergence is intentional — the security postures serve different threat models.
 
 **SecurityCheck scope:** These commands run on the Desktop host process, not inside containers — they are outside SecurityCheck's compose validation scope. SSRF protection is implemented directly in the command handlers via `validate_redmine_host_url()`.
 

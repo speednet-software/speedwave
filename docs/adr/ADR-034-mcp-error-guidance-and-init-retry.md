@@ -62,4 +62,4 @@ Key design decisions:
 
 [^4]: Node.js Timers documentation — `setTimeout(callback, delay)`. https://nodejs.org/api/timers.html#settimeoutcallback-delay-args
 
-[^5]: Model Context Protocol specification — tool result `isError` flag. https://spec.modelcontextprotocol.io/specification/2025-03-26/server/tools/#error-handling
+[^5]: Model Context Protocol specification — tool result `isError` flag. https://modelcontextprotocol.io/specification/2025-03-26/server/tools/#error-handling

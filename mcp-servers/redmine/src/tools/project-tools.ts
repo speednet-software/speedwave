@@ -8,13 +8,15 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  READ_ONLY_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 
 const listProjectIdsTool: Tool = {
   name: 'listProjectIds',
   description: 'List project IDs with optional filters. Returns only IDs for efficiency.',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['redmine', 'projects', 'list', 'ids', 'filter', 'active', 'closed'],
   example: `const { ids } = await redmine.listProjectIds({ status: 'active' })`,
   inputSchema: {
@@ -34,7 +36,8 @@ const listProjectIdsTool: Tool = {
 const getProjectFullTool: Tool = {
   name: 'getProjectFull',
   description: 'Get complete project data including trackers, categories, modules. No truncation.',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['redmine', 'project', 'details', 'full', 'trackers', 'categories', 'modules'],
   example: `const project = await redmine.getProjectFull({ project_id: 'my-project' })`,
   inputSchema: {
@@ -54,7 +57,8 @@ const getProjectFullTool: Tool = {
 const searchProjectIdsTool: Tool = {
   name: 'searchProjectIds',
   description: 'Search projects by name, identifier or description. Returns matching IDs only.',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['redmine', 'projects', 'search', 'find', 'query', 'name'],
   example: `const { ids } = await redmine.searchProjectIds({ query: 'mobile' })`,
   inputSchema: {

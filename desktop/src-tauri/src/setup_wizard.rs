@@ -185,7 +185,7 @@ images:
     arch: "aarch64"
 cpus: 4
 memory: "{}"
-disk: "30GiB"
+disk: "50GiB"
 mountType: virtiofs
 networks:
   - vzNAT: true
@@ -1212,10 +1212,13 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
 pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
     let rt = runtime::detect_runtime();
     let container_name = format!("{}_{}_claude", consts::compose_prefix(), project);
+    log::info!("check_claude_auth: container={container_name}");
     ensure_exec_healthy(&*rt, project, &container_name)?;
+    log::info!("check_claude_auth: container healthy, checking auth");
     let mut cmd =
         rt.container_exec_piped(&container_name, &[consts::CLAUDE_BINARY, "auth", "status"])?;
     let output = cmd.output()?;
+    log::info!("check_claude_auth: auth status exit={}", output.status);
     Ok(output.status.success())
 }
 

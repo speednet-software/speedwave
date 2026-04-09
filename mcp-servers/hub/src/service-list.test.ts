@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { BUILT_IN_SERVICES, getAllServiceNames, isPluginService } from './service-list.js';
+import { describe, it, expect, afterEach } from 'vitest';
+import { getAllServiceNames } from './service-list.js';
 
 describe('service-list', () => {
   const originalEnv = process.env.ENABLED_SERVICES;
@@ -12,36 +12,23 @@ describe('service-list', () => {
     }
   });
 
-  describe('BUILT_IN_SERVICES', () => {
-    it('contains exactly the 5 built-in services', () => {
-      expect(BUILT_IN_SERVICES).toEqual(['slack', 'sharepoint', 'redmine', 'gitlab', 'os']);
-    });
-
-    it('is a readonly tuple (as const)', () => {
-      // BUILT_IN_SERVICES is declared `as const` which makes it readonly at the TS level.
-      // Verify it cannot be changed at runtime by checking the type/content stability.
-      expect(BUILT_IN_SERVICES.length).toBe(5);
-      expect([...BUILT_IN_SERVICES]).toEqual(['slack', 'sharepoint', 'redmine', 'gitlab', 'os']);
-    });
-  });
-
   describe('getAllServiceNames', () => {
-    it('returns only built-in services when ENABLED_SERVICES is not set', () => {
+    it('returns empty array when ENABLED_SERVICES is not set', () => {
       delete process.env.ENABLED_SERVICES;
       const names = getAllServiceNames();
-      expect(names).toEqual(['slack', 'sharepoint', 'redmine', 'gitlab', 'os']);
+      expect(names).toEqual([]);
     });
 
-    it('returns only built-in services when ENABLED_SERVICES has only built-in names', () => {
+    it('returns services listed in ENABLED_SERVICES', () => {
       process.env.ENABLED_SERVICES = 'slack,gitlab';
       const names = getAllServiceNames();
-      expect(names).toEqual(['slack', 'sharepoint', 'redmine', 'gitlab', 'os']);
+      expect(names).toEqual(['slack', 'gitlab']);
     });
 
-    it('includes plugin services from ENABLED_SERVICES after built-in', () => {
+    it('includes plugin services from ENABLED_SERVICES', () => {
       process.env.ENABLED_SERVICES = 'slack,gitlab,presale';
       const names = getAllServiceNames();
-      expect(names).toEqual(['slack', 'sharepoint', 'redmine', 'gitlab', 'os', 'presale']);
+      expect(names).toEqual(['slack', 'gitlab', 'presale']);
     });
 
     it('includes multiple plugin services', () => {
@@ -50,50 +37,31 @@ describe('service-list', () => {
       expect(names).toContain('presale');
       expect(names).toContain('crm');
       expect(names).toContain('analytics');
-      expect(names.indexOf('presale')).toBeGreaterThan(names.indexOf('os'));
+      expect(names).toContain('slack');
     });
 
-    it('handles empty ENABLED_SERVICES', () => {
+    it('returns empty array when ENABLED_SERVICES is empty string', () => {
       process.env.ENABLED_SERVICES = '';
       const names = getAllServiceNames();
-      expect(names).toEqual(['slack', 'sharepoint', 'redmine', 'gitlab', 'os']);
+      expect(names).toEqual([]);
     });
 
     it('handles whitespace in ENABLED_SERVICES', () => {
       process.env.ENABLED_SERVICES = ' slack , presale , gitlab ';
       const names = getAllServiceNames();
-      expect(names).toContain('presale');
+      expect(names).toEqual(['slack', 'presale', 'gitlab']);
     });
 
-    it('does not duplicate built-in services', () => {
-      process.env.ENABLED_SERVICES = 'slack,slack,presale';
+    it('filters out empty entries from trailing commas', () => {
+      process.env.ENABLED_SERVICES = 'slack,,gitlab,';
       const names = getAllServiceNames();
-      const slackCount = names.filter((n) => n === 'slack').length;
-      expect(slackCount).toBe(1);
-    });
-  });
-
-  describe('isPluginService', () => {
-    it('returns false for all built-in services', () => {
-      for (const service of BUILT_IN_SERVICES) {
-        expect(isPluginService(service)).toBe(false);
-      }
+      expect(names).toEqual(['slack', 'gitlab']);
     });
 
-    it('returns true for plugin service names', () => {
-      expect(isPluginService('presale')).toBe(true);
-      expect(isPluginService('crm')).toBe(true);
-      expect(isPluginService('analytics')).toBe(true);
-    });
-
-    it('returns true for unknown service names', () => {
-      expect(isPluginService('nonexistent')).toBe(true);
-    });
-
-    it('is case-sensitive', () => {
-      expect(isPluginService('Slack')).toBe(true);
-      expect(isPluginService('SLACK')).toBe(true);
-      expect(isPluginService('slack')).toBe(false);
+    it('preserves order from env var', () => {
+      process.env.ENABLED_SERVICES = 'gitlab,slack,os';
+      const names = getAllServiceNames();
+      expect(names).toEqual(['gitlab', 'slack', 'os']);
     });
   });
 });

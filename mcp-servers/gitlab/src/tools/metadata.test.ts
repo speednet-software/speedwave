@@ -1,6 +1,6 @@
 /**
  * Metadata validation test — ensures every GitLab worker tool
- * has the required metadata fields: category, keywords, example.
+ * has the required metadata fields: annotations, keywords, example.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -22,9 +22,10 @@ describe('GitLab tool metadata', () => {
   });
 
   describe.each(ALL_TOOLS.map((t) => [t.name, t]))('%s', (_name, tool) => {
-    it('has category (read | write | delete)', () => {
-      expect(tool.category).toBeDefined();
-      expect(['read', 'write', 'delete']).toContain(tool.category);
+    it('has annotations with readOnlyHint and destructiveHint', () => {
+      expect(tool.annotations).toBeDefined();
+      expect(typeof tool.annotations!.readOnlyHint).toBe('boolean');
+      expect(typeof tool.annotations!.destructiveHint).toBe('boolean');
     });
 
     it('has non-empty keywords array', () => {
@@ -59,6 +60,14 @@ describe('GitLab tool metadata', () => {
         expect(ex.description.length).toBeGreaterThan(0);
         expect(typeof ex.input).toBe('object');
       }
+    });
+
+    it('has _meta with deferLoading', () => {
+      expect(tool._meta, `${tool.name} missing _meta`).toBeDefined();
+      expect(
+        typeof (tool._meta as Record<string, unknown>).deferLoading,
+        `${tool.name} missing deferLoading`
+      ).toBe('boolean');
     });
   });
 });

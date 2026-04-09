@@ -56,7 +56,7 @@ The `.github/workflows/test.yml` workflow runs on every push to `main`/`dev` and
 Pattern: `mcp-servers/hub/src/tools/gitlab/delete_tag.test.ts`
 
 - Import `metadata` + `execute` from the handler
-- **Metadata tests**: name, category, service, description, keywords, inputSchema (type, properties, required), outputSchema, example, inputExamples, deferLoading
+- **Metadata tests**: name, service, description, keywords, inputSchema (type, properties, required), outputSchema, example, inputExamples, annotations
 - **Execute success cases**: mock the service client method with `vi.fn()`, verify return value and mock calls
 - **Parameter validation**: missing, empty, null, undefined, falsy values
 - **Error handling**: Error objects, non-Error with message/description, plain strings, undefined

@@ -5,9 +5,7 @@
  * Security Principles:
  * 1. Validate ALL inputs
  * 2. Never expose tokens
- *
- * Note: MCP servers run inside an isolated Docker network without host-exposed
- * ports. No Origin/CORS validation is needed at the application layer.
+ * 3. Validate Origin headers per MCP Streamable HTTP spec
  */
 import fs from 'fs/promises';
 
@@ -178,4 +176,18 @@ export function validateWorkerUrl(url: string): boolean {
   if (parsed.username !== '' || parsed.password !== '') return false;
 
   return true;
+}
+
+/**
+ * Validate Origin header per MCP Streamable HTTP spec.
+ * Missing Origin (non-browser clients) is allowed.
+ * Present Origin must be in allowedOrigins list.
+ * @param origin - Origin header value (undefined if absent)
+ * @param allowedOrigins - List of allowed origin strings
+ * @returns true if the origin is acceptable
+ */
+export function validateOrigin(origin: string | undefined, allowedOrigins?: string[]): boolean {
+  if (origin == null) return true;
+  if (allowedOrigins && allowedOrigins.length > 0) return allowedOrigins.includes(origin);
+  return false;
 }

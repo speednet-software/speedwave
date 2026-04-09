@@ -544,6 +544,12 @@ impl ContainerRuntime for LimaRuntime {
     }
 
     fn ensure_ready(&self) -> anyhow::Result<()> {
+        super::with_ensure_ready_lock(|| self.ensure_ready_inner())
+    }
+}
+
+impl LimaRuntime {
+    fn ensure_ready_inner(&self) -> anyhow::Result<()> {
         let version_output = self.runner.run("limactl", &["--version"]).map_err(|_| {
             anyhow::anyhow!(
                 "limactl not found. Install Lima from https://lima-vm.io or run: brew install lima"
@@ -1003,6 +1009,101 @@ mod tests {
             err_msg.contains("restart Speedwave"),
             "error should suggest restarting, got: {err_msg}"
         );
+    }
+
+    /// Concurrent `ensure_ready()` calls must be serialized: the second thread
+    /// waits for the first to finish starting the VM, then sees "Running".
+    #[test]
+    fn test_ensure_ready_concurrent_calls_serialized() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let start_count = Arc::new(AtomicUsize::new(0));
+
+        // Track how many times `limactl start` is called.
+        // First call: VM is "Stopped" → start succeeds → subsequent status checks return "Running".
+        // Second call (serialized by lock): VM is "Running" → no start needed.
+        struct ConcurrentRunner {
+            start_count: Arc<AtomicUsize>,
+        }
+
+        impl CommandRunner for ConcurrentRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                if key.contains("--version") {
+                    return Ok("limactl version 2.0.0".to_string());
+                }
+                if key.contains("list --format") {
+                    // After a start has completed, report Running
+                    if self.start_count.load(Ordering::SeqCst) > 0 {
+                        return Ok("Running".to_string());
+                    }
+                    return Ok("Stopped".to_string());
+                }
+                Err(anyhow::anyhow!("unexpected: {key}"))
+            }
+
+            fn run_with_timeout(
+                &self,
+                cmd: &str,
+                args: &[&str],
+                _timeout: std::time::Duration,
+            ) -> anyhow::Result<()> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                if key.contains("start") {
+                    // Simulate VM start taking a moment
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    self.start_count.fetch_add(1, Ordering::SeqCst);
+                    return Ok(());
+                }
+                Err(anyhow::anyhow!("unexpected: {key}"))
+            }
+        }
+
+        let runner = Arc::new(ConcurrentRunner {
+            start_count: Arc::clone(&start_count),
+        });
+        let runner2 = Arc::clone(&runner);
+
+        let h1 = std::thread::spawn(move || {
+            let rt = LimaRuntime::with_runner(Box::new(ArcRunner(runner)));
+            rt.ensure_ready()
+        });
+        let h2 = std::thread::spawn(move || {
+            let rt = LimaRuntime::with_runner(Box::new(ArcRunner(runner2)));
+            rt.ensure_ready()
+        });
+
+        let r1 = h1.join().unwrap();
+        let r2 = h2.join().unwrap();
+        assert!(r1.is_ok(), "thread 1 should succeed: {:?}", r1);
+        assert!(r2.is_ok(), "thread 2 should succeed: {:?}", r2);
+
+        // The lock ensures only one thread actually calls `limactl start`.
+        // The second thread sees "Running" after acquiring the lock.
+        assert_eq!(
+            start_count.load(Ordering::SeqCst),
+            1,
+            "limactl start should be called exactly once, not twice"
+        );
+    }
+
+    /// Adapter that implements `CommandRunner` by delegating to an `Arc<T>`.
+    struct ArcRunner<T: CommandRunner>(Arc<T>);
+    impl<T: CommandRunner> CommandRunner for ArcRunner<T> {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+            self.0.run(cmd, args)
+        }
+        fn run_raw_stdout(&self, cmd: &str, args: &[&str]) -> anyhow::Result<Vec<u8>> {
+            self.0.run(cmd, args).map(|s| s.into_bytes())
+        }
+        fn run_with_timeout(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            timeout: std::time::Duration,
+        ) -> anyhow::Result<()> {
+            self.0.run_with_timeout(cmd, args, timeout)
+        }
     }
 
     /// Helper: creates a MockRunner that already has `is_available()` responses

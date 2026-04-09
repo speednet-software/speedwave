@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { JSONRPCHandler, JSONRPCErrorBuilder } from './jsonrpc.js';
-import { JSONRPCErrorCode } from './types.js';
+import type { ProcessRequestResult } from './types.js';
+import { JSONRPCErrorCode, SUPPORTED_PROTOCOL_VERSIONS, LATEST_PROTOCOL_VERSION } from './types.js';
 
 describe('jsonrpc', () => {
   describe('JSONRPCErrorBuilder', () => {
@@ -121,9 +122,10 @@ describe('jsonrpc', () => {
 
     describe('processRequest', () => {
       it('rejects invalid JSON-RPC message', async () => {
-        const response = await handler.processRequest({ invalid: 'message' }, null);
-        expect(response.error).toBeDefined();
-        expect(response.error?.code).toBe(JSONRPCErrorCode.InvalidRequest);
+        const result = await handler.processRequest({ invalid: 'message' }, null);
+        expect(result.response).not.toBeNull();
+        expect(result.response!.error).toBeDefined();
+        expect(result.response!.error?.code).toBe(JSONRPCErrorCode.InvalidRequest);
       });
 
       it('handles initialize request', async () => {
@@ -141,15 +143,78 @@ describe('jsonrpc', () => {
           },
         };
 
-        const response = await handler.processRequest(request, null);
+        const result = await handler.processRequest(request, null);
 
-        expect(response.error).toBeUndefined();
-        expect(response.result).toBeDefined();
-        expect((response.result as Record<string, unknown>).protocolVersion).toBe('2024-11-05');
-        expect((response.result as Record<string, unknown>)._meta).toBeDefined();
+        expect(result.response).not.toBeNull();
+        expect(result.response!.error).toBeUndefined();
+        expect(result.response!.result).toBeDefined();
+        const initResult = result.response!.result as Record<string, unknown>;
+        expect(initResult.protocolVersion).toBe('2024-11-05');
+        // Session ID is now returned separately, not in _meta
+        expect(result.sessionId).toBeDefined();
+        expect(typeof result.sessionId).toBe('string');
       });
 
-      it('rejects unsupported protocol version', async () => {
+      it('initialize includes logging capability', async () => {
+        const request = {
+          jsonrpc: '2.0',
+          method: 'initialize',
+          id: 1,
+          params: {
+            protocolVersion: '2024-11-05',
+            clientInfo: { name: 'test-client', version: '1.0.0' },
+            capabilities: {},
+          },
+        };
+
+        const result = await handler.processRequest(request, null);
+        const initResult = result.response!.result as Record<string, unknown>;
+        const capabilities = initResult.capabilities as Record<string, unknown>;
+        expect(capabilities.logging).toEqual({});
+        expect(capabilities.tools).toEqual({ listChanged: false });
+      });
+
+      it('initialize includes instructions when configured', async () => {
+        const handlerWithInstructions = new JSONRPCHandler({
+          name: 'test-server',
+          version: '1.0.0',
+          instructions: 'This server provides useful tools.',
+        });
+
+        const request = {
+          jsonrpc: '2.0',
+          method: 'initialize',
+          id: 1,
+          params: {
+            protocolVersion: '2024-11-05',
+            clientInfo: { name: 'test-client', version: '1.0.0' },
+            capabilities: {},
+          },
+        };
+
+        const result = await handlerWithInstructions.processRequest(request, null);
+        const initResult = result.response!.result as Record<string, unknown>;
+        expect(initResult.instructions).toBe('This server provides useful tools.');
+      });
+
+      it('initialize omits instructions when not configured', async () => {
+        const request = {
+          jsonrpc: '2.0',
+          method: 'initialize',
+          id: 1,
+          params: {
+            protocolVersion: '2024-11-05',
+            clientInfo: { name: 'test-client', version: '1.0.0' },
+            capabilities: {},
+          },
+        };
+
+        const result = await handler.processRequest(request, null);
+        const initResult = result.response!.result as Record<string, unknown>;
+        expect(initResult.instructions).toBeUndefined();
+      });
+
+      it('falls back to LATEST_PROTOCOL_VERSION for unsupported version', async () => {
         const request = {
           jsonrpc: '2.0',
           method: 'initialize',
@@ -164,23 +229,165 @@ describe('jsonrpc', () => {
           },
         };
 
-        const response = await handler.processRequest(request, null);
+        const result = await handler.processRequest(request, null);
 
-        expect(response.error).toBeDefined();
-        expect(response.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
+        expect(result.response).not.toBeNull();
+        expect(result.response!.error).toBeUndefined();
+        const initResult = result.response!.result as Record<string, unknown>;
+        expect(initResult.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
       });
 
-      it('handles notifications/initialized', async () => {
+      it('falls back to LATEST_PROTOCOL_VERSION for version 2025-06-18 (not in supported list)', async () => {
         const request = {
           jsonrpc: '2.0',
+          method: 'initialize',
+          id: 1,
+          params: {
+            protocolVersion: '2025-06-18',
+            clientInfo: { name: 'test-client', version: '1.0.0' },
+            capabilities: {},
+          },
+        };
+
+        const result = await handler.processRequest(request, null);
+        expect(result.response!.error).toBeUndefined();
+        const initResult = result.response!.result as Record<string, unknown>;
+        expect(initResult.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
+      });
+
+      it('falls back to LATEST_PROTOCOL_VERSION for unknown future version 2099-01-01', async () => {
+        const request = {
+          jsonrpc: '2.0',
+          method: 'initialize',
+          id: 1,
+          params: {
+            protocolVersion: '2099-01-01',
+            clientInfo: { name: 'test-client', version: '1.0.0' },
+            capabilities: {},
+          },
+        };
+
+        const result = await handler.processRequest(request, null);
+        expect(result.response).not.toBeNull();
+        expect(result.response!.error).toBeUndefined();
+        const initResult = result.response!.result as Record<string, unknown>;
+        expect(initResult.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
+      });
+
+      it('accepts protocol version 2025-11-25', async () => {
+        const request = {
+          jsonrpc: '2.0',
+          method: 'initialize',
+          id: 1,
+          params: {
+            protocolVersion: '2025-11-25',
+            clientInfo: { name: 'test-client', version: '1.0.0' },
+            capabilities: {},
+          },
+        };
+
+        const result = await handler.processRequest(request, null);
+        expect(result.response!.error).toBeUndefined();
+        const initResult = result.response!.result as Record<string, unknown>;
+        expect(initResult.protocolVersion).toBe('2025-11-25');
+      });
+
+      it('accepts protocol version 2025-03-26', async () => {
+        const request = {
+          jsonrpc: '2.0',
+          method: 'initialize',
+          id: 1,
+          params: {
+            protocolVersion: '2025-03-26',
+            clientInfo: { name: 'test-client', version: '1.0.0' },
+            capabilities: {},
+          },
+        };
+
+        const result = await handler.processRequest(request, null);
+        expect(result.response!.error).toBeUndefined();
+        const initResult = result.response!.result as Record<string, unknown>;
+        expect(initResult.protocolVersion).toBe('2025-03-26');
+      });
+
+      it('handles notifications/initialized as notification (no id) with null response', async () => {
+        const notification = {
+          jsonrpc: '2.0',
           method: 'notifications/initialized',
+        };
+
+        const result = await handler.processRequest(notification, null);
+        expect(result.response).toBeNull();
+      });
+
+      it('handles notifications/cancelled as notification with null response', async () => {
+        const notification = {
+          jsonrpc: '2.0',
+          method: 'notifications/cancelled',
+          params: { requestId: 'req-42' },
+        };
+
+        const result = await handler.processRequest(notification, null);
+        expect(result.response).toBeNull();
+      });
+
+      it('handles notifications/cancelled without requestId param', async () => {
+        const notification = {
+          jsonrpc: '2.0',
+          method: 'notifications/cancelled',
+        };
+
+        const result = await handler.processRequest(notification, null);
+        expect(result.response).toBeNull();
+      });
+
+      it('handles unknown notification methods with null response', async () => {
+        const notification = {
+          jsonrpc: '2.0',
+          method: 'notifications/unknown',
+        };
+
+        const result = await handler.processRequest(notification, null);
+        expect(result.response).toBeNull();
+      });
+
+      it('handles non-notification method sent without id as notification', async () => {
+        const notification = {
+          jsonrpc: '2.0',
+          method: 'tools/list',
+        };
+
+        const result = await handler.processRequest(notification, null);
+        expect(result.response).toBeNull();
+      });
+
+      it('handles ping request', async () => {
+        const request = {
+          jsonrpc: '2.0',
+          method: 'ping',
           id: 1,
         };
 
-        const response = await handler.processRequest(request, null);
+        const result = await handler.processRequest(request, null);
+        expect(result.response).not.toBeNull();
+        expect(result.response!.error).toBeUndefined();
+        expect(result.response!.result).toEqual({});
+        expect(result.response!.id).toBe(1);
+      });
 
-        expect(response.error).toBeUndefined();
-        expect(response.result).toEqual({});
+      it('handles logging/setLevel request', async () => {
+        const request = {
+          jsonrpc: '2.0',
+          method: 'logging/setLevel',
+          id: 1,
+          params: { level: 'warning' },
+        };
+
+        const result = await handler.processRequest(request, null);
+        expect(result.response).not.toBeNull();
+        expect(result.response!.error).toBeUndefined();
+        expect(result.response!.result).toEqual({});
+        expect(result.response!.id).toBe(1);
       });
 
       it('handles tools/list request', async () => {
@@ -197,10 +404,11 @@ describe('jsonrpc', () => {
           id: 1,
         };
 
-        const response = await handler.processRequest(request, null);
+        const result = await handler.processRequest(request, null);
 
-        expect(response.error).toBeUndefined();
-        expect((response.result as { tools: unknown[] }).tools).toHaveLength(1);
+        expect(result.response).not.toBeNull();
+        expect(result.response!.error).toBeUndefined();
+        expect((result.response!.result as { tools: unknown[] }).tools).toHaveLength(1);
       });
 
       it('handles tools/call request successfully', async () => {
@@ -225,10 +433,11 @@ describe('jsonrpc', () => {
           },
         };
 
-        const response = await handler.processRequest(request, null);
+        const result = await handler.processRequest(request, null);
 
-        expect(response.error).toBeUndefined();
-        expect(response.result).toEqual(expectedResult);
+        expect(result.response).not.toBeNull();
+        expect(result.response!.error).toBeUndefined();
+        expect(result.response!.result).toEqual(expectedResult);
         expect(toolHandler).toHaveBeenCalledWith({ message: 'hello' });
       });
 
@@ -243,10 +452,11 @@ describe('jsonrpc', () => {
           },
         };
 
-        const response = await handler.processRequest(request, null);
+        const result = await handler.processRequest(request, null);
 
-        expect(response.error).toBeDefined();
-        expect(response.error?.code).toBe(JSONRPCErrorCode.MethodNotFound);
+        expect(result.response).not.toBeNull();
+        expect(result.response!.error).toBeDefined();
+        expect(result.response!.error?.code).toBe(JSONRPCErrorCode.MethodNotFound);
       });
 
       it('returns error for invalid tool name in call', async () => {
@@ -260,10 +470,11 @@ describe('jsonrpc', () => {
           },
         };
 
-        const response = await handler.processRequest(request, null);
+        const result = await handler.processRequest(request, null);
 
-        expect(response.error).toBeDefined();
-        expect(response.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
+        expect(result.response).not.toBeNull();
+        expect(result.response!.error).toBeDefined();
+        expect(result.response!.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
       });
 
       it('handles tool execution errors', async () => {
@@ -285,10 +496,11 @@ describe('jsonrpc', () => {
           },
         };
 
-        const response = await handler.processRequest(request, null);
+        const result = await handler.processRequest(request, null);
 
-        expect(response.error).toBeDefined();
-        expect(response.error?.code).toBe(JSONRPCErrorCode.InternalError);
+        expect(result.response).not.toBeNull();
+        expect(result.response!.error).toBeDefined();
+        expect(result.response!.error?.code).toBe(JSONRPCErrorCode.InternalError);
       });
 
       it('returns method not found for unknown methods', async () => {
@@ -298,20 +510,21 @@ describe('jsonrpc', () => {
           id: 1,
         };
 
-        const response = await handler.processRequest(request, null);
+        const result = await handler.processRequest(request, null);
 
-        expect(response.error).toBeDefined();
-        expect(response.error?.code).toBe(JSONRPCErrorCode.MethodNotFound);
-        expect(response.error?.message).toContain('unknown/method');
+        expect(result.response).not.toBeNull();
+        expect(result.response!.error).toBeDefined();
+        expect(result.response!.error?.code).toBe(JSONRPCErrorCode.MethodNotFound);
+        expect(result.response!.error?.message).toContain('unknown/method');
       });
     });
 
     describe('initialize param validation', () => {
       it('returns invalidParams when initialize has no params', async () => {
         const request = { jsonrpc: '2.0', method: 'initialize', id: 1 };
-        const response = await handler.processRequest(request, null);
-        expect(response.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
-        expect(response.error?.message).toContain('params');
+        const result = await handler.processRequest(request, null);
+        expect(result.response!.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
+        expect(result.response!.error?.message).toContain('params');
       });
 
       it('returns invalidParams when protocolVersion missing', async () => {
@@ -321,8 +534,8 @@ describe('jsonrpc', () => {
           id: 1,
           params: { clientInfo: { name: 'test', version: '1.0' }, capabilities: {} },
         };
-        const response = await handler.processRequest(request, null);
-        expect(response.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
+        const result = await handler.processRequest(request, null);
+        expect(result.response!.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
       });
 
       it('returns invalidParams when clientInfo missing', async () => {
@@ -332,8 +545,8 @@ describe('jsonrpc', () => {
           id: 1,
           params: { protocolVersion: '2024-11-05', capabilities: {} },
         };
-        const response = await handler.processRequest(request, null);
-        expect(response.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
+        const result = await handler.processRequest(request, null);
+        expect(result.response!.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
       });
 
       it('returns invalidParams when clientInfo.name is not a string', async () => {
@@ -347,8 +560,8 @@ describe('jsonrpc', () => {
             capabilities: {},
           },
         };
-        const response = await handler.processRequest(request, null);
-        expect(response.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
+        const result = await handler.processRequest(request, null);
+        expect(result.response!.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
       });
 
       it('returns invalidParams when clientInfo.version is not a string', async () => {
@@ -362,16 +575,16 @@ describe('jsonrpc', () => {
             capabilities: {},
           },
         };
-        const response = await handler.processRequest(request, null);
-        expect(response.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
+        const result = await handler.processRequest(request, null);
+        expect(result.response!.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
       });
     });
 
     describe('tools/call param validation', () => {
       it('returns invalidParams when tools/call has no params', async () => {
         const request = { jsonrpc: '2.0', method: 'tools/call', id: 1 };
-        const response = await handler.processRequest(request, null);
-        expect(response.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
+        const result = await handler.processRequest(request, null);
+        expect(result.response!.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
       });
 
       it('returns invalidParams when params.name is not a string', async () => {
@@ -381,8 +594,8 @@ describe('jsonrpc', () => {
           id: 1,
           params: { name: 123, arguments: {} },
         };
-        const response = await handler.processRequest(request, null);
-        expect(response.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
+        const result = await handler.processRequest(request, null);
+        expect(result.response!.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
       });
 
       it('handles missing arguments gracefully (defaults to empty object)', async () => {
@@ -402,8 +615,8 @@ describe('jsonrpc', () => {
           id: 1,
           params: { name: 'no_args_tool' },
         };
-        const response = await handler.processRequest(request, null);
-        expect(response.error).toBeUndefined();
+        const result = await handler.processRequest(request, null);
+        expect(result.response!.error).toBeUndefined();
         expect(toolHandler).toHaveBeenCalledWith({});
       });
 
@@ -426,8 +639,8 @@ describe('jsonrpc', () => {
             id: 1,
             params: { name: 'args_tool', arguments: invalidArgs },
           };
-          const response = await handler.processRequest(request, null);
-          expect(response.error).toBeUndefined();
+          const result = await handler.processRequest(request, null);
+          expect(result.response!.error).toBeUndefined();
           expect(toolHandler).toHaveBeenCalledWith({});
         }
       );
@@ -451,10 +664,271 @@ describe('jsonrpc', () => {
           id: 1,
           params: { name: 'leaky_tool', arguments: {} },
         };
-        const response = await handler.processRequest(request, null);
-        expect(response.error?.message).toBe('Internal error');
-        expect(response.error?.message).not.toContain('ECONNREFUSED');
+        const result = await handler.processRequest(request, null);
+        expect(result.response!.error?.message).toBe('Internal error');
+        expect(result.response!.error?.message).not.toContain('ECONNREFUSED');
       });
+    });
+
+    describe('tools/list pagination', () => {
+      function registerNTools(h: JSONRPCHandler, count: number): void {
+        for (let i = 0; i < count; i++) {
+          h.registerTool(
+            {
+              name: `tool_${String(i).padStart(4, '0')}`,
+              description: `Tool ${i}`,
+              inputSchema: { type: 'object' as const, properties: {} },
+            },
+            vi.fn().mockResolvedValue({ content: [] })
+          );
+        }
+      }
+
+      it('returns all tools without cursor when count is under page size', async () => {
+        registerNTools(handler, 5);
+        const request = { jsonrpc: '2.0', method: 'tools/list', id: 1 };
+
+        const result = await handler.processRequest(request, null);
+        const listResult = result.response!.result as { tools: unknown[]; nextCursor?: string };
+
+        expect(listResult.tools).toHaveLength(5);
+        expect(listResult.nextCursor).toBeUndefined();
+      });
+
+      it('returns first page with nextCursor when more than 100 tools', async () => {
+        registerNTools(handler, 150);
+        const request = { jsonrpc: '2.0', method: 'tools/list', id: 1 };
+
+        const result = await handler.processRequest(request, null);
+        const listResult = result.response!.result as { tools: unknown[]; nextCursor?: string };
+
+        expect(listResult.tools).toHaveLength(100);
+        expect(listResult.nextCursor).toBeDefined();
+        // Decode cursor to verify it points to index 100
+        expect(Buffer.from(listResult.nextCursor!, 'base64').toString()).toBe('100');
+      });
+
+      it('returns second page when using cursor from first page', async () => {
+        registerNTools(handler, 150);
+        // First page
+        const firstResult = await handler.processRequest(
+          { jsonrpc: '2.0', method: 'tools/list', id: 1 },
+          null
+        );
+        const firstPage = firstResult.response!.result as {
+          tools: unknown[];
+          nextCursor?: string;
+        };
+
+        // Second page using cursor
+        const secondResult = await handler.processRequest(
+          {
+            jsonrpc: '2.0',
+            method: 'tools/list',
+            id: 2,
+            params: { cursor: firstPage.nextCursor },
+          },
+          null
+        );
+        const secondPage = secondResult.response!.result as {
+          tools: unknown[];
+          nextCursor?: string;
+        };
+
+        expect(secondPage.tools).toHaveLength(50);
+        expect(secondPage.nextCursor).toBeUndefined();
+      });
+
+      it('returns empty page when cursor points past end', async () => {
+        registerNTools(handler, 5);
+        const cursor = Buffer.from('999').toString('base64');
+        const request = {
+          jsonrpc: '2.0',
+          method: 'tools/list',
+          id: 1,
+          params: { cursor },
+        };
+
+        const result = await handler.processRequest(request, null);
+        const listResult = result.response!.result as { tools: unknown[]; nextCursor?: string };
+
+        expect(listResult.tools).toHaveLength(0);
+        expect(listResult.nextCursor).toBeUndefined();
+      });
+
+      it('returns exactly 100 tools on last full page without nextCursor', async () => {
+        registerNTools(handler, 100);
+        const request = { jsonrpc: '2.0', method: 'tools/list', id: 1 };
+
+        const result = await handler.processRequest(request, null);
+        const listResult = result.response!.result as { tools: unknown[]; nextCursor?: string };
+
+        expect(listResult.tools).toHaveLength(100);
+        expect(listResult.nextCursor).toBeUndefined();
+      });
+
+      it('returns empty list with no cursor when no tools registered', async () => {
+        const request = { jsonrpc: '2.0', method: 'tools/list', id: 1 };
+
+        const result = await handler.processRequest(request, null);
+        const listResult = result.response!.result as { tools: unknown[]; nextCursor?: string };
+
+        expect(listResult.tools).toHaveLength(0);
+        expect(listResult.nextCursor).toBeUndefined();
+      });
+
+      it('returns invalidParams error for malformed cursor (non-numeric base64)', async () => {
+        registerNTools(handler, 5);
+        const cursor = Buffer.from('not-a-number').toString('base64');
+        const request = {
+          jsonrpc: '2.0',
+          method: 'tools/list',
+          id: 1,
+          params: { cursor },
+        };
+
+        const result = await handler.processRequest(request, null);
+        expect(result.response!.error).toBeDefined();
+        expect(result.response!.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
+        expect(result.response!.error?.message).toContain('Invalid cursor');
+      });
+
+      it('returns invalidParams error for cursor encoding a negative number', async () => {
+        registerNTools(handler, 5);
+        const cursor = Buffer.from('-5').toString('base64');
+        const request = {
+          jsonrpc: '2.0',
+          method: 'tools/list',
+          id: 1,
+          params: { cursor },
+        };
+
+        const result = await handler.processRequest(request, null);
+        expect(result.response!.error).toBeDefined();
+        expect(result.response!.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
+        expect(result.response!.error?.message).toContain('Invalid cursor');
+      });
+
+      it('treats empty string cursor as no cursor (returns all tools)', async () => {
+        registerNTools(handler, 5);
+        const cursor = Buffer.from('').toString('base64');
+        const request = {
+          jsonrpc: '2.0',
+          method: 'tools/list',
+          id: 1,
+          params: { cursor },
+        };
+
+        const result = await handler.processRequest(request, null);
+        // Empty base64 encodes to empty string, which is falsy — treated as no cursor
+        expect(result.response!.error).toBeUndefined();
+        const listResult = result.response!.result as { tools: unknown[] };
+        expect(listResult.tools).toHaveLength(5);
+      });
+
+      it('returns invalidParams error for cursor with non-integer base64 content', async () => {
+        registerNTools(handler, 5);
+        // "abc" is valid base64 that decodes to binary gibberish, parseInt returns NaN
+        const cursor = 'abc';
+        const request = {
+          jsonrpc: '2.0',
+          method: 'tools/list',
+          id: 1,
+          params: { cursor },
+        };
+
+        const result = await handler.processRequest(request, null);
+        expect(result.response!.error).toBeDefined();
+        expect(result.response!.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
+      });
+
+      it('accepts valid cursor encoding zero', async () => {
+        registerNTools(handler, 5);
+        const cursor = Buffer.from('0').toString('base64');
+        const request = {
+          jsonrpc: '2.0',
+          method: 'tools/list',
+          id: 1,
+          params: { cursor },
+        };
+
+        const result = await handler.processRequest(request, null);
+        expect(result.response!.error).toBeUndefined();
+        const listResult = result.response!.result as { tools: unknown[] };
+        expect(listResult.tools).toHaveLength(5);
+      });
+    });
+
+    describe('ProcessRequestResult shape', () => {
+      it('wraps all responses in ProcessRequestResult with response field', async () => {
+        const request = {
+          jsonrpc: '2.0',
+          method: 'tools/list',
+          id: 1,
+        };
+
+        const result: ProcessRequestResult = await handler.processRequest(request, null);
+        expect(result).toHaveProperty('response');
+        expect(result.response).toHaveProperty('jsonrpc', '2.0');
+      });
+
+      it('returns sessionId only for initialize', async () => {
+        // tools/list should not have sessionId
+        const listResult = await handler.processRequest(
+          { jsonrpc: '2.0', method: 'tools/list', id: 1 },
+          null
+        );
+        expect(listResult.sessionId).toBeUndefined();
+
+        // ping should not have sessionId
+        const pingResult = await handler.processRequest(
+          { jsonrpc: '2.0', method: 'ping', id: 2 },
+          null
+        );
+        expect(pingResult.sessionId).toBeUndefined();
+
+        // initialize should have sessionId
+        const initResult = await handler.processRequest(
+          {
+            jsonrpc: '2.0',
+            method: 'initialize',
+            id: 3,
+            params: {
+              protocolVersion: '2024-11-05',
+              clientInfo: { name: 'test', version: '1.0' },
+              capabilities: {},
+            },
+          },
+          null
+        );
+        expect(initResult.sessionId).toBeDefined();
+      });
+    });
+  });
+
+  describe('SUPPORTED_PROTOCOL_VERSIONS', () => {
+    it('contains expected versions in order', () => {
+      expect(SUPPORTED_PROTOCOL_VERSIONS).toEqual(['2024-11-05', '2025-03-26', '2025-11-25']);
+    });
+
+    it('does not contain removed version 2025-06-18', () => {
+      expect(SUPPORTED_PROTOCOL_VERSIONS).not.toContain('2025-06-18');
+    });
+
+    it('is a frozen array (readonly)', () => {
+      expect(Object.isFrozen(SUPPORTED_PROTOCOL_VERSIONS)).toBe(true);
+    });
+  });
+
+  describe('LATEST_PROTOCOL_VERSION', () => {
+    it('equals the last entry in SUPPORTED_PROTOCOL_VERSIONS', () => {
+      expect(LATEST_PROTOCOL_VERSION).toBe(
+        SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.length - 1]
+      );
+    });
+
+    it('is 2025-11-25', () => {
+      expect(LATEST_PROTOCOL_VERSION).toBe('2025-11-25');
     });
   });
 });

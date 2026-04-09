@@ -140,12 +140,16 @@ setup-dev:
 	else \
 		echo "✅ All required tools present — installing dependencies...\n"; \
 	fi
-	@echo "── Cargo dependencies ──"
+	@echo "── Cargo dependencies (runtime + CLI) ──"
 	cargo fetch
+	@echo "── Cargo dependencies (desktop) ──"
+	cd desktop/src-tauri && cargo fetch
 	@echo "── MCP server dependencies ──"
 	cd mcp-servers && npm install
 	@echo "── Angular dependencies ──"
 	cd desktop/src && npm install
+	@echo "── E2E test dependencies ──"
+	cd desktop/e2e && npm install
 	@echo "── Git hooks (husky, commitlint) ──"
 	npm install
 	npx husky
@@ -723,7 +727,7 @@ else
 	chmod +x desktop/src-tauri/cli/speedwave
 endif
 	@$(MAKE) verify-bundled-assets
-	cd desktop/src-tauri && SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 cargo tauri dev
+	cd desktop/src-tauri && SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 TAURI_CONFIG='{"identifier":"pl.speedwave.desktop.dev","productName":"Speedwave Dev"}' cargo tauri dev
 
 # ── Quick status ─────────────────────────────────────────────────────────────
 
