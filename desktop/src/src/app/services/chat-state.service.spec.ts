@@ -170,7 +170,7 @@ describe('ChatStateService', () => {
 
       await service.sendMessage('Hello');
 
-      // Retry first re-sends (session may have recovered), then falls back to start_chat
+      // First send_message fails → list_projects → start_chat → retry send_message
       expect(sendAttempt).toBe(2);
       expect(service.messages).toHaveLength(1);
       expect(service.messages[0].role).toBe('user');

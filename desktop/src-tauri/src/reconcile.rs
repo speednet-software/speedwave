@@ -581,6 +581,8 @@ pub(crate) fn reconcile_compose_port(
         // env-var-only changes in `compose_up`, so force-recreate is needed
         // for correctness.  The compose lock prevents this from racing with
         // start_chat / resume_conversation.
+        // Images are guaranteed present — reconcile only runs after a
+        // successful mcp-os spawn, meaning containers were running.
         if let Err(e) = rt.compose_up_recreate(&project) {
             log::error!("reconcile_compose_port: compose_up_recreate failed: {e}");
             return;
