@@ -348,13 +348,12 @@ interface HistoryToolResultBlock {
  *   they do not appear standalone in the returned array.
  */
 function normalizeHistoryBlocks(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  blocks: any[]
+  blocks: (import('../models/chat').MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock)[]
 ): import('../models/chat').MessageBlock[] {
   const result: import('../models/chat').MessageBlock[] = [];
 
   for (const block of blocks) {
-    if (block.type === 'tool_use' && !block.tool) {
+    if (block.type === 'tool_use' && !('tool' in block)) {
       // History format: flat tool_use → wrap into nested ToolUseBlock
       const hist = block as HistoryToolUseBlock;
       result.push({
@@ -385,7 +384,7 @@ function normalizeHistoryBlocks(
       }
     } else {
       // text, thinking, error, or already-normalized tool_use — pass through
-      result.push(block);
+      result.push(block as import('../models/chat').MessageBlock);
     }
   }
 
