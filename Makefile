@@ -723,7 +723,7 @@ else
 	chmod +x desktop/src-tauri/cli/speedwave
 endif
 	@$(MAKE) verify-bundled-assets
-	cd desktop/src-tauri && SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 cargo tauri dev
+	cd desktop/src-tauri && SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 TAURI_CONFIG='{"identifier":"pl.speedwave.desktop.dev","productName":"Speedwave Dev"}' cargo tauri dev
 
 # ── Quick status ─────────────────────────────────────────────────────────────
 

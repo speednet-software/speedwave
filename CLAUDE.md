@@ -125,7 +125,7 @@ All plugins are toggled per-project via `integrations.plugins.<key>.enabled`, wh
 
 ## Key Gotchas
 
-- **NEVER run host `limactl`, `nerdctl`, or `docker` directly** — Speedwave bundles its own Lima runtime (`~/.speedwave/lima/bin/limactl`) with its own VM. The host may have a separate Lima/nerdctl/Docker installation with unrelated VMs and containers. All container operations must go through `speedwave-runtime` (`detect_runtime()`) or the `speedwave` CLI binary. If you need to inspect containers or images, use Tauri commands or the Speedwave CLI — never raw container commands.
+- **NEVER run host `limactl`, `nerdctl`, or `docker` directly** — the host may have a separate Lima/nerdctl/Docker installation with unrelated VMs and containers. Always use Speedwave's own bundled binaries (resolved by `detect_runtime()`) or the `speedwave` CLI binary.
 - **NEVER bypass git hooks** — no `--no-verify`, no `HUSKY=0`, no `core.hooksPath` tricks. Fix the issue or ask the user.
 - **NEVER skip tests** — no `.skip`, `xit`, `xdescribe`. Fix the code or the test.
 - **NEVER bypass branch protection or CI** — no `--admin`, no disabling checks. Fix CI.

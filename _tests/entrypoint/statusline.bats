@@ -276,6 +276,7 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
 # ---------------------------------------------------------------------------
 
 @test "shows git branch when workspace is a git repo" {
+    [[ -n "${GIT_DIR:-}" ]] && skip "git commands unreliable inside git hooks"
     local repo="$(mktemp -d)"
     git -C "$repo" init -q
     git -C "$repo" config user.email "test@test.com"
@@ -292,6 +293,7 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
 }
 
 @test "shows short SHA on detached HEAD" {
+    [[ -n "${GIT_DIR:-}" ]] && skip "git commands unreliable inside git hooks"
     local repo="$(mktemp -d)"
     git -C "$repo" init -q
     git -C "$repo" config user.email "test@test.com"
@@ -321,6 +323,7 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
 }
 
 @test "branch appears between model and CTX in correct order" {
+    [[ -n "${GIT_DIR:-}" ]] && skip "git commands unreliable inside git hooks"
     local repo="$(mktemp -d)"
     git -C "$repo" init -q
     git -C "$repo" config user.email "test@test.com"
