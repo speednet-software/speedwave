@@ -140,12 +140,16 @@ setup-dev:
 	else \
 		echo "✅ All required tools present — installing dependencies...\n"; \
 	fi
-	@echo "── Cargo dependencies ──"
+	@echo "── Cargo dependencies (runtime + CLI) ──"
 	cargo fetch
+	@echo "── Cargo dependencies (desktop) ──"
+	cd desktop/src-tauri && cargo fetch
 	@echo "── MCP server dependencies ──"
 	cd mcp-servers && npm install
 	@echo "── Angular dependencies ──"
 	cd desktop/src && npm install
+	@echo "── E2E test dependencies ──"
+	cd desktop/e2e && npm install
 	@echo "── Git hooks (husky, commitlint) ──"
 	npm install
 	npx husky
