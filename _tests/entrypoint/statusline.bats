@@ -275,8 +275,71 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
 # Git branch tests
 # ---------------------------------------------------------------------------
 
-# Git branch tests removed — they run `git init`/`git checkout` which
-# fails inside pre-push hooks (GIT_QUARANTINE_PATH leaks into subprocess).
+@test "shows git branch when workspace is a git repo" {
+    [[ -n "$GIT_QUARANTINE_PATH" ]] && skip "git commands fail inside pre-push quarantine"
+    local repo="$(mktemp -d)"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email "test@test.com"
+    git -C "$repo" config user.name "Test"
+    git -C "$repo" commit --allow-empty -m "init" -q
+    git -C "$repo" checkout -b feat/my-feature -q
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000}'
+    export STATUSLINE_WORKSPACE_DIR="$repo"
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    unset STATUSLINE_WORKSPACE_DIR
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"feat/my-feature"* ]]
+}
+
+@test "shows short SHA on detached HEAD" {
+    [[ -n "$GIT_QUARANTINE_PATH" ]] && skip "git commands fail inside pre-push quarantine"
+    local repo="$(mktemp -d)"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email "test@test.com"
+    git -C "$repo" config user.name "Test"
+    git -C "$repo" commit --allow-empty -m "init" -q
+    local sha
+    sha="$(git -C "$repo" rev-parse --short HEAD)"
+    git -C "$repo" checkout --detach -q
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000}'
+    export STATUSLINE_WORKSPACE_DIR="$repo"
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    unset STATUSLINE_WORKSPACE_DIR
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$sha"* ]]
+}
+
+@test "no branch shown when workspace is not a git repo" {
+    local repo="$(mktemp -d)"
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000}'
+    export STATUSLINE_WORKSPACE_DIR="$repo"
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    unset STATUSLINE_WORKSPACE_DIR
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Test"* ]]
+}
+
+@test "branch appears between model and CTX in correct order" {
+    [[ -n "$GIT_QUARANTINE_PATH" ]] && skip "git commands fail inside pre-push quarantine"
+    local repo="$(mktemp -d)"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email "test@test.com"
+    git -C "$repo" config user.name "Test"
+    git -C "$repo" commit --allow-empty -m "init" -q
+    local branch
+    branch="$(git -C "$repo" rev-parse --abbrev-ref HEAD)"
+    local input='{"model":{"display_name":"Test"},"used_percentage":10,"context_window_size":1000000}'
+    export STATUSLINE_WORKSPACE_DIR="$repo"
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    unset STATUSLINE_WORKSPACE_DIR
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    # Branch name must appear between model and CTX
+    [[ "$output" =~ Test.*"$branch".*CTX ]]
+}
 
 # ---------------------------------------------------------------------------
 # Float handling tests

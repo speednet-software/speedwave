@@ -883,8 +883,7 @@ impl ChatSession {
                 if matches!(
                     chunk,
                     Some(StreamChunk::Result { .. }) | Some(StreamChunk::Error { .. })
-                ) || msg_type == "result"
-                    || msg_type == "system"
+                ) || msg_type == "system"
                 {
                     got_result = true;
                 }

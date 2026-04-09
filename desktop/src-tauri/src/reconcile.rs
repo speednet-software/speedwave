@@ -576,16 +576,17 @@ pub(crate) fn reconcile_compose_port(
             return;
         }
 
-        // Use plain `compose_up` (not force-recreate) — nerdctl/compose
-        // detects the changed env var and restarts only affected services.
-        // This avoids tearing down ALL containers (including claude) just
-        // to update the hub's WORKER_OS_URL.
-        if let Err(e) = rt.compose_up(&project) {
-            log::error!("reconcile_compose_port: compose_up failed: {e}");
+        // Force-recreate to ensure the hub picks up the new WORKER_OS_URL.
+        // nerdctl compose (unlike Docker Compose) does not reliably detect
+        // env-var-only changes in `compose_up`, so force-recreate is needed
+        // for correctness.  The compose lock prevents this from racing with
+        // start_chat / resume_conversation.
+        if let Err(e) = rt.compose_up_recreate(&project) {
+            log::error!("reconcile_compose_port: compose_up_recreate failed: {e}");
             return;
         }
 
-        log::info!("reconcile_compose_port: containers updated with mcp-os port {current_port}");
+        log::info!("reconcile_compose_port: containers recreated with mcp-os port {current_port}");
 
         // Notify the frontend that containers were restarted
         use tauri::Emitter;
