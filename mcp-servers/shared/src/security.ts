@@ -25,15 +25,15 @@ export async function loadToken(tokenPath: string): Promise<string> {
     const code = (error as NodeJS.ErrnoException).code;
 
     if (code === 'ENOENT') {
-      throw new Error(`Token file not found: ${tokenPath}`);
+      throw new Error(`Token file not found: ${tokenPath}`, { cause: error });
     } else if (code === 'EACCES') {
-      throw new Error(`Permission denied reading token file: ${tokenPath}`);
+      throw new Error(`Permission denied reading token file: ${tokenPath}`, { cause: error });
     } else if (code === 'EISDIR') {
-      throw new Error(`Token path is a directory, not a file: ${tokenPath}`);
+      throw new Error(`Token path is a directory, not a file: ${tokenPath}`, { cause: error });
     } else {
       // Other errors (EIO, EMFILE, etc.)
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to read token file: ${tokenPath} (${message})`);
+      throw new Error(`Failed to read token file: ${tokenPath} (${message})`, { cause: error });
     }
   }
 }

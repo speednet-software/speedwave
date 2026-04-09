@@ -287,7 +287,9 @@ export class SharePointClient {
               return response;
             } catch (error) {
               if (error instanceof Error && error.name === 'AbortError') {
-                throw new Error(`Graph API request timeout after ${TIMEOUTS.API_CALL_MS}ms`);
+                throw new Error(`Graph API request timeout after ${TIMEOUTS.API_CALL_MS}ms`, {
+                  cause: error,
+                });
               }
               throw error;
             } finally {
@@ -314,7 +316,9 @@ export class SharePointClient {
             });
           } catch (error) {
             if (error instanceof Error && error.name === 'AbortError') {
-              throw new Error(`Graph API request timeout after ${TIMEOUTS.API_CALL_MS}ms`);
+              throw new Error(`Graph API request timeout after ${TIMEOUTS.API_CALL_MS}ms`, {
+                cause: error,
+              });
             }
             throw error;
           } finally {
@@ -328,7 +332,9 @@ export class SharePointClient {
       return response;
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error(`Graph API request timeout after ${TIMEOUTS.API_CALL_MS}ms`);
+        throw new Error(`Graph API request timeout after ${TIMEOUTS.API_CALL_MS}ms`, {
+          cause: error,
+        });
       }
       throw error;
     } finally {

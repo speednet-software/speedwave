@@ -230,14 +230,17 @@ export async function runCommand(
     if (err.killed) {
       throw new Error(
         `${domain}.${command} timed out after ${timeoutMs}ms. ` +
-          'This may happen on first run when macOS permission dialogs appear.'
+          'This may happen on first run when macOS permission dialogs appear.',
+        { cause: error }
       );
     }
 
     if (err.stderr) {
-      throw new Error(`${domain}.${command} failed: ${err.stderr.trim()}`);
+      throw new Error(`${domain}.${command} failed: ${err.stderr.trim()}`, { cause: error });
     }
 
-    throw new Error(`${domain}.${command} failed: ${err.message || String(error)}`);
+    throw new Error(`${domain}.${command} failed: ${err.message || String(error)}`, {
+      cause: error,
+    });
   }
 }

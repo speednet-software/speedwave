@@ -196,7 +196,9 @@ export class TokenManager {
       return newTokens;
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error(`Token refresh timeout after ${TIMEOUTS.TOKEN_REFRESH_MS}ms`);
+        throw new Error(`Token refresh timeout after ${TIMEOUTS.TOKEN_REFRESH_MS}ms`, {
+          cause: error,
+        });
       }
       throw error;
     } finally {

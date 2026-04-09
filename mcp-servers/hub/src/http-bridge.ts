@@ -139,7 +139,8 @@ export async function parseResponse(response: Response): Promise<JSONRPCResponse
           } catch (error) {
             const preview = json.length > 100 ? json.substring(0, 100) + '...' : json;
             throw new Error(
-              `Failed to parse SSE JSON-RPC response (status ${response.status}): ${error instanceof Error ? error.message : String(error)}. Data: "${preview}"`
+              `Failed to parse SSE JSON-RPC response (status ${response.status}): ${error instanceof Error ? error.message : String(error)}. Data: "${preview}"`,
+              { cause: error }
             );
           }
         }
@@ -151,7 +152,8 @@ export async function parseResponse(response: Response): Promise<JSONRPCResponse
     return (await response.json()) as JSONRPCResponse;
   } catch (error) {
     throw new Error(
-      `Failed to parse JSON response (status ${response.status}): ${error instanceof Error ? error.message : String(error)}`
+      `Failed to parse JSON response (status ${response.status}): ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
     );
   }
 }
@@ -512,7 +514,8 @@ export async function callWorker<T = unknown>(
           `Parse error: ${parseError instanceof Error ? parseError.message : parseError}`
         );
         throw new Error(
-          `Worker ${service} returned invalid response format. Expected JSON but received: ${preview}`
+          `Worker ${service} returned invalid response format. Expected JSON but received: ${preview}`,
+          { cause: parseError }
         );
       }
     }
@@ -520,7 +523,7 @@ export async function callWorker<T = unknown>(
     return result.result as T;
   } catch (error: unknown) {
     if (error instanceof Error && error.name === 'TimeoutError') {
-      throw new Error(`Worker ${service} timeout after ${timeout}ms`);
+      throw new Error(`Worker ${service} timeout after ${timeout}ms`, { cause: error });
     }
 
     console.error(

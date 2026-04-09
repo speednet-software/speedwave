@@ -359,7 +359,7 @@ function createToolWrappers(
       logErrorDebug(serviceName, error);
       const message = formatErrorMessage(error);
       console.error(`${ts()} [${serviceName}] Bridge call failed:`, message);
-      throw new Error(`${serviceName}: ${message}`);
+      throw new Error(`${serviceName}: ${message}`, { cause: error });
     }
   };
 
