@@ -475,7 +475,12 @@ pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) {
 /// recreate containers so the hub connects to the correct port.
 ///
 /// Runs in a background thread to avoid blocking app startup.
-pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
+/// The `compose_lock` serialises this with `start_chat`/`resume_conversation`
+/// to prevent concurrent compose operations.
+pub(crate) fn reconcile_compose_port(
+    app_handle: &tauri::AppHandle,
+    compose_lock: std::sync::Arc<std::sync::Mutex<()>>,
+) {
     let handle = app_handle.clone();
     std::thread::spawn(move || {
         let project = match config::load_user_config()
@@ -555,12 +560,15 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
             return;
         }
 
-        // Stop existing containers before regenerating compose — nerdctl's
-        // name-store can reject `compose up --force-recreate` with "name already
-        // used" if containers are not torn down first.
-        if let Err(e) = rt.compose_down(&project) {
-            log::warn!("reconcile_compose_port: compose_down failed (continuing): {e}");
-        }
+        // Acquire compose lock to prevent concurrent compose operations
+        // (e.g. start_chat running ensure_exec_healthy at the same time).
+        let _compose_guard = match compose_lock.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                log::error!("reconcile_compose_port: compose lock poisoned: {e}");
+                return;
+            }
+        };
 
         // Regenerate compose with the current port
         if let Err(e) = crate::containers_cmd::render_and_save_compose(&project, &*rt) {
@@ -568,19 +576,16 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
             return;
         }
 
-        // Wait for images to be ready before starting containers
-        if let Err(e) = crate::containers_cmd::ensure_images_ready() {
-            log::error!("reconcile_compose_port: images not ready: {e}");
+        // Use plain `compose_up` (not force-recreate) — nerdctl/compose
+        // detects the changed env var and restarts only affected services.
+        // This avoids tearing down ALL containers (including claude) just
+        // to update the hub's WORKER_OS_URL.
+        if let Err(e) = rt.compose_up(&project) {
+            log::error!("reconcile_compose_port: compose_up failed: {e}");
             return;
         }
 
-        // Start containers with the new compose
-        if let Err(e) = rt.compose_up_recreate(&project) {
-            log::error!("reconcile_compose_port: compose_up_recreate failed: {e}");
-            return;
-        }
-
-        log::info!("reconcile_compose_port: containers recreated with mcp-os port {current_port}");
+        log::info!("reconcile_compose_port: containers updated with mcp-os port {current_port}");
 
         // Notify the frontend that containers were restarted
         use tauri::Emitter;

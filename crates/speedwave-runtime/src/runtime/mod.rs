@@ -488,8 +488,12 @@ pub fn ensure_exec_healthy(
     project: &str,
     container: &str,
 ) -> anyhow::Result<()> {
+    log::info!("ensure_exec_healthy: probing '{container}'");
     match probe_container_exec(runtime, container) {
-        Ok(()) => return Ok(()),
+        Ok(()) => {
+            log::info!("ensure_exec_healthy: '{container}' is healthy");
+            return Ok(());
+        }
         Err(e) => {
             let msg = e.to_string();
             if is_stale_container_error(&msg) {

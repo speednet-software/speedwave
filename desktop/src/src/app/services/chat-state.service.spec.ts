@@ -48,10 +48,11 @@ describe('ChatStateService', () => {
   });
 
   describe('init', () => {
-    it('surfaces startChatSession error to projectState', async () => {
+    it('logs startChatSession error without blocking projectState', async () => {
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
 
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'start_chat') throw new Error('chat backend crashed');
         if (cmd === 'list_projects')
@@ -62,8 +63,14 @@ describe('ChatStateService', () => {
       };
 
       await service.init();
-      expect(projectState.status).toBe('error');
-      expect(projectState.error).toContain('Failed to start chat session');
+      // startChatSession is fire-and-forget — flush microtask queue
+      await new Promise((r) => setTimeout(r, 0));
+      // start_chat failure should NOT block projectState — containers are still running,
+      // only the Claude session failed (rate limit, OOM, etc). sendMessage auto-retry
+      // handles session recovery.
+      expect(projectState.status).toBe('ready');
+      expect(errorSpy).toHaveBeenCalledWith('Failed to start chat session:', expect.any(Error));
+      errorSpy.mockRestore();
     });
 
     it('only runs init once', async () => {
@@ -147,11 +154,9 @@ describe('ChatStateService', () => {
       );
     });
 
-    it('auto-retries on "session exited" by restarting chat', async () => {
+    it('auto-retries on "session exited" by re-sending', async () => {
       let sendAttempt = 0;
-      const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
-        calls.push(cmd);
         if (cmd === 'send_message') {
           sendAttempt++;
           if (sendAttempt === 1) throw new Error('session exited (exit status: 0)');
@@ -165,8 +170,8 @@ describe('ChatStateService', () => {
 
       await service.sendMessage('Hello');
 
-      expect(calls).toContain('start_chat');
-      expect(calls.filter((c) => c === 'send_message')).toHaveLength(2);
+      // Retry first re-sends (session may have recovered), then falls back to start_chat
+      expect(sendAttempt).toBe(2);
       expect(service.messages).toHaveLength(1);
       expect(service.messages[0].role).toBe('user');
     });
@@ -233,13 +238,8 @@ describe('ChatStateService', () => {
     });
 
     it('skips retry when no active project on restart', async () => {
-      let sendAttempt = 0;
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'send_message') {
-          sendAttempt++;
-          if (sendAttempt === 1) throw new Error('no active session');
-          return undefined;
-        }
+        if (cmd === 'send_message') throw new Error('no active session');
         if (cmd === 'list_projects') {
           return { projects: [], active_project: null };
         }
@@ -252,9 +252,6 @@ describe('ChatStateService', () => {
       expect(service.messages).toHaveLength(2);
       const errorBlock = service.messages[1].blocks[0];
       expect(errorBlock.type).toBe('error');
-      expect((errorBlock as { type: 'error'; content: string }).content).toContain(
-        'Failed to send message'
-      );
     });
   });
 
@@ -801,6 +798,8 @@ describe('ChatStateService', () => {
       };
 
       await service.init();
+      // startChatSession is fire-and-forget — flush microtask queue
+      await new Promise((r) => setTimeout(r, 0));
       expect(projectState.status).toBe('auth_required');
     });
 
@@ -826,6 +825,49 @@ describe('ChatStateService', () => {
       await service.init();
       await service.sendMessage('hello');
       expect(projectState.status).toBe('auth_required');
+    });
+  });
+
+  describe('session startup timeout', () => {
+    it('shows error when startingSession does not clear within deadline', async () => {
+      // Directly invoke sendMessage without full init — we only need the
+      // retry path and the startingSession flag.
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'send_message') throw new Error('no active session');
+        return undefined;
+      };
+
+      // Simulate startingSession permanently stuck true
+      (service as unknown as { startingSession: boolean }).startingSession = true;
+
+      // Mock Date.now to make the deadline expire immediately.
+      // sendMessage calls: (1) user-msg timestamp, (2) deadline = Date.now() + 30_000,
+      // (3+) while-loop condition Date.now() < deadline.
+      // Track Date.now() calls.  We need the deadline setup call to
+      // return `base` and all subsequent calls to return past the
+      // deadline.  Use a generous threshold: the first 5 calls return
+      // base (covers user-msg timestamp, notifyChange(), deadline setup,
+      // plus any framework overhead).  After that, jump past the
+      // deadline so the while loop exits on the next iteration.
+      const base = 1000000;
+      let nowCall = 0;
+      const spy = vi.spyOn(Date, 'now').mockImplementation(() => {
+        nowCall++;
+        return nowCall <= 5 ? base : base + 60_000;
+      });
+
+      await service.sendMessage('hello');
+      spy.mockRestore();
+
+      // Should have 2 messages: user + assistant error
+      expect(service.messages).toHaveLength(2);
+      const lastMsg = service.messages[1];
+      expect(lastMsg.role).toBe('assistant');
+      expect(lastMsg.blocks[0].type).toBe('error');
+      expect((lastMsg.blocks[0] as { content: string }).content).toContain(
+        'Session is still starting'
+      );
+      expect(service.isStreaming).toBe(false);
     });
   });
 });

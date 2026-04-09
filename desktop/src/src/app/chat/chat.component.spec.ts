@@ -471,6 +471,100 @@ describe('ChatComponent', () => {
       retrySpy.mockRestore();
     });
 
+    it('normalizes history tool_use blocks into nested format', async () => {
+      component.viewingTranscript = {
+        session_id: 's1',
+        messages: [
+          {
+            role: 'assistant',
+            content: '[Tool: Read]',
+            timestamp: null,
+            blocks: [
+              { type: 'tool_use', tool_name: 'Read', input_json: '{"file":"/a.ts"}' },
+              { type: 'tool_result', content: 'file contents', is_error: false },
+            ] as unknown as import('../models/chat').MessageBlock[],
+          },
+        ],
+      };
+      projectState.activeProject = 'test';
+
+      await component.resumeConversation('s1');
+
+      const msgs = chatState.messages;
+      expect(msgs).toHaveLength(1);
+      const block = msgs[0].blocks[0];
+      expect(block.type).toBe('tool_use');
+      if (block.type === 'tool_use') {
+        expect(block.tool.tool_name).toBe('Read');
+        expect(block.tool.input_json).toBe('{"file":"/a.ts"}');
+        expect(block.tool.status).toBe('done');
+        expect(block.tool.result).toBe('file contents');
+      }
+    });
+
+    it('normalizes history tool_use error result', async () => {
+      component.viewingTranscript = {
+        session_id: 's1',
+        messages: [
+          {
+            role: 'assistant',
+            content: '[Tool: Bash]',
+            timestamp: null,
+            blocks: [
+              { type: 'tool_use', tool_name: 'Bash', input_json: '{"command":"fail"}' },
+              { type: 'tool_result', content: 'command not found', is_error: true },
+            ] as unknown as import('../models/chat').MessageBlock[],
+          },
+        ],
+      };
+      projectState.activeProject = 'test';
+
+      await component.resumeConversation('s1');
+
+      const block = chatState.messages[0].blocks[0];
+      if (block.type === 'tool_use') {
+        expect(block.tool.status).toBe('error');
+        expect(block.tool.result_is_error).toBe(true);
+        expect(block.tool.result).toBe('command not found');
+      }
+    });
+
+    it('passes through already-normalized tool_use blocks', async () => {
+      const normalizedTool = {
+        type: 'tool_use' as const,
+        tool: {
+          type: 'tool_use' as const,
+          tool_id: 't1',
+          tool_name: 'Read',
+          input_json: '{}',
+          status: 'done' as const,
+          result: 'ok',
+          result_is_error: false as const,
+          collapsed: false,
+        },
+      };
+      component.viewingTranscript = {
+        session_id: 's1',
+        messages: [
+          {
+            role: 'assistant',
+            content: 'test',
+            timestamp: null,
+            blocks: [normalizedTool],
+          },
+        ],
+      };
+      projectState.activeProject = 'test';
+
+      await component.resumeConversation('s1');
+
+      const block = chatState.messages[0].blocks[0];
+      expect(block.type).toBe('tool_use');
+      if (block.type === 'tool_use') {
+        expect(block.tool.tool_id).toBe('t1');
+      }
+    });
+
     it('clears transcript and history state after resuming', async () => {
       component.viewingTranscript = {
         session_id: 's1',

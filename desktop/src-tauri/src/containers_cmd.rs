@@ -319,9 +319,10 @@ pub async fn add_project(
     chat_state: tauri::State<'_, crate::chat::SharedChatSession>,
     mcp_os: tauri::State<'_, SharedMcpOs>,
     ide_bridge: tauri::State<'_, SharedIdeBridge>,
+    compose_lock: tauri::State<'_, crate::ComposeLock>,
 ) -> Result<(), String> {
     // Start subsystems on-demand (e.g. after factory reset / fresh install)
-    crate::ensure_mcp_os_running(&mcp_os, &app);
+    crate::ensure_mcp_os_running(&mcp_os, &app, compose_lock.inner().clone());
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
     // Capture previous active project BEFORE runtime sets new one
     let previous = config::with_config_lock(|| {
@@ -426,9 +427,10 @@ pub async fn start_containers(
     app: tauri::AppHandle,
     mcp_os: tauri::State<'_, SharedMcpOs>,
     ide_bridge: tauri::State<'_, SharedIdeBridge>,
+    compose_lock: tauri::State<'_, crate::ComposeLock>,
 ) -> Result<(), String> {
     // Start subsystems on-demand (e.g. after factory reset / fresh install)
-    crate::ensure_mcp_os_running(&mcp_os, &app);
+    crate::ensure_mcp_os_running(&mcp_os, &app, compose_lock.inner().clone());
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
 
     tokio::task::spawn_blocking(move || {
