@@ -24,13 +24,13 @@
  * ✅ Rate limiting (100 req/min per session)
  */
 
-import express, { Request, Response } from 'express';
+import express, { Express, Request, Response } from 'express';
 
 // Import MCP infrastructure from shared library
 import {
   JSONRPCHandler,
-  createSSEStream,
-  sendJSONResponse,
+  handleMCPPost,
+  handleMCPDelete,
   Tool,
   TIMEOUTS,
   ts,
@@ -246,88 +246,8 @@ async function main() {
 
   console.log(`${ts()} ✅ 2 meta-tools registered: search_tools, execute_code`);
 
-  // Create Express app
-  const app = express();
-
-  // Security: Disable X-Powered-By header
-  app.disable('x-powered-by');
-
-  app.use(express.json({ limit: '1mb' })); // Allow larger payloads for code
-
-  //═══════════════════════════════════════════════════════════════════════════════
-  // MCP Protocol Endpoint
-  //═══════════════════════════════════════════════════════════════════════════════
-
-  app.post('/', async (req: Request, res: Response) => {
-    try {
-      // Get session ID from header
-      const sessionId = req.headers['mcp-session-id'] as string | null;
-
-      // Process JSON-RPC request
-      const response = await rpcHandler.processRequest(req.body, sessionId);
-
-      // Handle session ID in response
-      interface ResponseWithMeta {
-        _meta?: { sessionId?: string };
-      }
-      const resultWithMeta = response.result as ResponseWithMeta | undefined;
-      if (resultWithMeta?._meta?.sessionId) {
-        const newSessionId = resultWithMeta._meta.sessionId;
-        delete resultWithMeta._meta;
-        res.setHeader('Mcp-Session-Id', newSessionId);
-        console.log(`${ts()} ✅ New session created: ${newSessionId.substring(0, 8)}...`);
-      }
-
-      // Check Accept header to determine response format
-      const acceptHeader = req.headers.accept || '';
-
-      if (acceptHeader.includes('text/event-stream')) {
-        const stream = createSSEStream(res);
-        stream.sendMessage(response);
-        stream.close();
-      } else {
-        sendJSONResponse(res, response);
-      }
-    } catch (error) {
-      // Generate unique error ID for tracking in Sentry/logs
-      const errorId = Math.random().toString(16).substring(2, 10).toUpperCase();
-
-      console.error(`${ts()} ❌ Error processing MCP request [${errorId}]:`, error);
-
-      res.status(500).json({
-        jsonrpc: '2.0',
-        id: null,
-        error: {
-          code: -32603,
-          message: 'Internal server error',
-          data: {
-            errorId, // Include error ID for Sentry tracking
-            timestamp: new Date().toISOString(),
-          },
-        },
-      });
-    }
-  });
-
-  //═══════════════════════════════════════════════════════════════════════════════
-  // OAuth Registration Endpoint (Not Implemented)
-  //═══════════════════════════════════════════════════════════════════════════════
-
-  app.post('/register', (req: Request, res: Response) => {
-    res.status(501).json({
-      error: 'OAuth not implemented',
-      message: 'This MCP server does not require OAuth authentication.',
-      mcp_endpoint: '/',
-    });
-  });
-
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Health Check Endpoint
-  //═══════════════════════════════════════════════════════════════════════════════
-
-  app.get('/health', (_req: Request, res: Response) => {
-    res.json({ status: 'ok' });
-  });
+  // Create Express app using shared transport utilities
+  const app = createHubApp(rpcHandler);
 
   //═══════════════════════════════════════════════════════════════════════════════
   // Start Server
@@ -342,6 +262,7 @@ async function main() {
     );
     console.log(`${ts()} 📋 Endpoints:`);
     console.log(`${ts()}    POST /              - MCP protocol endpoint`);
+    console.log(`${ts()}    DELETE /            - Session termination`);
     console.log(`${ts()}    GET  /health        - Health check`);
     console.log(`${ts()} 🛠️  Meta-tools:`);
     console.log(`${ts()}    1. search_tools     - Progressive discovery (lazy loading)`);
@@ -366,8 +287,59 @@ async function main() {
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 }
 
+//═══════════════════════════════════════════════════════════════════════════════
+// Hub Express App Factory
+//═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Create the Hub Express app with MCP transport endpoints.
+ * Extracted for testability — callers can exercise routes without starting
+ * the full server (health check, bridges, registry).
+ * @param rpcHandler - JSON-RPC handler to process incoming requests
+ * @returns Configured Express app
+ */
+export function createHubApp(rpcHandler: JSONRPCHandler): Express {
+  const app = express();
+
+  // Security: Disable X-Powered-By header
+  app.disable('x-powered-by');
+
+  app.use(express.json({ limit: '1mb' })); // Allow larger payloads for code
+
+  //─────────────────────────────────────────────────────────────────────────────
+  // Health Check Endpoint
+  //─────────────────────────────────────────────────────────────────────────────
+
+  app.get('/health', (_req: Request, res: Response) => {
+    res.json({ status: 'ok' });
+  });
+
+  //─────────────────────────────────────────────────────────────────────────────
+  // MCP Protocol Endpoints (Streamable HTTP)
+  //─────────────────────────────────────────────────────────────────────────────
+
+  app.post('/', async (req: Request, res: Response) => {
+    await handleMCPPost(rpcHandler, req, res);
+  });
+
+  app.delete('/', (req: Request, res: Response) => {
+    handleMCPDelete(req, res);
+  });
+
+  //─────────────────────────────────────────────────────────────────────────────
+  // Method Not Allowed (405 for unsupported HTTP methods on /)
+  //─────────────────────────────────────────────────────────────────────────────
+
+  app.all('/', (_req: Request, res: Response) => {
+    res.setHeader('Allow', 'POST, DELETE');
+    res.status(405).json({ error: 'Method Not Allowed' });
+  });
+
+  return app;
+}
+
 // Run server
 main().catch((error) => {
-  console.error(`${ts()} ❌ Fatal error:`, error);
+  console.error(`${ts()} Fatal error:`, error);
   process.exit(1);
 });

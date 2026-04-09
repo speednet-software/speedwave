@@ -8,6 +8,9 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  READ_ONLY_ANNOTATIONS,
+  WRITE_ANNOTATIONS,
+  DESTRUCTIVE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
@@ -15,7 +18,8 @@ import { withValidation } from './validation.js';
 const listBranchesTool: Tool = {
   name: 'listBranches',
   description: 'List branches in a project',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'branches', 'list', 'git', 'refs'],
   example: 'const branches = await gitlab.listBranches({ project_id: "speedwave/core" })',
   inputSchema: {
@@ -63,7 +67,8 @@ const listBranchesTool: Tool = {
 const getBranchTool: Tool = {
   name: 'getBranch',
   description: 'Get details of a specific branch',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'branch', 'get', 'show', 'git'],
   example:
     'const branch = await gitlab.getBranch({ project_id: "speedwave/core", branch: "main" })',
@@ -104,7 +109,8 @@ const getBranchTool: Tool = {
 const createBranchTool: Tool = {
   name: 'createBranch',
   description: 'Create a new branch',
-  category: 'write',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'branch', 'create', 'new', 'git'],
   example:
     'const branch = await gitlab.createBranch({ project_id: "speedwave/core", branch: "feature/new", ref: "main" })',
@@ -144,7 +150,8 @@ const createBranchTool: Tool = {
 const deleteBranchTool: Tool = {
   name: 'deleteBranch',
   description: 'Delete a branch',
-  category: 'delete',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'branch', 'delete', 'remove', 'git'],
   example: 'await gitlab.deleteBranch({ project_id: "speedwave/core", branch: "feature/old" })',
   inputSchema: {
@@ -174,7 +181,8 @@ const deleteBranchTool: Tool = {
 const compareBranchesTool: Tool = {
   name: 'compareBranches',
   description: 'Compare two branches',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'compare', 'diff', 'branches', 'git'],
   example:
     'const diff = await gitlab.compareBranches({ project_id: "speedwave/core", from: "main", to: "develop" })',

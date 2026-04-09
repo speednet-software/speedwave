@@ -26,7 +26,7 @@
  * - Graceful degradation (unavailable services return null)
  */
 
-import { IToolResult, ToolCategory } from './hub-types.js';
+import { IToolResult } from './hub-types.js';
 import { tokenizePII, detokenizePII, createPIIContext, PIIContext } from './pii-tokenizer.js';
 import { type AllBridges, initializeAllBridges, callWorker } from './http-bridge.js';
 import { TIMEOUTS, ts } from '@speedwave/mcp-shared';
@@ -46,6 +46,7 @@ import {
   SERVICE_NAMES,
   getEnabledServices,
   getDisabledOsCategories,
+  getToolMetadata,
   WrapWithAuditFn,
   PrepareParamsFn,
   WrapBridgeCallFn,
@@ -134,8 +135,25 @@ const FORBIDDEN_PATTERNS = [
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Audit Logging
-// Based on: Anthropic "Advanced Tool Use" - Tool Category + Audit
 //═══════════════════════════════════════════════════════════════════════════════
+
+/** Operation category derived from tool annotations */
+type AuditCategory = 'READ' | 'WRITE' | 'DELETE';
+
+/**
+ * Derive audit category from a tool's annotations in the registry.
+ * Falls back to 'WRITE' when annotations are unavailable (safe default).
+ * @param service - Service name (e.g., 'redmine', 'gitlab')
+ * @param tool - camelCase tool method name (e.g., 'createIssue')
+ */
+function deriveAuditCategory(service: string, tool: string): AuditCategory {
+  const meta = getToolMetadata(service, tool);
+  const ann = meta?.annotations;
+  if (!ann) return 'WRITE';
+  if (ann.readOnlyHint) return 'READ';
+  if (ann.destructiveHint) return 'DELETE';
+  return 'WRITE';
+}
 
 /**
  * Single audit log entry
@@ -143,8 +161,8 @@ const FORBIDDEN_PATTERNS = [
 interface AuditEntry {
   /** ISO timestamp when the tool was called */
   timestamp: string;
-  /** Category of the operation */
-  category: ToolCategory;
+  /** Operation category derived from tool annotations (READ, WRITE, DELETE) */
+  category: AuditCategory;
   /** Service name (redmine, gitlab, slack, etc.) */
   service: string;
   /** Tool name that was called */
@@ -158,14 +176,14 @@ interface AuditEntry {
  */
 interface AuditContext {
   /** Log a tool execution */
-  log: (category: ToolCategory, service: string, tool: string, params: unknown) => void;
+  log: (service: string, tool: string, params: unknown) => void;
   /** Get summary of all logged operations */
-  getSummary: () => { read: number; write: number; delete: number; entries: AuditEntry[] };
+  getSummary: () => { total: number; entries: AuditEntry[] };
 }
 
 /**
  * Create audit context for tracking tool executions
- * Logs each tool call with timestamp, category, and parameters
+ * Logs each tool call with timestamp and parameters.
  * Note: Sensitive data is protected by PII Tokenizer before reaching Claude.
  * Local console logs are not sanitized as they stay within Docker container.
  * @returns A new audit context instance
@@ -173,7 +191,8 @@ interface AuditContext {
 function createAuditContext(): AuditContext {
   const entries: AuditEntry[] = [];
   return {
-    log: (category, service, tool, params) => {
+    log: (service, tool, params) => {
+      const category = deriveAuditCategory(service, tool);
       const entry: AuditEntry = {
         timestamp: new Date().toISOString(),
         category,
@@ -182,16 +201,13 @@ function createAuditContext(): AuditContext {
         params: (params ?? {}) as Record<string, unknown>,
       };
       entries.push(entry);
-      // Format: [2024-11-27 14:32:15] [WRITE] redmine.updateIssue({ issue_id: 123 })
       const auditTs = entry.timestamp.replace('T', ' ').substring(0, 19);
       console.log(
-        `${ts()} [${auditTs}] [${category.toUpperCase()}] ${service}.${tool}(${JSON.stringify(params ?? {})})`
+        `${ts()} [${auditTs}] [${category}] ${service}.${tool}(${JSON.stringify(params ?? {})})`
       );
     },
     getSummary: () => ({
-      read: entries.filter((e) => e.category === 'read').length,
-      write: entries.filter((e) => e.category === 'write').length,
-      delete: entries.filter((e) => e.category === 'delete').length,
+      total: entries.length,
       entries,
     }),
   };
@@ -287,7 +303,7 @@ function logErrorDebug(context: string, error: unknown): void {
  * These wrap HTTP bridge calls with PII tokenization and audit logging.
  *
  * ARCHITECTURE: Uses buildExecutorWrappers from tool-registry.ts
- * - Tool metadata (name, category, service) is Single Source of Truth
+ * - Tool metadata (name, service) is Single Source of Truth
  * - Wrappers are generated dynamically from registry
  * - No manual duplication of method definitions
  * - Timeout propagation: remaining time budget passed to each worker call
@@ -357,20 +373,18 @@ function createToolWrappers(
 
   /**
    * Wrap tool with audit logging
-   * Logs category, service, tool name, and parameters for each call
-   * @param category - Tool category for audit classification (e.g., 'read', 'write')
+   * Logs service, tool name, and parameters for each call
    * @param service - Service name for audit tracking (e.g., 'gitlab', 'slack')
    * @param tool - Tool name for audit tracking (e.g., 'getMrFull', 'sendChannel')
    * @param fn - Function to wrap with audit logging
    */
   const wrapWithAudit: WrapWithAuditFn = <TParams, TResult>(
-    category: ToolCategory,
     service: string,
     tool: string,
     fn: (params: TParams) => Promise<TResult>
   ) => {
     return async (params: TParams): Promise<TResult> => {
-      auditContext.log(category, service, tool, params);
+      auditContext.log(service, tool, params);
       return fn(params);
     };
   };
@@ -546,7 +560,6 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
     const result = await Promise.race([fn(...contextValues), timeoutPromise]);
 
     const executionMs = Date.now() - startTime;
-    const operations = auditContext.getSummary();
 
     return {
       success: true,
@@ -555,11 +568,6 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
         timestamp: new Date().toISOString(),
         executionMs,
         service: 'code-executor',
-        operations: {
-          read: operations.read,
-          write: operations.write,
-          delete: operations.delete,
-        },
         ...(syntaxWarning && { warning: syntaxWarning }),
       },
     };
@@ -647,3 +655,9 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
  * @internal
  */
 export { formatErrorMessage as _formatErrorMessage };
+
+/**
+ * Export deriveAuditCategory for testing purposes only.
+ * @internal
+ */
+export { deriveAuditCategory as _deriveAuditCategory };

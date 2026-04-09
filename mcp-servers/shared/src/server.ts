@@ -24,8 +24,8 @@ import express, { Express, Request, Response, NextFunction } from 'express';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { Tool, ToolHandler, ToolDefinition } from './types.js';
 import { JSONRPCHandler } from './jsonrpc.js';
-import { createSSEStream, sendJSONResponse } from './sse.js';
-import { validateSessionId } from './security.js';
+import { validateOrigin } from './security.js';
+import { handleMCPPost, handleMCPDelete } from './transport.js';
 import { ts } from './logger.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -65,6 +65,12 @@ export interface MCPServerOptions {
   healthCheck?: () => Promise<void>;
   /** Bearer token auth — when set, all requests except publicPaths require Authorization header */
   auth?: MCPServerAuth;
+  /**
+   * Allowed Origin values for CORS-like validation. When set, requests with an
+   * Origin header not in the list are rejected with 403. Requests without an
+   * Origin header (non-browser clients) are always allowed.
+   */
+  allowedOrigins?: string[];
   /** Rate limiting — sliding window per IP. Disabled when not set. */
   rateLimit?: {
     maxRequests?: number;
@@ -245,28 +251,43 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
   });
 
   //─────────────────────────────────────────────────────────────────────────────
-  // MCP Protocol Endpoint (Streamable HTTP)
+  // Origin Validation Middleware (when allowedOrigins is configured)
+  //─────────────────────────────────────────────────────────────────────────────
+
+  if (options.allowedOrigins) {
+    const origins = options.allowedOrigins;
+
+    function originCheck(req: Request, res: Response, next: NextFunction): void {
+      const origin = req.get('origin');
+      if (!validateOrigin(origin, origins)) {
+        res.status(403).json({ error: 'Forbidden: origin not allowed' });
+        return;
+      }
+      next();
+    }
+
+    app.use(originCheck);
+  }
+
+  //─────────────────────────────────────────────────────────────────────────────
+  // MCP Protocol Endpoints (Streamable HTTP)
   //─────────────────────────────────────────────────────────────────────────────
 
   app.post('/', async (req: Request, res: Response) => {
-    // Extract session ID from headers or body, validate format
-    const rawSessionId =
-      (req.get('x-mcp-session-id') as string) || (req.body?._meta?.sessionId as string) || null;
-    const sessionId = rawSessionId && validateSessionId(rawSessionId) ? rawSessionId : null;
+    await handleMCPPost(rpcHandler, req, res);
+  });
 
-    // Process request
-    const response = await rpcHandler.processRequest(req.body, sessionId);
+  app.delete('/', (req: Request, res: Response) => {
+    handleMCPDelete(req, res);
+  });
 
-    // Check if client wants SSE streaming
-    const wantsSSE = req.headers.accept?.includes('text/event-stream');
+  //─────────────────────────────────────────────────────────────────────────────
+  // Method Not Allowed Handler (405 for unsupported HTTP methods on /)
+  //─────────────────────────────────────────────────────────────────────────────
 
-    if (wantsSSE) {
-      const stream = createSSEStream(res);
-      stream.sendMessage(response);
-      stream.close();
-    } else {
-      sendJSONResponse(res, response);
-    }
+  app.all('/', (_req: Request, res: Response) => {
+    res.setHeader('Allow', 'POST, DELETE');
+    res.status(405).json({ error: 'Method Not Allowed' });
   });
 
   //─────────────────────────────────────────────────────────────────────────────

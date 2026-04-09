@@ -27,7 +27,7 @@ import {
   validateRegistry,
   stopBackgroundRefresh,
 } from './tool-registry.js';
-import { populateRegistryFromPolicies, _resetRegistryForTesting } from './test-helpers.js';
+import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
 
 /**
  * Extract method names from a bridge object
@@ -39,7 +39,7 @@ function getBridgeMethods(bridge: Record<string, unknown>): string[] {
 describe('Bridge-Executor Parity (SSOT)', () => {
   beforeAll(() => {
     _resetRegistryForTesting();
-    populateRegistryFromPolicies();
+    populateRegistryWithMockTools();
   });
 
   afterAll(() => {

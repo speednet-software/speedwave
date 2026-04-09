@@ -41,6 +41,8 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-032](ADR-032-nested-virtualization-resilience.md)                 | Nested Virtualization Resilience                        | Accepted              |
 | [ADR-033](ADR-033-permission-autofix-on-startup.md)                    | Permission Auto-Fix on Startup                          | Accepted              |
 | [ADR-034](ADR-034-mcp-error-guidance-and-init-retry.md)                | MCP Error Guidance and Client Init Retry                | Accepted              |
+| [ADR-035](ADR-035-mcp-spec-compliance-streamable-http.md)              | MCP Spec Compliance — Streamable HTTP Transport         | Accepted              |
+| [ADR-036](ADR-036-self-declaring-worker-policy.md)                     | Self-Declaring Worker Policy via `_meta`                | Accepted              |
 
 ## Creating a New ADR
 

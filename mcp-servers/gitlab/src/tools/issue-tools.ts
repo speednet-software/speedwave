@@ -8,6 +8,8 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  READ_ONLY_ANNOTATIONS,
+  WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
@@ -15,7 +17,8 @@ import { withValidation } from './validation.js';
 const listIssuesTool: Tool = {
   name: 'listIssues',
   description: 'List project issues',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'issues', 'list', 'bugs', 'tasks'],
   example:
     'const issues = await gitlab.listIssues({ project_id: "speedwave/core", state: "opened" })',
@@ -67,7 +70,8 @@ const listIssuesTool: Tool = {
 const getIssueTool: Tool = {
   name: 'getIssue',
   description: 'Get issue details',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'issue', 'get', 'show', 'details'],
   example: 'const issue = await gitlab.getIssue({ project_id: "speedwave/core", issue_iid: 42 })',
   inputSchema: {
@@ -110,7 +114,8 @@ const getIssueTool: Tool = {
 const createIssueTool: Tool = {
   name: 'createIssue',
   description: 'Create a new issue',
-  category: 'write',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'issue', 'create', 'new', 'bug'],
   example:
     'const issue = await gitlab.createIssue({ project_id: "speedwave/core", title: "Fix login bug", labels: "bug,urgent" })',
@@ -166,7 +171,8 @@ const createIssueTool: Tool = {
 const updateIssueTool: Tool = {
   name: 'updateIssue',
   description: 'Update an issue',
-  category: 'write',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'issue', 'update', 'edit', 'modify'],
   example:
     'await gitlab.updateIssue({ project_id: "speedwave/core", issue_iid: 42, title: "Updated title", state_event: "close" })',
@@ -222,7 +228,8 @@ const updateIssueTool: Tool = {
 const closeIssueTool: Tool = {
   name: 'closeIssue',
   description: 'Close an issue',
-  category: 'write',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'issue', 'close', 'resolve', 'done'],
   example: 'await gitlab.closeIssue({ project_id: "speedwave/core", issue_iid: 42 })',
   inputSchema: {

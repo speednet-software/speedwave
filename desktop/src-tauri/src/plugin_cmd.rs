@@ -1064,6 +1064,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
 

@@ -156,6 +156,22 @@ describe('SystemHealthComponent', () => {
       expect(component.lastUpdated).toBeInstanceOf(Date);
     });
 
+    it('renders last-updated with full date and time', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_health') return makeHealthReport();
+        if (cmd === 'get_bridge_status') return null;
+        return undefined;
+      };
+      await component.refresh();
+      fixture.detectChanges();
+
+      const el = fixture.nativeElement.querySelector('[data-testid="last-updated"]');
+      const match = el.textContent?.match(/(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2}):(\d{2})/);
+      expect(match).toBeTruthy();
+      const year = parseInt(match![3], 10);
+      expect(year).toBeGreaterThanOrEqual(2025);
+    });
+
     it('sets error and nulls report on failure', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_health') throw new Error('connection refused');
@@ -396,7 +412,7 @@ describe('SystemHealthComponent', () => {
       component.tailLines = 200;
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_container_logs') return 'container output';
-        if (cmd === 'get_claude_session_logs') return '[123] SESSION: started';
+        if (cmd === 'get_claude_session_logs') return '[07-04-2026 14:30:00] SESSION: started';
         return '';
       };
 
@@ -404,7 +420,7 @@ describe('SystemHealthComponent', () => {
 
       expect(component.logContent).toContain('container output');
       expect(component.logContent).toContain('--- Claude Session Logs ---');
-      expect(component.logContent).toContain('[123] SESSION: started');
+      expect(component.logContent).toContain('[07-04-2026 14:30:00] SESSION: started');
       expect(component.logLoading).toBe(false);
     });
 

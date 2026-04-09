@@ -1,7 +1,7 @@
 /// Chat history — reads Claude Code JSONL session files and project memory.
 ///
-/// All public functions resolve paths from `dirs::home_dir()` and delegate to
-/// internal `_impl` functions that accept a `base_dir: &Path` parameter.
+/// All public functions resolve paths from `consts::data_dir()` and delegate to
+/// internal `_impl` functions that accept a `data_dir: &Path` parameter.
 /// Tests call the `_impl` functions directly with `tempfile::TempDir`.
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -70,25 +70,67 @@ pub struct ConversationTranscript {
 // Path helpers
 // ---------------------------------------------------------------------------
 
-fn base_dir() -> anyhow::Result<PathBuf> {
-    consts::data_dir()
-        .parent()
-        .map(|p| p.to_path_buf())
-        .ok_or_else(|| anyhow::anyhow!("data_dir has no parent"))
+fn claude_dot_dir_impl(data_dir: &Path, project: &str) -> PathBuf {
+    data_dir.join("claude-home").join(project).join(".claude")
 }
 
-fn claude_dot_dir_impl(base: &Path, project: &str) -> anyhow::Result<PathBuf> {
-    Ok(base
-        .join(consts::DATA_DIR)
-        .join("claude-home")
-        .join(project)
-        .join(".claude"))
+fn sessions_dir_impl(data_dir: &Path, project: &str) -> PathBuf {
+    let projects_dir = claude_dot_dir_impl(data_dir, project).join("projects");
+    resolve_workspace_dir(&projects_dir)
 }
 
-fn sessions_dir_impl(base: &Path, project: &str) -> anyhow::Result<PathBuf> {
-    Ok(claude_dot_dir_impl(base, project)?
-        .join("projects")
-        .join("-workspace"))
+/// Resolves the workspace subdirectory inside `.claude/projects/`.
+/// Claude Code derives the dir name from CWD — `/workspace` → `-workspace`.
+/// Falls back to auto-discovery if `-workspace` doesn't exist (handles
+/// Claude Code internal path derivation changes across versions).
+///
+/// **Known limitation:** Auto-discovery is a best-effort heuristic.  When
+/// multiple candidates exist the newest-by-mtime is picked, which could be
+/// wrong if an unrelated process touched a stale directory.  Both session
+/// JSONL files and `memory/MEMORY.md` share the same resolved path, so they
+/// always resolve together (for better or worse).  Callers that get an empty
+/// result despite sessions existing should check the Desktop log for the
+/// "multiple project dirs" warning emitted here.
+fn resolve_workspace_dir(projects_dir: &Path) -> PathBuf {
+    let default = projects_dir.join("-workspace");
+    if default.is_dir() {
+        return default;
+    }
+    if projects_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(projects_dir) {
+            let mut candidates: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            if candidates.len() == 1 {
+                log::info!(
+                    "workspace dir fallback: using '{}' (only subdir in '{}')",
+                    candidates[0].display(),
+                    projects_dir.display()
+                );
+                return candidates.remove(0);
+            }
+            if candidates.len() > 1 {
+                // Sort by mtime (newest first), then alphabetically as
+                // deterministic tiebreak.  mtime is a best-effort heuristic —
+                // some filesystems (ext3, HFS+) have 1-second granularity;
+                // the alphabetical sort is the ultimate deterministic fallback.
+                candidates.sort_by(|a, b| {
+                    let ma = a.metadata().and_then(|m| m.modified()).ok();
+                    let mb = b.metadata().and_then(|m| m.modified()).ok();
+                    mb.cmp(&ma).then_with(|| a.cmp(b))
+                });
+                log::warn!(
+                    "multiple project dirs in '{}', using newest: '{}'",
+                    projects_dir.display(),
+                    candidates[0].display()
+                );
+                return candidates.remove(0);
+            }
+        }
+    }
+    default
 }
 
 // ---------------------------------------------------------------------------
@@ -317,11 +359,14 @@ fn truncate_preview(s: &str, max_chars: usize) -> String {
 
 /// List all conversations for a project, sorted newest first.
 pub fn list_conversations(project: &str) -> anyhow::Result<Vec<ConversationSummary>> {
-    list_conversations_impl(&base_dir()?, project)
+    list_conversations_impl(consts::data_dir(), project)
 }
 
-fn list_conversations_impl(base: &Path, project: &str) -> anyhow::Result<Vec<ConversationSummary>> {
-    let dir = sessions_dir_impl(base, project)?;
+fn list_conversations_impl(
+    data_dir: &Path,
+    project: &str,
+) -> anyhow::Result<Vec<ConversationSummary>> {
+    let dir = sessions_dir_impl(data_dir, project);
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -420,22 +465,29 @@ fn list_conversations_impl(base: &Path, project: &str) -> anyhow::Result<Vec<Con
     // Sort newest first (by timestamp descending, None last)
     summaries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
+    if dir.is_dir() && summaries.is_empty() {
+        log::debug!(
+            "sessions dir '{}' exists but contains no sessions",
+            dir.display()
+        );
+    }
+
     Ok(summaries)
 }
 
 /// Get the full transcript for a specific session.
 pub fn get_conversation(project: &str, session_id: &str) -> anyhow::Result<ConversationTranscript> {
-    get_conversation_impl(&base_dir()?, project, session_id)
+    get_conversation_impl(consts::data_dir(), project, session_id)
 }
 
 fn get_conversation_impl(
-    base: &Path,
+    data_dir: &Path,
     project: &str,
     session_id: &str,
 ) -> anyhow::Result<ConversationTranscript> {
     validate_session_id_impl(session_id)?;
 
-    let path = sessions_dir_impl(base, project)?.join(format!("{session_id}.jsonl"));
+    let path = sessions_dir_impl(data_dir, project).join(format!("{session_id}.jsonl"));
     let file = fs::File::open(&path)
         .map_err(|e| anyhow::anyhow!("cannot read session {session_id}: {e}"))?;
 
@@ -472,11 +524,11 @@ fn get_conversation_impl(
 
 /// Read the project memory file (MEMORY.md). Returns empty string if missing.
 pub fn get_project_memory(project: &str) -> anyhow::Result<String> {
-    get_project_memory_impl(&base_dir()?, project)
+    get_project_memory_impl(consts::data_dir(), project)
 }
 
-fn get_project_memory_impl(base: &Path, project: &str) -> anyhow::Result<String> {
-    let path = sessions_dir_impl(base, project)?
+fn get_project_memory_impl(data_dir: &Path, project: &str) -> anyhow::Result<String> {
+    let path = sessions_dir_impl(data_dir, project)
         .join("memory")
         .join("MEMORY.md");
     match fs::read_to_string(&path) {
@@ -496,8 +548,9 @@ mod tests {
     use super::*;
 
     /// Create the sessions directory structure inside a tempdir.
-    fn setup_sessions_dir(base: &Path, project: &str) -> PathBuf {
-        let dir = sessions_dir_impl(base, project).unwrap();
+    /// `data_dir` acts as the data directory (like `~/.speedwave`).
+    fn setup_sessions_dir(data_dir: &Path, project: &str) -> PathBuf {
+        let dir = sessions_dir_impl(data_dir, project);
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -548,8 +601,8 @@ mod tests {
 
     #[test]
     fn claude_dot_dir_has_correct_structure() {
-        let base = PathBuf::from("/home/test");
-        let result = claude_dot_dir_impl(&base, "acme").unwrap();
+        let data_dir = PathBuf::from("/home/test/.speedwave");
+        let result = claude_dot_dir_impl(&data_dir, "acme");
         assert_eq!(
             result,
             PathBuf::from("/home/test/.speedwave/claude-home/acme/.claude")
@@ -557,13 +610,164 @@ mod tests {
     }
 
     #[test]
-    fn sessions_dir_has_correct_structure() {
-        let base = PathBuf::from("/home/test");
-        let result = sessions_dir_impl(&base, "acme").unwrap();
+    fn sessions_dir_resolves_dash_workspace() {
+        // When -workspace exists, sessions_dir_impl returns it directly
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp
+            .path()
+            .join("claude-home")
+            .join("acme")
+            .join(".claude")
+            .join("projects")
+            .join("-workspace");
+        fs::create_dir_all(&workspace).unwrap();
+
+        let result = sessions_dir_impl(tmp.path(), "acme");
+        assert_eq!(result, workspace);
+    }
+
+    #[test]
+    fn sessions_dir_works_with_data_dir_directly() {
+        // Verify paths are built from data_dir without parent()+rejoin
+        let data_dir = PathBuf::from("/opt/custom-speedwave");
+        // sessions_dir_impl returns the expected path (dir may not exist on disk)
+        let result = sessions_dir_impl(&data_dir, "proj");
         assert_eq!(
             result,
-            PathBuf::from("/home/test/.speedwave/claude-home/acme/.claude/projects/-workspace")
+            PathBuf::from("/opt/custom-speedwave/claude-home/proj/.claude/projects/-workspace")
         );
+    }
+
+    // ── resolve_workspace_dir ─────────────────────────────────────
+
+    #[test]
+    fn resolve_workspace_dir_prefers_dash_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        fs::create_dir_all(projects.join("-workspace")).unwrap();
+        fs::create_dir_all(projects.join("-other")).unwrap();
+
+        let result = resolve_workspace_dir(&projects);
+        assert_eq!(result, projects.join("-workspace"));
+    }
+
+    #[test]
+    fn resolve_workspace_dir_finds_single_subdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        fs::create_dir_all(projects.join("-custom-workspace")).unwrap();
+
+        let result = resolve_workspace_dir(&projects);
+        assert_eq!(result, projects.join("-custom-workspace"));
+    }
+
+    #[test]
+    fn resolve_workspace_dir_picks_deterministic_when_multiple() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        fs::create_dir_all(projects.join("-alpha")).unwrap();
+        fs::create_dir_all(projects.join("-beta")).unwrap();
+
+        // Run twice — result must be identical (deterministic)
+        let result1 = resolve_workspace_dir(&projects);
+        let result2 = resolve_workspace_dir(&projects);
+        assert_eq!(result1, result2);
+    }
+
+    #[test]
+    fn resolve_workspace_dir_returns_default_when_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        fs::create_dir_all(&projects).unwrap();
+
+        let result = resolve_workspace_dir(&projects);
+        assert_eq!(result, projects.join("-workspace"));
+    }
+
+    #[test]
+    fn resolve_workspace_dir_returns_default_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = tmp.path().join("nonexistent");
+
+        let result = resolve_workspace_dir(&projects);
+        assert_eq!(result, projects.join("-workspace"));
+    }
+
+    #[test]
+    fn resolve_workspace_dir_skips_broken_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        fs::create_dir_all(&projects).unwrap();
+
+        // Create a broken symlink — is_dir() returns false for it
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/nonexistent/target", projects.join("-broken")).unwrap();
+            // Create one valid dir so we can verify the symlink is skipped
+            fs::create_dir_all(projects.join("-valid")).unwrap();
+
+            let result = resolve_workspace_dir(&projects);
+            assert_eq!(result, projects.join("-valid"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_workspace_dir_returns_default_on_read_dir_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        fs::create_dir_all(&projects).unwrap();
+
+        // Remove read permission — fs::read_dir will fail
+        fs::set_permissions(&projects, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = resolve_workspace_dir(&projects);
+        assert_eq!(result, projects.join("-workspace"));
+
+        // Restore permissions for cleanup
+        fs::set_permissions(&projects, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // ── Memory with auto-discovered dir ───────────────────────────
+
+    #[test]
+    fn get_project_memory_works_with_autodiscovered_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Create a non-standard workspace dir (not -workspace)
+        let custom_ws = tmp
+            .path()
+            .join("claude-home")
+            .join("proj")
+            .join(".claude")
+            .join("projects")
+            .join("-custom-workspace");
+        let memory_dir = custom_ws.join("memory");
+        fs::create_dir_all(&memory_dir).unwrap();
+        fs::write(memory_dir.join("MEMORY.md"), "# Auto-discovered memory").unwrap();
+
+        let result = get_project_memory_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(result, "# Auto-discovered memory");
+    }
+
+    // ── Diagnostic: empty auto-discovered dir ─────────────────────
+
+    #[test]
+    fn list_conversations_returns_empty_when_autodiscovered_dir_has_no_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Create a non-standard workspace dir with no .jsonl files
+        let custom_ws = tmp
+            .path()
+            .join("claude-home")
+            .join("proj")
+            .join(".claude")
+            .join("projects")
+            .join("-renamed-workspace");
+        fs::create_dir_all(&custom_ws).unwrap();
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert!(result.is_empty());
     }
 
     // ── JSONL parsing ──────────────────────────────────────────────
