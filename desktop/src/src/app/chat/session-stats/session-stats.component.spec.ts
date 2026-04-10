@@ -29,6 +29,8 @@ describe('SessionStatsComponent', () => {
       cost_usd: 0.01,
       total_cost: 0.05,
       model: 'Opus 4.6',
+      cumulative_input_tokens: 1000,
+      cumulative_output_tokens: 200,
     };
     fixture.detectChanges();
 
@@ -44,6 +46,8 @@ describe('SessionStatsComponent', () => {
       session_id: 'abc',
       cost_usd: 0.01,
       total_cost: 0.05,
+      cumulative_input_tokens: 0,
+      cumulative_output_tokens: 0,
     };
     fixture.detectChanges();
 
@@ -57,6 +61,8 @@ describe('SessionStatsComponent', () => {
       cost_usd: 0.01,
       total_cost: 0.05,
       model: '',
+      cumulative_input_tokens: 0,
+      cumulative_output_tokens: 0,
     };
     fixture.detectChanges();
 
@@ -64,30 +70,31 @@ describe('SessionStatsComponent', () => {
     expect(el.textContent).toContain('Claude');
   });
 
-  it('renders CTX bar and percentage when usage present', () => {
+  it('renders CTX bar and cumulative token counts', () => {
     component.stats = {
       session_id: 'abc',
       cost_usd: 0.01,
       total_cost: 0.05,
-      usage: {
-        input_tokens: 50000,
-        output_tokens: 1000,
-      },
+      usage: { input_tokens: 50000, output_tokens: 1000 },
+      cumulative_input_tokens: 50000,
+      cumulative_output_tokens: 1000,
     };
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
     expect(el.textContent).toContain('CTX');
     expect(el.textContent).toContain('%');
-    expect(el.textContent).toContain('In: 50000');
-    expect(el.textContent).toContain('Out: 1000');
+    expect(el.textContent).toContain('50,000');
+    expect(el.textContent).toContain('1,000');
   });
 
-  it('does not render CTX section when no usage', () => {
+  it('does not render CTX section when cumulative tokens are 0', () => {
     component.stats = {
       session_id: 'abc',
       cost_usd: 0.01,
       total_cost: 0.05,
+      cumulative_input_tokens: 0,
+      cumulative_output_tokens: 0,
     };
     fixture.detectChanges();
 
@@ -101,10 +108,9 @@ describe('SessionStatsComponent', () => {
       session_id: 'abc',
       cost_usd: 0.01,
       total_cost: 0.05,
-      rate_limit: {
-        utilization: 65,
-        resets_at: resetEpoch,
-      },
+      rate_limit: { utilization: 65, resets_at: resetEpoch },
+      cumulative_input_tokens: 1000,
+      cumulative_output_tokens: 200,
     };
     fixture.detectChanges();
 
@@ -119,6 +125,8 @@ describe('SessionStatsComponent', () => {
       session_id: 'abc',
       cost_usd: 0.01,
       total_cost: 0.05,
+      cumulative_input_tokens: 0,
+      cumulative_output_tokens: 0,
     };
     fixture.detectChanges();
 
@@ -131,6 +139,8 @@ describe('SessionStatsComponent', () => {
       session_id: 'abc',
       cost_usd: 0.003,
       total_cost: 0.015,
+      cumulative_input_tokens: 0,
+      cumulative_output_tokens: 0,
     };
     fixture.detectChanges();
 
@@ -143,11 +153,12 @@ describe('SessionStatsComponent', () => {
       session_id: 'abc',
       cost_usd: 0,
       total_cost: 0,
+      cumulative_input_tokens: 0,
+      cumulative_output_tokens: 0,
     };
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    // Model name is rendered but no cost section
     expect(el.textContent).toContain('Claude');
     expect(el.textContent).not.toContain('$0.0000');
   });
@@ -157,10 +168,9 @@ describe('SessionStatsComponent', () => {
       session_id: 'abc',
       cost_usd: 0.01,
       total_cost: 0.05,
-      usage: {
-        input_tokens: 100,
-        output_tokens: 50,
-      },
+      usage: { input_tokens: 100, output_tokens: 50 },
+      cumulative_input_tokens: 100,
+      cumulative_output_tokens: 50,
     };
     fixture.detectChanges();
 
@@ -175,38 +185,31 @@ describe('SessionStatsComponent', () => {
       session_id: 'abc',
       cost_usd: 0,
       total_cost: 0,
-      usage: { input_tokens: 100000, output_tokens: 0 },
+      cumulative_input_tokens: 100000,
+      cumulative_output_tokens: 0,
     };
     expect(component.ctxPct).toBe(50);
     expect(component.ctxFilled).toBe(3);
   });
 
-  it('computes ctxPct 0 when no usage', () => {
+  it('computes ctxPct 0 when no cumulative tokens', () => {
     component.stats = {
       session_id: 'abc',
       cost_usd: 0,
       total_cost: 0,
+      cumulative_input_tokens: 0,
+      cumulative_output_tokens: 0,
     };
     expect(component.ctxPct).toBe(0);
   });
 
-  it('caps ctxPct at 100', () => {
+  it('uses 1M window when cumulative input exceeds 180k', () => {
     component.stats = {
       session_id: 'abc',
       cost_usd: 0,
       total_cost: 0,
-      usage: { input_tokens: 300000, output_tokens: 0 },
-    };
-    // Over 180k triggers 1M window assumption, so 300k / 1M = 30%
-    expect(component.ctxPct).toBeLessThanOrEqual(100);
-  });
-
-  it('uses 1M window when input exceeds 180k', () => {
-    component.stats = {
-      session_id: 'abc',
-      cost_usd: 0,
-      total_cost: 0,
-      usage: { input_tokens: 200000, output_tokens: 0 },
+      cumulative_input_tokens: 200000,
+      cumulative_output_tokens: 0,
     };
     // 200k / 1M = 20%
     expect(component.ctxPct).toBe(20);
@@ -217,7 +220,8 @@ describe('SessionStatsComponent', () => {
       session_id: 'abc',
       cost_usd: 0,
       total_cost: 0,
-      usage: { input_tokens: 10000, output_tokens: 0 },
+      cumulative_input_tokens: 10000,
+      cumulative_output_tokens: 0,
     };
     expect(component.ctxBarColor).toBe('bg-green-500');
     expect(component.ctxTextColor).toBe('text-green-500');
@@ -228,10 +232,9 @@ describe('SessionStatsComponent', () => {
       session_id: 'abc',
       cost_usd: 0.01,
       total_cost: 0.05,
-      rate_limit: {
-        utilization: 30,
-        resets_at: null,
-      },
+      rate_limit: { utilization: 30, resets_at: null },
+      cumulative_input_tokens: 1000,
+      cumulative_output_tokens: 200,
     };
     fixture.detectChanges();
 
@@ -247,6 +250,8 @@ describe('SessionStatsComponent', () => {
       cost_usd: 0,
       total_cost: 0,
       rate_limit: { utilization: 60, resets_at: null },
+      cumulative_input_tokens: 0,
+      cumulative_output_tokens: 0,
     };
     expect(component.rlBarColor).toBe('bg-yellow-400');
     expect(component.rlTextColor).toBe('text-yellow-400');
@@ -258,6 +263,8 @@ describe('SessionStatsComponent', () => {
       cost_usd: 0,
       total_cost: 0,
       rate_limit: { utilization: 80, resets_at: null },
+      cumulative_input_tokens: 0,
+      cumulative_output_tokens: 0,
     };
     expect(component.rlBarColor).toBe('bg-red-400');
   });
@@ -268,8 +275,27 @@ describe('SessionStatsComponent', () => {
       cost_usd: 0,
       total_cost: 0,
       rate_limit: { utilization: 95, resets_at: null },
+      cumulative_input_tokens: 0,
+      cumulative_output_tokens: 0,
     };
     expect(component.rlBarColor).toBe('bg-red-500');
     expect(component.rlTextColor).toContain('font-bold');
+  });
+
+  it('accumulates tokens across multiple turns', () => {
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0.01,
+      total_cost: 0.03,
+      usage: { input_tokens: 5000, output_tokens: 500 },
+      cumulative_input_tokens: 15000,
+      cumulative_output_tokens: 1500,
+    };
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    // Shows cumulative, not per-turn
+    expect(el.textContent).toContain('15,000');
+    expect(el.textContent).toContain('1,500');
   });
 });

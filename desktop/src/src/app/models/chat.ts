@@ -131,6 +131,8 @@ export interface SessionStats {
   usage?: UsageInfo;
   model?: string;
   rate_limit?: RateLimitInfo;
+  cumulative_input_tokens: number;
+  cumulative_output_tokens: number;
 }
 
 // ProjectList and ProjectEntry are defined in models/update.ts (SSOT)

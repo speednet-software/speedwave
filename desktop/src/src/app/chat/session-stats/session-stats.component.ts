@@ -1,4 +1,5 @@
 import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
+import { DecimalPipe } from '@angular/common';
 import type { SessionStats } from '../../models/chat';
 
 /**
@@ -8,6 +9,7 @@ import type { SessionStats } from '../../models/chat';
 @Component({
   selector: 'app-session-stats',
   standalone: true,
+  imports: [DecimalPipe],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
@@ -20,7 +22,7 @@ import type { SessionStats } from '../../models/chat';
         <span class="text-sw-teal font-bold whitespace-nowrap">{{ stats.model || 'Claude' }}</span>
 
         <!-- Context usage bar -->
-        @if (stats.usage) {
+        @if (stats.cumulative_input_tokens > 0) {
           <span class="text-sw-text-ghost">│</span>
           <span class="whitespace-nowrap">
             <span class="text-sw-text-dim">CTX</span>
@@ -64,14 +66,14 @@ import type { SessionStats } from '../../models/chat';
           >
         }
 
-        <!-- Tokens -->
-        @if (stats.usage) {
+        <!-- Cumulative tokens -->
+        @if (stats.cumulative_input_tokens > 0) {
           <span class="text-sw-text-ghost">│</span>
           <span class="text-sw-code-gray whitespace-nowrap">
-            In: {{ stats.usage.input_tokens }}
+            In: {{ stats.cumulative_input_tokens | number }}
           </span>
           <span class="text-sw-code-gray whitespace-nowrap">
-            Out: {{ stats.usage.output_tokens }}
+            Out: {{ stats.cumulative_output_tokens | number }}
           </span>
         }
       </div>
@@ -83,13 +85,11 @@ export class SessionStatsComponent {
 
   readonly barIndices = [0, 1, 2, 3, 4];
 
-  /** Estimate context usage % from token counts (200k default window). */
+  /** Estimate context usage % from cumulative token counts (200k default window). */
   get ctxPct(): number {
-    if (!this.stats?.usage) return 0;
-    const totalInput =
-      this.stats.usage.input_tokens +
-      (this.stats.usage.cache_read_tokens ?? 0) +
-      (this.stats.usage.cache_write_tokens ?? 0);
+    if (!this.stats) return 0;
+    const totalInput = this.stats.cumulative_input_tokens;
+    if (totalInput <= 0) return 0;
     // Claude default context window is 200k, 1M for extended
     const windowSize = totalInput > 180_000 ? 1_000_000 : 200_000;
     return Math.min(100, Math.round((totalInput / windowSize) * 100));

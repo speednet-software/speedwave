@@ -406,6 +406,8 @@ describe('ChatStateService', () => {
         cost_usd: 0.01,
         total_cost: 0.05,
         usage: { input_tokens: 100, output_tokens: 50 },
+        cumulative_input_tokens: 100,
+        cumulative_output_tokens: 50,
       });
     });
 
@@ -683,6 +685,34 @@ describe('ChatStateService', () => {
       expect(service.sessionStats?.rate_limit).toBeUndefined();
     });
 
+    it('cumulative tokens accumulate across turns', () => {
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 'abc',
+          cost_usd: 0.01,
+          total_cost: 0.02,
+          usage: { input_tokens: 1000, output_tokens: 200 },
+        },
+      });
+      expect(service.sessionStats?.cumulative_input_tokens).toBe(1000);
+      expect(service.sessionStats?.cumulative_output_tokens).toBe(200);
+
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'bye' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 'abc',
+          cost_usd: 0.01,
+          total_cost: 0.04,
+          usage: { input_tokens: 1500, output_tokens: 300 },
+        },
+      });
+      expect(service.sessionStats?.cumulative_input_tokens).toBe(2500);
+      expect(service.sessionStats?.cumulative_output_tokens).toBe(500);
+    });
+
     it('resetForNewConversation clears rate limit', () => {
       service.handleStreamChunk({
         chunk_type: 'RateLimit',
@@ -705,7 +735,13 @@ describe('ChatStateService', () => {
       service._setState({
         messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
         currentBlocks: [{ type: 'text', content: 'partial' }],
-        sessionStats: { session_id: 'x', cost_usd: 0, total_cost: 0 },
+        sessionStats: {
+          session_id: 'x',
+          cost_usd: 0,
+          total_cost: 0,
+          cumulative_input_tokens: 0,
+          cumulative_output_tokens: 0,
+        },
       });
       service.isStreaming = true;
 

@@ -54,6 +54,8 @@ export class ChatStateService {
 
   private _model = '';
   private _rateLimit: RateLimitInfo | null = null;
+  private _cumulativeInputTokens = 0;
+  private _cumulativeOutputTokens = 0;
 
   private unlisten: UnlistenFn | null = null;
   private listenerReady = false;
@@ -423,6 +425,10 @@ export class ChatStateService {
           this._currentBlocks = [];
         }
         this.isStreaming = false;
+        if (chunk.data.usage) {
+          this._cumulativeInputTokens += chunk.data.usage.input_tokens;
+          this._cumulativeOutputTokens += chunk.data.usage.output_tokens;
+        }
         this._sessionStats = {
           session_id: chunk.data.session_id,
           cost_usd: chunk.data.cost_usd ?? 0,
@@ -430,6 +436,8 @@ export class ChatStateService {
           usage: chunk.data.usage,
           model: this._model || undefined,
           rate_limit: this._rateLimit ?? undefined,
+          cumulative_input_tokens: this._cumulativeInputTokens,
+          cumulative_output_tokens: this._cumulativeOutputTokens,
         };
         break;
 
@@ -462,6 +470,8 @@ export class ChatStateService {
     this._sessionStats = null;
     this._model = '';
     this._rateLimit = null;
+    this._cumulativeInputTokens = 0;
+    this._cumulativeOutputTokens = 0;
     this.initialized = false;
     this.startingSession = false;
     this.notifyChange();
@@ -489,6 +499,8 @@ export class ChatStateService {
         this._sessionStats = null;
         this._model = '';
         this._rateLimit = null;
+        this._cumulativeInputTokens = 0;
+        this._cumulativeOutputTokens = 0;
         this.notifyChange();
       }
     });
