@@ -23,7 +23,110 @@ describe('SessionStatsComponent', () => {
     expect(el.querySelector('[data-testid="session-stats"]')).toBeNull();
   });
 
-  it('renders cost and total', () => {
+  it('renders model name', () => {
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0.01,
+      total_cost: 0.05,
+      model: 'Opus 4.6',
+    };
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.textContent).toContain('Opus 4.6');
+    const statsDiv = el.querySelector('[data-testid="session-stats"]') as HTMLElement;
+    const firstSpan = statsDiv.querySelector('span') as HTMLElement;
+    expect(firstSpan.textContent?.trim()).toBe('Opus 4.6');
+  });
+
+  it('renders Claude fallback when model is undefined', () => {
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0.01,
+      total_cost: 0.05,
+    };
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.textContent).toContain('Claude');
+  });
+
+  it('renders Claude fallback when model is empty string', () => {
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0.01,
+      total_cost: 0.05,
+      model: '',
+    };
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.textContent).toContain('Claude');
+  });
+
+  it('renders CTX bar and percentage when usage present', () => {
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0.01,
+      total_cost: 0.05,
+      usage: {
+        input_tokens: 50000,
+        output_tokens: 1000,
+      },
+    };
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.textContent).toContain('CTX');
+    expect(el.textContent).toContain('%');
+    expect(el.textContent).toContain('In: 50000');
+    expect(el.textContent).toContain('Out: 1000');
+  });
+
+  it('does not render CTX section when no usage', () => {
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0.01,
+      total_cost: 0.05,
+    };
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.textContent).not.toContain('CTX');
+  });
+
+  it('renders rate limit with utilization and reset time', () => {
+    const resetEpoch = Math.floor(Date.now() / 1000) + 3600;
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0.01,
+      total_cost: 0.05,
+      rate_limit: {
+        utilization: 65,
+        resets_at: resetEpoch,
+      },
+    };
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.textContent).toContain('Limit');
+    expect(el.textContent).toContain('65%');
+    expect(el.textContent).toContain('reset');
+  });
+
+  it('does not render rate limit section when absent', () => {
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0.01,
+      total_cost: 0.05,
+    };
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.textContent).not.toContain('Limit');
+  });
+
+  it('renders cost when total_cost > 0', () => {
     component.stats = {
       session_id: 'abc',
       cost_usd: 0.003,
@@ -32,63 +135,141 @@ describe('SessionStatsComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.textContent).toContain('$0.0030');
     expect(el.textContent).toContain('$0.0150');
   });
 
-  it('renders token usage when available', () => {
+  it('does not render cost when total_cost is 0', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0.01,
-      total_cost: 0.05,
-      usage: {
-        input_tokens: 500,
-        output_tokens: 100,
-        cache_read_tokens: 50,
-        cache_write_tokens: 30,
-      },
+      cost_usd: 0,
+      total_cost: 0,
     };
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.textContent).toContain('In: 500');
-    expect(el.textContent).toContain('Out: 100');
-    expect(el.textContent).toContain('Cache read: 50');
-    expect(el.textContent).toContain('Cache write: 30');
+    // Model name is rendered but no cost section
+    expect(el.textContent).toContain('Claude');
+    expect(el.textContent).not.toContain('$0.0000');
   });
 
-  it('does not show cache tokens when not present', () => {
+  it('renders divider separators between sections', () => {
     component.stats = {
       session_id: 'abc',
       cost_usd: 0.01,
       total_cost: 0.05,
       usage: {
-        input_tokens: 500,
-        output_tokens: 100,
+        input_tokens: 100,
+        output_tokens: 50,
       },
     };
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.textContent).not.toContain('Cache read:');
-    expect(el.textContent).not.toContain('Cache write:');
+    const spans = Array.from(el.querySelectorAll('span'));
+    const dividers = spans.filter((s) => s.textContent?.trim() === '│');
+    expect(dividers.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('shows only cache_read when cache_write is not present', () => {
+  it('computes ctxPct correctly for 200k window', () => {
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0,
+      total_cost: 0,
+      usage: { input_tokens: 100000, output_tokens: 0 },
+    };
+    expect(component.ctxPct).toBe(50);
+    expect(component.ctxFilled).toBe(3);
+  });
+
+  it('computes ctxPct 0 when no usage', () => {
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0,
+      total_cost: 0,
+    };
+    expect(component.ctxPct).toBe(0);
+  });
+
+  it('caps ctxPct at 100', () => {
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0,
+      total_cost: 0,
+      usage: { input_tokens: 300000, output_tokens: 0 },
+    };
+    // Over 180k triggers 1M window assumption, so 300k / 1M = 30%
+    expect(component.ctxPct).toBeLessThanOrEqual(100);
+  });
+
+  it('uses 1M window when input exceeds 180k', () => {
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0,
+      total_cost: 0,
+      usage: { input_tokens: 200000, output_tokens: 0 },
+    };
+    // 200k / 1M = 20%
+    expect(component.ctxPct).toBe(20);
+  });
+
+  it('applies green bar color for low pct', () => {
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0,
+      total_cost: 0,
+      usage: { input_tokens: 10000, output_tokens: 0 },
+    };
+    expect(component.ctxBarColor).toBe('bg-green-500');
+    expect(component.ctxTextColor).toBe('text-green-500');
+  });
+
+  it('renders rate limit without reset time', () => {
     component.stats = {
       session_id: 'abc',
       cost_usd: 0.01,
       total_cost: 0.05,
-      usage: {
-        input_tokens: 500,
-        output_tokens: 100,
-        cache_read_tokens: 50,
+      rate_limit: {
+        utilization: 30,
+        resets_at: null,
       },
     };
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.textContent).toContain('Cache read: 50');
-    expect(el.textContent).not.toContain('Cache write:');
+    expect(el.textContent).toContain('Limit');
+    expect(el.textContent).toContain('30%');
+    expect(el.textContent).not.toContain('reset');
+  });
+
+  it('applies yellow bar color for medium pct', () => {
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0,
+      total_cost: 0,
+      rate_limit: { utilization: 60, resets_at: null },
+    };
+    expect(component.rlBarColor).toBe('bg-yellow-400');
+    expect(component.rlTextColor).toBe('text-yellow-400');
+  });
+
+  it('applies red bar color for high pct', () => {
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0,
+      total_cost: 0,
+      rate_limit: { utilization: 80, resets_at: null },
+    };
+    expect(component.rlBarColor).toBe('bg-red-400');
+  });
+
+  it('applies bold red for critical pct', () => {
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0,
+      total_cost: 0,
+      rate_limit: { utilization: 95, resets_at: null },
+    };
+    expect(component.rlBarColor).toBe('bg-red-500');
+    expect(component.rlTextColor).toContain('font-bold');
   });
 });

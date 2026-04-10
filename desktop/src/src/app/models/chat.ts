@@ -25,7 +25,12 @@ export type StreamChunk =
         result_text?: string;
       };
     }
-  | { chunk_type: 'Error'; data: { content: string } };
+  | { chunk_type: 'Error'; data: { content: string } }
+  | { chunk_type: 'SystemInit'; data: { model: string } }
+  | {
+      chunk_type: 'RateLimit';
+      data: { status: string; utilization: number | null; resets_at: number | null };
+    };
 
 /** A single selectable option in an AskUserQuestion prompt. */
 export interface AskUserOption {
@@ -112,12 +117,20 @@ export interface ChatMessage {
   timestamp: number;
 }
 
+/** Rate limit info from rate_limit_event. */
+export interface RateLimitInfo {
+  utilization: number;
+  resets_at: number | null;
+}
+
 /** Session cost/usage stats */
 export interface SessionStats {
   session_id: string;
   cost_usd: number;
   total_cost: number;
   usage?: UsageInfo;
+  model?: string;
+  rate_limit?: RateLimitInfo;
 }
 
 // ProjectList and ProjectEntry are defined in models/update.ts (SSOT)

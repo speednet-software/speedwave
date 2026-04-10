@@ -513,6 +513,30 @@ describe('ChatStateService', () => {
       expect(service.isStreaming).toBe(false);
     });
 
+    it('SystemInit stores model name and Result includes it in sessionStats', () => {
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6' },
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', cost_usd: 0.01, total_cost: 0.05 },
+      });
+
+      expect(service.sessionStats?.model).toBe('claude-opus-4-6');
+    });
+
+    it('Result without prior SystemInit has no model in sessionStats', () => {
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', cost_usd: 0.01, total_cost: 0.05 },
+      });
+
+      expect(service.sessionStats?.model).toBeUndefined();
+    });
+
     it('full streaming sequence produces correct state', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Let me ' } });
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'read that.' } });
@@ -566,6 +590,113 @@ describe('ChatStateService', () => {
       expect(service.messages).toEqual([]);
       expect(service.isStreaming).toBe(false);
       expect(service.sessionStats).toBeNull();
+    });
+
+    it('project switch clears model so subsequent Result has no model', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      await service.init();
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6' },
+      });
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other-project' });
+      await new Promise((r) => setTimeout(r, 10));
+
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', cost_usd: 0.01, total_cost: 0.05 },
+      });
+
+      expect(service.sessionStats?.model).toBeUndefined();
+    });
+  });
+
+  describe('SystemInit model lifecycle', () => {
+    it('resetForNewConversation clears model so subsequent Result has no model', () => {
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6' },
+      });
+      service.resetForNewConversation();
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', cost_usd: 0.01, total_cost: 0.05 },
+      });
+
+      expect(service.sessionStats?.model).toBeUndefined();
+    });
+  });
+
+  describe('RateLimit chunk handling', () => {
+    it('RateLimit with utilization updates sessionStats immediately if present', () => {
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', cost_usd: 0.01, total_cost: 0.05 },
+      });
+      expect(service.sessionStats?.rate_limit).toBeUndefined();
+
+      service.handleStreamChunk({
+        chunk_type: 'RateLimit',
+        data: { status: 'allowed_warning', utilization: 65, resets_at: 1738425600 },
+      });
+
+      expect(service.sessionStats?.rate_limit).toEqual({
+        utilization: 65,
+        resets_at: 1738425600,
+      });
+    });
+
+    it('RateLimit before Result is included when Result arrives', () => {
+      service.handleStreamChunk({
+        chunk_type: 'RateLimit',
+        data: { status: 'allowed', utilization: 30, resets_at: null },
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', cost_usd: 0.01, total_cost: 0.05 },
+      });
+
+      expect(service.sessionStats?.rate_limit).toEqual({
+        utilization: 30,
+        resets_at: null,
+      });
+    });
+
+    it('RateLimit with null utilization does not store rate limit', () => {
+      service.handleStreamChunk({
+        chunk_type: 'RateLimit',
+        data: { status: 'allowed', utilization: null, resets_at: null },
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', cost_usd: 0.01, total_cost: 0.05 },
+      });
+
+      expect(service.sessionStats?.rate_limit).toBeUndefined();
+    });
+
+    it('resetForNewConversation clears rate limit', () => {
+      service.handleStreamChunk({
+        chunk_type: 'RateLimit',
+        data: { status: 'allowed', utilization: 50, resets_at: 123 },
+      });
+      service.resetForNewConversation();
+
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', cost_usd: 0.01, total_cost: 0.05 },
+      });
+
+      expect(service.sessionStats?.rate_limit).toBeUndefined();
     });
   });
 

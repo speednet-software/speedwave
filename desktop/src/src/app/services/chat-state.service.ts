@@ -10,6 +10,7 @@ import type {
   ToolUseBlock,
   AskUserQuestionBlock,
   ProjectList,
+  RateLimitInfo,
 } from '../models/chat';
 
 // Re-export types consumed by components
@@ -20,6 +21,7 @@ export type {
   ProjectList,
   SessionStats,
   AskUserQuestionBlock,
+  RateLimitInfo,
 };
 
 /** Maximum time to wait for a chat session to start before surfacing a timeout error. */
@@ -49,6 +51,9 @@ export class ChatStateService {
   get sessionStats(): SessionStats | null {
     return this._sessionStats;
   }
+
+  private _model = '';
+  private _rateLimit: RateLimitInfo | null = null;
 
   private unlisten: UnlistenFn | null = null;
   private listenerReady = false;
@@ -379,6 +384,23 @@ export class ChatStateService {
         break;
       }
 
+      case 'SystemInit':
+        this._model = chunk.data.model;
+        break;
+
+      case 'RateLimit':
+        if (chunk.data.utilization !== null) {
+          this._rateLimit = {
+            utilization: chunk.data.utilization,
+            resets_at: chunk.data.resets_at,
+          };
+          // Update existing sessionStats immediately if present
+          if (this._sessionStats) {
+            this._sessionStats = { ...this._sessionStats, rate_limit: this._rateLimit };
+          }
+        }
+        break;
+
       case 'Result':
         if (chunk.data.result_text) {
           // Only append result_text when no streamed text blocks exist yet.
@@ -406,6 +428,8 @@ export class ChatStateService {
           cost_usd: chunk.data.cost_usd ?? 0,
           total_cost: chunk.data.total_cost ?? 0,
           usage: chunk.data.usage,
+          model: this._model || undefined,
+          rate_limit: this._rateLimit ?? undefined,
         };
         break;
 
@@ -436,6 +460,8 @@ export class ChatStateService {
     this._currentBlocks = [];
     this.isStreaming = false;
     this._sessionStats = null;
+    this._model = '';
+    this._rateLimit = null;
     this.initialized = false;
     this.startingSession = false;
     this.notifyChange();
@@ -461,6 +487,8 @@ export class ChatStateService {
         this._currentBlocks = [];
         this.isStreaming = false;
         this._sessionStats = null;
+        this._model = '';
+        this._rateLimit = null;
         this.notifyChange();
       }
     });

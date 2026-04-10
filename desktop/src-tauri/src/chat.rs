@@ -51,6 +51,14 @@ pub enum StreamChunk {
     },
     /// Error from the Claude subprocess.
     Error { content: String },
+    /// Session init metadata — model name from system init message.
+    SystemInit { model: String },
+    /// Rate limit event — utilization and reset info.
+    RateLimit {
+        status: String,
+        utilization: Option<f64>,
+        resets_at: Option<u64>,
+    },
 }
 
 /// A single option in an AskUserQuestion prompt.
@@ -126,6 +134,7 @@ impl StreamParser {
             "result" => self.parse_result(parsed),
             // assistant — ignored (ADR-006: we stream via stream_event, finalize on result)
             "system" => self.parse_system_message(parsed),
+            "rate_limit_event" => Self::parse_rate_limit_event(parsed),
             _ => (None, None),
         }
     }
@@ -465,6 +474,35 @@ impl StreamParser {
         )
     }
 
+    /// Parse a rate_limit_event from Claude Code.
+    /// Extracts status, utilization percentage, and reset timestamp.
+    fn parse_rate_limit_event(
+        parsed: &serde_json::Value,
+    ) -> (Option<StreamChunk>, Option<LogEntry>) {
+        let info = &parsed["rate_limit_info"];
+        let status = info["status"].as_str().unwrap_or("unknown").to_string();
+        let utilization = info["utilization"].as_f64();
+        let resets_at = info["resets_at"].as_u64();
+
+        let log_entry = Some(LogEntry {
+            prefix: "RATE_LIMIT",
+            message: format!(
+                "status={status} utilization={} resets_at={}",
+                utilization.map_or("none".to_string(), |v| format!("{v:.1}")),
+                resets_at.map_or("none".to_string(), |v| v.to_string()),
+            ),
+        });
+
+        (
+            Some(StreamChunk::RateLimit {
+                status,
+                utilization,
+                resets_at,
+            }),
+            log_entry,
+        )
+    }
+
     /// Patterns that indicate a system message should be surfaced to the
     /// user as an error (rate limits, billing, context limits).
     const ACTIONABLE_PATTERNS: &'static [&'static str] = &[
@@ -484,6 +522,29 @@ impl StreamParser {
         &self,
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
+        // ── Extract model from system init message ──
+        // Must be checked BEFORE the message.is_empty() early return below,
+        // because init messages may not carry a `message`/`content` field.
+        if parsed["subtype"].as_str() == Some("init") {
+            if let Some(model) = parsed["model"].as_str() {
+                if !model.is_empty() {
+                    let log_entry = Some(LogEntry {
+                        prefix: "SYSTEM",
+                        message: format!("init: model={model}"),
+                    });
+                    return (
+                        Some(StreamChunk::SystemInit {
+                            model: model.to_string(),
+                        }),
+                        log_entry,
+                    );
+                }
+            }
+            // subtype is "init" but model is missing/empty — fall through to
+            // existing text-based logic (which will likely return (None, None)
+            // since init messages typically have no `message` field).
+        }
+
         // System messages carry text in either `message` or `content`
         let message = parsed["message"]
             .as_str()
@@ -1483,6 +1544,195 @@ mod tests {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"system","message":""}"#;
         assert!(parse_line_str(&mut parser, line).is_none());
+    }
+
+    // ── StreamParser: system init message ────────────────────────────
+
+    #[test]
+    fn parse_system_init_extracts_model() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"system","subtype":"init","model":"claude-opus-4-6"}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::SystemInit { model } => assert_eq!(model, "claude-opus-4-6"),
+            other => panic!("expected SystemInit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_system_init_with_extra_fields() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"system","subtype":"init","model":"claude-opus-4-6","session_id":"abc","tools":["Read","Write"],"mcp_servers":[],"message":""}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::SystemInit { model } => assert_eq!(model, "claude-opus-4-6"),
+            other => panic!("expected SystemInit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_system_init_without_model_falls_through() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"system","subtype":"init","session_id":"abc"}"#;
+        assert!(
+            parse_line_str(&mut parser, line).is_none(),
+            "init without model field should fall through and produce None"
+        );
+    }
+
+    #[test]
+    fn parse_system_init_with_empty_model_falls_through() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"system","subtype":"init","model":""}"#;
+        assert!(
+            parse_line_str(&mut parser, line).is_none(),
+            "init with empty model should fall through and produce None"
+        );
+    }
+
+    #[test]
+    fn parse_system_init_with_null_model_falls_through() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"system","subtype":"init","model":null}"#;
+        assert!(
+            parse_line_str(&mut parser, line).is_none(),
+            "init with null model should fall through and produce None"
+        );
+    }
+
+    #[test]
+    fn parse_system_non_init_subtype_unchanged() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"system","subtype":"compact","message":"hello"}"#;
+        assert!(
+            parse_line_str(&mut parser, line).is_none(),
+            "non-init subtype should not produce SystemInit"
+        );
+    }
+
+    #[test]
+    fn parse_system_actionable_still_surfaces_as_error() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"system","message":"You've hit your limit · resets 5pm (UTC)"}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Error { content } => assert!(content.contains("hit your limit")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_chunk_system_init_round_trips() {
+        let chunk = StreamChunk::SystemInit {
+            model: "test".to_string(),
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert_eq!(
+            json,
+            r#"{"chunk_type":"SystemInit","data":{"model":"test"}}"#
+        );
+        let deserialized: StreamChunk = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            StreamChunk::SystemInit { model } => assert_eq!(model, "test"),
+            other => panic!("expected SystemInit after round-trip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_system_init_produces_log_entry() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"system","subtype":"init","model":"claude-opus-4-6"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        let (chunk, log_entry) = parser.parse_system_message(&parsed);
+        assert!(chunk.is_some(), "expected Some(SystemInit)");
+        let entry = log_entry.unwrap();
+        assert_eq!(entry.prefix, "SYSTEM");
+        assert_eq!(entry.message, "init: model=claude-opus-4-6");
+    }
+
+    #[test]
+    fn parse_rate_limit_event_extracts_fields() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","utilization":73.5,"resets_at":1738425600}}"#;
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        let (chunk, log_entry) = parser.parse_line(&parsed);
+        match chunk {
+            Some(StreamChunk::RateLimit {
+                status,
+                utilization,
+                resets_at,
+            }) => {
+                assert_eq!(status, "allowed_warning");
+                assert!((utilization.unwrap() - 73.5).abs() < f64::EPSILON);
+                assert_eq!(resets_at, Some(1738425600));
+            }
+            other => panic!("expected RateLimit, got {other:?}"),
+        }
+        let entry = log_entry.unwrap();
+        assert_eq!(entry.prefix, "RATE_LIMIT");
+        assert!(entry.message.contains("73.5"));
+    }
+
+    #[test]
+    fn parse_rate_limit_event_without_utilization() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#;
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        let (chunk, _) = parser.parse_line(&parsed);
+        match chunk {
+            Some(StreamChunk::RateLimit {
+                status,
+                utilization,
+                resets_at,
+            }) => {
+                assert_eq!(status, "allowed");
+                assert!(utilization.is_none());
+                assert!(resets_at.is_none());
+            }
+            other => panic!("expected RateLimit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_rate_limit_event_rejected() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","utilization":100.0,"resets_at":1738430000}}"#;
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        let (chunk, _) = parser.parse_line(&parsed);
+        match chunk {
+            Some(StreamChunk::RateLimit {
+                status,
+                utilization,
+                ..
+            }) => {
+                assert_eq!(status, "rejected");
+                assert!((utilization.unwrap() - 100.0).abs() < f64::EPSILON);
+            }
+            other => panic!("expected RateLimit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_chunk_rate_limit_round_trips() {
+        let chunk = StreamChunk::RateLimit {
+            status: "allowed".to_string(),
+            utilization: Some(42.5),
+            resets_at: Some(1738425600),
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        let deserialized: StreamChunk = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            StreamChunk::RateLimit {
+                status,
+                utilization,
+                resets_at,
+            } => {
+                assert_eq!(status, "allowed");
+                assert!((utilization.unwrap() - 42.5).abs() < f64::EPSILON);
+                assert_eq!(resets_at, Some(1738425600));
+            }
+            other => panic!("expected RateLimit after round-trip, got {other:?}"),
+        }
     }
 
     #[test]
