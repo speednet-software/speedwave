@@ -119,7 +119,10 @@ export class SessionStatsComponent {
 
   readonly barIndices = [0, 1, 2, 3, 4];
 
-  /** Context usage % from per-step flat usage and actual context window size. */
+  /**
+   * Context usage % from per-step flat usage and actual context window size.
+   *  Matches statusline.sh: input_tokens + cache_creation + cache_read (no output_tokens).
+   */
   get ctxPct(): number {
     if (!this.stats?.usage) return 0;
     const totalInput =
@@ -133,7 +136,7 @@ export class SessionStatsComponent {
 
   /** Number of filled bar segments (0–5) for context usage. */
   get ctxFilled(): number {
-    return Math.round((this.ctxPct * 5) / 100);
+    return Math.floor((this.ctxPct * 5) / 100);
   }
 
   /** Tailwind background color class for context usage bar segments. */
@@ -153,7 +156,7 @@ export class SessionStatsComponent {
 
   /** Number of filled bar segments (0–5) for rate limit. */
   get rlFilled(): number {
-    return Math.round((this.rlPct * 5) / 100);
+    return Math.floor((this.rlPct * 5) / 100);
   }
 
   /** Tailwind background color class for rate limit bar segments. */

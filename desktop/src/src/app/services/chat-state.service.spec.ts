@@ -649,6 +649,7 @@ describe('ChatStateService', () => {
       });
 
       expect(service.sessionStats?.rate_limit).toEqual({
+        status: 'allowed_warning',
         utilization: 65,
         resets_at: 1738425600,
       });
@@ -666,6 +667,7 @@ describe('ChatStateService', () => {
       });
 
       expect(service.sessionStats?.rate_limit).toEqual({
+        status: 'allowed',
         utilization: 30,
         resets_at: null,
       });

@@ -120,6 +120,7 @@ export interface ChatMessage {
 
 /** Rate limit info from rate_limit_event. */
 export interface RateLimitInfo {
+  status: string;
   utilization: number;
   resets_at: number | null;
 }

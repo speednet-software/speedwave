@@ -393,6 +393,7 @@ export class ChatStateService {
       case 'RateLimit':
         if (chunk.data.utilization !== null) {
           this._rateLimit = {
+            status: chunk.data.status,
             utilization: chunk.data.utilization,
             resets_at: chunk.data.resets_at,
           };

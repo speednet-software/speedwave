@@ -449,7 +449,8 @@ impl StreamParser {
             .as_f64()
             .or_else(|| parsed["total_cost_usd"].as_f64());
 
-        // Context window size from modelUsage (cumulative, but contextWindow is constant)
+        // contextWindow is constant for a given model — safe to take first entry.
+        // If Claude Code ever switches models mid-session, we'd need to reconcile.
         let context_window_size = parsed["modelUsage"]
             .as_object()
             .and_then(|mu| mu.values().next())

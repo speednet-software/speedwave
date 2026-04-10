@@ -127,7 +127,7 @@ describe('SessionStatsComponent', () => {
       session_id: 'abc',
       cost_usd: 0.01,
       total_cost: 0.05,
-      rate_limit: { utilization: 65, resets_at: resetEpoch },
+      rate_limit: { status: 'allowed_warning', utilization: 65, resets_at: resetEpoch },
       context_window_size: 200000,
       total_output_tokens: 0,
     };
@@ -218,7 +218,7 @@ describe('SessionStatsComponent', () => {
       session_id: 'abc',
       cost_usd: 0,
       total_cost: 0,
-      rate_limit: { utilization: 60, resets_at: null },
+      rate_limit: { status: 'allowed', utilization: 60, resets_at: null },
       context_window_size: 200000,
       total_output_tokens: 0,
     };
@@ -230,7 +230,7 @@ describe('SessionStatsComponent', () => {
       session_id: 'abc',
       cost_usd: 0,
       total_cost: 0,
-      rate_limit: { utilization: 95, resets_at: null },
+      rate_limit: { status: 'rejected', utilization: 95, resets_at: null },
       context_window_size: 200000,
       total_output_tokens: 0,
     };
