@@ -427,7 +427,9 @@ export class ChatStateService {
         }
         this.isStreaming = false;
         if (chunk.data.usage) {
-          this._cumulativeInputTokens += chunk.data.usage.input_tokens;
+          // input_tokens from modelUsage already includes the full context
+          // (system prompt + history + cache) — not a delta. Use as-is.
+          this._cumulativeInputTokens = chunk.data.usage.input_tokens;
           this._cumulativeOutputTokens += chunk.data.usage.output_tokens;
         }
         if (chunk.data.context_window_size) {

@@ -686,7 +686,7 @@ describe('ChatStateService', () => {
       expect(service.sessionStats?.rate_limit).toBeUndefined();
     });
 
-    it('cumulative tokens accumulate across turns', () => {
+    it('input tokens reflect latest turn (full context), output tokens accumulate', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
@@ -694,10 +694,10 @@ describe('ChatStateService', () => {
           session_id: 'abc',
           cost_usd: 0.01,
           total_cost: 0.02,
-          usage: { input_tokens: 1000, output_tokens: 200 },
+          usage: { input_tokens: 20000, output_tokens: 200 },
         },
       });
-      expect(service.sessionStats?.cumulative_input_tokens).toBe(1000);
+      expect(service.sessionStats?.cumulative_input_tokens).toBe(20000);
       expect(service.sessionStats?.cumulative_output_tokens).toBe(200);
 
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'bye' } });
@@ -707,10 +707,11 @@ describe('ChatStateService', () => {
           session_id: 'abc',
           cost_usd: 0.01,
           total_cost: 0.04,
-          usage: { input_tokens: 1500, output_tokens: 300 },
+          usage: { input_tokens: 25000, output_tokens: 300 },
         },
       });
-      expect(service.sessionStats?.cumulative_input_tokens).toBe(2500);
+      // input = latest turn (full context grows), output = cumulative
+      expect(service.sessionStats?.cumulative_input_tokens).toBe(25000);
       expect(service.sessionStats?.cumulative_output_tokens).toBe(500);
     });
 

@@ -449,18 +449,8 @@ impl StreamParser {
             .as_f64()
             .or_else(|| parsed["total_cost_usd"].as_f64());
 
-        // Usage: try flat "usage" object first (test fixtures), then aggregate from "modelUsage"
-        let (usage, context_window_size) = if parsed["usage"].is_object() {
-            (
-                Some(UsageInfo {
-                    input_tokens: parsed["usage"]["input_tokens"].as_u64().unwrap_or(0),
-                    output_tokens: parsed["usage"]["output_tokens"].as_u64().unwrap_or(0),
-                    cache_read_tokens: parsed["usage"]["cache_read_tokens"].as_u64(),
-                    cache_write_tokens: parsed["usage"]["cache_write_tokens"].as_u64(),
-                }),
-                None,
-            )
-        } else if parsed["modelUsage"].is_object() {
+        // Usage: prefer "modelUsage" (real CLI), fall back to flat "usage" (test fixtures)
+        let (usage, context_window_size) = if parsed["modelUsage"].is_object() {
             // modelUsage is a map of model_name -> { inputTokens, outputTokens, ... }
             // Aggregate across all models (usually just one).
             let mut input = 0u64;
@@ -495,6 +485,16 @@ impl StreamParser {
                     },
                 }),
                 ctx_window,
+            )
+        } else if parsed["usage"].is_object() {
+            (
+                Some(UsageInfo {
+                    input_tokens: parsed["usage"]["input_tokens"].as_u64().unwrap_or(0),
+                    output_tokens: parsed["usage"]["output_tokens"].as_u64().unwrap_or(0),
+                    cache_read_tokens: parsed["usage"]["cache_read_tokens"].as_u64(),
+                    cache_write_tokens: parsed["usage"]["cache_write_tokens"].as_u64(),
+                }),
+                None,
             )
         } else {
             (None, None)
