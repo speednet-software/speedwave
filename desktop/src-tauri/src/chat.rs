@@ -39,6 +39,8 @@ pub enum StreamChunk {
         usage: Option<UsageInfo>,
         #[serde(skip_serializing_if = "Option::is_none")]
         result_text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_window_size: Option<u64>,
     },
     /// Interactive question from Claude (AskUserQuestion tool).
     /// The frontend must display the question and send the answer back via `answer_question`.
@@ -438,18 +440,64 @@ impl StreamParser {
         if session_id.is_empty() {
             log::warn!("parse_result: result message missing 'session_id'");
         }
-        let cost_usd = parsed["cost_usd"].as_f64();
-        let total_cost = parsed["total_cost"].as_f64();
 
-        let usage = if parsed["usage"].is_object() {
-            Some(UsageInfo {
-                input_tokens: parsed["usage"]["input_tokens"].as_u64().unwrap_or(0),
-                output_tokens: parsed["usage"]["output_tokens"].as_u64().unwrap_or(0),
-                cache_read_tokens: parsed["usage"]["cache_read_tokens"].as_u64(),
-                cache_write_tokens: parsed["usage"]["cache_write_tokens"].as_u64(),
-            })
+        // Cost: try top-level fields first, then total_cost_usd
+        let cost_usd = parsed["cost_usd"]
+            .as_f64()
+            .or_else(|| parsed["total_cost_usd"].as_f64());
+        let total_cost = parsed["total_cost"]
+            .as_f64()
+            .or_else(|| parsed["total_cost_usd"].as_f64());
+
+        // Usage: try flat "usage" object first (test fixtures), then aggregate from "modelUsage"
+        let (usage, context_window_size) = if parsed["usage"].is_object() {
+            (
+                Some(UsageInfo {
+                    input_tokens: parsed["usage"]["input_tokens"].as_u64().unwrap_or(0),
+                    output_tokens: parsed["usage"]["output_tokens"].as_u64().unwrap_or(0),
+                    cache_read_tokens: parsed["usage"]["cache_read_tokens"].as_u64(),
+                    cache_write_tokens: parsed["usage"]["cache_write_tokens"].as_u64(),
+                }),
+                None,
+            )
+        } else if parsed["modelUsage"].is_object() {
+            // modelUsage is a map of model_name -> { inputTokens, outputTokens, ... }
+            // Aggregate across all models (usually just one).
+            let mut input = 0u64;
+            let mut output = 0u64;
+            let mut cache_read = 0u64;
+            let mut cache_write = 0u64;
+            let mut ctx_window: Option<u64> = None;
+            if let Some(obj) = parsed["modelUsage"].as_object() {
+                for (_model, stats) in obj {
+                    input += stats["inputTokens"].as_u64().unwrap_or(0);
+                    output += stats["outputTokens"].as_u64().unwrap_or(0);
+                    cache_read += stats["cacheReadInputTokens"].as_u64().unwrap_or(0);
+                    cache_write += stats["cacheCreationInputTokens"].as_u64().unwrap_or(0);
+                    if let Some(cw) = stats["contextWindow"].as_u64() {
+                        ctx_window = Some(cw);
+                    }
+                }
+            }
+            (
+                Some(UsageInfo {
+                    input_tokens: input + cache_read + cache_write,
+                    output_tokens: output,
+                    cache_read_tokens: if cache_read > 0 {
+                        Some(cache_read)
+                    } else {
+                        None
+                    },
+                    cache_write_tokens: if cache_write > 0 {
+                        Some(cache_write)
+                    } else {
+                        None
+                    },
+                }),
+                ctx_window,
+            )
         } else {
-            None
+            (None, None)
         };
 
         let result_text = parsed["result"]
@@ -469,6 +517,7 @@ impl StreamParser {
                 total_cost,
                 usage,
                 result_text,
+                context_window_size,
             }),
             log_entry,
         )
@@ -1211,6 +1260,7 @@ mod tests {
                 cache_write_tokens: None,
             }),
             result_text: None,
+            context_window_size: None,
         };
         let serialized = serde_json::to_string(&original).unwrap();
         let deserialized: StreamChunk = serde_json::from_str(&serialized).unwrap();
@@ -1425,6 +1475,7 @@ mod tests {
                 total_cost,
                 usage,
                 result_text,
+                context_window_size,
             } => {
                 assert_eq!(session_id, "550e8400-e29b-41d4-a716-446655440000");
                 assert_eq!(cost_usd, Some(0.003));
@@ -1435,6 +1486,34 @@ mod tests {
                 assert_eq!(u.cache_read_tokens, Some(50));
                 assert!(u.cache_write_tokens.is_none());
                 assert!(result_text.is_none(), "empty result should produce None");
+                assert!(context_window_size.is_none());
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_extracts_model_usage() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.142,"result":"","modelUsage":{"claude-opus-4-6[1m]":{"inputTokens":3,"outputTokens":762,"cacheReadInputTokens":11204,"cacheCreationInputTokens":18782,"contextWindow":1000000,"costUSD":0.142,"maxOutputTokens":64000,"webSearchRequests":0}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                session_id,
+                cost_usd,
+                usage,
+                context_window_size,
+                ..
+            } => {
+                assert_eq!(session_id, "abc");
+                assert_eq!(cost_usd, Some(0.142));
+                assert_eq!(context_window_size, Some(1_000_000));
+                let u = usage.unwrap();
+                // input_tokens = inputTokens + cacheRead + cacheCreation
+                assert_eq!(u.input_tokens, 3 + 11204 + 18782);
+                assert_eq!(u.output_tokens, 762);
+                assert_eq!(u.cache_read_tokens, Some(11204));
+                assert_eq!(u.cache_write_tokens, Some(18782));
             }
             other => panic!("expected Result, got {other:?}"),
         }
@@ -2511,11 +2590,16 @@ mod tests {
             total_cost: None,
             usage: None,
             result_text: None,
+            context_window_size: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(
             !json.contains("result_text"),
             "result_text should be absent when None, got: {json}"
+        );
+        assert!(
+            !json.contains("context_window_size"),
+            "context_window_size should be absent when None, got: {json}"
         );
     }
 

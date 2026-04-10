@@ -23,6 +23,7 @@ export type StreamChunk =
         total_cost?: number;
         usage?: UsageInfo;
         result_text?: string;
+        context_window_size?: number;
       };
     }
   | { chunk_type: 'Error'; data: { content: string } }
@@ -133,6 +134,7 @@ export interface SessionStats {
   rate_limit?: RateLimitInfo;
   cumulative_input_tokens: number;
   cumulative_output_tokens: number;
+  context_window_size: number;
 }
 
 // ProjectList and ProjectEntry are defined in models/update.ts (SSOT)

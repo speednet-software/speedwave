@@ -85,13 +85,12 @@ export class SessionStatsComponent {
 
   readonly barIndices = [0, 1, 2, 3, 4];
 
-  /** Estimate context usage % from cumulative token counts (200k default window). */
+  /** Context usage % from cumulative tokens and actual context window size. */
   get ctxPct(): number {
     if (!this.stats) return 0;
     const totalInput = this.stats.cumulative_input_tokens;
     if (totalInput <= 0) return 0;
-    // Claude default context window is 200k, 1M for extended
-    const windowSize = totalInput > 180_000 ? 1_000_000 : 200_000;
+    const windowSize = this.stats.context_window_size || 200_000;
     return Math.min(100, Math.round((totalInput / windowSize) * 100));
   }
 

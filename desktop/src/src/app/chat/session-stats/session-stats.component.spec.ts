@@ -31,6 +31,7 @@ describe('SessionStatsComponent', () => {
       model: 'Opus 4.6',
       cumulative_input_tokens: 1000,
       cumulative_output_tokens: 200,
+      context_window_size: 200000,
     };
     fixture.detectChanges();
 
@@ -48,6 +49,7 @@ describe('SessionStatsComponent', () => {
       total_cost: 0.05,
       cumulative_input_tokens: 0,
       cumulative_output_tokens: 0,
+      context_window_size: 200000,
     };
     fixture.detectChanges();
 
@@ -63,6 +65,7 @@ describe('SessionStatsComponent', () => {
       model: '',
       cumulative_input_tokens: 0,
       cumulative_output_tokens: 0,
+      context_window_size: 200000,
     };
     fixture.detectChanges();
 
@@ -78,6 +81,7 @@ describe('SessionStatsComponent', () => {
       usage: { input_tokens: 50000, output_tokens: 1000 },
       cumulative_input_tokens: 50000,
       cumulative_output_tokens: 1000,
+      context_window_size: 200000,
     };
     fixture.detectChanges();
 
@@ -95,6 +99,7 @@ describe('SessionStatsComponent', () => {
       total_cost: 0.05,
       cumulative_input_tokens: 0,
       cumulative_output_tokens: 0,
+      context_window_size: 200000,
     };
     fixture.detectChanges();
 
@@ -111,6 +116,7 @@ describe('SessionStatsComponent', () => {
       rate_limit: { utilization: 65, resets_at: resetEpoch },
       cumulative_input_tokens: 1000,
       cumulative_output_tokens: 200,
+      context_window_size: 200000,
     };
     fixture.detectChanges();
 
@@ -127,6 +133,7 @@ describe('SessionStatsComponent', () => {
       total_cost: 0.05,
       cumulative_input_tokens: 0,
       cumulative_output_tokens: 0,
+      context_window_size: 200000,
     };
     fixture.detectChanges();
 
@@ -141,6 +148,7 @@ describe('SessionStatsComponent', () => {
       total_cost: 0.015,
       cumulative_input_tokens: 0,
       cumulative_output_tokens: 0,
+      context_window_size: 200000,
     };
     fixture.detectChanges();
 
@@ -155,6 +163,7 @@ describe('SessionStatsComponent', () => {
       total_cost: 0,
       cumulative_input_tokens: 0,
       cumulative_output_tokens: 0,
+      context_window_size: 200000,
     };
     fixture.detectChanges();
 
@@ -171,6 +180,7 @@ describe('SessionStatsComponent', () => {
       usage: { input_tokens: 100, output_tokens: 50 },
       cumulative_input_tokens: 100,
       cumulative_output_tokens: 50,
+      context_window_size: 200000,
     };
     fixture.detectChanges();
 
@@ -187,6 +197,7 @@ describe('SessionStatsComponent', () => {
       total_cost: 0,
       cumulative_input_tokens: 100000,
       cumulative_output_tokens: 0,
+      context_window_size: 200000,
     };
     expect(component.ctxPct).toBe(50);
     expect(component.ctxFilled).toBe(3);
@@ -199,17 +210,19 @@ describe('SessionStatsComponent', () => {
       total_cost: 0,
       cumulative_input_tokens: 0,
       cumulative_output_tokens: 0,
+      context_window_size: 200000,
     };
     expect(component.ctxPct).toBe(0);
   });
 
-  it('uses 1M window when cumulative input exceeds 180k', () => {
+  it('uses actual context_window_size from result', () => {
     component.stats = {
       session_id: 'abc',
       cost_usd: 0,
       total_cost: 0,
       cumulative_input_tokens: 200000,
       cumulative_output_tokens: 0,
+      context_window_size: 1000000,
     };
     // 200k / 1M = 20%
     expect(component.ctxPct).toBe(20);
@@ -222,6 +235,7 @@ describe('SessionStatsComponent', () => {
       total_cost: 0,
       cumulative_input_tokens: 10000,
       cumulative_output_tokens: 0,
+      context_window_size: 200000,
     };
     expect(component.ctxBarColor).toBe('bg-green-500');
     expect(component.ctxTextColor).toBe('text-green-500');
@@ -235,6 +249,7 @@ describe('SessionStatsComponent', () => {
       rate_limit: { utilization: 30, resets_at: null },
       cumulative_input_tokens: 1000,
       cumulative_output_tokens: 200,
+      context_window_size: 200000,
     };
     fixture.detectChanges();
 
@@ -252,6 +267,7 @@ describe('SessionStatsComponent', () => {
       rate_limit: { utilization: 60, resets_at: null },
       cumulative_input_tokens: 0,
       cumulative_output_tokens: 0,
+      context_window_size: 200000,
     };
     expect(component.rlBarColor).toBe('bg-yellow-400');
     expect(component.rlTextColor).toBe('text-yellow-400');
@@ -265,6 +281,7 @@ describe('SessionStatsComponent', () => {
       rate_limit: { utilization: 80, resets_at: null },
       cumulative_input_tokens: 0,
       cumulative_output_tokens: 0,
+      context_window_size: 200000,
     };
     expect(component.rlBarColor).toBe('bg-red-400');
   });
@@ -277,6 +294,7 @@ describe('SessionStatsComponent', () => {
       rate_limit: { utilization: 95, resets_at: null },
       cumulative_input_tokens: 0,
       cumulative_output_tokens: 0,
+      context_window_size: 200000,
     };
     expect(component.rlBarColor).toBe('bg-red-500');
     expect(component.rlTextColor).toContain('font-bold');
@@ -290,6 +308,7 @@ describe('SessionStatsComponent', () => {
       usage: { input_tokens: 5000, output_tokens: 500 },
       cumulative_input_tokens: 15000,
       cumulative_output_tokens: 1500,
+      context_window_size: 200000,
     };
     fixture.detectChanges();
 

@@ -56,6 +56,7 @@ export class ChatStateService {
   private _rateLimit: RateLimitInfo | null = null;
   private _cumulativeInputTokens = 0;
   private _cumulativeOutputTokens = 0;
+  private _contextWindowSize = 200_000;
 
   private unlisten: UnlistenFn | null = null;
   private listenerReady = false;
@@ -429,6 +430,9 @@ export class ChatStateService {
           this._cumulativeInputTokens += chunk.data.usage.input_tokens;
           this._cumulativeOutputTokens += chunk.data.usage.output_tokens;
         }
+        if (chunk.data.context_window_size) {
+          this._contextWindowSize = chunk.data.context_window_size;
+        }
         this._sessionStats = {
           session_id: chunk.data.session_id,
           cost_usd: chunk.data.cost_usd ?? 0,
@@ -438,6 +442,7 @@ export class ChatStateService {
           rate_limit: this._rateLimit ?? undefined,
           cumulative_input_tokens: this._cumulativeInputTokens,
           cumulative_output_tokens: this._cumulativeOutputTokens,
+          context_window_size: this._contextWindowSize,
         };
         break;
 
@@ -472,6 +477,7 @@ export class ChatStateService {
     this._rateLimit = null;
     this._cumulativeInputTokens = 0;
     this._cumulativeOutputTokens = 0;
+    this._contextWindowSize = 200_000;
     this.initialized = false;
     this.startingSession = false;
     this.notifyChange();
@@ -501,6 +507,7 @@ export class ChatStateService {
         this._rateLimit = null;
         this._cumulativeInputTokens = 0;
         this._cumulativeOutputTokens = 0;
+        this._contextWindowSize = 200_000;
         this.notifyChange();
       }
     });

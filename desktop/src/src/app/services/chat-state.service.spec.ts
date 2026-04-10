@@ -408,6 +408,7 @@ describe('ChatStateService', () => {
         usage: { input_tokens: 100, output_tokens: 50 },
         cumulative_input_tokens: 100,
         cumulative_output_tokens: 50,
+        context_window_size: 200000,
       });
     });
 
@@ -741,6 +742,7 @@ describe('ChatStateService', () => {
           total_cost: 0,
           cumulative_input_tokens: 0,
           cumulative_output_tokens: 0,
+          context_window_size: 200000,
         },
       });
       service.isStreaming = true;
