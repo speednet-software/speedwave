@@ -54,8 +54,7 @@ export class ChatStateService {
 
   private _model = '';
   private _rateLimit: RateLimitInfo | null = null;
-  private _cumulativeInputTokens = 0;
-  private _cumulativeOutputTokens = 0;
+  private _totalOutputTokens = 0;
   private _contextWindowSize = 200_000;
 
   private unlisten: UnlistenFn | null = null;
@@ -427,10 +426,7 @@ export class ChatStateService {
         }
         this.isStreaming = false;
         if (chunk.data.usage) {
-          // input_tokens from modelUsage already includes the full context
-          // (system prompt + history + cache) — not a delta. Use as-is.
-          this._cumulativeInputTokens = chunk.data.usage.input_tokens;
-          this._cumulativeOutputTokens += chunk.data.usage.output_tokens;
+          this._totalOutputTokens += chunk.data.usage.output_tokens;
         }
         if (chunk.data.context_window_size) {
           this._contextWindowSize = chunk.data.context_window_size;
@@ -442,9 +438,8 @@ export class ChatStateService {
           usage: chunk.data.usage,
           model: this._model || undefined,
           rate_limit: this._rateLimit ?? undefined,
-          cumulative_input_tokens: this._cumulativeInputTokens,
-          cumulative_output_tokens: this._cumulativeOutputTokens,
           context_window_size: this._contextWindowSize,
+          total_output_tokens: this._totalOutputTokens,
         };
         break;
 
@@ -477,8 +472,7 @@ export class ChatStateService {
     this._sessionStats = null;
     this._model = '';
     this._rateLimit = null;
-    this._cumulativeInputTokens = 0;
-    this._cumulativeOutputTokens = 0;
+    this._totalOutputTokens = 0;
     this._contextWindowSize = 200_000;
     this.initialized = false;
     this.startingSession = false;
@@ -507,8 +501,7 @@ export class ChatStateService {
         this._sessionStats = null;
         this._model = '';
         this._rateLimit = null;
-        this._cumulativeInputTokens = 0;
-        this._cumulativeOutputTokens = 0;
+        this._totalOutputTokens = 0;
         this._contextWindowSize = 200_000;
         this.notifyChange();
       }

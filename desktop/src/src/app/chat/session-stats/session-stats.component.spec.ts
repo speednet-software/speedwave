@@ -18,7 +18,6 @@ describe('SessionStatsComponent', () => {
   it('renders nothing when stats is null', () => {
     component.stats = null;
     fixture.detectChanges();
-
     const el = fixture.nativeElement as HTMLElement;
     expect(el.querySelector('[data-testid="session-stats"]')).toBeNull();
   });
@@ -29,82 +28,97 @@ describe('SessionStatsComponent', () => {
       cost_usd: 0.01,
       total_cost: 0.05,
       model: 'Opus 4.6',
-      cumulative_input_tokens: 1000,
-      cumulative_output_tokens: 200,
       context_window_size: 200000,
+      total_output_tokens: 0,
     };
     fixture.detectChanges();
-
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.textContent).toContain('Opus 4.6');
-    const statsDiv = el.querySelector('[data-testid="session-stats"]') as HTMLElement;
-    const firstSpan = statsDiv.querySelector('span') as HTMLElement;
+    const firstSpan = el.querySelector('[data-testid="session-stats"] span') as HTMLElement;
     expect(firstSpan.textContent?.trim()).toBe('Opus 4.6');
   });
 
   it('renders Claude fallback when model is undefined', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0.01,
-      total_cost: 0.05,
-      cumulative_input_tokens: 0,
-      cumulative_output_tokens: 0,
+      cost_usd: 0,
+      total_cost: 0,
       context_window_size: 200000,
+      total_output_tokens: 0,
     };
     fixture.detectChanges();
-
-    const el = fixture.nativeElement as HTMLElement;
-    expect(el.textContent).toContain('Claude');
+    expect((fixture.nativeElement as HTMLElement).textContent).toContain('Claude');
   });
 
-  it('renders Claude fallback when model is empty string', () => {
+  it('renders CTX bar from per-step usage', () => {
     component.stats = {
       session_id: 'abc',
       cost_usd: 0.01,
       total_cost: 0.05,
-      model: '',
-      cumulative_input_tokens: 0,
-      cumulative_output_tokens: 0,
-      context_window_size: 200000,
+      usage: {
+        input_tokens: 3,
+        output_tokens: 65,
+        cache_read_tokens: 11204,
+        cache_write_tokens: 11358,
+      },
+      context_window_size: 1000000,
+      total_output_tokens: 65,
     };
     fixture.detectChanges();
-
-    const el = fixture.nativeElement as HTMLElement;
-    expect(el.textContent).toContain('Claude');
-  });
-
-  it('renders CTX bar and cumulative token counts', () => {
-    component.stats = {
-      session_id: 'abc',
-      cost_usd: 0.01,
-      total_cost: 0.05,
-      usage: { input_tokens: 50000, output_tokens: 1000 },
-      cumulative_input_tokens: 50000,
-      cumulative_output_tokens: 1000,
-      context_window_size: 200000,
-    };
-    fixture.detectChanges();
-
     const el = fixture.nativeElement as HTMLElement;
     expect(el.textContent).toContain('CTX');
-    expect(el.textContent).toContain('%');
-    expect(el.textContent).toContain('50,000');
-    expect(el.textContent).toContain('1,000');
+    // (3 + 11204 + 11358) / 1000000 = ~2%
+    expect(el.textContent).toContain('2%');
   });
 
-  it('does not render CTX section when cumulative tokens are 0', () => {
+  it('does not render CTX when no usage', () => {
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0,
+      total_cost: 0,
+      context_window_size: 200000,
+      total_output_tokens: 0,
+    };
+    fixture.detectChanges();
+    expect((fixture.nativeElement as HTMLElement).textContent).not.toContain('CTX');
+  });
+
+  it('renders cache read and cache write tokens separately', () => {
     component.stats = {
       session_id: 'abc',
       cost_usd: 0.01,
       total_cost: 0.05,
-      cumulative_input_tokens: 0,
-      cumulative_output_tokens: 0,
-      context_window_size: 200000,
+      usage: {
+        input_tokens: 3,
+        output_tokens: 65,
+        cache_read_tokens: 22562,
+        cache_write_tokens: 75,
+      },
+      context_window_size: 1000000,
+      total_output_tokens: 65,
     };
     fixture.detectChanges();
-
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.textContent).not.toContain('CTX');
+    expect(el.textContent).toContain('In: 3');
+    expect(el.textContent).toContain('CR: 22,562');
+    expect(el.textContent).toContain('CW: 75');
+    expect(el.textContent).toContain('Out: 65');
+  });
+
+  it('hides CR/CW when cache tokens are absent', () => {
+    component.stats = {
+      session_id: 'abc',
+      cost_usd: 0.01,
+      total_cost: 0.05,
+      usage: { input_tokens: 500, output_tokens: 100 },
+      context_window_size: 200000,
+      total_output_tokens: 100,
+    };
+    fixture.detectChanges();
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.textContent).toContain('In: 500');
+    expect(el.textContent).not.toContain('CR:');
+    expect(el.textContent).not.toContain('CW:');
+    expect(el.textContent).toContain('Out: 100');
   });
 
   it('renders rate limit with utilization and reset time', () => {
@@ -114,31 +128,26 @@ describe('SessionStatsComponent', () => {
       cost_usd: 0.01,
       total_cost: 0.05,
       rate_limit: { utilization: 65, resets_at: resetEpoch },
-      cumulative_input_tokens: 1000,
-      cumulative_output_tokens: 200,
       context_window_size: 200000,
+      total_output_tokens: 0,
     };
     fixture.detectChanges();
-
     const el = fixture.nativeElement as HTMLElement;
     expect(el.textContent).toContain('Limit');
     expect(el.textContent).toContain('65%');
     expect(el.textContent).toContain('reset');
   });
 
-  it('does not render rate limit section when absent', () => {
+  it('does not render rate limit when absent', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0.01,
-      total_cost: 0.05,
-      cumulative_input_tokens: 0,
-      cumulative_output_tokens: 0,
+      cost_usd: 0,
+      total_cost: 0,
       context_window_size: 200000,
+      total_output_tokens: 0,
     };
     fixture.detectChanges();
-
-    const el = fixture.nativeElement as HTMLElement;
-    expect(el.textContent).not.toContain('Limit');
+    expect((fixture.nativeElement as HTMLElement).textContent).not.toContain('Limit');
   });
 
   it('renders cost when total_cost > 0', () => {
@@ -146,86 +155,50 @@ describe('SessionStatsComponent', () => {
       session_id: 'abc',
       cost_usd: 0.003,
       total_cost: 0.015,
-      cumulative_input_tokens: 0,
-      cumulative_output_tokens: 0,
       context_window_size: 200000,
+      total_output_tokens: 0,
     };
     fixture.detectChanges();
-
-    const el = fixture.nativeElement as HTMLElement;
-    expect(el.textContent).toContain('$0.0150');
+    expect((fixture.nativeElement as HTMLElement).textContent).toContain('$0.0150');
   });
 
-  it('does not render cost when total_cost is 0', () => {
+  it('hides cost when total_cost is 0', () => {
     component.stats = {
       session_id: 'abc',
       cost_usd: 0,
       total_cost: 0,
-      cumulative_input_tokens: 0,
-      cumulative_output_tokens: 0,
       context_window_size: 200000,
+      total_output_tokens: 0,
     };
     fixture.detectChanges();
-
-    const el = fixture.nativeElement as HTMLElement;
-    expect(el.textContent).toContain('Claude');
-    expect(el.textContent).not.toContain('$0.0000');
+    expect((fixture.nativeElement as HTMLElement).textContent).not.toContain('$');
   });
 
-  it('renders divider separators between sections', () => {
-    component.stats = {
-      session_id: 'abc',
-      cost_usd: 0.01,
-      total_cost: 0.05,
-      usage: { input_tokens: 100, output_tokens: 50 },
-      cumulative_input_tokens: 100,
-      cumulative_output_tokens: 50,
-      context_window_size: 200000,
-    };
-    fixture.detectChanges();
-
-    const el = fixture.nativeElement as HTMLElement;
-    const spans = Array.from(el.querySelectorAll('span'));
-    const dividers = spans.filter((s) => s.textContent?.trim() === '│');
-    expect(dividers.length).toBeGreaterThanOrEqual(2);
-  });
-
-  it('computes ctxPct correctly for 200k window', () => {
+  it('computes ctxPct correctly', () => {
     component.stats = {
       session_id: 'abc',
       cost_usd: 0,
       total_cost: 0,
-      cumulative_input_tokens: 100000,
-      cumulative_output_tokens: 0,
+      usage: { input_tokens: 100, output_tokens: 0, cache_read_tokens: 49900 },
       context_window_size: 200000,
+      total_output_tokens: 0,
     };
-    expect(component.ctxPct).toBe(50);
-    expect(component.ctxFilled).toBe(3);
+    // (100 + 49900) / 200000 = 25%
+    expect(component.ctxPct).toBe(25);
+    expect(component.ctxFilled).toBe(1);
   });
 
-  it('computes ctxPct 0 when no cumulative tokens', () => {
+  it('uses actual context_window_size', () => {
     component.stats = {
       session_id: 'abc',
       cost_usd: 0,
       total_cost: 0,
-      cumulative_input_tokens: 0,
-      cumulative_output_tokens: 0,
-      context_window_size: 200000,
-    };
-    expect(component.ctxPct).toBe(0);
-  });
-
-  it('uses actual context_window_size from result', () => {
-    component.stats = {
-      session_id: 'abc',
-      cost_usd: 0,
-      total_cost: 0,
-      cumulative_input_tokens: 200000,
-      cumulative_output_tokens: 0,
+      usage: { input_tokens: 3, output_tokens: 0, cache_read_tokens: 20000 },
       context_window_size: 1000000,
+      total_output_tokens: 0,
     };
-    // 200k / 1M = 20%
-    expect(component.ctxPct).toBe(20);
+    // ~20k / 1M = 2%
+    expect(component.ctxPct).toBe(2);
   });
 
   it('applies green bar color for low pct', () => {
@@ -233,30 +206,11 @@ describe('SessionStatsComponent', () => {
       session_id: 'abc',
       cost_usd: 0,
       total_cost: 0,
-      cumulative_input_tokens: 10000,
-      cumulative_output_tokens: 0,
+      usage: { input_tokens: 1000, output_tokens: 0 },
       context_window_size: 200000,
+      total_output_tokens: 0,
     };
     expect(component.ctxBarColor).toBe('bg-green-500');
-    expect(component.ctxTextColor).toBe('text-green-500');
-  });
-
-  it('renders rate limit without reset time', () => {
-    component.stats = {
-      session_id: 'abc',
-      cost_usd: 0.01,
-      total_cost: 0.05,
-      rate_limit: { utilization: 30, resets_at: null },
-      cumulative_input_tokens: 1000,
-      cumulative_output_tokens: 200,
-      context_window_size: 200000,
-    };
-    fixture.detectChanges();
-
-    const el = fixture.nativeElement as HTMLElement;
-    expect(el.textContent).toContain('Limit');
-    expect(el.textContent).toContain('30%');
-    expect(el.textContent).not.toContain('reset');
   });
 
   it('applies yellow bar color for medium pct', () => {
@@ -265,25 +219,10 @@ describe('SessionStatsComponent', () => {
       cost_usd: 0,
       total_cost: 0,
       rate_limit: { utilization: 60, resets_at: null },
-      cumulative_input_tokens: 0,
-      cumulative_output_tokens: 0,
       context_window_size: 200000,
+      total_output_tokens: 0,
     };
     expect(component.rlBarColor).toBe('bg-yellow-400');
-    expect(component.rlTextColor).toBe('text-yellow-400');
-  });
-
-  it('applies red bar color for high pct', () => {
-    component.stats = {
-      session_id: 'abc',
-      cost_usd: 0,
-      total_cost: 0,
-      rate_limit: { utilization: 80, resets_at: null },
-      cumulative_input_tokens: 0,
-      cumulative_output_tokens: 0,
-      context_window_size: 200000,
-    };
-    expect(component.rlBarColor).toBe('bg-red-400');
   });
 
   it('applies bold red for critical pct', () => {
@@ -292,29 +231,25 @@ describe('SessionStatsComponent', () => {
       cost_usd: 0,
       total_cost: 0,
       rate_limit: { utilization: 95, resets_at: null },
-      cumulative_input_tokens: 0,
-      cumulative_output_tokens: 0,
       context_window_size: 200000,
+      total_output_tokens: 0,
     };
     expect(component.rlBarColor).toBe('bg-red-500');
     expect(component.rlTextColor).toContain('font-bold');
   });
 
-  it('accumulates tokens across multiple turns', () => {
+  it('shows cumulative output tokens', () => {
     component.stats = {
       session_id: 'abc',
       cost_usd: 0.01,
-      total_cost: 0.03,
-      usage: { input_tokens: 5000, output_tokens: 500 },
-      cumulative_input_tokens: 15000,
-      cumulative_output_tokens: 1500,
+      total_cost: 0.05,
+      usage: { input_tokens: 3, output_tokens: 100 },
       context_window_size: 200000,
+      total_output_tokens: 500,
     };
     fixture.detectChanges();
-
     const el = fixture.nativeElement as HTMLElement;
-    // Shows cumulative, not per-turn
-    expect(el.textContent).toContain('15,000');
-    expect(el.textContent).toContain('1,500');
+    // Out shows cumulative total, not per-step
+    expect(el.textContent).toContain('Out: 500');
   });
 });

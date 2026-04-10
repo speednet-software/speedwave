@@ -441,7 +441,7 @@ impl StreamParser {
             log::warn!("parse_result: result message missing 'session_id'");
         }
 
-        // Cost: try top-level fields first, then total_cost_usd
+        // Cost: try legacy fields first, then total_cost_usd (real CLI format)
         let cost_usd = parsed["cost_usd"]
             .as_f64()
             .or_else(|| parsed["total_cost_usd"].as_f64());
@@ -449,55 +449,29 @@ impl StreamParser {
             .as_f64()
             .or_else(|| parsed["total_cost_usd"].as_f64());
 
-        // Usage: prefer "modelUsage" (real CLI), fall back to flat "usage" (test fixtures)
-        let (usage, context_window_size) = if parsed["modelUsage"].is_object() {
-            // modelUsage is a map of model_name -> { inputTokens, outputTokens, ... }
-            // Aggregate across all models (usually just one).
-            let mut input = 0u64;
-            let mut output = 0u64;
-            let mut cache_read = 0u64;
-            let mut cache_write = 0u64;
-            let mut ctx_window: Option<u64> = None;
-            if let Some(obj) = parsed["modelUsage"].as_object() {
-                for (_model, stats) in obj {
-                    input += stats["inputTokens"].as_u64().unwrap_or(0);
-                    output += stats["outputTokens"].as_u64().unwrap_or(0);
-                    cache_read += stats["cacheReadInputTokens"].as_u64().unwrap_or(0);
-                    cache_write += stats["cacheCreationInputTokens"].as_u64().unwrap_or(0);
-                    if let Some(cw) = stats["contextWindow"].as_u64() {
-                        ctx_window = Some(cw);
-                    }
-                }
-            }
-            (
-                Some(UsageInfo {
-                    input_tokens: input + cache_read + cache_write,
-                    output_tokens: output,
-                    cache_read_tokens: if cache_read > 0 {
-                        Some(cache_read)
-                    } else {
-                        None
-                    },
-                    cache_write_tokens: if cache_write > 0 {
-                        Some(cache_write)
-                    } else {
-                        None
-                    },
-                }),
-                ctx_window,
-            )
-        } else if parsed["usage"].is_object() {
-            (
-                Some(UsageInfo {
-                    input_tokens: parsed["usage"]["input_tokens"].as_u64().unwrap_or(0),
-                    output_tokens: parsed["usage"]["output_tokens"].as_u64().unwrap_or(0),
-                    cache_read_tokens: parsed["usage"]["cache_read_tokens"].as_u64(),
-                    cache_write_tokens: parsed["usage"]["cache_write_tokens"].as_u64(),
-                }),
-                None,
-            )
+        // Context window size from modelUsage (cumulative, but contextWindow is constant)
+        let context_window_size = parsed["modelUsage"]
+            .as_object()
+            .and_then(|mu| mu.values().next())
+            .and_then(|stats| stats["contextWindow"].as_u64());
+
+        // Usage: prefer flat "usage" (per-step, matches statusline's context_window data).
+        // modelUsage is cumulative across the session — NOT suitable for CTX %.
+        // Fall back to modelUsage only when flat usage is absent (shouldn't happen in practice).
+        let usage = if parsed["usage"].is_object() {
+            let u = &parsed["usage"];
+            Some(UsageInfo {
+                input_tokens: u["input_tokens"].as_u64().unwrap_or(0),
+                output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
+                cache_read_tokens: u["cache_read_input_tokens"]
+                    .as_u64()
+                    .or_else(|| u["cache_read_tokens"].as_u64()),
+                cache_write_tokens: u["cache_creation_input_tokens"]
+                    .as_u64()
+                    .or_else(|| u["cache_write_tokens"].as_u64()),
+            })
         } else {
-            (None, None)
+            None
         };
 
         let result_text = parsed["result"]
@@ -1493,27 +1467,28 @@ mod tests {
     }
 
     #[test]
-    fn parse_result_extracts_model_usage() {
+    fn parse_result_with_flat_usage_and_model_usage() {
         let mut parser = StreamParser::new();
-        let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.142,"result":"","modelUsage":{"claude-opus-4-6[1m]":{"inputTokens":3,"outputTokens":762,"cacheReadInputTokens":11204,"cacheCreationInputTokens":18782,"contextWindow":1000000,"costUSD":0.142,"maxOutputTokens":64000,"webSearchRequests":0}}}"#;
+        // Real CLI sends both flat usage (per-step) and modelUsage (cumulative)
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.078,"result":"","usage":{"input_tokens":3,"cache_read_input_tokens":11204,"cache_creation_input_tokens":11358,"output_tokens":65},"modelUsage":{"claude-opus-4-6[1m]":{"inputTokens":3,"cacheReadInputTokens":11204,"cacheCreationInputTokens":11358,"outputTokens":65,"contextWindow":1000000,"costUSD":0.078}}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
             StreamChunk::Result {
-                session_id,
-                cost_usd,
                 usage,
                 context_window_size,
+                cost_usd,
                 ..
             } => {
-                assert_eq!(session_id, "abc");
-                assert_eq!(cost_usd, Some(0.142));
-                assert_eq!(context_window_size, Some(1_000_000));
+                // Should use flat usage (per-step), not modelUsage (cumulative)
                 let u = usage.unwrap();
-                // input_tokens = inputTokens + cacheRead + cacheCreation
-                assert_eq!(u.input_tokens, 3 + 11204 + 18782);
-                assert_eq!(u.output_tokens, 762);
+                assert_eq!(u.input_tokens, 3);
+                assert_eq!(u.output_tokens, 65);
                 assert_eq!(u.cache_read_tokens, Some(11204));
-                assert_eq!(u.cache_write_tokens, Some(18782));
+                assert_eq!(u.cache_write_tokens, Some(11358));
+                // contextWindow from modelUsage
+                assert_eq!(context_window_size, Some(1_000_000));
+                // cost from total_cost_usd
+                assert_eq!(cost_usd, Some(0.078));
             }
             other => panic!("expected Result, got {other:?}"),
         }
@@ -2600,6 +2575,23 @@ mod tests {
         assert!(
             !json.contains("context_window_size"),
             "context_window_size should be absent when None, got: {json}"
+        );
+    }
+
+    #[test]
+    fn context_window_size_present_in_serialization_when_some() {
+        let chunk = StreamChunk::Result {
+            session_id: "abc".to_string(),
+            cost_usd: None,
+            total_cost: None,
+            usage: None,
+            result_text: None,
+            context_window_size: Some(1_000_000),
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(
+            json.contains("\"context_window_size\":1000000"),
+            "context_window_size should be present when Some, got: {json}"
         );
     }
 

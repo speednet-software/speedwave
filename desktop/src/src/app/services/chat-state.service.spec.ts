@@ -406,8 +406,7 @@ describe('ChatStateService', () => {
         cost_usd: 0.01,
         total_cost: 0.05,
         usage: { input_tokens: 100, output_tokens: 50 },
-        cumulative_input_tokens: 100,
-        cumulative_output_tokens: 50,
+        total_output_tokens: 50,
         context_window_size: 200000,
       });
     });
@@ -686,7 +685,7 @@ describe('ChatStateService', () => {
       expect(service.sessionStats?.rate_limit).toBeUndefined();
     });
 
-    it('input tokens reflect latest turn (full context), output tokens accumulate', () => {
+    it('output tokens accumulate across turns', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
@@ -694,11 +693,10 @@ describe('ChatStateService', () => {
           session_id: 'abc',
           cost_usd: 0.01,
           total_cost: 0.02,
-          usage: { input_tokens: 20000, output_tokens: 200 },
+          usage: { input_tokens: 3, output_tokens: 65 },
         },
       });
-      expect(service.sessionStats?.cumulative_input_tokens).toBe(20000);
-      expect(service.sessionStats?.cumulative_output_tokens).toBe(200);
+      expect(service.sessionStats?.total_output_tokens).toBe(65);
 
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'bye' } });
       service.handleStreamChunk({
@@ -707,12 +705,10 @@ describe('ChatStateService', () => {
           session_id: 'abc',
           cost_usd: 0.01,
           total_cost: 0.04,
-          usage: { input_tokens: 25000, output_tokens: 300 },
+          usage: { input_tokens: 3, output_tokens: 88 },
         },
       });
-      // input = latest turn (full context grows), output = cumulative
-      expect(service.sessionStats?.cumulative_input_tokens).toBe(25000);
-      expect(service.sessionStats?.cumulative_output_tokens).toBe(500);
+      expect(service.sessionStats?.total_output_tokens).toBe(153);
     });
 
     it('resetForNewConversation clears rate limit', () => {
@@ -741,8 +737,7 @@ describe('ChatStateService', () => {
           session_id: 'x',
           cost_usd: 0,
           total_cost: 0,
-          cumulative_input_tokens: 0,
-          cumulative_output_tokens: 0,
+          total_output_tokens: 0,
           context_window_size: 200000,
         },
       });

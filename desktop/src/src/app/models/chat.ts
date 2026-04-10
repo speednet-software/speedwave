@@ -129,12 +129,13 @@ export interface SessionStats {
   session_id: string;
   cost_usd: number;
   total_cost: number;
+  /** Per-step usage from flat result.usage (not cumulative). Use for CTX %. */
   usage?: UsageInfo;
   model?: string;
   rate_limit?: RateLimitInfo;
-  cumulative_input_tokens: number;
-  cumulative_output_tokens: number;
   context_window_size: number;
+  /** Cumulative output tokens across all turns in the session. */
+  total_output_tokens: number;
 }
 
 // ProjectList and ProjectEntry are defined in models/update.ts (SSOT)
