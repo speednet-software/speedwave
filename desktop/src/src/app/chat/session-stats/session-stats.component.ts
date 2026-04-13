@@ -2,6 +2,9 @@ import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
 import { DecimalPipe } from '@angular/common';
 import type { SessionStats } from '../../models/chat';
 
+/** Shared bar segment indices — module-level constant to avoid per-instance allocation. */
+const BAR_INDICES: readonly number[] = [0, 1, 2, 3, 4];
+
 /**
  * Displays session stats matching the container statusline layout:
  *  model │ CTX bar % │ rate limit │ cost │ In / Cache R / Cache W / Out
@@ -117,7 +120,8 @@ import type { SessionStats } from '../../models/chat';
 export class SessionStatsComponent {
   @Input() stats: SessionStats | null = null;
 
-  readonly barIndices = [0, 1, 2, 3, 4];
+  /** Reference to the module-level constant — shared across all instances. */
+  readonly barIndices = BAR_INDICES;
 
   /**
    * Context usage % from per-step flat usage and actual context window size.

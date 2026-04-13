@@ -391,7 +391,6 @@ describe('ChatStateService', () => {
         chunk_type: 'Result',
         data: {
           session_id: 'abc',
-          cost_usd: 0.01,
           total_cost: 0.05,
           usage: { input_tokens: 100, output_tokens: 50 },
         },
@@ -444,7 +443,7 @@ describe('ChatStateService', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
-        data: { session_id: 'abc', cost_usd: 0.01 },
+        data: { session_id: 'abc' },
       });
 
       expect(service.messages).toHaveLength(1);
@@ -524,7 +523,7 @@ describe('ChatStateService', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
-        data: { session_id: 'abc', cost_usd: 0.01, total_cost: 0.05 },
+        data: { session_id: 'abc', total_cost: 0.05 },
       });
 
       expect(service.sessionStats?.model).toBe('claude-opus-4-6');
@@ -534,7 +533,7 @@ describe('ChatStateService', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
-        data: { session_id: 'abc', cost_usd: 0.01, total_cost: 0.05 },
+        data: { session_id: 'abc', total_cost: 0.05 },
       });
 
       expect(service.sessionStats?.model).toBeUndefined();
@@ -563,7 +562,7 @@ describe('ChatStateService', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'The file looks good.' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
-        data: { session_id: 'sid', cost_usd: 0.002, total_cost: 0.01 },
+        data: { session_id: 'sid', total_cost: 0.01 },
       });
 
       expect(service.messages).toHaveLength(1);
@@ -611,7 +610,7 @@ describe('ChatStateService', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
-        data: { session_id: 'abc', cost_usd: 0.01, total_cost: 0.05 },
+        data: { session_id: 'abc', total_cost: 0.05 },
       });
 
       expect(service.sessionStats?.model).toBeUndefined();
@@ -628,7 +627,7 @@ describe('ChatStateService', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
-        data: { session_id: 'abc', cost_usd: 0.01, total_cost: 0.05 },
+        data: { session_id: 'abc', total_cost: 0.05 },
       });
 
       expect(service.sessionStats?.model).toBeUndefined();
@@ -640,7 +639,7 @@ describe('ChatStateService', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
-        data: { session_id: 'abc', cost_usd: 0.01, total_cost: 0.05 },
+        data: { session_id: 'abc', total_cost: 0.05 },
       });
       expect(service.sessionStats?.rate_limit).toBeUndefined();
 
@@ -664,7 +663,7 @@ describe('ChatStateService', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
-        data: { session_id: 'abc', cost_usd: 0.01, total_cost: 0.05 },
+        data: { session_id: 'abc', total_cost: 0.05 },
       });
 
       expect(service.sessionStats?.rate_limit).toEqual({
@@ -682,7 +681,7 @@ describe('ChatStateService', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
-        data: { session_id: 'abc', cost_usd: 0.01, total_cost: 0.05 },
+        data: { session_id: 'abc', total_cost: 0.05 },
       });
 
       expect(service.sessionStats?.rate_limit).toBeUndefined();
@@ -694,7 +693,6 @@ describe('ChatStateService', () => {
         chunk_type: 'Result',
         data: {
           session_id: 'abc',
-          cost_usd: 0.01,
           total_cost: 0.02,
           usage: { input_tokens: 3, output_tokens: 65 },
         },
@@ -706,7 +704,6 @@ describe('ChatStateService', () => {
         chunk_type: 'Result',
         data: {
           session_id: 'abc',
-          cost_usd: 0.01,
           total_cost: 0.04,
           usage: { input_tokens: 3, output_tokens: 88 },
         },
@@ -724,7 +721,7 @@ describe('ChatStateService', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
-        data: { session_id: 'abc', cost_usd: 0.01, total_cost: 0.05 },
+        data: { session_id: 'abc', total_cost: 0.05 },
       });
 
       expect(service.sessionStats?.rate_limit).toBeUndefined();

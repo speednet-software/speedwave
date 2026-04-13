@@ -19,7 +19,6 @@ export type StreamChunk =
       chunk_type: 'Result';
       data: {
         session_id: string;
-        cost_usd?: number;
         total_cost?: number;
         usage?: UsageInfo;
         result_text?: string;
