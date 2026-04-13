@@ -19,6 +19,7 @@ pub const HOST_OVERHEAD_GIB: u32 = 6;
 /// Floor is intentionally safer than rounding: a 16 GB MacBook with ~15.7 GiB
 /// usable RAM returns 15, which the adaptive formula (`host/2`) then maps to
 /// 7 GiB VM — avoiding an unexpected jump to 8 GiB.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn bytes_to_gib(bytes: u64) -> u32 {
     (bytes / (1024 * 1024 * 1024)) as u32
 }
