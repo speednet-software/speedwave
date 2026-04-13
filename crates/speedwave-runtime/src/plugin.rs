@@ -72,6 +72,8 @@ pub struct PluginManifest {
     pub extra_env: Option<HashMap<String, String>>,
     #[serde(default)]
     pub mem_limit: Option<String>,
+    #[serde(default)]
+    pub cpu_limit: Option<String>,
     /// Core integrations this plugin depends on (e.g. `["sharepoint"]`).
     #[serde(default)]
     pub requires_integrations: Vec<String>,
@@ -289,6 +291,22 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
         if !re.is_match(limit) {
             anyhow::bail!(
                 "Invalid mem_limit '{}': must be a number optionally followed by b/k/m/g",
+                limit
+            );
+        }
+    }
+
+    // Validate cpu_limit format (e.g. "2.0", "4", "0.5")
+    if let Some(ref limit) = manifest.cpu_limit {
+        static CPU_RE: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
+            std::sync::OnceLock::new();
+        let re = CPU_RE
+            .get_or_init(|| regex::Regex::new(r"^[0-9]+(\.[0-9]+)?$"))
+            .as_ref()
+            .map_err(|e| anyhow::anyhow!("invalid cpu_limit regex: {e}"))?;
+        if !re.is_match(limit) {
+            anyhow::bail!(
+                "Invalid cpu_limit '{}': must be a positive number (e.g. '2.0', '4')",
                 limit
             );
         }
@@ -674,7 +692,8 @@ pub fn generate_plugin_service(
 
     let tokens_path = crate::compose::to_engine_path(&tokens_dir.join(sid))?;
     let workspace_path = crate::compose::to_engine_path(Path::new(project_dir))?;
-    let mem_limit = manifest.mem_limit.as_deref().unwrap_or("256m");
+    let mem_limit = manifest.mem_limit.as_deref().unwrap_or("128m");
+    let cpu_limit = manifest.cpu_limit.as_deref().unwrap_or("2.0");
     let user = container_user();
 
     let mut env_lines = format!("  - PORT={port}");
@@ -697,7 +716,7 @@ cap_drop:
 security_opt:
   - no-new-privileges:true
 tmpfs:
-  - /tmp:noexec,nosuid,size=64m
+  - /tmp:noexec,nosuid,size=512m
 volumes:
   - {tokens_path}:/tokens:{token_mount_mode}
   - {workspace_path}:/workspace:rw
@@ -710,7 +729,7 @@ labels:
 deploy:
   resources:
     limits:
-      cpus: '0.5'
+      cpus: '{cpu_limit}'
       memory: {mem_limit}
 "#,
         tag = tag,
@@ -722,6 +741,7 @@ deploy:
         env_lines = env_lines,
         network_name = network_name,
         mem_limit = mem_limit,
+        cpu_limit = cpu_limit,
     );
 
     let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml_str)?;
@@ -877,6 +897,7 @@ mod tests {
             speedwave_compat: Some(">=0.1.0".to_string()),
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec!["sharepoint".to_string()],
         };
         let json = serde_json::to_string(&manifest).unwrap();
@@ -985,6 +1006,7 @@ mod tests {
                 speedwave_compat: None,
                 extra_env: None,
                 mem_limit: None,
+                cpu_limit: None,
                 requires_integrations: vec![],
             };
             let tmp = tempfile::tempdir().unwrap();
@@ -1014,6 +1036,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -1039,6 +1062,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -1069,6 +1093,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -1109,6 +1134,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
 
@@ -1149,7 +1175,8 @@ mod tests {
             "network: {yaml}"
         );
         assert!(yaml.contains("speedwave.plugin-service"), "label: {yaml}");
-        assert!(yaml.contains("memory: 256m"), "mem limit: {yaml}");
+        assert!(yaml.contains("memory: 128m"), "mem limit: {yaml}");
+        assert!(yaml.contains("cpus: '2.0'"), "default cpu limit: {yaml}");
     }
 
     #[test]
@@ -1171,6 +1198,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: Some("512m".to_string()),
+            cpu_limit: None,
             requires_integrations: vec![],
         };
 
@@ -1210,6 +1238,7 @@ mod tests {
                 "value".to_string(),
             )])),
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
 
@@ -1327,6 +1356,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         assert_eq!(plugin_image_tag(&manifest), "speedwave-mcp-test:2.0.0");
@@ -1349,6 +1379,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         assert_eq!(plugin_image_tag(&manifest), "speedwave-mcp-test:custom-tag");
@@ -1511,6 +1542,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
 
@@ -1563,6 +1595,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
 
@@ -1595,6 +1628,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
 
@@ -1628,6 +1662,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
 
@@ -1670,6 +1705,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
 
@@ -1740,6 +1776,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
 
@@ -1775,6 +1812,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
 
@@ -1821,6 +1859,7 @@ mod tests {
                 ("PLAIN_VAR".to_string(), "simple-value".to_string()),
             ])),
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
 
@@ -1920,6 +1959,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -1952,6 +1992,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: Some("256m; rm -rf /".to_string()),
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -1975,10 +2016,94 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: Some("256m".to_string()),
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_invalid_cpu_limit() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-cpu".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: Some("2.0'; injected".to_string()),
+            requires_integrations: vec![],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_manifest(&manifest, tmp.path()).is_err());
+    }
+
+    #[test]
+    fn test_validate_manifest_accepts_valid_cpu_limit() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-cpu".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: Some("4.0".to_string()),
+            requires_integrations: vec![],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_manifest(&manifest, tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn test_generate_plugin_service_custom_cpu_limit() {
+        let manifest = PluginManifest {
+            name: "Heavy Plugin".to_string(),
+            service_id: Some("heavy".to_string()),
+            slug: "heavy".to_string(),
+            version: "1.0.0".to_string(),
+            description: "CPU-heavy plugin".to_string(),
+            port: Some(4020),
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: Some("4.0".to_string()),
+            requires_integrations: vec![],
+        };
+
+        let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/proj");
+        let result = generate_plugin_service(
+            &manifest,
+            "proj",
+            "speedwave_proj_network",
+            &tokens_dir,
+            "/home/user/projects/proj",
+        )
+        .unwrap();
+
+        let yaml = serde_yaml_ng::to_string(&result).unwrap();
+        assert!(yaml.contains("cpus: '4.0'"), "custom cpu limit: {yaml}");
     }
 
     #[test]
@@ -1998,6 +2123,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -2027,6 +2153,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -2056,6 +2183,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -2084,6 +2212,7 @@ mod tests {
                 "value".to_string(),
             )])),
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -2110,6 +2239,7 @@ mod tests {
                 "value".to_string(),
             )])),
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -2133,6 +2263,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: Some(HashMap::from([("PORT".to_string(), "9999".to_string())])),
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -2164,6 +2295,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         }];
 
@@ -2234,6 +2366,7 @@ mod tests {
                 "val".to_string(),
             )])),
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -2263,6 +2396,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec!["nonexistent-service".to_string()],
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -2292,6 +2426,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![consts::BUILT_IN_SERVICE_IDS[0].to_string()],
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -2321,6 +2456,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -2543,6 +2679,7 @@ mod tests {
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
+            cpu_limit: None,
             requires_integrations: vec![],
         };
         let result = validate_manifest(&manifest, dir.path());

@@ -50,6 +50,11 @@ use reconcile::{SharedAutoCheckHandle, SharedIdeBridge, SharedMcpOs};
 /// Tracks the latest available update version for the system tray menu.
 type SharedUpdateVersion = Arc<Mutex<Option<String>>>;
 
+/// Serialises compose operations across `start_chat`, `resume_conversation`,
+/// and `reconcile_compose_port` to prevent concurrent `compose_up` /
+/// `compose_up_recreate` calls during container restart.
+type ComposeLock = Arc<Mutex<()>>;
+
 const MAIN_WINDOW_LABEL: &str = "main";
 
 /// Stop flag for the mcp-os watchdog thread. Set during app exit cleanup
@@ -60,31 +65,77 @@ static WATCHDOG_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 // Chat commands
 // ---------------------------------------------------------------------------
 
+const MSG_NOT_AUTHENTICATED: &str = "Claude is not authenticated. Please authenticate first.";
+
+/// Shared implementation for `start_chat` and `resume_conversation`.
+///
+/// 1. Acquires the compose lock and verifies Claude auth (which also runs
+///    `ensure_exec_healthy`).
+/// 2. Extracts the old session from the mutex and stops it **outside** the
+///    session lock — `stop()` can block on `child.wait()` / reader thread
+///    join, and holding the session mutex during that time would starve
+///    `send_message`.
+/// 3. Re-acquires the session lock and starts the new session.
+fn start_session_inner(
+    project: &str,
+    resume_session_id: Option<&str>,
+    compose_arc: ComposeLock,
+    session_arc: SharedChatSession,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    // Pre-flight: verify Claude is authenticated.  `check_claude_auth`
+    // also calls `ensure_exec_healthy`, so containers are guaranteed
+    // healthy after this returns.  The compose lock serialises this with
+    // `reconcile_compose_port` to prevent concurrent compose operations.
+    {
+        log::info!("start_session_inner: acquiring compose lock");
+        let _compose_guard = compose_arc
+            .lock()
+            .map_err(|e| format!("Compose lock poisoned: {e}"))?;
+        log::info!("start_session_inner: compose lock acquired, checking auth");
+        let authed = setup_wizard::check_claude_auth(project).map_err(|e| e.to_string())?;
+        if !authed {
+            return Err(MSG_NOT_AUTHENTICATED.to_string());
+        }
+    }
+
+    // Extract old session and stop it outside the lock.
+    log::info!("start_session_inner: extracting old session");
+    let mut old_session = {
+        let mut guard = session_arc
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {e}"))?;
+        std::mem::replace(&mut *guard, ChatSession::new(project))
+    };
+    log::info!("start_session_inner: stopping old session (outside lock)");
+    old_session.stop().map_err(|e| e.to_string())?;
+    drop(old_session);
+
+    // Start the new session under the lock.
+    log::info!("start_session_inner: starting new session");
+    let mut session = session_arc
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    let result = session
+        .start(app_handle, resume_session_id)
+        .map_err(|e| e.to_string());
+    log::info!("start_session_inner: session.start result={result:?}");
+    result
+}
+
 #[tauri::command]
 async fn start_chat(
     project: String,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SharedChatSession>,
+    compose_lock: tauri::State<'_, ComposeLock>,
 ) -> Result<(), String> {
     check_project(&project)?;
+    log::info!("start_chat: project={project}");
     let session_arc = state.inner().clone();
+    let compose_arc = compose_lock.inner().clone();
     tokio::task::spawn_blocking(move || {
-        // Pre-flight: verify Claude is authenticated before spawning an
-        // interactive session.  `claude auth status` exits quickly with a
-        // non-zero code when not authed — no hang risk.
-        let authed = setup_wizard::check_claude_auth(&project).map_err(|e| e.to_string())?;
-        if !authed {
-            return Err("Claude is not authenticated. Please authenticate first.".to_string());
-        }
-
-        let mut session = session_arc
-            .lock()
-            .map_err(|e| format!("Lock poisoned: {e}"))?;
-        // Stop any existing session before starting a new one
-        session.stop().map_err(|e| e.to_string())?;
-        // Replace with a fresh session for the requested project
-        *session = ChatSession::new(&project);
-        session.start(app_handle, None).map_err(|e| e.to_string())
+        start_session_inner(&project, None, compose_arc, session_arc, app_handle)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -98,11 +149,14 @@ async fn send_message(
     if message.len() > 1_000_000 {
         return Err("Message too long".to_string());
     }
+    log::info!("send_message: len={}", message.len());
     let session_arc = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        let mut session = session_arc
-            .lock()
-            .map_err(|e| format!("Lock poisoned: {e}"))?;
+        let mut session = session_arc.try_lock().map_err(|_| {
+            log::info!("send_message: try_lock failed (session busy)");
+            "no active session (session is being started)".to_string()
+        })?;
+        log::info!("send_message: lock acquired, sending");
         session.send_message(&message).map_err(|e| e.to_string())
     })
     .await
@@ -121,8 +175,8 @@ async fn answer_question(
     let session_arc = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let mut session = session_arc
-            .lock()
-            .map_err(|e| format!("Lock poisoned: {e}"))?;
+            .try_lock()
+            .map_err(|_| "no active session (session is being started)".to_string())?;
         session
             .answer_question(&tool_use_id, &answer)
             .map_err(|e| e.to_string())
@@ -186,28 +240,21 @@ async fn resume_conversation(
     session_id: String,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SharedChatSession>,
+    compose_lock: tauri::State<'_, ComposeLock>,
 ) -> Result<(), String> {
     check_project(&project)?;
     history::validate_session_id(&session_id).map_err(|e| e.to_string())?;
     log::info!("resume_conversation: project={project}");
     let session_arc = state.inner().clone();
+    let compose_arc = compose_lock.inner().clone();
     tokio::task::spawn_blocking(move || {
-        // Pre-flight: verify Claude is authenticated before spawning an
-        // interactive session.
-        let authed = setup_wizard::check_claude_auth(&project).map_err(|e| e.to_string())?;
-        if !authed {
-            return Err("Claude is not authenticated. Please authenticate first.".to_string());
-        }
-
-        let mut session = session_arc
-            .lock()
-            .map_err(|e| format!("Lock poisoned: {e}"))?;
-        session.stop().map_err(|e| e.to_string())?;
-        *session = ChatSession::new(&project);
-        session.start(app_handle, Some(&session_id)).map_err(|e| {
-            log::error!("resume_conversation failed: {e}");
-            e.to_string()
-        })
+        start_session_inner(
+            &project,
+            Some(&session_id),
+            compose_arc,
+            session_arc,
+            app_handle,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -643,7 +690,11 @@ fn init_and_start_ide_bridge_inner(app_handle: &tauri::AppHandle) -> Option<ide_
 }
 
 /// Start mcp-os watchdog thread. Called from setup() and ensure_mcp_os_running().
-fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
+fn start_mcp_os_watchdog(
+    mcp_os: SharedMcpOs,
+    app_handle: tauri::AppHandle,
+    compose_lock: ComposeLock,
+) {
     std::thread::spawn(move || {
         use std::time::Duration;
         const CHECK_INTERVAL: Duration = Duration::from_secs(30);
@@ -683,7 +734,10 @@ fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
                         match proc.respawn() {
                             Ok(port) => {
                                 log::info!("mcp-os watchdog: respawned (port {port})");
-                                reconcile::reconcile_compose_port(&app_handle);
+                                reconcile::reconcile_compose_port(
+                                    &app_handle,
+                                    compose_lock.clone(),
+                                );
                             }
                             Err(e) => {
                                 log::error!("mcp-os watchdog: respawn failed: {e}");
@@ -723,7 +777,11 @@ fn ensure_ide_bridge_running(ide_bridge: &SharedIdeBridge, app_handle: &tauri::A
 /// spawn to prevent races (two callers both seeing None and double-spawning).
 /// This can block up to `PORT_READ_TIMEOUT` (10 s) — acceptable for a
 /// single-user desktop app where concurrent Tauri commands are rare.
-fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
+fn ensure_mcp_os_running(
+    mcp_os: &SharedMcpOs,
+    app_handle: &tauri::AppHandle,
+    compose_lock: ComposeLock,
+) {
     let mut guard = match mcp_os.lock() {
         Ok(g) => g,
         Err(e) => {
@@ -747,7 +805,7 @@ fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
                              // watchdog loop on None. Harmless in single-user desktop app
                              // — the watchdog exits on the next iteration when it sees None.
                 WATCHDOG_STOP.store(false, Ordering::Relaxed);
-                start_mcp_os_watchdog(mcp_os.clone(), app_handle.clone());
+                start_mcp_os_watchdog(mcp_os.clone(), app_handle.clone(), compose_lock);
             }
             Err(e) => log::error!("ensure_mcp_os_running: spawn failed: {e}"),
         }
@@ -801,6 +859,7 @@ fn main() {
     }
 
     let initial_session: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("default")));
+    let compose_lock: ComposeLock = Arc::new(Mutex::new(()));
 
     // Shared state for IDE Bridge, mcp-os process, auto-check handle, and tray update version
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
@@ -873,6 +932,7 @@ fn main() {
             }
         }))
         .manage(initial_session)
+        .manage(compose_lock.clone())
         .manage(ide_bridge.clone())
         .manage(mcp_os.clone())
         .setup(move |app| {
@@ -914,7 +974,10 @@ fn main() {
                             // If containers are already running, regenerate compose with the
                             // new mcp-os port and recreate them. Without this, the hub would
                             // keep connecting to the old (dead) port from the previous session.
-                            reconcile::reconcile_compose_port(app.handle());
+                            reconcile::reconcile_compose_port(
+                                app.handle(),
+                                compose_lock.clone(),
+                            );
                         }
                         Err(e) => log::error!("mcp-os spawn error: {e}"),
                     }
@@ -923,7 +986,11 @@ fn main() {
                 }
 
                 // Start mcp-os watchdog thread
-                start_mcp_os_watchdog(mcp_os.clone(), app.handle().clone());
+                start_mcp_os_watchdog(
+                    mcp_os.clone(),
+                    app.handle().clone(),
+                    compose_lock.clone(),
+                );
             } else {
                 log::info!("setup not started, deferring IDE Bridge / mcp-os / link_cli until setup completes");
             }
@@ -1304,16 +1371,36 @@ mod tests {
     // -- auth pre-flight structural tests --
 
     #[test]
-    fn start_chat_checks_auth_before_session_start() {
+    fn start_chat_delegates_to_start_session_inner() {
         let source = include_str!("main.rs");
         let body = extract_fn_body(source, "async fn start_chat(");
+        assert!(
+            body.contains("start_session_inner"),
+            "start_chat must delegate to start_session_inner"
+        );
+    }
+
+    #[test]
+    fn resume_conversation_delegates_to_start_session_inner() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "async fn resume_conversation(");
+        assert!(
+            body.contains("start_session_inner"),
+            "resume_conversation must delegate to start_session_inner"
+        );
+    }
+
+    #[test]
+    fn start_session_inner_checks_auth_before_session_start() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "fn start_session_inner(");
 
         let auth_pos = body
             .find("check_claude_auth")
-            .expect("start_chat must call check_claude_auth");
+            .expect("start_session_inner must call check_claude_auth");
         let start_pos = body
-            .find("session.start(")
-            .expect("start_chat must call session.start()");
+            .find(".start(app_handle")
+            .expect("start_session_inner must call session.start(app_handle, ...)");
 
         assert!(
             auth_pos < start_pos,
@@ -1322,20 +1409,20 @@ mod tests {
     }
 
     #[test]
-    fn resume_conversation_checks_auth_before_session_start() {
+    fn start_session_inner_acquires_compose_lock_for_auth() {
         let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn resume_conversation(");
+        let body = extract_fn_body(source, "fn start_session_inner(");
 
+        let compose_pos = body
+            .find("_compose_guard")
+            .expect("start_session_inner must acquire compose lock");
         let auth_pos = body
-            .find("check_claude_auth")
-            .expect("resume_conversation must call check_claude_auth");
-        let start_pos = body
-            .find("session.start(")
-            .expect("resume_conversation must call session.start()");
+            .find("setup_wizard::check_claude_auth")
+            .expect("start_session_inner must call check_claude_auth");
 
         assert!(
-            auth_pos < start_pos,
-            "check_claude_auth must come BEFORE session.start()"
+            compose_pos < auth_pos,
+            "compose lock must be acquired BEFORE check_claude_auth"
         );
     }
 
@@ -1376,18 +1463,12 @@ mod tests {
     }
 
     #[test]
-    fn start_chat_acquires_lock_inside_spawn_blocking() {
+    fn start_session_inner_acquires_session_lock() {
         let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn start_chat(");
-        let spawn_pos = body
-            .find("spawn_blocking")
-            .expect("start_chat must use spawn_blocking");
-        let lock_pos = body
-            .find(".lock()")
-            .expect("start_chat must acquire the session lock");
+        let body = extract_fn_body(source, "fn start_session_inner(");
         assert!(
-            lock_pos > spawn_pos,
-            "session lock must be acquired INSIDE spawn_blocking, not before it"
+            body.contains("session_arc") && body.contains(".lock()"),
+            "start_session_inner must acquire the session lock"
         );
     }
 
@@ -1399,8 +1480,8 @@ mod tests {
             .find("spawn_blocking")
             .expect("send_message must use spawn_blocking");
         let lock_pos = body
-            .find(".lock()")
-            .expect("send_message must acquire the session lock");
+            .find(".try_lock()")
+            .expect("send_message must acquire the session lock via try_lock");
         assert!(
             lock_pos > spawn_pos,
             "session lock must be acquired INSIDE spawn_blocking, not before it"
@@ -1415,8 +1496,8 @@ mod tests {
             .find("spawn_blocking")
             .expect("answer_question must use spawn_blocking");
         let lock_pos = body
-            .find(".lock()")
-            .expect("answer_question must acquire the session lock");
+            .find(".try_lock()")
+            .expect("answer_question must acquire the session lock via try_lock");
         assert!(
             lock_pos > spawn_pos,
             "session lock must be acquired INSIDE spawn_blocking, not before it"
@@ -1488,9 +1569,7 @@ mod tests {
         let source = include_str!("main.rs");
         let body = extract_fn_body(source, "async fn start_chat(");
         assert!(
-            body.contains(".await")
-                && body.contains("map_err(|e| e.to_string())")
-                && body.matches("map_err").count() >= 2,
+            body.contains(".await") && body.contains("map_err(|e| e.to_string())"),
             "start_chat must handle JoinError from spawn_blocking via .await.map_err"
         );
     }

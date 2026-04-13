@@ -24,6 +24,7 @@ export interface RedmineEnumEntry {
 /** Response from the `fetch_redmine_enumerations` Tauri command. */
 export interface RedmineEnumerations {
   projects: RedmineEnumEntry[];
+  projects_truncated: boolean;
   statuses: RedmineEnumEntry[];
   trackers: RedmineEnumEntry[];
   priorities: RedmineEnumEntry[];
@@ -282,14 +283,14 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
                       <option [ngValue]="proj.id">{{ proj.name }}</option>
                     }
                   </select>
-                  @if ((enumerations?.projects?.length ?? 0) >= 100) {
-                    <p
+                  @if (enumerations?.projects_truncated) {
+                    <div
                       class="text-sw-text-faint text-[11px] mt-1"
-                      data-testid="redmine-projects-note"
+                      data-testid="redmine-projects-truncation-notice"
                     >
-                      Showing first {{ enumerations?.projects?.length }} projects. Use project
-                      identifier for filtering if needed.
-                    </p>
+                      Showing first 100 projects. Use the Redmine project ID field above for
+                      projects not listed.
+                    </div>
                   }
                 </div>
 

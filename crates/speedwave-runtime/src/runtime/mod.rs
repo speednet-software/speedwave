@@ -2,10 +2,32 @@ use crate::binary;
 use crate::consts;
 use serde_json::Value;
 use std::process::Command;
+use std::sync::Mutex;
 
 pub mod lima;
 pub mod nerdctl;
 pub mod wsl;
+
+/// Serializes concurrent `ensure_ready()` calls across all runtime instances.
+///
+/// `detect_runtime()` creates a fresh runtime on every call, so instance-level
+/// locking cannot prevent two threads from racing startup. This static mutex
+/// ensures at most one thread starts the runtime at a time; the second thread
+/// waits for the lock, then sees the runtime already running and returns immediately.
+static ENSURE_READY_LOCK: Mutex<()> = Mutex::new(());
+
+/// Acquires the global `ENSURE_READY_LOCK` and runs `f` under it.
+///
+/// All `ContainerRuntime::ensure_ready()` implementations delegate to this
+/// function so that concurrent callers are serialized regardless of which
+/// runtime variant they hold.
+pub(crate) fn with_ensure_ready_lock<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let _guard = ENSURE_READY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    f()
+}
 
 pub trait ContainerRuntime: Send + Sync {
     fn compose_up(&self, project: &str) -> anyhow::Result<()>;
@@ -20,7 +42,20 @@ pub trait ContainerRuntime: Send + Sync {
     /// Returns `Result` so implementations can check preconditions (e.g. Lima
     /// VM running) before constructing the command.
     fn container_exec_piped(&self, container: &str, cmd: &[&str]) -> anyhow::Result<Command>;
+    /// Returns `true` only if the runtime is already operational (binary present,
+    /// VM/engine running). This is a lightweight, read-only probe — it does **not**
+    /// attempt to start or repair the runtime.
+    ///
+    /// Use this for status displays and optional optimisations. **Do not** use as a
+    /// gate before [`ensure_ready`] — a stopped Lima VM returns `false` here but
+    /// `ensure_ready()` can start it successfully.
     fn is_available(&self) -> bool;
+
+    /// Brings the runtime to a fully operational state, or returns a descriptive error.
+    ///
+    /// Safe to call unconditionally before any runtime operation. Implementations
+    /// may start a stopped VM, verify engine health, etc. Prefer this over
+    /// [`is_available`] whenever you need the runtime to become operational.
     fn ensure_ready(&self) -> anyhow::Result<()>;
     fn build_image(
         &self,
@@ -453,8 +488,12 @@ pub fn ensure_exec_healthy(
     project: &str,
     container: &str,
 ) -> anyhow::Result<()> {
+    log::info!("ensure_exec_healthy: probing '{container}'");
     match probe_container_exec(runtime, container) {
-        Ok(()) => return Ok(()),
+        Ok(()) => {
+            log::info!("ensure_exec_healthy: '{container}' is healthy");
+            return Ok(());
+        }
         Err(e) => {
             let msg = e.to_string();
             if is_stale_container_error(&msg) {
@@ -1399,6 +1438,53 @@ services:
         assert!(
             elapsed < std::time::Duration::from_secs(9),
             "should not wait for the full 10s, elapsed: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn with_ensure_ready_lock_returns_closure_value() {
+        let result = with_ensure_ready_lock(|| 42);
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn with_ensure_ready_lock_propagates_error() {
+        let result: anyhow::Result<()> = with_ensure_ready_lock(|| anyhow::bail!("inner error"));
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("inner error"),
+            "error message should be propagated from the closure"
+        );
+    }
+
+    #[test]
+    fn with_ensure_ready_lock_serializes_concurrent_calls() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let concurrent_count = Arc::new(AtomicU32::new(0));
+        let max_concurrent = Arc::new(AtomicU32::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let cc = Arc::clone(&concurrent_count);
+            let mc = Arc::clone(&max_concurrent);
+            handles.push(std::thread::spawn(move || {
+                with_ensure_ready_lock(|| {
+                    let prev = cc.fetch_add(1, Ordering::SeqCst);
+                    mc.fetch_max(prev + 1, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    cc.fetch_sub(1, Ordering::SeqCst);
+                });
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(
+            max_concurrent.load(Ordering::SeqCst),
+            1,
+            "at most one thread should hold the lock at a time"
         );
     }
 }

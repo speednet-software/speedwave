@@ -8,13 +8,15 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  READ_ONLY_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 
 const listUsersTool: Tool = {
   name: 'listUsers',
   description: 'List users (optionally filtered by project membership)',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['redmine', 'users', 'list', 'members', 'team', 'assignable'],
   example: `const users = await redmine.listUsers({ project_id: "my-project" })`,
   inputSchema: {
@@ -64,7 +66,8 @@ const listUsersTool: Tool = {
 const resolveUserTool: Tool = {
   name: 'resolveUser',
   description: "Resolve user identifier to user ID (supports 'me', user ID, or username)",
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['redmine', 'user', 'resolve', 'lookup', 'identity', 'id'],
   example: `const user = await redmine.resolveUser({ identifier: "john@example.com" })`,
   inputSchema: {
@@ -111,7 +114,8 @@ const resolveUserTool: Tool = {
 const getCurrentUserTool: Tool = {
   name: 'getCurrentUser',
   description: "Get current authenticated user's profile (id, login, email, name)",
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['redmine', 'user', 'profile', 'current', 'me', 'authenticated'],
   example: `const user = await redmine.getCurrentUser()`,
   inputSchema: {

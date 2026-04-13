@@ -125,12 +125,16 @@ jobs:
         include:
           - platform: macos-latest
             args: "--target aarch64-apple-darwin"
+            arch_label: "macOS_Apple_Silicon"
           - platform: macos-latest
             args: "--target x86_64-apple-darwin"
+            arch_label: "macOS_Intel"
           - platform: ubuntu-22.04
             args: ""
+            arch_label: ""
           - platform: windows-latest
             args: ""
+            arch_label: ""
     timeout-minutes: 45
     runs-on: ${{ matrix.platform }}
     steps:
@@ -314,6 +318,7 @@ jobs:
           releaseDraft: ${{ needs.resolve.outputs.release_id == '' && 'true' || 'false' }}
           prerelease: false
           args: ${{ matrix.args }}
+          assetNamePattern: ${{ matrix.arch_label != '' && format('[name]_[version]_{0}[setup][ext]', matrix.arch_label) || '' }}
 
       - name: Install Linux packaging tools
         if: matrix.platform == 'ubuntu-22.04'

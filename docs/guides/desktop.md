@@ -50,7 +50,30 @@ Desktop packaging now fails before release if the staged app bundle is missing r
 
 ## Chat UI
 
-<!-- Content to be written: claude -p subprocess, stream-json output, conversation flow -->
+The Desktop chat UI launches `claude -p --output-format stream-json` inside the container and renders the response as it streams. See [ADR-006](../adr/ADR-006-chat-ui-via-stream-json.md) for the architectural decision.
+
+### Session stats bar
+
+The bar at the bottom of the chat shows the current state of the session, mirroring the container statusline layout:
+
+```
+claude-opus-4-6[1m] │ CTX ██░░░ 2% │ Limit ░░░░░ 30% reset 16:42 │ $0.1409 │ In: 3 CR: 22,560 CW: 75 Out: 825
+```
+
+| Element    | Source                                                 | Meaning                                                                                                                                                                          |
+| ---------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`    | `system.init.model`                                    | Model name with extended-context suffix (e.g. `[1m]` for 1M context)                                                                                                             |
+| `CTX N%`   | `result.usage` (per-step) + `modelUsage.contextWindow` | Percentage of the context window used by the current turn (`input_tokens + cache_read + cache_creation`) ÷ `contextWindow`. Bar turns yellow at 50%, red at 76%, bold red at 90% |
+| `Limit N%` | `rate_limit_event.rate_limit_info`                     | 5-hour subscription quota utilization (Pro/Max only — absent for API-key users)                                                                                                  |
+| `$N.NNNN`  | `result.total_cost_usd`                                | Estimated API cost for the session (what it would cost at API pricing — shown even on subscriptions)                                                                             |
+| `In: N`    | `result.usage.input_tokens`                            | New input tokens for the last turn (tokens not served from cache)                                                                                                                |
+| `CR: N`    | `result.usage.cache_read_input_tokens`                 | Tokens loaded from prompt cache (system prompt, conversation history)                                                                                                            |
+| `CW: N`    | `result.usage.cache_creation_input_tokens`             | Tokens written to prompt cache during the last turn                                                                                                                              |
+| `Out: N`   | Cumulative `result.usage.output_tokens`                | Total tokens generated across all turns in the session                                                                                                                           |
+
+**Per-step vs. cumulative.** Claude Code's result message contains two usage sources: `result.usage` (flat — per-step, resets each API call) and `result.modelUsage` (cumulative — grows over the session). The CTX % uses the flat per-step value so it reflects actual context window consumption; the total cost uses `total_cost_usd` (cumulative) because cost accumulates.
+
+**Context window size.** Read from `modelUsage.<model>.contextWindow` — typically `200000` for base models and `1000000` for `[1m]` extended-context variants. Defaults to `200000` if absent.
 
 ## System Tray
 

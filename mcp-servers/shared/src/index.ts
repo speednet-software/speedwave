@@ -40,6 +40,7 @@ export type {
   ClientCapabilities,
   ServerCapabilities,
   Tool,
+  ToolAnnotations,
   ToolsListRequest,
   ToolsListResult,
   ToolsCallRequest,
@@ -51,9 +52,18 @@ export type {
   // Tool types
   ToolHandler,
   ToolDefinition,
+  // Transport types
+  ProcessRequestResult,
 } from './types.js';
 
-export { JSONRPCErrorCode } from './types.js';
+export {
+  JSONRPCErrorCode,
+  SUPPORTED_PROTOCOL_VERSIONS,
+  LATEST_PROTOCOL_VERSION,
+  READ_ONLY_ANNOTATIONS,
+  WRITE_ANNOTATIONS,
+  DESTRUCTIVE_ANNOTATIONS,
+} from './types.js';
 
 // Security
 export {
@@ -63,7 +73,11 @@ export {
   validateSessionId,
   validateToolName,
   validateWorkerUrl,
+  validateOrigin,
 } from './security.js';
+
+// Transport
+export { handleMCPPost, handleMCPDelete, readSessionId } from './transport.js';
 
 // Session
 export { SessionManager, sessionManager } from './session.js';

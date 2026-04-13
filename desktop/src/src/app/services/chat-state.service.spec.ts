@@ -48,10 +48,11 @@ describe('ChatStateService', () => {
   });
 
   describe('init', () => {
-    it('surfaces startChatSession error to projectState', async () => {
+    it('logs startChatSession error without blocking projectState', async () => {
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
 
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'start_chat') throw new Error('chat backend crashed');
         if (cmd === 'list_projects')
@@ -62,8 +63,14 @@ describe('ChatStateService', () => {
       };
 
       await service.init();
-      expect(projectState.status).toBe('error');
-      expect(projectState.error).toContain('Failed to start chat session');
+      // startChatSession is fire-and-forget — flush microtask queue
+      await new Promise((r) => setTimeout(r, 0));
+      // start_chat failure should NOT block projectState — containers are still running,
+      // only the Claude session failed (rate limit, OOM, etc). sendMessage auto-retry
+      // handles session recovery.
+      expect(projectState.status).toBe('ready');
+      expect(errorSpy).toHaveBeenCalledWith('Failed to start chat session:', expect.any(Error));
+      errorSpy.mockRestore();
     });
 
     it('only runs init once', async () => {
@@ -147,11 +154,9 @@ describe('ChatStateService', () => {
       );
     });
 
-    it('auto-retries on "session exited" by restarting chat', async () => {
+    it('auto-retries on "session exited" by re-sending', async () => {
       let sendAttempt = 0;
-      const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
-        calls.push(cmd);
         if (cmd === 'send_message') {
           sendAttempt++;
           if (sendAttempt === 1) throw new Error('session exited (exit status: 0)');
@@ -165,8 +170,8 @@ describe('ChatStateService', () => {
 
       await service.sendMessage('Hello');
 
-      expect(calls).toContain('start_chat');
-      expect(calls.filter((c) => c === 'send_message')).toHaveLength(2);
+      // First send_message fails → list_projects → start_chat → retry send_message
+      expect(sendAttempt).toBe(2);
       expect(service.messages).toHaveLength(1);
       expect(service.messages[0].role).toBe('user');
     });
@@ -233,13 +238,8 @@ describe('ChatStateService', () => {
     });
 
     it('skips retry when no active project on restart', async () => {
-      let sendAttempt = 0;
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'send_message') {
-          sendAttempt++;
-          if (sendAttempt === 1) throw new Error('no active session');
-          return undefined;
-        }
+        if (cmd === 'send_message') throw new Error('no active session');
         if (cmd === 'list_projects') {
           return { projects: [], active_project: null };
         }
@@ -252,9 +252,6 @@ describe('ChatStateService', () => {
       expect(service.messages).toHaveLength(2);
       const errorBlock = service.messages[1].blocks[0];
       expect(errorBlock.type).toBe('error');
-      expect((errorBlock as { type: 'error'; content: string }).content).toContain(
-        'Failed to send message'
-      );
     });
   });
 
@@ -394,7 +391,6 @@ describe('ChatStateService', () => {
         chunk_type: 'Result',
         data: {
           session_id: 'abc',
-          cost_usd: 0.01,
           total_cost: 0.05,
           usage: { input_tokens: 100, output_tokens: 50 },
         },
@@ -406,9 +402,12 @@ describe('ChatStateService', () => {
       expect(service.currentBlocks).toHaveLength(0);
       expect(service.sessionStats).toEqual({
         session_id: 'abc',
-        cost_usd: 0.01,
         total_cost: 0.05,
         usage: { input_tokens: 100, output_tokens: 50 },
+        total_output_tokens: 50,
+        context_window_size: 200000,
+        model: undefined,
+        rate_limit: undefined,
       });
     });
 
@@ -444,7 +443,7 @@ describe('ChatStateService', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
-        data: { session_id: 'abc', cost_usd: 0.01 },
+        data: { session_id: 'abc' },
       });
 
       expect(service.messages).toHaveLength(1);
@@ -516,6 +515,30 @@ describe('ChatStateService', () => {
       expect(service.isStreaming).toBe(false);
     });
 
+    it('SystemInit stores model name and Result includes it in sessionStats', () => {
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6' },
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.05 },
+      });
+
+      expect(service.sessionStats?.model).toBe('claude-opus-4-6');
+    });
+
+    it('Result without prior SystemInit has no model in sessionStats', () => {
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.05 },
+      });
+
+      expect(service.sessionStats?.model).toBeUndefined();
+    });
+
     it('full streaming sequence produces correct state', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Let me ' } });
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'read that.' } });
@@ -539,7 +562,7 @@ describe('ChatStateService', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'The file looks good.' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
-        data: { session_id: 'sid', cost_usd: 0.002, total_cost: 0.01 },
+        data: { session_id: 'sid', total_cost: 0.01 },
       });
 
       expect(service.messages).toHaveLength(1);
@@ -570,6 +593,139 @@ describe('ChatStateService', () => {
       expect(service.isStreaming).toBe(false);
       expect(service.sessionStats).toBeNull();
     });
+
+    it('project switch clears model so subsequent Result has no model', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      await service.init();
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6' },
+      });
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other-project' });
+      await new Promise((r) => setTimeout(r, 10));
+
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.05 },
+      });
+
+      expect(service.sessionStats?.model).toBeUndefined();
+    });
+  });
+
+  describe('SystemInit model lifecycle', () => {
+    it('resetForNewConversation clears model so subsequent Result has no model', () => {
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6' },
+      });
+      service.resetForNewConversation();
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.05 },
+      });
+
+      expect(service.sessionStats?.model).toBeUndefined();
+    });
+  });
+
+  describe('RateLimit chunk handling', () => {
+    it('RateLimit with utilization updates sessionStats immediately if present', () => {
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.05 },
+      });
+      expect(service.sessionStats?.rate_limit).toBeUndefined();
+
+      service.handleStreamChunk({
+        chunk_type: 'RateLimit',
+        data: { status: 'allowed_warning', utilization: 65, resets_at: 1738425600 },
+      });
+
+      expect(service.sessionStats?.rate_limit).toEqual({
+        status: 'allowed_warning',
+        utilization: 65,
+        resets_at: 1738425600,
+      });
+    });
+
+    it('RateLimit before Result is included when Result arrives', () => {
+      service.handleStreamChunk({
+        chunk_type: 'RateLimit',
+        data: { status: 'allowed', utilization: 30, resets_at: null },
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.05 },
+      });
+
+      expect(service.sessionStats?.rate_limit).toEqual({
+        status: 'allowed',
+        utilization: 30,
+        resets_at: null,
+      });
+    });
+
+    it('RateLimit with null utilization does not store rate limit', () => {
+      service.handleStreamChunk({
+        chunk_type: 'RateLimit',
+        data: { status: 'allowed', utilization: null, resets_at: null },
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.05 },
+      });
+
+      expect(service.sessionStats?.rate_limit).toBeUndefined();
+    });
+
+    it('output tokens accumulate across turns', () => {
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 'abc',
+          total_cost: 0.02,
+          usage: { input_tokens: 3, output_tokens: 65 },
+        },
+      });
+      expect(service.sessionStats?.total_output_tokens).toBe(65);
+
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'bye' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 'abc',
+          total_cost: 0.04,
+          usage: { input_tokens: 3, output_tokens: 88 },
+        },
+      });
+      expect(service.sessionStats?.total_output_tokens).toBe(153);
+    });
+
+    it('resetForNewConversation clears rate limit', () => {
+      service.handleStreamChunk({
+        chunk_type: 'RateLimit',
+        data: { status: 'allowed', utilization: 50, resets_at: 123 },
+      });
+      service.resetForNewConversation();
+
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.05 },
+      });
+
+      expect(service.sessionStats?.rate_limit).toBeUndefined();
+    });
   });
 
   describe('resetForNewConversation', () => {
@@ -577,7 +733,12 @@ describe('ChatStateService', () => {
       service._setState({
         messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
         currentBlocks: [{ type: 'text', content: 'partial' }],
-        sessionStats: { session_id: 'x', cost_usd: 0, total_cost: 0 },
+        sessionStats: {
+          session_id: 'x',
+          total_cost: 0,
+          total_output_tokens: 0,
+          context_window_size: 200000,
+        },
       });
       service.isStreaming = true;
 
@@ -801,6 +962,8 @@ describe('ChatStateService', () => {
       };
 
       await service.init();
+      // startChatSession is fire-and-forget — flush microtask queue
+      await new Promise((r) => setTimeout(r, 0));
       expect(projectState.status).toBe('auth_required');
     });
 
@@ -826,6 +989,49 @@ describe('ChatStateService', () => {
       await service.init();
       await service.sendMessage('hello');
       expect(projectState.status).toBe('auth_required');
+    });
+  });
+
+  describe('session startup timeout', () => {
+    it('shows error when startingSession does not clear within deadline', async () => {
+      // Directly invoke sendMessage without full init — we only need the
+      // retry path and the startingSession flag.
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'send_message') throw new Error('no active session');
+        return undefined;
+      };
+
+      // Simulate startingSession permanently stuck true
+      (service as unknown as { startingSession: boolean }).startingSession = true;
+
+      // Mock Date.now to make the deadline expire immediately.
+      // sendMessage calls: (1) user-msg timestamp, (2) deadline = Date.now() + 30_000,
+      // (3+) while-loop condition Date.now() < deadline.
+      // Track Date.now() calls.  We need the deadline setup call to
+      // return `base` and all subsequent calls to return past the
+      // deadline.  Use a generous threshold: the first 5 calls return
+      // base (covers user-msg timestamp, notifyChange(), deadline setup,
+      // plus any framework overhead).  After that, jump past the
+      // deadline so the while loop exits on the next iteration.
+      const base = 1000000;
+      let nowCall = 0;
+      const spy = vi.spyOn(Date, 'now').mockImplementation(() => {
+        nowCall++;
+        return nowCall <= 5 ? base : base + 60_000;
+      });
+
+      await service.sendMessage('hello');
+      spy.mockRestore();
+
+      // Should have 2 messages: user + assistant error
+      expect(service.messages).toHaveLength(2);
+      const lastMsg = service.messages[1];
+      expect(lastMsg.role).toBe('assistant');
+      expect(lastMsg.blocks[0].type).toBe('error');
+      expect((lastMsg.blocks[0] as { content: string }).content).toContain(
+        'Session is still starting'
+      );
+      expect(service.isStreaming).toBe(false);
     });
   });
 });

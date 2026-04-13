@@ -1,29 +1,117 @@
 import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
+import { DecimalPipe } from '@angular/common';
 import type { SessionStats } from '../../models/chat';
 
-/** Displays session cost and token usage statistics. */
+/** Shared bar segment indices — module-level constant to avoid per-instance allocation. */
+const BAR_INDICES: readonly number[] = [0, 1, 2, 3, 4];
+
+/**
+ * Displays session stats matching the container statusline layout:
+ *  model │ CTX bar % │ rate limit │ cost │ In / Cache R / Cache W / Out
+ */
 @Component({
   selector: 'app-session-stats',
   standalone: true,
+  imports: [DecimalPipe],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
     @if (stats) {
       <div
         data-testid="session-stats"
-        class="flex gap-4 px-4 py-2 text-xs text-sw-code-gray border-t border-sw-border-dark"
+        class="flex items-center gap-3 px-4 py-1.5 text-xs border-t border-sw-border-dark"
       >
-        <span class="whitespace-nowrap">Cost: \${{ stats.cost_usd.toFixed(4) }}</span>
-        <span class="whitespace-nowrap">Total: \${{ stats.total_cost.toFixed(4) }}</span>
+        <!-- Model name -->
+        <span
+          class="text-sw-teal font-bold whitespace-nowrap"
+          title="AI model used for this session"
+          >{{ stats.model || 'Claude' }}</span
+        >
+
+        <!-- Context usage bar (from per-step flat usage) -->
+        @if (ctxPct > 0) {
+          <span class="text-sw-text-ghost">│</span>
+          <span
+            class="whitespace-nowrap"
+            title="Context window usage — percentage of the model's token limit consumed by the current conversation"
+          >
+            <span class="text-sw-text-dim">CTX</span>
+            <span class="ml-1 inline-flex gap-px align-middle">
+              @for (i of barIndices; track i) {
+                <span
+                  class="inline-block w-1.5 h-2.5 rounded-sm"
+                  [class]="i < ctxFilled ? ctxBarColor : 'bg-sw-text-ghost/20'"
+                ></span>
+              }
+            </span>
+            <span class="ml-1" [class]="ctxTextColor">{{ ctxPct }}%</span>
+          </span>
+        }
+
+        <!-- Rate limit -->
+        @if (stats.rate_limit) {
+          <span class="text-sw-text-ghost">│</span>
+          <span
+            class="whitespace-nowrap"
+            title="Subscription rate limit — percentage of your 5-hour usage quota consumed"
+          >
+            <span class="text-sw-text-dim">Limit</span>
+            <span class="ml-1 inline-flex gap-px align-middle">
+              @for (i of barIndices; track i) {
+                <span
+                  class="inline-block w-1.5 h-2.5 rounded-sm"
+                  [class]="i < rlFilled ? rlBarColor : 'bg-sw-text-ghost/20'"
+                ></span>
+              }
+            </span>
+            <span class="ml-1" [class]="rlTextColor">{{ rlPct }}%</span>
+            @if (rlResetTime) {
+              <span class="text-sw-text-dim ml-1">reset {{ rlResetTime }}</span>
+            }
+          </span>
+        }
+
+        <!-- Cost -->
+        @if (stats.total_cost > 0) {
+          <span class="text-sw-text-ghost">│</span>
+          <span
+            class="text-sw-text-dim whitespace-nowrap"
+            title="Estimated API cost — how much this session would cost at API pricing"
+            >\${{ stats.total_cost.toFixed(4) }}</span
+          >
+        }
+
+        <!-- Token breakdown -->
         @if (stats.usage) {
-          <span class="whitespace-nowrap">In: {{ stats.usage.input_tokens }}</span>
-          <span class="whitespace-nowrap">Out: {{ stats.usage.output_tokens }}</span>
+          <span class="text-sw-text-ghost">│</span>
+          <span
+            class="text-sw-code-gray whitespace-nowrap"
+            title="Input tokens — new tokens sent to the model (not from cache)"
+          >
+            In: {{ stats.usage.input_tokens | number }}
+          </span>
           @if (stats.usage.cache_read_tokens) {
-            <span class="whitespace-nowrap">Cache read: {{ stats.usage.cache_read_tokens }}</span>
+            <span
+              class="text-sw-code-gray whitespace-nowrap"
+              title="Cache Read — tokens loaded from prompt cache (system prompt, conversation history)"
+            >
+              CR: {{ stats.usage.cache_read_tokens | number }}
+            </span>
           }
           @if (stats.usage.cache_write_tokens) {
-            <span class="whitespace-nowrap">Cache write: {{ stats.usage.cache_write_tokens }}</span>
+            <span
+              class="text-sw-code-gray whitespace-nowrap"
+              title="Cache Write — tokens written to prompt cache for future turns"
+            >
+              CW: {{ stats.usage.cache_write_tokens | number }}
+            </span>
           }
+          <span
+            class="text-sw-code-gray whitespace-nowrap"
+            title="Output tokens — total tokens generated by the model across all turns"
+          >
+            Out: {{ stats.total_output_tokens | number }}
+          </span>
         }
       </div>
     }
@@ -31,4 +119,79 @@ import type { SessionStats } from '../../models/chat';
 })
 export class SessionStatsComponent {
   @Input() stats: SessionStats | null = null;
+
+  /** Reference to the module-level constant — shared across all instances. */
+  readonly barIndices = BAR_INDICES;
+
+  /**
+   * Context usage % from per-step flat usage and actual context window size.
+   *  Matches statusline.sh: input_tokens + cache_creation + cache_read (no output_tokens).
+   */
+  get ctxPct(): number {
+    if (!this.stats?.usage) return 0;
+    const totalInput =
+      this.stats.usage.input_tokens +
+      (this.stats.usage.cache_read_tokens ?? 0) +
+      (this.stats.usage.cache_write_tokens ?? 0);
+    if (totalInput <= 0) return 0;
+    const windowSize = this.stats.context_window_size || 200_000;
+    return Math.min(100, Math.round((totalInput / windowSize) * 100));
+  }
+
+  /** Number of filled bar segments (0–5) for context usage. */
+  get ctxFilled(): number {
+    return Math.floor((this.ctxPct * 5) / 100);
+  }
+
+  /** Tailwind background color class for context usage bar segments. */
+  get ctxBarColor(): string {
+    return barColor(this.ctxPct);
+  }
+
+  /** Tailwind text color class for context usage percentage. */
+  get ctxTextColor(): string {
+    return textColor(this.ctxPct);
+  }
+
+  /** Rate limit utilization as integer percentage (0–100). */
+  get rlPct(): number {
+    return Math.round(this.stats?.rate_limit?.utilization ?? 0);
+  }
+
+  /** Number of filled bar segments (0–5) for rate limit. */
+  get rlFilled(): number {
+    return Math.floor((this.rlPct * 5) / 100);
+  }
+
+  /** Tailwind background color class for rate limit bar segments. */
+  get rlBarColor(): string {
+    return barColor(this.rlPct);
+  }
+
+  /** Tailwind text color class for rate limit percentage. */
+  get rlTextColor(): string {
+    return textColor(this.rlPct);
+  }
+
+  /** Formatted reset time (HH:MM) for rate limit, or empty string if absent. */
+  get rlResetTime(): string {
+    const epoch = this.stats?.rate_limit?.resets_at;
+    if (!epoch) return '';
+    const d = new Date(epoch * 1000);
+    return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+  }
+}
+
+function barColor(pct: number): string {
+  if (pct >= 90) return 'bg-red-500';
+  if (pct >= 76) return 'bg-red-400';
+  if (pct >= 50) return 'bg-yellow-400';
+  return 'bg-green-500';
+}
+
+function textColor(pct: number): string {
+  if (pct >= 90) return 'text-red-500 font-bold';
+  if (pct >= 76) return 'text-red-400';
+  if (pct >= 50) return 'text-yellow-400';
+  return 'text-green-500';
 }

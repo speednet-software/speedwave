@@ -20,7 +20,7 @@ vi.mock('./session.js', () => ({
 vi.mock('./jsonrpc.js', () => {
   // Define mock class inside the factory to avoid hoisting issues
   class MockJSONRPCHandler {
-    processRequest = vi.fn().mockResolvedValue({ jsonrpc: '2.0', id: 1, result: {} });
+    processRequest = vi.fn().mockResolvedValue({ response: { jsonrpc: '2.0', id: 1, result: {} } });
     registerTool = vi.fn();
     getTools = vi.fn(() => []);
     getServerInfo = vi.fn(() => ({ name: 'test-server', version: '1.0.0' }));
@@ -48,6 +48,14 @@ vi.mock('./sse.js', () => {
       res.setHeader('Content-Type', 'application/json');
       res.json(response);
     }),
+  };
+});
+
+vi.mock('./security.js', async () => {
+  const actual = await vi.importActual<typeof import('./security.js')>('./security.js');
+  return {
+    ...actual,
+    validateOrigin: actual.validateOrigin,
   };
 });
 
@@ -479,7 +487,7 @@ describe('server', () => {
           port: 3000,
         });
 
-        server.rpcHandler.processRequest = vi.fn().mockResolvedValue(mockResponse);
+        server.rpcHandler.processRequest = vi.fn().mockResolvedValue({ response: mockResponse });
 
         const requestBody = {
           jsonrpc: '2.0',
@@ -512,11 +520,11 @@ describe('server', () => {
           port: 3000,
         });
 
-        server.rpcHandler.processRequest = vi.fn().mockResolvedValue(mockResponse);
+        server.rpcHandler.processRequest = vi.fn().mockResolvedValue({ response: mockResponse });
 
         const req = createMockRequest(
           { jsonrpc: '2.0', id: 1, method: 'test' },
-          { 'x-mcp-session-id': '550e8400-e29b-41d4-a716-446655440000' }
+          { 'mcp-session-id': '550e8400-e29b-41d4-a716-446655440000' }
         );
         const res = createMockResponse();
 
@@ -532,7 +540,7 @@ describe('server', () => {
         );
       });
 
-      it('extracts session ID from request body meta', async () => {
+      it('ignores _meta.sessionId in body (session only from headers per MCP spec)', async () => {
         const mockResponse: JSONRPCResponse = {
           jsonrpc: '2.0',
           id: 1,
@@ -545,7 +553,7 @@ describe('server', () => {
           port: 3000,
         });
 
-        server.rpcHandler.processRequest = vi.fn().mockResolvedValue(mockResponse);
+        server.rpcHandler.processRequest = vi.fn().mockResolvedValue({ response: mockResponse });
 
         const req = createMockRequest({
           jsonrpc: '2.0',
@@ -561,13 +569,11 @@ describe('server', () => {
 
         await mcpRoute.route.stack[0].handle(req, res);
 
-        expect(server.rpcHandler.processRequest).toHaveBeenCalledWith(
-          expect.anything(),
-          '660e8400-e29b-41d4-a716-446655440001'
-        );
+        // Session from body _meta is NOT used — only Mcp-Session-Id header
+        expect(server.rpcHandler.processRequest).toHaveBeenCalledWith(expect.anything(), null);
       });
 
-      it('prefers header session ID over body session ID', async () => {
+      it('uses header session ID even when body has _meta.sessionId', async () => {
         const mockResponse: JSONRPCResponse = {
           jsonrpc: '2.0',
           id: 1,
@@ -580,7 +586,7 @@ describe('server', () => {
           port: 3000,
         });
 
-        server.rpcHandler.processRequest = vi.fn().mockResolvedValue(mockResponse);
+        server.rpcHandler.processRequest = vi.fn().mockResolvedValue({ response: mockResponse });
 
         const req = createMockRequest(
           {
@@ -589,7 +595,7 @@ describe('server', () => {
             method: 'test',
             _meta: { sessionId: '660e8400-e29b-41d4-a716-446655440001' },
           },
-          { 'x-mcp-session-id': '550e8400-e29b-41d4-a716-446655440000' }
+          { 'mcp-session-id': '550e8400-e29b-41d4-a716-446655440000' }
         );
         const res = createMockResponse();
 
@@ -618,7 +624,7 @@ describe('server', () => {
           port: 3000,
         });
 
-        server.rpcHandler.processRequest = vi.fn().mockResolvedValue(mockResponse);
+        server.rpcHandler.processRequest = vi.fn().mockResolvedValue({ response: mockResponse });
 
         const req = createMockRequest({ jsonrpc: '2.0', id: 1, method: 'test' });
         const res = createMockResponse();
@@ -645,11 +651,11 @@ describe('server', () => {
           port: 3000,
         });
 
-        server.rpcHandler.processRequest = vi.fn().mockResolvedValue(mockResponse);
+        server.rpcHandler.processRequest = vi.fn().mockResolvedValue({ response: mockResponse });
 
         const req = createMockRequest(
           { jsonrpc: '2.0', id: 1, method: 'test' },
-          { 'x-mcp-session-id': 'not-a-valid-uuid' }
+          { 'mcp-session-id': 'not-a-valid-uuid' }
         );
         const res = createMockResponse();
 
@@ -675,11 +681,11 @@ describe('server', () => {
           port: 3000,
         });
 
-        server.rpcHandler.processRequest = vi.fn().mockResolvedValue(mockResponse);
+        server.rpcHandler.processRequest = vi.fn().mockResolvedValue({ response: mockResponse });
 
         const req = createMockRequest(
           { jsonrpc: '2.0', id: 1, method: 'test' },
-          { 'x-mcp-session-id': '"; DROP TABLE sessions; --' }
+          { 'mcp-session-id': '"; DROP TABLE sessions; --' }
         );
         const res = createMockResponse();
 
@@ -705,11 +711,11 @@ describe('server', () => {
           port: 3000,
         });
 
-        server.rpcHandler.processRequest = vi.fn().mockResolvedValue(mockResponse);
+        server.rpcHandler.processRequest = vi.fn().mockResolvedValue({ response: mockResponse });
 
         const req = createMockRequest(
           { jsonrpc: '2.0', id: 1, method: 'test' },
-          { 'x-mcp-session-id': 'a'.repeat(10000) }
+          { 'mcp-session-id': 'a'.repeat(10000) }
         );
         const res = createMockResponse();
 
@@ -736,11 +742,11 @@ describe('server', () => {
           port: 3000,
         });
 
-        server.rpcHandler.processRequest = vi.fn().mockResolvedValue(mockResponse);
+        server.rpcHandler.processRequest = vi.fn().mockResolvedValue({ response: mockResponse });
 
         const req = createMockRequest(
           { jsonrpc: '2.0', id: 1, method: 'test' },
-          { 'x-mcp-session-id': validUUID }
+          { 'mcp-session-id': validUUID }
         );
         const res = createMockResponse();
 
@@ -766,7 +772,7 @@ describe('server', () => {
           port: 3000,
         });
 
-        server.rpcHandler.processRequest = vi.fn().mockResolvedValue(mockResponse);
+        server.rpcHandler.processRequest = vi.fn().mockResolvedValue({ response: mockResponse });
 
         const req = createMockRequest({ jsonrpc: '2.0', id: 1, method: 'test' });
         const res = createMockResponse();
@@ -794,11 +800,11 @@ describe('server', () => {
           port: 3000,
         });
 
-        server.rpcHandler.processRequest = vi.fn().mockResolvedValue(mockResponse);
+        server.rpcHandler.processRequest = vi.fn().mockResolvedValue({ response: mockResponse });
 
         const req = createMockRequest(
           { jsonrpc: '2.0', id: 1, method: 'test' },
-          { accept: 'text/event-stream' }
+          { accept: 'application/json, text/event-stream' }
         );
         const res = createMockResponse();
 
@@ -825,7 +831,7 @@ describe('server', () => {
           port: 3000,
         });
 
-        server.rpcHandler.processRequest = vi.fn().mockResolvedValue(mockResponse);
+        server.rpcHandler.processRequest = vi.fn().mockResolvedValue({ response: mockResponse });
 
         const req = createMockRequest(
           { jsonrpc: '2.0', id: 1, method: 'test' },
@@ -856,11 +862,11 @@ describe('server', () => {
           port: 3000,
         });
 
-        server.rpcHandler.processRequest = vi.fn().mockResolvedValue(mockResponse);
+        server.rpcHandler.processRequest = vi.fn().mockResolvedValue({ response: mockResponse });
 
         const req = createMockRequest(
           { jsonrpc: '2.0', id: 1, method: 'test' },
-          { accept: 'text/event-stream' }
+          { accept: 'application/json, text/event-stream' }
         );
         const res = createMockResponse();
 
@@ -875,6 +881,132 @@ describe('server', () => {
 
         expect(mockStream.sendMessage).toHaveBeenCalledWith(mockResponse);
         expect(mockStream.close).toHaveBeenCalled();
+      });
+    });
+
+    describe('DELETE endpoint', () => {
+      it('has DELETE route registered on /', () => {
+        const server = createMCPServer({
+          name: 'test-server',
+          version: '1.0.0',
+          port: 3000,
+        });
+
+        const routes = (server.app as any).router.stack.filter((layer: any) => layer.route);
+        const deleteRoute = routes.find(
+          (layer: any) => layer.route?.path === '/' && layer.route?.methods?.delete
+        );
+
+        expect(deleteRoute).toBeDefined();
+      });
+    });
+
+    describe('Method Not Allowed (405)', () => {
+      it('has catch-all route on / for unsupported methods', () => {
+        const server = createMCPServer({
+          name: 'test-server',
+          version: '1.0.0',
+          port: 3000,
+        });
+
+        // Express registers app.all() routes with the internal `_all` flag set
+        // on the layer's route.methods. Verify we have POST, DELETE, and a catch-all.
+        const routes = (server.app as any).router.stack.filter((layer: any) => layer.route);
+        const rootRoutes = routes.filter((layer: any) => layer.route?.path === '/');
+
+        // There should be at least 3 routes on / (POST, DELETE, ALL)
+        expect(rootRoutes.length).toBeGreaterThanOrEqual(3);
+      });
+    });
+
+    describe('Origin validation', () => {
+      it('has origin check middleware when allowedOrigins is configured', () => {
+        const server = createMCPServer({
+          name: 'origin-test',
+          version: '1.0.0',
+          port: 3000,
+          allowedOrigins: ['http://localhost:4200'],
+        });
+
+        const layers = (server.app as any).router.stack;
+        const originLayer = layers.find((layer: any) => layer.name === 'originCheck');
+
+        expect(originLayer).toBeDefined();
+      });
+
+      it('allows requests without Origin header', () => {
+        const server = createMCPServer({
+          name: 'origin-test',
+          version: '1.0.0',
+          port: 3000,
+          allowedOrigins: ['http://localhost:4200'],
+        });
+
+        const layers = (server.app as any).router.stack;
+        const originLayer = layers.find((layer: any) => layer.name === 'originCheck');
+
+        const req = createMockRequest({}, {});
+        const res = createMockResponse();
+        const next = vi.fn();
+
+        originLayer.handle(req, res, next);
+
+        expect(next).toHaveBeenCalled();
+        expect(res.status).not.toHaveBeenCalled();
+      });
+
+      it('allows requests with valid Origin', () => {
+        const server = createMCPServer({
+          name: 'origin-test',
+          version: '1.0.0',
+          port: 3000,
+          allowedOrigins: ['http://localhost:4200'],
+        });
+
+        const layers = (server.app as any).router.stack;
+        const originLayer = layers.find((layer: any) => layer.name === 'originCheck');
+
+        const req = createMockRequest({}, { origin: 'http://localhost:4200' });
+        const res = createMockResponse();
+        const next = vi.fn();
+
+        originLayer.handle(req, res, next);
+
+        expect(next).toHaveBeenCalled();
+      });
+
+      it('rejects requests with invalid Origin with 403', () => {
+        const server = createMCPServer({
+          name: 'origin-test',
+          version: '1.0.0',
+          port: 3000,
+          allowedOrigins: ['http://localhost:4200'],
+        });
+
+        const layers = (server.app as any).router.stack;
+        const originLayer = layers.find((layer: any) => layer.name === 'originCheck');
+
+        const req = createMockRequest({}, { origin: 'http://evil.com' });
+        const res = createMockResponse();
+        const next = vi.fn();
+
+        originLayer.handle(req, res, next);
+
+        expect(next).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(403);
+      });
+
+      it('does not have origin middleware when allowedOrigins is not configured', () => {
+        const server = createMCPServer({
+          name: 'no-origin-test',
+          version: '1.0.0',
+          port: 3000,
+        });
+
+        const layers = (server.app as any).router.stack;
+        const originLayer = layers.find((layer: any) => layer.name === 'originCheck');
+
+        expect(originLayer).toBeUndefined();
       });
     });
 

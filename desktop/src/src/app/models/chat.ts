@@ -19,13 +19,18 @@ export type StreamChunk =
       chunk_type: 'Result';
       data: {
         session_id: string;
-        cost_usd?: number;
         total_cost?: number;
         usage?: UsageInfo;
         result_text?: string;
+        context_window_size?: number;
       };
     }
-  | { chunk_type: 'Error'; data: { content: string } };
+  | { chunk_type: 'Error'; data: { content: string } }
+  | { chunk_type: 'SystemInit'; data: { model: string } }
+  | {
+      chunk_type: 'RateLimit';
+      data: { status: string; utilization: number | null; resets_at: number | null };
+    };
 
 /** A single selectable option in an AskUserQuestion prompt. */
 export interface AskUserOption {
@@ -112,12 +117,25 @@ export interface ChatMessage {
   timestamp: number;
 }
 
+/** Rate limit info from rate_limit_event. */
+export interface RateLimitInfo {
+  status: string;
+  utilization: number;
+  resets_at: number | null;
+}
+
 /** Session cost/usage stats */
 export interface SessionStats {
   session_id: string;
-  cost_usd: number;
+  /** Total session cost in USD — estimated from token counts at API pricing. */
   total_cost: number;
+  /** Per-step usage from flat result.usage (not cumulative). Use for CTX %. */
   usage?: UsageInfo;
+  model?: string;
+  rate_limit?: RateLimitInfo;
+  context_window_size: number;
+  /** Cumulative output tokens across all turns in the session. */
+  total_output_tokens: number;
 }
 
 // ProjectList and ProjectEntry are defined in models/update.ts (SSOT)

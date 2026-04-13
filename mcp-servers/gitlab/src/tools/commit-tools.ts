@@ -8,6 +8,7 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  READ_ONLY_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
@@ -15,7 +16,8 @@ import { withValidation } from './validation.js';
 const listBranchCommitsTool: Tool = {
   name: 'listBranchCommits',
   description: 'List commits on a specific branch',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'commits', 'branch', 'history', 'log', 'git'],
   example:
     'const commits = await gitlab.listBranchCommits({ project_id: "speedwave/core", branch: "main" })',
@@ -71,7 +73,8 @@ const listBranchCommitsTool: Tool = {
 const listCommitsTool: Tool = {
   name: 'listCommits',
   description: 'List commits with filters',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'commits', 'history', 'log', 'git'],
   example:
     'const commits = await gitlab.listCommits({ project_id: "speedwave/core", ref: "main", limit: 10 })',
@@ -127,7 +130,8 @@ const listCommitsTool: Tool = {
 const searchCommitsTool: Tool = {
   name: 'searchCommits',
   description: 'Search commits by message',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'commits', 'search', 'find', 'git'],
   example:
     'const commits = await gitlab.searchCommits({ project_id: "speedwave/core", query: "fix bug" })',
@@ -172,7 +176,8 @@ const searchCommitsTool: Tool = {
 const getCommitDiffTool: Tool = {
   name: 'getCommitDiff',
   description: 'Get diff of a specific commit',
-  category: 'read',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { deferLoading: true },
   keywords: ['gitlab', 'commit', 'diff', 'changes', 'files', 'git'],
   example:
     'const diff = await gitlab.getCommitDiff({ project_id: "speedwave/core", commit_sha: "abc123" })',

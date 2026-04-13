@@ -16,9 +16,10 @@ describe('tool metadata', () => {
 
   for (const { tool } of allTools) {
     describe(tool.name, () => {
-      it('should have category defined', () => {
-        expect(tool.category).toBeDefined();
-        expect(['read', 'write', 'delete']).toContain(tool.category);
+      it('should have annotations with readOnlyHint and destructiveHint', () => {
+        expect(tool.annotations).toBeDefined();
+        expect(typeof tool.annotations!.readOnlyHint).toBe('boolean');
+        expect(typeof tool.annotations!.destructiveHint).toBe('boolean');
       });
 
       it('should have keywords with at least 1 entry', () => {
@@ -31,6 +32,14 @@ describe('tool metadata', () => {
         expect(tool.example).toBeDefined();
         expect(typeof tool.example).toBe('string');
         expect(tool.example!.length).toBeGreaterThan(0);
+      });
+
+      it('should have _meta with deferLoading', () => {
+        expect(tool._meta, `${tool.name} missing _meta`).toBeDefined();
+        expect(
+          typeof (tool._meta as Record<string, unknown>).deferLoading,
+          `${tool.name} missing deferLoading`
+        ).toBe('boolean');
       });
     });
   }

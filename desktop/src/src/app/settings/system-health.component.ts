@@ -64,7 +64,9 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
             <span class="text-xs text-sw-text-muted uppercase tracking-wide">Overall Status</span>
           </div>
           <div class="text-sm font-semibold text-sw-text">
-            @if (report === null) {
+            @if (report === null && !error) {
+              Checking...
+            } @else if (report === null) {
               Not connected
             } @else if (report.overall_healthy) {
               Healthy
@@ -93,7 +95,9 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
             <span class="text-xs text-sw-text-muted uppercase tracking-wide">VM</span>
           </div>
           <div class="text-sm font-semibold text-sw-text">
-            @if (report === null) {
+            @if (report === null && !error) {
+              Checking...
+            } @else if (report === null) {
               Not connected
             } @else if (report.vm.running) {
               Running ({{ report.vm.vm_type }})
@@ -122,7 +126,9 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
             <span class="text-xs text-sw-text-muted uppercase tracking-wide">mcp-os</span>
           </div>
           <div class="text-sm font-semibold text-sw-text">
-            @if (report === null) {
+            @if (report === null && !error) {
+              Checking...
+            } @else if (report === null) {
               Not connected
             } @else if (report.mcp_os.running) {
               Running
@@ -151,7 +157,9 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
             <span class="text-xs text-sw-text-muted uppercase tracking-wide">IDE Bridge</span>
           </div>
           <div class="text-sm font-semibold text-sw-text">
-            @if (report === null) {
+            @if (report === null && !error) {
+              Checking...
+            } @else if (report === null) {
               Not connected
             } @else if (bridgeStatus) {
               <span class="font-mono text-xs text-sw-success">:{{ bridgeStatus.port }}</span>
@@ -205,7 +213,11 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
             {{ recreating ? 'Recreating...' : 'Recreate' }}
           </button>
         </div>
-        @if (report === null) {
+        @if (report === null && !error) {
+          <div class="text-sw-text-muted text-[13px] py-2" data-testid="no-data">
+            Checking container status...
+          </div>
+        } @else if (report === null) {
           <div class="text-sw-text-muted text-[13px] py-2" data-testid="no-data">
             Not connected — unable to fetch container status.
           </div>
@@ -344,7 +356,7 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
 
       <div class="text-center text-sw-slider text-xs" data-testid="last-updated">
         @if (lastUpdated) {
-          Last updated: {{ lastUpdated | date: 'HH:mm:ss' }}
+          Last updated: {{ lastUpdated | date: 'dd-MM-yyyy HH:mm:ss' }}
         } @else {
           Waiting for first health check...
         }

@@ -105,18 +105,33 @@ fn check_uidmap() -> Vec<PrereqViolation> {
 // Non-blocking OS warnings (separate from blocking prereqs)
 // ---------------------------------------------------------------------------
 
-/// Returns non-blocking OS warnings (e.g. nested virtualization detected).
+/// Returns non-blocking OS warnings (e.g. low memory, nested virtualization).
 /// Separate from `check_os_prereqs()` which returns blocking errors.
 ///
 /// Warnings are logged by callers — they do not block container operations.
 pub fn check_os_warnings() -> Vec<String> {
-    #[cfg(target_os = "windows")]
-    {
-        check_nested_virt()
-    }
+    let mut warnings = Vec::new();
 
-    #[cfg(not(target_os = "windows"))]
-    {
+    warnings.extend(check_low_memory());
+
+    #[cfg(target_os = "windows")]
+    warnings.extend(check_nested_virt());
+
+    warnings
+}
+
+fn check_low_memory() -> Vec<String> {
+    check_low_memory_with(crate::resources::host_total_memory_gib())
+}
+
+fn check_low_memory_with(host_ram_gib: u32) -> Vec<String> {
+    if host_ram_gib < 8 {
+        vec![format!(
+            "Low memory detected: {} GiB RAM. Speedwave requires at least 8 GiB. \
+             Performance may be severely degraded.",
+            host_ram_gib
+        )]
+    } else {
         Vec::new()
     }
 }
@@ -388,17 +403,68 @@ mod tests {
     }
 
     #[test]
-    fn test_check_os_warnings_returns_empty_on_non_windows() {
-        // On macOS/Linux (dev/CI), check_os_warnings() returns empty Vec
-        // because check_nested_virt() is #[cfg(target_os = "windows")] only.
+    fn test_check_os_warnings_returns_empty_on_non_windows_with_sufficient_ram() {
+        // On macOS/Linux dev machines with ≥8 GiB RAM, check_os_warnings()
+        // returns empty (no nested-virt check, no low-memory warning).
         #[cfg(not(target_os = "windows"))]
         {
-            let warnings = check_os_warnings();
-            assert!(
-                warnings.is_empty(),
-                "check_os_warnings() should return empty on non-Windows, got: {:?}",
-                warnings
-            );
+            let host_ram = crate::resources::host_total_memory_gib();
+            if host_ram >= 8 {
+                let warnings = check_os_warnings();
+                assert!(
+                    warnings.is_empty(),
+                    "check_os_warnings() should return empty on non-Windows with ≥8 GiB RAM, \
+                     got: {:?}",
+                    warnings
+                );
+            }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // check_low_memory_with() tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn low_memory_warning_below_8() {
+        let w = check_low_memory_with(4);
+        assert_eq!(w.len(), 1);
+        assert!(
+            w[0].contains("4 GiB"),
+            "warning must mention host RAM: {}",
+            w[0]
+        );
+        assert!(
+            w[0].contains("8 GiB"),
+            "warning must mention threshold: {}",
+            w[0]
+        );
+    }
+
+    #[test]
+    fn low_memory_no_warning_at_8() {
+        assert!(check_low_memory_with(8).is_empty());
+    }
+
+    #[test]
+    fn low_memory_no_warning_above_8() {
+        assert!(check_low_memory_with(16).is_empty());
+    }
+
+    #[test]
+    fn low_memory_warning_at_zero() {
+        let w = check_low_memory_with(0);
+        assert_eq!(w.len(), 1);
+    }
+
+    #[test]
+    fn low_memory_warning_at_7() {
+        let w = check_low_memory_with(7);
+        assert_eq!(w.len(), 1);
+        assert!(
+            w[0].contains("7 GiB"),
+            "warning must mention host RAM: {}",
+            w[0]
+        );
     }
 }

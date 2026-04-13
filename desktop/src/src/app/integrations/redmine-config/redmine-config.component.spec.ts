@@ -55,6 +55,7 @@ function makeEnumerations(overrides?: Partial<RedmineEnumerations>): RedmineEnum
       { id: 1, name: 'Alpha' },
       { id: 2, name: 'Beta' },
     ],
+    projects_truncated: false,
     statuses: [
       { id: 1, name: 'New' },
       { id: 2, name: 'In Progress' },
@@ -526,21 +527,27 @@ describe('RedmineConfigComponent', () => {
       }
     });
 
-    it('shows note when 100 or more projects (API limit reached)', () => {
-      const limitProjects = Array.from({ length: 100 }, (_, i) => ({
-        id: i + 1,
-        name: `Project ${i + 1}`,
-      }));
-      component.enumerations = makeEnumerations({ projects: limitProjects });
+    it('shows truncation notice when projects_truncated is true', () => {
+      component.enumerations = makeEnumerations({ projects_truncated: true });
       fixture.detectChanges();
       expect(
-        fixture.nativeElement.querySelector('[data-testid="redmine-projects-note"]')
+        fixture.nativeElement.querySelector('[data-testid="redmine-projects-truncation-notice"]')
       ).not.toBeNull();
     });
 
-    it('does not show note when fewer than 100 projects', () => {
+    it('hides truncation notice when projects_truncated is false', () => {
+      component.enumerations = makeEnumerations({ projects_truncated: false });
+      fixture.detectChanges();
       expect(
-        fixture.nativeElement.querySelector('[data-testid="redmine-projects-note"]')
+        fixture.nativeElement.querySelector('[data-testid="redmine-projects-truncation-notice"]')
+      ).toBeNull();
+    });
+
+    it('hides truncation notice when enumerations is null', () => {
+      component.enumerations = null;
+      fixture.detectChanges();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="redmine-projects-truncation-notice"]')
       ).toBeNull();
     });
   });

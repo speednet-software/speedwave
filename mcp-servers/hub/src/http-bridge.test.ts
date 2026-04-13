@@ -14,15 +14,18 @@ import {
   initializeAllBridges,
   STARTUP_HEALTH_RETRIES,
   STARTUP_RETRY_DELAYS_MS,
+  parseResponse,
+  buildWorkerHeaders,
 } from './http-bridge.js';
+import { LATEST_PROTOCOL_VERSION } from '@speedwave/mcp-shared';
 import {
   getServiceMethods,
   stopBackgroundRefresh,
   TOOL_REGISTRY,
   buildServiceBridge,
+  resetServiceCaches,
 } from './tool-registry.js';
-import { SERVICES } from './http-bridge.js';
-import { populateRegistryFromPolicies, _resetRegistryForTesting } from './test-helpers.js';
+import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
 import * as authTokens from './auth-tokens.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -37,7 +40,7 @@ import * as authTokens from './auth-tokens.js';
 describe('http-bridge', () => {
   beforeAll(() => {
     _resetRegistryForTesting();
-    populateRegistryFromPolicies();
+    populateRegistryWithMockTools();
   });
 
   afterAll(() => {
@@ -47,10 +50,12 @@ describe('http-bridge', () => {
   const savedEnv: Record<string, string | undefined> = {};
 
   beforeEach(() => {
-    for (const svc of SERVICES) {
+    const builtInServices = ['slack', 'sharepoint', 'redmine', 'gitlab', 'os'];
+    for (let i = 0; i < builtInServices.length; i++) {
+      const svc = builtInServices[i];
       const key = `WORKER_${svc.toUpperCase()}_URL`;
       savedEnv[key] = process.env[key];
-      process.env[key] = `http://mcp-${svc}:${3001 + SERVICES.indexOf(svc)}`;
+      process.env[key] = `http://mcp-${svc}:${3001 + i}`;
     }
   });
 
@@ -80,6 +85,7 @@ describe('http-bridge', () => {
     it('should call worker with correct JSON-RPC format', async () => {
       fetchMock.mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({
           jsonrpc: '2.0',
           id: '123',
@@ -95,7 +101,11 @@ describe('http-bridge', () => {
         expect.stringContaining('gitlab'),
         expect.objectContaining({
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: expect.objectContaining({
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+            'MCP-Protocol-Version': LATEST_PROTOCOL_VERSION,
+          }),
           body: expect.stringContaining('list_branches'),
         })
       );
@@ -110,6 +120,7 @@ describe('http-bridge', () => {
       const mockData = { branches: ['main', 'develop'] };
       fetchMock.mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({
           jsonrpc: '2.0',
           id: '123',
@@ -127,6 +138,7 @@ describe('http-bridge', () => {
     it('should handle worker errors', async () => {
       fetchMock.mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({
           jsonrpc: '2.0',
           id: '123',
@@ -155,13 +167,12 @@ describe('http-bridge', () => {
     });
 
     it('should handle timeout', async () => {
-      // Mock fetch to listen to abort signal (like real fetch does)
+      // Mock fetch to listen to abort signal (like real fetch does with AbortSignal.timeout())
       fetchMock.mockImplementation((_url: string, options?: { signal?: AbortSignal }) => {
         return new Promise((_, reject) => {
           if (options?.signal) {
             options.signal.addEventListener('abort', () => {
-              const error = new Error('The operation was aborted');
-              error.name = 'AbortError';
+              const error = new DOMException('The operation was aborted', 'TimeoutError');
               reject(error);
             });
           }
@@ -197,13 +208,12 @@ describe('http-bridge', () => {
       const fetchMock = vi.fn();
       global.fetch = fetchMock as unknown as typeof fetch;
 
-      // Mock fetch to listen to abort signal
+      // Mock fetch to listen to abort signal (AbortSignal.timeout() throws TimeoutError)
       fetchMock.mockImplementation((_url: string, options?: { signal?: AbortSignal }) => {
         return new Promise((_, reject) => {
           if (options?.signal) {
             options.signal.addEventListener('abort', () => {
-              const error = new Error('The operation was aborted');
-              error.name = 'AbortError';
+              const error = new DOMException('The operation was aborted', 'TimeoutError');
               reject(error);
             });
           }
@@ -233,27 +243,40 @@ describe('http-bridge', () => {
       vi.restoreAllMocks();
     });
 
-    it('should return true when worker health check succeeds', async () => {
-      fetchMock.mockResolvedValue({ ok: true });
+    it('should return true when MCP ping succeeds', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ jsonrpc: '2.0', id: '1', result: {} }),
+      });
 
       const result = await isWorkerAvailable('gitlab');
 
       expect(result).toBe(true);
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining('/health'),
-        expect.any(Object)
-      );
+      // First call is the MCP ping POST (no /health path)
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const callUrl = fetchMock.mock.calls[0][0] as string;
+      expect(callUrl).not.toContain('/health');
     });
 
-    it('should return false when worker health check fails', async () => {
-      fetchMock.mockResolvedValue({ ok: false });
+    it('should return true via /health fallback when ping fails', async () => {
+      // Ping fails (e.g. network error), /health succeeds
+      let callCount = 0;
+      fetchMock.mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return Promise.reject(new Error('ping failed'));
+        return Promise.resolve({ ok: true });
+      });
 
-      const result = await isWorkerAvailable('slack');
+      const result = await isWorkerAvailable('gitlab');
 
-      expect(result).toBe(false);
+      expect(result).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const secondCallUrl = fetchMock.mock.calls[1][0] as string;
+      expect(secondCallUrl).toContain('/health');
     });
 
-    it('should return false on network error', async () => {
+    it('should return false when both ping and /health fail', async () => {
       fetchMock.mockRejectedValue(new Error('Network error'));
 
       const result = await isWorkerAvailable('redmine');
@@ -261,8 +284,35 @@ describe('http-bridge', () => {
       expect(result).toBe(false);
     });
 
+    it('should return false when ping returns error and /health is not ok', async () => {
+      let callCount = 0;
+      fetchMock.mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) {
+          return Promise.resolve({
+            ok: true,
+            headers: new Headers({ 'content-type': 'application/json' }),
+            json: async () => ({
+              jsonrpc: '2.0',
+              id: '1',
+              error: { code: -32601, message: 'Method not found' },
+            }),
+          });
+        }
+        return Promise.resolve({ ok: false });
+      });
+
+      const result = await isWorkerAvailable('slack');
+
+      expect(result).toBe(false);
+    });
+
     it('should use cache when available', async () => {
-      fetchMock.mockResolvedValue({ ok: true });
+      fetchMock.mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ jsonrpc: '2.0', id: '1', result: {} }),
+      });
 
       await isWorkerAvailable('sharepoint');
       expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -274,19 +324,33 @@ describe('http-bridge', () => {
 
   describe('getAvailableServices', () => {
     let fetchMock: ReturnType<typeof vi.fn>;
+    const origEnabled = process.env.ENABLED_SERVICES;
 
     beforeEach(() => {
       clearWorkerCache();
       fetchMock = vi.fn();
       global.fetch = fetchMock as unknown as typeof fetch;
+      process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,gitlab,os';
+      resetServiceCaches();
     });
 
     afterEach(() => {
       vi.restoreAllMocks();
+      if (origEnabled === undefined) {
+        delete process.env.ENABLED_SERVICES;
+      } else {
+        process.env.ENABLED_SERVICES = origEnabled;
+      }
+      resetServiceCaches();
     });
 
     it('should return list of available services', async () => {
-      fetchMock.mockResolvedValue({ ok: true });
+      // Mock ping success for all services
+      fetchMock.mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ jsonrpc: '2.0', id: '1', result: {} }),
+      });
 
       const services = await getAvailableServices();
 
@@ -298,9 +362,19 @@ describe('http-bridge', () => {
 
     it('should filter out unavailable services', async () => {
       fetchMock.mockImplementation((url: string) => {
-        if (url.includes('gitlab') || url.includes('slack')) {
-          return Promise.resolve({ ok: true });
+        // Ping requests (POST without /health)
+        if (!url.includes('/health')) {
+          if (url.includes('gitlab') || url.includes('slack')) {
+            return Promise.resolve({
+              ok: true,
+              headers: new Headers({ 'content-type': 'application/json' }),
+              json: async () => ({ jsonrpc: '2.0', id: '1', result: {} }),
+            });
+          }
+          // Ping fails for others
+          return Promise.reject(new Error('Connection refused'));
         }
+        // /health fallback also fails
         return Promise.resolve({ ok: false });
       });
 
@@ -325,6 +399,7 @@ describe('http-bridge', () => {
       // Default mock response
       fetchMock.mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({
           jsonrpc: '2.0',
           id: '123',
@@ -660,7 +735,6 @@ describe('http-bridge', () => {
         searchCustomers: {
           name: 'searchCustomers',
           service: 'presale',
-          category: 'read',
           description: 'Search CRM customers',
           inputSchema: { type: 'object', properties: {} },
           keywords: ['crm'],
@@ -693,7 +767,6 @@ describe('http-bridge', () => {
         runReport: {
           name: 'runReport',
           service: 'analytics',
-          category: 'read',
           description: 'Run analytics report',
           inputSchema: { type: 'object', properties: {} },
           keywords: ['report'],
@@ -711,8 +784,8 @@ describe('http-bridge', () => {
       const { resetServiceCaches } = await import('./tool-registry.js');
       resetServiceCaches();
 
-      // Mock fetch for health checks — always fail
-      const fetchMock = vi.fn().mockResolvedValue({ ok: false });
+      // Mock fetch for health checks — always fail (both ping and /health)
+      const fetchMock = vi.fn().mockRejectedValue(new Error('Connection refused'));
       global.fetch = fetchMock as unknown as typeof fetch;
 
       // Run initializeAllBridges with fake timers to skip retry delays
@@ -756,6 +829,7 @@ describe('http-bridge', () => {
     it('should handle worker response with isError flag', async () => {
       fetchMock.mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({
           jsonrpc: '2.0',
           id: '123',
@@ -774,6 +848,7 @@ describe('http-bridge', () => {
     it('should handle non-JSON text response', async () => {
       fetchMock.mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({
           jsonrpc: '2.0',
           id: '123',
@@ -792,6 +867,7 @@ describe('http-bridge', () => {
     it('should handle empty content array', async () => {
       fetchMock.mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({
           jsonrpc: '2.0',
           id: '123',
@@ -808,6 +884,7 @@ describe('http-bridge', () => {
     it('should handle missing content text', async () => {
       fetchMock.mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({
           jsonrpc: '2.0',
           id: '123',
@@ -832,8 +909,7 @@ describe('http-bridge', () => {
         return new Promise((_, reject) => {
           if (options?.signal) {
             options.signal.addEventListener('abort', () => {
-              const error = new Error('The operation was aborted');
-              error.name = 'AbortError';
+              const error = new DOMException('The operation was aborted', 'TimeoutError');
               reject(error);
             });
           }
@@ -857,6 +933,7 @@ describe('http-bridge', () => {
 
       fetchMock.mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({
           jsonrpc: '2.0',
           id: '123',
@@ -870,24 +947,21 @@ describe('http-bridge', () => {
       expect(result).toEqual(complexData);
     });
 
-    it('should clear timeout on successful response', async () => {
-      const clearTimeoutSpy = vi.spyOn(global, 'clearTimeout');
-
+    it('should resolve without timeout interference on successful response', async () => {
       fetchMock.mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({
           jsonrpc: '2.0',
           id: '123',
           result: {
-            content: [{ type: 'text', text: '{}' }],
+            content: [{ type: 'text', text: '{"ok":true}' }],
           },
         }),
       });
 
-      await callWorker('slack', 'test', {});
-      expect(clearTimeoutSpy).toHaveBeenCalled();
-
-      clearTimeoutSpy.mockRestore();
+      const result = await callWorker('slack', 'test', {});
+      expect(result).toEqual({ ok: true });
     });
 
     it('should log error message on failure', async () => {
@@ -928,6 +1002,7 @@ describe('http-bridge', () => {
 
       fetchMock.mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({
           jsonrpc: '2.0',
           id: '123',
@@ -941,10 +1016,12 @@ describe('http-bridge', () => {
         expect.stringContaining('gitlab'),
         expect.objectContaining({
           method: 'POST',
-          headers: {
+          headers: expect.objectContaining({
             'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+            'MCP-Protocol-Version': LATEST_PROTOCOL_VERSION,
             Authorization: 'Bearer test-secret-token',
-          },
+          }),
         })
       );
     });
@@ -954,6 +1031,7 @@ describe('http-bridge', () => {
 
       fetchMock.mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({
           jsonrpc: '2.0',
           id: '123',
@@ -963,14 +1041,10 @@ describe('http-bridge', () => {
 
       await callWorker('gitlab', 'list_branches', { project_id: '1' });
 
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining('gitlab'),
-        expect.objectContaining({
-          headers: { 'Content-Type': 'application/json' },
-        })
-      );
-      // Verify no Authorization key in headers
       const calledHeaders = fetchMock.mock.calls[0][1].headers;
+      expect(calledHeaders['Content-Type']).toBe('application/json');
+      expect(calledHeaders['Accept']).toBe('application/json, text/event-stream');
+      expect(calledHeaders['MCP-Protocol-Version']).toBe(LATEST_PROTOCOL_VERSION);
       expect(calledHeaders).not.toHaveProperty('Authorization');
     });
   });
@@ -1020,6 +1094,7 @@ describe('http-bridge', () => {
 
       fetchMock.mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({
           jsonrpc: '2.0',
           id: '123',
@@ -1038,6 +1113,7 @@ describe('http-bridge', () => {
     it('should pass redirect: error in callWorker fetch', async () => {
       fetchMock.mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({
           jsonrpc: '2.0',
           id: '123',
@@ -1053,10 +1129,15 @@ describe('http-bridge', () => {
     });
 
     it('should pass redirect: error in isWorkerAvailable fetch', async () => {
-      fetchMock.mockResolvedValue({ ok: true });
+      fetchMock.mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ jsonrpc: '2.0', id: '1', result: {} }),
+      });
 
       await isWorkerAvailable('gitlab');
 
+      // First call is the MCP ping POST
       expect(fetchMock.mock.calls[0][1].redirect).toBe('error');
     });
   });
@@ -1206,12 +1287,22 @@ describe('http-bridge', () => {
     });
 
     it('retries startup health checks with backoff when worker is not ready', async () => {
-      // Fail first 3 attempts, succeed on 4th (attempt index 3)
+      // All fetches fail (both ping and /health) until the last attempt's ping succeeds
+      // Each health check attempt: ping (fail) -> /health (fail) = 2 calls
+      // Last attempt: ping (success) = 1 call
+      // Total attempts: 4 (initial + 3 retries)
+      // 3 failed attempts * 2 calls + 1 success * 1 call = 7 calls
       let callCount = 0;
       fetchMock.mockImplementation(() => {
         callCount++;
-        if (callCount <= 3) return Promise.reject(new Error('Connection refused'));
-        return Promise.resolve({ ok: true });
+        // First 6 calls fail (3 attempts * 2 calls each for ping+health)
+        if (callCount <= 6) return Promise.reject(new Error('Connection refused'));
+        // 7th call (4th attempt's ping) succeeds
+        return Promise.resolve({
+          ok: true,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          json: async () => ({ jsonrpc: '2.0', id: '1', result: {} }),
+        });
       });
 
       const bridgesPromise = initializeAllBridges();
@@ -1220,25 +1311,32 @@ describe('http-bridge', () => {
       }
       await bridgesPromise;
 
-      // Should have retried — 4 total calls (3 failures + 1 success)
-      expect(fetchMock.mock.calls.length).toBe(4);
+      // 3 failed attempts (2 calls each: ping + /health) + 1 success (1 call: ping)
+      expect(fetchMock.mock.calls.length).toBe(7);
     });
 
     it('succeeds on first attempt without retrying', async () => {
-      fetchMock.mockResolvedValue({ ok: true });
+      // Ping succeeds on first try
+      fetchMock.mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ jsonrpc: '2.0', id: '1', result: {} }),
+      });
 
       const bridgesPromise = initializeAllBridges();
       await vi.advanceTimersByTimeAsync(0);
       await bridgesPromise;
 
-      // Checked exactly once — no retries needed
+      // Checked exactly once via MCP ping — no retries needed
       expect(fetchMock.mock.calls.length).toBe(1);
-      expect(fetchMock.mock.calls[0][0]).toContain('/health');
+      // First call is ping POST, not /health
+      expect(fetchMock.mock.calls[0][0]).not.toContain('/health');
     });
 
     it('logs at info level (not warn) during startup retries', async () => {
       const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      // All health check attempts fail (both ping and /health)
       fetchMock.mockRejectedValue(new Error('Connection refused'));
 
       const bridgesPromise = initializeAllBridges();
@@ -1271,7 +1369,11 @@ describe('http-bridge', () => {
     });
 
     it('seeds worker cache after startup checks', async () => {
-      fetchMock.mockResolvedValue({ ok: true });
+      fetchMock.mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ jsonrpc: '2.0', id: '1', result: {} }),
+      });
 
       const bridgesPromise = initializeAllBridges();
       await vi.advanceTimersByTimeAsync(0);
@@ -1283,6 +1385,267 @@ describe('http-bridge', () => {
       const available = await isWorkerAvailable('gitlab');
       expect(available).toBe(true);
       expect(fetchMock.mock.calls.length).toBe(callsBefore);
+    });
+  });
+
+  describe('buildWorkerHeaders', () => {
+    it('includes Content-Type, Accept, and MCP-Protocol-Version', () => {
+      const headers = buildWorkerHeaders();
+      expect(headers['Content-Type']).toBe('application/json');
+      expect(headers['Accept']).toBe('application/json, text/event-stream');
+      expect(headers['MCP-Protocol-Version']).toBe(LATEST_PROTOCOL_VERSION);
+    });
+
+    it('adds Authorization header when auth token is provided', () => {
+      const headers = buildWorkerHeaders('my-token');
+      expect(headers['Authorization']).toBe('Bearer my-token');
+    });
+
+    it('omits Authorization header when auth token is undefined', () => {
+      const headers = buildWorkerHeaders(undefined);
+      expect(headers).not.toHaveProperty('Authorization');
+    });
+
+    it('omits Authorization header when auth token is empty string', () => {
+      const headers = buildWorkerHeaders('');
+      expect(headers).not.toHaveProperty('Authorization');
+    });
+  });
+
+  describe('parseResponse', () => {
+    it('parses JSON content-type as JSON', async () => {
+      const mockResponse = {
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ jsonrpc: '2.0' as const, id: '1', result: { data: 'test' } }),
+      } as unknown as Response;
+
+      const result = await parseResponse(mockResponse);
+      expect(result).toEqual({ jsonrpc: '2.0', id: '1', result: { data: 'test' } });
+    });
+
+    it('parses SSE content-type by extracting data: line', async () => {
+      const sseText = 'event: message\ndata: {"jsonrpc":"2.0","id":"1","result":{"ok":true}}\n\n';
+      const mockResponse = {
+        headers: new Headers({ 'content-type': 'text/event-stream' }),
+        text: async () => sseText,
+      } as unknown as Response;
+
+      const result = await parseResponse(mockResponse);
+      expect(result).toEqual({ jsonrpc: '2.0', id: '1', result: { ok: true } });
+    });
+
+    it('throws when SSE response has no data: lines', async () => {
+      const sseText = 'event: message\n: comment\n\n';
+      const mockResponse = {
+        headers: new Headers({ 'content-type': 'text/event-stream' }),
+        text: async () => sseText,
+      } as unknown as Response;
+
+      await expect(parseResponse(mockResponse)).rejects.toThrow(
+        'No JSON-RPC response in SSE stream'
+      );
+    });
+
+    it('handles SSE with multiple data lines and returns the first', async () => {
+      const sseText =
+        'data: {"jsonrpc":"2.0","id":"1","result":{"first":true}}\ndata: {"jsonrpc":"2.0","id":"2","result":{"second":true}}\n';
+      const mockResponse = {
+        headers: new Headers({ 'content-type': 'text/event-stream' }),
+        text: async () => sseText,
+      } as unknown as Response;
+
+      const result = await parseResponse(mockResponse);
+      expect(result.result).toEqual({ first: true });
+    });
+
+    it('handles content-type with charset parameter', async () => {
+      const mockResponse = {
+        headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+        json: async () => ({ jsonrpc: '2.0' as const, id: '1', result: {} }),
+      } as unknown as Response;
+
+      const result = await parseResponse(mockResponse);
+      expect(result).toEqual({ jsonrpc: '2.0', id: '1', result: {} });
+    });
+
+    it('handles missing content-type header as JSON', async () => {
+      const mockResponse = {
+        headers: new Headers(),
+        json: async () => ({ jsonrpc: '2.0' as const, id: '1', result: {} }),
+      } as unknown as Response;
+
+      const result = await parseResponse(mockResponse);
+      expect(result).toEqual({ jsonrpc: '2.0', id: '1', result: {} });
+    });
+
+    it('skips empty data: lines in SSE', async () => {
+      const sseText = 'data: \ndata: {"jsonrpc":"2.0","id":"1","result":{"ok":true}}\n';
+      const mockResponse = {
+        headers: new Headers({ 'content-type': 'text/event-stream' }),
+        text: async () => sseText,
+      } as unknown as Response;
+
+      const result = await parseResponse(mockResponse);
+      expect(result).toEqual({ jsonrpc: '2.0', id: '1', result: { ok: true } });
+    });
+
+    it('throws with context when JSON body is malformed', async () => {
+      const mockResponse = {
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => {
+          throw new SyntaxError('Unexpected token < in JSON at position 0');
+        },
+      } as unknown as Response;
+
+      await expect(parseResponse(mockResponse)).rejects.toThrow(
+        /Failed to parse JSON response \(status 200\)/
+      );
+    });
+
+    it('throws with context when SSE data line contains invalid JSON', async () => {
+      const sseText = 'data: not-valid-json\n';
+      const mockResponse = {
+        status: 200,
+        headers: new Headers({ 'content-type': 'text/event-stream' }),
+        text: async () => sseText,
+      } as unknown as Response;
+
+      await expect(parseResponse(mockResponse)).rejects.toThrow(
+        /Failed to parse SSE JSON-RPC response \(status 200\)/
+      );
+    });
+
+    it('includes response status in JSON parse error message', async () => {
+      const mockResponse = {
+        status: 502,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => {
+          throw new SyntaxError('Unexpected end of JSON input');
+        },
+      } as unknown as Response;
+
+      await expect(parseResponse(mockResponse)).rejects.toThrow('status 502');
+    });
+
+    it('includes data preview in SSE parse error message', async () => {
+      const sseText = 'data: <html>Bad Gateway</html>\n';
+      const mockResponse = {
+        status: 502,
+        headers: new Headers({ 'content-type': 'text/event-stream' }),
+        text: async () => sseText,
+      } as unknown as Response;
+
+      await expect(parseResponse(mockResponse)).rejects.toThrow('Data: "<html>Bad Gateway</html>"');
+    });
+  });
+
+  describe('MCP ping health check', () => {
+    let fetchMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      clearWorkerCache();
+      fetchMock = vi.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('returns true when ping succeeds', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ jsonrpc: '2.0', id: '1', result: {} }),
+      });
+
+      const result = await isWorkerAvailable('gitlab');
+      expect(result).toBe(true);
+
+      // Only 1 call — ping succeeded, no /health fallback needed
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.method).toBe('ping');
+    });
+
+    it('logs warning when ping fails before falling back to /health', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      let callCount = 0;
+      fetchMock.mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) {
+          return Promise.reject(new Error('Connection error'));
+        }
+        return Promise.resolve({ ok: true });
+      });
+
+      const result = await isWorkerAvailable('gitlab');
+      expect(result).toBe(true);
+
+      const pingWarns = warnSpy.mock.calls
+        .map((c) => c.join(' '))
+        .filter((msg) => msg.includes('MCP ping failed for gitlab'));
+      expect(pingWarns).toHaveLength(1);
+      expect(pingWarns[0]).toContain('Connection error');
+
+      warnSpy.mockRestore();
+    });
+
+    it('falls back to /health when ping fails, returns true if /health succeeds', async () => {
+      let callCount = 0;
+      fetchMock.mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) {
+          // Ping fails
+          return Promise.reject(new Error('Connection error'));
+        }
+        // /health succeeds
+        return Promise.resolve({ ok: true });
+      });
+
+      const result = await isWorkerAvailable('gitlab');
+      expect(result).toBe(true);
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const secondUrl = fetchMock.mock.calls[1][0] as string;
+      expect(secondUrl).toContain('/health');
+    });
+
+    it('returns false when both ping and /health fail', async () => {
+      fetchMock.mockRejectedValue(new Error('Connection refused'));
+
+      const result = await isWorkerAvailable('gitlab');
+      expect(result).toBe(false);
+
+      // 2 calls: ping attempt + /health attempt
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('falls back to /health when ping returns JSON-RPC error', async () => {
+      let callCount = 0;
+      fetchMock.mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) {
+          // Ping returns error response
+          return Promise.resolve({
+            ok: true,
+            headers: new Headers({ 'content-type': 'application/json' }),
+            json: async () => ({
+              jsonrpc: '2.0',
+              id: '1',
+              error: { code: -32601, message: 'Method not found' },
+            }),
+          });
+        }
+        // /health succeeds
+        return Promise.resolve({ ok: true });
+      });
+
+      const result = await isWorkerAvailable('gitlab');
+      expect(result).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     });
   });
 });

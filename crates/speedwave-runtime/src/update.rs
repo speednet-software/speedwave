@@ -50,6 +50,20 @@ fn snapshot_path_in(data_dir: &std::path::Path, project: &str) -> PathBuf {
         .join("snapshot.json")
 }
 
+/// Sets `0o700` permissions on `dir` and its parent (if any).
+/// Used by both `save_snapshot()` and `save_snapshot_in()` to secure the
+/// `snapshots/<project>/` directory and its parent `snapshots/` directory.
+#[cfg(unix)]
+fn secure_snapshot_dirs(dir: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode_700 = std::fs::Permissions::from_mode(0o700);
+    std::fs::set_permissions(dir, mode_700.clone())?;
+    if let Some(parent) = dir.parent() {
+        std::fs::set_permissions(parent, mode_700)?;
+    }
+    Ok(())
+}
+
 /// Testable variant: saves a snapshot reading compose from an explicit data directory.
 #[cfg(test)]
 fn save_snapshot_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result<()> {
@@ -65,16 +79,9 @@ fn save_snapshot_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result
     let dir = data_dir.join("snapshots").join(project);
     std::fs::create_dir_all(&dir)?;
 
-    // See also: save_snapshot() — identical permission block (2 of 3, Rule of Three)
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mode_700 = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(&dir, mode_700.clone())?;
-        if let Some(parent) = dir.parent() {
-            // parent = data_dir/snapshots/ — stop here
-            std::fs::set_permissions(parent, mode_700)?;
-        }
+        secure_snapshot_dirs(&dir)?;
     }
 
     let snapshot = UpdateSnapshot {
@@ -121,16 +128,9 @@ pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
     let dir = snapshot_dir(project)?;
     std::fs::create_dir_all(&dir)?;
 
-    // See also: save_snapshot_in() — identical permission block (2 of 3, Rule of Three)
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mode_700 = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(&dir, mode_700.clone())?;
-        if let Some(parent) = dir.parent() {
-            // parent = data_dir/snapshots/ — stop here
-            std::fs::set_permissions(parent, mode_700)?;
-        }
+        secure_snapshot_dirs(&dir)?;
     }
 
     let plugin_manifests = crate::plugin::list_installed_plugins().unwrap_or_else(|e| {
@@ -685,8 +685,9 @@ mod tests {
 
     #[test]
     fn test_save_snapshot_sets_parent_permissions() {
-        // Structural test: verify save_snapshot() (production, not _in) sets permissions
-        // on both dir and parent. Protects against divergence between production and test helper.
+        // Structural test: verify save_snapshot() (production, not _in) delegates
+        // to secure_snapshot_dirs. Protects against accidental removal of the
+        // permission-setting call.
         let source = include_str!("update.rs");
 
         // Find the production save_snapshot function (not save_snapshot_in)
@@ -702,12 +703,8 @@ mod tests {
         let fn_body = &fn_body[..fn_end];
 
         assert!(
-            fn_body.contains("set_permissions(&dir"),
-            "save_snapshot must set_permissions on dir"
-        );
-        assert!(
-            fn_body.contains("set_permissions(parent"),
-            "save_snapshot must set_permissions on parent dir"
+            fn_body.contains("secure_snapshot_dirs"),
+            "save_snapshot must call secure_snapshot_dirs to set permissions on dir and parent"
         );
     }
 

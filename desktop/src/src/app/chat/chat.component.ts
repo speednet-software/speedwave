@@ -41,6 +41,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   projectMemory = '';
   showMemory = false;
   viewError = '';
+  private resumeInProgress = false;
 
   readonly chat = inject(ChatStateService);
   readonly projectState = inject(ProjectStateService);
@@ -186,43 +187,54 @@ export class ChatComponent implements OnInit, OnDestroy {
    * @param sessionId - The UUID of the conversation to resume.
    */
   async resumeConversation(sessionId: string): Promise<void> {
-    if (!this.viewingTranscript) return;
+    if (!this.viewingTranscript || this.resumeInProgress) return;
+    this.resumeInProgress = true;
+    console.debug('[chat] resumeConversation: sessionId=%s', sessionId);
     const messages: ChatMessage[] = this.viewingTranscript.messages.map((msg) => ({
       role: msg.role as 'user' | 'assistant',
-      blocks: msg.blocks ?? [{ type: 'text' as const, content: msg.content }],
+      blocks: normalizeHistoryBlocks(
+        msg.blocks ?? [{ type: 'text' as const, content: msg.content }]
+      ),
       timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
     }));
+
+    // Load transcript messages immediately so the user sees history while
+    // the backend resumes the session (which may take seconds).
+    this.chat.loadMessages(messages);
+    this.viewingTranscript = null;
+    this.showHistory = false;
+    this.cdr.markForCheck();
 
     try {
       const project = this.projectState.activeProject;
       if (project) {
+        console.debug('[chat] resumeConversation: invoking backend');
         await this.tauri.invoke('resume_conversation', { project, sessionId });
+        console.debug('[chat] resumeConversation: backend success');
       }
-      this.chat.loadMessages(messages);
     } catch (err) {
+      console.error('[chat] resumeConversation failed:', err);
       const msg = String(err);
       if (msg.includes('not authenticated')) {
         await this.projectState.retryAuth();
       } else {
         this.chat.loadMessages([
-          ...messages,
+          ...this.chat.messages,
           {
             role: 'assistant',
             blocks: [
               {
                 type: 'error' as const,
-                content: `Failed to resume session: ${err}. Showing transcript for context only.`,
+                content: `Failed to resume session: ${err}`,
               },
             ],
             timestamp: Date.now(),
           },
         ]);
       }
+    } finally {
+      this.resumeInProgress = false;
     }
-
-    this.viewingTranscript = null;
-    this.showHistory = false;
-    this.cdr.markForCheck();
   }
 
   /** Starts a new conversation by clearing all state and re-initialising. */
@@ -308,4 +320,73 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.unsubAuthWatch = null;
     }
   }
+}
+
+// ── History block normalization ───────────────────────────────────────
+
+/** Raw tool_use block shape from Rust history.rs (flat, no nested `tool`). */
+interface HistoryToolUseBlock {
+  type: 'tool_use';
+  tool_name: string;
+  input_json: string;
+}
+
+/** Raw tool_result block from Rust history.rs. */
+interface HistoryToolResultBlock {
+  type: 'tool_result';
+  content: string;
+  is_error: boolean;
+}
+
+/**
+ * Converts blocks from Rust history format to the Angular live-chat format.
+ * History `tool_use` blocks are flat (`{ type, tool_name, input_json }`),
+ * while live-chat blocks nest inside `{ type: 'tool_use', tool: ToolUseBlock }`.
+ * History `tool_result` blocks are merged into the preceding `tool_use` block.
+ * @param blocks - Raw blocks from Rust history (may be flat tool_use or already normalized).
+ *   `tool_result` blocks are consumed and merged into the preceding `tool_use`;
+ *   they do not appear standalone in the returned array.
+ */
+function normalizeHistoryBlocks(
+  blocks: (import('../models/chat').MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock)[]
+): import('../models/chat').MessageBlock[] {
+  const result: import('../models/chat').MessageBlock[] = [];
+
+  for (const block of blocks) {
+    if (block.type === 'tool_use' && !('tool' in block)) {
+      // History format: flat tool_use → wrap into nested ToolUseBlock
+      const hist = block as HistoryToolUseBlock;
+      result.push({
+        type: 'tool_use',
+        tool: {
+          type: 'tool_use',
+          tool_id: '',
+          tool_name: hist.tool_name,
+          input_json: hist.input_json,
+          status: 'done',
+          result: '',
+          result_is_error: false,
+          collapsed: true,
+        },
+      });
+    } else if (block.type === 'tool_result') {
+      // History format: merge result into the preceding tool_use block.
+      // tool_result blocks are consumed here and do not appear standalone.
+      const hist = block as HistoryToolResultBlock;
+      const prev = result[result.length - 1];
+      if (prev?.type === 'tool_use') {
+        const base = { ...prev.tool, result: hist.content };
+        prev.tool = hist.is_error
+          ? { ...base, status: 'error' as const, result_is_error: true as const }
+          : { ...base, status: 'done' as const, result_is_error: false as const };
+      } else {
+        console.warn('[normalizeHistoryBlocks] orphaned tool_result (no preceding tool_use)');
+      }
+    } else {
+      // text, thinking, error, or already-normalized tool_use — pass through
+      result.push(block as import('../models/chat').MessageBlock);
+    }
+  }
+
+  return result;
 }

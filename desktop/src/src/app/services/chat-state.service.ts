@@ -10,6 +10,7 @@ import type {
   ToolUseBlock,
   AskUserQuestionBlock,
   ProjectList,
+  RateLimitInfo,
 } from '../models/chat';
 
 // Re-export types consumed by components
@@ -20,7 +21,13 @@ export type {
   ProjectList,
   SessionStats,
   AskUserQuestionBlock,
+  RateLimitInfo,
 };
+
+/** Maximum time to wait for a chat session to start before surfacing a timeout error. */
+const SESSION_START_TIMEOUT_MS = 30_000;
+/** Polling interval while waiting for a session to start. */
+const SESSION_START_POLL_MS = 500;
 
 /** Singleton service that holds chat session state across navigation. */
 @Injectable({ providedIn: 'root' })
@@ -45,9 +52,15 @@ export class ChatStateService {
     return this._sessionStats;
   }
 
+  private _model = '';
+  private _rateLimit: RateLimitInfo | null = null;
+  private _totalOutputTokens = 0;
+  private _contextWindowSize = 200_000;
+
   private unlisten: UnlistenFn | null = null;
   private listenerReady = false;
   private initialized = false;
+  private startingSession = false;
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private unsubProjectChange: (() => void) | null = null;
@@ -92,6 +105,11 @@ export class ChatStateService {
 
   /** Ensures the stream listener runs exactly once. Waits for project ready before starting chat. */
   async init(): Promise<void> {
+    console.debug(
+      '[chat-state] init: listenerReady=%s initialized=%s',
+      this.listenerReady,
+      this.initialized
+    );
     if (!this.listenerReady) {
       this.listenerReady = true;
       await this.setupStreamListener();
@@ -99,14 +117,15 @@ export class ChatStateService {
     }
     if (!this.initialized) {
       this.initialized = true;
-      // Wait for containers to be ready before starting chat session.
-      // ProjectStateService guarantees containers are running when status='ready'.
+      // Start chat session in the background — don't await so the UI stays
+      // responsive.  If the user sends a message before start_chat completes,
+      // sendMessage's auto-retry handles "no active session" transparently.
       if (this.projectState.status === 'ready') {
-        await this.startChatSession();
+        this.startChatSession();
       } else {
-        const unsub = this.projectState.onProjectReady(async () => {
+        const unsub = this.projectState.onProjectReady(() => {
           unsub();
-          await this.startChatSession();
+          this.startChatSession();
         });
       }
     }
@@ -114,19 +133,22 @@ export class ChatStateService {
 
   private async startChatSession(): Promise<void> {
     const project = this.projectState.activeProject;
-    if (project) {
+    if (project && !this.startingSession) {
+      this.startingSession = true;
+      console.debug('[chat-state] startChatSession: project=%s', project);
       try {
         await this.tauri.invoke('start_chat', { project });
+        console.debug('[chat-state] startChatSession: success');
       } catch (err) {
         const msg = String(err);
         if (msg.includes('not authenticated')) {
           this.projectState.status = 'auth_required';
+          this.notifyChange();
         } else {
           console.error('Failed to start chat session:', err);
-          this.projectState.status = 'error';
-          this.projectState.error = `Failed to start chat session: ${err}`;
         }
-        this.notifyChange();
+      } finally {
+        this.startingSession = false;
       }
     }
   }
@@ -137,6 +159,7 @@ export class ChatStateService {
    */
   async sendMessage(text: string): Promise<void> {
     if (!text || this.isStreaming) return;
+    console.debug('[chat-state] sendMessage: isStreaming=%s', this.isStreaming);
 
     this._messages = [
       ...this._messages,
@@ -161,12 +184,84 @@ export class ChatStateService {
         errStr.includes('Broken pipe')
       ) {
         try {
+          // If startChatSession is already in progress (from init), wait for
+          // it to finish rather than starting a competing session.
+          if (this.startingSession) {
+            const deadline = Date.now() + SESSION_START_TIMEOUT_MS;
+            while (this.startingSession && Date.now() < deadline) {
+              await new Promise((r) => setTimeout(r, SESSION_START_POLL_MS));
+            }
+            if (this.startingSession) {
+              // Timed out — session startup is still running (likely
+              // container recreation).  Show an error instead of hanging.
+              this.isStreaming = false;
+              this._messages = [
+                ...this._messages,
+                {
+                  role: 'assistant',
+                  blocks: [
+                    {
+                      type: 'error',
+                      content:
+                        'Session is still starting (containers may be restarting). Please try again in a moment.',
+                    },
+                  ],
+                  timestamp: Date.now(),
+                },
+              ];
+              this.notifyChange();
+              return;
+            }
+            // After waiting, try to send — session should be ready now
+            try {
+              await this.tauri.invoke('send_message', { message: text });
+            } catch (postWaitErr) {
+              this.isStreaming = false;
+              this._messages = [
+                ...this._messages,
+                {
+                  role: 'assistant',
+                  blocks: [
+                    {
+                      type: 'error',
+                      content: `Failed to send message after session started: ${postWaitErr}`,
+                    },
+                  ],
+                  timestamp: Date.now(),
+                },
+              ];
+              this.notifyChange();
+            }
+            return;
+          }
           const result = await this.tauri.invoke<ProjectList>('list_projects');
           if (result.active_project) {
-            await this.tauri.invoke('start_chat', { project: result.active_project });
+            this.startingSession = true;
+            try {
+              await this.tauri.invoke('start_chat', { project: result.active_project });
+            } finally {
+              this.startingSession = false;
+            }
             await this.tauri.invoke('send_message', { message: text });
             return;
           }
+          // No active project — surface actionable error
+          this.isStreaming = false;
+          this._messages = [
+            ...this._messages,
+            {
+              role: 'assistant',
+              blocks: [
+                {
+                  type: 'error',
+                  content: 'No active project. Please select or add a project first.',
+                },
+              ],
+              timestamp: Date.now(),
+            },
+          ];
+          this.notifyChange();
+          return;
         } catch (retryErr) {
           const retryMsg = String(retryErr);
           if (retryMsg.includes('not authenticated')) {
@@ -291,6 +386,24 @@ export class ChatStateService {
         break;
       }
 
+      case 'SystemInit':
+        this._model = chunk.data.model;
+        break;
+
+      case 'RateLimit':
+        if (chunk.data.utilization !== null) {
+          this._rateLimit = {
+            status: chunk.data.status,
+            utilization: chunk.data.utilization,
+            resets_at: chunk.data.resets_at,
+          };
+          // Update existing sessionStats immediately if present
+          if (this._sessionStats) {
+            this._sessionStats = { ...this._sessionStats, rate_limit: this._rateLimit };
+          }
+        }
+        break;
+
       case 'Result':
         if (chunk.data.result_text) {
           // Only append result_text when no streamed text blocks exist yet.
@@ -313,11 +426,20 @@ export class ChatStateService {
           this._currentBlocks = [];
         }
         this.isStreaming = false;
+        if (chunk.data.usage) {
+          this._totalOutputTokens += chunk.data.usage.output_tokens;
+        }
+        if (chunk.data.context_window_size) {
+          this._contextWindowSize = chunk.data.context_window_size;
+        }
         this._sessionStats = {
           session_id: chunk.data.session_id,
-          cost_usd: chunk.data.cost_usd ?? 0,
           total_cost: chunk.data.total_cost ?? 0,
           usage: chunk.data.usage,
+          model: this._model || undefined,
+          rate_limit: this._rateLimit ?? undefined,
+          context_window_size: this._contextWindowSize,
+          total_output_tokens: this._totalOutputTokens,
         };
         break;
 
@@ -343,11 +465,17 @@ export class ChatStateService {
 
   /** Clears all chat state to start a fresh conversation. */
   resetForNewConversation(): void {
+    console.debug('[chat-state] resetForNewConversation');
     this._messages = [];
     this._currentBlocks = [];
     this.isStreaming = false;
     this._sessionStats = null;
+    this._model = '';
+    this._rateLimit = null;
+    this._totalOutputTokens = 0;
+    this._contextWindowSize = 200_000;
     this.initialized = false;
+    this.startingSession = false;
     this.notifyChange();
   }
 
@@ -371,6 +499,10 @@ export class ChatStateService {
         this._currentBlocks = [];
         this.isStreaming = false;
         this._sessionStats = null;
+        this._model = '';
+        this._rateLimit = null;
+        this._totalOutputTokens = 0;
+        this._contextWindowSize = 200_000;
         this.notifyChange();
       }
     });

@@ -199,6 +199,10 @@ fn set_bundle_error(state: &mut bundle::BundleState, message: String) -> String 
     message
 }
 
+/// INVARIANT: `ensure_ready()` must NOT be gated behind `is_available()`.
+/// A stopped Lima VM returns `is_available() == false` but `ensure_ready()`
+/// can start it; gating one behind the other silently skips VM auto-start.
+/// The behavioral test for this lives in `lima.rs` → `test_ensure_ready_stopped_vm_starts_it`.
 fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), String> {
     log::info!("reconcile_bundle: loading current bundle manifest");
     let manifest = bundle::load_current_bundle_manifest().map_err(|e| {
@@ -218,18 +222,21 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         bundle_changed,
     );
 
+    let rt = speedwave_runtime::runtime::detect_runtime();
+
+    // Call ensure_ready() once and track whether it succeeded. This avoids a
+    // double limactl probe (once for image-existence check, once before rebuild).
+    let mut runtime_ready = false;
+    match rt.ensure_ready() {
+        Ok(()) => runtime_ready = true,
+        Err(e) => log::warn!("reconcile: runtime not ready: {e}"),
+    }
+
     // Even when bundle_id matches, verify images actually exist.
     // They may have been lost after containerd reinstall or VM recreation.
-    if !bundle_changed {
-        let rt = speedwave_runtime::runtime::detect_runtime();
-        if rt.is_available() {
-            if let Err(e) = rt.ensure_ready() {
-                log::warn!("reconcile: runtime not ready, skipping image check: {e}");
-            } else if !build::images_exist(&*rt) {
-                log::warn!("reconcile: bundle unchanged but images missing, forcing rebuild");
-                bundle_changed = true;
-            }
-        }
+    if !bundle_changed && runtime_ready && !build::images_exist(&*rt) {
+        log::warn!("reconcile: bundle unchanged but images missing, forcing rebuild");
+        bundle_changed = true;
     }
 
     if !bundle_changed {
@@ -268,19 +275,16 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
     set_image_readiness(ImageReadiness::Building);
     emit_bundle_status(app_handle);
 
-    let rt = speedwave_runtime::runtime::detect_runtime();
-    if !rt.is_available() {
-        return Err(set_bundle_error(
-            &mut state,
-            "Runtime not available while applying the new bundle".to_string(),
-        ));
+    // If the first ensure_ready() failed, retry now — runtime may have
+    // recovered (e.g. VM was starting). If it fails again, report the error.
+    if !runtime_ready {
+        rt.ensure_ready().map_err(|e| {
+            set_bundle_error(
+                &mut state,
+                format!("Runtime is not ready while applying the new bundle: {e}"),
+            )
+        })?;
     }
-    rt.ensure_ready().map_err(|e| {
-        set_bundle_error(
-            &mut state,
-            format!("Runtime is not ready while applying the new bundle: {e}"),
-        )
-    })?;
 
     let build_root = build::resolve_build_root().map_err(|e| {
         let msg = format!("Failed to resolve build root: {e}");
@@ -471,7 +475,12 @@ pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) {
 /// recreate containers so the hub connects to the correct port.
 ///
 /// Runs in a background thread to avoid blocking app startup.
-pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
+/// The `compose_lock` serialises this with `start_chat`/`resume_conversation`
+/// to prevent concurrent compose operations.
+pub(crate) fn reconcile_compose_port(
+    app_handle: &tauri::AppHandle,
+    compose_lock: std::sync::Arc<std::sync::Mutex<()>>,
+) {
     let handle = app_handle.clone();
     std::thread::spawn(move || {
         let project = match config::load_user_config()
@@ -551,12 +560,15 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
             return;
         }
 
-        // Stop existing containers before regenerating compose — nerdctl's
-        // name-store can reject `compose up --force-recreate` with "name already
-        // used" if containers are not torn down first.
-        if let Err(e) = rt.compose_down(&project) {
-            log::warn!("reconcile_compose_port: compose_down failed (continuing): {e}");
-        }
+        // Acquire compose lock to prevent concurrent compose operations
+        // (e.g. start_chat running ensure_exec_healthy at the same time).
+        let _compose_guard = match compose_lock.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                log::error!("reconcile_compose_port: compose lock poisoned: {e}");
+                return;
+            }
+        };
 
         // Regenerate compose with the current port
         if let Err(e) = crate::containers_cmd::render_and_save_compose(&project, &*rt) {
@@ -564,13 +576,13 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
             return;
         }
 
-        // Wait for images to be ready before starting containers
-        if let Err(e) = crate::containers_cmd::ensure_images_ready() {
-            log::error!("reconcile_compose_port: images not ready: {e}");
-            return;
-        }
-
-        // Start containers with the new compose
+        // Force-recreate to ensure the hub picks up the new WORKER_OS_URL.
+        // nerdctl compose (unlike Docker Compose) does not reliably detect
+        // env-var-only changes in `compose_up`, so force-recreate is needed
+        // for correctness.  The compose lock prevents this from racing with
+        // start_chat / resume_conversation.
+        // Images are guaranteed present — reconcile only runs after a
+        // successful mcp-os spawn, meaning containers were running.
         if let Err(e) = rt.compose_up_recreate(&project) {
             log::error!("reconcile_compose_port: compose_up_recreate failed: {e}");
             return;
