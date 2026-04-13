@@ -88,7 +88,7 @@ describe('ChatComponent', () => {
 
       chatState.handleStreamChunk({
         chunk_type: 'Result',
-        data: { session_id: 'abc', cost_usd: 0.01, total_cost: 0.05 },
+        data: { session_id: 'abc', total_cost: 0.05 },
       });
 
       expect(chatState.isStreaming).toBe(false);
