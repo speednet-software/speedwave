@@ -24,6 +24,19 @@ Claude Code is installed via `install-claude.sh` — a reusable script (SSOT) us
 
 **Accepted residual risk (CWE-494 of bootstrap.sh):** The bootstrap script is fetched via TLS (`--proto '=https' --tlsv1.2`) without hash verification — identical to rustup, nvm, and homebrew. Hash-pinning the bootstrap script is operationally fragile (it changes independently of Claude Code versions). Mitigating factors: (1) official Anthropic installer, (2) TLS protection, (3) installer verifies binary SHA256, (4) container isolation (cap_drop ALL, no tokens, read-only FS).
 
+## Runtime Behavior Flags
+
+Claude Code behavior inside the container is tuned via environment variables injected by `render_compose()`. Defaults live in `defaults::base_env()` so they are user-overridable via `claude.env.<VAR>` in `.speedwave.json` or `~/.speedwave/config.json`.
+
+| Variable                       | Default | Purpose                                                                                                                                                           |
+| ------------------------------ | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLAUDE_CODE_ENABLE_TELEMETRY` | `0`     | Disables upstream telemetry.                                                                                                                                      |
+| `DISABLE_AUTOUPDATER`          | `1`     | Prevents in-container auto-update after pinned installation.                                                                                                      |
+| `IS_SANDBOX`                   | `1`     | Signals a sandboxed environment so Claude Code accepts `--dangerously-skip-permissions` under Linux rootless UID 0 (ADR-026).[^39]                                |
+| `CLAUDE_CODE_NO_FLICKER`       | `1`     | Enables the alt-screen / differential renderer (focus view). Mitigates PTY write-side backpressure that previously froze long streaming sessions in the CLI.[^40] |
+
+A separate template-sourced flag (`CLAUDE_CODE_EFFORT_LEVEL=max` in `compose.template.yml`) is considered non-user-overridable — it is a Speedwave policy, not a tuning knob.
+
 ## Persistent Volume
 
 Claude Code binary and user data persist across container rebuilds via a named volume:
@@ -55,3 +68,7 @@ Speedwave v1 used `npm install -g @anthropic-ai/claude-code`. The npm package ha
 [^37]: [Claude Code Output Styles — Custom Styles](https://code.claude.com/docs/en/output-styles)
 
 [^38]: [Claude Code installation — native installer replaces npm](https://code.claude.com/docs/en/setup)
+
+[^39]: [ADR-026: Linux rootless container user](./ADR-026-linux-rootless-container-user.md)
+
+[^40]: [Claude Code CHANGELOG — 2.1.97 introduces `CLAUDE_CODE_NO_FLICKER` / Ctrl+O focus view toggle](https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md)
