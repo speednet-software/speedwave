@@ -25,7 +25,6 @@ describe('SessionStatsComponent', () => {
   it('renders model name', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0.01,
       total_cost: 0.05,
       model: 'Opus 4.6',
       context_window_size: 200000,
@@ -40,7 +39,6 @@ describe('SessionStatsComponent', () => {
   it('renders Claude fallback when model is undefined', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0,
       total_cost: 0,
       context_window_size: 200000,
       total_output_tokens: 0,
@@ -52,7 +50,6 @@ describe('SessionStatsComponent', () => {
   it('renders CTX bar from per-step usage', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0.01,
       total_cost: 0.05,
       usage: {
         input_tokens: 3,
@@ -73,7 +70,6 @@ describe('SessionStatsComponent', () => {
   it('does not render CTX when no usage', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0,
       total_cost: 0,
       context_window_size: 200000,
       total_output_tokens: 0,
@@ -85,7 +81,6 @@ describe('SessionStatsComponent', () => {
   it('renders cache read and cache write tokens separately', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0.01,
       total_cost: 0.05,
       usage: {
         input_tokens: 3,
@@ -107,7 +102,6 @@ describe('SessionStatsComponent', () => {
   it('hides CR/CW when cache tokens are absent', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0.01,
       total_cost: 0.05,
       usage: { input_tokens: 500, output_tokens: 100 },
       context_window_size: 200000,
@@ -125,7 +119,6 @@ describe('SessionStatsComponent', () => {
     const resetEpoch = Math.floor(Date.now() / 1000) + 3600;
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0.01,
       total_cost: 0.05,
       rate_limit: { status: 'allowed_warning', utilization: 65, resets_at: resetEpoch },
       context_window_size: 200000,
@@ -141,7 +134,6 @@ describe('SessionStatsComponent', () => {
   it('does not render rate limit when absent', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0,
       total_cost: 0,
       context_window_size: 200000,
       total_output_tokens: 0,
@@ -153,7 +145,6 @@ describe('SessionStatsComponent', () => {
   it('renders cost when total_cost > 0', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0.003,
       total_cost: 0.015,
       context_window_size: 200000,
       total_output_tokens: 0,
@@ -165,7 +156,6 @@ describe('SessionStatsComponent', () => {
   it('hides cost when total_cost is 0', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0,
       total_cost: 0,
       context_window_size: 200000,
       total_output_tokens: 0,
@@ -177,7 +167,6 @@ describe('SessionStatsComponent', () => {
   it('computes ctxPct correctly', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0,
       total_cost: 0,
       usage: { input_tokens: 100, output_tokens: 0, cache_read_tokens: 49900 },
       context_window_size: 200000,
@@ -191,7 +180,6 @@ describe('SessionStatsComponent', () => {
   it('uses actual context_window_size', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0,
       total_cost: 0,
       usage: { input_tokens: 3, output_tokens: 0, cache_read_tokens: 20000 },
       context_window_size: 1000000,
@@ -204,7 +192,6 @@ describe('SessionStatsComponent', () => {
   it('applies green bar color for low pct', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0,
       total_cost: 0,
       usage: { input_tokens: 1000, output_tokens: 0 },
       context_window_size: 200000,
@@ -216,7 +203,6 @@ describe('SessionStatsComponent', () => {
   it('applies yellow bar color for medium pct', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0,
       total_cost: 0,
       rate_limit: { status: 'allowed', utilization: 60, resets_at: null },
       context_window_size: 200000,
@@ -228,7 +214,6 @@ describe('SessionStatsComponent', () => {
   it('applies bold red for critical pct', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0,
       total_cost: 0,
       rate_limit: { status: 'rejected', utilization: 95, resets_at: null },
       context_window_size: 200000,
@@ -241,7 +226,6 @@ describe('SessionStatsComponent', () => {
   it('shows cumulative output tokens', () => {
     component.stats = {
       session_id: 'abc',
-      cost_usd: 0.01,
       total_cost: 0.05,
       usage: { input_tokens: 3, output_tokens: 100 },
       context_window_size: 200000,

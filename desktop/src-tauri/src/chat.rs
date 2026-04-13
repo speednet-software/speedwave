@@ -34,7 +34,7 @@ pub enum StreamChunk {
     /// Final result — conversation turn complete.
     Result {
         session_id: String,
-        cost_usd: Option<f64>,
+        /// Total session cost in USD — estimated from token counts at API pricing.
         total_cost: Option<f64>,
         usage: Option<UsageInfo>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -441,13 +441,10 @@ impl StreamParser {
             log::warn!("parse_result: result message missing 'session_id'");
         }
 
-        // Cost: try legacy fields first, then total_cost_usd (real CLI format)
-        let cost_usd = parsed["cost_usd"]
+        // Cost: prefer total_cost_usd (real CLI), fall back to total_cost (legacy)
+        let total_cost = parsed["total_cost_usd"]
             .as_f64()
-            .or_else(|| parsed["total_cost_usd"].as_f64());
-        let total_cost = parsed["total_cost"]
-            .as_f64()
-            .or_else(|| parsed["total_cost_usd"].as_f64());
+            .or_else(|| parsed["total_cost"].as_f64());
 
         // contextWindow is constant for a given model — safe to take first entry.
         // If Claude Code ever switches models mid-session, we'd need to reconcile.
@@ -488,7 +485,6 @@ impl StreamParser {
         (
             Some(StreamChunk::Result {
                 session_id,
-                cost_usd,
                 total_cost,
                 usage,
                 result_text,
@@ -1226,7 +1222,6 @@ mod tests {
     fn stream_chunk_result_round_trips() {
         let original = StreamChunk::Result {
             session_id: "abc".to_string(),
-            cost_usd: Some(0.01),
             total_cost: Some(0.05),
             usage: Some(UsageInfo {
                 input_tokens: 100,
@@ -1242,12 +1237,12 @@ mod tests {
         match deserialized {
             StreamChunk::Result {
                 session_id,
-                cost_usd,
+                total_cost,
                 usage,
                 ..
             } => {
                 assert_eq!(session_id, "abc");
-                assert_eq!(cost_usd, Some(0.01));
+                assert_eq!(total_cost, Some(0.05));
                 let u = usage.unwrap();
                 assert_eq!(u.input_tokens, 100);
                 assert_eq!(u.cache_read_tokens, Some(10));
@@ -1446,14 +1441,12 @@ mod tests {
         match chunk {
             StreamChunk::Result {
                 session_id,
-                cost_usd,
                 total_cost,
                 usage,
                 result_text,
                 context_window_size,
             } => {
                 assert_eq!(session_id, "550e8400-e29b-41d4-a716-446655440000");
-                assert_eq!(cost_usd, Some(0.003));
                 assert_eq!(total_cost, Some(0.015));
                 let u = usage.unwrap();
                 assert_eq!(u.input_tokens, 500);
@@ -1477,7 +1470,7 @@ mod tests {
             StreamChunk::Result {
                 usage,
                 context_window_size,
-                cost_usd,
+                total_cost,
                 ..
             } => {
                 // Should use flat usage (per-step), not modelUsage (cumulative)
@@ -1489,7 +1482,7 @@ mod tests {
                 // contextWindow from modelUsage
                 assert_eq!(context_window_size, Some(1_000_000));
                 // cost from total_cost_usd
-                assert_eq!(cost_usd, Some(0.078));
+                assert_eq!(total_cost, Some(0.078));
             }
             other => panic!("expected Result, got {other:?}"),
         }
@@ -1529,12 +1522,8 @@ mod tests {
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
             StreamChunk::Result {
-                cost_usd,
-                total_cost,
-                usage,
-                ..
+                total_cost, usage, ..
             } => {
-                assert!(cost_usd.is_none());
                 assert!(total_cost.is_none());
                 assert!(usage.is_none());
             }
@@ -1951,13 +1940,13 @@ mod tests {
         match &chunks[9] {
             StreamChunk::Result {
                 session_id,
-                cost_usd,
+                total_cost,
                 usage,
                 result_text,
                 ..
             } => {
                 assert_eq!(session_id, "550e8400-e29b-41d4-a716-446655440000");
-                assert_eq!(cost_usd, &Some(0.003));
+                assert_eq!(total_cost, &Some(0.003));
                 let u = usage.as_ref().unwrap();
                 assert_eq!(u.input_tokens, 100);
                 assert_eq!(u.output_tokens, 50);
@@ -2562,7 +2551,6 @@ mod tests {
     fn result_text_skipped_in_serialization_when_none() {
         let chunk = StreamChunk::Result {
             session_id: "abc".to_string(),
-            cost_usd: None,
             total_cost: None,
             usage: None,
             result_text: None,
@@ -2583,7 +2571,6 @@ mod tests {
     fn context_window_size_present_in_serialization_when_some() {
         let chunk = StreamChunk::Result {
             session_id: "abc".to_string(),
-            cost_usd: None,
             total_cost: None,
             usage: None,
             result_text: None,

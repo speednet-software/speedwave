@@ -128,7 +128,7 @@ export interface RateLimitInfo {
 /** Session cost/usage stats */
 export interface SessionStats {
   session_id: string;
-  cost_usd: number;
+  /** Total session cost in USD — estimated from token counts at API pricing. */
   total_cost: number;
   /** Per-step usage from flat result.usage (not cumulative). Use for CTX %. */
   usage?: UsageInfo;

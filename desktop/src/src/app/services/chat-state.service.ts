@@ -434,7 +434,6 @@ export class ChatStateService {
         }
         this._sessionStats = {
           session_id: chunk.data.session_id,
-          cost_usd: chunk.data.cost_usd ?? 0,
           total_cost: chunk.data.total_cost ?? 0,
           usage: chunk.data.usage,
           model: this._model || undefined,

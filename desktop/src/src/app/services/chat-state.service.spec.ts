@@ -403,11 +403,12 @@ describe('ChatStateService', () => {
       expect(service.currentBlocks).toHaveLength(0);
       expect(service.sessionStats).toEqual({
         session_id: 'abc',
-        cost_usd: 0.01,
         total_cost: 0.05,
         usage: { input_tokens: 100, output_tokens: 50 },
         total_output_tokens: 50,
         context_window_size: 200000,
+        model: undefined,
+        rate_limit: undefined,
       });
     });
 
@@ -737,7 +738,6 @@ describe('ChatStateService', () => {
         currentBlocks: [{ type: 'text', content: 'partial' }],
         sessionStats: {
           session_id: 'x',
-          cost_usd: 0,
           total_cost: 0,
           total_output_tokens: 0,
           context_window_size: 200000,
