@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.7.0](https://github.com/speednet-software/speedwave/compare/v0.6.1...v0.7.0) (2026-04-13)
+
+
+### Features
+
+* statusline rewrite, plugin limits, chat lifecycle fixes, and MCP 2025-11-25 compliance ([#430](https://github.com/speednet-software/speedwave/issues/430)) ([0af89f8](https://github.com/speednet-software/speedwave/commit/0af89f8b5d8a1a2d2494d17e729eb25a6e176ee4))
+
 ## [0.6.1](https://github.com/speednet-software/speedwave/compare/v0.6.0...v0.6.1) (2026-04-01)
 
 
