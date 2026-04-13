@@ -3736,6 +3736,39 @@ services:
     }
 
     #[test]
+    fn test_claude_env_has_effort_level() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig::default(),
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+
+        let claude_env = doc
+            .get("services")
+            .and_then(|s| s.get("claude"))
+            .and_then(|c| c.get("environment"))
+            .and_then(|e| e.as_sequence())
+            .expect("claude service must have environment");
+
+        let has_effort_level = claude_env
+            .iter()
+            .any(|v| v.as_str() == Some("CLAUDE_CODE_EFFORT_LEVEL=max"));
+        assert!(
+            has_effort_level,
+            "CLAUDE_CODE_EFFORT_LEVEL=max must be in claude service environment"
+        );
+    }
+
+    #[test]
     fn test_security_no_ports_on_each_worker() {
         for name in [
             "claude",

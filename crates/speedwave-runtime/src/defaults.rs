@@ -32,6 +32,13 @@ pub fn base_env() -> HashMap<String, String> {
     // containers run as UID 0 and Claude Code refuses --dangerously-skip-permissions
     // as root. IS_SANDBOX=1 bypasses this check. On macOS/Windows (UID 1000) it's a no-op.
     env.insert("IS_SANDBOX".into(), "1".into());
+    // Claude Code focus-view mode: alt-screen + differential rendering emits smaller
+    // ANSI updates instead of full-frame redraws on every stream chunk. Mitigates PTY
+    // write-side backpressure in the CLI (ssh → nerdctl exec → claude) that caused
+    // long streaming sessions to freeze. Introduced upstream in Claude Code 2.1.97.
+    // See issue #451. Users can override via claude.env.CLAUDE_CODE_NO_FLICKER in
+    // .speedwave.json if they prefer the legacy renderer.
+    env.insert("CLAUDE_CODE_NO_FLICKER".into(), "1".into());
     env
 }
 
@@ -81,6 +88,17 @@ mod tests {
         assert_eq!(
             env.get("CLAUDE_CODE_ENABLE_TELEMETRY").map(|s| s.as_str()),
             Some("0")
+        );
+    }
+
+    #[test]
+    fn base_env_enables_no_flicker() {
+        let env = base_env();
+        assert_eq!(
+            env.get("CLAUDE_CODE_NO_FLICKER").map(|s| s.as_str()),
+            Some("1"),
+            "CLAUDE_CODE_NO_FLICKER=1 mitigates PTY backpressure by emitting smaller \
+             ANSI updates via Claude Code's alt-screen renderer. See issue #451."
         );
     }
 

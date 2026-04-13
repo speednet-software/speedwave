@@ -30,7 +30,6 @@ services:
       - MCP_HUB_PORT=${PORT_HUB}
       - CLAUDE_CODE_IDE_HOST_OVERRIDE=${IDE_HOST_OVERRIDE}
       - CLAUDE_CODE_EFFORT_LEVEL=max
-      - CLAUDE_CODE_NO_FLICKER=1
     working_dir: /workspace
     networks:
       - ${NETWORK_NAME}
