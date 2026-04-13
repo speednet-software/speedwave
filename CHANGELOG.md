@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.7.1](https://github.com/speednet-software/speedwave/compare/v0.7.0...v0.7.1) (2026-04-13)
+
+
+### Bug Fixes
+
+* **runtime:** mitigate CLI TUI hang on long streams via NO_FLICKER ([#452](https://github.com/speednet-software/speedwave/issues/452)) ([#454](https://github.com/speednet-software/speedwave/issues/454)) ([f85ff4e](https://github.com/speednet-software/speedwave/commit/f85ff4e34fcc3e9f57719391266900278404f5cd))
+
 ## [0.7.0](https://github.com/speednet-software/speedwave/compare/v0.6.1...v0.7.0) (2026-04-13)
 
 Major release with 26 user-visible changes. Highlights: statusline rewrite with live Claude Code data, per-plugin CPU limits, major chat session lifecycle fixes, and MCP spec 2025-11-25 compliance. Batched in [#430](https://github.com/speednet-software/speedwave/pull/430).
