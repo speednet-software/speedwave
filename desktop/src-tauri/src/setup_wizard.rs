@@ -1812,6 +1812,7 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
 
     #[cfg(target_os = "windows")]
     {
+        let _ = home;
         let cli_dir = consts::data_dir().join("bin");
 
         let cli_dir_str = cli_dir.to_string_lossy().to_string();
