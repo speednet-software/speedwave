@@ -28,7 +28,9 @@ if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SRC_TAURI="$REPO_ROOT/desktop/src-tauri"
+# SRC_TAURI can be overridden by tests to point at a sandbox directory.
+# In production, this resolves to desktop/src-tauri/ within the repo.
+SRC_TAURI="${SRC_TAURI:-$REPO_ROOT/desktop/src-tauri}"
 NODE_ENTITLEMENTS="$SRC_TAURI/entitlements/node.plist"
 
 # Paths that tauri.macos.conf.json copies into .app/Contents/Resources/.

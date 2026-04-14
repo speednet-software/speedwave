@@ -361,6 +361,7 @@ test-desktop-build: build-angular build-mcp
 	bats _tests/desktop/desktop-build.bats
 	bats _tests/desktop/bundle-build-context.bats
 	bats _tests/desktop/verify-bundled-assets.bats
+	bats _tests/desktop/sign-bundled-binaries.bats
 	@echo "✅ Desktop build tests passed"
 
 # ── Desktop E2E tests ────────────────────────────────────────────────────────
