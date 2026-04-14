@@ -34,6 +34,8 @@ Store the private key as `TAURI_SIGNING_PRIVATE_KEY`. The public key is already 
 - `TAURI_SIGNING_PRIVATE_KEY` missing — tauri-action produces unsigned bundles. The Tauri updater will **refuse to install** them (signature verification fails). Users cannot auto-update.
 - Apple/Windows signing secrets missing — builds succeed but produce unsigned binaries. macOS Gatekeeper blocks the app (users must right-click > Open). Windows SmartScreen shows a warning.
 
+**Operational setup for Apple signing** (certificate generation, Keychain import, notary configuration, rotation) is documented in [Release Signing Guide](docs/contributing/release-signing.md). The architectural rationale — including why every Mach-O binary in `Contents/Resources/` is signed individually — is in [ADR-037](docs/adr/ADR-037-code-signing-and-bundled-binary-signing.md).
+
 ## How release-please Works
 
 Speedwave uses [release-please](https://github.com/googleapis/release-please) to automate version bumping and release creation from [Conventional Commits](https://www.conventionalcommits.org/) (already enforced via commitlint).

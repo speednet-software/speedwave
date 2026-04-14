@@ -1,6 +1,76 @@
 # Changelog
 
 
+## [0.7.1](https://github.com/speednet-software/speedwave/compare/v0.7.0...v0.7.1) (2026-04-13)
+
+
+### Bug Fixes
+
+* **runtime:** mitigate CLI TUI hang on long streams via NO_FLICKER ([#452](https://github.com/speednet-software/speedwave/issues/452)) ([#454](https://github.com/speednet-software/speedwave/issues/454)) ([f85ff4e](https://github.com/speednet-software/speedwave/commit/f85ff4e34fcc3e9f57719391266900278404f5cd))
+
+## [0.7.0](https://github.com/speednet-software/speedwave/compare/v0.6.1...v0.7.0) (2026-04-13)
+
+Major release with 26 user-visible changes. Highlights: statusline rewrite with live Claude Code data, per-plugin CPU limits, major chat session lifecycle fixes, and MCP spec 2025-11-25 compliance. Batched in [#430](https://github.com/speednet-software/speedwave/pull/430).
+
+### Features
+
+#### Runtime & Containers
+
+* **runtime:** add per-plugin `cpu_limit`, set effort level max ([#406](https://github.com/speednet-software/speedwave/pull/406))
+* **containers:** rewrite statusline with real data from Claude Code API ([#401](https://github.com/speednet-software/speedwave/pull/401))
+* **containers:** show git branch in statusline ([#402](https://github.com/speednet-software/speedwave/pull/402))
+
+#### Desktop
+
+* **desktop:** redesign chat status bar to match container statusline ([#420](https://github.com/speednet-software/speedwave/pull/420))
+
+#### CLI
+
+* **cli:** add automated plan→review→implement→verify loop ([#375](https://github.com/speednet-software/speedwave/pull/375))
+
+#### CI
+
+* **ci:** rename macOS .dmg files to clarify Apple Silicon vs Intel ([#378](https://github.com/speednet-software/speedwave/pull/378))
+
+### Bug Fixes
+
+#### Desktop
+
+* **desktop:** fix chat session lifecycle — New Chat/Resume hang, race conditions, dev/prod isolation ([#415](https://github.com/speednet-software/speedwave/pull/415))
+* **desktop:** redesign integration enable/configure UX ([#399](https://github.com/speednet-software/speedwave/pull/399))
+* **desktop:** format Settings timestamps as DD-MM-YYYY HH:MM:SS ([#403](https://github.com/speednet-software/speedwave/pull/403))
+* **desktop:** resolve code review findings ([#379](https://github.com/speednet-software/speedwave/pull/379))
+
+#### Runtime
+
+* **runtime:** improve plugin container limits, VM diagnostics, and reconcile flow ([#396](https://github.com/speednet-software/speedwave/pull/396))
+
+#### MCP
+
+* **mcp:** MCP spec 2025-11-25 compliance, self-declaring worker policy, and platform fixes ([#405](https://github.com/speednet-software/speedwave/pull/405))
+
+#### CLI
+
+* **cli:** improve plan-loop convergence and reduce review churn ([#380](https://github.com/speednet-software/speedwave/pull/380))
+
+#### Other
+
+* silence cross-target unused warnings surfaced by e2e ([#429](https://github.com/speednet-software/speedwave/pull/429))
+
+### Dependencies
+
+Extensive Dependabot batch covering Rust (`rust-minor-patch` [#383](https://github.com/speednet-software/speedwave/pull/383), `rust-desktop-minor-patch` [#388](https://github.com/speednet-software/speedwave/pull/388)), npm desktop (group [#397](https://github.com/speednet-software/speedwave/pull/397), `eslint` 9→10 [#390](https://github.com/speednet-software/speedwave/pull/390), `hono` [#410](https://github.com/speednet-software/speedwave/pull/410), `@hono/node-server` [#409](https://github.com/speednet-software/speedwave/pull/409)), npm mcp-servers (group [#417](https://github.com/speednet-software/speedwave/pull/417), `vite` 7→8 [#416](https://github.com/speednet-software/speedwave/pull/416), `eslint` 9→10 [#387](https://github.com/speednet-software/speedwave/pull/387), `@types/node` 24→25 [#386](https://github.com/speednet-software/speedwave/pull/386)), npm e2e (`fast-xml-parser` [#412](https://github.com/speednet-software/speedwave/pull/412), `basic-ftp` [#411](https://github.com/speednet-software/speedwave/pull/411), `lodash` [#377](https://github.com/speednet-software/speedwave/pull/377)).
+
+### Known Issues / Follow-ups
+
+Code review of [#430](https://github.com/speednet-software/speedwave/pull/430) surfaced 11 tracked follow-ups ([#431–#441](https://github.com/speednet-software/speedwave/issues/431)). Notable: silent message drop on session race ([#431](https://github.com/speednet-software/speedwave/issues/431), P2) and plugin tmpfs size configurability ([#435](https://github.com/speednet-software/speedwave/issues/435), P2).
+
+### Upgrade Notes
+
+* **VM memory on 16 GiB hosts:** `desired_vm_memory_gib` formula change ([#396](https://github.com/speednet-software/speedwave/pull/396)) may reduce VM memory from 12 → 8 GiB on 16 GiB hosts. Monitor and tune manually if needed.
+* **Plugin `/tmp`:** tmpfs increased from 64m → 512m for all plugins (follow-up [#435](https://github.com/speednet-software/speedwave/issues/435) to make configurable).
+* **MCP spec:** workers now self-declare tool policy via `_meta` per ADR-036 — custom workers must be updated.
+
 ## [0.6.1](https://github.com/speednet-software/speedwave/compare/v0.6.0...v0.6.1) (2026-04-01)
 
 

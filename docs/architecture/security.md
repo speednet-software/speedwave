@@ -252,7 +252,42 @@ chat access. Enforced at two layers:
   app's own data directory, which is determined at process start and never
   re-read from the terminal session's environment.
 
+## Binary Authenticity
+
+Speedwave desktop artifacts are cryptographically signed at two layers that protect different install paths.
+
+### Layer 1 — OS-level code signing (Developer ID + notarization)
+
+Every Mach-O binary shipped inside `Speedwave.app` (bundled Lima, Node.js, Swift helpers, Rust CLI) is signed with the Speednet Developer ID Application certificate, uses Hardened Runtime, and carries an RFC 3161 timestamp from Apple. The full bundle is submitted to Apple Notary Service, and the resulting ticket is stapled so Gatekeeper validates offline.
+
+This layer gates **first-time installs** (user downloads the DMG) and all launches thereafter. It protects against:
+
+- **Tampering in transit** — a modified binary fails Gatekeeper signature verification on launch
+- **Supply-chain impersonation** — only holders of the Speednet private key can produce artifacts that pass Gatekeeper
+- **Malware insertion post-download** — Hardened Runtime blocks common injection vectors (DYLD env vars, library validation bypass)
+
+Signing responsibility and implementation details are in [ADR-037](../adr/ADR-037-code-signing-and-bundled-binary-signing.md). Operational setup and certificate rotation are in [Release Signing Guide](../contributing/release-signing.md).
+
+### Layer 2 — Tauri updater Ed25519 signatures
+
+Orthogonal to OS signing, the Tauri auto-updater verifies every downloaded update against an Ed25519 public key embedded in the app binary (`desktop/src-tauri/tauri.conf.json → plugins.updater.pubkey`). The corresponding private key is stored as `TAURI_SIGNING_PRIVATE_KEY` in CI.
+
+This layer gates **auto-updates** for already-installed users. An attacker who compromised the GitHub Releases endpoint but not the CI signing key cannot ship an update — the updater refuses to install unsigned or wrongly-signed artifacts.
+
+### What each layer actually protects
+
+| Install path                                   | Layer 1 (Apple Dev ID)                             | Layer 2 (Tauri Ed25519) |
+| ---------------------------------------------- | -------------------------------------------------- | ----------------------- |
+| First install — user downloads DMG from GitHub | Required                                           | Not checked             |
+| Auto-update on already-installed app           | Required (Gatekeeper still validates the new .app) | Required                |
+
+Compromising the **Apple Developer ID key alone** is sufficient to ship malware to new users via a replaced GitHub Release asset — Layer 2 doesn't run on a fresh install. Compromising the **Tauri Ed25519 key alone** is sufficient to deliver a malicious update that installs but fails Gatekeeper on first launch (users see a runtime crash, not a silent breach). Compromising **both** is sufficient to ship malware to all users silently.
+
+Treat the Apple Developer ID as the primary secret. The Tauri key is a defense-in-depth layer against compromises of the GitHub release infrastructure, not a substitute for Apple Developer ID protection.
+
 ## See Also
 
 - [ADR-009: Per-Project Isolation Preserved](../adr/ADR-009-per-project-isolation-preserved.md)
 - [ADR-026: Linux Rootless nerdctl — Per-Platform Container User](../adr/ADR-026-linux-rootless-container-user.md)
+- [ADR-037: Code Signing and Bundled Binary Signing](../adr/ADR-037-code-signing-and-bundled-binary-signing.md)
+- [Release Signing Guide](../contributing/release-signing.md)
