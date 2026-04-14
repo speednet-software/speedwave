@@ -33,6 +33,18 @@ docs/superpowers/
 .tauri-privkey.pub
 .tauri-pubkey
 
+# Code signing credentials — MUST NEVER be committed
+*.p12
+*.pfx
+*.cer
+*.p8
+*.key
+*.csr
+*.p12.base64
+*.pfx.base64
+apple-signing/
+azure-signing/
+
 # Speedwave runtime data (should never be committed)
 .speedwave/
 
