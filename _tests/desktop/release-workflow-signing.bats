@@ -75,7 +75,7 @@ WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/desktop-release.yml"
     # downstream grep verification would match every line (empty pattern) and
     # silently report success — then tauri-action would fail cryptically
     # inside the bundle step. The step must fail fast before find-identity.
-    grep -qE 'APPLE_SIGNING_IDENTITY is empty' "$WORKFLOW"
+    grep -qF 'APPLE_SIGNING_IDENTITY is empty' "$WORKFLOW"
 }
 
 @test "keychain import uses mapfile for safe keychain list expansion" {

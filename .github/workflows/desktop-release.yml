@@ -221,6 +221,7 @@ jobs:
       # starts. See: https://v2.tauri.app/distribute/sign/macos/
       - name: Import Apple signing certificate to keychain
         if: matrix.platform == 'macos-latest' && env.APPLE_CERTIFICATE != ''
+        shell: bash
         env:
           CERT: ${{ env.APPLE_CERTIFICATE }}
           CERT_PASSWORD: ${{ env.APPLE_CERTIFICATE_PASSWORD }}
@@ -241,8 +242,11 @@ jobs:
           # Prepend the build keychain to the search list so codesign can find
           # the identity without overriding the login keychain globally. Read
           # the existing list into an array so quoted paths survive word
-          # splitting if a keychain path ever contains spaces.
-          mapfile -t _existing_keychains < <(security list-keychains -d user | tr -d '"' | awk '{$1=$1};1')
+          # splitting if a keychain path ever contains spaces. Trim leading
+          # and trailing whitespace with sed, not `awk '{$1=$1};1'` — the
+          # latter re-splits on internal whitespace and would mangle any path
+          # that contains spaces, defeating the point of mapfile.
+          mapfile -t _existing_keychains < <(security list-keychains -d user | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d')
           security list-keychains -d user -s "$KEYCHAIN_PATH" "${_existing_keychains[@]}"
 
           security import "$CERT_FILE" \
