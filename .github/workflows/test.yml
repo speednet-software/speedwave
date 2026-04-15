@@ -171,6 +171,12 @@ jobs:
         working-directory: desktop/src
         run: npm ci
 
+      - name: Install mcp-servers dependencies
+        # Required by `make test-desktop-build` → `build-mcp` → TypeScript
+        # compiler needs @types/node and mcp-servers workspace deps.
+        working-directory: mcp-servers
+        run: npm ci
+
       - name: Create resource stubs for Tauri build script
         run: |
           mkdir -p desktop/src-tauri/nerdctl-full/{bin,lib,libexec,share}
@@ -205,6 +211,16 @@ jobs:
       - name: Angular tests + coverage
         working-directory: desktop/src
         run: npx vitest run --coverage
+
+      - name: Install bats
+        run: sudo apt-get update && sudo apt-get install -y bats
+
+      - name: Desktop bats tests
+        # Runs make test-desktop-build which has build-angular + build-mcp
+        # as dependencies. desktop-build.bats checks that the Angular
+        # frontendDist contains index.html after the build — skipping the
+        # build step would defeat the purpose of that assertion.
+        run: make test-desktop-build
 
   audit:
     runs-on: ubuntu-latest

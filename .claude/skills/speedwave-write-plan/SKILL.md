@@ -100,7 +100,7 @@ For EVERY change, answer:
 
 - Does it affect installer artifacts? (.dmg, .deb, .exe)
 
-- Does this change add or modify a bundled macOS binary? If yes: (1) add to `SIGN_TARGETS` in `sign-bundled-binaries.sh`, (2) determine if it needs entitlements under Hardened Runtime (check: does it use Virtualization.framework, Apple Events/osascript, JIT, or other restricted APIs?), (3) create entitlements plist in `desktop/src-tauri/entitlements/` if needed, (4) update ADR-037 entitlements inventory table
+- Does this change add or modify a bundled macOS binary? If yes, follow the "Adding a new bundled binary" checklist in [`docs/contributing/release-signing.md`](../../../docs/contributing/release-signing.md#adding-a-new-bundled-binary) — it is the authoritative source for SIGN_TARGETS, entitlements plists, `Info.plist` TCC keys, and ADR-037 updates.
 
 - Filesystem case sensitivity? (macOS VirtioFS insensitive, Linux ext4 sensitive)
 
@@ -196,7 +196,7 @@ Answer EVERY question. "N/A" is acceptable only with justification.
 
 - [ ] `path-validator.ts` denylist intact? (`.git/`, `.env`, `.speedwave/`)
 
-- [ ] New or modified bundled macOS binary? → (1) added to `SIGN_TARGETS` in `sign-bundled-binaries.sh`, (2) entitlements analysis done (Virtualization.framework, Apple Events/osascript, JIT, other restricted APIs), (3) entitlements plist created in `desktop/src-tauri/entitlements/` if needed, (4) ADR-037 entitlements inventory table updated
+- [ ] New or modified bundled macOS binary? → satisfies the "Adding a new bundled binary" checklist in [`docs/contributing/release-signing.md`](../../../docs/contributing/release-signing.md#adding-a-new-bundled-binary)
 
 ### 7. Documentation Plan
 

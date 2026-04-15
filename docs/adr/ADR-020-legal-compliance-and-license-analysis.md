@@ -200,7 +200,7 @@ The `presale` MCP server (private business component) remains proprietary and is
 | crun GPL on Linux           | 🟢 LOW    | Not bundled — subprocess invocation, no copyleft risk    |
 | MSVC license on Windows     | 🟡 MEDIUM | Use MinGW toolchain in GitHub Actions                    |
 | Missing attribution         | 🟡 MEDIUM | Create LICENSES/ directory before release                |
-| Apple VZ entitlement        | 🟡 MEDIUM | Apply via Apple Developer portal                         |
+| Apple VZ entitlement        | 🟢 LOW    | Embedded via codesign — self-serve, no Apple approval (see ADR-037) |
 | Anthropic ToS changes       | 🟡 MEDIUM | Monitor; no bundling = lower exposure                    |
 
 ---

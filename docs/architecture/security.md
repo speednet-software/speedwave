@@ -260,7 +260,7 @@ Speedwave desktop artifacts are cryptographically signed at two layers that prot
 
 Every Mach-O binary shipped inside `Speedwave.app` (bundled Lima, Node.js, Swift helpers, Rust CLI) is signed with the Speednet Developer ID Application certificate, uses Hardened Runtime, and carries an RFC 3161 timestamp from Apple. The full bundle is submitted to Apple Notary Service, and the resulting ticket is stapled so Gatekeeper validates offline.
 
-Hardened Runtime restricts platform APIs by default; specific binaries carry entitlements to opt back in (virtualization for limactl, Apple Events for mail/notes CLIs, JIT for Node.js). See [ADR-037](../adr/ADR-037-code-signing-and-bundled-binary-signing.md#entitlements-inventory) for the full inventory.
+Hardened Runtime restricts platform APIs by default; specific binaries carry entitlements to opt back in (virtualization for limactl, Apple Events for mail/notes CLIs, calendars/EventKit for calendar/reminders CLIs, JIT for Node.js). See [ADR-037](../adr/ADR-037-code-signing-and-bundled-binary-signing.md#entitlements-inventory) for the full inventory.
 
 This layer gates **first-time installs** (user downloads the DMG) and all launches thereafter. It protects against:
 

@@ -61,7 +61,7 @@ populate_targets() {
     mkdir -p "$SRC_TAURI/entitlements"
     local ent_src="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements"
     cp "$ent_src/node.plist" "$SRC_TAURI/entitlements/node.plist"
-    cp "$ent_src/limactl.plist" "$SRC_TAURI/entitlements/limactl.plist"
+    cp "$ent_src/virtualization.plist" "$SRC_TAURI/entitlements/virtualization.plist"
     cp "$ent_src/calendars.plist" "$SRC_TAURI/entitlements/calendars.plist"
     cp "$ent_src/apple-events.plist" "$SRC_TAURI/entitlements/apple-events.plist"
 }
@@ -157,8 +157,8 @@ for key in conf.get('bundle', {}).get('resources', {}):
 }
 
 @test "limactl has virtualization entitlement in SIGN_TARGETS" {
-    grep -qF 'limactl:$LIMACTL_ENTITLEMENTS' "$SCRIPT" || \
-    grep -qF 'limactl:$SRC_TAURI/entitlements/limactl.plist' "$SCRIPT"
+    grep -qF 'limactl:$VIRTUALIZATION_ENTITLEMENTS' "$SCRIPT" || \
+    grep -qF 'limactl:$SRC_TAURI/entitlements/virtualization.plist' "$SCRIPT"
 }
 
 @test "mail-cli has apple-events entitlement in SIGN_TARGETS" {
@@ -188,8 +188,10 @@ for key in conf.get('bundle', {}).get('resources', {}):
 
 @test "speedwave CLI has no entitlements in SIGN_TARGETS" {
     # speedwave is pure Rust — no restricted APIs, no entitlements needed.
-    # The entry must end with ":" (empty entitlements).
-    grep -qF 'cli/speedwave:"' "$SCRIPT"
+    # The entry must end with ":" followed by end-of-value. Match the full
+    # array-element form explicitly so the test doesn't accidentally rely on
+    # shell quoting around the colon.
+    grep -E '"\$SRC_TAURI/cli/speedwave:"[[:space:]]*$' "$SCRIPT"
 }
 
 @test "post-sign verification calls codesign -v --strict" {
@@ -200,12 +202,66 @@ for key in conf.get('bundle', {}).get('resources', {}):
     grep -qF 'codesign -d --entitlements' "$SCRIPT"
 }
 
+@test "post-sign verification rejects plists with zero entitlement keys" {
+    # Guard against silent verification pass when grep '<key>' yields nothing
+    # (malformed plist, truncated file, future format change). Without this
+    # guard the while-loop never executes and signing reports success.
+    grep -qF 'contains no <key> entries' "$SCRIPT"
+}
+
+@test "sign_macho fails fast when entitlements plist is missing" {
+    # Binary path is validated; plist path must be validated too. Without
+    # this check codesign produces a cryptic error instead of a friendly
+    # "create the plist" hint.
+    grep -qF 'entitlements plist does not exist' "$SCRIPT"
+}
+
+@test "signing and verification are separate functions" {
+    # sign_macho does signing; verify_macho does post-sign assertions.
+    # Keeps each responsibility independently testable.
+    grep -qF 'verify_macho()' "$SCRIPT"
+}
+
 @test "all entitlements plists exist" {
     local ent_dir="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements"
-    [ -f "$ent_dir/node.plist" ]
-    [ -f "$ent_dir/limactl.plist" ]
-    [ -f "$ent_dir/calendars.plist" ]
-    [ -f "$ent_dir/apple-events.plist" ]
+    local plist
+    for plist in node.plist virtualization.plist calendars.plist apple-events.plist; do
+        [ -f "$ent_dir/$plist" ] || {
+            echo "Missing entitlements plist: $ent_dir/$plist" >&2
+            return 1
+        }
+    done
+}
+
+@test "all entitlements plists are well-formed XML plists" {
+    # Parse with plistlib — catches truncation, missing close tags, encoding
+    # errors. plistlib is in Python stdlib (cross-platform, no plutil on Linux).
+    local ent_dir="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements"
+    run python3 -c "
+import plistlib, glob, sys
+for path in glob.glob('$ent_dir/*.plist'):
+    try:
+        plistlib.load(open(path, 'rb'))
+    except Exception as e:
+        print(f'{path}: {e}', file=sys.stderr)
+        sys.exit(1)
+"
+    [ "$status" -eq 0 ]
+}
+
+@test "each single-capability plist declares exactly one <key>" {
+    # Prevents least-privilege drift. node.plist is exempt — V8 needs both
+    # allow-jit and allow-unsigned-executable-memory and the two are
+    # structurally inseparable.
+    local ent_dir="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements"
+    local plist keys
+    for plist in virtualization.plist calendars.plist apple-events.plist; do
+        keys="$(grep -c '<key>' "$ent_dir/$plist")"
+        [ "$keys" = "1" ] || {
+            echo "Expected 1 <key> in $plist, got $keys" >&2
+            return 1
+        }
+    done
 }
 
 @test "calendars.plist contains calendars entitlement" {
@@ -213,8 +269,8 @@ for key in conf.get('bundle', {}).get('resources', {}):
     grep -qF 'com.apple.security.personal-information.calendars' "$plist"
 }
 
-@test "limactl.plist contains virtualization entitlement" {
-    local plist="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements/limactl.plist"
+@test "virtualization.plist contains virtualization entitlement" {
+    local plist="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements/virtualization.plist"
     grep -qF 'com.apple.security.virtualization' "$plist"
 }
 

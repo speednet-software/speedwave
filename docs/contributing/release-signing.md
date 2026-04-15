@@ -198,10 +198,11 @@ Common failure modes:
 When a PR introduces a new executable resource in `tauri.macos.conf.json → bundle.resources`:
 
 1. Add its source path to the `SIGN_TARGETS` array in `scripts/sign-bundled-binaries.sh` with an entitlements suffix: `"$SRC_TAURI/<path>:"` for no entitlements, or `"$SRC_TAURI/<path>:$SOME_PLIST"` for a plist
-2. If the binary uses restricted platform APIs, create or reuse an entitlements plist in `desktop/src-tauri/entitlements/` and reference it in step 1. Three categories require entitlements:
+2. If the binary uses restricted platform APIs, create or reuse an entitlements plist in `desktop/src-tauri/entitlements/` and reference it in step 1. Four categories require entitlements:
    - **(a) JIT runtimes** (V8, PyPy, YARV): `com.apple.security.cs.allow-jit` + `com.apple.security.cs.allow-unsigned-executable-memory` — see `node.plist`
-   - **(b) Virtualization API users** (Apple Virtualization.framework): `com.apple.security.virtualization` — see `limactl.plist`
+   - **(b) Virtualization API users** (Apple Virtualization.framework): `com.apple.security.virtualization` — see `virtualization.plist`
    - **(c) Apple Events senders** (osascript / NSAppleScript): `com.apple.security.automation.apple-events` — see `apple-events.plist`
+   - **(d) Personal information access** (EventKit Calendars/Reminders, Contacts, Photos): `com.apple.security.personal-information.calendars` / `.addressbook` / `.photos-library` — see `calendars.plist`. Each of these *also* requires a matching `NS*UsageDescription` key in `Info.plist` for the TCC consent prompt to appear
 
    See the [ADR-037 entitlements inventory](../adr/ADR-037-code-signing-and-bundled-binary-signing.md#entitlements-inventory) for the full table of bundled binaries and their entitlements.
 3. Verify locally with `make build-tauri` + the notarization test above — if Apple rejects, the log says which binary is missing

@@ -59,7 +59,7 @@ The three flags encode three non-negotiable notarization requirements:
 
 The script is a no-op when `APPLE_SIGNING_IDENTITY` is not set, so dev builds on developer machines work without Apple credentials.
 
-**1a. Per-binary entitlements for Node.js.** Node.js is the only bundled binary that needs additional `codesign --entitlements` — V8 allocates executable+writable memory pages for JIT-compiled bytecode, and Hardened Runtime blocks those allocations by default. Without `com.apple.security.cs.allow-jit` and `com.apple.security.cs.allow-unsigned-executable-memory`, `node` crashes at startup with `Fatal process out of memory: Failed to reserve virtual memory for CodeRange`[^15]. The entitlements plist lives at `desktop/src-tauri/entitlements/node.plist`.
+**1a. Per-binary entitlements.** Several bundled binaries require `codesign --entitlements` to opt back into platform capabilities that Hardened Runtime disables. Each capability is backed by a minimal plist under `desktop/src-tauri/entitlements/` declaring exactly the keys that binary needs — see the [Entitlements inventory](#entitlements-inventory) below for the full table. Symptomatic failure modes vary by capability: Node.js crashes at startup with `Fatal process out of memory: Failed to reserve virtual memory for CodeRange`[^15]; `limactl` fails with `VZErrorDomain Code=2 "doesn't have the com.apple.security.virtualization entitlement"`; Apple Events calls fail with error -1743; EventKit access is denied before any consent prompt appears.
 
 **2. `tauri.conf.json` — `beforeBundleCommand` hook** — Tauri v2 runs a pre-bundle script after `cargo build` but before `tauri bundle` wraps binaries into `.app`[^7]. This is the correct integration point because all dependencies are already copied into `desktop/src-tauri/{cli,lima,nodejs,*-cli}` but not yet sealed into the bundle.
 
@@ -96,14 +96,21 @@ Hardened Runtime disables several platform capabilities by default[^11]. Bundled
 | Binary | Entitlements plist | Keys | Reason |
 |---|---|---|---|
 | `nodejs/bin/node` | `node.plist` | `allow-jit`, `allow-unsigned-executable-memory` | V8 JIT engine |
-| `lima/bin/limactl` | `limactl.plist` | `com.apple.security.virtualization` | Apple Virtualization Framework[^16] |
+| `lima/bin/limactl` | `virtualization.plist` | `com.apple.security.virtualization` | Apple Virtualization Framework[^16] |
 | `mail-cli` | `apple-events.plist` | `com.apple.security.automation.apple-events` | Sends Apple Events to Mail.app/Outlook via osascript |
 | `notes-cli` | `apple-events.plist` | `com.apple.security.automation.apple-events` | Sends Apple Events to Notes.app via osascript |
-| `speedwave` | none | — | AOT Rust, no restricted APIs |
+| `cli/speedwave` | none | — | AOT Rust, no restricted APIs |
 | `calendar-cli` | `calendars.plist` | `com.apple.security.personal-information.calendars` | EventKit read-write access (Hardened Runtime Resource Access)[^17] |
 | `reminders-cli` | `calendars.plist` | `com.apple.security.personal-information.calendars` | EventKit read-write access (Hardened Runtime Resource Access)[^17] |
 
 If a future bundled binary requires JIT (e.g. a Python runtime with PyPy), virtualization APIs, Apple Events automation, or access to personal information (calendars, contacts, photos), add its entitlements plist under `desktop/src-tauri/entitlements/` and reference it from the `SIGN_TARGETS` table in the script.
+
+**1b. Info.plist TCC usage descriptions.** Entitlements grant *capability* at codesign time; TCC (Transparency, Consent, and Control) still requires a user-facing `NS*UsageDescription` key in `Info.plist` before macOS will display the consent prompt for protected resources. The two surfaces are parallel but distinct — missing either one silently breaks the feature. The required keys track the restricted APIs actually used by bundled binaries:
+
+- `NSRemindersUsageDescription`, `NSCalendarsUsageDescription` — EventKit, required by `reminders-cli` and `calendar-cli`
+- `NSContactsUsageDescription` — reserved for future Contacts access
+- `NSAppleEventsUsageDescription` — osascript → Apple Events, required by `mail-cli` and `notes-cli`
+- `NSFileProviderDomainUsageDescription` — FileProvider domains (OneDrive, iCloud Drive, Dropbox, Google Drive), required when the user's workspace directory lives under `~/Library/CloudStorage/`. Lima's virtiofs mount inherits the host app's TCC attribution, so without this key macOS silently blocks reads from CloudStorage paths inside the VM (see anthropics/claude-code#26981 for the same pattern in Claude Code)
 
 [^17]: Apple's Hardened Runtime documentation lists Calendars under Resource Access — `com.apple.security.personal-information.calendars` is required for EventKit read-write access. There is no separate Reminders entitlement; the calendars entitlement covers both Calendar and Reminders since both use EventKit. See https://developer.apple.com/documentation/security/hardened_runtime
 
