@@ -43,6 +43,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-034](ADR-034-mcp-error-guidance-and-init-retry.md)                | MCP Error Guidance and Client Init Retry                | Accepted              |
 | [ADR-035](ADR-035-mcp-spec-compliance-streamable-http.md)              | MCP Spec Compliance — Streamable HTTP Transport         | Accepted              |
 | [ADR-036](ADR-036-self-declaring-worker-policy.md)                     | Self-Declaring Worker Policy via `_meta`                | Accepted              |
+| [ADR-037](ADR-037-code-signing-and-bundled-binary-signing.md)          | Code Signing and Bundled Binary Signing                 | Accepted              |
 
 ## Creating a New ADR
 

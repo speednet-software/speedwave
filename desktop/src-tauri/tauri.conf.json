@@ -13,6 +13,10 @@
     "beforeBuildCommand": {
       "script": "npx ng build",
       "cwd": "../src"
+    },
+    "beforeBundleCommand": {
+      "script": "bash scripts/sign-bundled-binaries.sh",
+      "cwd": "../.."
     }
   },
   "app": {

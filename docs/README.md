@@ -27,6 +27,7 @@ Welcome to the Speedwave documentation. Speedwave is an AI platform that connect
 
 - [Development Setup](contributing/development-setup.md) — prerequisites, build, test
 - [Testing](contributing/testing.md) — test strategy, coverage, CI
+- [Release Signing](contributing/release-signing.md) — macOS code signing, notarization, certificate rotation
 
 ## Architecture Decision Records
 
