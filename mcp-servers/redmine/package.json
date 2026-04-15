@@ -1,6 +1,6 @@
 {
   "name": "@speedwave/mcp-redmine",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Speedwave MCP Redmine Worker - Isolated Redmine API access",
   "main": "dist/index.js",
   "type": "module",
