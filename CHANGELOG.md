@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.7.3](https://github.com/speednet-software/speedwave/compare/v0.7.2...v0.7.3) (2026-04-15)
+
+
+### Bug Fixes
+
+* **security:** add missing macOS entitlements and CloudStorage TCC access ([#476](https://github.com/speednet-software/speedwave/issues/476)) ([3bedaa6](https://github.com/speednet-software/speedwave/commit/3bedaa642d99e175a41183311a3cd864e13a3feb))
+
 ## [0.7.2](https://github.com/speednet-software/speedwave/compare/v0.7.1...v0.7.2) (2026-04-15)
 
 
