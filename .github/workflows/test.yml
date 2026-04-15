@@ -206,6 +206,21 @@ jobs:
         working-directory: desktop/src
         run: npx vitest run --coverage
 
+      - name: Install bats
+        run: sudo apt-get update && sudo apt-get install -y bats
+
+      - name: Desktop bats tests
+        # Static checks on Tauri config, signing script, Info.plist, and
+        # release workflow YAML. Does NOT invoke the Angular or Tauri build —
+        # that's covered by the steps above.
+        run: |
+          bats _tests/desktop/desktop-build.bats
+          bats _tests/desktop/bundle-build-context.bats
+          bats _tests/desktop/verify-bundled-assets.bats
+          bats _tests/desktop/sign-bundled-binaries.bats
+          bats _tests/desktop/release-workflow-signing.bats
+          bats _tests/desktop/info-plist.bats
+
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
