@@ -14,7 +14,10 @@
       "script": "npx ng build",
       "cwd": "../src"
     },
-    "beforeBundleCommand": "bash -c 'cd \"$(git rev-parse --show-toplevel)\" && scripts/sign-bundled-binaries.sh'"
+    "beforeBundleCommand": {
+      "script": "bash scripts/sign-bundled-binaries.sh",
+      "cwd": "../.."
+    }
   },
   "app": {
     "security": {
