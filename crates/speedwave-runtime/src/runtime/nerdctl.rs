@@ -219,6 +219,9 @@ impl ContainerRuntime for NerdctlRuntime {
         let mut args = vec!["rmi"];
         let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
         args.extend(tag_refs);
+        // Intentionally no --force: if an old image is still referenced by a
+        // running container rmi fails, caller logs warn-only and the image
+        // gets retried on the next update cycle once the container is gone.
         if let Err(e) = self.runner.run("nerdctl", &args) {
             log::warn!("nerdctl rmi failed: {e}");
         }

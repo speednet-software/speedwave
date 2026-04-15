@@ -316,11 +316,11 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
             "reconcile_bundle: building images for bundle {}",
             manifest.bundle_id,
         );
-        if let Some(ref old_id) = state.applied_bundle_id {
-            if old_id != &manifest.bundle_id {
-                if let Err(e) = build::prune_old_bundle_images(rt.as_ref(), old_id) {
-                    log::warn!("Failed to prune old bundle images: {e}");
-                }
+        if let Some(old_id) =
+            build::should_prune_bundle(state.applied_bundle_id.as_deref(), &manifest.bundle_id)
+        {
+            if let Err(e) = build::prune_old_bundle_images(rt.as_ref(), old_id) {
+                log::warn!("Failed to prune old bundle images: {e}");
             }
         }
         // build.rs handles: build → fail → prune → retry → SnapshotterRecoveryFailed.

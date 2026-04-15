@@ -234,21 +234,23 @@ pub fn update_containers(
     // 6. Rebuild images from local Containerfiles BEFORE stopping containers.
     //    If the build fails, containers keep running with the previous version.
     //    containerd uses content-addressable storage — new builds don't affect running containers.
+    let new_manifest = bundle::load_current_bundle_manifest()?;
     let bundle_state = bundle::load_bundle_state();
-    if let Some(ref old_id) = bundle_state.applied_bundle_id {
-        let new_manifest = bundle::load_current_bundle_manifest()?;
-        if old_id != &new_manifest.bundle_id {
-            if let Err(e) = build::prune_old_bundle_images(runtime, old_id) {
-                log::warn!("Failed to prune old bundle images: {e}");
-            }
+    if let Some(old_id) = build::should_prune_bundle(
+        bundle_state.applied_bundle_id.as_deref(),
+        &new_manifest.bundle_id,
+    ) {
+        if let Err(e) = build::prune_old_bundle_images(runtime, old_id) {
+            log::warn!("Failed to prune old bundle images: {e}");
         }
     }
-    let images_rebuilt = build::build_all_images(runtime).map_err(|e| {
-        anyhow::anyhow!(
-            "Image rebuild failed: {}. Containers are still running with the previous version.",
-            e
-        )
-    })?;
+    let images_rebuilt = build::build_all_images_for_bundle(runtime, &new_manifest.bundle_id)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Image rebuild failed: {}. Containers are still running with the previous version.",
+                e
+            )
+        })?;
 
     // 7. Graceful shutdown — stop running containers before recreate.
     //    SIGTERM + timeout (compose default 10s) prevents killing active Claude sessions.

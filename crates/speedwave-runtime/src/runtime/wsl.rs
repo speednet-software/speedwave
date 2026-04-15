@@ -474,6 +474,9 @@ impl ContainerRuntime for WslRuntime {
         let mut args = vec!["-d", consts::WSL_DISTRO_NAME, "--", "nerdctl", "rmi"];
         let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
         args.extend(tag_refs);
+        // Intentionally no --force: if an old image is still referenced by a
+        // running container rmi fails, caller logs warn-only and the image
+        // gets retried on the next update cycle once the container is gone.
         if let Err(e) = self.runner.run("wsl.exe", &args) {
             log::warn!("wsl rmi failed: {e}");
         }

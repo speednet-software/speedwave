@@ -374,6 +374,19 @@ pub fn build_all_images(runtime: &dyn ContainerRuntime) -> anyhow::Result<u32> {
     build_all_images_for_bundle(runtime, &manifest.bundle_id)
 }
 
+/// Decide whether pruning a previous bundle's images is warranted.
+///
+/// Returns `Some(old_id)` only when the previously applied bundle exists and
+/// differs from the new one. Fresh installs (`applied` is `None`) and
+/// same-version rebuilds (`applied == new`) return `None`, so the caller
+/// skips `prune_old_bundle_images` entirely in those cases.
+pub fn should_prune_bundle<'a>(applied: Option<&'a str>, new_bundle_id: &str) -> Option<&'a str> {
+    match applied {
+        Some(old) if old != new_bundle_id => Some(old),
+        _ => None,
+    }
+}
+
 /// Remove images from a previous bundle to reclaim disk space.
 pub fn prune_old_bundle_images(
     runtime: &dyn ContainerRuntime,
@@ -1965,5 +1978,31 @@ mod tests {
         let rt = PruneMockRuntime::new();
         prune_old_bundle_images(&rt, "same123").unwrap();
         assert_eq!(rt.removed_tags.lock().unwrap().len(), IMAGES.len());
+    }
+
+    #[test]
+    fn should_prune_bundle_returns_none_for_fresh_install() {
+        assert_eq!(should_prune_bundle(None, "new-bundle-id"), None);
+    }
+
+    #[test]
+    fn should_prune_bundle_returns_none_for_same_bundle() {
+        assert_eq!(should_prune_bundle(Some("same-id"), "same-id"), None);
+    }
+
+    #[test]
+    fn should_prune_bundle_returns_old_id_for_different_bundle() {
+        assert_eq!(
+            should_prune_bundle(Some("old-id"), "new-id"),
+            Some("old-id")
+        );
+    }
+
+    #[test]
+    fn should_prune_bundle_handles_empty_strings() {
+        // Empty applied id differs from non-empty new id — prune signalled.
+        assert_eq!(should_prune_bundle(Some(""), "new-id"), Some(""));
+        // Both empty (unexpected, but well-defined) — same-id path.
+        assert_eq!(should_prune_bundle(Some(""), ""), None);
     }
 }
