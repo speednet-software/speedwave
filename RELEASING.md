@@ -351,13 +351,35 @@ After every release, `main` has commits that `dev` doesn't (version bumps, CHANG
 
 When using `workflow_dispatch` on `desktop-release.yml` to re-build an existing release, the tag must exist on the remote. The `resolve` job checks for the tag and warns if it doesn't exist. Without a tag, the build uses branch HEAD which may have different code than expected.
 
+### `workflow_dispatch` uses workflow YAML from the default branch, not `main`
+
+**Symptom:** Manual re-trigger of `desktop-release.yml` via `gh workflow run` or Actions UI fails on steps that were recently hotfixed on `main`, even though `actions/checkout` checks out the correct tag.
+
+**Cause:** GitHub Actions `workflow_dispatch` reads the **workflow YAML file** (steps, `run:` blocks, `if:` guards) from the **default branch** — which is `dev` in this repo, not `main`[^wd-ref]. The `actions/checkout` step inside the workflow checks out the correct tag/ref for **source code**, but `run:` blocks are baked into the YAML at dispatch time. If `dev` has an older version of the workflow YAML than `main`, the build executes stale step logic.
+
+This is a two-path problem: **workflow definition** comes from the default branch, **repo source** comes from the checkout ref. They can diverge when hotfixes land on `main` but haven't been cherry-picked to `dev` yet.
+
+**Fix:** When manually dispatching, always pass `--ref main` to source the workflow YAML from `main`:
+
+```bash
+gh workflow run desktop-release.yml --ref main -f version=0.7.2
+```
+
+In the Actions UI, select `main` from the branch dropdown before clicking "Run workflow".
+
+**Prevention:** When hotfixing any workflow YAML file (`.github/workflows/`) on `main`, always cherry-pick the same change to `dev` in the same session. This keeps both branches' workflow definitions in sync and avoids the `--ref` footgun entirely.
+
+[^wd-ref]: GitHub docs: "This event will only trigger a workflow run if the workflow file exists on the default branch." `gh workflow run --ref` overrides which branch's YAML is used. See `gh workflow run --help`.
+
 ## Manual Desktop Build (without release)
 
 To trigger a desktop build without creating a release (e.g. for testing):
 
 ```bash
-# From Actions UI: run "Desktop Release" workflow manually
-# with version: "0.3.0"
+# Re-build an existing release (YAML from main, not dev):
+gh workflow run desktop-release.yml --ref main -f version=0.3.0
+
+# From Actions UI: select "main" branch, run "Desktop Release" with version "0.3.0"
 ```
 
 **Note:** `workflow_dispatch` now checks whether the tag exists. If `v0.3.0` tag exists, the build checks out that tag (builds from tagged code with correct version). If no tag exists, falls back to branch HEAD (for testing only — version in artifacts will match whatever the branch has).
