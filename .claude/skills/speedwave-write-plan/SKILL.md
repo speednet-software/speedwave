@@ -100,6 +100,8 @@ For EVERY change, answer:
 
 - Does it affect installer artifacts? (.dmg, .deb, .exe)
 
+- Does this change add or modify a bundled macOS binary? If yes, follow the "Adding a new bundled binary" checklist in [`docs/contributing/release-signing.md`](../../../docs/contributing/release-signing.md#adding-a-new-bundled-binary) — it is the authoritative source for SIGN_TARGETS, entitlements plists, `Info.plist` TCC keys, and ADR-037 updates.
+
 - Filesystem case sensitivity? (macOS VirtioFS insensitive, Linux ext4 sensitive)
 
 If the change is platform-independent, state WHY it's platform-independent — don't just skip this section.
@@ -193,6 +195,8 @@ Answer EVERY question. "N/A" is acceptable only with justification.
 - [ ] Authentication gates preserved? (backend + frontend)
 
 - [ ] `path-validator.ts` denylist intact? (`.git/`, `.env`, `.speedwave/`)
+
+- [ ] New or modified bundled macOS binary? → satisfies the "Adding a new bundled binary" checklist in [`docs/contributing/release-signing.md`](../../../docs/contributing/release-signing.md#adding-a-new-bundled-binary)
 
 ### 7. Documentation Plan
 

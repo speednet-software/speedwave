@@ -165,7 +165,7 @@ Permitted for building and shipping Speedwave.[^19] The prohibition applies only
 - [ ] **Add `cargo-deny` to GitHub Actions CI** for dependency license auditing
 - [x] **Publish LICENSE** (Apache-2.0 chosen for Speedwave) at repo root
 - [ ] **Obtain Apple Developer Program membership** for notarization + VZ entitlement
-- [ ] **Apply for `com.apple.security.virtualization` entitlement** in Apple Developer portal
+- [ ] **Embed `com.apple.security.virtualization` entitlement** via codesign during bundle signing (self-serve, no Apple approval needed) — see [ADR-037](ADR-037-code-signing-and-bundled-binary-signing.md)
 
 ### Ongoing
 
@@ -200,7 +200,7 @@ The `presale` MCP server (private business component) remains proprietary and is
 | crun GPL on Linux           | 🟢 LOW    | Not bundled — subprocess invocation, no copyleft risk    |
 | MSVC license on Windows     | 🟡 MEDIUM | Use MinGW toolchain in GitHub Actions                    |
 | Missing attribution         | 🟡 MEDIUM | Create LICENSES/ directory before release                |
-| Apple VZ entitlement        | 🟡 MEDIUM | Apply via Apple Developer portal                         |
+| Apple VZ entitlement        | 🟢 LOW    | Embedded via codesign — self-serve, no Apple approval (see ADR-037) |
 | Anthropic ToS changes       | 🟡 MEDIUM | Monitor; no bundling = lower exposure                    |
 
 ---

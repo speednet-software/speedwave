@@ -20,8 +20,9 @@ When you enable an OS integration on macOS, Speedwave checks and requests the re
 
 - **Reminders / Calendar** — triggers the macOS Privacy & Security permission dialog (TCC). The system asks whether Speedwave is allowed to access your Reminders or Calendar data.
 - **Notes / Mail** — triggers the macOS Automation permission dialog. The system asks whether Speedwave is allowed to control the Notes or Mail application.
+- **Cloud storage workspaces** (OneDrive, iCloud Drive, Dropbox, Google Drive) — if your project directory lives under `~/Library/CloudStorage/`, macOS treats it as a protected FileProvider domain. The Lima VM inherits Speedwave's TCC attribution, so on first access macOS shows a Privacy & Security consent dialog for that specific cloud provider. If the VM reports "operation not permitted" when reading your workspace, grant access in **System Settings > Privacy & Security > Files and Folders** (or **Full Disk Access**) for Speedwave. This applies regardless of which integrations are enabled — the mount itself is TCC-gated.
 
-If you deny the permission, the toggle reverts and an error message explains how to grant access. To grant permission after denial, go to **System Settings > Privacy & Security > [Reminders | Calendars | Automation]**, find Speedwave in the list, and enable it.
+If you deny the permission, the toggle reverts and an error message explains how to grant access. To grant permission after denial, go to **System Settings > Privacy & Security > [Reminders | Calendars | Automation | Files and Folders]**, find Speedwave in the list, and enable it.
 
 The Reminders integration supports tags stored as `[#tag]` markers in the notes field. Use `tags: ["idea", "work"]` in `createReminder` to assign tags; `listReminders` and `getReminder` extract tags from notes and return them separately in the `tags` field. Apple's EventKit API does not expose a dedicated tags property, so tags are persisted in notes using the `[#tag]` convention.
 

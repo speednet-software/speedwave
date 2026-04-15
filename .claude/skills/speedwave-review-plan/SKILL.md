@@ -233,6 +233,8 @@ Check:
 
 - Does it touch OS prerequisite checks (`os_prereqs.rs`)? Verify violations still block container start.
 
+- If the plan adds a new bundled binary: does it satisfy the "Adding a new bundled binary" checklist in [`docs/contributing/release-signing.md`](../../../docs/contributing/release-signing.md#adding-a-new-bundled-binary)? (`SIGN_TARGETS` updated, entitlements plist created if needed, matching `NS*UsageDescription` in `Info.plist` for any TCC-protected API, ADR-037 inventory updated.)
+
 **Severity: Any security relaxation without an ADR justification = BLOCKER.**
 
 ### 2. ARCHITECTURAL INTEGRITY & SSOT
@@ -292,6 +294,8 @@ Check:
 - **Build context:** `prepare_build_context()` handles path translation for VMs. Does the plan respect this?
 
 - **Resource limits:** Adaptive on macOS/Linux (formulas in `resources.rs`), fixed on Windows. Does the plan change memory/CPU assumptions?
+
+- **macOS code signing:** If the plan adds or modifies a bundled binary, verify against the "Adding a new bundled binary" checklist in [`docs/contributing/release-signing.md`](../../../docs/contributing/release-signing.md#adding-a-new-bundled-binary) — this is the single source of truth for SIGN_TARGETS, entitlements, `Info.plist` TCC keys, and ADR-037 updates.
 
 **Severity: Platform blindness = HIGH. Silent failures on platforms the developer didn't test on.**
 

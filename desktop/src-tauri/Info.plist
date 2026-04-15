@@ -10,5 +10,7 @@
     <string>Speedwave needs access to Contacts to look up email addresses for Claude Code.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Speedwave needs to send Apple Events to automate Mail, Notes, and other apps via Claude Code.</string>
+    <key>NSFileProviderDomainUsageDescription</key>
+    <string>Speedwave needs access to your cloud storage files (OneDrive, iCloud Drive, Dropbox, Google Drive) to enable AI-powered editing in your workspace.</string>
 </dict>
 </plist>

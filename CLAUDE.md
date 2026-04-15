@@ -8,6 +8,7 @@ Security-first AI platform connecting Claude Code with external services (Slack,
 - **SSOT: `mcp-servers/shared/`** — MCP protocol utilities shared by all servers
 - **SSOT: `containers/compose.template.yml`** — container definitions. `render_compose()` generates per-project files
 - **SSOT alignment:** `scripts/bundle-build-context.sh` IMAGES list must stay aligned with `crates/speedwave-runtime/src/build.rs` IMAGES constant
+- **SSOT alignment:** `scripts/sign-bundled-binaries.sh` SIGN_TARGETS must stay aligned with `desktop/src-tauri/tauri.macos.conf.json` bundle.resources — every bundled Mach-O must be signed, and binaries using restricted platform APIs need entitlements plists in `desktop/src-tauri/entitlements/`
 - **Per-project isolation:** `~/.speedwave/tokens/<project>/<service>/` (read-only mount), `speedwave_<project>_network` (isolated network)
 - **ContainerRuntime trait:** `Box<dyn ContainerRuntime>` — implementations: `LimaRuntime`, `NerdctlRuntime`, `WslRuntime`
 - **MCP Hub:** port 4000, the ONLY MCP server Claude sees. Hub has zero tokens.
