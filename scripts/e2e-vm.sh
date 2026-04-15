@@ -150,19 +150,26 @@ fi
 # Remove installed .deb if present
 sudo dpkg --remove speedwave 2>/dev/null || sudo dpkg --remove speedwave-desktop 2>/dev/null || true
 sudo apt-get autoremove -y 2>/dev/null || true
-# Stop rootless containerd (installed as systemd --user service by setup wizard)
+# Stop rootless containerd + buildkit (installed as systemd --user services by setup wizard)
+systemctl --user stop buildkit 2>/dev/null || true
+systemctl --user disable buildkit 2>/dev/null || true
 systemctl --user stop containerd 2>/dev/null || true
 systemctl --user disable containerd 2>/dev/null || true
-# Remove containerd user service file and state
-rm -f ~/.config/systemd/user/containerd.service 2>/dev/null || true
+# Reset failed state so a stale "failed" status from a prior run doesn't
+# propagate to the next run's ensure_ready check.
+systemctl --user reset-failed containerd buildkit 2>/dev/null || true
+# Remove user service files and state
+rm -f ~/.config/systemd/user/containerd.service ~/.config/systemd/user/buildkit.service 2>/dev/null || true
 systemctl --user daemon-reload 2>/dev/null || true
 # Kill rootlesskit process tree (containerd runs inside rootlesskit in rootless mode).
 # Without this, stale containerd processes hold locks on snapshot directories,
 # causing "failed to rename: file exists" errors in the next test run.
 pkill -9 -f 'rootlesskit.*containerd' 2>/dev/null || true
 sleep 1
-# Remove containerd rootless data (images, snapshots, state)
-rm -rf ~/.local/share/containerd ~/.local/share/buildkit ~/.local/share/nerdctl 2>/dev/null || true
+# Remove containerd rootless data (images, snapshots, state).
+# Use sudo because rootless buildkit snapshots contain files owned by mapped
+# subuids (not $USER), so plain rm -rf gets EPERM on nested overlayfs layers.
+sudo rm -rf ~/.local/share/containerd ~/.local/share/buildkit ~/.local/share/nerdctl 2>/dev/null || true
 rm -rf /run/user/$(id -u)/containerd-rootless 2>/dev/null || true
 # Remove Speedwave user data (config, compose files, setup markers)
 rm -rf ~/.speedwave 2>/dev/null || true

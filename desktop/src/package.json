@@ -39,8 +39,8 @@
     "undici": "^7.24.0"
   },
   "devDependencies": {
-    "@angular/build": "^21.2.6",
-    "@angular/cli": "^21.2.6",
+    "@angular/build": "^21.2.7",
+    "@angular/cli": "^21.2.7",
     "@angular/compiler-cli": "^21.2.7",
     "@eslint/js": "^10.0.1",
     "@tailwindcss/postcss": "^4.2.2",
