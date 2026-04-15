@@ -67,7 +67,7 @@ WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/desktop-release.yml"
     # parentheses as regex metacharacters. More importantly, `grep -q ""`
     # matches every line, so without `-F` and an empty-identity guard the
     # verification silently passes when APPLE_SIGNING_IDENTITY is unset.
-    grep -q 'grep -qF' "$WORKFLOW"
+    grep -qF 'grep -qF' "$WORKFLOW"
 }
 
 @test "keychain import guards against empty APPLE_SIGNING_IDENTITY" {
@@ -82,7 +82,7 @@ WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/desktop-release.yml"
     # `security list-keychains -d user` output was previously consumed via
     # an unquoted $(...) subshell, which is subject to word splitting and
     # glob expansion. `mapfile` + quoted array expansion is the robust form.
-    grep -q 'mapfile -t' "$WORKFLOW"
+    grep -qF 'mapfile -t' "$WORKFLOW"
 }
 
 @test "keychain import step gates on matrix.platform == 'macos-latest'" {
