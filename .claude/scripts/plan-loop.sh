@@ -98,13 +98,26 @@ NC='\033[0m'
 
 LOCK_STATE_FILE=""
 
+# Portable SHA-256: prefer sha256sum (coreutils, default on Linux), fall back
+# to shasum -a 256 (macOS / systems shipping Perl's shasum). Resolved once at
+# start; the absence of both yields an empty SHA_CMD, which aggregate_lock_hash
+# treats as "state unknown → reinstall".
+if command -v sha256sum >/dev/null 2>&1; then
+    SHA_CMD="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+    SHA_CMD="shasum -a 256"
+else
+    SHA_CMD=""
+fi
+
 aggregate_lock_hash() {
     local root="$1"
+    [[ -z "$SHA_CMD" ]] && return 0
     find "$root" -name package-lock.json -not -path '*/node_modules/*' -print0 2>/dev/null \
-        | xargs -0 shasum -a 256 2>/dev/null \
+        | xargs -0 $SHA_CMD 2>/dev/null \
         | awk '{print $1}' \
         | sort \
-        | shasum -a 256 \
+        | $SHA_CMD \
         | awk '{print $1}'
 }
 
@@ -359,7 +372,10 @@ if [[ "$NO_WORKTREE" != "true" && -z "$IMPL_ONLY" ]]; then
     printf "  ${GREEN}Worktree ready${NC}\n"
     echo ""
 
-    LOCK_STATE_FILE="$WORKTREE_DIR/.plan-loop-lock-hashes"
+    # Stored inside TMPDIR_LOOP so it doesn't show up as untracked in the
+    # worktree — otherwise the implementation agent sees a stray file in
+    # git status and may try to clean it up.
+    LOCK_STATE_FILE="$TMPDIR_LOOP/lock-hashes"
     printf "  ${CYAN}Checking npm dependencies...${NC}\n"
     if ! ensure_deps_fresh "$PROJECT_ROOT" "$LOCK_STATE_FILE"; then
         rm -rf "$TMPDIR_LOOP" 2>/dev/null || true
