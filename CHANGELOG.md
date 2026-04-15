@@ -1,6 +1,42 @@
 # Changelog
 
 
+## [0.8.0](https://github.com/speednet-software/speedwave/compare/v0.7.3...v0.8.0) (2026-04-15)
+
+
+### Features
+
+* **desktop:** auth UX improvements and v0.4.2 release ([#292](https://github.com/speednet-software/speedwave/issues/292)) ([edb12d1](https://github.com/speednet-software/speedwave/commit/edb12d1b785b60cb86105adde64935f0de6a881e))
+* initial commit — Speedwave v0.0.1 ([88d7a3d](https://github.com/speednet-software/speedwave/commit/88d7a3dc5b87eff887760e1a374f2b97ce180265))
+* release — docs sync, Lima memory fix, plugin system, Swift CI alignment ([#215](https://github.com/speednet-software/speedwave/issues/215)) ([b7b045d](https://github.com/speednet-software/speedwave/commit/b7b045d576547476d5542c5cd23bc57c7d8e5020))
+* release — plugin system, Tailwind migration, chat UI, security hardening ([#203](https://github.com/speednet-software/speedwave/issues/203)) ([4155156](https://github.com/speednet-software/speedwave/commit/415515630b159bf7da6eddbcf3bab3b377e8e0c9))
+* **release:** runtime fixes, Redmine improvements, and plan skills ([#331](https://github.com/speednet-software/speedwave/issues/331)) ([baf8bf8](https://github.com/speednet-software/speedwave/commit/baf8bf83c5a830b433b26613ae6b8589348170ba))
+* **runtime:** OS prerequisite checks, container recovery, and adaptive memory ([#257](https://github.com/speednet-software/speedwave/issues/257)) ([b4577d6](https://github.com/speednet-software/speedwave/commit/b4577d699551e98401c37c0f431e15580e03d0cd))
+* **runtime:** plugin system, transactional project switching, streaming chat UI, security hardening ([#134](https://github.com/speednet-software/speedwave/issues/134)) ([8dc90cb](https://github.com/speednet-software/speedwave/commit/8dc90cb9c3d307eddb1fc9193d058f83845a971d))
+* statusline rewrite, plugin limits, chat lifecycle fixes, and MCP 2025-11-25 compliance ([#430](https://github.com/speednet-software/speedwave/issues/430)) ([0af89f8](https://github.com/speednet-software/speedwave/commit/0af89f8b5d8a1a2d2494d17e729eb25a6e176ee4))
+
+
+### Bug Fixes
+
+* **ci:** fix gitflow pipeline — tag-aware checkout, version sync, backmerge automation ([#221](https://github.com/speednet-software/speedwave/issues/221)) ([fc7f22a](https://github.com/speednet-software/speedwave/commit/fc7f22ae098d227da314f5b551b0e23ceecf2746))
+* **ci:** fix Windows CLI build, tag creation, backmerge conflicts, and release-please label parsing ([#229](https://github.com/speednet-software/speedwave/issues/229)) ([338dec5](https://github.com/speednet-software/speedwave/commit/338dec5bf4d6f35014f46749fe4c151165a6304f))
+* **ci:** force-push backmerge and ghost commit cleanup ([#293](https://github.com/speednet-software/speedwave/issues/293)) ([#310](https://github.com/speednet-software/speedwave/issues/310)) ([cdb9faa](https://github.com/speednet-software/speedwave/commit/cdb9faa08fd84a0a3fcc1db77974f91ddb99de56))
+* **ci:** reset release-please manifest to 0.0.1 for clean 0.1.0 release ([#162](https://github.com/speednet-software/speedwave/issues/162)) ([0802a35](https://github.com/speednet-software/speedwave/commit/0802a350bd28370802874cb300f5abcd67f92ce8))
+* **ci:** set last-release-sha to v0.0.1 tag to reset version to 0.1.0 ([#160](https://github.com/speednet-software/speedwave/issues/160)) ([6e1a6a7](https://github.com/speednet-software/speedwave/commit/6e1a6a7bb7f2ce91e327fda57e502c56719bef86))
+* **ci:** sync claude.yml with dev — allowlist guard, remove redundant permissions ([#129](https://github.com/speednet-software/speedwave/issues/129)) ([24e879a](https://github.com/speednet-software/speedwave/commit/24e879a5ba7698a379805f8e28527307371def2a))
+* **ci:** use login allowlist for Claude Code Review trigger ([#89](https://github.com/speednet-software/speedwave/issues/89)) ([8cce77e](https://github.com/speednet-software/speedwave/commit/8cce77e1b27e71f8c6ff80d6987ab502bafa193c))
+* **config:** simplify severity headings in review-plan skill ([186fd35](https://github.com/speednet-software/speedwave/commit/186fd35d254148b53cf4c2d55e1b5e54cfd653a0))
+* **deps:** sync desktop dependencies from dev — Angular 21.2.4, Express 5, audit fixes ([#132](https://github.com/speednet-software/speedwave/issues/132)) ([8bfd1b5](https://github.com/speednet-software/speedwave/commit/8bfd1b53517723d6051eb254948f953114ded0ea))
+* **desktop:** auth overlay blocks only chat, setup regressions, OS prereqs ([#284](https://github.com/speednet-software/speedwave/issues/284)) ([68fef67](https://github.com/speednet-software/speedwave/commit/68fef6709232446e3ee61c777d57036713a63f4b))
+* **desktop:** setup screen regression and wizard dead-end after v0.4.0 update ([#278](https://github.com/speednet-software/speedwave/issues/278)) ([ead2aad](https://github.com/speednet-software/speedwave/commit/ead2aad7627fd2f8adfb5469e04208ee24176162))
+* **docs:** trigger release ([5efe385](https://github.com/speednet-software/speedwave/commit/5efe38552c701bf4e9259e06f2e2c6d1ce622af5))
+* **e2e:** repair broken selectors and macOS clean_state after Tailwind migration ([#238](https://github.com/speednet-software/speedwave/issues/238)) ([f798226](https://github.com/speednet-software/speedwave/commit/f798226171fc71c6bc49d66dddb5af2fd79b270f))
+* **release:** import Apple cert into keychain before tauri-action on macOS ([#469](https://github.com/speednet-software/speedwave/issues/469)) ([8354e27](https://github.com/speednet-software/speedwave/commit/8354e27ba5e6b406554237a2dcfb002407c9b2fc))
+* **release:** replace mapfile with while-read loop for bash 3.2 ([#470](https://github.com/speednet-software/speedwave/issues/470)) ([7cc128e](https://github.com/speednet-software/speedwave/commit/7cc128e6ff5be31923647438101db95343e6b857)), closes [#376](https://github.com/speednet-software/speedwave/issues/376)
+* **runtime:** mitigate CLI TUI hang on long streams via NO_FLICKER ([#452](https://github.com/speednet-software/speedwave/issues/452)) ([#454](https://github.com/speednet-software/speedwave/issues/454)) ([f85ff4e](https://github.com/speednet-software/speedwave/commit/f85ff4e34fcc3e9f57719391266900278404f5cd))
+* **security:** add missing macOS entitlements and CloudStorage TCC access ([#476](https://github.com/speednet-software/speedwave/issues/476)) ([3bedaa6](https://github.com/speednet-software/speedwave/commit/3bedaa642d99e175a41183311a3cd864e13a3feb))
+* sign bundled macOS binaries and close vite/rustls-webpki CVEs ([#461](https://github.com/speednet-software/speedwave/issues/461)) ([856afcb](https://github.com/speednet-software/speedwave/commit/856afcb3755c815f14b168ee8a2e7a56927e042a))
+
 ## [0.7.3](https://github.com/speednet-software/speedwave/compare/v0.7.2...v0.7.3) (2026-04-15)
 
 
