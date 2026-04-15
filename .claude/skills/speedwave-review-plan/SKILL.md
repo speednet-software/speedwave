@@ -233,7 +233,7 @@ Check:
 
 - Does it touch OS prerequisite checks (`os_prereqs.rs`)? Verify violations still block container start.
 
-- If the plan adds a new bundled binary: does it include entitlements analysis? Is `SIGN_TARGETS` in `sign-bundled-binaries.sh` updated? Is the entitlements plist created in `desktop/src-tauri/entitlements/` if needed? Is ADR-037 updated? Does the plan account for Hardened Runtime restrictions (Virtualization.framework, Apple Events/osascript, JIT, other restricted APIs)?
+- If the plan adds a new bundled binary: does it satisfy the "Adding a new bundled binary" checklist in [`docs/contributing/release-signing.md`](../../../docs/contributing/release-signing.md#adding-a-new-bundled-binary)? (`SIGN_TARGETS` updated, entitlements plist created if needed, matching `NS*UsageDescription` in `Info.plist` for any TCC-protected API, ADR-037 inventory updated.)
 
 **Severity: Any security relaxation without an ADR justification = BLOCKER.**
 
@@ -295,7 +295,7 @@ Check:
 
 - **Resource limits:** Adaptive on macOS/Linux (formulas in `resources.rs`), fixed on Windows. Does the plan change memory/CPU assumptions?
 
-- **macOS code signing:** If the plan adds a new bundled binary: is it added to `SIGN_TARGETS` in `sign-bundled-binaries.sh`? Does it need entitlements under Hardened Runtime (Virtualization.framework, Apple Events/osascript, JIT, other restricted APIs)? Is the entitlements plist in `desktop/src-tauri/entitlements/` created? Is ADR-037 entitlements inventory table updated?
+- **macOS code signing:** If the plan adds or modifies a bundled binary, verify against the "Adding a new bundled binary" checklist in [`docs/contributing/release-signing.md`](../../../docs/contributing/release-signing.md#adding-a-new-bundled-binary) — this is the single source of truth for SIGN_TARGETS, entitlements, `Info.plist` TCC keys, and ADR-037 updates.
 
 **Severity: Platform blindness = HIGH. Silent failures on platforms the developer didn't test on.**
 

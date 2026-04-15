@@ -7,6 +7,18 @@
 
 INFO_PLIST="$BATS_TEST_DIRNAME/../../desktop/src-tauri/Info.plist"
 
+# Single source of truth for which TCC usage-description keys Speedwave must
+# declare. Add a key here when a bundled binary starts using a new TCC-gated
+# API — every @test below iterates this list. See ADR-037 §1b for the mapping
+# between keys and the APIs/binaries that require them.
+REQUIRED_TCC_KEYS=(
+    NSRemindersUsageDescription
+    NSCalendarsUsageDescription
+    NSContactsUsageDescription
+    NSAppleEventsUsageDescription
+    NSFileProviderDomainUsageDescription
+)
+
 plist_get() {
     # Parse the plist XML directly with python so this works on Linux CI
     # where plutil does not exist. Handles the standard <key>/<string>
@@ -32,51 +44,47 @@ PY
     [ "$status" -eq 0 ]
 }
 
-@test "NSRemindersUsageDescription is present and non-empty" {
-    local val
-    val="$(plist_get NSRemindersUsageDescription)"
-    [ -n "$val" ]
+@test "all required TCC usage descriptions are present and non-empty" {
+    # Each key must resolve to a non-empty string, otherwise macOS cannot
+    # display the consent dialog. Failures are reported per-key so a
+    # missing key names itself in the output.
+    local key val missing=()
+    for key in "${REQUIRED_TCC_KEYS[@]}"; do
+        val="$(plist_get "$key")"
+        if [ -z "$val" ]; then
+            missing+=("$key")
+        fi
+    done
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo "Missing or empty Info.plist keys: ${missing[*]}" >&2
+        return 1
+    fi
 }
 
-@test "NSCalendarsUsageDescription is present and non-empty" {
-    local val
-    val="$(plist_get NSCalendarsUsageDescription)"
-    [ -n "$val" ]
-}
-
-@test "NSContactsUsageDescription is present and non-empty" {
-    local val
-    val="$(plist_get NSContactsUsageDescription)"
-    [ -n "$val" ]
-}
-
-@test "NSAppleEventsUsageDescription is present and non-empty" {
-    # Required by mail-cli and notes-cli — without this, macOS cannot
-    # display the Automation consent prompt and osascript → Apple Events
-    # calls are silently blocked (error -1743).
-    local val
-    val="$(plist_get NSAppleEventsUsageDescription)"
-    [ -n "$val" ]
-}
-
-@test "NSFileProviderDomainUsageDescription is present and non-empty" {
-    # Required for virtiofs access to ~/Library/CloudStorage/ (OneDrive,
-    # iCloud Drive, Dropbox, Google Drive). Without this, macOS TCC
-    # silently blocks reads and stat returns "operation not permitted"
-    # inside the VM. Regression introduced by code signing (PR #458),
-    # fixed by PR #475. See anthropics/claude-code#26981 for the same
-    # pattern in Claude Code.
+@test "NSFileProviderDomainUsageDescription specifically is declared" {
+    # Explicit test for the key that caused the v0.7.2 CloudStorage
+    # regression — macOS silently blocks virtiofs reads from
+    # ~/Library/CloudStorage/ (OneDrive, iCloud Drive, Dropbox, Google
+    # Drive) without this key. See anthropics/claude-code#26981.
     local val
     val="$(plist_get NSFileProviderDomainUsageDescription)"
+    [ -n "$val" ]
+}
+
+@test "NSAppleEventsUsageDescription specifically is declared" {
+    # Explicit test for the key used by mail-cli and notes-cli. Missing
+    # this key makes osascript → Apple Events calls fail silently with
+    # error -1743.
+    local val
+    val="$(plist_get NSAppleEventsUsageDescription)"
     [ -n "$val" ]
 }
 
 @test "all usage descriptions mention Speedwave or Claude Code" {
     # User-facing strings should identify the app, not be Lorem-ipsum
     # placeholder text. This catches copy-paste regressions.
-    for key in NSRemindersUsageDescription NSCalendarsUsageDescription \
-               NSContactsUsageDescription NSAppleEventsUsageDescription \
-               NSFileProviderDomainUsageDescription; do
+    local key val
+    for key in "${REQUIRED_TCC_KEYS[@]}"; do
         val="$(plist_get "$key")"
         if ! echo "$val" | grep -qE 'Speedwave|Claude'; then
             echo "Usage description for $key does not mention Speedwave/Claude: $val" >&2
