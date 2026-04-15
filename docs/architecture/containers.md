@@ -82,6 +82,19 @@ Existing projects receive the new Claude container memory limit on next containe
 - The `IMAGES` constant in `crates/speedwave-runtime/src/build.rs` must stay aligned with `scripts/bundle-build-context.sh`
 - All binary downloads in Containerfiles are **SHA256-verified** for supply chain security
 
+### Image pruning on update
+
+When the bundle ID changes (app version bump or build-context change), the previous bundle's 6 images are removed via `nerdctl rmi` **before** building the new set. This reclaims ~4–6 GiB of disk space per update cycle on the Lima VM diffdisk (50 GiB cap).
+
+Both update paths perform this pruning:
+
+- **Desktop** (`reconcile_bundle_update_inner` in `desktop/src-tauri/src/reconcile.rs`) — prunes before calling `build_all_images_for_bundle`
+- **CLI** (`update_containers` in `crates/speedwave-runtime/src/update.rs`) — prunes before calling `build_all_images`
+
+The guard condition is: `applied_bundle_id` exists **and** differs from the new bundle ID. Fresh installs (no `applied_bundle_id`) and rebuilds without a version change produce no prune call.
+
+Failure to prune is warn-only and never blocks the update — the build proceeds regardless.
+
 ## Dynamic Port Reconciliation (mcp-os)
 
 The mcp-os process runs on the host (not in a container) and binds to a dynamic port at startup. When the Desktop app starts — or when the mcp-os watchdog respawns a crashed process — the new port may differ from the `WORKER_OS_URL` baked into the running compose configuration.
