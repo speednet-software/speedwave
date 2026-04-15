@@ -59,8 +59,11 @@ populate_targets() {
     write_mach_o "$SRC_TAURI/lima/bin/limactl"
     write_mach_o "$SRC_TAURI/nodejs/bin/node"
     mkdir -p "$SRC_TAURI/entitlements"
-    cp "$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements/node.plist" \
-       "$SRC_TAURI/entitlements/node.plist"
+    local ent_src="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements"
+    cp "$ent_src/node.plist" "$SRC_TAURI/entitlements/node.plist"
+    cp "$ent_src/limactl.plist" "$SRC_TAURI/entitlements/limactl.plist"
+    cp "$ent_src/calendars.plist" "$SRC_TAURI/entitlements/calendars.plist"
+    cp "$ent_src/apple-events.plist" "$SRC_TAURI/entitlements/apple-events.plist"
 }
 
 @test "sign-bundled-binaries script exists and is executable" {
@@ -112,6 +115,112 @@ populate_targets() {
 
     [ "$status" -eq 1 ]
     [[ "$output" == *"is not a Mach-O binary"* ]]
+}
+
+@test "SIGN_TARGETS covers every executable resource in tauri.macos.conf.json" {
+    # Prevents the "added binary to tauri.macos.conf.json but forgot
+    # SIGN_TARGETS" regression. Extracts executable resource keys (those
+    # that don't end with /) and verifies each has a SIGN_TARGETS entry.
+    local macos_conf="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.macos.conf.json"
+    [ -f "$macos_conf" ]
+
+    # Extract resource keys that are individual files (not directories ending in /)
+    local resources
+    resources=$(python3 -c "
+import json, sys
+with open('$macos_conf') as f:
+    conf = json.load(f)
+for key in conf.get('bundle', {}).get('resources', {}):
+    if not key.endswith('/'):
+        print(key)
+" | sort)
+
+    # Extract paths from SIGN_TARGETS (relative to SRC_TAURI)
+    local targets
+    targets=$(sed -n 's/.*"\$SRC_TAURI\/\([^":]*\).*/\1/p' "$SCRIPT" | sort)
+
+    [ -n "$resources" ]
+    [ -n "$targets" ]
+
+    # Every executable resource must have a SIGN_TARGETS entry
+    local missing=""
+    while IFS= read -r res; do
+        if ! echo "$targets" | grep -qF "$res"; then
+            missing="$missing  $res"
+        fi
+    done <<< "$resources"
+
+    if [ -n "$missing" ]; then
+        echo "Resources in tauri.macos.conf.json missing from SIGN_TARGETS:$missing" >&2
+        return 1
+    fi
+}
+
+@test "limactl has virtualization entitlement in SIGN_TARGETS" {
+    grep -qF 'limactl:$LIMACTL_ENTITLEMENTS' "$SCRIPT" || \
+    grep -qF 'limactl:$SRC_TAURI/entitlements/limactl.plist' "$SCRIPT"
+}
+
+@test "mail-cli has apple-events entitlement in SIGN_TARGETS" {
+    grep -qF 'mail-cli:$APPLE_EVENTS_ENTITLEMENTS' "$SCRIPT" || \
+    grep -qF 'mail-cli:$SRC_TAURI/entitlements/apple-events.plist' "$SCRIPT"
+}
+
+@test "notes-cli has apple-events entitlement in SIGN_TARGETS" {
+    grep -qF 'notes-cli:$APPLE_EVENTS_ENTITLEMENTS' "$SCRIPT" || \
+    grep -qF 'notes-cli:$SRC_TAURI/entitlements/apple-events.plist' "$SCRIPT"
+}
+
+@test "node has JIT entitlement in SIGN_TARGETS" {
+    grep -qF 'node:$NODE_ENTITLEMENTS' "$SCRIPT" || \
+    grep -qF 'node:$SRC_TAURI/entitlements/node.plist' "$SCRIPT"
+}
+
+@test "calendar-cli has calendars entitlement in SIGN_TARGETS" {
+    grep -qF 'calendar-cli:$CALENDARS_ENTITLEMENTS' "$SCRIPT" || \
+    grep -qF 'calendar-cli:$SRC_TAURI/entitlements/calendars.plist' "$SCRIPT"
+}
+
+@test "reminders-cli has calendars entitlement in SIGN_TARGETS" {
+    grep -qF 'reminders-cli:$CALENDARS_ENTITLEMENTS' "$SCRIPT" || \
+    grep -qF 'reminders-cli:$SRC_TAURI/entitlements/calendars.plist' "$SCRIPT"
+}
+
+@test "speedwave CLI has no entitlements in SIGN_TARGETS" {
+    # speedwave is pure Rust — no restricted APIs, no entitlements needed.
+    # The entry must end with ":" (empty entitlements).
+    grep -qF 'cli/speedwave:"' "$SCRIPT"
+}
+
+@test "post-sign verification calls codesign -v --strict" {
+    grep -qF 'codesign -v --strict' "$SCRIPT"
+}
+
+@test "post-sign verification checks entitlements via codesign -d --entitlements" {
+    grep -qF 'codesign -d --entitlements' "$SCRIPT"
+}
+
+@test "all entitlements plists exist" {
+    local ent_dir="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements"
+    [ -f "$ent_dir/node.plist" ]
+    [ -f "$ent_dir/limactl.plist" ]
+    [ -f "$ent_dir/calendars.plist" ]
+    [ -f "$ent_dir/apple-events.plist" ]
+}
+
+@test "calendars.plist contains calendars entitlement" {
+    local plist="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements/calendars.plist"
+    grep -qF 'com.apple.security.personal-information.calendars' "$plist"
+}
+
+@test "limactl.plist contains virtualization entitlement" {
+    local plist="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements/limactl.plist"
+    grep -qF 'com.apple.security.virtualization' "$plist"
+}
+
+@test "apple-events.plist contains automation entitlement" {
+    local plist="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements/apple-events.plist"
+    grep -qF 'com.apple.security.automation.apple-events' "$plist"
 }
 
 @test "error message names the missing file and gives actionable hint" {

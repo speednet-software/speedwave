@@ -233,6 +233,8 @@ Check:
 
 - Does it touch OS prerequisite checks (`os_prereqs.rs`)? Verify violations still block container start.
 
+- If the plan adds a new bundled binary: does it include entitlements analysis? Is `SIGN_TARGETS` in `sign-bundled-binaries.sh` updated? Is the entitlements plist created in `desktop/src-tauri/entitlements/` if needed? Is ADR-037 updated? Does the plan account for Hardened Runtime restrictions (Virtualization.framework, Apple Events/osascript, JIT, other restricted APIs)?
+
 **Severity: Any security relaxation without an ADR justification = BLOCKER.**
 
 ### 2. ARCHITECTURAL INTEGRITY & SSOT
@@ -292,6 +294,8 @@ Check:
 - **Build context:** `prepare_build_context()` handles path translation for VMs. Does the plan respect this?
 
 - **Resource limits:** Adaptive on macOS/Linux (formulas in `resources.rs`), fixed on Windows. Does the plan change memory/CPU assumptions?
+
+- **macOS code signing:** If the plan adds a new bundled binary: is it added to `SIGN_TARGETS` in `sign-bundled-binaries.sh`? Does it need entitlements under Hardened Runtime (Virtualization.framework, Apple Events/osascript, JIT, other restricted APIs)? Is the entitlements plist in `desktop/src-tauri/entitlements/` created? Is ADR-037 entitlements inventory table updated?
 
 **Severity: Platform blindness = HIGH. Silent failures on platforms the developer didn't test on.**
 

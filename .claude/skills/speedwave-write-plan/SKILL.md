@@ -100,6 +100,8 @@ For EVERY change, answer:
 
 - Does it affect installer artifacts? (.dmg, .deb, .exe)
 
+- Does this change add or modify a bundled macOS binary? If yes: (1) add to `SIGN_TARGETS` in `sign-bundled-binaries.sh`, (2) determine if it needs entitlements under Hardened Runtime (check: does it use Virtualization.framework, Apple Events/osascript, JIT, or other restricted APIs?), (3) create entitlements plist in `desktop/src-tauri/entitlements/` if needed, (4) update ADR-037 entitlements inventory table
+
 - Filesystem case sensitivity? (macOS VirtioFS insensitive, Linux ext4 sensitive)
 
 If the change is platform-independent, state WHY it's platform-independent — don't just skip this section.
@@ -193,6 +195,8 @@ Answer EVERY question. "N/A" is acceptable only with justification.
 - [ ] Authentication gates preserved? (backend + frontend)
 
 - [ ] `path-validator.ts` denylist intact? (`.git/`, `.env`, `.speedwave/`)
+
+- [ ] New or modified bundled macOS binary? → (1) added to `SIGN_TARGETS` in `sign-bundled-binaries.sh`, (2) entitlements analysis done (Virtualization.framework, Apple Events/osascript, JIT, other restricted APIs), (3) entitlements plist created in `desktop/src-tauri/entitlements/` if needed, (4) ADR-037 entitlements inventory table updated
 
 ### 7. Documentation Plan
 

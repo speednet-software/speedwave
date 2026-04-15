@@ -32,6 +32,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # In production, this resolves to desktop/src-tauri/ within the repo.
 SRC_TAURI="${SRC_TAURI:-$REPO_ROOT/desktop/src-tauri}"
 NODE_ENTITLEMENTS="$SRC_TAURI/entitlements/node.plist"
+LIMACTL_ENTITLEMENTS="$SRC_TAURI/entitlements/limactl.plist"
+CALENDARS_ENTITLEMENTS="$SRC_TAURI/entitlements/calendars.plist"
+APPLE_EVENTS_ENTITLEMENTS="$SRC_TAURI/entitlements/apple-events.plist"
 
 # Paths that tauri.macos.conf.json copies into .app/Contents/Resources/.
 # Source: desktop/src-tauri/tauri.macos.conf.json → bundle.resources.
@@ -44,11 +47,11 @@ NODE_ENTITLEMENTS="$SRC_TAURI/entitlements/node.plist"
 # Runtime blocks by default. Without the entitlement, node crashes at startup.
 SIGN_TARGETS=(
   "$SRC_TAURI/cli/speedwave:"
-  "$SRC_TAURI/reminders-cli:"
-  "$SRC_TAURI/calendar-cli:"
-  "$SRC_TAURI/mail-cli:"
-  "$SRC_TAURI/notes-cli:"
-  "$SRC_TAURI/lima/bin/limactl:"
+  "$SRC_TAURI/reminders-cli:$CALENDARS_ENTITLEMENTS"
+  "$SRC_TAURI/calendar-cli:$CALENDARS_ENTITLEMENTS"
+  "$SRC_TAURI/mail-cli:$APPLE_EVENTS_ENTITLEMENTS"
+  "$SRC_TAURI/notes-cli:$APPLE_EVENTS_ENTITLEMENTS"
+  "$SRC_TAURI/lima/bin/limactl:$LIMACTL_ENTITLEMENTS"
   "$SRC_TAURI/nodejs/bin/node:$NODE_ENTITLEMENTS"
 )
 
@@ -81,6 +84,35 @@ sign_macho() {
       --timestamp \
       --sign "$APPLE_SIGNING_IDENTITY" \
       "$path"
+  fi
+
+  # Verify signature is valid
+  if ! codesign -v --strict "$path"; then
+    echo "ERROR: signature verification failed for $path" >&2
+    exit 1
+  fi
+
+  # Verify entitlements were applied correctly — check every <key> in the
+  # plist, not just the first, so multi-key plists (e.g. node.plist with
+  # allow-jit + allow-unsigned-executable-memory) are fully verified.
+  if [[ -n "$entitlements" ]]; then
+    local ent_output
+    ent_output="$(codesign -d --entitlements - "$path" 2>/dev/null)"
+    local all_verified=true
+    while IFS= read -r expected_key; do
+      if ! echo "$ent_output" | grep -qF "$expected_key"; then
+        echo "ERROR: entitlement '$expected_key' not found in signed binary $path" >&2
+        all_verified=false
+      fi
+    done < <(grep '<key>' "$entitlements" | sed 's/.*<key>\(.*\)<\/key>.*/\1/')
+    if [[ "$all_verified" != "true" ]]; then
+      exit 1
+    fi
+    local key_count
+    key_count="$(grep -c '<key>' "$entitlements")"
+    echo "  verified: signature valid, $key_count entitlement(s) present"
+  else
+    echo "  verified: signature valid"
   fi
 }
 
