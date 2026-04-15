@@ -580,6 +580,15 @@ Only report NEW issues if they are BLOCKER or HIGH severity."
     PREV_FINDINGS="$findings"
     PREV_HIGH_COUNT="$high_count"
 
+    # Sanity check: reviewer may return READY_TO_IMPLEMENT while also reporting
+    # blockers (schema does not enforce the correlation). Reject that combo — a
+    # plan with BLOCKERS is never ready to implement regardless of what the
+    # model claims in the verdict field.
+    if [[ "$verdict" == "READY_TO_IMPLEMENT" && "$blocker_count" -gt 0 ]]; then
+        printf "\n  ${RED}[sanity] Reviewer returned READY_TO_IMPLEMENT with $blocker_count blocker(s) — demoting to NEEDS_REVISION${NC}\n"
+        verdict="NEEDS_REVISION"
+    fi
+
     if [[ "$verdict" == "READY_TO_IMPLEMENT" ]]; then
         echo ""
         if [[ "$high_count" -gt 0 ]]; then
@@ -754,6 +763,19 @@ $IMPL_FEEDBACK" \
     echo "  Steps:      $v_steps / $v_total"
     echo "  make check: $( [[ "$v_check" == "true" ]] && echo "PASS" || echo "FAIL" )"
     echo "  make test:  $( [[ "$v_test" == "true" ]] && echo "PASS" || echo "FAIL" )"
+
+    # Sanity check: demote VERIFIED if model contradicts itself (e.g. reports
+    # VERIFIED with missing steps or failing checks). The JSON schema cannot
+    # express these correlations, so the orchestrator enforces them.
+    if [[ "$v_verdict" == "VERIFIED" ]]; then
+        if [[ "$v_check" != "true" || "$v_test" != "true" ]]; then
+            printf "\n  ${RED}[sanity] Verifier returned VERIFIED with failing check/test — demoting to GAPS_FOUND${NC}\n"
+            v_verdict="GAPS_FOUND"
+        elif [[ "$v_total" -gt 0 && "$v_steps" -lt "$v_total" ]]; then
+            printf "\n  ${RED}[sanity] Verifier returned VERIFIED with $v_steps/$v_total steps implemented — demoting to GAPS_FOUND${NC}\n"
+            v_verdict="GAPS_FOUND"
+        fi
+    fi
 
     if [[ "$v_verdict" == "VERIFIED" && "$v_check" == "true" && "$v_test" == "true" ]]; then
         echo ""
