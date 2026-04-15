@@ -161,10 +161,11 @@ systemctl --user reset-failed containerd buildkit 2>/dev/null || true
 # Remove user service files and state
 rm -f ~/.config/systemd/user/containerd.service ~/.config/systemd/user/buildkit.service 2>/dev/null || true
 systemctl --user daemon-reload 2>/dev/null || true
-# Kill rootlesskit process tree (containerd runs inside rootlesskit in rootless mode).
-# Without this, stale containerd processes hold locks on snapshot directories,
-# causing "failed to rename: file exists" errors in the next test run.
-pkill -9 -f 'rootlesskit.*containerd' 2>/dev/null || true
+# Kill rootlesskit process tree (both containerd and buildkit run inside
+# rootlesskit in rootless mode). Without this, stale processes hold locks
+# on snapshot directories, causing "failed to rename: file exists" errors
+# in the next test run.
+pkill -9 -f 'rootlesskit.*(containerd|buildkit)' 2>/dev/null || true
 sleep 1
 # Remove containerd rootless data (images, snapshots, state).
 # Use sudo because rootless buildkit snapshots contain files owned by mapped
