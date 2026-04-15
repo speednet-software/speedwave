@@ -165,7 +165,7 @@ Permitted for building and shipping Speedwave.[^19] The prohibition applies only
 - [ ] **Add `cargo-deny` to GitHub Actions CI** for dependency license auditing
 - [x] **Publish LICENSE** (Apache-2.0 chosen for Speedwave) at repo root
 - [ ] **Obtain Apple Developer Program membership** for notarization + VZ entitlement
-- [ ] **Apply for `com.apple.security.virtualization` entitlement** in Apple Developer portal
+- [ ] **Embed `com.apple.security.virtualization` entitlement** via codesign during bundle signing (self-serve, no Apple approval needed) — see [ADR-037](ADR-037-code-signing-and-bundled-binary-signing.md)
 
 ### Ongoing
 

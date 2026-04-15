@@ -33,6 +33,7 @@ Store the private key as `TAURI_SIGNING_PRIVATE_KEY`. The public key is already 
 - `RELEASE_TOKEN` missing — release-please cannot create PRs or push to `main`. The workflow fails with a permissions error.
 - `TAURI_SIGNING_PRIVATE_KEY` missing — tauri-action produces unsigned bundles. The Tauri updater will **refuse to install** them (signature verification fails). Users cannot auto-update.
 - Apple/Windows signing secrets missing — builds succeed but produce unsigned binaries. macOS Gatekeeper blocks the app (users must right-click > Open). Windows SmartScreen shows a warning.
+- Entitlements plists missing — builds and notarization succeed, but binaries crash at runtime when they attempt to use restricted platform APIs (Virtualization.framework, Apple Events). This is NOT caught by CI — only by manual testing.
 
 **Operational setup for Apple signing** (certificate generation, Keychain import, notary configuration, rotation) is documented in [Release Signing Guide](docs/contributing/release-signing.md). The architectural rationale — including why every Mach-O binary in `Contents/Resources/` is signed individually — is in [ADR-037](docs/adr/ADR-037-code-signing-and-bundled-binary-signing.md).
 

@@ -32,6 +32,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # In production, this resolves to desktop/src-tauri/ within the repo.
 SRC_TAURI="${SRC_TAURI:-$REPO_ROOT/desktop/src-tauri}"
 NODE_ENTITLEMENTS="$SRC_TAURI/entitlements/node.plist"
+LIMACTL_ENTITLEMENTS="$SRC_TAURI/entitlements/limactl.plist"
+APPLE_EVENTS_ENTITLEMENTS="$SRC_TAURI/entitlements/apple-events.plist"
 
 # Paths that tauri.macos.conf.json copies into .app/Contents/Resources/.
 # Source: desktop/src-tauri/tauri.macos.conf.json → bundle.resources.
@@ -46,9 +48,9 @@ SIGN_TARGETS=(
   "$SRC_TAURI/cli/speedwave:"
   "$SRC_TAURI/reminders-cli:"
   "$SRC_TAURI/calendar-cli:"
-  "$SRC_TAURI/mail-cli:"
-  "$SRC_TAURI/notes-cli:"
-  "$SRC_TAURI/lima/bin/limactl:"
+  "$SRC_TAURI/mail-cli:$APPLE_EVENTS_ENTITLEMENTS"
+  "$SRC_TAURI/notes-cli:$APPLE_EVENTS_ENTITLEMENTS"
+  "$SRC_TAURI/lima/bin/limactl:$LIMACTL_ENTITLEMENTS"
   "$SRC_TAURI/nodejs/bin/node:$NODE_ENTITLEMENTS"
 )
 
@@ -81,6 +83,27 @@ sign_macho() {
       --timestamp \
       --sign "$APPLE_SIGNING_IDENTITY" \
       "$path"
+  fi
+
+  # Verify signature is valid
+  if ! codesign -v --strict "$path"; then
+    echo "ERROR: signature verification failed for $path" >&2
+    exit 1
+  fi
+
+  # Verify entitlements were applied correctly
+  if [[ -n "$entitlements" ]]; then
+    local expected_key
+    expected_key="$(grep '<key>' "$entitlements" | head -1 | sed 's/.*<key>\(.*\)<\/key>.*/\1/')"
+    if [[ -n "$expected_key" ]]; then
+      if ! codesign -d --entitlements - "$path" 2>/dev/null | grep -q "$expected_key"; then
+        echo "ERROR: entitlement '$expected_key' not found in signed binary $path" >&2
+        exit 1
+      fi
+      echo "  verified: signature valid, entitlement '$expected_key' present"
+    fi
+  else
+    echo "  verified: signature valid"
   fi
 }
 

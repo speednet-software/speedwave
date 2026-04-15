@@ -89,9 +89,23 @@ Three reasons:
 
 tauri-action's macOS signing logic was designed assuming the Tauri app has no bundled external binaries. It signs `Contents/MacOS/<main>` and the `.app` bundle root, but does not recursively sign `Contents/Resources/**/*` Mach-O files[^10]. This is a known limitation — PRs to extend it upstream have stalled. Implementing it ourselves via `beforeBundleCommand` is more maintainable than carrying a fork.
 
-#### Why Node.js needs entitlements and other binaries do not
+#### Entitlements inventory
 
-Hardened Runtime disables several legacy behaviors by default (JIT, DYLD env vars, library validation). `limactl` is a Go binary with no JIT; our Swift and Rust CLIs are AOT-compiled. Only Node.js (V8 engine) needs `allow-jit` + `allow-unsigned-executable-memory` entitlements[^11]. If a future bundled binary requires JIT (e.g. a Python runtime with PyPy) or DYLD injection, add its entitlements plist under `desktop/src-tauri/entitlements/` and reference it from the `SIGN_TARGETS` table in the script.
+Hardened Runtime disables several platform capabilities by default[^11]. Bundled binaries that use restricted APIs must carry entitlements plists to opt back in. The complete inventory:
+
+| Binary | Entitlements plist | Keys | Reason |
+|---|---|---|---|
+| `nodejs/bin/node` | `node.plist` | `allow-jit`, `allow-unsigned-executable-memory` | V8 JIT engine |
+| `lima/bin/limactl` | `limactl.plist` | `com.apple.security.virtualization` | Apple Virtualization Framework[^16] |
+| `mail-cli` | `apple-events.plist` | `com.apple.security.automation.apple-events` | Sends Apple Events to Mail.app/Outlook via osascript |
+| `notes-cli` | `apple-events.plist` | `com.apple.security.automation.apple-events` | Sends Apple Events to Notes.app via osascript |
+| `speedwave` | none | — | AOT Rust, no restricted APIs |
+| `calendar-cli` | none | — | EventKit (TCC-gated, no entitlement needed) |
+| `reminders-cli` | none | — | EventKit (TCC-gated, no entitlement needed) |
+
+If a future bundled binary requires JIT (e.g. a Python runtime with PyPy), virtualization APIs, or Apple Events automation, add its entitlements plist under `desktop/src-tauri/entitlements/` and reference it from the `SIGN_TARGETS` table in the script.
+
+[^16]: Lima uses Apple's Virtualization.framework (`vmType: vz`) for VM management. The upstream Lima project carries a similar entitlements file at [`vz.entitlements`](https://github.com/lima-vm/lima/blob/master/vz.entitlements).
 
 ## Consequences
 
