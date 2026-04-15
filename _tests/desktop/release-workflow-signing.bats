@@ -1,0 +1,74 @@
+#!/usr/bin/env bats
+
+# Static sanity checks on .github/workflows/desktop-release.yml to prevent the
+# macOS signing regression that shipped in PR #458 / v0.7.2-draft: without a
+# keychain-import step before tauri-action, `beforeBundleCommand` runs
+# `codesign --sign "$APPLE_SIGNING_IDENTITY"` against an empty keychain and the
+# entire macOS matrix fails with "item could not be found in the keychain".
+#
+# These tests guard the contract between the workflow and
+# scripts/sign-bundled-binaries.sh: by the time tauri-action starts on macOS,
+# the identity must already be importable and the script's `codesign` call must
+# be able to resolve it.
+
+WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/desktop-release.yml"
+
+@test "desktop-release.yml exists" {
+    [ -f "$WORKFLOW" ]
+}
+
+@test "workflow imports Apple certificate into keychain before tauri-action" {
+    # Grab line numbers of the keychain-import step and the tauri-action step.
+    # `grep -n` prints "LINE:content"; cut to just the line number.
+    import_line=$(grep -n "Import Apple signing certificate to keychain" "$WORKFLOW" | head -1 | cut -d: -f1)
+    tauri_line=$(grep -n "tauri-apps/tauri-action@" "$WORKFLOW" | head -1 | cut -d: -f1)
+
+    [ -n "$import_line" ]
+    [ -n "$tauri_line" ]
+    # Import must come before tauri-action, otherwise beforeBundleCommand sees
+    # an empty keychain on the ephemeral GitHub runner.
+    [ "$import_line" -lt "$tauri_line" ]
+}
+
+@test "keychain import uses the prescribed security commands" {
+    # security create-keychain + import + set-key-partition-list is the
+    # pattern Tauri and Apple require for codesign to find a Developer ID
+    # identity on a headless CI runner. All three must be present.
+    grep -q "security create-keychain" "$WORKFLOW"
+    grep -q "security import" "$WORKFLOW"
+    grep -q "security set-key-partition-list" "$WORKFLOW"
+}
+
+@test "keychain import grants codesign access to the imported key" {
+    # `-T /usr/bin/codesign` is what lets codesign read the private key from
+    # the build keychain without triggering a GUI password prompt. Missing
+    # this flag is a common silent-failure mode.
+    grep -q -- "-T /usr/bin/codesign" "$WORKFLOW"
+}
+
+@test "keychain import prepends build keychain to search list" {
+    # codesign resolves identities via the user's keychain search list; if the
+    # build keychain is created but not added to that list, `find-identity`
+    # returns empty and signing fails. `security list-keychains -s` is the
+    # single command that fixes this.
+    grep -q "security list-keychains" "$WORKFLOW"
+}
+
+@test "keychain import fails fast if identity is not resolvable" {
+    # The step must verify the identity is actually importable, not just
+    # that `security import` exited 0 — a malformed .p12 can import without
+    # producing a usable codesigning identity. `find-identity` after import
+    # is the canonical smoke test.
+    grep -q "security find-identity" "$WORKFLOW"
+}
+
+@test "keychain import step gates on matrix.platform == 'macos-latest'" {
+    # Must not run on Linux/Windows matrix jobs — security commands don't
+    # exist there and the step would error out the entire matrix. The `if:`
+    # guard must appear on the line immediately following the step name
+    # (standard Actions step layout).
+    import_line=$(grep -n "Import Apple signing certificate to keychain" "$WORKFLOW" | head -1 | cut -d: -f1)
+    [ -n "$import_line" ]
+    guard_line=$((import_line + 1))
+    sed -n "${guard_line}p" "$WORKFLOW" | grep -q "matrix.platform == 'macos-latest'"
+}
