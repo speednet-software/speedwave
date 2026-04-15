@@ -33,6 +33,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC_TAURI="${SRC_TAURI:-$REPO_ROOT/desktop/src-tauri}"
 NODE_ENTITLEMENTS="$SRC_TAURI/entitlements/node.plist"
 LIMACTL_ENTITLEMENTS="$SRC_TAURI/entitlements/limactl.plist"
+CALENDARS_ENTITLEMENTS="$SRC_TAURI/entitlements/calendars.plist"
 APPLE_EVENTS_ENTITLEMENTS="$SRC_TAURI/entitlements/apple-events.plist"
 
 # Paths that tauri.macos.conf.json copies into .app/Contents/Resources/.
@@ -46,8 +47,8 @@ APPLE_EVENTS_ENTITLEMENTS="$SRC_TAURI/entitlements/apple-events.plist"
 # Runtime blocks by default. Without the entitlement, node crashes at startup.
 SIGN_TARGETS=(
   "$SRC_TAURI/cli/speedwave:"
-  "$SRC_TAURI/reminders-cli:"
-  "$SRC_TAURI/calendar-cli:"
+  "$SRC_TAURI/reminders-cli:$CALENDARS_ENTITLEMENTS"
+  "$SRC_TAURI/calendar-cli:$CALENDARS_ENTITLEMENTS"
   "$SRC_TAURI/mail-cli:$APPLE_EVENTS_ENTITLEMENTS"
   "$SRC_TAURI/notes-cli:$APPLE_EVENTS_ENTITLEMENTS"
   "$SRC_TAURI/lima/bin/limactl:$LIMACTL_ENTITLEMENTS"

@@ -62,6 +62,7 @@ populate_targets() {
     local ent_src="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements"
     cp "$ent_src/node.plist" "$SRC_TAURI/entitlements/node.plist"
     cp "$ent_src/limactl.plist" "$SRC_TAURI/entitlements/limactl.plist"
+    cp "$ent_src/calendars.plist" "$SRC_TAURI/entitlements/calendars.plist"
     cp "$ent_src/apple-events.plist" "$SRC_TAURI/entitlements/apple-events.plist"
 }
 
@@ -175,12 +176,20 @@ for key in conf.get('bundle', {}).get('resources', {}):
     grep -qF 'node:$SRC_TAURI/entitlements/node.plist' "$SCRIPT"
 }
 
+@test "calendar-cli has calendars entitlement in SIGN_TARGETS" {
+    grep -qF 'calendar-cli:$CALENDARS_ENTITLEMENTS' "$SCRIPT" || \
+    grep -qF 'calendar-cli:$SRC_TAURI/entitlements/calendars.plist' "$SCRIPT"
+}
+
+@test "reminders-cli has calendars entitlement in SIGN_TARGETS" {
+    grep -qF 'reminders-cli:$CALENDARS_ENTITLEMENTS' "$SCRIPT" || \
+    grep -qF 'reminders-cli:$SRC_TAURI/entitlements/calendars.plist' "$SCRIPT"
+}
+
 @test "speedwave CLI has no entitlements in SIGN_TARGETS" {
     # speedwave is pure Rust — no restricted APIs, no entitlements needed.
     # The entry must end with ":" (empty entitlements).
-    grep -qF 'cli/speedwave:' "$SCRIPT"
-    # Must NOT have an entitlement path after the colon
-    ! grep -qP 'cli/speedwave:\$' "$SCRIPT"
+    grep -qF 'cli/speedwave:"' "$SCRIPT"
 }
 
 @test "post-sign verification calls codesign -v --strict" {
@@ -195,7 +204,13 @@ for key in conf.get('bundle', {}).get('resources', {}):
     local ent_dir="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements"
     [ -f "$ent_dir/node.plist" ]
     [ -f "$ent_dir/limactl.plist" ]
+    [ -f "$ent_dir/calendars.plist" ]
     [ -f "$ent_dir/apple-events.plist" ]
+}
+
+@test "calendars.plist contains calendars entitlement" {
+    local plist="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements/calendars.plist"
+    grep -qF 'com.apple.security.personal-information.calendars' "$plist"
 }
 
 @test "limactl.plist contains virtualization entitlement" {

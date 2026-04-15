@@ -100,10 +100,12 @@ Hardened Runtime disables several platform capabilities by default[^11]. Bundled
 | `mail-cli` | `apple-events.plist` | `com.apple.security.automation.apple-events` | Sends Apple Events to Mail.app/Outlook via osascript |
 | `notes-cli` | `apple-events.plist` | `com.apple.security.automation.apple-events` | Sends Apple Events to Notes.app via osascript |
 | `speedwave` | none | — | AOT Rust, no restricted APIs |
-| `calendar-cli` | none | — | EventKit (TCC-gated, no entitlement needed) |
-| `reminders-cli` | none | — | EventKit (TCC-gated, no entitlement needed) |
+| `calendar-cli` | `calendars.plist` | `com.apple.security.personal-information.calendars` | EventKit read-write access (Hardened Runtime Resource Access)[^17] |
+| `reminders-cli` | `calendars.plist` | `com.apple.security.personal-information.calendars` | EventKit read-write access (Hardened Runtime Resource Access)[^17] |
 
-If a future bundled binary requires JIT (e.g. a Python runtime with PyPy), virtualization APIs, or Apple Events automation, add its entitlements plist under `desktop/src-tauri/entitlements/` and reference it from the `SIGN_TARGETS` table in the script.
+If a future bundled binary requires JIT (e.g. a Python runtime with PyPy), virtualization APIs, Apple Events automation, or access to personal information (calendars, contacts, photos), add its entitlements plist under `desktop/src-tauri/entitlements/` and reference it from the `SIGN_TARGETS` table in the script.
+
+[^17]: Apple's Hardened Runtime documentation lists Calendars under Resource Access — `com.apple.security.personal-information.calendars` is required for EventKit read-write access. There is no separate Reminders entitlement; the calendars entitlement covers both Calendar and Reminders since both use EventKit. See https://developer.apple.com/documentation/security/hardened_runtime
 
 [^16]: Lima uses Apple's Virtualization.framework (`vmType: vz`) for VM management. The upstream Lima project carries a similar entitlements file at [`vz.entitlements`](https://github.com/lima-vm/lima/blob/master/vz.entitlements).
 
