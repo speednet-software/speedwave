@@ -466,6 +466,27 @@ impl ContainerRuntime for LimaRuntime {
         Ok(())
     }
 
+    fn remove_images(&self, tags: &[String]) -> anyhow::Result<()> {
+        self.require_running()?;
+        if tags.is_empty() {
+            return Ok(());
+        }
+        let mut args = vec![
+            "shell",
+            consts::lima_vm_name(),
+            "--",
+            "sudo",
+            "nerdctl",
+            "rmi",
+        ];
+        let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+        args.extend(tag_refs);
+        if let Err(e) = self.runner.run("limactl", &args) {
+            log::warn!("lima rmi failed: {e}");
+        }
+        Ok(())
+    }
+
     fn restart_container_engine(&self) -> anyhow::Result<()> {
         self.require_running()?;
         let vm = consts::lima_vm_name();
@@ -1440,6 +1461,73 @@ mod tests {
         assert!(
             err.to_string().contains("not running"),
             "should report VM not running, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_remove_images_empty_tags_is_noop_after_require_running() {
+        // VM is running, but no rmi command should be issued for empty tags
+        let runner = mock_runner_with_vm_running();
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(
+            rt.remove_images(&[]).is_ok(),
+            "empty tags should return Ok without calling rmi"
+        );
+    }
+
+    #[test]
+    fn test_remove_images_happy_path() {
+        let tags = vec![
+            "speedwave-claude:abc123".to_string(),
+            "speedwave-mcp-hub:abc123".to_string(),
+        ];
+        let runner = mock_runner_with_vm_running().with_response(
+            &format!(
+                "limactl shell {} -- sudo nerdctl rmi speedwave-claude:abc123 speedwave-mcp-hub:abc123",
+                consts::LIMA_VM_NAME
+            ),
+            "",
+        );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(rt.remove_images(&tags).is_ok());
+    }
+
+    #[test]
+    fn test_remove_images_error_is_warn_only() {
+        let tags = vec!["speedwave-claude:abc123".to_string()];
+        let runner = mock_runner_with_vm_running().with_error(
+            &format!(
+                "limactl shell {} -- sudo nerdctl rmi speedwave-claude:abc123",
+                consts::LIMA_VM_NAME
+            ),
+            "no such image",
+        );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        // rmi failure must not propagate — just warn and return Ok
+        assert!(
+            rt.remove_images(&tags).is_ok(),
+            "rmi failure should not propagate"
+        );
+    }
+
+    #[test]
+    fn test_remove_images_fails_when_vm_stopped() {
+        let runner = MockRunner::new()
+            .with_response("limactl --version", "limactl version 1.0.0")
+            .with_response(
+                &format!(
+                    "limactl list --format {{{{.Status}}}} {}",
+                    consts::LIMA_VM_NAME
+                ),
+                "Stopped",
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let err = rt
+            .remove_images(&["speedwave-claude:abc123".to_string()])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not running"),
+            "require_running error should propagate, got: {err}"
         );
     }
 

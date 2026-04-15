@@ -212,6 +212,19 @@ impl ContainerRuntime for NerdctlRuntime {
         Ok(())
     }
 
+    fn remove_images(&self, tags: &[String]) -> anyhow::Result<()> {
+        if tags.is_empty() {
+            return Ok(());
+        }
+        let mut args = vec!["rmi"];
+        let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+        args.extend(tag_refs);
+        if let Err(e) = self.runner.run("nerdctl", &args) {
+            log::warn!("nerdctl rmi failed: {e}");
+        }
+        Ok(())
+    }
+
     fn restart_container_engine(&self) -> anyhow::Result<()> {
         log::info!("restarting containerd (rootless)");
         self.runner
@@ -739,6 +752,44 @@ mod tests {
         let result = rt.system_prune();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("prune failed"));
+    }
+
+    #[test]
+    fn test_remove_images_empty_tags_is_noop() {
+        // No runner responses set — any run() call would fail with "unexpected command"
+        let runner = MockRunner::new();
+        let rt = NerdctlRuntime::with_runner(Box::new(runner));
+        assert!(
+            rt.remove_images(&[]).is_ok(),
+            "empty tags should return Ok without calling runner"
+        );
+    }
+
+    #[test]
+    fn test_remove_images_happy_path() {
+        let tags = vec![
+            "speedwave-claude:abc123".to_string(),
+            "speedwave-mcp-hub:abc123".to_string(),
+        ];
+        let runner = MockRunner::new().with_response(
+            "nerdctl rmi speedwave-claude:abc123 speedwave-mcp-hub:abc123",
+            "",
+        );
+        let rt = NerdctlRuntime::with_runner(Box::new(runner));
+        assert!(rt.remove_images(&tags).is_ok());
+    }
+
+    #[test]
+    fn test_remove_images_error_is_warn_only() {
+        let tags = vec!["speedwave-claude:abc123".to_string()];
+        let runner =
+            MockRunner::new().with_error("nerdctl rmi speedwave-claude:abc123", "no such image");
+        let rt = NerdctlRuntime::with_runner(Box::new(runner));
+        // rmi failure must not propagate — just warn and return Ok
+        assert!(
+            rt.remove_images(&tags).is_ok(),
+            "rmi failure should not propagate"
+        );
     }
 
     #[test]

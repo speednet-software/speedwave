@@ -1,4 +1,5 @@
 use crate::build;
+use crate::bundle;
 use crate::compose::{self, SecurityCheck};
 use crate::config;
 use crate::consts;
@@ -233,6 +234,15 @@ pub fn update_containers(
     // 6. Rebuild images from local Containerfiles BEFORE stopping containers.
     //    If the build fails, containers keep running with the previous version.
     //    containerd uses content-addressable storage — new builds don't affect running containers.
+    let bundle_state = bundle::load_bundle_state();
+    if let Some(ref old_id) = bundle_state.applied_bundle_id {
+        let new_manifest = bundle::load_current_bundle_manifest()?;
+        if old_id != &new_manifest.bundle_id {
+            if let Err(e) = build::prune_old_bundle_images(runtime, old_id) {
+                log::warn!("Failed to prune old bundle images: {e}");
+            }
+        }
+    }
     let images_rebuilt = build::build_all_images(runtime).map_err(|e| {
         anyhow::anyhow!(
             "Image rebuild failed: {}. Containers are still running with the previous version.",
@@ -717,6 +727,32 @@ mod tests {
         assert!(
             consts::CONTAINER_STABILIZATION_DELAY_SECS <= 10,
             "stabilization delay must not exceed 10 seconds"
+        );
+    }
+
+    #[test]
+    fn test_prune_before_build_in_update_containers() {
+        // Structural test: prune_old_bundle_images must appear BEFORE build_all_images
+        // inside update_containers — pruning first means old images are removed before
+        // new ones are built, with no risk of removing newly-built images.
+        let source = include_str!("update.rs");
+
+        let fn_start = source
+            .find("fn update_containers(")
+            .expect("update_containers function must exist in update.rs");
+        let fn_body = &source[fn_start..];
+
+        let prune_pos = fn_body
+            .find("prune_old_bundle_images")
+            .expect("prune_old_bundle_images call must exist in update_containers");
+        let build_pos = fn_body
+            .find("build::build_all_images")
+            .expect("build_all_images call must exist in update_containers");
+
+        assert!(
+            prune_pos < build_pos,
+            "prune_old_bundle_images (at byte {prune_pos}) must appear before \
+             build_all_images (at byte {build_pos}) in update_containers"
         );
     }
 }
