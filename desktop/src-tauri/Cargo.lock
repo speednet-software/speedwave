@@ -4676,7 +4676,7 @@ dependencies = [
 
 [[package]]
 name = "speedwave-desktop"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4710,7 +4710,7 @@ dependencies = [
 
 [[package]]
 name = "speedwave-runtime"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
