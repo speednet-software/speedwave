@@ -87,6 +87,67 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# --- Dependency freshness ---
+#
+# npm deps are installed with `npm ci` when the package-lock.json hash changes.
+# We track hashes in $LOCK_STATE_FILE (per-worktree) and run npm ci only for
+# subprojects where the hash differs. Cargo deps are shared via ~/.cargo so no
+# action needed for Rust.
+
+NPM_SUBPROJECTS=("." "mcp-servers" "desktop/src" "desktop/e2e")
+LOCK_STATE_FILE=""
+
+ensure_deps_fresh() {
+    local root="$1"
+    local state_file="$2"
+
+    local any_changed=false
+    local -a to_install=()
+    local sub
+    for sub in "${NPM_SUBPROJECTS[@]}"; do
+        local lock="$root/$sub/package-lock.json"
+        if [[ ! -f "$lock" ]]; then
+            continue
+        fi
+        local hash
+        hash=$(shasum -a 256 "$lock" | awk '{print $1}')
+        local key
+        key=$(printf '%s' "$sub" | tr '/' '_')
+        local prev=""
+        if [[ -f "$state_file" ]]; then
+            prev=$(grep -E "^${key}=" "$state_file" 2>/dev/null | tail -1 | cut -d= -f2-)
+        fi
+        if [[ "$hash" != "$prev" ]]; then
+            to_install+=("$sub|$hash|$key")
+            any_changed=true
+        fi
+    done
+
+    if [[ "$any_changed" != "true" ]]; then
+        return 0
+    fi
+
+    local entry
+    for entry in "${to_install[@]}"; do
+        local sub="${entry%%|*}"
+        local rest="${entry#*|}"
+        local hash="${rest%%|*}"
+        local key="${rest##*|}"
+        printf "  ${CYAN}npm ci${NC} in $sub (lock changed)\n"
+        if ! (cd "$root/$sub" && npm ci --no-audit --no-fund 2>&1 | tail -5 | sed 's/^/    /'); then
+            printf "  ${RED}ERROR: npm ci failed in $sub${NC}\n" >&2
+            return 1
+        fi
+        # Update state atomically: remove old key line, append new
+        if [[ -f "$state_file" ]]; then
+            grep -v -E "^${key}=" "$state_file" > "${state_file}.tmp" 2>/dev/null || true
+            mv "${state_file}.tmp" "$state_file"
+        fi
+        printf '%s=%s\n' "$key" "$hash" >> "$state_file"
+    done
+    return 0
+}
+
 # --- Validate prerequisites ---
 
 for cmd in claude jq perl; do
@@ -310,6 +371,14 @@ if [[ "$NO_WORKTREE" != "true" && -z "$IMPL_ONLY" ]]; then
 
     echo ""
     printf "  ${GREEN}Worktree ready${NC}\n"
+    echo ""
+
+    LOCK_STATE_FILE="$WORKTREE_DIR/.plan-loop-lock-hashes"
+    printf "  ${CYAN}Checking npm dependencies...${NC}\n"
+    if ! ensure_deps_fresh "$PROJECT_ROOT" "$LOCK_STATE_FILE"; then
+        rm -rf "$TMPDIR_LOOP" 2>/dev/null || true
+        exit 1
+    fi
     echo ""
 else
     if [[ -n "$IMPL_ONLY" ]]; then
@@ -658,6 +727,15 @@ $IMPL_FEEDBACK" \
 
     # ===================== VERIFIER =====================
     echo ""
+
+    if [[ -n "$LOCK_STATE_FILE" ]]; then
+        printf "  ${CYAN}Checking npm dependencies (post-implementation)...${NC}\n"
+        if ! ensure_deps_fresh "$PROJECT_ROOT" "$LOCK_STATE_FILE"; then
+            printf "  ${RED}ERROR: dependency sync failed — verifier cannot run${NC}\n" >&2
+            rm -rf "$TMPDIR_LOOP"; exit 1
+        fi
+    fi
+
     printf "  ${CYAN}[verifier]${NC} Verifying implementation (fresh context)...\n"
 
     rm -f "$RESULT_FILE"
@@ -691,7 +769,7 @@ $IMPL_FEEDBACK" \
     echo "  make check: $( [[ "$v_check" == "true" ]] && echo "PASS" || echo "FAIL" )"
     echo "  make test:  $( [[ "$v_test" == "true" ]] && echo "PASS" || echo "FAIL" )"
 
-    if [[ "$v_verdict" == "VERIFIED" ]]; then
+    if [[ "$v_verdict" == "VERIFIED" && "$v_check" == "true" && "$v_test" == "true" ]]; then
         echo ""
         printf "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}\n"
         printf "${GREEN}║  IMPLEMENTATION VERIFIED after $impl_iteration iteration(s)${NC}\n"
@@ -713,7 +791,11 @@ $IMPL_FEEDBACK" \
 
     IMPL_FEEDBACK="$v_gaps"
     if [[ -z "$IMPL_FEEDBACK" || "$IMPL_FEEDBACK" == "null" ]]; then
-        IMPL_FEEDBACK="Steps verified: $v_steps/$v_total. make check: $v_check. make test: $v_test. Review the plan and fix all remaining gaps."
+        IMPL_FEEDBACK="Verdict: $v_verdict. Steps verified: $v_steps/$v_total. make check passed: $v_check. make test passed: $v_test. Fix ALL failing checks/tests and any remaining gaps before next verification."
+    else
+        IMPL_FEEDBACK="$IMPL_FEEDBACK
+
+Additionally: make check passed: $v_check. make test passed: $v_test. Both MUST pass before verification can succeed."
     fi
 
     echo ""
