@@ -240,13 +240,12 @@ jobs:
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
           # Prepend the build keychain to the search list so codesign can find
-          # the identity without overriding the login keychain globally. Read
-          # the existing list into an array so quoted paths survive word
-          # splitting if a keychain path ever contains spaces. Trim leading
-          # and trailing whitespace with sed, not `awk '{$1=$1};1'` — the
-          # latter re-splits on internal whitespace and would mangle any path
-          # that contains spaces, defeating the point of mapfile.
-          mapfile -t _existing_keychains < <(security list-keychains -d user | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d')
+          # the identity without overriding the login keychain globally.
+          # macOS ships bash 3.2 which lacks mapfile — use a while-read loop.
+          _existing_keychains=()
+          while IFS= read -r _kc; do
+            [ -n "$_kc" ] && _existing_keychains+=("$_kc")
+          done < <(security list-keychains -d user | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
           security list-keychains -d user -s "$KEYCHAIN_PATH" "${_existing_keychains[@]}"
 
           security import "$CERT_FILE" \

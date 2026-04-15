@@ -78,11 +78,11 @@ WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/desktop-release.yml"
     grep -qF 'APPLE_SIGNING_IDENTITY is empty' "$WORKFLOW"
 }
 
-@test "keychain import uses mapfile for safe keychain list expansion" {
-    # `security list-keychains -d user` output was previously consumed via
-    # an unquoted $(...) subshell, which is subject to word splitting and
-    # glob expansion. `mapfile` + quoted array expansion is the robust form.
-    grep -qF 'mapfile -t' "$WORKFLOW"
+@test "keychain import uses while-read loop for safe keychain list expansion" {
+    # `security list-keychains -d user` output must be read into an array
+    # without word splitting. macOS ships bash 3.2 which lacks mapfile, so
+    # a while-read loop is the bash 3.2-compatible equivalent.
+    grep -qF 'while IFS= read -r' "$WORKFLOW"
 }
 
 @test "keychain import step gates on matrix.platform == 'macos-latest'" {
