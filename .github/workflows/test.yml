@@ -171,6 +171,12 @@ jobs:
         working-directory: desktop/src
         run: npm ci
 
+      - name: Install mcp-servers dependencies
+        # Required by `make test-desktop-build` → `build-mcp` → TypeScript
+        # compiler needs @types/node and mcp-servers workspace deps.
+        working-directory: mcp-servers
+        run: npm ci
+
       - name: Create resource stubs for Tauri build script
         run: |
           mkdir -p desktop/src-tauri/nerdctl-full/{bin,lib,libexec,share}
