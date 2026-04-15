@@ -210,16 +210,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y bats
 
       - name: Desktop bats tests
-        # Static checks on Tauri config, signing script, Info.plist, and
-        # release workflow YAML. Does NOT invoke the Angular or Tauri build —
-        # that's covered by the steps above.
-        run: |
-          bats _tests/desktop/desktop-build.bats
-          bats _tests/desktop/bundle-build-context.bats
-          bats _tests/desktop/verify-bundled-assets.bats
-          bats _tests/desktop/sign-bundled-binaries.bats
-          bats _tests/desktop/release-workflow-signing.bats
-          bats _tests/desktop/info-plist.bats
+        # Runs make test-desktop-build which has build-angular + build-mcp
+        # as dependencies. desktop-build.bats checks that the Angular
+        # frontendDist contains index.html after the build — skipping the
+        # build step would defeat the purpose of that assertion.
+        run: make test-desktop-build
 
   audit:
     runs-on: ubuntu-latest
