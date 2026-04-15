@@ -1,13 +1,6 @@
 # Changelog
 
 
-## [0.7.2](https://github.com/speednet-software/speedwave/compare/v0.7.1...v0.7.2) (2026-04-15)
-
-
-### Bug Fixes
-
-* sign bundled macOS binaries and close vite/rustls-webpki CVEs ([#461](https://github.com/speednet-software/speedwave/issues/461)) ([856afcb](https://github.com/speednet-software/speedwave/commit/856afcb3755c815f14b168ee8a2e7a56927e042a))
-
 ## [0.7.1](https://github.com/speednet-software/speedwave/compare/v0.7.0...v0.7.1) (2026-04-13)
 
 
