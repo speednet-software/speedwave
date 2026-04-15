@@ -221,6 +221,7 @@ jobs:
       # starts. See: https://v2.tauri.app/distribute/sign/macos/
       - name: Import Apple signing certificate to keychain
         if: matrix.platform == 'macos-latest' && env.APPLE_CERTIFICATE != ''
+        shell: bash
         env:
           CERT: ${{ env.APPLE_CERTIFICATE }}
           CERT_PASSWORD: ${{ env.APPLE_CERTIFICATE_PASSWORD }}
@@ -239,8 +240,14 @@ jobs:
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
           # Prepend the build keychain to the search list so codesign can find
-          # the identity without overriding the login keychain globally.
-          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          # the identity without overriding the login keychain globally. Read
+          # the existing list into an array so quoted paths survive word
+          # splitting if a keychain path ever contains spaces. Trim leading
+          # and trailing whitespace with sed, not `awk '{$1=$1};1'` — the
+          # latter re-splits on internal whitespace and would mangle any path
+          # that contains spaces, defeating the point of mapfile.
+          mapfile -t _existing_keychains < <(security list-keychains -d user | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d')
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "${_existing_keychains[@]}"
 
           security import "$CERT_FILE" \
             -k "$KEYCHAIN_PATH" \
@@ -253,9 +260,18 @@ jobs:
 
           rm -f "$CERT_FILE"
 
+          # Guard against an empty APPLE_SIGNING_IDENTITY — `grep -q ""` would
+          # match every line and the verification below would silently pass
+          # even without a usable identity in the keychain.
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "::error::APPLE_SIGNING_IDENTITY is empty — check the repository secret"
+            exit 1
+          fi
           # Verify the identity is now resolvable — fail fast if not.
+          # -qF: fixed-string match, since the identity contains `()` which
+          # grep would otherwise treat as regex metacharacters in ERE.
           if ! security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
-               | grep -q "$APPLE_SIGNING_IDENTITY"; then
+               | grep -qF "$APPLE_SIGNING_IDENTITY"; then
             echo "::error::APPLE_SIGNING_IDENTITY not found in imported keychain"
             security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
             exit 1

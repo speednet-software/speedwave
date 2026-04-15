@@ -62,13 +62,37 @@ WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/desktop-release.yml"
     grep -q "security find-identity" "$WORKFLOW"
 }
 
+@test "keychain import uses fixed-string grep for identity verification" {
+    # The identity string contains `(TEAM)` — grep without -F treats the
+    # parentheses as regex metacharacters. More importantly, `grep -q ""`
+    # matches every line, so without `-F` and an empty-identity guard the
+    # verification silently passes when APPLE_SIGNING_IDENTITY is unset.
+    grep -qF 'grep -qF' "$WORKFLOW"
+}
+
+@test "keychain import guards against empty APPLE_SIGNING_IDENTITY" {
+    # If APPLE_CERTIFICATE is set but APPLE_SIGNING_IDENTITY isn't, the
+    # downstream grep verification would match every line (empty pattern) and
+    # silently report success — then tauri-action would fail cryptically
+    # inside the bundle step. The step must fail fast before find-identity.
+    grep -qF 'APPLE_SIGNING_IDENTITY is empty' "$WORKFLOW"
+}
+
+@test "keychain import uses mapfile for safe keychain list expansion" {
+    # `security list-keychains -d user` output was previously consumed via
+    # an unquoted $(...) subshell, which is subject to word splitting and
+    # glob expansion. `mapfile` + quoted array expansion is the robust form.
+    grep -qF 'mapfile -t' "$WORKFLOW"
+}
+
 @test "keychain import step gates on matrix.platform == 'macos-latest'" {
     # Must not run on Linux/Windows matrix jobs — security commands don't
-    # exist there and the step would error out the entire matrix. The `if:`
-    # guard must appear on the line immediately following the step name
-    # (standard Actions step layout).
+    # exist there and the step would error out the entire matrix. Search
+    # forward from the step name for the next `if:` line instead of assuming
+    # a fixed offset — tolerates blank lines or comments between them.
     import_line=$(grep -n "Import Apple signing certificate to keychain" "$WORKFLOW" | head -1 | cut -d: -f1)
     [ -n "$import_line" ]
-    guard_line=$((import_line + 1))
+    guard_line=$(awk -v start="$import_line" 'NR>start && /^        if:/ { print NR; exit }' "$WORKFLOW")
+    [ -n "$guard_line" ]
     sed -n "${guard_line}p" "$WORKFLOW" | grep -q "matrix.platform == 'macos-latest'"
 }
