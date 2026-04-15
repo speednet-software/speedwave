@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.7.3](https://github.com/speednet-software/speedwave/compare/v0.7.2...v0.7.3) (2026-04-15)
+
+
+### Bug Fixes
+
+* **release:** replace mapfile with while-read loop for bash 3.2 ([#470](https://github.com/speednet-software/speedwave/issues/470)) ([7cc128e](https://github.com/speednet-software/speedwave/commit/7cc128e6ff5be31923647438101db95343e6b857)), closes [#376](https://github.com/speednet-software/speedwave/issues/376)
+
 ## [0.7.2](https://github.com/speednet-software/speedwave/compare/v0.7.1...v0.7.2) (2026-04-15)
 
 
