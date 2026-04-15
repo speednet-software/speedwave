@@ -92,17 +92,25 @@ sign_macho() {
     exit 1
   fi
 
-  # Verify entitlements were applied correctly
+  # Verify entitlements were applied correctly — check every <key> in the
+  # plist, not just the first, so multi-key plists (e.g. node.plist with
+  # allow-jit + allow-unsigned-executable-memory) are fully verified.
   if [[ -n "$entitlements" ]]; then
-    local expected_key
-    expected_key="$(grep '<key>' "$entitlements" | head -1 | sed 's/.*<key>\(.*\)<\/key>.*/\1/')"
-    if [[ -n "$expected_key" ]]; then
-      if ! codesign -d --entitlements - "$path" 2>/dev/null | grep -q "$expected_key"; then
+    local ent_output
+    ent_output="$(codesign -d --entitlements - "$path" 2>/dev/null)"
+    local all_verified=true
+    while IFS= read -r expected_key; do
+      if ! echo "$ent_output" | grep -qF "$expected_key"; then
         echo "ERROR: entitlement '$expected_key' not found in signed binary $path" >&2
-        exit 1
+        all_verified=false
       fi
-      echo "  verified: signature valid, entitlement '$expected_key' present"
+    done < <(grep '<key>' "$entitlements" | sed 's/.*<key>\(.*\)<\/key>.*/\1/')
+    if [[ "$all_verified" != "true" ]]; then
+      exit 1
     fi
+    local key_count
+    key_count="$(grep -c '<key>' "$entitlements")"
+    echo "  verified: signature valid, $key_count entitlement(s) present"
   else
     echo "  verified: signature valid"
   fi
