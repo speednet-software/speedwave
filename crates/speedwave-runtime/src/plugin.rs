@@ -241,6 +241,45 @@ fn validate_slug(slug: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Validates the `speedwave_compat` field against the current crate version.
+///
+/// The empty-string guard is first because `semver::VersionReq::parse("")` returns
+/// `Ok(VersionReq { comparators: [] })` which matches any version — without this guard
+/// a manifest with `"speedwave_compat": ""` would silently pass.
+fn validate_speedwave_compat(compat: Option<&str>) -> anyhow::Result<()> {
+    let s = match compat {
+        None => return Ok(()),
+        Some(s) => s,
+    };
+    if s.trim().is_empty() {
+        anyhow::bail!(
+            "speedwave_compat must not be empty — omit the field to disable the compatibility check"
+        );
+    }
+    let req = semver::VersionReq::parse(s).map_err(|e| {
+        anyhow::anyhow!(
+            "Invalid speedwave_compat '{}': must be a valid semver version requirement (e.g. '>=0.8, <1', '^0.8'): {}",
+            s,
+            e
+        )
+    })?;
+    let current_version = semver::Version::parse(env!("CARGO_PKG_VERSION")).map_err(|e| {
+        anyhow::anyhow!(
+            "internal: CARGO_PKG_VERSION '{}' is not valid semver: {}",
+            env!("CARGO_PKG_VERSION"),
+            e
+        )
+    })?;
+    if !req.matches(&current_version) {
+        anyhow::bail!(
+            "Plugin requires Speedwave version matching '{}', but this Speedwave is {}. Upgrade Speedwave or install an older plugin version.",
+            s,
+            current_version
+        );
+    }
+    Ok(())
+}
+
 /// Validates manifest constraints at install time.
 fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Result<()> {
     validate_slug(&manifest.slug)?;
@@ -397,6 +436,8 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
             anyhow::bail!("ReadWrite token mount requires a non-empty justification");
         }
     }
+
+    validate_speedwave_compat(manifest.speedwave_compat.as_deref())?;
 
     Ok(())
 }
@@ -3655,5 +3696,149 @@ mod tests {
             project_a_result.is_err(),
             "project using plugin-a should fail when plugin-a cannot be rebuilt"
         );
+    }
+
+    // --- validate_speedwave_compat unit tests ---
+
+    fn minimal_resource_only_manifest(compat: Option<String>) -> PluginManifest {
+        PluginManifest {
+            name: "Test Plugin".to_string(),
+            service_id: None,
+            slug: "test-plugin".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: compat,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+        }
+    }
+
+    #[test]
+    fn test_compat_none_is_ok() {
+        assert!(validate_speedwave_compat(None).is_ok());
+    }
+
+    #[test]
+    fn test_compat_exact_current_version_matches() {
+        let range = format!("={}", env!("CARGO_PKG_VERSION"));
+        assert!(validate_speedwave_compat(Some(&range)).is_ok());
+    }
+
+    #[test]
+    fn test_compat_lower_bound_current_version_matches() {
+        let range = format!(">={}", env!("CARGO_PKG_VERSION"));
+        assert!(validate_speedwave_compat(Some(&range)).is_ok());
+    }
+
+    #[test]
+    fn test_compat_current_major_minor_range_matches() {
+        let v = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let next_major = v.major + 1;
+        let range = format!(">={}.{}, <{}", v.major, v.minor, next_major);
+        assert!(validate_speedwave_compat(Some(&range)).is_ok());
+    }
+
+    #[test]
+    fn test_compat_legacy_wide_range_matches() {
+        assert!(validate_speedwave_compat(Some(">=0.1.0")).is_ok());
+    }
+
+    #[test]
+    fn test_compat_empty_string_rejected() {
+        let result = validate_speedwave_compat(Some(""));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("speedwave_compat"));
+    }
+
+    #[test]
+    fn test_compat_whitespace_only_rejected() {
+        let result = validate_speedwave_compat(Some("   "));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("speedwave_compat"));
+    }
+
+    #[test]
+    fn test_compat_garbage_rejected() {
+        let result = validate_speedwave_compat(Some("banana"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("banana"));
+    }
+
+    #[test]
+    fn test_compat_unsatisfied_range_rejected() {
+        let result = validate_speedwave_compat(Some(">=99.0.0"));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains(">=99.0.0"));
+        assert!(msg.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn test_compat_unsatisfied_upper_bound_rejected() {
+        let result = validate_speedwave_compat(Some("<0.1"));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("<0.1"));
+        assert!(msg.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn test_compat_error_message_contains_upgrade_guidance() {
+        let result = validate_speedwave_compat(Some(">=99.0.0"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Upgrade Speedwave"));
+    }
+
+    // --- validate_manifest integration tests for speedwave_compat ---
+
+    #[test]
+    fn test_validate_manifest_rejects_invalid_compat() {
+        let manifest = minimal_resource_only_manifest(Some("banana".to_string()));
+        let tmp = tempfile::tempdir().unwrap();
+        let result = validate_manifest(&manifest, tmp.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("banana"));
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_unsatisfied_compat() {
+        let manifest = minimal_resource_only_manifest(Some(">=99.0.0".to_string()));
+        let tmp = tempfile::tempdir().unwrap();
+        let result = validate_manifest(&manifest, tmp.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains(">=99.0.0"));
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_empty_compat() {
+        let manifest = minimal_resource_only_manifest(Some(String::new()));
+        let tmp = tempfile::tempdir().unwrap();
+        let result = validate_manifest(&manifest, tmp.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_manifest_accepts_compatible_compat() {
+        let range = format!(">={}", env!("CARGO_PKG_VERSION"));
+        let manifest = minimal_resource_only_manifest(Some(range));
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_manifest(&manifest, tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_manifest_accepts_missing_compat() {
+        let manifest = minimal_resource_only_manifest(None);
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_manifest(&manifest, tmp.path()).is_ok());
     }
 }
