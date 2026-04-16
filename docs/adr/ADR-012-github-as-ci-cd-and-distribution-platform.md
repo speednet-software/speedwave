@@ -44,8 +44,6 @@ This prevents supply-chain attacks where a compromised download could inject mal
 
 ---
 
-[^47]: [GitHub REST API — Get the latest release (non-prerelease, non-draft only)](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)
-
 [^53]: [Tauri Updater Plugin](https://v2.tauri.app/plugin/updater/)
 
 [^57]: [GitHub Actions - Billing for public repos](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions)

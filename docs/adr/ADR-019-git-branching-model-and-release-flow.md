@@ -39,7 +39,7 @@ feature/* ──PR→ dev           (integration branch, default)
    feature/foo ──PR→ dev ──CI passes→ merge
 
 2. Release preparation
-   dev ──PR→ main ──CI passes + review→ squash merge (PR title = conventional commit)[^60]
+   dev ──PR→ main ──CI passes + review→ squash merge (PR title = conventional commit)[^58]
 
 3. Automated version bump (release-please)
    Push to main triggers release-please
@@ -322,7 +322,7 @@ On macOS the CLI is symlinked from inside `Speedwave.app` — updating the Deskt
 
 All workflow `run:` blocks follow these security practices:
 
-- **No `${{ }}` interpolation in `run:` blocks** — all GitHub context values (`inputs.*`, `github.event.*`) are passed via `env:` to prevent shell injection[^59]
+- **No `${{ }}` interpolation in `run:` blocks** — all GitHub context values (`inputs.*`, `github.event.*`) are passed via `env:` to prevent shell injection[^57]
 - **Version format validation** — `desktop-release.yml` validates version strings against `^[0-9]+\.[0-9]+\.[0-9]+$` before use
 - **`set -e` in all multi-command steps where early exit is appropriate** — ensures early exit on command failure
 - **Least-privilege `permissions:`** — `desktop-build.yml` uses `contents: read` (CI-only, no write needed)
@@ -387,8 +387,8 @@ After the v0.3.0 incident (wrong-version artifacts due to manual dispatch from d
 
 [^56]: [Apple Developer Program - Notarization](https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution)
 
-[^59]: [GitHub Security Lab — Script injection in GitHub Actions](https://securitylab.github.com/resources/github-actions-untrusted-input/)
+[^57]: [GitHub Security Lab — Script injection in GitHub Actions](https://securitylab.github.com/resources/github-actions-untrusted-input/)
 
-[^60]: [release-please — Commit parsing uses `--first-parent` traversal](https://github.com/googleapis/release-please/blob/main/docs/design.md) — release-please walks `--first-parent` commits on the target branch and parses each message as a conventional commit. Regular merge commits (`Merge pull request #N`) are not conventional commits and are ignored. Squash merge ensures the PR title (which must be a conventional commit) becomes the first-parent commit message.
+[^58]: [release-please — Commit parsing uses `--first-parent` traversal](https://github.com/googleapis/release-please/blob/main/docs/design.md) — release-please walks `--first-parent` commits on the target branch and parses each message as a conventional commit. Regular merge commits (`Merge pull request #N`) are not conventional commits and are ignored. Squash merge ensures the PR title (which must be a conventional commit) becomes the first-parent commit message.
 
 [^release-please-chore]: [release-please — `changelog-sections` configuration schema](https://github.com/googleapis/release-please/blob/main/schemas/config.json) — release-please only tracks commit types listed in `changelog-sections` when computing version bumps and changelog entries. Types absent from the list (such as `chore` in our `release-please-config.json`) are ignored entirely.
