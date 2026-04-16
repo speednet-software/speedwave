@@ -1,6 +1,6 @@
 ---
 name: speedwave-review-plan
-description: Hostile review of a Speedwave implementation plan. Checks 12 verification axes — security, architecture, platform coverage, tests, upgrade safety, CLAUDE.md compliance, and more. Use this skill to verify any implementation plan before starting work.
+description: Hostile review of a Speedwave implementation plan. Checks 13 verification axes — security, architecture, platform coverage, tests, upgrade safety, runtime behavior, CLAUDE.md compliance, and more. Use this skill to verify any implementation plan before starting work.
 user-invocable: true
 disable-model-invocation: true
 model: opus
@@ -553,6 +553,24 @@ Check:
 
 **Severity: Persisted state incompatibility that crashes on update = BLOCKER. Missing env var defaults in containers = HIGH. No rollback consideration for state-changing feature = HIGH. Minor format change with `serde(default)` coverage = LOW.**
 
+### 12. RUNTIME BEHAVIOR & CLEANUP
+
+Plans that spawn threads, register signal handlers, or schedule async cleanup must ensure operations complete before process exit. Silent cleanup failures defeat the feature's purpose.
+
+Check:
+
+- Does the plan spawn background threads or async tasks for cleanup/shutdown? → Verify it specifies how callers WAIT for completion before `process::exit` (`JoinHandle::join()`, `.await`, channel). A fire-and-forget thread in a signal handler or window-close callback will be killed before it runs.
+
+- Does the plan register signal handlers (`ctrlc`, SIGTERM, SIGINT)? → Signal handler spawning a thread + immediately calling `process::exit` = thread never runs. Verify the plan specifies join/await BEFORE exit.
+
+- Does the plan add shutdown/cleanup hooks (app close, `WindowEvent::Destroyed`, `RunEvent::Exit`)? → Verify cleanup ordering: operations that depend on external processes (VM stop, container stop) must complete before the process exits. "Fire and forget" is only valid for operations that don't need to complete (logging, telemetry).
+
+- Does the plan add `Once` guards, `AtomicBool` flags, or `static Mutex` for cleanup deduplication? → Good pattern, but verify the guarded operation actually completes. A `Once` that spawns-and-forgets still loses the race with `process::exit`.
+
+- Does the plan touch resource cleanup (VM stop, container prune, temp file deletion)? → Verify timeout handling: what happens if cleanup hangs? Is there a deadline? Does the deadline allow graceful degradation (force-kill after N seconds)?
+
+**Severity: Cleanup that never runs = HIGH (defeats feature purpose). Missing timeout on blocking cleanup = MEDIUM.**
+
 ## Output Format
 
 <analysis>
@@ -601,6 +619,7 @@ If there are no findings at a given severity level, omit that section entirely.
 | 9. Git Workflow & Release         | PASS / FAIL | count  |
 | 10. Documentation                 | PASS / FAIL | count  |
 | 11. Upgrade Safety                | PASS / FAIL | count  |
+| 12. Runtime Behavior & Cleanup    | PASS / FAIL | count  |
 
 **Overall: READY TO IMPLEMENT / NEEDS REVISION / REJECT**
 
