@@ -561,8 +561,10 @@ pub fn list_installed_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<PluginM
 /// then checks whether each enabled MCP plugin's image exists in the container
 /// engine. If an image is missing, attempts to rebuild it from the plugin source.
 ///
-/// Errors are accumulated across all enabled plugins. If any rebuild fails, the
-/// accumulated error is returned after attempting all plugins.
+/// The pending-build pass (pass 1) propagates errors immediately — a failed
+/// pending build indicates a freshly-installed plugin with a broken image, which
+/// warrants aborting before pass 2.  Pass 2 (missing-image rebuild) accumulates
+/// errors across all enabled plugins and returns them together.
 ///
 /// This is the primary fix for image loss after VM reset. Use in `render_compose()`.
 pub fn ensure_plugin_images(
@@ -639,6 +641,10 @@ fn ensure_plugin_images_from_dir(
 /// Unlike `ensure_plugin_images()`, this is not scoped to a project — it rebuilds
 /// all plugin images regardless of which projects use them.
 ///
+/// Does **not** run the pending-build pass (`.image_pending` markers). Freshly
+/// installed plugins that haven't been built yet are handled at per-project
+/// startup via `ensure_plugin_images` → `build_pending_from_dir`.
+///
 /// Errors are accumulated but individual failures do not stop other plugins from
 /// being rebuilt. Use in the Desktop reconcile path (warn-only caller).
 pub fn ensure_all_plugin_images(runtime: &dyn ContainerRuntime) -> anyhow::Result<()> {
@@ -699,8 +705,10 @@ fn ensure_all_plugin_images_from_dir(
 /// plugin (no `service_id`) yields `sid = ""`, which never matches any caller-supplied list, so
 /// such plugins are silently skipped when filtering is active.
 ///
-/// When `enabled_service_ids` is `None`, all pending plugins are built — used at app startup
-/// (`ensure_all_plugin_images`) and in tests.
+/// When `enabled_service_ids` is `None`, all pending plugins are built — used in tests.
+/// Note: `ensure_all_plugin_images` does not call this function; it only rebuilds
+/// missing images. Pending builds are handled at per-project startup via
+/// `ensure_plugin_images`.
 fn build_pending_from_dir(
     runtime: &dyn ContainerRuntime,
     enabled_service_ids: Option<&[&str]>,
