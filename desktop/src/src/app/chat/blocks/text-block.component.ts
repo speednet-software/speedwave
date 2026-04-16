@@ -10,6 +10,12 @@ import { marked } from 'marked';
  * tags, event-handler attributes (`onerror`, `onclick`, etc.), and rewriting `javascript:`
  * URLs to the inert `unsafe:javascript:` prefix so they cannot execute.
  *
+ * SCOPE LIMIT: Angular's HTML sanitizer only rewrites the `javascript:` scheme; `data:`
+ * and `vbscript:` URLs pass through unchanged. Speedwave relies on assistant-controlled
+ * (not user-controlled) chat content here, so those schemes are not an active threat —
+ * but any future render path that accepts attacker-controlled markdown must add its own
+ * scheme filtering or rely on CSP, not on this component alone.
+ *
  * WARNING: Do not switch this binding to a `SafeHtml` produced by
  * `DomSanitizer.bypassSecurityTrustHtml(...)` — doing so disables all sanitization and
  * would make `<script>` tags, event-handler attributes, and `javascript:` URLs executable.
