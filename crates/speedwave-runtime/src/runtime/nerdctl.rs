@@ -228,6 +228,12 @@ impl ContainerRuntime for NerdctlRuntime {
         Ok(())
     }
 
+    fn prune_buildkit_cache(&self) -> anyhow::Result<()> {
+        self.runner
+            .run("nerdctl", &["builder", "prune", "--all", "--force"])?;
+        Ok(())
+    }
+
     fn restart_container_engine(&self) -> anyhow::Result<()> {
         log::info!("restarting containerd (rootless)");
         self.runner
@@ -753,6 +759,23 @@ mod tests {
         let runner = MockRunner::new().with_error("nerdctl system prune --force", "prune failed");
         let rt = NerdctlRuntime::with_runner(Box::new(runner));
         let result = rt.system_prune();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("prune failed"));
+    }
+
+    #[test]
+    fn test_prune_buildkit_cache() {
+        let runner = MockRunner::new().with_response("nerdctl builder prune --all --force", "");
+        let rt = NerdctlRuntime::with_runner(Box::new(runner));
+        assert!(rt.prune_buildkit_cache().is_ok());
+    }
+
+    #[test]
+    fn test_prune_buildkit_cache_propagates_error() {
+        let runner =
+            MockRunner::new().with_error("nerdctl builder prune --all --force", "prune failed");
+        let rt = NerdctlRuntime::with_runner(Box::new(runner));
+        let result = rt.prune_buildkit_cache();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("prune failed"));
     }

@@ -827,4 +827,29 @@ mod tests {
              from update_containers depends on this"
         );
     }
+
+    #[test]
+    fn test_buildkit_prune_in_prune_old_bundle_images() {
+        // Structural test: prune_buildkit_cache must be called inside
+        // prune_old_bundle_images — this ensures BuildKit cache is cleaned
+        // alongside old tagged images during bundle updates.
+        let source = include_str!("build.rs");
+
+        let fn_start = source
+            .find("fn prune_old_bundle_images(")
+            .expect("prune_old_bundle_images function must exist in build.rs");
+        let fn_body = &source[fn_start..];
+
+        // Find the end of the function (next `pub fn` or `fn ` at top level)
+        let fn_end = fn_body[1..]
+            .find("\npub fn ")
+            .or_else(|| fn_body[1..].find("\nfn "))
+            .unwrap_or(fn_body.len());
+        let fn_body = &fn_body[..fn_end];
+
+        assert!(
+            fn_body.contains("prune_buildkit_cache"),
+            "prune_old_bundle_images must call prune_buildkit_cache to clear BuildKit cache"
+        );
+    }
 }

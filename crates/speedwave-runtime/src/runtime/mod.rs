@@ -108,6 +108,20 @@ pub trait ContainerRuntime: Send + Sync {
         Ok(())
     }
 
+    /// Removes BuildKit build cache.
+    ///
+    /// BuildKit cache mounts (`--mount=type=cache`) are stored separately
+    /// from container images and are not affected by `remove_images()` or
+    /// `system_prune()`. This method runs `nerdctl builder prune --all --force`
+    /// to reclaim that space.
+    ///
+    /// Called by `prune_old_bundle_images()` after removing old tagged images,
+    /// before building new ones for the updated bundle.
+    fn prune_buildkit_cache(&self) -> anyhow::Result<()> {
+        log::debug!("prune_buildkit_cache: not implemented for this runtime, skipping");
+        Ok(())
+    }
+
     /// Restarts the container engine (containerd + buildkitd) and waits for readiness.
     ///
     /// Implementations MUST restart containerd, MUST restart buildkit (skip
