@@ -877,6 +877,20 @@ fn main() {
     let auto_check_exit = auto_check_handle.clone();
     let update_version_setup = update_version.clone();
 
+    // Register SIGTERM/SIGINT handler so process signals trigger the same
+    // cleanup as graceful window close. The CLEANUP_ONCE guard in
+    // run_exit_cleanup ensures the body runs at most once even when both
+    // the signal handler and WindowEvent::Destroyed fire concurrently.
+    let ide_bridge_signal = ide_bridge.clone();
+    let mcp_os_signal = mcp_os.clone();
+    let auto_check_signal = auto_check_handle.clone();
+    #[allow(clippy::expect_used)]
+    ctrlc::set_handler(move || {
+        reconcile::run_exit_cleanup(&ide_bridge_signal, &mcp_os_signal, &auto_check_signal);
+        std::process::exit(0);
+    })
+    .expect("fatal: failed to set signal handler");
+
     #[allow(unused_mut)] // mut needed when "e2e" feature is enabled
     let mut builder = tauri::Builder::default();
 
@@ -1703,5 +1717,34 @@ mod tests {
         let mut cfg = SpeedwaveUserConfig::default();
         let result = apply_switch_project(&mut cfg, "anything");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn signal_handler_is_registered_in_main_rs() {
+        let source = include_str!("main.rs");
+        assert!(
+            source.contains("ctrlc::set_handler"),
+            "main.rs must register a ctrlc signal handler"
+        );
+        assert!(
+            source.contains("run_exit_cleanup"),
+            "signal handler must call run_exit_cleanup"
+        );
+    }
+
+    #[test]
+    fn signal_handler_registered_before_run() {
+        let source = include_str!("main.rs");
+        let handler_pos = source
+            .find("ctrlc::set_handler")
+            .expect("ctrlc::set_handler must be in main.rs");
+        let run_pos = source
+            .find(".run(tauri::generate_context!())")
+            .expect(".run(tauri::generate_context!()) must be in main.rs");
+        assert!(
+            handler_pos < run_pos,
+            "ctrlc::set_handler (at byte {handler_pos}) must appear before \
+             .run(tauri::generate_context!()) (at byte {run_pos})"
+        );
     }
 }

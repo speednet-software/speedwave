@@ -136,6 +136,17 @@ pub trait ContainerRuntime: Send + Sync {
     fn restart_container_engine(&self) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Stops the underlying VM (e.g. Lima on macOS) to free reserved RAM.
+    ///
+    /// Default is a no-op — Linux (native nerdctl) and Windows (WSL2) have no
+    /// VM layer that Speedwave owns. Only `LimaRuntime` overrides this.
+    ///
+    /// Callers MUST treat errors as non-fatal: log them and continue. Exit
+    /// cleanup must never block app termination on a VM stop failure.
+    fn stop_vm(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 pub trait CommandRunner: Send + Sync {

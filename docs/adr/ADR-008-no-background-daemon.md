@@ -26,6 +26,18 @@ The IDE Bridge must be running for Claude (inside a container) to communicate wi
   - This is an acceptable trade-off given the simplicity gained.
 - If a future requirement demands "always-on" host services (e.g., headless server usage), this decision can be revisited by adding an optional system service.
 
+## Lima VM Lifecycle on Exit (macOS)
+
+On macOS, the Lima VM is stopped when the Desktop app exits (`limactl stop --force`). This frees the ~9–32 GiB of RAM that QEMU/VZ reserves for the VM (hypervisors do not support memory ballooning, so the RAM is not returned to the system while the VM is running)[^23].
+
+- **Trade-off:** Next startup is ~10–20s slower due to VM cold boot. `ensure_ready()` starts the stopped VM automatically — the user sees no manual intervention required.
+- **Linux and Windows are unaffected:** Linux runs containerd directly (no VM layer); WSL2 on Windows has its own memory management at the hypervisor level, and stopping the WSL2 distro would affect all workloads in it — not just Speedwave.
+- **Signal handlers (SIGTERM/SIGINT):** Cleanup runs on process signals as well as graceful close. A `CLEANUP_ONCE` guard ensures the cleanup body runs exactly once even if both a signal and `WindowEvent::Destroyed` fire concurrently.
+- **Non-blocking:** All cleanup (container stop, image prune, VM stop, IDE Bridge, mcp-os) runs in a spawned background thread. The Tauri event loop is not blocked.
+- **`stop_vm()` errors are non-fatal:** Callers log warnings and continue. Exit cleanup must never block app termination. If the VM is left in a `"Stopping"` state, `ensure_ready()` on next launch detects this and polls until the VM finishes stopping, then starts it.
+
 ---
 
 [^22]: [macOS TCC — Transparency Consent and Control](https://developer.apple.com/documentation/bundleresources/information-property-list/nscalendarsusagedescription)
+
+[^23]: [QEMU does not support memory ballooning with Apple Hypervisor](https://github.com/lima-vm/lima/discussions/1534)

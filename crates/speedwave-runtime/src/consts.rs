@@ -156,6 +156,12 @@ pub const CONTAINERD_RESTART_READY_MAX_RETRIES: u32 = 6;
 /// while preventing indefinite hangs that freeze the Desktop UI.
 pub const LIMA_VM_START_TIMEOUT_SECS: u64 = 120;
 
+/// Maximum seconds to wait for `limactl stop --force` to stop the Lima VM.
+/// 30s is generous — Lima's `--force` flag sends SIGKILL after its own
+/// internal timeout, so this is an outer safety net preventing exit cleanup
+/// from blocking app termination indefinitely.
+pub const LIMA_VM_STOP_TIMEOUT_SECS: u64 = 30;
+
 /// Descriptor for a single auth/credential field of an MCP service.
 pub struct McpAuthFieldDescriptor {
     /// Field key used as filename in the tokens directory (e.g. "bot_token").
@@ -1193,6 +1199,20 @@ mod tests {
             SYSTEM_CHECK_FAILED_PREFIX, "System check failed:",
             "Changing this prefix silently breaks the Desktop UI — \
              update project-state.service.ts startsWith check to match"
+        );
+    }
+
+    #[test]
+    fn test_lima_vm_stop_timeout_is_within_bounds() {
+        assert!(
+            LIMA_VM_STOP_TIMEOUT_SECS > 0,
+            "LIMA_VM_STOP_TIMEOUT_SECS must be positive"
+        );
+        assert!(
+            LIMA_VM_STOP_TIMEOUT_SECS <= LIMA_VM_START_TIMEOUT_SECS,
+            "LIMA_VM_STOP_TIMEOUT_SECS ({}) must not exceed LIMA_VM_START_TIMEOUT_SECS ({})",
+            LIMA_VM_STOP_TIMEOUT_SECS,
+            LIMA_VM_START_TIMEOUT_SECS
         );
     }
 }
