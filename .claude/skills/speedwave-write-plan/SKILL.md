@@ -50,6 +50,8 @@ You MUST read and internalize the project context. Plans written without this co
 
 10. **Read the update/reconcile flow** — `updater.rs`, `update_commands.rs`, `bundle-manifest.json` handling, `bundle-state.json` phases, snapshot/rollback logic. Understand what happens when a user updates from version N to version N+1.
 
+11. **Perform external verification NOW, not later.** If the task requires checking sibling repos (e.g. `speedwave-plugins` at `../speedwave-plugins`), existing files, CLI outputs, or any state outside the current code — run the check (`grep`, `gh search code`, `Read`) during planning and record the concrete result in the plan. Do NOT add a step like "verify that X is true" to Implementation Steps — a plan step must be an action the implementer takes, not a fact-check the planner skipped.
+
 ## The Task
 
 <task>
@@ -222,11 +224,11 @@ Answer EVERY question. "N/A" is acceptable only with justification.
 
 ### 8. Git Strategy
 
-- Branch name: `feat/<name>` or `fix/<name>`
+- **Do not propose a new branch name or worktree setup.** When this plan runs under `plan-loop.sh`, the worktree and branch are already created before Phase 1 starts — proposing a different branch name only creates confusion. Specify only: commit format, PR target, commit split if any, linked issues.
 
 - PR target: `dev` (NEVER `main`)
 
-- Commit format: conventional commits (`feat(scope):`, `fix(scope):`)
+- Commit format: conventional commits (`feat(scope):`, `fix(scope):`) — match the commit type to the task (bug fix → `fix`, new capability → `feat`, cleanup/chore → `chore`). Do not default to `feat` when the change is a fix.
 
 - If multiple commits needed: describe the split and order
 
