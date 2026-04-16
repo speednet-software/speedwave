@@ -95,7 +95,7 @@ Snap's confinement model has similar restrictions to Flatpak for container manag
 
 [^5]: [Rancher Desktop releases — .deb packages](https://github.com/rancher-sandbox/rancher-desktop/releases)
 
-[^6]: [Firezone Linux packages](https://www.firezone.dev/kb/deploy/linux)
+[^6]: [Firezone Linux GUI Client — .deb via APT](https://www.firezone.dev/kb/client-apps/linux-gui-client)
 
 [^7]: [Tauri Updater — Linux support limited to AppImage](https://tauri.app/plugin/updater/)
 

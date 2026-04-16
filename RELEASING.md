@@ -167,6 +167,14 @@ That's it — no manual version bumping, no workflow dispatch, no release type s
 - Release-please also backfills file lists per commit — empty commits (`--allow-empty`) return 0 files and are excluded from path-based detection
 - Squash merge produces a single commit with the PR title as the message — if the PR title follows conventional commits (e.g. `feat(runtime): add logging`), release-please picks it up correctly
 
+#### `chore(...)` is NOT allowed as a PR title to `main`
+
+Release-please only tracks commit types listed in its `changelog-sections` (`release-please-config.json`). `chore` is intentionally absent — a `chore` squash merge from `dev` to `main` would collapse every bundled `feat`/`fix` commit into a single `chore` commit that release-please ignores entirely. Result: no version bump, no release PR, the whole batch vanishes from the release record.
+
+`merge-strategy-check.yml` enforces this by rejecting `chore(...)` PR titles on PRs to `main`. Allowed types for `dev → main`: `feat, fix, perf, refactor, docs, ci, test, build, style, revert`.
+
+If a `dev → main` PR contains only housekeeping, wait for the next `feat`/`fix` before merging — do not promote a `chore`-only batch on its own. `chore` remains valid for PRs targeting `dev`.
+
 #### What happens if you accidentally use a regular merge
 
 A regular merge brings the entire `dev` commit history onto `main` as a merge commit with two parents. Release-please walks both parents and sees all historical commits from `dev` — including ones already released in previous versions — as "new" commits. This causes **phantom release PRs**: release-please opens a new release PR containing duplicate changelog entries for already-released features.

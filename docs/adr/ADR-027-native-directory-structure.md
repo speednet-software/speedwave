@@ -38,7 +38,20 @@ native/
 | `swift-mail/`      | `native/macos/mail/`      |
 | `swift-notes/`     | `native/macos/notes/`     |
 
-The `shared/` directory is a Swift library package (`SharedCLI`) containing utilities common to all macOS CLIs: `exitWithError`, `formatPermissionResult`, `parseISO8601`, `iso8601String`, `hexColor`, `CLIError`, and `resolveCalendars`. Unlike the other packages, `shared/` produces a library (not an executable). Each CLI package depends on it via `.package(path: "../shared")`.
+The `shared/` directory is a Swift library package (`SharedCLI`) containing
+utilities common to all macOS CLIs:
+
+- `exitWithError`, `formatPermissionResult` (in `Utilities.swift`)
+- `parseISO8601`, `iso8601String` (in `DateUtils.swift`)
+- `hexColor` (in `ColorUtils.swift`)
+- `CLIError` (in `Errors.swift`)
+- `resolveCalendars` (in `CalendarResolution.swift`)
+- `ScriptRunner`, `ScriptError`, `escapeAppleScript`, `parseDelimited`
+  (in `ScriptRunner.swift`) — shared by `mail` and `notes` only; other packages
+  use EventKit and do not invoke AppleScript
+
+Unlike the other packages, `shared/` produces a library (not an executable).
+Each CLI package depends on it via `.package(path: "../shared")`.
 
 ### Build target rename
 
