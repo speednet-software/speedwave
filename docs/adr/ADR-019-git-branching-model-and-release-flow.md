@@ -350,7 +350,7 @@ After the v0.3.0 incident (wrong-version artifacts due to manual dispatch from d
 
 - **`backmerge.yml`** — triggered on `release: [published]`. Resets `dev` to `main` via force-push to prevent ghost commit accumulation from squash merge SHA divergence. Falls back to regular merge via PR if `dev` has new commits since the release. Force-push is permitted by a GitHub Repository Ruleset that grants admin role bypass on `dev`.
 
-- **`merge-strategy-check.yml`** — triggered on PRs to `main`. Validates that the PR title follows conventional commits format. Release-please and backmerge PRs are exempt.
+- **`merge-strategy-check.yml`** — triggered on PRs to `main`. Validates that the PR title follows conventional commits format. Release-please and backmerge PRs are exempt. `chore(...)` is explicitly rejected: release-please omits `chore` from its `changelog-sections`[^release-please-chore], so a `chore` squash merge from `dev` would collapse bundled `feat`/`fix` commits into an invisible release (no version bump). Allowed types: `feat, fix, perf, refactor, docs, ci, test, build, style, revert`.
 
 ### Merge strategy clarification
 
@@ -390,3 +390,5 @@ After the v0.3.0 incident (wrong-version artifacts due to manual dispatch from d
 [^59]: [GitHub Security Lab — Script injection in GitHub Actions](https://securitylab.github.com/resources/github-actions-untrusted-input/)
 
 [^60]: [release-please — Commit parsing uses `--first-parent` traversal](https://github.com/googleapis/release-please/blob/main/docs/design.md) — release-please walks `--first-parent` commits on the target branch and parses each message as a conventional commit. Regular merge commits (`Merge pull request #N`) are not conventional commits and are ignored. Squash merge ensures the PR title (which must be a conventional commit) becomes the first-parent commit message.
+
+[^release-please-chore]: [release-please — `changelog-sections` configuration schema](https://github.com/googleapis/release-please/blob/main/schemas/config.json) — release-please only tracks commit types listed in `changelog-sections` when computing version bumps and changelog entries. Types absent from the list (such as `chore` in our `release-please-config.json`) are ignored entirely.
