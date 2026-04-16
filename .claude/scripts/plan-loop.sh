@@ -11,6 +11,7 @@
 #   --max-iter N          Phase 1: max write→review iterations (default 8)
 #   --max-impl-iter N     Phase 2: max implement→verify iterations (default 5)
 #   --max-review-iter N   Phase 3: max code-review→fix iterations (default 3)
+#                         NOTE: --max-iter, --max-impl-iter, --max-review-iter must be >= 1
 #   --plan-name NAME      Plan filename stem and branch suffix (default: YYYY-MM-DD-plan)
 #   --plan-only           Run Phase 1 only (no implementation)
 #   --impl-only <path>    Run Phase 2 only (plan already exists at <path>)
@@ -181,6 +182,15 @@ if [[ "$PLAN_ONLY" != "true" ]]; then
         echo "ERROR: Required file not found: $VERIFY_SCHEMA_FILE" >&2
         exit 1
     fi
+fi
+
+if [[ "$PLAN_ONLY" != "true" && "$SKIP_REVIEW" != "true" ]]; then
+    for f in "$CODE_REVIEW_SKILL_DIR/SKILL.md" "$CODE_REVIEW_SCHEMA_FILE"; do
+        if [[ ! -f "$f" ]]; then
+            echo "ERROR: Required file not found: $f" >&2
+            exit 1
+        fi
+    done
 fi
 
 # --- Functions ---
@@ -869,6 +879,7 @@ ${CODE_REVIEW_BODY}"
 
 review_iteration=0
 cr_verdict="UNKNOWN"
+phase3_error=false
 
 while [[ $review_iteration -lt $MAX_REVIEW_ITER ]]; do
     review_iteration=$((review_iteration + 1))
@@ -962,6 +973,7 @@ $cr_findings" \
             --dangerously-skip-permissions \
             --append-system-prompt "$IMPLEMENTER_SYSTEM_PROMPT" || {
             printf "  ${RED}[implementer] FAILED${NC}\n" >&2
+            phase3_error=true
             break
         }
         IMPL_SESSION_ID="$(get_session_id "$RESULT_FILE")"
@@ -1006,11 +1018,21 @@ $cr_findings" \
 
     if [[ "$rv_verdict" != "VERIFIED" || "$rv_check" != "true" || "$rv_test" != "true" ]]; then
         printf "\n  ${RED}Re-verification failed after code review fixes — stopping Phase 3${NC}\n"
+        phase3_error=true
         break
     fi
 
     echo ""
 done
+
+if [[ "$phase3_error" == "true" ]]; then
+    printf "\n${RED}╔══════════════════════════════════════════════════════════════╗${NC}\n"
+    printf "${RED}║  Phase 3: RE-VERIFICATION FAILED${NC}\n"
+    printf "${RED}║  Implementation is in a broken state.${NC}\n"
+    printf "${RED}╚══════════════════════════════════════════════════════════════╝${NC}\n"
+    rm -rf "$TMPDIR_LOOP"
+    exit 1
+fi
 
 if [[ "$cr_verdict" != "CLEAN" && "$review_iteration" -ge "$MAX_REVIEW_ITER" ]]; then
     printf "\n${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}\n"
@@ -1026,19 +1048,31 @@ fi # end of Phase 3 (skipped if --skip-review)
 # DONE — print next steps
 # ═══════════════════════════════════════════════════════════════
 
-echo ""
-printf "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}\n"
-printf "${GREEN}║  ALL PHASES COMPLETE${NC}\n"
-printf "${GREEN}║  Plan: $PLAN_PATH${NC}\n"
-if [[ "$WORKTREE_CREATED" == "true" ]]; then
-printf "${GREEN}║  Worktree: $WORKTREE_DIR${NC}\n"
-printf "${GREEN}║  Branch: $BRANCH_NAME${NC}\n"
-printf "${GREEN}║${NC}\n"
-printf "${GREEN}║  Next steps:${NC}\n"
-printf "${GREEN}║    cd $WORKTREE_DIR${NC}\n"
-printf "${GREEN}║    git push -u origin $BRANCH_NAME${NC}\n"
-printf "${GREEN}║    gh pr create --base dev${NC}\n"
+# Green banner only when code review came back CLEAN or was skipped.
+# If Phase 3 ran and ended with HAS_ISSUES (max iter exhausted), use a neutral
+# yellow "done with warnings" banner so the prior warning is not visually
+# cancelled by a green "ALL PHASES COMPLETE".
+if [[ "$SKIP_REVIEW" == "true" || "${cr_verdict:-UNKNOWN}" == "CLEAN" ]]; then
+    banner_color="$GREEN"
+    banner_title="ALL PHASES COMPLETE"
+else
+    banner_color="$YELLOW"
+    banner_title="DONE WITH WARNINGS — review issues remain"
 fi
-printf "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}\n"
+
+echo ""
+printf "${banner_color}╔══════════════════════════════════════════════════════════════╗${NC}\n"
+printf "${banner_color}║  %s${NC}\n" "$banner_title"
+printf "${banner_color}║  Plan: $PLAN_PATH${NC}\n"
+if [[ "$WORKTREE_CREATED" == "true" ]]; then
+printf "${banner_color}║  Worktree: $WORKTREE_DIR${NC}\n"
+printf "${banner_color}║  Branch: $BRANCH_NAME${NC}\n"
+printf "${banner_color}║${NC}\n"
+printf "${banner_color}║  Next steps:${NC}\n"
+printf "${banner_color}║    cd $WORKTREE_DIR${NC}\n"
+printf "${banner_color}║    git push -u origin $BRANCH_NAME${NC}\n"
+printf "${banner_color}║    gh pr create --base dev${NC}\n"
+fi
+printf "${banner_color}╚══════════════════════════════════════════════════════════════╝${NC}\n"
 rm -rf "$TMPDIR_LOOP"
 exit 0
