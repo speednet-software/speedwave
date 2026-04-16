@@ -23,7 +23,6 @@ public enum ScriptRunner {
             process.waitUntilExit()
             throw ScriptError.timeout(timeout, nil)
         }
-        process.waitUntilExit()
 
         let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
         let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
