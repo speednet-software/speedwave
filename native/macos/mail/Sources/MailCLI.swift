@@ -23,7 +23,7 @@ struct MailCLI {
         // Pattern: see also notes/Sources/NotesCLI.swift check_permission
         if command == "check_permission" {
             do {
-                _ = try ScriptRunner.run(permissionCheckScript)
+                _ = try ScriptRunner.run(permissionCheckScript, timeout: 15)
                 print(formatPermissionResult(granted: true, error: nil))
             } catch {
                 let detail = "Mail access denied: \(error.localizedDescription)\nGrant access in System Settings > Privacy & Security > Automation"

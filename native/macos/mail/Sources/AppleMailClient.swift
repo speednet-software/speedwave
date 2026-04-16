@@ -1,4 +1,5 @@
 import Foundation
+import SharedCLI
 
 /// Apple Mail.app automation via AppleScript.
 enum AppleMailClient {
@@ -25,7 +26,7 @@ enum AppleMailClient {
         end tell
         """
 
-        let output = try ScriptRunner.run(script)
+        let output = try ScriptRunner.run(script, timeout: 15)
         return parseDelimited(output, fields: ["account", "name", "message_count"])
     }
 
@@ -152,7 +153,7 @@ enum AppleMailClient {
         end tell
         """
 
-        _ = try ScriptRunner.run(script)
+        _ = try ScriptRunner.run(script, timeout: 15)
         return ["status": "sent"]
     }
 
@@ -176,23 +177,8 @@ enum AppleMailClient {
         end tell
         """
 
-        _ = try ScriptRunner.run(script)
+        _ = try ScriptRunner.run(script, timeout: 15)
         return ["status": "sent"]
     }
 }
 
-/// Parse `||`-delimited AppleScript output into array of dictionaries.
-func parseDelimited(_ output: String, fields: [String]) -> [[String: Any]] {
-    output
-        .components(separatedBy: .newlines)
-        .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-        .compactMap { line in
-            let parts = line.components(separatedBy: "||")
-            guard parts.count == fields.count else { return nil }
-            var dict: [String: Any] = [:]
-            for (key, val) in zip(fields, parts) {
-                dict[key] = val.trimmingCharacters(in: .whitespaces)
-            }
-            return dict
-        }
-}
