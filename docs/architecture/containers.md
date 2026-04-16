@@ -168,7 +168,8 @@ The Lima VM reserves ~9–32 GiB of RAM for the lifetime of the process — QEMU
 
 - **Next startup:** `ensure_ready()` detects the stopped VM and runs `limactl start` automatically. Startup is ~10–20s slower due to VM cold boot.
 - **If the process is force-killed during `limactl stop`:** The VM may be left in a `"Stopping"` state. `ensure_ready_inner()` on next launch polls until the VM finishes stopping, then starts it — no user intervention required.
-- **Cleanup is non-blocking:** All exit cleanup (container stop, VM stop, IDE Bridge, mcp-os) runs in a spawned background thread. The Tauri event loop is not blocked.
+- **Cleanup is non-blocking:** All exit cleanup (VM stop, IDE Bridge, mcp-os) runs in a spawned background thread. The Tauri event loop is not blocked.
+- **Per-project `compose_down` is skipped on macOS:** the VM poweroff reaps every container in one shot; calling `compose_down` would add ~10 s per project of nerdctl's hard-coded graceful-stop timeout. The full macOS exit sequence is just `limactl stop --force` (hard Apple Virtualization Framework VM poweroff, typically under a second).
 
 ### Linux (native nerdctl)
 
@@ -176,7 +177,7 @@ There is no VM layer. Containers are stopped by `compose_down`. The containerd d
 
 ### Windows (WSL2)
 
-`stop_vm()` is a no-op for `WslRuntime`. Running `wsl --terminate Speedwave` would stop all processes in the WSL2 distro — including workloads unrelated to Speedwave. Windows manages WSL2 memory via the hypervisor; Speedwave does not control the distro lifecycle.
+`stop_vm()` is a no-op for `WslRuntime`. Running `wsl --terminate Speedwave` would stop all processes in the WSL2 distro — including workloads unrelated to Speedwave. Windows manages WSL2 memory via the hypervisor; Speedwave does not control the distro lifecycle. Because `stop_vm()` is a no-op, containers are stopped via per-project `compose_down` on app exit (same path as Linux). Without it, containers would survive in the `Speedwave` distro until the next Windows boot or manual `wsl --shutdown`.
 
 ### Signal handling
 

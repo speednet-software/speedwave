@@ -84,7 +84,7 @@ pub(crate) fn join_with_exit_watchdog(handle: std::thread::JoinHandle<()>) {
 /// both call sites (WindowEvent::Destroyed and RunEvent::ExitRequested) only
 /// stash the handle; the actual join happens in `RunEvent::Exit` on the same
 /// thread after Tauri has finished processing events.
-pub(crate) fn stash_or_join_cleanup_handle(
+pub(crate) fn stash_cleanup_handle(
     slot: &Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     handle: std::thread::JoinHandle<()>,
 ) {
@@ -988,9 +988,11 @@ fn main() {
     #[allow(clippy::expect_used)]
     builder
         .plugin({
-            use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
+            use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
+            // Note: no timezone_strategy() here — the custom `.format(...)`
+            // below takes over and uses `chrono::Local::now()` directly, so
+            // the plugin's TimezoneStrategy would be dead config.
             tauri_plugin_log::Builder::new()
-                .timezone_strategy(TimezoneStrategy::UseLocal)
                 .targets([
                     Target::new(TargetKind::Stdout),
                     Target::new(TargetKind::LogDir {
@@ -1007,8 +1009,15 @@ fn main() {
                 .format(move |callback, message, record| {
                     let sanitized =
                         speedwave_runtime::log_sanitizer::sanitize(&format!("{message}"));
+                    // ISO8601 local-time timestamp with millisecond precision.
+                    // Shipped in every log line so post-mortem timing analysis
+                    // (e.g. shutdown-sequence profiling) does not need a
+                    // separate overlay. `%.3f` keeps the millis in the
+                    // fractional-seconds slot; `%z` is the numeric UTC offset
+                    // from chrono::Local::now(), which reads the system timezone.
+                    let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%z");
                     callback.finish(format_args!(
-                        "[{level}][{target}] {sanitized}",
+                        "{ts} [{level}][{target}] {sanitized}",
                         level = record.level(),
                         target = record.target(),
                     ))
@@ -1416,7 +1425,7 @@ fn main() {
                     // the handle so `RunEvent::Exit` can join before the
                     // process actually exits.
                     if let Some(handle) = reconcile::run_exit_cleanup(&cleanup_ctx_window) {
-                        stash_or_join_cleanup_handle(&exit_cleanup_handle_window, handle);
+                        stash_cleanup_handle(&exit_cleanup_handle_window, handle);
                     }
                 }
                 _ => {}
@@ -1445,7 +1454,7 @@ fn main() {
                 // WindowServer then draws the beachball.
                 hide_main_window(app_handle);
                 if let Some(handle) = reconcile::run_exit_cleanup(&cleanup_ctx_runevent) {
-                    stash_or_join_cleanup_handle(&exit_cleanup_handle_runevent, handle);
+                    stash_cleanup_handle(&exit_cleanup_handle_runevent, handle);
                 }
             }
             tauri::RunEvent::Exit => {
@@ -1858,7 +1867,7 @@ mod tests {
         //   1. fn join_with_exit_watchdog definition
         //   2. ctrlc signal handler call site (blocks — safe on ctrlc's dedicated thread)
         //   3. RunEvent::Exit call site (blocks — after Tauri finishes processing events)
-        // The stash_or_join_cleanup_handle helper used by WindowEvent::Destroyed and
+        // The stash_cleanup_handle helper used by WindowEvent::Destroyed and
         // RunEvent::ExitRequested drops handles rather than joining on the event-loop
         // thread, so it does NOT add occurrences here.
         // Total: at least 3 (fn def + 2 call sites) outside the test module.
@@ -1940,10 +1949,30 @@ mod tests {
              so RunEvent::Exit can join the cleanup thread before the process exits"
         );
         assert!(
-            exit_arm.contains("stash_or_join_cleanup_handle"),
-            "the ExitRequested arm must call stash_or_join_cleanup_handle to \
+            exit_arm.contains("stash_cleanup_handle"),
+            "the ExitRequested arm must call stash_cleanup_handle to \
              store the JoinHandle — direct slot manipulation would bypass the \
              write-once safety logic in the helper"
         );
+    }
+
+    /// Behavioral test for `stash_cleanup_handle` happy path: handle is
+    /// stashed into an empty slot. Covers the dominant branch; other
+    /// branches (slot-occupied, poisoned-mutex) are unreachable under
+    /// `CLEANUP_ONCE` or documented-contract-only.
+    #[test]
+    fn stash_cleanup_handle_stores_into_empty_slot() {
+        let slot: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+        let handle = std::thread::spawn(|| {});
+        stash_cleanup_handle(&slot, handle);
+
+        let stashed = slot.lock().unwrap().take();
+        // Regression guard: if the empty-slot branch were ever inverted
+        // (e.g. `if guard.is_some()` instead of `is_none()`), this would be None.
+        assert!(
+            stashed.is_some(),
+            "first handle must be stashed into empty slot"
+        );
+        stashed.unwrap().join().expect("test thread must not panic");
     }
 }
