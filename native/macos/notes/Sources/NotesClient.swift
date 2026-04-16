@@ -1,4 +1,5 @@
 import Foundation
+import SharedCLI
 
 /// Apple Notes.app automation via AppleScript.
 enum NotesClient {
@@ -20,7 +21,7 @@ enum NotesClient {
         end tell
         """
 
-        let output = try ScriptRunner.run(script)
+        let output = try runNoteScript(script, timeout: 30)
         let folders = parseDelimited(output, fields: ["id", "name", "account_name", "note_count"])
         return ["folders": folders]
     }
@@ -56,7 +57,7 @@ enum NotesClient {
         end tell
         """
 
-        let output = try ScriptRunner.run(script)
+        let output = try runNoteScript(script, timeout: 30)
         let notes = parseDelimited(output, fields: ["id", "name", "modified", "folder"])
         return ["notes": notes]
     }
@@ -82,7 +83,7 @@ enum NotesClient {
         end tell
         """
 
-        let output = try ScriptRunner.run(script, timeout: 30)
+        let output = try runNoteScript(script, timeout: 30)
         // Split on || but body (HTML) might contain || so we use |||| as body separator
         let mainParts = output.components(separatedBy: "||||")
         guard mainParts.count >= 2 else {
@@ -132,7 +133,7 @@ enum NotesClient {
         end tell
         """
 
-        let output = try ScriptRunner.run(script, timeout: 30)
+        let output = try runNoteScript(script, timeout: 30)
         let notes = parseDelimited(output, fields: ["id", "name", "modified", "folder"])
         return ["notes": notes]
     }
@@ -156,7 +157,7 @@ enum NotesClient {
         end tell
         """
 
-        let noteId = try ScriptRunner.run(script)
+        let noteId = try runNoteScript(script, timeout: 30)
         return [
             "id": noteId.trimmingCharacters(in: .whitespacesAndNewlines),
             "status": "created",
@@ -185,7 +186,7 @@ enum NotesClient {
         end tell
         """
 
-        _ = try ScriptRunner.run(script)
+        _ = try runNoteScript(script, timeout: 30)
         return ["status": "updated"]
     }
 
@@ -197,25 +198,16 @@ enum NotesClient {
         end tell
         """
 
-        _ = try ScriptRunner.run(script)
+        _ = try runNoteScript(script, timeout: 30)
         return ["status": "deleted"]
     }
 }
 
-/// Parse `||`-delimited AppleScript output into array of dictionaries.
-func parseDelimited(_ output: String, fields: [String]) -> [[String: Any]] {
-    output
-        .components(separatedBy: .newlines)
-        .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-        .compactMap { line in
-            let parts = line.components(separatedBy: "||")
-            guard parts.count == fields.count else { return nil }
-            var dict: [String: Any] = [:]
-            for (key, val) in zip(fields, parts) {
-                dict[key] = val.trimmingCharacters(in: .whitespaces)
-            }
-            return dict
-        }
+func runNoteScript(_ script: String, timeout: TimeInterval) throws -> String {
+    do { return try ScriptRunner.run(script, timeout: timeout) }
+    catch ScriptError.timeout(let seconds, _) {
+        throw ScriptError.timeout(seconds, "note may contain large attachments")
+    }
 }
 
 enum NotesError: LocalizedError {
