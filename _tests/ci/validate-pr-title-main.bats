@@ -123,6 +123,12 @@ run_script() {
     [[ "$output" == *"'chore' is NOT allowed"* ]]
 }
 
+@test "chore with scope and breaking-change marker is REJECTED" {
+    run_script "chore(deps)!: drop legacy dep"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"'chore' is NOT allowed"* ]]
+}
+
 @test "chore error message suggests feat/fix alternative" {
     run_script "chore(deps): bump"
     [ "$status" -eq 1 ]
