@@ -146,6 +146,8 @@ For EACH implementation step, specify concrete tests. "Add tests" is not accepta
 
 - **Upgrade scenarios:** old config + new binary, new config + old containers, partial update interrupted mid-way (if applicable)
 
+- **Idempotency / mock fidelity:** if the system-under-test claims to be idempotent (skip-if-exists, rebuild-only-if-missing), the test must use a mock whose state mutates after create/build calls, and assert exact call counts (`== N`, not `>= N`). A test that passes with `>= 1` cannot distinguish "correctly skipped the second call" from "executed twice". For each new mock, specify which write methods should update the mock's read state (e.g., `build_image` must add the tag so `image_exists` returns `true` on subsequent calls).
+
 **Test placement:**
 
 - Rust: `#[cfg(test)] mod tests` at bottom of source file
