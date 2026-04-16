@@ -168,11 +168,11 @@ The Lima VM reserves ~9–32 GiB of RAM for the lifetime of the process — QEMU
 
 - **Next startup:** `ensure_ready()` detects the stopped VM and runs `limactl start` automatically. Startup is ~10–20s slower due to VM cold boot.
 - **If the process is force-killed during `limactl stop`:** The VM may be left in a `"Stopping"` state. `ensure_ready_inner()` on next launch polls until the VM finishes stopping, then starts it — no user intervention required.
-- **Cleanup is non-blocking:** All exit cleanup (container stop, image prune, VM stop, IDE Bridge, mcp-os) runs in a spawned background thread. The Tauri event loop is not blocked.
+- **Cleanup is non-blocking:** All exit cleanup (container stop, VM stop, IDE Bridge, mcp-os) runs in a spawned background thread. The Tauri event loop is not blocked.
 
 ### Linux (native nerdctl)
 
-There is no VM layer. Containers are stopped by `compose_down`. The containerd daemon continues as a systemd user service — this matches the Docker Desktop model where containerd is always available. `system_prune()` removes dangling images on exit.
+There is no VM layer. Containers are stopped by `compose_down`. The containerd daemon continues as a systemd user service — this matches the Docker Desktop model where containerd is always available.
 
 ### Windows (WSL2)
 
