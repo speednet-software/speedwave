@@ -18,6 +18,19 @@ pub(crate) type SharedMcpOs = Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>;
 /// Shared handle for the background auto-update check task.
 pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>;
 
+/// The three shared-state Arcs required by every `run_exit_cleanup` call site.
+///
+/// Wrapping them in a struct eliminates the nine parallel Arc clones that would
+/// otherwise appear at each of the three call sites (signal handler,
+/// `WindowEvent::Destroyed`, `RunEvent::ExitRequested`). Clone the struct once
+/// per exit path instead of cloning each Arc individually.
+#[derive(Clone)]
+pub(crate) struct ExitCleanupContext {
+    pub(crate) ide_bridge: SharedIdeBridge,
+    pub(crate) mcp_os: SharedMcpOs,
+    pub(crate) auto_check_handle: SharedAutoCheckHandle,
+}
+
 /// Reconcile phase: nothing running.
 const RECONCILE_IDLE: u8 = 0;
 /// Reconcile phase: background thread is checking whether a rebuild is needed.
@@ -612,6 +625,16 @@ pub(crate) fn reconcile_compose_port(
 
 /// Stop containers for all projects. Best-effort — failures are logged
 /// but do not prevent remaining cleanup.
+///
+/// Runs on platforms where container state outlives the runtime process:
+/// Linux (native containerd keeps running after app exit) and Windows
+/// (WSL2 distro is system-managed; `WslRuntime::stop_vm` inherits the
+/// no-op default from `ContainerRuntime` — see
+/// `crates/speedwave-runtime/src/runtime/mod.rs:142-149`). On macOS,
+/// `LimaRuntime::stop_vm` hard-powers the Apple Virtualization VM off
+/// via `limactl stop --force` and reaps containers with it, so this
+/// function is not called on macOS (compiled out by the cfg).
+#[cfg(not(target_os = "macos"))]
 fn stop_all_containers(
     rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
     projects: &[config::ProjectUserEntry],
@@ -627,13 +650,38 @@ fn stop_all_containers(
     }
 }
 
-/// Stops all containers and stops the VM. Extracted so tests can call it
-/// directly with a mock runtime.
+/// Stops all containers (where applicable) and stops the VM (where
+/// applicable). Extracted so tests can call it directly with a mock
+/// runtime.
+///
+/// Platform split (macOS is the outlier; Linux and Windows share the same
+/// per-project loop):
+///
+/// - macOS (Lima): `limactl stop --force` poweroffs the VM. Every
+///   container inside dies with the VM, so the per-project `compose_down`
+///   loop is pure UX drag (each `compose down` waits up to ~10 s for
+///   nerdctl's hard-coded graceful stop). Skipped.
+/// - Linux (native containerd): no VM. `compose_down` is the only thing
+///   that stops containers.
+/// - Windows (WSL2): `WslRuntime::stop_vm` is a no-op (Speedwave does not
+///   own the WSL distro lifecycle), so without `compose_down` containers
+///   would keep running in the `Speedwave` distro until next Windows boot
+///   or manual `wsl --shutdown`. `compose_down` is required.
+///
+/// Safety: the per-project loop is best-effort on every platform — a
+/// failing `compose_down` only logs a warning. Skipping it on macOS loses
+/// no information, since VM shutdown imminently replaces it.
 pub(crate) fn run_container_cleanup(
     rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
     projects: &[config::ProjectUserEntry],
 ) {
+    #[cfg(not(target_os = "macos"))]
     stop_all_containers(rt, projects);
+    #[cfg(target_os = "macos")]
+    log::info!(
+        "exit cleanup: skipping per-project compose_down for {} project(s) — VM shutdown below will kill all containers",
+        projects.len()
+    );
     if let Err(e) = rt.stop_vm() {
         log::warn!("exit cleanup: stop_vm failed: {e}");
     }
@@ -642,19 +690,15 @@ pub(crate) fn run_container_cleanup(
 /// Runs cleanup when the app exits: stops containers, stops VM, stops IDE
 /// Bridge, mcp-os process, and aborts the background auto-update check.
 ///
-/// Guarded by `CLEANUP_ONCE` — safe to call from both `WindowEvent::Destroyed`
-/// and a signal handler concurrently. The first call starts the cleanup work
-/// in a background thread and returns its `JoinHandle`; subsequent calls
-/// return `None`. Callers that intend to terminate the process (e.g. signal
-/// handlers calling `std::process::exit`, or the Tauri `RunEvent::Exit` hook)
-/// MUST `.join()` the handle before exit, otherwise the cleanup thread is
-/// killed mid-flight and the VM never stops.
+/// Guarded by `CLEANUP_ONCE` — safe to call from `WindowEvent::Destroyed`,
+/// `RunEvent::ExitRequested`, and a signal handler concurrently. The first
+/// call starts the cleanup work in a background thread and returns its
+/// `JoinHandle`; subsequent calls return `None`. Callers that intend to
+/// terminate the process (e.g. signal handlers calling `std::process::exit`,
+/// or the Tauri `RunEvent::Exit` hook) MUST `.join()` the handle before exit,
+/// otherwise the cleanup thread is killed mid-flight and the VM never stops.
 #[must_use = "join the returned handle before process exit, or VM cleanup will be killed mid-flight"]
-pub(crate) fn run_exit_cleanup(
-    ide_bridge: &SharedIdeBridge,
-    mcp_os: &SharedMcpOs,
-    auto_check: &SharedAutoCheckHandle,
-) -> Option<std::thread::JoinHandle<()>> {
+pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::JoinHandle<()>> {
     static CLEANUP_ONCE: AtomicBool = AtomicBool::new(false);
     if CLEANUP_ONCE.swap(true, Ordering::SeqCst) {
         return None;
@@ -662,9 +706,9 @@ pub(crate) fn run_exit_cleanup(
 
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
-    let ide_bridge = ide_bridge.clone();
-    let mcp_os = mcp_os.clone();
-    let auto_check = auto_check.clone();
+    let ide_bridge = ctx.ide_bridge.clone();
+    let mcp_os = ctx.mcp_os.clone();
+    let auto_check = ctx.auto_check_handle.clone();
 
     let handle = std::thread::spawn(move || {
         // Container + VM cleanup. stop_vm() runs unconditionally because it
@@ -771,6 +815,10 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    // stop_all_containers is compiled out on macOS (see its definition).
+    // Its tests are gated to match, otherwise the `use super::stop_all_containers`
+    // would fail to resolve on macOS.
+    #[cfg(not(target_os = "macos"))]
     mod stop_all_containers_tests {
         use super::stop_all_containers;
         use speedwave_runtime::config::ProjectUserEntry;
@@ -1008,8 +1056,14 @@ mod tests {
             }
         }
 
+        #[cfg(not(target_os = "macos"))]
         #[test]
-        fn full_cleanup_calls_in_order() {
+        fn full_cleanup_calls_in_order_non_macos() {
+            // Note: runs on any non-macOS target. Linux dev hosts + Ubuntu CI
+            // execute this test routinely. Windows dev hosts would too — but
+            // Windows CI (.github/workflows/desktop-build.yml) runs only
+            // `cargo build`, not `cargo test`. Enabling `cargo test` on the
+            // Windows matrix leg is tracked as a follow-up PR.
             let (rt, calls) = TrackingRuntime::new();
             let projects = vec![project("alpha"), project("beta")];
             run_container_cleanup(&rt, &projects);
@@ -1017,7 +1071,26 @@ mod tests {
             assert_eq!(
                 *recorded,
                 vec!["compose_down:alpha", "compose_down:beta", "stop_vm",],
-                "cleanup order must be: compose_down per project, then stop_vm"
+                "on non-macOS cleanup order must be: compose_down per project, then stop_vm"
+            );
+        }
+
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn cleanup_skips_compose_down_when_vm_will_stop() {
+            // On macOS the Lima VM is hard-powered off by `limactl stop
+            // --force`, which reaps containers for free. Per-project
+            // compose_down would waste up to 10s per project (nerdctl's
+            // hard-coded graceful stop) and kill the Quit UX.
+            let (rt, calls) = TrackingRuntime::new();
+            let projects = vec![project("alpha"), project("beta")];
+            run_container_cleanup(&rt, &projects);
+            let recorded = calls.lock().unwrap();
+            assert_eq!(
+                *recorded,
+                vec!["stop_vm"],
+                "on macOS only stop_vm must be called; the Lima VM poweroff reaps \
+                 every container for free"
             );
         }
 
@@ -1498,11 +1571,13 @@ mod tests {
     #[test]
     #[serial]
     fn cleanup_once_idempotency() {
-        let ide = SharedIdeBridge::default();
-        let mcp = SharedMcpOs::default();
-        let auto_check = SharedAutoCheckHandle::default();
+        let ctx = ExitCleanupContext {
+            ide_bridge: SharedIdeBridge::default(),
+            mcp_os: SharedMcpOs::default(),
+            auto_check_handle: SharedAutoCheckHandle::default(),
+        };
 
-        let first = run_exit_cleanup(&ide, &mcp, &auto_check);
+        let first = run_exit_cleanup(&ctx);
         assert!(
             first.is_some(),
             "first call to run_exit_cleanup must return Some(JoinHandle)"
@@ -1510,7 +1585,7 @@ mod tests {
         // Wait for the cleanup thread to finish to avoid leaking threads.
         first.unwrap().join().ok();
 
-        let second = run_exit_cleanup(&ide, &mcp, &auto_check);
+        let second = run_exit_cleanup(&ctx);
         assert!(
             second.is_none(),
             "second call to run_exit_cleanup must return None (CLEANUP_ONCE guard)"

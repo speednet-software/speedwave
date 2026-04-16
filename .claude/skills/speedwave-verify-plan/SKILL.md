@@ -31,30 +31,35 @@ Do not praise what works. Only report what's wrong or missing.
 
 ## Step 2 — Run Tests
 
-1. Run `make check` — report pass/fail
-2. Run `make test` — report pass/fail
+1. Run `make check` with the Bash tool in the foreground, `run_in_background: false`, `timeout: 900000` (15 min). Wait for it to finish. Record the exit code and the tail of the output. Report `PASSED`, `FAILED`, or `UNKNOWN` (only UNKNOWN if the command was killed before printing its own success/failure marker — never UNKNOWN out of uncertainty about what you saw).
+2. Run `make test` the same way. Report `PASSED`, `FAILED`, or `UNKNOWN`.
+
+Never substitute `sleep`, `Monitor`, `ScheduleWakeup`, or any polling mechanism for "wait for this command to finish". Bash already waits. Using Monitor/sleep against a file-backed stdout stream is the specific anti-pattern that caused the false-negative verdicts this skill is designed to prevent.
+
 3. **Test quality scan.** For every NEW test added in this PR (find them via `git diff origin/dev...HEAD`):
-   - Flag assertions that use `>=`, `>`, or `.contains()` where exact equality (`==`, `assert_eq!`) would correctly express intent. Imprecise assertions mask bugs (e.g., `>= 1` hides double-execution).
-   - For every mock / test-double used: verify that write methods (e.g., `build_image`, `create`, `insert`) mutate the mock's observable state so that subsequent read methods (e.g., `image_exists`, `get`) return updated values. A mock whose read methods return static data regardless of writes hides idempotency bugs. Report as a gap if the mock does not reflect mutations.
-   - **Zero-assertion detection.** For every new test function: confirm the test body contains at least one assertion macro (`assert!`, `assert_eq!`, `assert_ne!`, `assert_matches!`, `#[should_panic]`, `.expect(` in a test that should panic). A test function with no assertions exercises zero code paths and violates "never skip tests." Report any assertion-free test as a gap.
-   - **Test brittleness scan.** Flag tests that use `include_str!` to embed source code and then scan it with `str::find`, `contains()`, or regex — these break on any formatting/refactoring change. Flag tests that hardcode whitespace patterns (indentation, newlines) to locate code structures. Such tests should be rewritten as behavioral tests (mock + assert) or removed if behavioral coverage already exists. Report as a gap.
+
+- Flag assertions that use `>=`, `>`, or `.contains()` where exact equality (`==`, `assert_eq!`) would correctly express intent. Imprecise assertions mask bugs (e.g., `>= 1` hides double-execution).
+- For every mock / test-double used: verify that write methods (e.g., `build_image`, `create`, `insert`) mutate the mock's observable state so that subsequent read methods (e.g., `image_exists`, `get`) return updated values. A mock whose read methods return static data regardless of writes hides idempotency bugs. Report as a gap if the mock does not reflect mutations.
+- **Zero-assertion detection.** For every new test function: confirm the test body contains at least one assertion macro (`assert!`, `assert_eq!`, `assert_ne!`, `assert_matches!`, `#[should_panic]`, `.expect(` in a test that should panic). A test function with no assertions exercises zero code paths and violates "never skip tests." Report any assertion-free test as a gap.
+- **Test brittleness scan.** Flag tests that use `include_str!` to embed source code and then scan it with `str::find`, `contains()`, or regex — these break on any formatting/refactoring change. Flag tests that hardcode whitespace patterns (indentation, newlines) to locate code structures. Such tests should be rewritten as behavioral tests (mock + assert) or removed if behavioral coverage already exists. Report as a gap.
 
 ## Step 3 — Report
 
 Report your findings:
 
 - Total plan steps and how many are fully implemented
-- Whether `make check` passed
-- Whether `make test` passed
+- `make_check_status`: `PASSED`, `FAILED`, or `UNKNOWN`
+- `make_test_status`: `PASSED`, `FAILED`, or `UNKNOWN`
 - For each gap found: which plan step, what's missing, what needs to be done to fix it
 
 **Hard verdict rules — these are non-negotiable:**
 
 - `overall_verdict: "VERIFIED"` is allowed ONLY if ALL THREE conditions hold:
   - every plan step is fully implemented (`steps_verified == steps_total`)
-  - `make_check_passed: true`
-  - `make_test_passed: true`
-- If ANY of the three fails, `overall_verdict` MUST be `"GAPS_FOUND"`.
-- `gaps_summary` MUST contain concrete, actionable fix instructions whenever the verdict is `GAPS_FOUND`, or whenever `make_check_passed`/`make_test_passed` is false. Paste the actual failing output from make — do not summarize vaguely.
+  - `make_check_status: "PASSED"`
+  - `make_test_status: "PASSED"`
+- If either `make_check_status` or `make_test_status` is `"UNKNOWN"` — `overall_verdict` MUST be `"UNKNOWN"`. Do NOT promote UNKNOWN to GAPS_FOUND. The orchestrator distinguishes the two: UNKNOWN triggers retry with a fresh verifier context, GAPS_FOUND triggers the implementer to attempt a fix based on `gaps_summary`. Wrong routing wastes an iteration and can corrupt working state.
+- If either `make_check_status` or `make_test_status` is `"FAILED"` (and neither is UNKNOWN) — `overall_verdict` MUST be `"GAPS_FOUND"`.
+- `gaps_summary` MUST contain concrete, actionable fix instructions whenever the verdict is `GAPS_FOUND`. When the verdict is `UNKNOWN`, `gaps_summary` MUST explain WHY verification could not complete (which command, which sub-phase, how long before cut-off) so the orchestrator can decide whether a retry is likely to succeed or whether to surface the timeout to the user.
 
-Returning `VERIFIED` with a failing check or test is a critical bug in your output and will cause the orchestrator to ship broken code. Double-check the booleans before emitting the structured result.
+Never infer `PASSED` if you did not observe the actual success marker yourself (e.g., `test result: ok` for cargo, `Finished` for make). Never infer `FAILED` from "I could not determine". When uncertain, return `UNKNOWN` — it is a first-class verdict. Returning a confident verdict you did not actually confirm is a critical bug in your output.
