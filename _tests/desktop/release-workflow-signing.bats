@@ -119,13 +119,15 @@ WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/desktop-release.yml"
 @test "publish-release enumerates required latest.json platform keys" {
     # Anti-removal guard: all 7 required platform keys must appear in the
     # workflow so missing keys are caught before the release publishes.
-    grep -qF "darwin-x86_64" "$WORKFLOW"
-    grep -qF "darwin-x86_64-app" "$WORKFLOW"
-    grep -qF "darwin-aarch64" "$WORKFLOW"
-    grep -qF "darwin-aarch64-app" "$WORKFLOW"
-    grep -qF "windows-x86_64" "$WORKFLOW"
-    grep -qF "windows-x86_64-msi" "$WORKFLOW"
-    grep -qF "windows-x86_64-nsis" "$WORKFLOW"
+    # Quotes are part of the pattern so "darwin-x86_64" does not match
+    # "darwin-x86_64-app" (keys in the workflow array are quoted strings).
+    grep -qF '"darwin-x86_64"' "$WORKFLOW"
+    grep -qF '"darwin-x86_64-app"' "$WORKFLOW"
+    grep -qF '"darwin-aarch64"' "$WORKFLOW"
+    grep -qF '"darwin-aarch64-app"' "$WORKFLOW"
+    grep -qF '"windows-x86_64"' "$WORKFLOW"
+    grep -qF '"windows-x86_64-msi"' "$WORKFLOW"
+    grep -qF '"windows-x86_64-nsis"' "$WORKFLOW"
 }
 
 @test "publish-release documents Linux auto-update exclusion" {
