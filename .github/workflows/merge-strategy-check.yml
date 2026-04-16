@@ -2,6 +2,8 @@
 #
 # - Release-please and backmerge PRs are exempt
 # - All other PRs must have conventional commit titles (for squash merge)
+# - `chore` is intentionally rejected here (see scripts/validate-pr-title-main.sh
+#   header and issue #371) because release-please ignores `chore` commits.
 
 name: Merge Strategy Check
 
@@ -17,37 +19,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
+      - uses: actions/checkout@v4
       - name: Validate PR title for squash merge
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           HEAD_REF: ${{ github.head_ref }}
-        run: |
-          set -e
-
-          # Release-please PRs are exempt (they manage their own titles)
-          if [[ "$HEAD_REF" == release-please--* ]]; then
-            echo "Release-please PR — skipping title check"
-            exit 0
-          fi
-
-          # Backmerge PRs are exempt (fallback merge when dev has new commits)
-          if [[ "$HEAD_REF" == chore/backmerge-* ]]; then
-            echo "Backmerge PR — skipping title check"
-            exit 0
-          fi
-
-          # Validate conventional commit format
-          # Pattern: type(optional-scope): description
-          if [[ "$PR_TITLE" =~ ^(feat|fix|perf|refactor|docs|ci|test|chore|build|style|revert)(\(.+\))?\!?:\ .+ ]]; then
-            echo "PR title follows conventional commits: $PR_TITLE"
-          else
-            echo "::error::PR title does not follow conventional commits format."
-            echo "::error::Expected: type(scope): description"
-            echo "::error::Examples: feat(runtime): add logging, fix(ci): correct build path"
-            echo "::error::Valid types: feat, fix, perf, refactor, docs, ci, test, chore, build, style, revert"
-            echo ""
-            echo "::error::PRs to main must use SQUASH MERGE with a conventional commit title."
-            echo "::error::The PR title becomes the commit message on main, which release-please"
-            echo "::error::uses to determine version bumps."
-            exit 1
-          fi
+        run: ./scripts/validate-pr-title-main.sh
