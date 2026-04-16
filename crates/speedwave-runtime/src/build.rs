@@ -403,7 +403,13 @@ pub fn prune_old_bundle_images(
         "Pruning {} images from old bundle {old_bundle_id}",
         tags.len()
     );
-    runtime.remove_images(&tags)
+    runtime.remove_images(&tags)?;
+
+    log::info!("Pruning BuildKit cache");
+    if let Err(e) = runtime.prune_buildkit_cache() {
+        log::warn!("Failed to prune BuildKit cache: {e}");
+    }
+    Ok(())
 }
 
 pub fn build_all_images_for_bundle(
@@ -1895,15 +1901,17 @@ mod tests {
 
     // ── prune_old_bundle_images tests ─────────────────────────────────────
 
-    /// Minimal mock runtime that records remove_images calls.
+    /// Minimal mock runtime that records remove_images and prune_buildkit_cache calls.
     struct PruneMockRuntime {
         removed_tags: Arc<Mutex<Vec<String>>>,
+        buildkit_pruned: Arc<std::sync::atomic::AtomicU32>,
     }
 
     impl PruneMockRuntime {
         fn new() -> Self {
             Self {
                 removed_tags: Arc::new(Mutex::new(Vec::new())),
+                buildkit_pruned: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             }
         }
     }
@@ -1949,6 +1957,11 @@ mod tests {
             self.removed_tags.lock().unwrap().extend_from_slice(tags);
             Ok(())
         }
+        fn prune_buildkit_cache(&self) -> anyhow::Result<()> {
+            self.buildkit_pruned
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
     }
 
     #[test]
@@ -1978,6 +1991,80 @@ mod tests {
         let rt = PruneMockRuntime::new();
         prune_old_bundle_images(&rt, "same123").unwrap();
         assert_eq!(rt.removed_tags.lock().unwrap().len(), IMAGES.len());
+    }
+
+    #[test]
+    fn test_prune_old_bundle_images_also_prunes_buildkit_cache() {
+        let rt = PruneMockRuntime::new();
+        prune_old_bundle_images(&rt, "abc123").unwrap();
+
+        let pruned = rt.buildkit_pruned.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            pruned, 1,
+            "prune_buildkit_cache should be called exactly once"
+        );
+    }
+
+    #[test]
+    fn test_prune_old_bundle_images_buildkit_failure_is_warn_only() {
+        // A runtime where prune_buildkit_cache fails should NOT cause
+        // prune_old_bundle_images to return an error.
+        struct FailingBuildkitPruneRuntime;
+
+        impl ContainerRuntime for FailingBuildkitPruneRuntime {
+            fn compose_up(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn compose_down(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+                Ok(vec![])
+            }
+            fn container_exec(&self, _: &str, _: &[&str]) -> Command {
+                Command::new("true")
+            }
+            fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
+                Ok(Command::new("true"))
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn ensure_ready(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn build_image(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &[(&str, &str)],
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
+                Ok(true)
+            }
+            fn remove_images(&self, _: &[String]) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn prune_buildkit_cache(&self) -> anyhow::Result<()> {
+                anyhow::bail!("buildkit prune failed")
+            }
+        }
+
+        let rt = FailingBuildkitPruneRuntime;
+        // prune_old_bundle_images should succeed despite BuildKit prune failure
+        assert!(prune_old_bundle_images(&rt, "abc123").is_ok());
     }
 
     #[test]

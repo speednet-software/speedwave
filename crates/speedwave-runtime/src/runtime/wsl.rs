@@ -483,6 +483,23 @@ impl ContainerRuntime for WslRuntime {
         Ok(())
     }
 
+    fn prune_buildkit_cache(&self) -> anyhow::Result<()> {
+        self.runner.run(
+            "wsl.exe",
+            &[
+                "-d",
+                consts::WSL_DISTRO_NAME,
+                "--",
+                "nerdctl",
+                "builder",
+                "prune",
+                "--all",
+                "--force",
+            ],
+        )?;
+        Ok(())
+    }
+
     fn restart_container_engine(&self) -> anyhow::Result<()> {
         let distro = consts::WSL_DISTRO_NAME;
 
@@ -995,6 +1012,31 @@ mod tests {
         );
         let rt = WslRuntime::with_runner(Box::new(runner));
         let result = rt.system_prune();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("prune failed"));
+    }
+
+    #[test]
+    fn test_prune_buildkit_cache_calls_nerdctl_in_wsl() {
+        let runner = MockRunner::new().with_response(
+            "wsl.exe -d Speedwave -- nerdctl builder prune --all --force",
+            "",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        assert!(
+            rt.prune_buildkit_cache().is_ok(),
+            "WslRuntime::prune_buildkit_cache should succeed"
+        );
+    }
+
+    #[test]
+    fn test_prune_buildkit_cache_propagates_error() {
+        let runner = MockRunner::new().with_error(
+            "wsl.exe -d Speedwave -- nerdctl builder prune --all --force",
+            "prune failed",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let result = rt.prune_buildkit_cache();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("prune failed"));
     }
