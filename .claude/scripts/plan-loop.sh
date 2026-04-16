@@ -404,15 +404,12 @@ if [[ "$NO_WORKTREE" != "true" && -z "$IMPL_ONLY" ]]; then
     VERIFIER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-verify-plan"
     CODE_REVIEW_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-code-review"
 
-    # Isolate npm's cacache per worktree so parallel plan-loops don't race on
-    # ~/.npm/_cacache — concurrent `npm ci` calls (run by build-mcp and by the
-    # bundle-build-context.bats "standalone lockfile" test) write to the same
-    # integrity files and occasionally corrupt each other's installs.
-    # Cargo's target/ directory already lives under the worktree and is
-    # naturally isolated, so no CARGO_TARGET_DIR override is needed — and
-    # overriding it would break Makefile paths that assume ./target/debug/.
-    export NPM_CONFIG_CACHE="$WORKTREE_DIR/.npm-cache"
-    mkdir -p "$NPM_CONFIG_CACHE"
+    # Per-worktree npm cache — avoids EINTEGRITY/ENOTEMPTY races from concurrent
+    # npm ci in parallel plan-loop runs. Stored in TMPDIR_LOOP (not the worktree)
+    # so it stays out of `git status` and auto-cleans on exit.
+    # CARGO_TARGET_DIR intentionally not overridden: Makefile hard-codes
+    # ./target/debug/ paths in cp rules.
+    export NPM_CONFIG_CACHE="$TMPDIR_LOOP/.npm-cache"
 
     echo ""
     printf "  ${GREEN}Worktree ready${NC}\n"
