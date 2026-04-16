@@ -1,6 +1,6 @@
 [package]
 name = "speedwave-runtime"
-version = "0.7.5"
+version = "0.8.0"
 edition = "2021"
 publish = false
 description = "Container runtime abstraction for Speedwave (Lima, nerdctl, WSL2)"
