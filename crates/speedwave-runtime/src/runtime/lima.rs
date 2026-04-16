@@ -10,6 +10,8 @@ pub struct LimaRuntime {
     vm_stop_poll_delay: std::time::Duration,
     /// Override for the deadline used in the `Stopping` arm of
     /// `ensure_ready_inner`. `None` means use `LIMA_VM_STOP_TIMEOUT_SECS`.
+    /// Note: `stop_vm()` always uses `LIMA_VM_STOP_TIMEOUT_SECS` directly;
+    /// this field only affects the Stopping polling loop in `ensure_ready`.
     /// Tests can shrink this so the deadline-exceeded path can be exercised
     /// in milliseconds rather than 30+ seconds.
     vm_stop_timeout: Option<std::time::Duration>,
@@ -37,7 +39,9 @@ impl LimaRuntime {
             restart_ready_delay: std::time::Duration::from_secs(
                 consts::CONTAINERD_RESTART_READY_DELAY_SECS,
             ),
-            vm_stop_poll_delay: std::time::Duration::from_secs(3),
+            vm_stop_poll_delay: std::time::Duration::from_secs(
+                consts::LIMA_VM_STOP_POLL_DELAY_SECS,
+            ),
             vm_stop_timeout: None,
         }
     }
@@ -48,7 +52,9 @@ impl LimaRuntime {
             restart_ready_delay: std::time::Duration::from_secs(
                 consts::CONTAINERD_RESTART_READY_DELAY_SECS,
             ),
-            vm_stop_poll_delay: std::time::Duration::from_secs(3),
+            vm_stop_poll_delay: std::time::Duration::from_secs(
+                consts::LIMA_VM_STOP_POLL_DELAY_SECS,
+            ),
             vm_stop_timeout: None,
         }
     }
@@ -619,16 +625,30 @@ impl ContainerRuntime for LimaRuntime {
 
     fn stop_vm(&self) -> anyhow::Result<()> {
         let vm = consts::lima_vm_name();
-        let status = self
+        let status = match self
             .runner
             .run("limactl", &["list", "--format", "{{.Status}}", vm])
-            .unwrap_or_default();
-        if status.trim() != "Running" {
-            log::debug!(
-                "Lima VM '{}' is not running (status: '{}'), skipping stop",
-                vm,
-                status.trim()
-            );
+        {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("Lima VM status check failed, skipping stop: {e}");
+                return Ok(());
+            }
+        };
+        let trimmed = status.trim();
+        if trimmed != "Running" {
+            if trimmed == "Stopping" {
+                log::debug!(
+                    "Lima VM '{}' is in Stopping state, will be stopped on next ensure_ready",
+                    vm,
+                );
+            } else {
+                log::debug!(
+                    "Lima VM '{}' is not running (status: '{}'), skipping stop",
+                    vm,
+                    trimmed,
+                );
+            }
             return Ok(());
         }
         let timeout = std::time::Duration::from_secs(consts::LIMA_VM_STOP_TIMEOUT_SECS);
@@ -646,6 +666,27 @@ impl ContainerRuntime for LimaRuntime {
 }
 
 impl LimaRuntime {
+    /// Starts a Lima VM that is in the Stopped state.
+    /// Shared by the `Stopped` and `Stopping→Stopped` paths in `ensure_ready_inner`.
+    fn start_stopped_vm(&self, vm: &str) -> anyhow::Result<()> {
+        let timeout = std::time::Duration::from_secs(consts::LIMA_VM_START_TIMEOUT_SECS);
+        log::info!(
+            "Lima VM '{}' is stopped, starting (timeout: {}s)",
+            vm,
+            timeout.as_secs()
+        );
+        self.runner
+            .run_with_timeout("limactl", &["start", vm], timeout)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to start Lima VM '{vm}': {e}. \
+                     Please restart Speedwave or check system resources.",
+                )
+            })?;
+        log::info!("Lima VM '{}' started successfully", vm);
+        Ok(())
+    }
+
     fn ensure_ready_inner(&self) -> anyhow::Result<()> {
         let version_output = self.runner.run("limactl", &["--version"]).map_err(|_| {
             anyhow::anyhow!(
@@ -674,24 +715,7 @@ impl LimaRuntime {
 
         match status.trim() {
             "Running" => Ok(()),
-            "Stopped" => {
-                let timeout = std::time::Duration::from_secs(consts::LIMA_VM_START_TIMEOUT_SECS);
-                log::info!(
-                    "Lima VM '{}' is stopped, starting (timeout: {}s)",
-                    vm,
-                    timeout.as_secs()
-                );
-                self.runner
-                    .run_with_timeout("limactl", &["start", vm], timeout)
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to start Lima VM '{vm}': {e}. \
-                             Please restart Speedwave or check system resources.",
-                        )
-                    })?;
-                log::info!("Lima VM '{}' started successfully", vm);
-                Ok(())
-            }
+            "Stopped" => self.start_stopped_vm(vm),
             "Stopping" => {
                 log::info!("Lima VM '{}' is stopping, waiting for it to finish", vm);
                 let stop_timeout = self.vm_stop_timeout.unwrap_or_else(|| {
@@ -700,10 +724,16 @@ impl LimaRuntime {
                 let deadline = std::time::Instant::now() + stop_timeout;
                 loop {
                     std::thread::sleep(self.vm_stop_poll_delay);
-                    let s = self
+                    let s = match self
                         .runner
                         .run("limactl", &["list", "--format", "{{.Status}}", vm])
-                        .unwrap_or_default();
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            log::warn!("Lima VM status poll failed (will retry): {e}");
+                            continue;
+                        }
+                    };
                     match s.trim() {
                         "Stopped" => {
                             log::info!("Lima VM '{}' finished stopping, now starting", vm);
@@ -726,23 +756,7 @@ impl LimaRuntime {
                         _ => continue,
                     }
                 }
-                // VM is now Stopped — start it (same as the Stopped arm)
-                let timeout = std::time::Duration::from_secs(consts::LIMA_VM_START_TIMEOUT_SECS);
-                log::info!(
-                    "Lima VM '{}' is stopped, starting (timeout: {}s)",
-                    vm,
-                    timeout.as_secs()
-                );
-                self.runner
-                    .run_with_timeout("limactl", &["start", vm], timeout)
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to start Lima VM '{vm}': {e}. \
-                             Please restart Speedwave or check system resources.",
-                        )
-                    })?;
-                log::info!("Lima VM '{}' started successfully", vm);
-                Ok(())
+                self.start_stopped_vm(vm)
             }
             _ => {
                 anyhow::bail!(

@@ -167,6 +167,14 @@ pub const EXIT_CLEANUP_TIMEOUT_SECS: u64 = 60;
 /// from blocking app termination indefinitely.
 pub const LIMA_VM_STOP_TIMEOUT_SECS: u64 = 30;
 
+/// Delay in seconds between status polls while waiting for a Lima VM
+/// in `Stopping` state to finish. Used by `ensure_ready_inner`.
+pub const LIMA_VM_STOP_POLL_DELAY_SECS: u64 = 3;
+
+// Compile-time invariant: VM stop must complete before the exit cleanup
+// watchdog fires, otherwise the watchdog kills the process mid-stop.
+const _: () = assert!(LIMA_VM_STOP_TIMEOUT_SECS < EXIT_CLEANUP_TIMEOUT_SECS);
+
 /// Descriptor for a single auth/credential field of an MCP service.
 pub struct McpAuthFieldDescriptor {
     /// Field key used as filename in the tokens directory (e.g. "bot_token").

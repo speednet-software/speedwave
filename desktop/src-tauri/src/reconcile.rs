@@ -667,13 +667,17 @@ pub(crate) fn run_exit_cleanup(
     let auto_check = auto_check.clone();
 
     let handle = std::thread::spawn(move || {
-        // Container + VM cleanup
-        if let Ok(user_config) = config::load_user_config() {
-            let rt = speedwave_runtime::runtime::detect_runtime();
-            run_container_cleanup(rt.as_ref(), &user_config.projects);
-        } else {
-            log::warn!("exit cleanup: failed to load config, skipping container/VM cleanup");
-        }
+        // Container + VM cleanup. stop_vm() runs unconditionally because it
+        // does not need the project list — only compose_down does.
+        let rt = speedwave_runtime::runtime::detect_runtime();
+        let projects = match config::load_user_config() {
+            Ok(user_config) => user_config.projects,
+            Err(e) => {
+                log::warn!("exit cleanup: failed to load config, skipping container stop: {e}");
+                Vec::new()
+            }
+        };
+        run_container_cleanup(rt.as_ref(), &projects);
 
         // Host process cleanup
         match ide_bridge.lock() {
@@ -1480,6 +1484,37 @@ mod tests {
             let result = resolve_resources_dir(&exe_parent);
             assert_eq!(result, Some(exe_parent));
         }
+    }
+
+    /// Verifies that `run_exit_cleanup` is idempotent: the first call returns
+    /// `Some(JoinHandle)` and the second returns `None`. This tests the
+    /// `CLEANUP_ONCE` AtomicBool guard.
+    ///
+    /// NOTE: Because `CLEANUP_ONCE` is a `static` inside `run_exit_cleanup`, once
+    /// set it stays set for the entire process lifetime. This test must run last
+    /// (or in a separate test binary) — any subsequent test calling `run_exit_cleanup`
+    /// in the same process will see `None`. `#[serial]` ensures ordering within this
+    /// module.
+    #[test]
+    #[serial]
+    fn cleanup_once_idempotency() {
+        let ide = SharedIdeBridge::default();
+        let mcp = SharedMcpOs::default();
+        let auto_check = SharedAutoCheckHandle::default();
+
+        let first = run_exit_cleanup(&ide, &mcp, &auto_check);
+        assert!(
+            first.is_some(),
+            "first call to run_exit_cleanup must return Some(JoinHandle)"
+        );
+        // Wait for the cleanup thread to finish to avoid leaking threads.
+        first.unwrap().join().ok();
+
+        let second = run_exit_cleanup(&ide, &mcp, &auto_check);
+        assert!(
+            second.is_none(),
+            "second call to run_exit_cleanup must return None (CLEANUP_ONCE guard)"
+        );
     }
 
     #[test]

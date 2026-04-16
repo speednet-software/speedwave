@@ -47,6 +47,30 @@ use tauri::Manager;
 
 use reconcile::{SharedAutoCheckHandle, SharedIdeBridge, SharedMcpOs};
 
+/// Joins a cleanup thread handle with a watchdog that force-exits after
+/// `EXIT_CLEANUP_TIMEOUT_SECS`. If the cleanup thread panics, exits with
+/// code 1. If it completes normally, returns and the caller may exit cleanly.
+///
+/// `drop(watchdog)` detaches the watchdog thread (does NOT cancel it), but
+/// `process::exit` from the main path terminates the process before the
+/// sleeping watchdog fires.
+pub(crate) fn join_with_exit_watchdog(handle: std::thread::JoinHandle<()>) {
+    let watchdog = std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(
+            speedwave_runtime::consts::EXIT_CLEANUP_TIMEOUT_SECS,
+        ));
+        log::error!(
+            "exit cleanup timed out after {}s — force-exiting",
+            speedwave_runtime::consts::EXIT_CLEANUP_TIMEOUT_SECS
+        );
+        std::process::exit(1);
+    });
+    if let Err(e) = handle.join() {
+        log::warn!("exit cleanup thread panicked: {e:?}");
+    }
+    drop(watchdog);
+}
+
 /// Tracks the latest available update version for the system tray menu.
 type SharedUpdateVersion = Arc<Mutex<Option<String>>>;
 
@@ -892,20 +916,10 @@ fn main() {
         if let Some(handle) =
             reconcile::run_exit_cleanup(&ide_bridge_signal, &mcp_os_signal, &auto_check_signal)
         {
-            // Watchdog: force-exit if cleanup hangs
-            let watchdog = std::thread::spawn(|| {
-                std::thread::sleep(std::time::Duration::from_secs(
-                    speedwave_runtime::consts::EXIT_CLEANUP_TIMEOUT_SECS,
-                ));
-                log::error!("exit cleanup timed out — force-exiting");
-                std::process::exit(1);
-            });
-            if let Err(e) = handle.join() {
-                log::warn!("exit cleanup thread panicked: {e:?}");
-            }
-            drop(watchdog);
+            join_with_exit_watchdog(handle);
         }
-        std::process::exit(0);
+        // Exit code 1: process was terminated by a signal (SIGTERM/SIGINT).
+        std::process::exit(1);
     }) {
         Ok(()) => {}
         Err(e) => {
@@ -1397,19 +1411,7 @@ fn main() {
                     }
                 };
                 if let Some(handle) = handle {
-                    // Watchdog: force-exit after timeout if cleanup hangs
-                    let watchdog = std::thread::spawn(|| {
-                        std::thread::sleep(std::time::Duration::from_secs(
-                            speedwave_runtime::consts::EXIT_CLEANUP_TIMEOUT_SECS,
-                        ));
-                        log::error!("exit cleanup timed out after {}s — force-exiting",
-                            speedwave_runtime::consts::EXIT_CLEANUP_TIMEOUT_SECS);
-                        std::process::exit(1);
-                    });
-                    if let Err(e) = handle.join() {
-                        log::warn!("exit cleanup thread panicked: {e:?}");
-                    }
-                    drop(watchdog);
+                    join_with_exit_watchdog(handle);
                 }
             }
         });
@@ -1793,5 +1795,35 @@ mod tests {
         let mut cfg = SpeedwaveUserConfig::default();
         let result = apply_switch_project(&mut cfg, "anything");
         assert!(result.is_err());
+    }
+
+    /// Structural test: both the ctrlc signal handler and RunEvent::Exit handler
+    /// must use `join_with_exit_watchdog` instead of inline watchdog patterns.
+    #[test]
+    fn both_exit_paths_use_join_with_exit_watchdog() {
+        let source = include_str!("main.rs");
+        let occurrences: Vec<_> = source.match_indices("join_with_exit_watchdog").collect();
+        // One definition (the fn) + two call sites + one test reference = at least 4.
+        // We check for at least 3 non-test occurrences (fn def + 2 calls).
+        let non_test_count = occurrences
+            .iter()
+            .filter(|(idx, _)| {
+                // Exclude occurrences inside #[cfg(test)] mod tests block
+                let before = &source[..*idx];
+                let last_mod_tests = before.rfind("mod tests");
+                let last_cfg_test = before.rfind("#[cfg(test)]");
+                // If both markers are found and cfg(test) is close before mod tests,
+                // this occurrence is inside the test module.
+                match (last_mod_tests, last_cfg_test) {
+                    (Some(mt), Some(ct)) if ct < mt && *idx > mt => false,
+                    _ => true,
+                }
+            })
+            .count();
+        assert!(
+            non_test_count >= 3,
+            "join_with_exit_watchdog must appear at least 3 times outside tests \
+             (1 definition + 2 call sites), found {non_test_count}"
+        );
     }
 }
