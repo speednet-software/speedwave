@@ -241,16 +241,12 @@ fn validate_slug(slug: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Validates the `speedwave_compat` field against the current crate version.
-///
-/// The empty-string guard is first because `semver::VersionReq::parse("")` returns
-/// `Ok(VersionReq { comparators: [] })` which matches any version — without this guard
-/// a manifest with `"speedwave_compat": ""` would silently pass.
 fn validate_speedwave_compat(compat: Option<&str>) -> anyhow::Result<()> {
     let s = match compat {
         None => return Ok(()),
         Some(s) => s,
     };
+    // `VersionReq::parse("")` returns a match-all comparator list — guard before calling it.
     if s.trim().is_empty() {
         anyhow::bail!(
             "speedwave_compat must not be empty — omit the field to disable the compatibility check"
@@ -283,6 +279,7 @@ fn validate_speedwave_compat(compat: Option<&str>) -> anyhow::Result<()> {
 /// Validates manifest constraints at install time.
 fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Result<()> {
     validate_slug(&manifest.slug)?;
+    validate_speedwave_compat(manifest.speedwave_compat.as_deref())?;
 
     // If service_id present, slug must equal service_id
     if let Some(ref sid) = manifest.service_id {
@@ -436,8 +433,6 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
             anyhow::bail!("ReadWrite token mount requires a non-empty justification");
         }
     }
-
-    validate_speedwave_compat(manifest.speedwave_compat.as_deref())?;
 
     Ok(())
 }
