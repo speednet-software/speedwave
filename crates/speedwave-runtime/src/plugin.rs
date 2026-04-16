@@ -3390,8 +3390,8 @@ mod tests {
 
         let msg = err.to_string();
         assert!(
-            msg.contains("plugin-a") || msg.contains("plugin-b"),
-            "error should mention failing plugins: {msg}"
+            msg.contains("plugin-a") && msg.contains("plugin-b"),
+            "error should mention both failing plugins: {msg}"
         );
         assert!(
             msg.contains("Some plugin images failed to rebuild"),
