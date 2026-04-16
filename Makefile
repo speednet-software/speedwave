@@ -33,7 +33,7 @@ LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
 .PHONY: all build test check clean dev install-deps setup-dev install-hooks \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets verify-bundled-assets \
-        test-rust test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-desktop-build \
+        test-rust test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
         test-e2e-desktop _e2e-macos _e2e-linux _e2e-windows test-e2e-all setup-e2e-vms \
         check-clippy check-desktop-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
@@ -164,7 +164,7 @@ all: build
 build: build-runtime build-cli build-os-cli build-mcp build-angular
 	@echo "\n✅ All builds complete"
 
-test: test-rust test-angular test-mcp test-entrypoint test-desktop-build test-desktop
+test: test-rust test-angular test-mcp test-entrypoint test-desktop-build test-desktop test-ci
 	@echo "\n✅ All tests passed"
 
 check: check-clippy check-desktop-clippy check-fmt check-mcp check-mcp-lint check-angular-lint
@@ -355,6 +355,11 @@ test-entrypoint:
 	bats _tests/entrypoint/install-claude.bats
 	bats _tests/entrypoint/statusline.bats
 	@echo "✅ Entrypoint tests passed"
+
+test-ci:
+	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	bats _tests/ci/validate-pr-title-main.bats
+	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
