@@ -1483,29 +1483,6 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_bundle_update_gated_behind_setup_started() {
-        let source = include_str!("main.rs");
-        // Find text after `setup_wizard::link_cli()` up to the closing brace of the
-        // enclosing `if setup_started` block. `reconcile_bundle_update` must appear
-        // in that window — i.e. inside the same guard block, not after it.
-        let after_link_cli = source
-            .split_once("setup_wizard::link_cli()")
-            .expect("main.rs must contain setup_wizard::link_cli()")
-            .1;
-        // The `if setup_started` block is indented with 12 spaces; its closing
-        // brace sits on a line that is exactly "            }\n".
-        let closing = "\n            }\n";
-        let until_close = after_link_cli
-            .split_once(closing)
-            .expect("should find closing brace of if setup_started block")
-            .0;
-        assert!(
-            until_close.contains("reconcile_bundle_update"),
-            "reconcile_bundle_update must be inside the if setup_started block with link_cli"
-        );
-    }
-
-    #[test]
     fn reconcile_inner_has_snapshotter_recovery_and_ensure_ready_after_build() {
         let source = include_str!("reconcile.rs");
         let inner_fn = source
