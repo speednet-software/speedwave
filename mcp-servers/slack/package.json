@@ -1,6 +1,6 @@
 {
   "name": "@speedwave/mcp-slack",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "description": "Speedwave MCP Slack Worker - Isolated Slack API access",
   "main": "dist/index.js",
   "type": "module",

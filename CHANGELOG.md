@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.7.5](https://github.com/speednet-software/speedwave/compare/v0.7.4...v0.7.5) (2026-04-16)
+
+
+### Bug Fixes
+
+* **runtime:** auto-rebuild plugins and prune BuildKit cache ([#495](https://github.com/speednet-software/speedwave/issues/495)) ([ef1e11c](https://github.com/speednet-software/speedwave/commit/ef1e11c1f1ad99f7cc29ae4d5f7cd393c4d8c62f))
+
 ## [0.7.4](https://github.com/speednet-software/speedwave/compare/v0.7.3...v0.7.4) (2026-04-16)
 
 
