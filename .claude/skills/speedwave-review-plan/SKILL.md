@@ -415,6 +415,10 @@ Check:
 
 - When tempted by a feature — does any user need this TODAY?
 
+- **Speculative regression tests.** Reject tests that assert the _absence_ of behavior which was never implemented, justified only by "a future developer might accidentally add it." Tests must cover real behavior (current or planned), not hypothetical future mistakes. A regression test requires concrete evidence: a past incident, a real ambiguity in the code, or a documented contract that could be violated. Without that — it's speculative and should be removed from the plan.
+
+- **Deferred verification steps.** Reject Implementation Steps that are phrased as "verify X" or "confirm Y" without a concrete change. Verification of external state (sibling repos, file existence, CLI output) is the planner's responsibility — it must happen _during planning_ and be recorded as a fact in the plan, not deferred to the implementer as a pseudo-step. If the plan contains a step like "verify no other consumers read field X" without the verification result embedded — that's a FAIL.
+
 **Severity: Speculative feature = MEDIUM. Speculative feature that complicates security model = HIGH.**
 
 ### 8. DRY — Duplication Check

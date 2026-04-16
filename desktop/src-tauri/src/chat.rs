@@ -1436,7 +1436,7 @@ mod tests {
     #[test]
     fn parse_result_extracts_cost_and_usage() {
         let mut parser = StreamParser::new();
-        let line = r#"{"type":"result","session_id":"550e8400-e29b-41d4-a716-446655440000","cost_usd":0.003,"total_cost":0.015,"usage":{"input_tokens":500,"output_tokens":100,"cache_read_tokens":50},"is_error":false,"result":""}"#;
+        let line = r#"{"type":"result","session_id":"550e8400-e29b-41d4-a716-446655440000","total_cost_usd":0.015,"usage":{"input_tokens":500,"output_tokens":100,"cache_read_tokens":50},"is_error":false,"result":""}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
             StreamChunk::Result {
@@ -1455,6 +1455,44 @@ mod tests {
                 assert!(u.cache_write_tokens.is_none());
                 assert!(result_text.is_none(), "empty result should produce None");
                 assert!(context_window_size.is_none());
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    // `cost_usd` was the original JSON field name in older test fixtures. The CLI
+    // never actually emitted it — the parser reads `total_cost_usd` (current) with
+    // `total_cost` (legacy) as fallback. This test guards against someone adding
+    // `cost_usd` back as a third alias, which would silently resurrect a dead name.
+    #[test]
+    fn parse_result_with_legacy_cost_usd_only_produces_no_cost() {
+        let mut parser = StreamParser::new();
+        let line =
+            r#"{"type":"result","session_id":"abc","is_error":false,"result":"","cost_usd":0.05}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { total_cost, .. } => {
+                assert!(
+                    total_cost.is_none(),
+                    "cost_usd alone should not populate total_cost"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_with_legacy_total_cost_fallback() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"result":"","total_cost":0.042}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { total_cost, .. } => {
+                assert_eq!(
+                    total_cost,
+                    Some(0.042),
+                    "total_cost should populate via the legacy fallback path when total_cost_usd is absent"
+                );
             }
             other => panic!("expected Result, got {other:?}"),
         }
@@ -2439,7 +2477,7 @@ mod tests {
     #[test]
     fn result_with_missing_session_id_still_emits_result() {
         let mut parser = StreamParser::new();
-        let line = r#"{"type":"result","is_error":false,"result":"","cost_usd":0.01}"#;
+        let line = r#"{"type":"result","is_error":false,"result":"","total_cost_usd":0.01}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
             StreamChunk::Result { session_id, .. } => {
@@ -2518,7 +2556,7 @@ mod tests {
     #[test]
     fn slash_command_result_includes_result_text() {
         let mut parser = StreamParser::new();
-        let line = r#"{"type":"result","session_id":"abc","cost_usd":0.0,"total_cost":0.0,"usage":{"input_tokens":0,"output_tokens":0},"is_error":false,"result":"Session cost: $0.003\nTotal cost: $0.015"}"#;
+        let line = r#"{"type":"result","session_id":"abc","total_cost_usd":0.0,"usage":{"input_tokens":0,"output_tokens":0},"is_error":false,"result":"Session cost: $0.003\nTotal cost: $0.015"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
             StreamChunk::Result { result_text, .. } => {
@@ -2658,7 +2696,7 @@ mod tests {
     #[test]
     fn result_produces_log_entry() {
         let mut parser = StreamParser::new();
-        let line = r#"{"type":"result","session_id":"abc123","cost_usd":0.003,"is_error":false,"result":""}"#;
+        let line = r#"{"type":"result","session_id":"abc123","total_cost_usd":0.003,"is_error":false,"result":""}"#;
         let (chunk, log_entry) = parse_line_full(&mut parser, line);
         assert!(chunk.is_some(), "should produce Result chunk");
         let entry = log_entry.unwrap();
