@@ -312,7 +312,7 @@ Your output will be captured as structured JSON via --json-schema.
 The gaps_summary field MUST be specific enough for the implementer to fix every gap WITHOUT reading your full analysis."
 
 VERIFY_SCHEMA="$(cat "$VERIFY_SCHEMA_FILE" 2>/dev/null || echo '{}')"
-CODE_REVIEW_SCHEMA="$(cat "$CODE_REVIEW_SCHEMA_FILE" 2>/dev/null || echo '{}')"
+CODE_REVIEW_SCHEMA="$(cat "$CODE_REVIEW_SCHEMA_FILE")"
 
 # NOTE: IMPLEMENTER_BODY and VERIFIER_BODY are computed after Phase 0
 # (worktree setup) so they read from the correct skill paths.
@@ -903,7 +903,7 @@ while [[ $review_iteration -lt $MAX_REVIEW_ITER ]]; do
         --append-system-prompt "$CODE_REVIEW_SYSTEM_PROMPT" \
         --json-schema "$CODE_REVIEW_SCHEMA" || {
         printf "  ${RED}[code-review] FAILED${NC}\n" >&2
-        printf "  ${YELLOW}Skipping Phase 3 due to code review failure${NC}\n"
+        printf "  ${YELLOW}Phase 3 aborted: code review tool failed (not an intentional skip)${NC}\n"
         break
     }
 
@@ -1004,6 +1004,7 @@ $cr_findings" \
         --append-system-prompt "$VERIFIER_SYSTEM_PROMPT" \
         --json-schema "$VERIFY_SCHEMA" || {
         printf "  ${RED}[verifier] FAILED${NC}\n" >&2
+        phase3_error=true
         break
     }
 
