@@ -156,6 +156,11 @@ pub const CONTAINERD_RESTART_READY_MAX_RETRIES: u32 = 6;
 /// while preventing indefinite hangs that freeze the Desktop UI.
 pub const LIMA_VM_START_TIMEOUT_SECS: u64 = 120;
 
+/// Maximum seconds to wait for exit cleanup (container teardown + VM stop)
+/// before the Desktop app force-exits. Used as a watchdog timeout in both
+/// the RunEvent::Exit handler and the ctrlc signal handler.
+pub const EXIT_CLEANUP_TIMEOUT_SECS: u64 = 60;
+
 /// Maximum seconds to wait for `limactl stop --force` to stop the Lima VM.
 /// 30s is generous — Lima's `--force` flag sends SIGKILL after its own
 /// internal timeout, so this is an outer safety net preventing exit cleanup
@@ -1199,6 +1204,14 @@ mod tests {
             SYSTEM_CHECK_FAILED_PREFIX, "System check failed:",
             "Changing this prefix silently breaks the Desktop UI — \
              update project-state.service.ts startsWith check to match"
+        );
+    }
+
+    #[test]
+    fn test_exit_cleanup_timeout_is_positive() {
+        assert!(
+            EXIT_CLEANUP_TIMEOUT_SECS > 0,
+            "EXIT_CLEANUP_TIMEOUT_SECS must be positive"
         );
     }
 

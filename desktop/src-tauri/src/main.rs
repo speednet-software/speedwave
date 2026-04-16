@@ -888,18 +888,31 @@ fn main() {
     // handler), so blocking with `.join()` here is safe and necessary —
     // `std::process::exit` would otherwise kill the cleanup thread mid-flight
     // and the Lima VM would never stop.
-    #[allow(clippy::expect_used)]
-    ctrlc::set_handler(move || {
+    match ctrlc::set_handler(move || {
         if let Some(handle) =
             reconcile::run_exit_cleanup(&ide_bridge_signal, &mcp_os_signal, &auto_check_signal)
         {
+            // Watchdog: force-exit if cleanup hangs
+            let watchdog = std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(
+                    speedwave_runtime::consts::EXIT_CLEANUP_TIMEOUT_SECS,
+                ));
+                log::error!("exit cleanup timed out — force-exiting");
+                std::process::exit(1);
+            });
             if let Err(e) = handle.join() {
                 log::warn!("exit cleanup thread panicked: {e:?}");
             }
+            drop(watchdog);
         }
         std::process::exit(0);
-    })
-    .expect("fatal: failed to set signal handler");
+    }) {
+        Ok(()) => {}
+        Err(e) => {
+            log::error!("fatal: failed to set signal handler: {e}");
+            std::process::exit(1);
+        }
+    }
 
     // Shared slot for the cleanup `JoinHandle` produced inside
     // `WindowEvent::Destroyed`. The Tauri `RunEvent::Exit` hook drains and
@@ -1384,9 +1397,19 @@ fn main() {
                     }
                 };
                 if let Some(handle) = handle {
+                    // Watchdog: force-exit after timeout if cleanup hangs
+                    let watchdog = std::thread::spawn(|| {
+                        std::thread::sleep(std::time::Duration::from_secs(
+                            speedwave_runtime::consts::EXIT_CLEANUP_TIMEOUT_SECS,
+                        ));
+                        log::error!("exit cleanup timed out after {}s — force-exiting",
+                            speedwave_runtime::consts::EXIT_CLEANUP_TIMEOUT_SECS);
+                        std::process::exit(1);
+                    });
                     if let Err(e) = handle.join() {
                         log::warn!("exit cleanup thread panicked: {e:?}");
                     }
+                    drop(watchdog);
                 }
             }
         });
