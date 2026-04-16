@@ -1460,6 +1460,10 @@ mod tests {
         }
     }
 
+    // `cost_usd` was the original JSON field name in older test fixtures. The CLI
+    // never actually emitted it — the parser reads `total_cost_usd` (current) with
+    // `total_cost` (legacy) as fallback. This test guards against someone adding
+    // `cost_usd` back as a third alias, which would silently resurrect a dead name.
     #[test]
     fn parse_result_with_legacy_cost_usd_only_produces_no_cost() {
         let mut parser = StreamParser::new();
@@ -1471,6 +1475,23 @@ mod tests {
                 assert!(
                     total_cost.is_none(),
                     "cost_usd alone should not populate total_cost"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_with_legacy_total_cost_fallback() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"result":"","total_cost":0.042}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { total_cost, .. } => {
+                assert_eq!(
+                    total_cost,
+                    Some(0.042),
+                    "total_cost should populate via the legacy fallback path when total_cost_usd is absent"
                 );
             }
             other => panic!("expected Result, got {other:?}"),
