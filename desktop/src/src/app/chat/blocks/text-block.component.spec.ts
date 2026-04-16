@@ -72,6 +72,24 @@ describe('TextBlockComponent', () => {
     expect(href).toBe('unsafe:javascript:alert(1)');
   });
 
+  it('rewrites data: URLs in links via Angular DomSanitizer', () => {
+    component.content = '[click](data:text/html,<script>alert(1)</script>)';
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    const href = el.querySelector('a')?.getAttribute('href') ?? '';
+    expect(href).toMatch(/^unsafe:data:/);
+  });
+
+  it('rewrites vbscript: URLs in links via Angular DomSanitizer', () => {
+    component.content = '[click](vbscript:MsgBox(1))';
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    const href = el.querySelector('a')?.getAttribute('href') ?? '';
+    expect(href).toMatch(/^unsafe:vbscript:/);
+  });
+
   it('rendered getter returns unsanitized HTML containing script tags', () => {
     component.content = '<script>alert(1)</script>';
     // The getter itself does not sanitize — sanitization happens at [innerHTML] binding time.
