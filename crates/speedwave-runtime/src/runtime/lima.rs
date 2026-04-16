@@ -7,6 +7,14 @@ use std::process::Command;
 pub struct LimaRuntime {
     runner: Box<dyn CommandRunner>,
     restart_ready_delay: std::time::Duration,
+    vm_stop_poll_delay: std::time::Duration,
+    /// Override for the deadline used in the `Stopping` arm of
+    /// `ensure_ready_inner`. `None` means use `LIMA_VM_STOP_TIMEOUT_SECS`.
+    /// Note: `stop_vm()` always uses `LIMA_VM_STOP_TIMEOUT_SECS` directly;
+    /// this field only affects the Stopping polling loop in `ensure_ready`.
+    /// Tests can shrink this so the deadline-exceeded path can be exercised
+    /// in milliseconds rather than 30+ seconds.
+    vm_stop_timeout: Option<std::time::Duration>,
 }
 
 /// Returns the Lima SSH config path for the VM.
@@ -31,6 +39,10 @@ impl LimaRuntime {
             restart_ready_delay: std::time::Duration::from_secs(
                 consts::CONTAINERD_RESTART_READY_DELAY_SECS,
             ),
+            vm_stop_poll_delay: std::time::Duration::from_secs(
+                consts::LIMA_VM_STOP_POLL_DELAY_SECS,
+            ),
+            vm_stop_timeout: None,
         }
     }
 
@@ -40,6 +52,10 @@ impl LimaRuntime {
             restart_ready_delay: std::time::Duration::from_secs(
                 consts::CONTAINERD_RESTART_READY_DELAY_SECS,
             ),
+            vm_stop_poll_delay: std::time::Duration::from_secs(
+                consts::LIMA_VM_STOP_POLL_DELAY_SECS,
+            ),
+            vm_stop_timeout: None,
         }
     }
 
@@ -47,6 +63,23 @@ impl LimaRuntime {
     #[cfg(test)]
     fn with_zero_restart_delay(mut self) -> Self {
         self.restart_ready_delay = std::time::Duration::ZERO;
+        self
+    }
+
+    /// Sets the VM stop poll delay to zero for tests to avoid sleeping.
+    #[cfg(test)]
+    fn with_zero_vm_stop_poll_delay(mut self) -> Self {
+        self.vm_stop_poll_delay = std::time::Duration::ZERO;
+        self
+    }
+
+    /// Overrides the deadline duration used in the `Stopping` arm of
+    /// `ensure_ready_inner`. Tests use this to exercise the
+    /// "stuck in Stopping state" error path in milliseconds rather than
+    /// the production `LIMA_VM_STOP_TIMEOUT_SECS` value.
+    #[cfg(test)]
+    fn with_stop_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.vm_stop_timeout = Some(timeout);
         self
     }
 
@@ -589,9 +622,71 @@ impl ContainerRuntime for LimaRuntime {
     fn ensure_ready(&self) -> anyhow::Result<()> {
         super::with_ensure_ready_lock(|| self.ensure_ready_inner())
     }
+
+    fn stop_vm(&self) -> anyhow::Result<()> {
+        let vm = consts::lima_vm_name();
+        let status = match self
+            .runner
+            .run("limactl", &["list", "--format", "{{.Status}}", vm])
+        {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("Lima VM status check failed, skipping stop: {e}");
+                return Ok(());
+            }
+        };
+        let trimmed = status.trim();
+        if trimmed != "Running" {
+            if trimmed == "Stopping" {
+                log::debug!(
+                    "Lima VM '{}' is in Stopping state, will be stopped on next ensure_ready",
+                    vm,
+                );
+            } else {
+                log::debug!(
+                    "Lima VM '{}' is not running (status: '{}'), skipping stop",
+                    vm,
+                    trimmed,
+                );
+            }
+            return Ok(());
+        }
+        let timeout = std::time::Duration::from_secs(consts::LIMA_VM_STOP_TIMEOUT_SECS);
+        log::info!(
+            "Stopping Lima VM '{}' (timeout: {}s)",
+            vm,
+            timeout.as_secs()
+        );
+        self.runner
+            .run_with_timeout("limactl", &["stop", "--force", vm], timeout)
+            .map_err(|e| anyhow::anyhow!("Failed to stop Lima VM '{}': {e}", vm))?;
+        log::info!("Lima VM '{}' stopped successfully", vm);
+        Ok(())
+    }
 }
 
 impl LimaRuntime {
+    /// Starts a Lima VM that is in the Stopped state.
+    /// Shared by the `Stopped` and `Stopping→Stopped` paths in `ensure_ready_inner`.
+    fn start_stopped_vm(&self, vm: &str) -> anyhow::Result<()> {
+        let timeout = std::time::Duration::from_secs(consts::LIMA_VM_START_TIMEOUT_SECS);
+        log::info!(
+            "Lima VM '{}' is stopped, starting (timeout: {}s)",
+            vm,
+            timeout.as_secs()
+        );
+        self.runner
+            .run_with_timeout("limactl", &["start", vm], timeout)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to start Lima VM '{vm}': {e}. \
+                     Please restart Speedwave or check system resources.",
+                )
+            })?;
+        log::info!("Lima VM '{}' started successfully", vm);
+        Ok(())
+    }
+
     fn ensure_ready_inner(&self) -> anyhow::Result<()> {
         let version_output = self.runner.run("limactl", &["--version"]).map_err(|_| {
             anyhow::anyhow!(
@@ -620,23 +715,48 @@ impl LimaRuntime {
 
         match status.trim() {
             "Running" => Ok(()),
-            "Stopped" => {
-                let timeout = std::time::Duration::from_secs(consts::LIMA_VM_START_TIMEOUT_SECS);
-                log::info!(
-                    "Lima VM '{}' is stopped, starting (timeout: {}s)",
-                    vm,
-                    timeout.as_secs()
-                );
-                self.runner
-                    .run_with_timeout("limactl", &["start", vm], timeout)
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to start Lima VM '{vm}': {e}. \
-                             Please restart Speedwave or check system resources.",
-                        )
-                    })?;
-                log::info!("Lima VM '{}' started successfully", vm);
-                Ok(())
+            "Stopped" => self.start_stopped_vm(vm),
+            "Stopping" => {
+                log::info!("Lima VM '{}' is stopping, waiting for it to finish", vm);
+                let stop_timeout = self.vm_stop_timeout.unwrap_or_else(|| {
+                    std::time::Duration::from_secs(consts::LIMA_VM_STOP_TIMEOUT_SECS)
+                });
+                let deadline = std::time::Instant::now() + stop_timeout;
+                loop {
+                    std::thread::sleep(self.vm_stop_poll_delay);
+                    let s = match self
+                        .runner
+                        .run("limactl", &["list", "--format", "{{.Status}}", vm])
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            log::warn!("Lima VM status poll failed (will retry): {e}");
+                            continue;
+                        }
+                    };
+                    match s.trim() {
+                        "Stopped" => {
+                            log::info!("Lima VM '{}' finished stopping, now starting", vm);
+                            break;
+                        }
+                        "Running" => {
+                            log::info!("Lima VM '{}' is running again", vm);
+                            return Ok(());
+                        }
+                        _ if std::time::Instant::now() >= deadline => {
+                            anyhow::bail!(
+                                "Lima VM '{}' stuck in Stopping state for {}s. \
+                                 Try: limactl stop --force {} && limactl start {}",
+                                vm,
+                                stop_timeout.as_secs(),
+                                vm,
+                                vm,
+                            );
+                        }
+                        _ => continue,
+                    }
+                }
+                self.start_stopped_vm(vm)
             }
             _ => {
                 anyhow::bail!(
@@ -1730,6 +1850,302 @@ mod tests {
         assert!(
             result.unwrap_err().to_string().contains("some other error"),
             "should propagate non-unit-not-found buildkit errors"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // stop_vm() tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_stop_vm_running_vm_stops_it() {
+        let runner = MockRunner::new()
+            .with_response(
+                &format!(
+                    "limactl list --format {{{{.Status}}}} {}",
+                    consts::LIMA_VM_NAME
+                ),
+                "Running",
+            )
+            .with_response(
+                &format!("limactl stop --force {}", consts::LIMA_VM_NAME),
+                "",
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(
+            rt.stop_vm().is_ok(),
+            "stop_vm should succeed for a Running VM"
+        );
+    }
+
+    #[test]
+    fn test_stop_vm_already_stopped_skips_stop() {
+        let runner = MockRunner::new().with_response(
+            &format!(
+                "limactl list --format {{{{.Status}}}} {}",
+                consts::LIMA_VM_NAME
+            ),
+            "Stopped",
+        );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(
+            rt.stop_vm().is_ok(),
+            "stop_vm should return Ok when VM is already Stopped"
+        );
+    }
+
+    #[test]
+    fn test_stop_vm_empty_status_skips_stop() {
+        let runner = MockRunner::new().with_response(
+            &format!(
+                "limactl list --format {{{{.Status}}}} {}",
+                consts::LIMA_VM_NAME
+            ),
+            "",
+        );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(
+            rt.stop_vm().is_ok(),
+            "stop_vm should return Ok when status is empty"
+        );
+    }
+
+    #[test]
+    fn test_stop_vm_stopping_status_skips_stop() {
+        let runner = MockRunner::new().with_response(
+            &format!(
+                "limactl list --format {{{{.Status}}}} {}",
+                consts::LIMA_VM_NAME
+            ),
+            "Stopping",
+        );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(
+            rt.stop_vm().is_ok(),
+            "stop_vm should return Ok when VM is already Stopping (another process handles it)"
+        );
+    }
+
+    #[test]
+    fn test_stop_vm_creating_status_skips_stop() {
+        let runner = MockRunner::new().with_response(
+            &format!(
+                "limactl list --format {{{{.Status}}}} {}",
+                consts::LIMA_VM_NAME
+            ),
+            "Creating",
+        );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(
+            rt.stop_vm().is_ok(),
+            "stop_vm should return Ok when VM is Creating (setup wizard in progress)"
+        );
+    }
+
+    #[test]
+    fn test_stop_vm_stop_command_fails_returns_err() {
+        let runner = MockRunner::new()
+            .with_response(
+                &format!(
+                    "limactl list --format {{{{.Status}}}} {}",
+                    consts::LIMA_VM_NAME
+                ),
+                "Running",
+            )
+            .with_error(
+                &format!("limactl stop --force {}", consts::LIMA_VM_NAME),
+                "limactl stop failed",
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let result = rt.stop_vm();
+        assert!(
+            result.is_err(),
+            "stop_vm should propagate stop command error"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to stop Lima VM"),
+            "error should mention VM stop failure, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_stop_vm_status_with_whitespace_still_stops() {
+        let runner = MockRunner::new()
+            .with_response(
+                &format!(
+                    "limactl list --format {{{{.Status}}}} {}",
+                    consts::LIMA_VM_NAME
+                ),
+                "  Running  \n",
+            )
+            .with_response(
+                &format!("limactl stop --force {}", consts::LIMA_VM_NAME),
+                "",
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(
+            rt.stop_vm().is_ok(),
+            "stop_vm should handle whitespace around status"
+        );
+    }
+
+    #[test]
+    fn test_stop_vm_status_check_error_skips_stop() {
+        let runner = MockRunner::new().with_error(
+            &format!(
+                "limactl list --format {{{{.Status}}}} {}",
+                consts::LIMA_VM_NAME
+            ),
+            "limactl not found",
+        );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(
+            rt.stop_vm().is_ok(),
+            "stop_vm should return Ok when status check fails (unwrap_or_default gives empty string)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ensure_ready_inner() "Stopping" arm tests
+    //
+    // Uses a SequencedRunner that returns responses in order for the same key.
+    // -----------------------------------------------------------------------
+
+    /// A CommandRunner that returns a sequence of responses for a given key.
+    /// Once all responses are exhausted it returns the last one repeatedly.
+    struct SequencedRunner {
+        sequences: std::collections::HashMap<String, Arc<Mutex<Vec<String>>>>,
+        fallback: std::collections::HashMap<String, anyhow::Result<String>>,
+    }
+
+    impl SequencedRunner {
+        fn new() -> Self {
+            Self {
+                sequences: std::collections::HashMap::new(),
+                fallback: std::collections::HashMap::new(),
+            }
+        }
+
+        fn with_sequence(mut self, key: &str, responses: Vec<&str>) -> Self {
+            self.sequences.insert(
+                key.to_string(),
+                Arc::new(Mutex::new(
+                    responses.iter().map(|s| s.to_string()).collect(),
+                )),
+            );
+            self
+        }
+
+        fn with_fallback(mut self, key: &str, response: &str) -> Self {
+            self.fallback
+                .insert(key.to_string(), Ok(response.to_string()));
+            self
+        }
+    }
+
+    impl CommandRunner for SequencedRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+            let key = format!("{} {}", cmd, args.join(" "));
+            if let Some(seq) = self.sequences.get(&key) {
+                let mut v = seq.lock().unwrap();
+                if v.len() > 1 {
+                    return Ok(v.remove(0));
+                }
+                if let Some(last) = v.first() {
+                    return Ok(last.clone());
+                }
+            }
+            if let Some(r) = self.fallback.get(&key) {
+                return match r {
+                    Ok(s) => Ok(s.clone()),
+                    Err(e) => Err(anyhow::anyhow!("{}", e)),
+                };
+            }
+            Err(anyhow::anyhow!("unexpected command: {}", key))
+        }
+
+        fn run_with_timeout(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            _timeout: std::time::Duration,
+        ) -> anyhow::Result<()> {
+            self.run(cmd, args)?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_ensure_ready_stopping_then_stopped_starts_vm() {
+        let vm = consts::LIMA_VM_NAME;
+        let runner = SequencedRunner::new()
+            // ensure_ready_inner calls: --version, then list (Stopping), then list (Stopped)
+            .with_fallback("limactl --version", "limactl version 1.0.0")
+            .with_sequence(
+                &format!("limactl list --format {{{{.Status}}}} {vm}"),
+                vec!["Stopping", "Stopped"],
+            )
+            .with_fallback(&format!("limactl start {vm}"), "");
+        let rt = LimaRuntime::with_runner(Box::new(runner)).with_zero_vm_stop_poll_delay();
+        assert!(
+            rt.ensure_ready().is_ok(),
+            "ensure_ready should succeed: Stopping → Stopped → start"
+        );
+    }
+
+    #[test]
+    fn test_ensure_ready_stopping_then_running_returns_ok_without_start() {
+        let vm = consts::LIMA_VM_NAME;
+        let runner = SequencedRunner::new()
+            .with_fallback("limactl --version", "limactl version 1.0.0")
+            .with_sequence(
+                &format!("limactl list --format {{{{.Status}}}} {vm}"),
+                vec!["Stopping", "Running"],
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner)).with_zero_vm_stop_poll_delay();
+        assert!(
+            rt.ensure_ready().is_ok(),
+            "ensure_ready should return Ok when VM recovers to Running"
+        );
+    }
+
+    #[test]
+    fn test_ensure_ready_stopping_deadline_exceeded_returns_err() {
+        // Runner whose `list --format` query always reports `Stopping`, so
+        // `ensure_ready_inner`'s Stopping arm spins until the deadline fires.
+        struct AlwaysStoppingRunner;
+        impl CommandRunner for AlwaysStoppingRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                if key.contains("--version") {
+                    return Ok("limactl version 1.0.0".to_string());
+                }
+                if key.contains("list --format") {
+                    return Ok("Stopping".to_string());
+                }
+                Err(anyhow::anyhow!("unexpected: {key}"))
+            }
+        }
+
+        // 1 ms stop timeout + zero poll delay → deadline expires on the first
+        // iteration, so we exercise the real bail-out path in milliseconds
+        // instead of the production 30 s value.
+        let rt = LimaRuntime::with_runner(Box::new(AlwaysStoppingRunner))
+            .with_zero_vm_stop_poll_delay()
+            .with_stop_timeout(std::time::Duration::from_millis(1));
+
+        let err = rt
+            .ensure_ready()
+            .expect_err("ensure_ready must return Err when VM is stuck in Stopping state");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("stuck in Stopping state"),
+            "error message must mention 'stuck in Stopping state', got: {msg}"
+        );
+        assert!(
+            msg.contains("limactl stop --force"),
+            "error message must include the recovery hint, got: {msg}"
         );
     }
 }
