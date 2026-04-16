@@ -158,6 +158,8 @@ When a bundle update triggers image rebuilds, container restart operations (incl
 
 Plugins that declare `requires_integrations` (e.g. `["sharepoint"]`) display the required integration status on the plugin dashboard. The Desktop UI indicates whether required integrations are configured, linking to the Integrations tab when they are not.
 
+Plugin authors should set `speedwave_compat` in `plugin.json` to declare which Speedwave versions the plugin supports — for example, `"speedwave_compat": ">=0.8, <1"` for plugins targeting the 0.8 series. If the field is present and the running Speedwave version does not satisfy the declared range, installation is rejected with a clear error. Omit the field to disable the check. See [ADR-015](../adr/ADR-015-plugin-system.md) for details on the enforcement model and version-requirement syntax.
+
 ## See Also
 
 - [ADR-010: mcp-os as Host Process Per Platform](../adr/ADR-010-mcp-os-as-host-process-per-platform.md)
