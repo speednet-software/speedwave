@@ -933,7 +933,7 @@ fn main() {
     let cleanup_ctx = ExitCleanupContext {
         ide_bridge: ide_bridge.clone(),
         mcp_os: mcp_os.clone(),
-        auto_check: auto_check_handle.clone(),
+        auto_check_handle: auto_check_handle.clone(),
     };
     let cleanup_ctx_window = cleanup_ctx.clone();
     let cleanup_ctx_runevent = cleanup_ctx.clone();
@@ -1452,6 +1452,14 @@ fn main() {
                 // for ~1s on Cmd+Q because the event loop blocks joining the
                 // limactl stop thread while the window is still visible —
                 // WindowServer then draws the beachball.
+                //
+                // Safe on Linux and Windows too: on those platforms the
+                // window is typically already being destroyed when
+                // ExitRequested fires (tray-less setups), making this a
+                // harmless no-op. Do NOT gate this to macOS — a
+                // `#[cfg(target_os = "macos")]` guard would re-introduce the
+                // beachball if macOS ever reorders event delivery, and
+                // removing it costs nothing elsewhere.
                 hide_main_window(app_handle);
                 if let Some(handle) = reconcile::run_exit_cleanup(&cleanup_ctx_runevent) {
                     stash_cleanup_handle(&exit_cleanup_handle_runevent, handle);

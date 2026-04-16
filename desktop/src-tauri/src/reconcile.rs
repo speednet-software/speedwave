@@ -28,7 +28,7 @@ pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::J
 pub(crate) struct ExitCleanupContext {
     pub(crate) ide_bridge: SharedIdeBridge,
     pub(crate) mcp_os: SharedMcpOs,
-    pub(crate) auto_check: SharedAutoCheckHandle,
+    pub(crate) auto_check_handle: SharedAutoCheckHandle,
 }
 
 /// Reconcile phase: nothing running.
@@ -708,7 +708,7 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
 
     let ide_bridge = ctx.ide_bridge.clone();
     let mcp_os = ctx.mcp_os.clone();
-    let auto_check = ctx.auto_check.clone();
+    let auto_check = ctx.auto_check_handle.clone();
 
     let handle = std::thread::spawn(move || {
         // Container + VM cleanup. stop_vm() runs unconditionally because it
@@ -1089,8 +1089,8 @@ mod tests {
             assert_eq!(
                 *recorded,
                 vec!["stop_vm"],
-                "on macOS/Windows only stop_vm must be called; compose_down is \
-                 redundant because VM shutdown kills every container"
+                "on macOS only stop_vm must be called; the Lima VM poweroff reaps \
+                 every container for free"
             );
         }
 
@@ -1574,7 +1574,7 @@ mod tests {
         let ctx = ExitCleanupContext {
             ide_bridge: SharedIdeBridge::default(),
             mcp_os: SharedMcpOs::default(),
-            auto_check: SharedAutoCheckHandle::default(),
+            auto_check_handle: SharedAutoCheckHandle::default(),
         };
 
         let first = run_exit_cleanup(&ctx);

@@ -1111,8 +1111,6 @@ $cr_findings" \
     printf "\n  ${RED}Re-verification failed after code review fixes — stopping Phase 3${NC}\n"
     phase3_error=true
     break
-
-    echo ""
 done
 
 if [[ "$phase3_error" == "true" ]]; then
