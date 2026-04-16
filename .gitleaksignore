@@ -1,6 +1,10 @@
 # Tauri updater public key ID (minisign key fingerprint inside base64-encoded pubkey)
 # This is a PUBLIC key embedded in tauri.conf.json — not a secret.
 desktop/src-tauri/tauri.conf.json:generic-api-key:38
+_tests/desktop/fixtures/tauri.conf.empty-endpoints.json:generic-api-key:25
+_tests/desktop/fixtures/tauri.conf.missing-dmg.json:generic-api-key:27
+_tests/desktop/fixtures/tauri.conf.missing-updater-artifacts.json:generic-api-key:27
+_tests/desktop/fixtures/tauri.conf.wrong-endpoint.json:generic-api-key:27
 
 # Log sanitizer test fixtures — fake secrets used to verify redaction works.
 crates/speedwave-runtime/src/log_sanitizer.rs:private-key:17

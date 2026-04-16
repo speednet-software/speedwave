@@ -476,53 +476,57 @@ jobs:
   publish-release:
     needs: [resolve, publish-tauri, cli]
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - name: Validate artifacts and publish release
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Verify release assets (pre-publish)
         env:
-          # Use RELEASE_TOKEN (PAT) instead of GITHUB_TOKEN so that the
-          # release:published event triggers downstream workflows (backmerge).
-          # GITHUB_TOKEN events don't trigger new workflow runs.
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          TAG_NAME: ${{ needs.resolve.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           VERSION: ${{ needs.resolve.outputs.version }}
-          RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
+          TAG_NAME: ${{ needs.resolve.outputs.tag_name }}
           REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
         run: |
           set -e
-
-          # Resolve release ID — use the one from resolve job, or look it up by tag
           RID="$RELEASE_ID"
           if [ -z "$RID" ]; then
             RID=$(gh release view "$TAG_NAME" --repo "$REPO" --json databaseId --jq '.databaseId')
           fi
+          RID="$RID" bash scripts/verify-release-assets.sh
 
+      - name: Publish release (draft → live)
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          TAG_NAME: ${{ needs.resolve.outputs.tag_name }}
+          RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          RID="$RELEASE_ID"
           if [ -z "$RID" ]; then
-            echo "ERROR: Could not find release for tag $TAG_NAME"
-            exit 1
+            RID=$(gh release view "$TAG_NAME" --repo "$REPO" --json databaseId --jq '.databaseId')
           fi
-
-          # Verify asset count (~12 Tauri + 4 CLI + latest.json = 17 minimum)
-          ASSET_COUNT=$(gh api "repos/$REPO/releases/$RID/assets" --jq 'length')
-          echo "Release has $ASSET_COUNT assets"
-          if [ "$ASSET_COUNT" -lt 17 ]; then
-            echo "::error::Release has $ASSET_COUNT assets (expected 17+: ~12 Tauri + 4 CLI + latest.json). Some platforms may have failed."
-            echo "::error::To publish anyway: gh api --method PATCH repos/$REPO/releases/$RID -f draft=false"
-            exit 1
-          fi
-
-          # Publish: draft -> live
           gh api --method PATCH "repos/$REPO/releases/$RID" -f draft=false
           echo "Release published successfully"
 
-          # Verify latest.json has correct version
-          LATEST_VERSION=$(gh release download "$TAG_NAME" --repo "$REPO" --pattern "latest.json" --output - | jq -r '.version')
-          if [ "$LATEST_VERSION" != "$VERSION" ]; then
-            echo "::error::latest.json reports version '$LATEST_VERSION' but expected '$VERSION'"
-            echo "::error::This indicates the build checked out wrong code. Reverting to draft."
+      - name: Verify release assets (post-publish safety net)
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          TAG_NAME: ${{ needs.resolve.outputs.tag_name }}
+          REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
+        run: |
+          set -e
+          RID="$RELEASE_ID"
+          if [ -z "$RID" ]; then
+            RID=$(gh release view "$TAG_NAME" --repo "$REPO" --json databaseId --jq '.databaseId')
+          fi
+          if ! RID="$RID" bash scripts/verify-release-assets.sh; then
+            echo "::error::Post-publish validation failed — reverting to draft"
             gh api --method PATCH "repos/$REPO/releases/$RID" -f draft=true
             exit 1
           fi
-          echo "Verified: latest.json version matches expected version $VERSION"

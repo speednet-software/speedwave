@@ -1,0 +1,15 @@
+{
+  "version": "0.8.1",
+  "notes": "Release notes for 0.8.1",
+  "pub_date": "2026-04-16T00:00:00Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "canned-sig",
+      "url": "https://example.com/Speedwave_0.8.1_macOS_Apple_Silicon.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "canned-sig",
+      "url": "https://example.com/Speedwave_0.8.1_macOS_Intel.app.tar.gz"
+    }
+  }
+}
