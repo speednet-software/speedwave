@@ -180,7 +180,11 @@ There is no VM layer. Containers are stopped by `compose_down`. The containerd d
 
 ### Signal handling
 
-SIGTERM and SIGINT (and `SetConsoleCtrlHandler` on Windows) are handled by the `ctrlc` crate. The signal handler calls `run_exit_cleanup()`, which is guarded by `CLEANUP_ONCE` — if both the signal handler and `WindowEvent::Destroyed` fire concurrently, the cleanup body runs exactly once.
+SIGTERM and SIGINT (and `SetConsoleCtrlHandler` on Windows) are handled by the `ctrlc` crate. The signal handler calls `run_exit_cleanup()`, which is guarded by `CLEANUP_ONCE` — the cleanup body runs exactly once across all three call sites:
+
+1. **Signal handler** (`ctrlc::set_handler`) — SIGTERM/SIGINT
+2. **`WindowEvent::Destroyed`** — main window destroyed (app closed without tray, or Linux without libappindicator)
+3. **`RunEvent::ExitRequested`** — tray menu "Quit", macOS Cmd+Q / app-menu "Quit", or SIGTERM via the Tauri runtime (paths where the main window is hidden rather than destroyed)
 
 ## See Also
 
