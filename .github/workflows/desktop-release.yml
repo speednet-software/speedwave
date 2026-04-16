@@ -515,7 +515,7 @@ jobs:
 
           # Step 3.b — Enumerate required macOS + Windows updater assets in the draft.
           # Linux is excluded: updater.rs disables auto-update on Linux (the .deb target produces no updater archive).
-          # The 8 filenames below were observed on v0.8.0 (2026-04-16). If the matrix
+          # The 8 filenames below are the required updater assets. If the matrix
           # in publish-tauri changes, update this list or the release will fail to
           # publish (intentional failure mode).
           ASSETS_JSON=$(gh api "repos/$REPO/releases/$RID/assets")
@@ -555,7 +555,7 @@ jobs:
           echo "All .sig files are non-empty"
 
           # Step 3.d — Verify latest.json shape and required platform keys.
-          # latest.json.platforms must contain these 7 keys (observed on v0.8.0).
+          # latest.json.platforms must contain these 7 keys.
           # Missing keys = auto-update broken for that platform. Extra keys are
           # allowed (forward-compat for future tauri-action versions).
           LATEST_URL=$(echo "$ASSETS_JSON" | jq -r '.[] | select(.name == "latest.json") | .browser_download_url')

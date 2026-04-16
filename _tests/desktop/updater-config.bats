@@ -18,7 +18,12 @@
 # This file runs under `make test-desktop-build` via the `desktop` CI job.
 
 setup() {
-    command -v python3 >/dev/null 2>&1 || skip "python3 is required for updater-config.bats"
+    # Hard-fail rather than skip: silent skips hide CI regressions (all 10
+    # tests would pass without any assertions if python3 vanished).
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "FATAL: python3 is required for updater-config.bats but was not found in PATH" >&2
+        exit 1
+    fi
     export TAURI_CONF="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.conf.json"
     export UPDATER_RS="$BATS_TEST_DIRNAME/../../desktop/src-tauri/src/updater.rs"
     export RELEASE_PLEASE_CFG="$BATS_TEST_DIRNAME/../../release-please-config.json"
@@ -181,7 +186,10 @@ manifest = json.load(open(os.environ["RELEASE_PLEASE_MANIFEST"]))
 expected = manifest["."]
 
 cfg = json.load(open(os.environ["RELEASE_PLEASE_CFG"]))
-extra_files = cfg["packages"]["."]["extra-files"]
+extra_files = cfg.get("packages", {}).get(".", {}).get("extra-files", [])
+if not extra_files:
+    print("Could not find packages[\".\"][\"extra-files\"] in release-please-config.json — config shape changed")
+    sys.exit(1)
 
 repo_root = os.environ["REPO_ROOT"]
 mismatches = []
@@ -204,7 +212,7 @@ for entry in extra_files:
         except Exception as e:
             mismatches.append("  " + entry["path"] + ": could not read: " + str(e))
             continue
-        m = re.search(r"^\[package\].*?^version\s*=\s*\"([^\"]+)\"", content, re.MULTILINE | re.DOTALL)
+        m = re.search(r"^\[package\][^\[]*?^version\s*=\s*\"([^\"]+)\"", content, re.MULTILINE | re.DOTALL)
         if not m:
             mismatches.append("  " + entry["path"] + ": could not find version in [package] section")
             continue
