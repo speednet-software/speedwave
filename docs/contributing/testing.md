@@ -51,6 +51,10 @@ The `.github/workflows/test.yml` workflow runs on every push to `main`/`dev` and
 
 ## Test Patterns
 
+### Bats tests (`_tests/desktop/*.bats`)
+
+Each bats file in `_tests/desktop/` starts with a header comment describing the regression it prevents. Read the header to understand the file's purpose. Files added in issue #26: `updater-config.bats` (tauri.conf.json updater-plugin shape + version-consistency across release-please-managed files) and new `@test` blocks in `release-workflow-signing.bats` (anti-removal guards for `publish-release` asset verification).
+
 ### MCP Hub Tool Tests
 
 Pattern: `mcp-servers/hub/src/tools/gitlab/delete_tag.test.ts`
