@@ -1,5 +1,5 @@
 ---
-name: code-review
+name: speedwave-code-review
 description: Comprehensive code review using specialized skills
 disable-model-invocation: true
 model: opus

@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# Automated plan → review → implement → verify loop.
+# Automated plan → review → implement → verify → code-review loop.
 #
 # Creates an isolated git worktree + branch, then:
 # Phase 1: Writer creates plan, reviewer iterates until READY_TO_IMPLEMENT.
 # Phase 2: Implementer codes from plan, verifier checks 100% implementation + tests.
+# Phase 3: 13-agent code review on the diff. If critical/important issues found,
+#           implementer fixes + re-verify, then code-review again.
 #
 # Usage: plan-loop.sh <task description> [options]
 #   --max-iter N          Phase 1: max write→review iterations (default 8)
 #   --max-impl-iter N     Phase 2: max implement→verify iterations (default 5)
+#   --max-review-iter N   Phase 3: max code-review→fix iterations (default 3)
 #   --plan-name NAME      Plan filename stem and branch suffix (default: YYYY-MM-DD-plan)
 #   --plan-only           Run Phase 1 only (no implementation)
 #   --impl-only <path>    Run Phase 2 only (plan already exists at <path>)
+#   --skip-review         Skip Phase 3 (code review after implementation)
 #   --no-worktree         Skip worktree creation, work in current directory
 #   --branch NAME         Branch name (default: feat/<plan-name>)
 #   --base BRANCH         Base branch for worktree (default: origin/dev)
@@ -25,15 +29,18 @@ TASK=""
 PLAN_ONLY=false
 IMPL_ONLY=""
 NO_WORKTREE=false
+SKIP_REVIEW=false
 BRANCH_NAME=""
 BASE_BRANCH="origin/dev"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --max-iter)        MAX_ITERATIONS="$2"; shift 2 ;;
         --max-impl-iter)   MAX_IMPL_ITERATIONS="$2"; shift 2 ;;
+        --max-review-iter) MAX_REVIEW_ITERATIONS="$2"; shift 2 ;;
         --plan-name)       PLAN_NAME="$2"; shift 2 ;;
         --plan-only)       PLAN_ONLY=true; shift ;;
         --impl-only)       IMPL_ONLY="$2"; shift 2 ;;
+        --skip-review)     SKIP_REVIEW=true; shift ;;
         --no-worktree)     NO_WORKTREE=true; shift ;;
         --branch)          BRANCH_NAME="$2"; shift 2 ;;
         --base)            BASE_BRANCH="$2"; shift 2 ;;
@@ -45,13 +52,15 @@ done
 
 if [[ -z "$TASK" && -z "$IMPL_ONLY" ]]; then
     echo "Usage: plan-loop.sh <task> [options]" >&2
-    echo "Options: --max-iter N, --max-impl-iter N, --plan-name NAME, --plan-only," >&2
-    echo "         --impl-only <path>, --no-worktree, --branch NAME, --base BRANCH" >&2
+    echo "Options: --max-iter N, --max-impl-iter N, --max-review-iter N, --plan-name NAME," >&2
+    echo "         --plan-only, --impl-only <path>, --skip-review, --no-worktree," >&2
+    echo "         --branch NAME, --base BRANCH" >&2
     exit 1
 fi
 
 MAX_ITER="${MAX_ITERATIONS:-8}"
 MAX_IMPL_ITER="${MAX_IMPL_ITERATIONS:-5}"
+MAX_REVIEW_ITER="${MAX_REVIEW_ITERATIONS:-3}"
 PLAN_NAME="${PLAN_NAME:-$(date +%Y-%m-%d-%H%M%S)-plan}"
 BRANCH_NAME="${BRANCH_NAME:-feat/${PLAN_NAME}}"
 PLAN_DIR="${TMPDIR:-/tmp}/speedwave-plans"
@@ -62,11 +71,13 @@ PROJECT_ROOT="$(git rev-parse --show-toplevel)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REVIEW_SCHEMA_FILE="$SCRIPT_DIR/plan-loop-review-schema.json"
 VERIFY_SCHEMA_FILE="$SCRIPT_DIR/plan-loop-verify-schema.json"
+CODE_REVIEW_SCHEMA_FILE="$SCRIPT_DIR/plan-loop-code-review-schema.json"
 
 WRITER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-write-plan"
 REVIEWER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-review-plan"
 IMPLEMENTER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-implement-plan"
 VERIFIER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-verify-plan"
+CODE_REVIEW_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-code-review"
 
 WORKTREE_DIR="${TMPDIR:-/tmp}/speedwave-loop-${PLAN_NAME}"
 WORKTREE_CREATED=false
@@ -291,6 +302,7 @@ Your output will be captured as structured JSON via --json-schema.
 The gaps_summary field MUST be specific enough for the implementer to fix every gap WITHOUT reading your full analysis."
 
 VERIFY_SCHEMA="$(cat "$VERIFY_SCHEMA_FILE" 2>/dev/null || echo '{}')"
+CODE_REVIEW_SCHEMA="$(cat "$CODE_REVIEW_SCHEMA_FILE" 2>/dev/null || echo '{}')"
 
 # NOTE: IMPLEMENTER_BODY and VERIFIER_BODY are computed after Phase 0
 # (worktree setup) so they read from the correct skill paths.
@@ -367,6 +379,7 @@ if [[ "$NO_WORKTREE" != "true" && -z "$IMPL_ONLY" ]]; then
     REVIEWER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-review-plan"
     IMPLEMENTER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-implement-plan"
     VERIFIER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-verify-plan"
+    CODE_REVIEW_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-code-review"
 
     echo ""
     printf "  ${GREEN}Worktree ready${NC}\n"
@@ -799,18 +812,8 @@ $IMPL_FEEDBACK" \
         printf "${GREEN}║  IMPLEMENTATION VERIFIED after $impl_iteration iteration(s)${NC}\n"
         printf "${GREEN}║  Steps: $v_steps/$v_total  check: PASS  test: PASS${NC}\n"
         printf "${GREEN}║  Plan: $PLAN_PATH${NC}\n"
-        if [[ "$WORKTREE_CREATED" == "true" ]]; then
-        printf "${GREEN}║  Worktree: $WORKTREE_DIR${NC}\n"
-        printf "${GREEN}║  Branch: $BRANCH_NAME${NC}\n"
-        printf "${GREEN}║${NC}\n"
-        printf "${GREEN}║  Next steps:${NC}\n"
-        printf "${GREEN}║    cd $WORKTREE_DIR${NC}\n"
-        printf "${GREEN}║    git push -u origin $BRANCH_NAME${NC}\n"
-        printf "${GREEN}║    gh pr create --base dev${NC}\n"
-        fi
         printf "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}\n"
-        rm -rf "$TMPDIR_LOOP"
-        exit 0
+        break
     fi
 
     IMPL_FEEDBACK="$v_gaps"
@@ -825,10 +828,217 @@ Additionally: make check passed: $v_check. make test passed: $v_test. Both MUST 
     echo ""
 done
 
-printf "\n${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}\n"
-printf "${YELLOW}║  Phase 2: MAX ITERATIONS ($MAX_IMPL_ITER) — verdict: $v_verdict${NC}\n"
-printf "${YELLOW}║  Steps: $v_steps/$v_total  check: $v_check  test: $v_test${NC}\n"
-printf "${YELLOW}║  Plan: $PLAN_PATH${NC}\n"
-printf "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}\n"
+if [[ "$v_verdict" != "VERIFIED" || "$v_check" != "true" || "$v_test" != "true" ]]; then
+    printf "\n${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}\n"
+    printf "${YELLOW}║  Phase 2: MAX ITERATIONS ($MAX_IMPL_ITER) — verdict: $v_verdict${NC}\n"
+    printf "${YELLOW}║  Steps: $v_steps/$v_total  check: $v_check  test: $v_test${NC}\n"
+    printf "${YELLOW}║  Plan: $PLAN_PATH${NC}\n"
+    printf "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}\n"
+    rm -rf "$TMPDIR_LOOP"
+    exit 1
+fi
+
+# ═══════════════════════════════════════════════════════════════
+# PHASE 3: CODE REVIEW
+# ═══════════════════════════════════════════════════════════════
+
+if [[ "$SKIP_REVIEW" == "true" ]]; then
+    printf "\n  ${DIM}Skipping Phase 3 (--skip-review)${NC}\n"
+else
+
+echo ""
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║  PHASE 3: CODE REVIEW                                        ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
+echo ""
+echo "  Max review iter:  $MAX_REVIEW_ITER"
+echo ""
+
+CODE_REVIEW_BODY="$(extract_prompt "$CODE_REVIEW_SKILL_DIR" "")"
+CODE_REVIEW_PREAMBLE="You are running in headless mode (claude -p). You have full tool access.
+Do NOT use AskUserQuestion — it is unavailable.
+Your output will be captured as structured JSON via --json-schema.
+After completing the code review workflow below and seeing the aggregated summary, produce structured JSON:
+- Count issues by severity: Critical, Important, Suggestion
+- Set overall_verdict to CLEAN if critical_count == 0 AND important_count == 0
+- Set overall_verdict to HAS_ISSUES otherwise
+- findings_summary: ALL critical and important findings with file:line references and fix instructions"
+CODE_REVIEW_SYSTEM_PROMPT="${CODE_REVIEW_PREAMBLE}
+
+${CODE_REVIEW_BODY}"
+
+review_iteration=0
+cr_verdict="UNKNOWN"
+
+while [[ $review_iteration -lt $MAX_REVIEW_ITER ]]; do
+    review_iteration=$((review_iteration + 1))
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    printf "  ${BOLD}Review iteration $review_iteration / $MAX_REVIEW_ITER${NC}\n"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    # ===================== CODE REVIEWER =====================
+    echo ""
+    rm -f "$RESULT_FILE"
+    cr_start=$(date +%s)
+
+    printf "  ${CYAN}[code-review]${NC} Running 13-agent code review...\n"
+
+    run_claude_stream "$RESULT_FILE" \
+        -p "Run a comprehensive code review on the changes in this branch. The diff command is: git diff origin/dev...HEAD" \
+        --model opus \
+        --effort max \
+        --dangerously-skip-permissions \
+        --append-system-prompt "$CODE_REVIEW_SYSTEM_PROMPT" \
+        --json-schema "$CODE_REVIEW_SCHEMA" || {
+        printf "  ${RED}[code-review] FAILED${NC}\n" >&2
+        printf "  ${YELLOW}Skipping Phase 3 due to code review failure${NC}\n"
+        break
+    }
+
+    cr_end=$(date +%s)
+
+    cr_verdict=$(jq -r '.structured_output.overall_verdict // "UNKNOWN"' "$RESULT_FILE" 2>/dev/null)
+    cr_critical=$(jq -r '.structured_output.critical_count // 0' "$RESULT_FILE" 2>/dev/null)
+    cr_important=$(jq -r '.structured_output.important_count // 0' "$RESULT_FILE" 2>/dev/null)
+    cr_suggestion=$(jq -r '.structured_output.suggestion_count // 0' "$RESULT_FILE" 2>/dev/null)
+    cr_findings=$(jq -r '.structured_output.findings_summary // ""' "$RESULT_FILE" 2>/dev/null)
+
+    printf "  ${GREEN}[code-review] Done${NC} ($((cr_end - cr_start))s)\n"
+    echo ""
+    printf "  ${BOLD}Verdict:  $cr_verdict${NC}\n"
+    echo "  Issues:   critical=$cr_critical  important=$cr_important  suggestions=$cr_suggestion"
+
+    # Sanity: demote CLEAN if critical issues exist
+    if [[ "$cr_verdict" == "CLEAN" && "$cr_critical" -gt 0 ]]; then
+        printf "\n  ${RED}[sanity] Code review returned CLEAN with $cr_critical critical issue(s) — demoting to HAS_ISSUES${NC}\n"
+        cr_verdict="HAS_ISSUES"
+    fi
+
+    if [[ "$cr_verdict" == "CLEAN" ]]; then
+        echo ""
+        printf "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}\n"
+        printf "${GREEN}║  CODE REVIEW CLEAN after $review_iteration iteration(s)${NC}\n"
+        printf "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}\n"
+        break
+    fi
+
+    # HAS_ISSUES — feed findings to implementer, then re-verify
+    echo ""
+    printf "  ${YELLOW}Code review found issues — sending to implementer for fix...${NC}\n"
+
+    # ===================== IMPLEMENTER FIX =====================
+    echo ""
+    rm -f "$RESULT_FILE"
+    fix_start=$(date +%s)
+
+    printf "  ${CYAN}[implementer]${NC} Fixing code review findings...\n"
+
+    impl_fix_ok=false
+    if [[ -n "$IMPL_SESSION_ID" ]]; then
+        if run_claude_stream "$RESULT_FILE" \
+            -p "Code review found issues in your implementation. Fix ALL of the following, then run \`make check\` and \`make test\`:
+
+$cr_findings" \
+            --model sonnet \
+            --effort high \
+            --resume "$IMPL_SESSION_ID" \
+            --dangerously-skip-permissions; then
+            impl_fix_ok=true
+        else
+            printf "  ${YELLOW}Resume failed, falling back to new session${NC}\n"
+            IMPL_SESSION_ID=""
+        fi
+    fi
+
+    if [[ "$impl_fix_ok" != "true" ]]; then
+        rm -f "$RESULT_FILE"
+        run_claude_stream "$RESULT_FILE" \
+            -p "Code review found issues in the implementation of the plan at $PLAN_PATH. Fix ALL of the following, then run \`make check\` and \`make test\`:
+
+$cr_findings" \
+            --model sonnet \
+            --effort high \
+            --dangerously-skip-permissions \
+            --append-system-prompt "$IMPLEMENTER_SYSTEM_PROMPT" || {
+            printf "  ${RED}[implementer] FAILED${NC}\n" >&2
+            break
+        }
+        IMPL_SESSION_ID="$(get_session_id "$RESULT_FILE")"
+    fi
+
+    fix_end=$(date +%s)
+    printf "  ${GREEN}[implementer] Done${NC} ($((fix_end - fix_start))s)\n"
+
+    # ===================== RE-VERIFY =====================
+    echo ""
+
+    if [[ -n "$LOCK_STATE_FILE" ]]; then
+        printf "  ${CYAN}Checking npm dependencies (post-fix)...${NC}\n"
+        ensure_deps_fresh "$PROJECT_ROOT" "$LOCK_STATE_FILE" || true
+    fi
+
+    printf "  ${CYAN}[verifier]${NC} Re-verifying after code review fixes...\n"
+
+    rm -f "$RESULT_FILE"
+    rv_start=$(date +%s)
+
+    run_claude_stream "$RESULT_FILE" \
+        -p "Verify that the implementation plan at $PLAN_PATH was 100% implemented. Check every step, then run make check and make test." \
+        --model opus \
+        --effort max \
+        --no-session-persistence \
+        --allowed-tools "$VERIFIER_TOOLS" \
+        --append-system-prompt "$VERIFIER_SYSTEM_PROMPT" \
+        --json-schema "$VERIFY_SCHEMA" || {
+        printf "  ${RED}[verifier] FAILED${NC}\n" >&2
+        break
+    }
+
+    rv_end=$(date +%s)
+
+    rv_verdict=$(jq -r '.structured_output.overall_verdict // "UNKNOWN"' "$RESULT_FILE" 2>/dev/null)
+    rv_check=$(jq -r '.structured_output.make_check_passed // false' "$RESULT_FILE" 2>/dev/null)
+    rv_test=$(jq -r '.structured_output.make_test_passed // false' "$RESULT_FILE" 2>/dev/null)
+
+    printf "  ${GREEN}[verifier] Done${NC} ($((rv_end - rv_start))s)\n"
+    echo "  Verdict: $rv_verdict  check: $( [[ "$rv_check" == "true" ]] && echo "PASS" || echo "FAIL" )  test: $( [[ "$rv_test" == "true" ]] && echo "PASS" || echo "FAIL" )"
+
+    if [[ "$rv_verdict" != "VERIFIED" || "$rv_check" != "true" || "$rv_test" != "true" ]]; then
+        printf "\n  ${RED}Re-verification failed after code review fixes — stopping Phase 3${NC}\n"
+        break
+    fi
+
+    echo ""
+done
+
+if [[ "$cr_verdict" != "CLEAN" && "$review_iteration" -ge "$MAX_REVIEW_ITER" ]]; then
+    printf "\n${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}\n"
+    printf "${YELLOW}║  Phase 3: MAX ITERATIONS ($MAX_REVIEW_ITER) — review: $cr_verdict${NC}\n"
+    printf "${YELLOW}║  Critical: $cr_critical  Important: $cr_important${NC}\n"
+    printf "${YELLOW}║  Code was VERIFIED but review issues may remain${NC}\n"
+    printf "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}\n"
+fi
+
+fi # end of Phase 3 (skipped if --skip-review)
+
+# ═══════════════════════════════════════════════════════════════
+# DONE — print next steps
+# ═══════════════════════════════════════════════════════════════
+
+echo ""
+printf "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}\n"
+printf "${GREEN}║  ALL PHASES COMPLETE${NC}\n"
+printf "${GREEN}║  Plan: $PLAN_PATH${NC}\n"
+if [[ "$WORKTREE_CREATED" == "true" ]]; then
+printf "${GREEN}║  Worktree: $WORKTREE_DIR${NC}\n"
+printf "${GREEN}║  Branch: $BRANCH_NAME${NC}\n"
+printf "${GREEN}║${NC}\n"
+printf "${GREEN}║  Next steps:${NC}\n"
+printf "${GREEN}║    cd $WORKTREE_DIR${NC}\n"
+printf "${GREEN}║    git push -u origin $BRANCH_NAME${NC}\n"
+printf "${GREEN}║    gh pr create --base dev${NC}\n"
+fi
+printf "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}\n"
 rm -rf "$TMPDIR_LOOP"
-exit 1
+exit 0

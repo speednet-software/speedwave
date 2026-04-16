@@ -23,7 +23,7 @@
     },
     "verdict_table": {
       "type": "string",
-      "description": "Markdown table with 12 axes: axis name, PASS/FAIL, issue count"
+      "description": "Markdown table with 13 axes: axis name, PASS/FAIL, issue count"
     },
     "new_issue_count": {
       "type": "integer",
