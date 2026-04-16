@@ -415,6 +415,10 @@ Check:
 
 - When tempted by a feature — does any user need this TODAY?
 
+- **Speculative regression tests.** Reject tests that assert the _absence_ of behavior which was never implemented, justified only by "a future developer might accidentally add it." Tests must cover real behavior (current or planned), not hypothetical future mistakes. A regression test requires concrete evidence: a past incident, a real ambiguity in the code, or a documented contract that could be violated. Without that — it's speculative and should be removed from the plan.
+
+- **Deferred verification steps.** Reject Implementation Steps that are phrased as "verify X" or "confirm Y" without a concrete change. Verification of external state (sibling repos, file existence, CLI output) is the planner's responsibility — it must happen _during planning_ and be recorded as a fact in the plan, not deferred to the implementer as a pseudo-step. If the plan contains a step like "verify no other consumers read field X" without the verification result embedded — that's a FAIL.
+
 **Severity: Speculative feature = MEDIUM. Speculative feature that complicates security model = HIGH.**
 
 ### 8. DRY — Duplication Check
@@ -536,6 +540,8 @@ Check:
 **Interrupted update recovery:**
 
 - If the update is interrupted mid-way (crash, power loss, `kill -9`), is the system left in a recoverable state? → Check for atomic file writes (`.tmp` + rename pattern), persisted reconcile phases, snapshot before compose mutation. A partially-written config or compose file = corrupted system.
+
+- For every persisted phase/state write (e.g., `BundleReconcilePhase::ImagesBuilt`, `.image_pending` marker removal, compose snapshot), verify the plan specifies writing the phase marker AFTER the operation it represents succeeds — never before. A phase written before its operation lies to crash-recovery (on restart, recovery sees "done" and skips the unfinished work). If the plan does not specify ordering, flag this as HIGH — the implementer will pick an order arbitrarily, and "write marker first, do work second" is the natural but wrong default.
 
 - Can the user recover by simply running `speedwave update` again? → The update flow must be idempotent. Running it twice must produce the same result as running it once. No "already migrated" flags that prevent retry.
 

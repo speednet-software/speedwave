@@ -1,1 +1,1 @@
-{"type":"result","session_id":"550e8400-e29b-41d4-a716-446655440000","cost_usd":0.0,"total_cost":0.0,"usage":{"input_tokens":0,"output_tokens":0},"is_error":false,"result":"Session cost: $0.003\nTotal cost: $0.015\nDuration: 2m 30s"}
+{"type":"result","session_id":"550e8400-e29b-41d4-a716-446655440000","total_cost_usd":0.0,"usage":{"input_tokens":0,"output_tokens":0},"is_error":false,"result":"Session cost: $0.003\nTotal cost: $0.015\nDuration: 2m 30s"}

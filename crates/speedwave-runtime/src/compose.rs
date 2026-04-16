@@ -122,9 +122,12 @@ pub fn render_compose(
     // Handle LLM provider switching
     yaml = apply_llm_config(&yaml, project_name, &resolved_config.llm)?;
 
-    // Build any pending plugin images before compose generation
+    // Ensure plugin images exist (builds pending and missing) before compose generation.
+    // Scoped to plugins enabled for this project — a broken plugin in another project
+    // does not block this one.
     if let Some(rt) = runtime {
-        plugin::build_pending_plugin_images(rt)?;
+        let enabled_ids = integrations.enabled_plugin_service_ids();
+        plugin::ensure_plugin_images(rt, &enabled_ids)?;
     }
 
     // Integrate installed plugins
@@ -6283,6 +6286,49 @@ services:
         assert!(
             dir_violations.len() >= 2,
             "Expected violations for tokens/<project>/ and tokens/<project>/slack/ directories"
+        );
+    }
+
+    #[test]
+    fn test_ensure_plugin_images_called_before_apply_plugins() {
+        // Structural test: verify render_compose() uses ensure_plugin_images (not
+        // build_pending_plugin_images) and calls it BEFORE apply_plugins.
+        let source = include_str!("compose.rs");
+
+        // Find the render_compose function body
+        let fn_start = source
+            .find("pub fn render_compose(")
+            .expect("render_compose function must exist in compose.rs");
+        let fn_body = &source[fn_start..];
+
+        // Verify ensure_plugin_images is used (not the old build_pending_plugin_images)
+        assert!(
+            fn_body.contains("ensure_plugin_images"),
+            "render_compose must call ensure_plugin_images (not build_pending_plugin_images)"
+        );
+        assert!(
+            !fn_body[..fn_body.find("fn apply_plugins(").unwrap_or(fn_body.len())]
+                .contains("build_pending_plugin_images"),
+            "render_compose must not call build_pending_plugin_images"
+        );
+
+        // Verify ensure_plugin_images appears before apply_plugins
+        let ensure_pos = fn_body
+            .find("ensure_plugin_images")
+            .expect("ensure_plugin_images call must exist in render_compose");
+        let apply_pos = fn_body
+            .find("apply_plugins(")
+            .expect("apply_plugins call must exist in render_compose");
+        assert!(
+            ensure_pos < apply_pos,
+            "ensure_plugin_images (offset {ensure_pos}) must appear before \
+             apply_plugins (offset {apply_pos}) in render_compose"
+        );
+
+        // Verify project scoping via enabled_plugin_service_ids
+        assert!(
+            fn_body[ensure_pos..].contains("enabled_plugin_service_ids"),
+            "ensure_plugin_images call must use enabled_plugin_service_ids for project scoping"
         );
     }
 }

@@ -129,6 +129,7 @@ Speedwave supports extending integrations via the plugin system:
 - Each plugin contains a `plugin.json` manifest, an optional MCP service (`src/`, `Containerfile`), and optional claude-resources (`skills/`, `commands/`)
 - `compose.rs` generates plugin service containers via `apply_plugins()`
 - Plugin services get injected `WORKER_<PLUGIN>_URL` in the hub environment
+- Plugin images are automatically rebuilt if missing (e.g. after a VM reset or `nerdctl system prune`) — you do not need to reinstall the plugin
 
 See [ADR-015](../adr/ADR-015-plugin-system.md) for the plugin system design and [ADR-036](../adr/ADR-036-self-declaring-worker-policy.md) for the tool policy model.
 
