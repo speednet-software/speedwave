@@ -188,9 +188,14 @@ pub fn update_containers(
     let (resolved, integrations) =
         config::resolve_project_config(&project_path, &user_config, project);
 
-    // 2. Re-render compose.yml with current template
-    let compose_yml =
-        compose::render_compose(project, &project_dir, &resolved, &integrations, None)?;
+    // 2. Re-render compose.yml with current template (includes plugin image rebuild)
+    let compose_yml = compose::render_compose(
+        project,
+        &project_dir,
+        &resolved,
+        &integrations,
+        Some(runtime),
+    )?;
 
     // 3a. OS prerequisite check
     let prereq_violations = crate::os_prereqs::check_os_prereqs();
@@ -755,6 +760,71 @@ mod tests {
             prune_pos < build_pos,
             "prune_old_bundle_images (at byte {prune_pos}) must appear before \
              build_all_images (at byte {build_pos}) in update_containers"
+        );
+    }
+
+    #[test]
+    fn test_render_compose_called_with_runtime_in_update_containers() {
+        // Structural test: render_compose in update_containers must pass Some(runtime),
+        // not None — this ensures plugin images are checked/rebuilt during CLI updates.
+        //
+        // A behavioral test is not feasible here because render_compose, build_all_images,
+        // and config::load_user_config are all free functions (not trait methods), making
+        // mocking prohibitively complex. The source-text test is the established pattern
+        // in this file — see test_build_before_compose_down_in_update_containers.
+        let source = include_str!("update.rs");
+
+        let fn_start = source
+            .find("fn update_containers(")
+            .expect("update_containers function must exist in update.rs");
+        let fn_body = &source[fn_start..];
+
+        // Find the render_compose call site
+        let render_pos = fn_body
+            .find("render_compose(")
+            .expect("render_compose call must exist in update_containers");
+        let render_call = &fn_body[render_pos..render_pos + 300];
+
+        // Must NOT pass None as the last argument
+        assert!(
+            !render_call.contains("None)?"),
+            "render_compose in update_containers must NOT pass None for runtime — \
+             plugin images won't be rebuilt during CLI updates: {render_call}"
+        );
+
+        // Must pass Some(runtime)
+        assert!(
+            render_call.contains("Some(runtime)"),
+            "render_compose in update_containers must pass Some(runtime) so that \
+             plugin images are rebuilt if missing: {render_call}"
+        );
+    }
+
+    #[test]
+    fn test_update_containers_plugin_rebuild_via_render_compose() {
+        // Cross-file structural test: verifies the full path
+        // update_containers → render_compose(Some(runtime)) → ensure_plugin_images.
+        //
+        // update_containers passes Some(runtime) to render_compose (verified by
+        // test_render_compose_called_with_runtime_in_update_containers). Here we
+        // verify that render_compose's body calls ensure_plugin_images, completing
+        // the behavioral chain.
+        //
+        // This cross-file test is justified because update_containers depends on
+        // free functions (render_compose, build_all_images, load_user_config) that
+        // cannot be mocked without major test infrastructure — the same reasoning
+        // documented in test_build_before_compose_down_in_update_containers.
+        let compose_source = include_str!("compose.rs");
+
+        let fn_start = compose_source
+            .find("pub fn render_compose(")
+            .expect("render_compose function must exist in compose.rs");
+        let fn_body = &compose_source[fn_start..];
+
+        assert!(
+            fn_body.contains("ensure_plugin_images"),
+            "render_compose must call ensure_plugin_images — the plugin rebuild chain \
+             from update_containers depends on this"
         );
     }
 }

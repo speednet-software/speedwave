@@ -289,7 +289,7 @@ Plugin images are built lazily:
 
 1. `install_plugin()` creates `.image_pending` marker in the plugin directory
 2. If `ContainerRuntime` is available at install time, builds immediately
-3. Otherwise, `render_compose()` calls `build_pending_plugin_images(runtime)` before compose generation
+3. Otherwise, `render_compose()` calls `ensure_plugin_images(runtime, enabled_ids)` before compose generation — this builds pending installs (`.image_pending` marker) AND rebuilds any images missing from the container engine (e.g., after VM reset), scoped to plugins enabled for the current project
 4. Build uses `prepare_build_context()` + `build_image()`, handling Lima/WSL path translation[^6]
 
 ---

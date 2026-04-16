@@ -3,7 +3,7 @@
 use crate::ide_bridge;
 use crate::mcp_os_process;
 use crate::types::BundleReconcileStatus;
-use speedwave_runtime::{build, bundle, config};
+use speedwave_runtime::{build, bundle, config, plugin};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -353,9 +353,16 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                 return Err(set_bundle_error(&mut state, msg));
             }
         }
+        // Opportunistically rebuild any missing plugin images (best-effort, warn-only).
+        // If this fails, per-project enforcement in render_compose() still catches it.
+        if let Err(e) = plugin::ensure_all_plugin_images(rt.as_ref()) {
+            log::warn!("reconcile_bundle: failed to rebuild some plugin images: {e}");
+        }
+
         state.phase = bundle::BundleReconcilePhase::ImagesBuilt;
         state.last_error = None;
         bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
+
         set_image_readiness(ImageReadiness::Ready);
         log::info!("reconcile_bundle: all images built, waiters unblocked");
         emit_bundle_status(app_handle);
@@ -1423,6 +1430,63 @@ mod tests {
              build_all_images_for_bundle (at byte {build_pos}) in \
              reconcile_bundle_update_inner — pruning first ensures old images are \
              removed before building new ones"
+        );
+    }
+
+    /// Structural test: verifies that `ensure_all_plugin_images` is called AFTER
+    /// `build_all_images_for_bundle` and BEFORE the `set_image_readiness(ImageReadiness::Ready)`
+    /// that follows it. Also verifies it uses warn-only error handling (not `?` propagation).
+    #[test]
+    fn test_ensure_all_plugin_images_after_core_build_before_ready() {
+        let source = include_str!("reconcile.rs");
+        let inner_fn = source
+            .split("fn reconcile_bundle_update_inner(")
+            .nth(1)
+            .expect("reconcile_bundle_update_inner function should exist");
+
+        // Verify ensure_all_plugin_images is present
+        assert!(
+            inner_fn.contains("ensure_all_plugin_images"),
+            "reconcile_bundle_update_inner must call ensure_all_plugin_images"
+        );
+
+        let build_pos = inner_fn
+            .find("build_all_images_for_bundle")
+            .expect("build_all_images_for_bundle call must exist");
+        let plugin_pos = inner_fn
+            .find("ensure_all_plugin_images")
+            .expect("ensure_all_plugin_images call must exist");
+
+        assert!(
+            build_pos < plugin_pos,
+            "ensure_all_plugin_images (offset {plugin_pos}) must appear after \
+             build_all_images_for_bundle (offset {build_pos})"
+        );
+
+        // Find the set_image_readiness(ImageReadiness::Ready) that comes AFTER
+        // ensure_all_plugin_images (not any earlier occurrence in the function).
+        let after_plugin = &inner_fn[plugin_pos..];
+        let ready_pos_relative = after_plugin
+            .find("set_image_readiness(ImageReadiness::Ready)")
+            .expect(
+                "set_image_readiness(Ready) must appear after ensure_all_plugin_images in \
+                 reconcile_bundle_update_inner",
+            );
+        let ready_pos = plugin_pos + ready_pos_relative;
+
+        assert!(
+            plugin_pos < ready_pos,
+            "ensure_all_plugin_images (offset {plugin_pos}) must appear before \
+             set_image_readiness(Ready) (offset {ready_pos})"
+        );
+
+        // Verify warn-only error handling: the call is inside an `if let Err` block
+        // with `log::warn!`, NOT a `?` propagation
+        let plugin_context = &inner_fn[plugin_pos.saturating_sub(100)..plugin_pos + 200];
+        assert!(
+            plugin_context.contains("if let Err") || plugin_context.contains("warn!"),
+            "ensure_all_plugin_images must use warn-only error handling, not '?' propagation: \
+             context around call: {plugin_context}"
         );
     }
 }
