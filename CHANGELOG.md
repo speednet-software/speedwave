@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.7.4](https://github.com/speednet-software/speedwave/compare/v0.7.3...v0.7.4) (2026-04-16)
+
+
+### Bug Fixes
+
+* **runtime:** auto-prune old bundle images + harden plan-loop tooling ([#481](https://github.com/speednet-software/speedwave/issues/481)) ([#483](https://github.com/speednet-software/speedwave/issues/483)) ([09905b7](https://github.com/speednet-software/speedwave/commit/09905b7f38ea2b4fcc374ddb123ec69165b7037b))
+
 ## [0.7.3](https://github.com/speednet-software/speedwave/compare/v0.7.2...v0.7.3) (2026-04-15)
 
 
