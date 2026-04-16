@@ -6,4 +6,4 @@
 {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Done."}}}
 {"type":"stream_event","event":{"type":"content_block_stop","index":0}}
 {"type":"stream_event","event":{"type":"message_stop"}}
-{"type":"result","session_id":"ctrl-session-001","cost_usd":0.001,"total_cost":0.001,"usage":{"input_tokens":50,"output_tokens":20},"is_error":false,"result":""}
+{"type":"result","session_id":"ctrl-session-001","total_cost_usd":0.001,"usage":{"input_tokens":50,"output_tokens":20},"is_error":false,"result":""}
