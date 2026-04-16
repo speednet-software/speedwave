@@ -13,19 +13,16 @@ public enum ScriptRunner {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
+        let semaphore = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in semaphore.signal() }
+
         try process.run()
 
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.1)
-        }
-
-        if process.isRunning {
+        if semaphore.wait(timeout: .now() + timeout) == .timedOut {
             process.terminate()
             process.waitUntilExit()
             throw ScriptError.timeout(timeout, nil)
         }
-
         process.waitUntilExit()
 
         let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
@@ -41,7 +38,7 @@ public enum ScriptRunner {
     }
 
     /// Classify a non-zero osascript exit into the appropriate ScriptError case.
-    public static func classifyFailure(stderr: String) -> ScriptError {
+    static func classifyFailure(stderr: String) -> ScriptError {
         if stderr.contains("not allowed") || stderr.contains("not permitted") || stderr.contains("assistive access") {
             return .automationPermission(stderr)
         }

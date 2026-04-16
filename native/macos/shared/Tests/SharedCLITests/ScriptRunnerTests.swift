@@ -137,7 +137,7 @@ final class ScriptRunnerTests: XCTestCase {
         XCTAssertEqual(result[1]["folder"] as? String, "Work")
     }
 
-    func testParseDelimitedBasic2Field() {
+    func testParseDelimitedBasic3Field() {
         let output = "Alice||Hello||2024-01-01\nBob||World||2024-01-02\n"
         let result = parseDelimited(output, fields: ["from", "subject", "date"])
         XCTAssertEqual(result.count, 2)
