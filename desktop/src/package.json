@@ -1,6 +1,6 @@
 {
   "name": "speedwave-desktop-ui",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "private": true,
   "description": "Speedwave desktop UI — Angular frontend for Tauri app",
   "license": "Apache-2.0",
