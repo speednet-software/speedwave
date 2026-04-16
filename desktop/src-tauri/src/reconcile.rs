@@ -353,15 +353,15 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                 return Err(set_bundle_error(&mut state, msg));
             }
         }
-        state.phase = bundle::BundleReconcilePhase::ImagesBuilt;
-        state.last_error = None;
-        bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
-
         // Opportunistically rebuild any missing plugin images (best-effort, warn-only).
         // If this fails, per-project enforcement in render_compose() still catches it.
         if let Err(e) = plugin::ensure_all_plugin_images(rt.as_ref()) {
             log::warn!("reconcile_bundle: failed to rebuild some plugin images: {e}");
         }
+
+        state.phase = bundle::BundleReconcilePhase::ImagesBuilt;
+        state.last_error = None;
+        bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
 
         set_image_readiness(ImageReadiness::Ready);
         log::info!("reconcile_bundle: all images built, waiters unblocked");

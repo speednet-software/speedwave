@@ -584,7 +584,7 @@ fn ensure_plugin_images_from_dir(
     }
 
     // First: build any pending (newly-installed) images for enabled plugins.
-    build_pending_from_dir_filtered(runtime, enabled_service_ids, plugins_dir)?;
+    build_pending_from_dir(runtime, Some(enabled_service_ids), plugins_dir)?;
 
     // Second: check image existence and rebuild any missing images.
     let plugins = list_installed_from_dir(plugins_dir)?;
@@ -692,68 +692,18 @@ fn ensure_all_plugin_images_from_dir(
     }
 }
 
-/// Builds pending plugin images (`.image_pending` marker), filtered to enabled service IDs.
-fn build_pending_from_dir_filtered(
-    runtime: &dyn ContainerRuntime,
-    enabled_service_ids: &[&str],
-    plugins_dir: &Path,
-) -> anyhow::Result<()> {
-    if !plugins_dir.exists() {
-        return Ok(());
-    }
-
-    let mut errors: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(plugins_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let pending_marker = entry.path().join(".image_pending");
-        if !pending_marker.exists() {
-            continue;
-        }
-        let manifest_path = entry.path().join("plugin.json");
-        if !manifest_path.exists() {
-            continue;
-        }
-        let content = match std::fs::read_to_string(&manifest_path) {
-            Ok(c) => c,
-            Err(e) => {
-                errors.push(format!("{}: read manifest: {e}", entry.path().display()));
-                continue;
-            }
-        };
-        let manifest: PluginManifest = match serde_json::from_str(&content) {
-            Ok(m) => m,
-            Err(e) => {
-                errors.push(format!("{}: parse manifest: {e}", entry.path().display()));
-                continue;
-            }
-        };
-
-        // Only build for enabled plugins
-        let sid = manifest.service_id.as_deref().unwrap_or("");
-        if !enabled_service_ids.contains(&sid) {
-            continue;
-        }
-
-        if let Err(e) = build_single_plugin_image(runtime, &manifest, &entry.path()) {
-            errors.push(format!("plugin '{}': {e}", manifest.slug));
-        }
-    }
-
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        anyhow::bail!("Some plugin images failed to build:\n{}", errors.join("\n"))
-    }
-}
-
-/// Inner implementation: builds pending plugin images from a given directory.
-/// Extracted for testability (avoids dependency on `$HOME`).
-#[cfg(test)]
+/// Builds pending plugin images (`.image_pending` marker).
+///
+/// When `enabled_service_ids` is `Some(list)`, only plugins whose `service_id` is in the list
+/// are built — used at per-project startup to avoid touching unrelated plugins. A resource-only
+/// plugin (no `service_id`) yields `sid = ""`, which never matches any caller-supplied list, so
+/// such plugins are silently skipped when filtering is active.
+///
+/// When `enabled_service_ids` is `None`, all pending plugins are built — used at app startup
+/// (`ensure_all_plugin_images`) and in tests.
 fn build_pending_from_dir(
     runtime: &dyn ContainerRuntime,
+    enabled_service_ids: Option<&[&str]>,
     plugins_dir: &Path,
 ) -> anyhow::Result<()> {
     if !plugins_dir.exists() {
@@ -788,6 +738,13 @@ fn build_pending_from_dir(
                 continue;
             }
         };
+
+        if let Some(enabled) = enabled_service_ids {
+            let sid = manifest.service_id.as_deref().unwrap_or("");
+            if !enabled.contains(&sid) {
+                continue;
+            }
+        }
 
         if let Err(e) = build_single_plugin_image(runtime, &manifest, &entry.path()) {
             errors.push(format!("plugin '{}': {e}", manifest.slug));
@@ -2953,7 +2910,7 @@ mod tests {
         .unwrap();
 
         let rt = FailingBuildRuntime;
-        let result = build_pending_from_dir(&rt, plugins_dir);
+        let result = build_pending_from_dir(&rt, None, plugins_dir);
 
         assert!(
             result.is_err(),
@@ -3002,7 +2959,7 @@ mod tests {
         std::fs::write(valid_dir.join("Containerfile"), "FROM scratch").unwrap();
 
         let rt = FailingBuildRuntime;
-        let result = build_pending_from_dir(&rt, plugins_dir);
+        let result = build_pending_from_dir(&rt, None, plugins_dir);
 
         assert!(result.is_err(), "should return error when build fails");
         let err_msg = result.unwrap_err().to_string();
@@ -3046,7 +3003,7 @@ mod tests {
         std::fs::write(good_dir.join("Containerfile"), "FROM scratch").unwrap();
 
         let rt = FailingBuildRuntime;
-        let result = build_pending_from_dir(&rt, plugins_dir);
+        let result = build_pending_from_dir(&rt, None, plugins_dir);
 
         assert!(result.is_err(), "should accumulate both error types");
         let err_msg = result.unwrap_err().to_string();
@@ -3072,7 +3029,7 @@ mod tests {
         std::fs::write(no_marker_dir.join("plugin.json"), "INVALID").unwrap();
 
         let rt = FailingBuildRuntime;
-        let result = build_pending_from_dir(&rt, plugins_dir);
+        let result = build_pending_from_dir(&rt, None, plugins_dir);
         assert!(
             result.is_ok(),
             "plugins without .image_pending should be skipped, not cause errors"
@@ -3085,7 +3042,7 @@ mod tests {
         let nonexistent = tmp.path().join("does-not-exist");
 
         let rt = FailingBuildRuntime;
-        let result = build_pending_from_dir(&rt, &nonexistent);
+        let result = build_pending_from_dir(&rt, None, &nonexistent);
         assert!(
             result.is_ok(),
             "nonexistent plugins dir should return Ok(())"
@@ -3155,8 +3112,12 @@ mod tests {
     use std::sync::Mutex;
 
     /// Mock runtime that tracks image_exists and build_image calls with configurable responses.
+    ///
+    /// After a successful `build_image`, the tag is added to `existing_images` so subsequent
+    /// `image_exists` checks behave like a real runtime (built images stay built). This lets
+    /// tests assert exact build call counts instead of `>= 1`.
     struct TrackingRuntime {
-        existing_images: HashSet<String>,
+        existing_images: Mutex<HashSet<String>>,
         build_calls: Mutex<Vec<String>>,
         build_should_fail: bool,
     }
@@ -3164,7 +3125,7 @@ mod tests {
     impl TrackingRuntime {
         fn new(existing: &[&str]) -> Self {
             Self {
-                existing_images: existing.iter().map(|s| s.to_string()).collect(),
+                existing_images: Mutex::new(existing.iter().map(|s| s.to_string()).collect()),
                 build_calls: Mutex::new(vec![]),
                 build_should_fail: false,
             }
@@ -3172,7 +3133,7 @@ mod tests {
 
         fn failing(existing: &[&str]) -> Self {
             Self {
-                existing_images: existing.iter().map(|s| s.to_string()).collect(),
+                existing_images: Mutex::new(existing.iter().map(|s| s.to_string()).collect()),
                 build_calls: Mutex::new(vec![]),
                 build_should_fail: true,
             }
@@ -3224,6 +3185,7 @@ mod tests {
             if self.build_should_fail {
                 anyhow::bail!("mock build failure")
             } else {
+                self.existing_images.lock().unwrap().insert(tag.to_string());
                 Ok(())
             }
         }
@@ -3237,7 +3199,7 @@ mod tests {
             Ok(())
         }
         fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
-            Ok(self.existing_images.contains(tag))
+            Ok(self.existing_images.lock().unwrap().contains(tag))
         }
     }
 
@@ -3362,10 +3324,12 @@ mod tests {
         let rt = TrackingRuntime::new(&[]); // image missing
         ensure_plugin_images_from_dir(&rt, &["presale"], tmp.path()).unwrap();
 
-        // Should be built (once from pending pass, image_exists check after won't rebuild again)
-        assert!(
-            rt.build_call_count() >= 1,
-            "pending plugin image should be built"
+        // Built exactly once: the pending pass builds it, then the second pass sees it via
+        // image_exists() and skips. (TrackingRuntime.build_image now inserts into existing_images.)
+        assert_eq!(
+            rt.build_call_count(),
+            1,
+            "pending plugin image should be built exactly once"
         );
     }
 
