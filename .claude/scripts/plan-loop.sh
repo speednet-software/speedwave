@@ -335,6 +335,13 @@ CODE_REVIEW_SCHEMA="$(cat "$CODE_REVIEW_SCHEMA_FILE")"
 TMPDIR_LOOP=$(mktemp -d)
 RESULT_FILE="$TMPDIR_LOOP/result.json"
 
+# Per-run npm cache — avoids EINTEGRITY/ENOTEMPTY races from concurrent npm ci
+# across parallel plan-loops, regardless of --no-worktree/--impl-only mode.
+# Stored in TMPDIR_LOOP (unique per run via mktemp -d, auto-cleaned on exit).
+# CARGO_TARGET_DIR intentionally not overridden: Makefile hard-codes
+# ./target/debug/ paths in cp rules.
+export NPM_CONFIG_CACHE="$TMPDIR_LOOP/.npm-cache"
+
 WRITER_SESSION_ID=""
 IMPL_SESSION_ID=""
 
@@ -403,13 +410,6 @@ if [[ "$NO_WORKTREE" != "true" && -z "$IMPL_ONLY" ]]; then
     IMPLEMENTER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-implement-plan"
     VERIFIER_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-verify-plan"
     CODE_REVIEW_SKILL_DIR="$PROJECT_ROOT/.claude/skills/speedwave-code-review"
-
-    # Per-worktree npm cache — avoids EINTEGRITY/ENOTEMPTY races from concurrent
-    # npm ci in parallel plan-loop runs. Stored in TMPDIR_LOOP (not the worktree)
-    # so it stays out of `git status` and auto-cleans on exit.
-    # CARGO_TARGET_DIR intentionally not overridden: Makefile hard-codes
-    # ./target/debug/ paths in cp rules.
-    export NPM_CONFIG_CACHE="$TMPDIR_LOOP/.npm-cache"
 
     echo ""
     printf "  ${GREEN}Worktree ready${NC}\n"
