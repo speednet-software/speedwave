@@ -491,7 +491,7 @@ jobs:
           RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
           REPO: ${{ github.repository }}
         run: |
-          set -e
+          set -euo pipefail
 
           # Resolve release ID — use the one from resolve job, or look it up by tag
           RID="$RELEASE_ID"
@@ -504,7 +504,7 @@ jobs:
             exit 1
           fi
 
-          # Verify asset count (~12 Tauri + 4 CLI + latest.json = 17 minimum)
+          # Step 3.a — Verify asset count (~12 Tauri + 4 CLI + latest.json = 17 minimum)
           ASSET_COUNT=$(gh api "repos/$REPO/releases/$RID/assets" --jq 'length')
           echo "Release has $ASSET_COUNT assets"
           if [ "$ASSET_COUNT" -lt 17 ]; then
@@ -512,6 +512,108 @@ jobs:
             echo "::error::To publish anyway: gh api --method PATCH repos/$REPO/releases/$RID -f draft=false"
             exit 1
           fi
+
+          # Step 3.b — Enumerate required macOS + Windows updater assets in the draft.
+          # Linux is excluded: updater.rs disables auto-update on Linux (the .deb target produces no updater archive).
+          # The 8 filenames below are the required updater assets. If the matrix
+          # in publish-tauri changes, update this list or the release will fail to
+          # publish (intentional failure mode).
+          ASSETS_JSON=$(gh api "repos/$REPO/releases/$RID/assets")
+          REQUIRED_ASSETS=(
+            "Speedwave_${VERSION}_macOS_Apple_Silicon.app.tar.gz"
+            "Speedwave_${VERSION}_macOS_Apple_Silicon.app.tar.gz.sig"
+            "Speedwave_${VERSION}_macOS_Intel.app.tar.gz"
+            "Speedwave_${VERSION}_macOS_Intel.app.tar.gz.sig"
+            "Speedwave_${VERSION}_x64-setup.nsis.zip"
+            "Speedwave_${VERSION}_x64-setup.nsis.zip.sig"
+            "Speedwave_${VERSION}_x64_en-US.msi.zip"
+            "Speedwave_${VERSION}_x64_en-US.msi.zip.sig"
+          )
+          for n in "${REQUIRED_ASSETS[@]}"; do
+            if ! echo "$ASSETS_JSON" | jq -e --arg name "$n" '.[] | select(.name == $name)' > /dev/null 2>&1; then
+              echo "::error::Missing asset: $n"
+              exit 1
+            fi
+          done
+          echo "All required updater assets present"
+
+          # Step 3.c — Verify .sig files are non-empty (a zero-byte .sig file means
+          # the signature step silently failed — auto-update would break on install).
+          SIG_ASSETS=(
+            "Speedwave_${VERSION}_macOS_Apple_Silicon.app.tar.gz.sig"
+            "Speedwave_${VERSION}_macOS_Intel.app.tar.gz.sig"
+            "Speedwave_${VERSION}_x64-setup.nsis.zip.sig"
+            "Speedwave_${VERSION}_x64_en-US.msi.zip.sig"
+          )
+          for n in "${SIG_ASSETS[@]}"; do
+            size=$(echo "$ASSETS_JSON" | jq -r --arg name "$n" '.[] | select(.name == $name) | .size')
+            if [ -z "$size" ] || [ "$size" -le 0 ]; then
+              echo "::error::Empty .sig file: $n"
+              exit 1
+            fi
+          done
+          echo "All .sig files are non-empty"
+
+          # Step 3.d — Verify latest.json shape and required platform keys.
+          # latest.json.platforms must contain these 7 keys.
+          # Missing keys = auto-update broken for that platform. Extra keys are
+          # allowed (forward-compat for future tauri-action versions).
+          LATEST_URL=$(echo "$ASSETS_JSON" | jq -r '.[] | select(.name == "latest.json") | .browser_download_url')
+          if [ -z "$LATEST_URL" ]; then
+            echo "::error::Invalid latest.json: asset not found in release"
+            exit 1
+          fi
+          LATEST_JSON=$(curl -sSL -H "Authorization: token $GITHUB_TOKEN" "$LATEST_URL")
+
+          # Verify required top-level fields exist with correct types
+          for field in version notes pub_date; do
+            val=$(echo "$LATEST_JSON" | jq -r --arg f "$field" '.[$f] // empty')
+            if [ -z "$val" ]; then
+              echo "::error::Invalid latest.json: missing or empty field '$field'"
+              exit 1
+            fi
+          done
+          platforms_type=$(echo "$LATEST_JSON" | jq -r 'if .platforms | type == "object" then "ok" else "bad" end')
+          if [ "$platforms_type" != "ok" ]; then
+            echo "::error::Invalid latest.json: 'platforms' must be an object"
+            exit 1
+          fi
+
+          REQUIRED_PLATFORMS=(
+            "darwin-x86_64"
+            "darwin-x86_64-app"
+            "darwin-aarch64"
+            "darwin-aarch64-app"
+            "windows-x86_64"
+            "windows-x86_64-msi"
+            "windows-x86_64-nsis"
+          )
+          for key in "${REQUIRED_PLATFORMS[@]}"; do
+            entry=$(echo "$LATEST_JSON" | jq -r --arg k "$key" '.platforms[$k] // empty')
+            if [ -z "$entry" ]; then
+              echo "::error::Invalid latest.json: missing required platform key '$key'"
+              exit 1
+            fi
+            sig=$(echo "$LATEST_JSON" | jq -r --arg k "$key" '.platforms[$k].signature // empty')
+            url=$(echo "$LATEST_JSON" | jq -r --arg k "$key" '.platforms[$k].url // empty')
+            if [ -z "$sig" ]; then
+              echo "::error::Invalid latest.json: platforms.$key.signature is empty"
+              exit 1
+            fi
+            if [ -z "$url" ]; then
+              echo "::error::Invalid latest.json: platforms.$key.url is empty"
+              exit 1
+            fi
+            if [[ "$url" != "https://github.com/${REPO}/releases/"* ]]; then
+              echo "::error::Invalid latest.json: platforms.$key.url does not start with expected prefix: $url"
+              exit 1
+            fi
+          done
+          echo "latest.json shape verified: all 7 required platform keys present"
+
+          # Shape checks pass — safe to publish.
+          # Note: the version check (Step 3.e) runs AFTER publish by design —
+          # it validates what actually got published matches the tag.
 
           # Publish: draft -> live
           gh api --method PATCH "repos/$REPO/releases/$RID" -f draft=false

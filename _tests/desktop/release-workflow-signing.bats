@@ -96,3 +96,43 @@ WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/desktop-release.yml"
     [ -n "$guard_line" ]
     sed -n "${guard_line}p" "$WORKFLOW" | grep -q "matrix.platform == 'macos-latest'"
 }
+
+@test "publish-release enumerates macOS updater assets" {
+    # Anti-removal guard: the publish-release job must enumerate macOS updater
+    # archive names explicitly so a missing asset fails the release before publish.
+    grep -qF "macOS_Apple_Silicon.app.tar.gz.sig" "$WORKFLOW"
+}
+
+@test "publish-release enumerates Windows updater assets" {
+    # Anti-removal guard: Windows updater asset names must appear explicitly so
+    # a missing .sig fails the release before publish.
+    grep -qF "x64-setup.nsis.zip.sig" "$WORKFLOW"
+    grep -qF "x64_en-US.msi.zip.sig" "$WORKFLOW"
+}
+
+@test "publish-release verifies .sig non-emptiness" {
+    # Anti-removal guard: an empty .sig file (size == 0) must cause a release
+    # failure before publish — the error message is the stable semantic marker.
+    grep -qF "Empty .sig file" "$WORKFLOW"
+}
+
+@test "publish-release enumerates required latest.json platform keys" {
+    # Anti-removal guard: all 7 required platform keys must appear in the
+    # workflow so missing keys are caught before the release publishes.
+    # Quotes are part of the pattern so "darwin-x86_64" does not match
+    # "darwin-x86_64-app" (keys in the workflow array are quoted strings).
+    grep -qF '"darwin-x86_64"' "$WORKFLOW"
+    grep -qF '"darwin-x86_64-app"' "$WORKFLOW"
+    grep -qF '"darwin-aarch64"' "$WORKFLOW"
+    grep -qF '"darwin-aarch64-app"' "$WORKFLOW"
+    grep -qF '"windows-x86_64"' "$WORKFLOW"
+    grep -qF '"windows-x86_64-msi"' "$WORKFLOW"
+    grep -qF '"windows-x86_64-nsis"' "$WORKFLOW"
+}
+
+@test "publish-release documents Linux auto-update exclusion" {
+    # Anti-removal guard: the inline comment explaining why Linux is excluded
+    # from asset verification must remain so future maintainers don't add Linux
+    # assets incorrectly. The semantic intent string is stable across refactors.
+    grep -qF "Linux is excluded: updater.rs disables auto-update" "$WORKFLOW"
+}
