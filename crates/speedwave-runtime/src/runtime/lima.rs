@@ -8,6 +8,11 @@ pub struct LimaRuntime {
     runner: Box<dyn CommandRunner>,
     restart_ready_delay: std::time::Duration,
     vm_stop_poll_delay: std::time::Duration,
+    /// Override for the deadline used in the `Stopping` arm of
+    /// `ensure_ready_inner`. `None` means use `LIMA_VM_STOP_TIMEOUT_SECS`.
+    /// Tests can shrink this so the deadline-exceeded path can be exercised
+    /// in milliseconds rather than 30+ seconds.
+    vm_stop_timeout: Option<std::time::Duration>,
 }
 
 /// Returns the Lima SSH config path for the VM.
@@ -33,6 +38,7 @@ impl LimaRuntime {
                 consts::CONTAINERD_RESTART_READY_DELAY_SECS,
             ),
             vm_stop_poll_delay: std::time::Duration::from_secs(3),
+            vm_stop_timeout: None,
         }
     }
 
@@ -43,6 +49,7 @@ impl LimaRuntime {
                 consts::CONTAINERD_RESTART_READY_DELAY_SECS,
             ),
             vm_stop_poll_delay: std::time::Duration::from_secs(3),
+            vm_stop_timeout: None,
         }
     }
 
@@ -57,6 +64,16 @@ impl LimaRuntime {
     #[cfg(test)]
     fn with_zero_vm_stop_poll_delay(mut self) -> Self {
         self.vm_stop_poll_delay = std::time::Duration::ZERO;
+        self
+    }
+
+    /// Overrides the deadline duration used in the `Stopping` arm of
+    /// `ensure_ready_inner`. Tests use this to exercise the
+    /// "stuck in Stopping state" error path in milliseconds rather than
+    /// the production `LIMA_VM_STOP_TIMEOUT_SECS` value.
+    #[cfg(test)]
+    fn with_stop_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.vm_stop_timeout = Some(timeout);
         self
     }
 
@@ -677,8 +694,10 @@ impl LimaRuntime {
             }
             "Stopping" => {
                 log::info!("Lima VM '{}' is stopping, waiting for it to finish", vm);
-                let deadline = std::time::Instant::now()
-                    + std::time::Duration::from_secs(consts::LIMA_VM_STOP_TIMEOUT_SECS);
+                let stop_timeout = self.vm_stop_timeout.unwrap_or_else(|| {
+                    std::time::Duration::from_secs(consts::LIMA_VM_STOP_TIMEOUT_SECS)
+                });
+                let deadline = std::time::Instant::now() + stop_timeout;
                 loop {
                     std::thread::sleep(self.vm_stop_poll_delay);
                     let s = self
@@ -699,7 +718,7 @@ impl LimaRuntime {
                                 "Lima VM '{}' stuck in Stopping state for {}s. \
                                  Try: limactl stop --force {} && limactl start {}",
                                 vm,
-                                consts::LIMA_VM_STOP_TIMEOUT_SECS,
+                                stop_timeout.as_secs(),
                                 vm,
                                 vm,
                             );
@@ -2079,11 +2098,8 @@ mod tests {
 
     #[test]
     fn test_ensure_ready_stopping_deadline_exceeded_returns_err() {
-        let vm = consts::LIMA_VM_NAME;
-        // Always returns Stopping — deadline will be exceeded immediately with zero poll delay
-        // because deadline = now + LIMA_VM_STOP_TIMEOUT_SECS and each poll sleeps 0s.
-        // We override stop timeout constant effect by making deadline very short via poll delay=0
-        // and checking that the function bails after enough polls.
+        // Runner whose `list --format` query always reports `Stopping`, so
+        // `ensure_ready_inner`'s Stopping arm spins until the deadline fires.
         struct AlwaysStoppingRunner;
         impl CommandRunner for AlwaysStoppingRunner {
             fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
@@ -2098,59 +2114,24 @@ mod tests {
             }
         }
 
-        // The deadline is now + LIMA_VM_STOP_TIMEOUT_SECS (30s by default).
-        // With zero poll delay, we need the deadline to expire immediately.
-        // We set a very short poll by patching the LimaRuntime with zero vm_stop_poll_delay,
-        // and we force the deadline to be in the past by checking that time elapses.
-        // Since LIMA_VM_STOP_TIMEOUT_SECS = 30, we just sleep > 30s in real time — not feasible.
-        // Instead, we use a custom runner that pauses time simulation:
-        // Just verify that many iterations of the same status eventually trigger the deadline.
-        // The actual deadline is checked via Instant::now() >= deadline.
-        // With zero sleep and deadline = now + 30s, the loop will run fast but not hit deadline
-        // within test time. So we instead use a non-zero LIMA_VM_STOP_TIMEOUT_SECS scenario
-        // indirectly — verify the error message contains "stuck in Stopping state".
-        //
-        // Practical approach: use the runtime with poll_delay = 0 and wait for the deadline
-        // to expire by adjusting deadline to "now" using a Stopping state that takes ~0ms each.
-        // Since we can't change the constant, we spawn the ensure_ready in a thread with a timeout.
+        // 1 ms stop timeout + zero poll delay → deadline expires on the first
+        // iteration, so we exercise the real bail-out path in milliseconds
+        // instead of the production 30 s value.
+        let rt = LimaRuntime::with_runner(Box::new(AlwaysStoppingRunner))
+            .with_zero_vm_stop_poll_delay()
+            .with_stop_timeout(std::time::Duration::from_millis(1));
 
-        let rt = LimaRuntime {
-            runner: Box::new(AlwaysStoppingRunner),
-            restart_ready_delay: std::time::Duration::ZERO,
-            vm_stop_poll_delay: std::time::Duration::from_millis(1),
-        };
-
-        // Run ensure_ready in a thread with deadline: the test timeout is the outer bound.
-        // LIMA_VM_STOP_TIMEOUT_SECS = 30s, but with 1ms sleep, 30s / 1ms = 30000 iterations.
-        // That's too slow. Override the constant by using a very short actual elapsed time check.
-        // The only way to make this fast without changing production code is to use a thread
-        // with an outer timeout to verify the error is returned within a reasonable time.
-        // We accept up to 31s (the stop timeout) but use a generous outer timeout of 35s.
-        //
-        // NOTE: This test verifies the error PATH exists, not that it's fast.
-        // For CI, we keep poll_delay=1ms and accept the 30s runtime as worst case.
-        // The test is skipped to keep CI fast — validated in local builds only.
-        //
-        // For the CI-safe version: just verify the error message format with a manual deadline
-        // by calling ensure_ready_inner indirectly via a subtest:
-        let _ = rt; // The actual test is the structural one below
-    }
-
-    #[test]
-    fn test_ensure_ready_stopping_arm_error_message_format() {
-        // Verify the error message format by inspecting the source code.
-        let source = include_str!("lima.rs");
-        let stopping_arm = source
-            .split("\"Stopping\" => {")
-            .nth(1)
-            .expect("Stopping arm must exist in ensure_ready_inner");
+        let err = rt
+            .ensure_ready()
+            .expect_err("ensure_ready must return Err when VM is stuck in Stopping state");
+        let msg = format!("{err}");
         assert!(
-            stopping_arm.contains("stuck in Stopping state"),
-            "error message must contain 'stuck in Stopping state'"
+            msg.contains("stuck in Stopping state"),
+            "error message must mention 'stuck in Stopping state', got: {msg}"
         );
         assert!(
-            stopping_arm.contains("limactl stop --force"),
-            "recovery hint must mention 'limactl stop --force'"
+            msg.contains("limactl stop --force"),
+            "error message must include the recovery hint, got: {msg}"
         );
     }
 }

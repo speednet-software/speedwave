@@ -627,35 +627,37 @@ fn stop_all_containers(
     }
 }
 
-/// Stops all containers, prunes dangling images, and stops the VM.
-/// Extracted so tests can call it directly with a mock runtime.
+/// Stops all containers and stops the VM. Extracted so tests can call it
+/// directly with a mock runtime.
 pub(crate) fn run_container_cleanup(
     rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
     projects: &[config::ProjectUserEntry],
 ) {
     stop_all_containers(rt, projects);
-    if let Err(e) = rt.system_prune() {
-        log::warn!("exit cleanup: system_prune failed: {e}");
-    }
     if let Err(e) = rt.stop_vm() {
         log::warn!("exit cleanup: stop_vm failed: {e}");
     }
 }
 
-/// Runs cleanup when the app exits: stops containers, prunes images, stops VM,
-/// stops IDE Bridge, mcp-os process, and aborts the background auto-update check.
+/// Runs cleanup when the app exits: stops containers, stops VM, stops IDE
+/// Bridge, mcp-os process, and aborts the background auto-update check.
 ///
 /// Guarded by `CLEANUP_ONCE` — safe to call from both `WindowEvent::Destroyed`
-/// and a signal handler concurrently. All work runs in a spawned thread so the
-/// Tauri event loop is not blocked during cleanup.
+/// and a signal handler concurrently. The first call starts the cleanup work
+/// in a background thread and returns its `JoinHandle`; subsequent calls
+/// return `None`. Callers that intend to terminate the process (e.g. signal
+/// handlers calling `std::process::exit`, or the Tauri `RunEvent::Exit` hook)
+/// MUST `.join()` the handle before exit, otherwise the cleanup thread is
+/// killed mid-flight and the VM never stops.
+#[must_use = "join the returned handle before process exit, or VM cleanup will be killed mid-flight"]
 pub(crate) fn run_exit_cleanup(
     ide_bridge: &SharedIdeBridge,
     mcp_os: &SharedMcpOs,
     auto_check: &SharedAutoCheckHandle,
-) {
+) -> Option<std::thread::JoinHandle<()>> {
     static CLEANUP_ONCE: AtomicBool = AtomicBool::new(false);
     if CLEANUP_ONCE.swap(true, Ordering::SeqCst) {
-        return;
+        return None;
     }
 
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -664,7 +666,7 @@ pub(crate) fn run_exit_cleanup(
     let mcp_os = mcp_os.clone();
     let auto_check = auto_check.clone();
 
-    std::thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         // Container + VM cleanup
         if let Ok(user_config) = config::load_user_config() {
             let rt = speedwave_runtime::runtime::detect_runtime();
@@ -705,6 +707,7 @@ pub(crate) fn run_exit_cleanup(
             Err(e) => log::warn!("auto-check cleanup skipped: mutex poisoned: {e}"),
         }
     });
+    Some(handle)
 }
 
 /// Resolves the bundled resources directory from the executable's parent path.
@@ -904,7 +907,6 @@ mod tests {
 
         struct TrackingRuntime {
             calls: Arc<Mutex<Vec<String>>>,
-            fail_system_prune: bool,
             fail_stop_vm: bool,
         }
 
@@ -914,19 +916,6 @@ mod tests {
                 (
                     Self {
                         calls: calls.clone(),
-                        fail_system_prune: false,
-                        fail_stop_vm: false,
-                    },
-                    calls,
-                )
-            }
-
-            fn failing_system_prune() -> (Self, Arc<Mutex<Vec<String>>>) {
-                let calls = Arc::new(Mutex::new(Vec::new()));
-                (
-                    Self {
-                        calls: calls.clone(),
-                        fail_system_prune: true,
                         fail_stop_vm: false,
                     },
                     calls,
@@ -938,7 +927,6 @@ mod tests {
                 (
                     Self {
                         calls: calls.clone(),
-                        fail_system_prune: false,
                         fail_stop_vm: true,
                     },
                     calls,
@@ -997,13 +985,6 @@ mod tests {
             fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
                 Ok(true)
             }
-            fn system_prune(&self) -> anyhow::Result<()> {
-                self.calls.lock().unwrap().push("system_prune".to_string());
-                if self.fail_system_prune {
-                    anyhow::bail!("mock system_prune error");
-                }
-                Ok(())
-            }
             fn stop_vm(&self) -> anyhow::Result<()> {
                 self.calls.lock().unwrap().push("stop_vm".to_string());
                 if self.fail_stop_vm {
@@ -1031,24 +1012,8 @@ mod tests {
             let recorded = calls.lock().unwrap();
             assert_eq!(
                 *recorded,
-                vec![
-                    "compose_down:alpha",
-                    "compose_down:beta",
-                    "system_prune",
-                    "stop_vm",
-                ],
-                "cleanup order must be: compose_down per project, then system_prune, then stop_vm"
-            );
-        }
-
-        #[test]
-        fn system_prune_failure_does_not_prevent_stop_vm() {
-            let (rt, calls) = TrackingRuntime::failing_system_prune();
-            run_container_cleanup(&rt, &[]);
-            let recorded = calls.lock().unwrap();
-            assert!(
-                recorded.contains(&"stop_vm".to_string()),
-                "stop_vm must be called even when system_prune fails, got: {recorded:?}"
+                vec!["compose_down:alpha", "compose_down:beta", "stop_vm",],
+                "cleanup order must be: compose_down per project, then stop_vm"
             );
         }
 
@@ -1064,44 +1029,16 @@ mod tests {
         }
 
         #[test]
-        fn empty_projects_still_calls_prune_and_stop_vm() {
+        fn empty_projects_still_calls_stop_vm() {
             let (rt, calls) = TrackingRuntime::new();
             run_container_cleanup(&rt, &[]);
             let recorded = calls.lock().unwrap();
             assert_eq!(
                 *recorded,
-                vec!["system_prune", "stop_vm"],
-                "system_prune and stop_vm must run even with no projects"
+                vec!["stop_vm"],
+                "stop_vm must run even with no projects"
             );
         }
-    }
-
-    /// Structural test: verifies that `run_container_cleanup` calls operations in order:
-    /// stop_all_containers → system_prune → stop_vm.
-    #[test]
-    fn cleanup_order_stop_containers_then_prune_then_stop_vm() {
-        let source = include_str!("reconcile.rs");
-        let fn_body = source
-            .split("pub(crate) fn run_container_cleanup(")
-            .nth(1)
-            .expect("run_container_cleanup must exist in reconcile.rs");
-        let stop_pos = fn_body
-            .find("stop_all_containers")
-            .expect("stop_all_containers must be in run_container_cleanup");
-        let prune_pos = fn_body
-            .find("system_prune")
-            .expect("system_prune must be in run_container_cleanup");
-        let vm_pos = fn_body
-            .find("stop_vm")
-            .expect("stop_vm must be in run_container_cleanup");
-        assert!(
-            stop_pos < prune_pos,
-            "stop_all_containers ({stop_pos}) must appear before system_prune ({prune_pos})"
-        );
-        assert!(
-            prune_pos < vm_pos,
-            "system_prune ({prune_pos}) must appear before stop_vm ({vm_pos})"
-        );
     }
 
     mod bundle_status_tests {

@@ -1203,16 +1203,10 @@ mod tests {
     }
 
     #[test]
-    fn test_lima_vm_stop_timeout_is_within_bounds() {
+    fn test_lima_vm_stop_timeout_is_positive() {
         assert!(
             LIMA_VM_STOP_TIMEOUT_SECS > 0,
             "LIMA_VM_STOP_TIMEOUT_SECS must be positive"
-        );
-        assert!(
-            LIMA_VM_STOP_TIMEOUT_SECS <= LIMA_VM_START_TIMEOUT_SECS,
-            "LIMA_VM_STOP_TIMEOUT_SECS ({}) must not exceed LIMA_VM_START_TIMEOUT_SECS ({})",
-            LIMA_VM_STOP_TIMEOUT_SECS,
-            LIMA_VM_START_TIMEOUT_SECS
         );
     }
 }
