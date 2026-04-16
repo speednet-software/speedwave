@@ -148,7 +148,7 @@ Bundle `libfuse2.so` as a separate file next to the AppImage and set `LD_LIBRARY
 
 [^3]: [AppImage/type2-runtime — static runtime with bundled libfuse](https://github.com/AppImage/type2-runtime)
 
-[^4]: [type2-runtime build — static linking with musl and libfuse3](https://github.com/AppImage/type2-runtime/blob/main/build.sh)
+[^4]: [type2-runtime build — static linking with musl and libfuse3](https://github.com/AppImage/type2-runtime/blob/main/BUILD.md)
 
 [^5]: [PCSX2 CI — AppImage repacking with static type2-runtime](https://github.com/PCSX2/pcsx2/blob/master/.github/workflows/linux_build_qt.yml)
 

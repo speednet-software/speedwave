@@ -123,7 +123,7 @@ Rejected for similar reasons to Flatpak. Snap's confinement model blocks the ker
 
 [^4]: [nerdctl rootless mode — containerd-rootless-setuptool.sh](https://github.com/containerd/nerdctl/blob/main/docs/rootless.md)
 
-[^5]: [rootless containers — uidmap / newuidmap requirement](https://rootlesscontaine.rs/getting-started/common/uidmap/)
+[^5]: [rootless containers — subuid/subgid + newuidmap/newgidmap requirement](https://rootlesscontaine.rs/getting-started/common/subuid/)
 
 [^6]: [/etc/subuid and /etc/subgid — subordinate UID/GID ranges](https://man7.org/linux/man-pages/man5/subuid.5.html)
 

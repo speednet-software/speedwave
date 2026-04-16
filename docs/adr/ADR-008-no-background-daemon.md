@@ -50,7 +50,7 @@ The decision to skip `compose_down` on macOS while running it on Linux and Windo
 
 [^23]: [QEMU does not support memory ballooning with Apple Hypervisor](https://github.com/lima-vm/lima/discussions/1534)
 
-[^24]: [Lima `limactl stop --force` uses Apple Virtualization Framework](https://github.com/lima-vm/lima/blob/v2.0.2/pkg/driver/vz/requirements.go) — `--force` skips the guest-side graceful shutdown.
+[^24]: [Lima `limactl stop --force` uses Apple Virtualization Framework](https://github.com/lima-vm/lima/blob/v2.0.2/pkg/instance/stop.go) — `--force` skips the guest-side graceful shutdown.
 
 [^25]: [nerdctl hard-coded 10 s graceful-stop timeout](https://github.com/containerd/nerdctl/blob/v2.0.0/pkg/cmd/container/stop.go) — see `defaultStopTimeout`.
 
