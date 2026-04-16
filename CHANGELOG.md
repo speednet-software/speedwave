@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.8.0](https://github.com/speednet-software/speedwave/compare/v0.7.5...v0.8.0) (2026-04-16)
+
+
+### Features
+
+* **ci:** add Phase 3 code review and stop Lima VM on app close ([#500](https://github.com/speednet-software/speedwave/issues/500)) ([426ee68](https://github.com/speednet-software/speedwave/commit/426ee682b5090b8dd33c585bb6273f5be0e8e942))
+
 ## [0.7.5](https://github.com/speednet-software/speedwave/compare/v0.7.4...v0.7.5) (2026-04-16)
 
 
