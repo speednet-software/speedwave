@@ -1528,6 +1528,27 @@ mod tests {
     }
 
     #[test]
+    fn test_prune_buildkit_cache_propagates_command_error() {
+        let runner = mock_runner_with_vm_running().with_error(
+            &format!(
+                "limactl shell {} -- sudo nerdctl builder prune --all --force",
+                consts::LIMA_VM_NAME
+            ),
+            "buildkit prune failed",
+        );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let result = rt.prune_buildkit_cache();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("buildkit prune failed"),
+            "should propagate the command error message"
+        );
+    }
+
+    #[test]
     fn test_remove_images_empty_tags_is_noop_after_require_running() {
         // VM is running, but no rmi command should be issued for empty tags
         let runner = mock_runner_with_vm_running();

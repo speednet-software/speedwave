@@ -1905,6 +1905,7 @@ mod tests {
     struct PruneMockRuntime {
         removed_tags: Arc<Mutex<Vec<String>>>,
         buildkit_pruned: Arc<std::sync::atomic::AtomicU32>,
+        buildkit_should_fail: bool,
     }
 
     impl PruneMockRuntime {
@@ -1912,6 +1913,14 @@ mod tests {
             Self {
                 removed_tags: Arc::new(Mutex::new(Vec::new())),
                 buildkit_pruned: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                buildkit_should_fail: false,
+            }
+        }
+
+        fn with_failing_buildkit() -> Self {
+            Self {
+                buildkit_should_fail: true,
+                ..Self::new()
             }
         }
     }
@@ -1960,6 +1969,9 @@ mod tests {
         fn prune_buildkit_cache(&self) -> anyhow::Result<()> {
             self.buildkit_pruned
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.buildkit_should_fail {
+                anyhow::bail!("buildkit prune failed");
+            }
             Ok(())
         }
     }
@@ -2009,61 +2021,7 @@ mod tests {
     fn test_prune_old_bundle_images_buildkit_failure_is_warn_only() {
         // A runtime where prune_buildkit_cache fails should NOT cause
         // prune_old_bundle_images to return an error.
-        struct FailingBuildkitPruneRuntime;
-
-        impl ContainerRuntime for FailingBuildkitPruneRuntime {
-            fn compose_up(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn compose_down(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-                Ok(vec![])
-            }
-            fn container_exec(&self, _: &str, _: &[&str]) -> Command {
-                Command::new("true")
-            }
-            fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
-                Ok(Command::new("true"))
-            }
-            fn is_available(&self) -> bool {
-                true
-            }
-            fn ensure_ready(&self) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn build_image(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &[(&str, &str)],
-            ) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-                Ok(String::new())
-            }
-            fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
-                Ok(String::new())
-            }
-            fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
-                Ok(true)
-            }
-            fn remove_images(&self, _: &[String]) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn prune_buildkit_cache(&self) -> anyhow::Result<()> {
-                anyhow::bail!("buildkit prune failed")
-            }
-        }
-
-        let rt = FailingBuildkitPruneRuntime;
-        // prune_old_bundle_images should succeed despite BuildKit prune failure
+        let rt = PruneMockRuntime::with_failing_buildkit();
         assert!(prune_old_bundle_images(&rt, "abc123").is_ok());
     }
 
