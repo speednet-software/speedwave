@@ -138,11 +138,11 @@ nerdctl supports `--uidmap` and `--gidmap` flags for per-container UID mapping o
 
 [^1]: [rootlesscontaine.rs — Getting Started with containerd](https://rootlesscontaine.rs/getting-started/containerd/)
 
-[^2]: [rootlesscontaine.rs — User Namespaces](https://rootlesscontaine.rs/getting-started/common/userns/)
+[^2]: [rootlesscontaine.rs — User Namespaces](https://rootlesscontaine.rs/how-it-works/userns/)
 
 [^3]: [Linux man-pages — user_namespaces(7)](https://man7.org/linux/man-pages/man7/user_namespaces.7.html)
 
-[^4]: [Lima default template — containerd runs as root inside the VM](https://github.com/lima-vm/lima/blob/master/examples/default.yaml)
+[^4]: [Lima default template — containerd runs as root inside the VM](https://github.com/lima-vm/lima/blob/master/templates/default.yaml)
 
 [^5]: [Microsoft — WSL2 architecture overview](https://learn.microsoft.com/en-us/windows/wsl/about#what-is-wsl-2)
 
