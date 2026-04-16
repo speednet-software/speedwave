@@ -541,6 +541,8 @@ Check:
 
 - If the update is interrupted mid-way (crash, power loss, `kill -9`), is the system left in a recoverable state? → Check for atomic file writes (`.tmp` + rename pattern), persisted reconcile phases, snapshot before compose mutation. A partially-written config or compose file = corrupted system.
 
+- For every persisted phase/state write (e.g., `BundleReconcilePhase::ImagesBuilt`, `.image_pending` marker removal, compose snapshot), verify the plan specifies writing the phase marker AFTER the operation it represents succeeds — never before. A phase written before its operation lies to crash-recovery (on restart, recovery sees "done" and skips the unfinished work). If the plan does not specify ordering, flag this as HIGH — the implementer will pick an order arbitrarily, and "write marker first, do work second" is the natural but wrong default.
+
 - Can the user recover by simply running `speedwave update` again? → The update flow must be idempotent. Running it twice must produce the same result as running it once. No "already migrated" flags that prevent retry.
 
 **Rollback path:**
