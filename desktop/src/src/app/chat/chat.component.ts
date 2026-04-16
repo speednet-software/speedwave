@@ -12,19 +12,25 @@ import {
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
-import { marked } from 'marked';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import type { ChatMessage, ConversationSummary, ConversationTranscript } from '../models/chat';
 import { ChatMessageComponent } from './message/chat-message.component';
 import { SessionStatsComponent } from './session-stats/session-stats.component';
+import { TextBlockComponent } from './blocks/text-block.component';
 
 /** Chat component that handles message rendering, user input, and streaming responses from Claude. */
 @Component({
   selector: 'app-chat',
   standalone: true,
-  imports: [CommonModule, FormsModule, ChatMessageComponent, SessionStatsComponent],
+  imports: [
+    CommonModule,
+    FormsModule,
+    ChatMessageComponent,
+    SessionStatsComponent,
+    TextBlockComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './chat.component.html',
 })
@@ -107,15 +113,6 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
     event.preventDefault();
     this.sendMessage();
-  }
-
-  /**
-   * Converts markdown content to sanitized HTML for display.
-   * Used by transcript view (which still uses flat content strings).
-   * @param content - The raw markdown string to render.
-   */
-  renderMarkdown(content: string): string {
-    return marked.parse(content, { async: false }) as string;
   }
 
   /**
