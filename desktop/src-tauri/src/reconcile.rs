@@ -316,6 +316,13 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
             "reconcile_bundle: building images for bundle {}",
             manifest.bundle_id,
         );
+        if let Some(old_id) =
+            build::should_prune_bundle(state.applied_bundle_id.as_deref(), &manifest.bundle_id)
+        {
+            if let Err(e) = build::prune_old_bundle_images(rt.as_ref(), old_id) {
+                log::warn!("Failed to prune old bundle images: {e}");
+            }
+        }
         // build.rs handles: build → fail → prune → retry → SnapshotterRecoveryFailed.
         // Here we escalate: restart engine → retry build. Safe because we are in the
         // pre-restore phase — no containers are running yet (see ContainerRuntime
@@ -1388,6 +1395,34 @@ mod tests {
         assert!(
             images_pos < ready_pos,
             "images_exist check must come before set_image_readiness(Ready)"
+        );
+    }
+
+    /// Structural test: verifies that `prune_old_bundle_images` is called BEFORE
+    /// `build_all_images_for_bundle` inside `reconcile_bundle_update_inner`.
+    /// Pruning before building ensures old images are cleaned up first — no data
+    /// loss possible since new images haven't been built yet at prune time.
+    #[test]
+    fn reconcile_prunes_old_images_before_building_new_ones() {
+        let source = include_str!("reconcile.rs");
+        let inner_fn = source
+            .split("fn reconcile_bundle_update_inner(")
+            .nth(1)
+            .expect("reconcile_bundle_update_inner function should exist");
+
+        let prune_pos = inner_fn
+            .find("prune_old_bundle_images")
+            .expect("prune_old_bundle_images call must exist in reconcile_bundle_update_inner");
+        let build_pos = inner_fn
+            .find("build_all_images_for_bundle")
+            .expect("build_all_images_for_bundle call must exist in reconcile_bundle_update_inner");
+
+        assert!(
+            prune_pos < build_pos,
+            "prune_old_bundle_images (at byte {prune_pos}) must appear before \
+             build_all_images_for_bundle (at byte {build_pos}) in \
+             reconcile_bundle_update_inner — pruning first ensures old images are \
+             removed before building new ones"
         );
     }
 }

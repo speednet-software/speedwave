@@ -101,6 +101,13 @@ pub trait ContainerRuntime: Send + Sync {
         Ok(())
     }
 
+    /// Remove container images by their full tags.
+    fn remove_images(&self, tags: &[String]) -> anyhow::Result<()> {
+        let _ = tags;
+        log::debug!("remove_images: not implemented for this runtime, skipping");
+        Ok(())
+    }
+
     /// Restarts the container engine (containerd + buildkitd) and waits for readiness.
     ///
     /// Implementations MUST restart containerd, MUST restart buildkit (skip
@@ -1438,6 +1445,21 @@ services:
         assert!(
             elapsed < std::time::Duration::from_secs(9),
             "should not wait for the full 10s, elapsed: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn test_remove_images_default_impl_is_noop() {
+        // ProbeTestRuntime uses the trait default (no override).
+        let rt = ProbeTestRuntime::healthy();
+        assert!(
+            rt.remove_images(&[]).is_ok(),
+            "default remove_images with empty slice should return Ok"
+        );
+        assert!(
+            rt.remove_images(&["speedwave-claude:old123".to_string()])
+                .is_ok(),
+            "default remove_images with tags should return Ok (no-op)"
         );
     }
 

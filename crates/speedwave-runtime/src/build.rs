@@ -374,6 +374,38 @@ pub fn build_all_images(runtime: &dyn ContainerRuntime) -> anyhow::Result<u32> {
     build_all_images_for_bundle(runtime, &manifest.bundle_id)
 }
 
+/// Decide whether pruning a previous bundle's images is warranted.
+///
+/// Returns `Some(old_id)` only when the previously applied bundle exists and
+/// differs from the new one. Fresh installs (`applied` is `None`) and
+/// same-version rebuilds (`applied == new`) return `None`, so the caller
+/// skips `prune_old_bundle_images` entirely in those cases.
+pub fn should_prune_bundle<'a>(applied: Option<&'a str>, new_bundle_id: &str) -> Option<&'a str> {
+    match applied {
+        Some(old) if old != new_bundle_id => Some(old),
+        _ => None,
+    }
+}
+
+/// Remove images from a previous bundle to reclaim disk space.
+pub fn prune_old_bundle_images(
+    runtime: &dyn ContainerRuntime,
+    old_bundle_id: &str,
+) -> anyhow::Result<()> {
+    let tags: Vec<String> = IMAGES
+        .iter()
+        .map(|img| image_ref(img.name, old_bundle_id))
+        .collect();
+    if tags.is_empty() {
+        return Ok(());
+    }
+    log::info!(
+        "Pruning {} images from old bundle {old_bundle_id}",
+        tags.len()
+    );
+    runtime.remove_images(&tags)
+}
+
 pub fn build_all_images_for_bundle(
     runtime: &dyn ContainerRuntime,
     bundle_id: &str,
@@ -1859,5 +1891,118 @@ mod tests {
             msg.contains("virtual machine"),
             "chain-wrapped I/O error should still get VM hint, got: {msg}"
         );
+    }
+
+    // ── prune_old_bundle_images tests ─────────────────────────────────────
+
+    /// Minimal mock runtime that records remove_images calls.
+    struct PruneMockRuntime {
+        removed_tags: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl PruneMockRuntime {
+        fn new() -> Self {
+            Self {
+                removed_tags: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl ContainerRuntime for PruneMockRuntime {
+        fn compose_up(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn compose_down(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+            Ok(vec![])
+        }
+        fn container_exec(&self, _: &str, _: &[&str]) -> Command {
+            Command::new("true")
+        }
+        fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
+            Ok(Command::new("true"))
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn ensure_ready(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn build_image(&self, _: &str, _: &str, _: &str, _: &[(&str, &str)]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        fn remove_images(&self, tags: &[String]) -> anyhow::Result<()> {
+            self.removed_tags.lock().unwrap().extend_from_slice(tags);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_prune_old_bundle_images_generates_correct_tags() {
+        let rt = PruneMockRuntime::new();
+        prune_old_bundle_images(&rt, "abc123").unwrap();
+
+        let removed = rt.removed_tags.lock().unwrap().clone();
+        assert_eq!(
+            removed.len(),
+            IMAGES.len(),
+            "should remove exactly {} tags (one per image)",
+            IMAGES.len()
+        );
+        for (tag, img) in removed.iter().zip(IMAGES.iter()) {
+            assert_eq!(
+                tag,
+                &image_ref(img.name, "abc123"),
+                "tag should be <name>:abc123"
+            );
+        }
+    }
+
+    #[test]
+    fn test_prune_old_bundle_images_same_id_still_works() {
+        // The caller is responsible for guarding same-id; the function itself is correct either way.
+        let rt = PruneMockRuntime::new();
+        prune_old_bundle_images(&rt, "same123").unwrap();
+        assert_eq!(rt.removed_tags.lock().unwrap().len(), IMAGES.len());
+    }
+
+    #[test]
+    fn should_prune_bundle_returns_none_for_fresh_install() {
+        assert_eq!(should_prune_bundle(None, "new-bundle-id"), None);
+    }
+
+    #[test]
+    fn should_prune_bundle_returns_none_for_same_bundle() {
+        assert_eq!(should_prune_bundle(Some("same-id"), "same-id"), None);
+    }
+
+    #[test]
+    fn should_prune_bundle_returns_old_id_for_different_bundle() {
+        assert_eq!(
+            should_prune_bundle(Some("old-id"), "new-id"),
+            Some("old-id")
+        );
+    }
+
+    #[test]
+    fn should_prune_bundle_handles_empty_strings() {
+        // Empty applied id differs from non-empty new id — prune signalled.
+        assert_eq!(should_prune_bundle(Some(""), "new-id"), Some(""));
+        // Both empty (unexpected, but well-defined) — same-id path.
+        assert_eq!(should_prune_bundle(Some(""), ""), None);
     }
 }

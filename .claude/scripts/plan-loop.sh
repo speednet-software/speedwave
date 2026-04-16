@@ -87,6 +87,66 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# --- Dependency freshness ---
+#
+# Delegates to `make install-deps` (= setup-dev) — the Makefile is the SSOT for
+# provisioning the workspace: cargo fetch + npm install in every npm subproject
+# including mcp-servers/* sub-packages where tsc lives. A hand-rolled npm-ci
+# loop would miss those and fail at build-mcp. The state file caches the
+# aggregate hash of all package-lock.json files; reruns skip when nothing
+# changed.
+
+LOCK_STATE_FILE=""
+
+# Portable SHA-256: prefer sha256sum (coreutils, default on Linux), fall back
+# to shasum -a 256 (macOS / systems shipping Perl's shasum). Resolved once at
+# start; the absence of both yields an empty SHA_CMD, which aggregate_lock_hash
+# treats as "state unknown → reinstall".
+if command -v sha256sum >/dev/null 2>&1; then
+    SHA_CMD="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+    SHA_CMD="shasum -a 256"
+else
+    SHA_CMD=""
+fi
+
+aggregate_lock_hash() {
+    local root="$1"
+    [[ -z "$SHA_CMD" ]] && return 0
+    find "$root" -name package-lock.json -not -path '*/node_modules/*' -print0 2>/dev/null \
+        | xargs -0 $SHA_CMD 2>/dev/null \
+        | awk '{print $1}' \
+        | sort \
+        | $SHA_CMD \
+        | awk '{print $1}'
+}
+
+ensure_deps_fresh() {
+    local root="$1"
+    local state_file="$2"
+
+    local agg
+    agg=$(aggregate_lock_hash "$root")
+
+    local prev=""
+    if [[ -f "$state_file" ]]; then
+        prev=$(cat "$state_file")
+    fi
+
+    if [[ -n "$agg" && "$agg" == "$prev" ]]; then
+        printf "  ${DIM}npm deps unchanged, skipping install${NC}\n"
+        return 0
+    fi
+
+    printf "  ${CYAN}Running make install-deps (may take a few minutes)...${NC}\n"
+    if ! (cd "$root" && make install-deps 2>&1 | tail -12 | sed 's/^/    /'); then
+        printf "  ${RED}ERROR: make install-deps failed${NC}\n" >&2
+        return 1
+    fi
+    printf '%s' "$agg" > "$state_file"
+    return 0
+}
+
 # --- Validate prerequisites ---
 
 for cmd in claude jq perl; do
@@ -311,6 +371,17 @@ if [[ "$NO_WORKTREE" != "true" && -z "$IMPL_ONLY" ]]; then
     echo ""
     printf "  ${GREEN}Worktree ready${NC}\n"
     echo ""
+
+    # Stored inside TMPDIR_LOOP so it doesn't show up as untracked in the
+    # worktree — otherwise the implementation agent sees a stray file in
+    # git status and may try to clean it up.
+    LOCK_STATE_FILE="$TMPDIR_LOOP/lock-hashes"
+    printf "  ${CYAN}Checking npm dependencies...${NC}\n"
+    if ! ensure_deps_fresh "$PROJECT_ROOT" "$LOCK_STATE_FILE"; then
+        rm -rf "$TMPDIR_LOOP" 2>/dev/null || true
+        exit 1
+    fi
+    echo ""
 else
     if [[ -n "$IMPL_ONLY" ]]; then
         printf "  ${DIM}Skipping worktree (--impl-only mode)${NC}\n"
@@ -525,6 +596,15 @@ Only report NEW issues if they are BLOCKER or HIGH severity."
     PREV_FINDINGS="$findings"
     PREV_HIGH_COUNT="$high_count"
 
+    # Sanity check: reviewer may return READY_TO_IMPLEMENT while also reporting
+    # blockers (schema does not enforce the correlation). Reject that combo — a
+    # plan with BLOCKERS is never ready to implement regardless of what the
+    # model claims in the verdict field.
+    if [[ "$verdict" == "READY_TO_IMPLEMENT" && "$blocker_count" -gt 0 ]]; then
+        printf "\n  ${RED}[sanity] Reviewer returned READY_TO_IMPLEMENT with $blocker_count blocker(s) — demoting to NEEDS_REVISION${NC}\n"
+        verdict="NEEDS_REVISION"
+    fi
+
     if [[ "$verdict" == "READY_TO_IMPLEMENT" ]]; then
         echo ""
         if [[ "$high_count" -gt 0 ]]; then
@@ -658,6 +738,15 @@ $IMPL_FEEDBACK" \
 
     # ===================== VERIFIER =====================
     echo ""
+
+    if [[ -n "$LOCK_STATE_FILE" ]]; then
+        printf "  ${CYAN}Checking npm dependencies (post-implementation)...${NC}\n"
+        if ! ensure_deps_fresh "$PROJECT_ROOT" "$LOCK_STATE_FILE"; then
+            printf "  ${RED}ERROR: dependency sync failed — verifier cannot run${NC}\n" >&2
+            rm -rf "$TMPDIR_LOOP"; exit 1
+        fi
+    fi
+
     printf "  ${CYAN}[verifier]${NC} Verifying implementation (fresh context)...\n"
 
     rm -f "$RESULT_FILE"
@@ -691,7 +780,20 @@ $IMPL_FEEDBACK" \
     echo "  make check: $( [[ "$v_check" == "true" ]] && echo "PASS" || echo "FAIL" )"
     echo "  make test:  $( [[ "$v_test" == "true" ]] && echo "PASS" || echo "FAIL" )"
 
+    # Sanity check: demote VERIFIED if model contradicts itself (e.g. reports
+    # VERIFIED with missing steps or failing checks). The JSON schema cannot
+    # express these correlations, so the orchestrator enforces them.
     if [[ "$v_verdict" == "VERIFIED" ]]; then
+        if [[ "$v_check" != "true" || "$v_test" != "true" ]]; then
+            printf "\n  ${RED}[sanity] Verifier returned VERIFIED with failing check/test — demoting to GAPS_FOUND${NC}\n"
+            v_verdict="GAPS_FOUND"
+        elif [[ "$v_total" -gt 0 && "$v_steps" -lt "$v_total" ]]; then
+            printf "\n  ${RED}[sanity] Verifier returned VERIFIED with $v_steps/$v_total steps implemented — demoting to GAPS_FOUND${NC}\n"
+            v_verdict="GAPS_FOUND"
+        fi
+    fi
+
+    if [[ "$v_verdict" == "VERIFIED" && "$v_check" == "true" && "$v_test" == "true" ]]; then
         echo ""
         printf "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}\n"
         printf "${GREEN}║  IMPLEMENTATION VERIFIED after $impl_iteration iteration(s)${NC}\n"
@@ -713,7 +815,11 @@ $IMPL_FEEDBACK" \
 
     IMPL_FEEDBACK="$v_gaps"
     if [[ -z "$IMPL_FEEDBACK" || "$IMPL_FEEDBACK" == "null" ]]; then
-        IMPL_FEEDBACK="Steps verified: $v_steps/$v_total. make check: $v_check. make test: $v_test. Review the plan and fix all remaining gaps."
+        IMPL_FEEDBACK="Verdict: $v_verdict. Steps verified: $v_steps/$v_total. make check passed: $v_check. make test passed: $v_test. Fix ALL failing checks/tests and any remaining gaps before next verification."
+    else
+        IMPL_FEEDBACK="$IMPL_FEEDBACK
+
+Additionally: make check passed: $v_check. make test passed: $v_test. Both MUST pass before verification can succeed."
     fi
 
     echo ""

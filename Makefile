@@ -145,13 +145,13 @@ setup-dev:
 	@echo "── Cargo dependencies (desktop) ──"
 	cd desktop/src-tauri && cargo fetch
 	@echo "── MCP server dependencies ──"
-	cd mcp-servers && npm install
+	cd mcp-servers && npm ci
 	@echo "── Angular dependencies ──"
-	cd desktop/src && npm install
+	cd desktop/src && npm ci
 	@echo "── E2E test dependencies ──"
-	cd desktop/e2e && npm install
+	cd desktop/e2e && npm ci
 	@echo "── Git hooks (husky, commitlint) ──"
-	npm install
+	npm ci
 	npx husky
 	@echo "\n✅ Dev environment ready. Next:"
 	@echo "  make test    # verify everything works"

@@ -608,6 +608,15 @@ If NEEDS REVISION or REJECT: list the specific items that must be addressed, in 
 
 **`new_issue_count`:** Include in structured output. Set to the total number of ALL genuinely new issues found in this review (including suppressed MEDIUM/LOW in verification mode). On the first review, equals the total issue count. On follow-up reviews, only count issues NOT present in the previous review context. This field drives convergence logic in the automated loop.
 
+**Hard verdict rules — non-negotiable, the orchestrator relies on these:**
+
+- `overall_verdict: "READY_TO_IMPLEMENT"` MUST imply `blocker_count == 0` AND `high_count == 0`.
+- If `blocker_count > 0`, the verdict MUST be `"REJECT"`.
+- If `blocker_count == 0` but `high_count > 0`, the verdict MUST be `"NEEDS_REVISION"`. The orchestrator handles auto-acceptance at high iteration counts — do not preempt it by inflating the verdict.
+- `findings_summary` MUST contain concrete, actionable fix instructions for every BLOCKER and HIGH finding. Give verbatim file paths, line references, or code suggestions — not generic advice.
+
+Returning `READY_TO_IMPLEMENT` with blockers or HIGH issues present is a critical bug in your output.
+
 </verdict>
 
 ---

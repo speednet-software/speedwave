@@ -39,5 +39,13 @@ Report your findings:
 - Whether `make test` passed
 - For each gap found: which plan step, what's missing, what needs to be done to fix it
 
-If everything is implemented and tests pass, say "VERIFIED — all steps implemented, all tests pass."
-If gaps exist, say "GAPS FOUND" and list every gap with specific fix instructions.
+**Hard verdict rules — these are non-negotiable:**
+
+- `overall_verdict: "VERIFIED"` is allowed ONLY if ALL THREE conditions hold:
+  - every plan step is fully implemented (`steps_verified == steps_total`)
+  - `make_check_passed: true`
+  - `make_test_passed: true`
+- If ANY of the three fails, `overall_verdict` MUST be `"GAPS_FOUND"`.
+- `gaps_summary` MUST contain concrete, actionable fix instructions whenever the verdict is `GAPS_FOUND`, or whenever `make_check_passed`/`make_test_passed` is false. Paste the actual failing output from make — do not summarize vaguely.
+
+Returning `VERIFIED` with a failing check or test is a critical bug in your output and will cause the orchestrator to ship broken code. Double-check the booleans before emitting the structured result.
