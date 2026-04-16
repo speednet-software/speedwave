@@ -34,7 +34,9 @@ Do not praise what works. Only report what's wrong or missing.
 1. Run `make check` with the Bash tool in the foreground, `run_in_background: false`, `timeout: 900000` (15 min). Wait for it to finish. Record the exit code and the tail of the output. Report `PASSED`, `FAILED`, or `UNKNOWN` (only UNKNOWN if the command was killed before printing its own success/failure marker — never UNKNOWN out of uncertainty about what you saw).
 2. Run `make test` the same way. Report `PASSED`, `FAILED`, or `UNKNOWN`.
 
-Never substitute `sleep`, `Monitor`, `ScheduleWakeup`, or any polling mechanism for "wait for this command to finish". Bash already waits. Using Monitor/sleep against a file-backed stdout stream is the specific anti-pattern that caused the false-negative verdicts this skill is designed to prevent. 3. **Test quality scan.** For every NEW test added in this PR (find them via `git diff origin/dev...HEAD`):
+Never substitute `sleep`, `Monitor`, `ScheduleWakeup`, or any polling mechanism for "wait for this command to finish". Bash already waits. Using Monitor/sleep against a file-backed stdout stream is the specific anti-pattern that caused the false-negative verdicts this skill is designed to prevent.
+
+3. **Test quality scan.** For every NEW test added in this PR (find them via `git diff origin/dev...HEAD`):
 
 - Flag assertions that use `>=`, `>`, or `.contains()` where exact equality (`==`, `assert_eq!`) would correctly express intent. Imprecise assertions mask bugs (e.g., `>= 1` hides double-execution).
 - For every mock / test-double used: verify that write methods (e.g., `build_image`, `create`, `insert`) mutate the mock's observable state so that subsequent read methods (e.g., `image_exists`, `get`) return updated values. A mock whose read methods return static data regardless of writes hides idempotency bugs. Report as a gap if the mock does not reflect mutations.
