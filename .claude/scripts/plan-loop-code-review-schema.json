@@ -1,0 +1,33 @@
+{
+  "type": "object",
+  "properties": {
+    "overall_verdict": {
+      "type": "string",
+      "enum": ["CLEAN", "HAS_ISSUES"]
+    },
+    "critical_count": {
+      "type": "integer",
+      "description": "Number of critical issues found"
+    },
+    "important_count": {
+      "type": "integer",
+      "description": "Number of important issues found"
+    },
+    "suggestion_count": {
+      "type": "integer",
+      "description": "Number of suggestions (non-blocking)"
+    },
+    "findings_summary": {
+      "type": "string",
+      "description": "All critical and important findings with file:line references and fix instructions. Passed directly to the implementer as fix instructions."
+    }
+  },
+  "required": [
+    "overall_verdict",
+    "critical_count",
+    "important_count",
+    "suggestion_count",
+    "findings_summary"
+  ],
+  "additionalProperties": false
+}

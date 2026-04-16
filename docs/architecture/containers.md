@@ -158,7 +158,32 @@ The recovery logic is in `ensure_exec_healthy()` (`crates/speedwave-runtime/src/
 
 At startup, `reconcile_bundle_update` verifies that all expected container images exist even when the bundle ID has not changed. If images are missing (e.g. containerd was reinstalled), the reconcile forces a full image rebuild before setting `IMAGES_READY = Ready`. This prevents `start_containers` from attempting `compose_up` with nonexistent images.
 
+## VM Lifecycle on Exit
+
+When the Desktop app exits, Speedwave stops the underlying VM (where applicable) to free RAM and system resources.
+
+### macOS (Lima VM)
+
+The Lima VM reserves ~9–32 GiB of RAM for the lifetime of the process — QEMU/VZ does not support memory ballooning, so this RAM is not returned to the system while the VM is running. On app exit, `LimaRuntime::stop_vm()` runs `limactl stop --force <vm_name>` with a 30s timeout.
+
+- **Next startup:** `ensure_ready()` detects the stopped VM and runs `limactl start` automatically. Startup is ~10–20s slower due to VM cold boot.
+- **If the process is force-killed during `limactl stop`:** The VM may be left in a `"Stopping"` state. `ensure_ready_inner()` on next launch polls until the VM finishes stopping, then starts it — no user intervention required.
+- **Cleanup is non-blocking:** All exit cleanup (container stop, VM stop, IDE Bridge, mcp-os) runs in a spawned background thread. The Tauri event loop is not blocked.
+
+### Linux (native nerdctl)
+
+There is no VM layer. Containers are stopped by `compose_down`. The containerd daemon continues as a systemd user service — this matches the Docker Desktop model where containerd is always available.
+
+### Windows (WSL2)
+
+`stop_vm()` is a no-op for `WslRuntime`. Running `wsl --terminate Speedwave` would stop all processes in the WSL2 distro — including workloads unrelated to Speedwave. Windows manages WSL2 memory via the hypervisor; Speedwave does not control the distro lifecycle.
+
+### Signal handling
+
+SIGTERM and SIGINT (and `SetConsoleCtrlHandler` on Windows) are handled by the `ctrlc` crate. The signal handler calls `run_exit_cleanup()`, which is guarded by `CLEANUP_ONCE` — if both the signal handler and `WindowEvent::Destroyed` fire concurrently, the cleanup body runs exactly once.
+
 ## See Also
 
 - [ADR-001: Eliminate Docker Desktop](../adr/ADR-001-eliminate-docker-desktop.md)
+- [ADR-008: No Background Daemon](../adr/ADR-008-no-background-daemon.md)
 - [ADR-017: Claude Code in Container via entrypoint.sh](../adr/ADR-017-claude-code-in-container-via-entrypoint.md)

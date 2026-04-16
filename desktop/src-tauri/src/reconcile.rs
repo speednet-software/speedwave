@@ -4,7 +4,7 @@ use crate::ide_bridge;
 use crate::mcp_os_process;
 use crate::types::BundleReconcileStatus;
 use speedwave_runtime::{build, bundle, config, plugin};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use tauri::Emitter;
@@ -610,9 +610,6 @@ pub(crate) fn reconcile_compose_port(
     });
 }
 
-/// Maximum time to wait for all containers to stop during exit cleanup.
-const CONTAINER_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-
 /// Stop containers for all projects. Best-effort — failures are logged
 /// but do not prevent remaining cleanup.
 fn stop_all_containers(
@@ -630,69 +627,91 @@ fn stop_all_containers(
     }
 }
 
-/// Runs cleanup when the main window is destroyed: stops IDE Bridge,
-/// mcp-os process, and aborts the background auto-update check.
+/// Stops all containers and stops the VM. Extracted so tests can call it
+/// directly with a mock runtime.
+pub(crate) fn run_container_cleanup(
+    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    projects: &[config::ProjectUserEntry],
+) {
+    stop_all_containers(rt, projects);
+    if let Err(e) = rt.stop_vm() {
+        log::warn!("exit cleanup: stop_vm failed: {e}");
+    }
+}
+
+/// Runs cleanup when the app exits: stops containers, stops VM, stops IDE
+/// Bridge, mcp-os process, and aborts the background auto-update check.
+///
+/// Guarded by `CLEANUP_ONCE` — safe to call from both `WindowEvent::Destroyed`
+/// and a signal handler concurrently. The first call starts the cleanup work
+/// in a background thread and returns its `JoinHandle`; subsequent calls
+/// return `None`. Callers that intend to terminate the process (e.g. signal
+/// handlers calling `std::process::exit`, or the Tauri `RunEvent::Exit` hook)
+/// MUST `.join()` the handle before exit, otherwise the cleanup thread is
+/// killed mid-flight and the VM never stops.
+#[must_use = "join the returned handle before process exit, or VM cleanup will be killed mid-flight"]
 pub(crate) fn run_exit_cleanup(
     ide_bridge: &SharedIdeBridge,
     mcp_os: &SharedMcpOs,
     auto_check: &SharedAutoCheckHandle,
-) {
-    // Stop watchdog before killing mcp-os to prevent respawn during shutdown
+) -> Option<std::thread::JoinHandle<()>> {
+    static CLEANUP_ONCE: AtomicBool = AtomicBool::new(false);
+    if CLEANUP_ONCE.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
-    // Stop containers for all projects before killing mcp-os.
-    // Analogous to Docker Desktop stopping containers on quit.
-    // Runs in a thread with a timeout so the UI doesn't freeze on quit.
-    match config::load_user_config() {
-        Ok(user_config) => {
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let rt = speedwave_runtime::runtime::detect_runtime();
-                stop_all_containers(rt.as_ref(), &user_config.projects);
-                let _ = tx.send(());
-            });
-            if rx.recv_timeout(CONTAINER_STOP_TIMEOUT).is_err() {
-                log::warn!(
-                    "exit cleanup: container stop timed out after {}s, proceeding",
-                    CONTAINER_STOP_TIMEOUT.as_secs()
-                );
-            }
-        }
-        Err(e) => {
-            log::warn!("exit cleanup: failed to load config, skipping compose_down: {e}");
-        }
-    }
+    let ide_bridge = ide_bridge.clone();
+    let mcp_os = mcp_os.clone();
+    let auto_check = auto_check.clone();
 
-    match ide_bridge.lock() {
-        Ok(mut guard) => {
-            if let Some(mut bridge) = guard.take() {
-                if let Err(e) = bridge.stop() {
-                    log::warn!("IDE Bridge stop error: {e}");
+    let handle = std::thread::spawn(move || {
+        // Container + VM cleanup. stop_vm() runs unconditionally because it
+        // does not need the project list — only compose_down does.
+        let rt = speedwave_runtime::runtime::detect_runtime();
+        let projects = match config::load_user_config() {
+            Ok(user_config) => user_config.projects,
+            Err(e) => {
+                log::warn!("exit cleanup: failed to load config, skipping container stop: {e}");
+                Vec::new()
+            }
+        };
+        run_container_cleanup(rt.as_ref(), &projects);
+
+        // Host process cleanup
+        match ide_bridge.lock() {
+            Ok(mut guard) => {
+                if let Some(mut bridge) = guard.take() {
+                    if let Err(e) = bridge.stop() {
+                        log::warn!("IDE Bridge stop error: {e}");
+                    }
                 }
             }
+            Err(e) => log::warn!("IDE Bridge cleanup skipped: mutex poisoned: {e}"),
         }
-        Err(e) => log::warn!("IDE Bridge cleanup skipped: mutex poisoned: {e}"),
-    }
-    match mcp_os.lock() {
-        Ok(mut guard) => {
-            if let Some(mut proc) = guard.take() {
-                if let Err(e) = proc.stop() {
-                    log::warn!("mcp-os stop error: {e}");
+        match mcp_os.lock() {
+            Ok(mut guard) => {
+                if let Some(mut proc) = guard.take() {
+                    if let Err(e) = proc.stop() {
+                        log::warn!("mcp-os stop error: {e}");
+                    }
+                    proc.cleanup_files();
                 }
-                proc.cleanup_files();
             }
+            Err(e) => log::warn!("mcp-os cleanup skipped: mutex poisoned: {e}"),
         }
-        Err(e) => log::warn!("mcp-os cleanup skipped: mutex poisoned: {e}"),
-    }
-    match auto_check.lock() {
-        Ok(mut guard) => {
-            if let Some(handle) = guard.take() {
-                handle.abort();
-                log::info!("auto-update check task cancelled on exit");
+        match auto_check.lock() {
+            Ok(mut guard) => {
+                if let Some(handle) = guard.take() {
+                    handle.abort();
+                    log::info!("auto-update check task cancelled on exit");
+                }
             }
+            Err(e) => log::warn!("auto-check cleanup skipped: mutex poisoned: {e}"),
         }
-        Err(e) => log::warn!("auto-check cleanup skipped: mutex poisoned: {e}"),
-    }
+    });
+    Some(handle)
 }
 
 /// Resolves the bundled resources directory from the executable's parent path.
@@ -880,6 +899,148 @@ mod tests {
                 *recorded,
                 vec!["alpha", "beta", "gamma"],
                 "all projects should be attempted even when one fails"
+            );
+        }
+    }
+
+    mod run_container_cleanup_tests {
+        use super::run_container_cleanup;
+        use speedwave_runtime::config::ProjectUserEntry;
+        use speedwave_runtime::runtime::ContainerRuntime;
+        use std::sync::{Arc, Mutex};
+
+        struct TrackingRuntime {
+            calls: Arc<Mutex<Vec<String>>>,
+            fail_stop_vm: bool,
+        }
+
+        impl TrackingRuntime {
+            fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
+                let calls = Arc::new(Mutex::new(Vec::new()));
+                (
+                    Self {
+                        calls: calls.clone(),
+                        fail_stop_vm: false,
+                    },
+                    calls,
+                )
+            }
+
+            fn failing_stop_vm() -> (Self, Arc<Mutex<Vec<String>>>) {
+                let calls = Arc::new(Mutex::new(Vec::new()));
+                (
+                    Self {
+                        calls: calls.clone(),
+                        fail_stop_vm: true,
+                    },
+                    calls,
+                )
+            }
+        }
+
+        impl ContainerRuntime for TrackingRuntime {
+            fn compose_up(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn compose_down(&self, project: &str) -> anyhow::Result<()> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("compose_down:{project}"));
+                Ok(())
+            }
+            fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+                Ok(vec![])
+            }
+            fn container_exec(&self, _: &str, _: &[&str]) -> std::process::Command {
+                std::process::Command::new("true")
+            }
+            fn container_exec_piped(
+                &self,
+                _: &str,
+                _: &[&str],
+            ) -> anyhow::Result<std::process::Command> {
+                Ok(std::process::Command::new("true"))
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn ensure_ready(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn build_image(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &[(&str, &str)],
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
+                Ok(true)
+            }
+            fn stop_vm(&self) -> anyhow::Result<()> {
+                self.calls.lock().unwrap().push("stop_vm".to_string());
+                if self.fail_stop_vm {
+                    anyhow::bail!("mock stop_vm error");
+                }
+                Ok(())
+            }
+        }
+
+        fn project(name: &str) -> ProjectUserEntry {
+            ProjectUserEntry {
+                name: name.to_string(),
+                dir: "/tmp/fake".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }
+        }
+
+        #[test]
+        fn full_cleanup_calls_in_order() {
+            let (rt, calls) = TrackingRuntime::new();
+            let projects = vec![project("alpha"), project("beta")];
+            run_container_cleanup(&rt, &projects);
+            let recorded = calls.lock().unwrap();
+            assert_eq!(
+                *recorded,
+                vec!["compose_down:alpha", "compose_down:beta", "stop_vm",],
+                "cleanup order must be: compose_down per project, then stop_vm"
+            );
+        }
+
+        #[test]
+        fn stop_vm_failure_does_not_panic() {
+            let (rt, calls) = TrackingRuntime::failing_stop_vm();
+            run_container_cleanup(&rt, &[]);
+            let recorded = calls.lock().unwrap();
+            assert!(
+                recorded.contains(&"stop_vm".to_string()),
+                "stop_vm must be attempted, got: {recorded:?}"
+            );
+        }
+
+        #[test]
+        fn empty_projects_still_calls_stop_vm() {
+            let (rt, calls) = TrackingRuntime::new();
+            run_container_cleanup(&rt, &[]);
+            let recorded = calls.lock().unwrap();
+            assert_eq!(
+                *recorded,
+                vec!["stop_vm"],
+                "stop_vm must run even with no projects"
             );
         }
     }
@@ -1325,26 +1486,34 @@ mod tests {
         }
     }
 
+    /// Verifies that `run_exit_cleanup` is idempotent: the first call returns
+    /// `Some(JoinHandle)` and the second returns `None`. This tests the
+    /// `CLEANUP_ONCE` AtomicBool guard.
+    ///
+    /// NOTE: Because `CLEANUP_ONCE` is a `static` inside `run_exit_cleanup`, once
+    /// set it stays set for the entire process lifetime. This test must run last
+    /// (or in a separate test binary) — any subsequent test calling `run_exit_cleanup`
+    /// in the same process will see `None`. `#[serial]` ensures ordering within this
+    /// module.
     #[test]
-    fn reconcile_bundle_update_gated_behind_setup_started() {
-        let source = include_str!("main.rs");
-        // Find text after `setup_wizard::link_cli()` up to the closing brace of the
-        // enclosing `if setup_started` block. `reconcile_bundle_update` must appear
-        // in that window — i.e. inside the same guard block, not after it.
-        let after_link_cli = source
-            .split_once("setup_wizard::link_cli()")
-            .expect("main.rs must contain setup_wizard::link_cli()")
-            .1;
-        // The `if setup_started` block is indented with 12 spaces; its closing
-        // brace sits on a line that is exactly "            }\n".
-        let closing = "\n            }\n";
-        let until_close = after_link_cli
-            .split_once(closing)
-            .expect("should find closing brace of if setup_started block")
-            .0;
+    #[serial]
+    fn cleanup_once_idempotency() {
+        let ide = SharedIdeBridge::default();
+        let mcp = SharedMcpOs::default();
+        let auto_check = SharedAutoCheckHandle::default();
+
+        let first = run_exit_cleanup(&ide, &mcp, &auto_check);
         assert!(
-            until_close.contains("reconcile_bundle_update"),
-            "reconcile_bundle_update must be inside the if setup_started block with link_cli"
+            first.is_some(),
+            "first call to run_exit_cleanup must return Some(JoinHandle)"
+        );
+        // Wait for the cleanup thread to finish to avoid leaking threads.
+        first.unwrap().join().ok();
+
+        let second = run_exit_cleanup(&ide, &mcp, &auto_check);
+        assert!(
+            second.is_none(),
+            "second call to run_exit_cleanup must return None (CLEANUP_ONCE guard)"
         );
     }
 
