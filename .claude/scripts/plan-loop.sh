@@ -311,7 +311,7 @@ Do NOT use AskUserQuestion — it is unavailable.
 Your output will be captured as structured JSON via --json-schema.
 The gaps_summary field MUST be specific enough for the implementer to fix every gap WITHOUT reading your full analysis."
 
-VERIFY_SCHEMA="$(cat "$VERIFY_SCHEMA_FILE" 2>/dev/null || echo '{}')"
+VERIFY_SCHEMA="$(cat "$VERIFY_SCHEMA_FILE")"
 CODE_REVIEW_SCHEMA="$(cat "$CODE_REVIEW_SCHEMA_FILE")"
 
 # NOTE: IMPLEMENTER_BODY and VERIFIER_BODY are computed after Phase 0

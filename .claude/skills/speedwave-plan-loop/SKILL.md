@@ -32,7 +32,7 @@ Runs `.claude/scripts/plan-loop.sh` which creates an isolated worktree and orche
 
 ## Options
 
-- `--max-iter N` — Phase 1: max write-review iterations (default: 12)
+- `--max-iter N` — Phase 1: max write-review iterations (default: 8)
 - `--max-impl-iter N` — Phase 2: max implement-verify iterations (default: 5)
 - `--max-review-iter N` — Phase 3: max code-review→fix iterations (default: 3)
 - `--plan-name NAME` — plan filename stem and branch suffix (default: YYYY-MM-DD-plan)
