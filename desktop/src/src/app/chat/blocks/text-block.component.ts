@@ -19,7 +19,7 @@ import { marked } from 'marked';
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
-  template: `<div class="prose-sw" [innerHTML]="rendered"></div>`,
+  template: `<div class="prose-sw text-sw-text" [innerHTML]="rendered"></div>`,
 })
 export class TextBlockComponent {
   @Input({ required: true }) content!: string;

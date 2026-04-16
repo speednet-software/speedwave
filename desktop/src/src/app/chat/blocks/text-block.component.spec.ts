@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { marked } from 'marked';
 import { TextBlockComponent } from './text-block.component';
 
 describe('TextBlockComponent', () => {
@@ -69,13 +70,20 @@ describe('TextBlockComponent', () => {
     const href = el.querySelector('a')?.getAttribute('href') ?? '';
     // Angular's HTML sanitizer rewrites javascript: to unsafe:javascript:, making it inert.
     expect(href).toBe('unsafe:javascript:alert(1)');
-    expect(href.startsWith('javascript:')).toBe(false);
   });
 
   it('rendered getter returns unsanitized HTML containing script tags', () => {
     component.content = '<script>alert(1)</script>';
     // The getter itself does not sanitize — sanitization happens at [innerHTML] binding time.
     expect(component.rendered).toContain('<script>');
+  });
+
+  it('rendered getter throws if marked.parse returns a Promise', () => {
+    vi.spyOn(marked, 'parse').mockReturnValueOnce(Promise.resolve('<p>hi</p>') as never);
+    component.content = 'irrelevant';
+    expect(() => component.rendered).toThrow(
+      'marked.parse returned a Promise; async option must remain false'
+    );
   });
 
   it('renders empty content without error', () => {
