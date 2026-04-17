@@ -13,7 +13,6 @@
 
 WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/desktop-release.yml"
 VERIFY_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/verify-release-assets.sh"
-HAPPY_FIXTURE="$BATS_TEST_DIRNAME/fixtures/verify-release-assets/latest-happy.json"
 
 @test "desktop-release.yml exists" {
     [ -f "$WORKFLOW" ]
