@@ -53,10 +53,10 @@ services:
       - /tmp:noexec,nosuid,size=64m
     environment:
       - PORT=${PORT_HUB}
-      - WORKER_SLACK_URL=http://mcp-slack:${PORT_SLACK}
-      - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:${PORT_SHAREPOINT}
-      - WORKER_REDMINE_URL=http://mcp-redmine:${PORT_REDMINE}
-      - WORKER_GITLAB_URL=http://mcp-gitlab:${PORT_GITLAB}
+      - WORKER_SLACK_URL=http://mcp-slack:${PORT_WORKER}
+      - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:${PORT_WORKER}
+      - WORKER_REDMINE_URL=http://mcp-redmine:${PORT_WORKER}
+      - WORKER_GITLAB_URL=http://mcp-gitlab:${PORT_WORKER}
     networks:
       - ${NETWORK_NAME}
     deploy:
@@ -80,7 +80,7 @@ services:
     volumes:
       - ${TOKENS_DIR}/slack:/tokens:ro
     environment:
-      - PORT=${PORT_SLACK}
+      - PORT=${PORT_WORKER}
     networks:
       - ${NETWORK_NAME}
     deploy:
@@ -107,7 +107,7 @@ services:
       - ${TOKENS_DIR}/sharepoint:/tokens:rw
       - ${PROJECT_DIR}:/workspace:rw
     environment:
-      - PORT=${PORT_SHAREPOINT}
+      - PORT=${PORT_WORKER}
     networks:
       - ${NETWORK_NAME}
     deploy:
@@ -131,7 +131,7 @@ services:
     volumes:
       - ${TOKENS_DIR}/redmine:/tokens:ro
     environment:
-      - PORT=${PORT_REDMINE}
+      - PORT=${PORT_WORKER}
     networks:
       - ${NETWORK_NAME}
     deploy:
@@ -155,7 +155,7 @@ services:
     volumes:
       - ${TOKENS_DIR}/gitlab:/tokens:ro
     environment:
-      - PORT=${PORT_GITLAB}
+      - PORT=${PORT_WORKER}
     networks:
       - ${NETWORK_NAME}
     deploy:

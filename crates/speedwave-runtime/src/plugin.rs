@@ -54,6 +54,12 @@ pub struct PluginManifest {
     pub slug: String,
     pub version: String,
     pub description: String,
+    /// DEPRECATED — ignored by compose emitter since ADR-038.
+    ///
+    /// All workers (built-in and plugin) now listen on the same internal
+    /// port ([`consts::PORT_WORKER`]). Kept `Option<u16>` for backward
+    /// compatibility with already-signed plugin manifests; setting a non-zero
+    /// value merely emits a warning at compose render time.
     #[serde(default)]
     pub port: Option<u16>,
     #[serde(default)]
@@ -308,14 +314,6 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
         );
     }
 
-    // MCP plugins must specify a port
-    if manifest.service_id.is_some() && manifest.port.is_none() {
-        anyhow::bail!(
-            "MCP plugins (service_id='{}') must specify a port",
-            manifest.service_id.as_deref().unwrap_or("")
-        );
-    }
-
     // Validate mem_limit format (e.g. "256m", "1g", "512000")
     if let Some(ref limit) = manifest.mem_limit {
         static MEM_RE: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
@@ -437,38 +435,6 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
     Ok(())
 }
 
-/// Checks that a plugin port doesn't collide with built-in services or other plugins.
-fn validate_plugin_port(port: u16, slug: &str, existing: &[PluginManifest]) -> anyhow::Result<()> {
-    let builtin_count = consts::TOGGLEABLE_MCP_SERVICES.len() as u16;
-    let builtin_end = consts::PORT_BASE + builtin_count;
-    if (consts::PORT_BASE..=builtin_end).contains(&port) {
-        anyhow::bail!(
-            "Port {} is reserved for built-in services (range {}-{})",
-            port,
-            consts::PORT_BASE,
-            builtin_end
-        );
-    }
-    if port == consts::PORT_LLM_PROXY {
-        anyhow::bail!(
-            "Port {} is reserved for the LLM proxy",
-            consts::PORT_LLM_PROXY
-        );
-    }
-    for existing_manifest in existing {
-        if let Some(existing_port) = existing_manifest.port {
-            if existing_port == port && existing_manifest.slug != slug {
-                anyhow::bail!(
-                    "Port {} is already claimed by plugin '{}'",
-                    port,
-                    existing_manifest.slug
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Install a plugin from a ZIP file into `~/.speedwave/plugins/<slug>/`.
 /// Verifies signature, validates manifest, and creates `.image_pending` marker
 /// for deferred image build.
@@ -516,10 +482,6 @@ pub fn install_plugin(
             }
         }
     }
-    if let Some(new_port) = manifest.port {
-        validate_plugin_port(new_port, &manifest.slug, &existing)?;
-    }
-
     // Move to final location
     let dest = plugins_dir.join(&manifest.slug);
     if dest.exists() {
@@ -871,9 +833,8 @@ pub fn generate_plugin_service(
         "mcp",
         sid.replace('-', "_")
     );
-    let port = manifest
-        .port
-        .ok_or_else(|| anyhow::anyhow!("MCP plugin '{}' must specify a port", sid))?;
+    // All workers use a single internal port — see ADR-038.
+    let port = consts::PORT_WORKER;
 
     let token_mount_mode = match &manifest.token_mount {
         TokenMount::ReadOnly => "ro",
@@ -1072,7 +1033,7 @@ mod tests {
             slug: "presale".to_string(),
             version: "1.2.0".to_string(),
             description: "Presale CRM integration".to_string(),
-            port: Some(4010),
+            port: None,
             image_tag: None,
             resources: vec!["skills".to_string(), "commands".to_string()],
             token_mount: TokenMount::ReadOnly,
@@ -1096,7 +1057,7 @@ mod tests {
         assert_eq!(parsed.service_id.as_deref(), Some("presale"));
         assert_eq!(parsed.slug, "presale");
         assert_eq!(parsed.version, "1.2.0");
-        assert_eq!(parsed.port, Some(4010));
+        assert_eq!(parsed.port, None);
         assert_eq!(parsed.resources.len(), 2);
         assert!(matches!(parsed.token_mount, TokenMount::ReadOnly));
         assert_eq!(parsed.requires_integrations, vec!["sharepoint"]);
@@ -1217,7 +1178,7 @@ mod tests {
             slug: "different-slug".to_string(),
             version: "1.0.0".to_string(),
             description: "test".to_string(),
-            port: Some(4010),
+            port: None,
             image_tag: None,
             resources: vec![],
             token_mount: TokenMount::ReadOnly,
@@ -1243,7 +1204,7 @@ mod tests {
             slug: "test-mcp".to_string(),
             version: "1.0.0".to_string(),
             description: "test".to_string(),
-            port: Some(4010),
+            port: None,
             image_tag: None,
             resources: vec![],
             token_mount: TokenMount::ReadOnly,
@@ -1315,7 +1276,7 @@ mod tests {
             slug: "presale".to_string(),
             version: "1.2.0".to_string(),
             description: "Presale CRM".to_string(),
-            port: Some(4010),
+            port: None,
             image_tag: None,
             resources: vec![],
             token_mount: TokenMount::ReadOnly,
@@ -1359,7 +1320,8 @@ mod tests {
         assert!(yaml.contains("/tmp:noexec,nosuid"), "tmpfs: {yaml}");
         assert!(yaml.contains("/tokens:ro"), "token mount: {yaml}");
         assert!(yaml.contains("/workspace:rw"), "workspace mount: {yaml}");
-        assert!(yaml.contains("PORT=4010"), "PORT env: {yaml}");
+        // ADR-038: every worker — including plugins — uses PORT_WORKER (3000).
+        assert!(yaml.contains("PORT=3000"), "PORT env: {yaml}");
         assert!(
             yaml.contains("speedwave_myproject_network"),
             "network: {yaml}"
@@ -1377,7 +1339,7 @@ mod tests {
             slug: "sp-ext".to_string(),
             version: "1.0.0".to_string(),
             description: "test".to_string(),
-            port: Some(4020),
+            port: None,
             image_tag: None,
             resources: vec![],
             token_mount: TokenMount::ReadWrite {
@@ -1416,7 +1378,7 @@ mod tests {
             slug: "test-env".to_string(),
             version: "1.0.0".to_string(),
             description: "test".to_string(),
-            port: Some(4030),
+            port: None,
             image_tag: None,
             resources: vec![],
             token_mount: TokenMount::ReadOnly,
@@ -1537,7 +1499,7 @@ mod tests {
             slug: "test".to_string(),
             version: "2.0.0".to_string(),
             description: "test".to_string(),
-            port: Some(4010),
+            port: None,
             image_tag: None,
             resources: vec![],
             token_mount: TokenMount::ReadOnly,
@@ -1560,7 +1522,7 @@ mod tests {
             slug: "test".to_string(),
             version: "2.0.0".to_string(),
             description: "test".to_string(),
-            port: Some(4010),
+            port: None,
             image_tag: Some("custom-tag".to_string()),
             resources: vec![],
             token_mount: TokenMount::ReadOnly,
@@ -1701,7 +1663,7 @@ mod tests {
             slug: "test-svc".to_string(),
             version: "1.0.0".to_string(),
             description: "test".to_string(),
-            port: Some(4010),
+            port: None,
             image_tag: None,
             resources: vec![],
             token_mount: TokenMount::ReadOnly,
@@ -1761,7 +1723,7 @@ mod tests {
             slug: "test-svc".to_string(),
             version: "1.0.0".to_string(),
             description: "test".to_string(),
-            port: Some(4010),
+            port: None,
             image_tag: None,
             resources: vec![],
             token_mount: TokenMount::ReadOnly,
@@ -1837,7 +1799,7 @@ mod tests {
             slug: "test-svc".to_string(),
             version: "1.0.0".to_string(),
             description: "test".to_string(),
-            port: Some(4010),
+            port: None,
             image_tag: None,
             resources: vec![],
             token_mount: TokenMount::ReadOnly,
@@ -1880,7 +1842,7 @@ mod tests {
             slug: "test-svc".to_string(),
             version: "1.0.0".to_string(),
             description: "test".to_string(),
-            port: Some(4010),
+            port: None,
             image_tag: None,
             resources: vec![],
             token_mount: TokenMount::ReadOnly,
@@ -1957,7 +1919,7 @@ mod tests {
             slug: "presale".to_string(), // slug == service_id (required by validation)
             version: "2.0.0".to_string(),
             description: "A clone".to_string(),
-            port: Some(4011),
+            port: None,
             image_tag: None,
             resources: vec![],
             token_mount: TokenMount::ReadOnly,
@@ -1993,7 +1955,7 @@ mod tests {
             slug: "presale-fork".to_string(),
             version: "1.0.0".to_string(),
             description: "A fork".to_string(),
-            port: Some(4012),
+            port: None,
             image_tag: None,
             resources: vec![],
             token_mount: TokenMount::ReadOnly,
@@ -2031,7 +1993,7 @@ mod tests {
             slug: "test-special".to_string(),
             version: "1.0.0".to_string(),
             description: "test".to_string(),
-            port: Some(4040),
+            port: None,
             image_tag: None,
             resources: vec![],
             token_mount: TokenMount::ReadOnly,
@@ -2133,14 +2095,16 @@ mod tests {
     }
 
     #[test]
-    fn test_mcp_plugin_requires_port() {
+    fn test_mcp_plugin_without_port_is_accepted() {
+        // Since ADR-038, manifest.port is deprecated/ignored — a missing port
+        // must NOT cause validate_manifest to fail.
         let manifest = PluginManifest {
             name: "test".to_string(),
             service_id: Some("test-mcp".to_string()),
             slug: "test-mcp".to_string(),
             version: "1.0.0".to_string(),
             description: "test".to_string(),
-            port: None, // missing port
+            port: None,
             image_tag: None,
             resources: vec![],
             token_mount: TokenMount::ReadOnly,
@@ -2156,12 +2120,8 @@ mod tests {
         std::fs::write(tmp.path().join("Containerfile"), "FROM node:22").unwrap();
         let result = validate_manifest(&manifest, tmp.path());
         assert!(
-            result.is_err(),
-            "MCP plugin without port should be rejected"
-        );
-        assert!(
-            result.unwrap_err().to_string().contains("port"),
-            "Error should mention port"
+            result.is_ok(),
+            "MCP plugin without port must pass validation (ADR-038)"
         );
     }
 
@@ -2269,7 +2229,7 @@ mod tests {
             slug: "heavy".to_string(),
             version: "1.0.0".to_string(),
             description: "CPU-heavy plugin".to_string(),
-            port: Some(4020),
+            port: None,
             image_tag: None,
             resources: vec![],
             token_mount: TokenMount::ReadOnly,
@@ -2463,76 +2423,6 @@ mod tests {
         assert!(
             err.contains("reserved"),
             "should mention reserved key, got: {err}"
-        );
-    }
-
-    #[test]
-    fn test_install_rejects_duplicate_port() {
-        // Port uniqueness is checked in install_plugin against existing plugins.
-        // We test the logic by simulating the check.
-        let existing = vec![PluginManifest {
-            name: "Existing".to_string(),
-            service_id: Some("existing".to_string()),
-            slug: "existing".to_string(),
-            version: "1.0.0".to_string(),
-            description: "test".to_string(),
-            port: Some(4010),
-            image_tag: None,
-            resources: vec![],
-            token_mount: TokenMount::ReadOnly,
-            auth_fields: vec![],
-            settings_schema: None,
-            speedwave_compat: None,
-            extra_env: None,
-            mem_limit: None,
-            cpu_limit: None,
-            requires_integrations: vec![],
-        }];
-
-        let new_port: u16 = 4010;
-        let new_slug = "new-plugin";
-        let conflict = existing
-            .iter()
-            .any(|m| m.port == Some(new_port) && m.slug != new_slug);
-        assert!(conflict, "Duplicate port should be detected");
-    }
-
-    #[test]
-    fn test_install_rejects_builtin_port_range() {
-        let no_existing: Vec<PluginManifest> = vec![];
-
-        // Hub port (4000) should be rejected
-        let err = validate_plugin_port(consts::PORT_BASE, "test", &no_existing)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("reserved"),
-            "PORT_BASE should be reserved, got: {err}"
-        );
-
-        // Last built-in worker port should be rejected
-        let builtin_end = consts::PORT_BASE + consts::TOGGLEABLE_MCP_SERVICES.len() as u16;
-        let err = validate_plugin_port(builtin_end, "test", &no_existing)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("reserved"),
-            "builtin_end should be reserved, got: {err}"
-        );
-
-        // First port above the range should be accepted
-        assert!(validate_plugin_port(builtin_end + 1, "test", &no_existing).is_ok());
-    }
-
-    #[test]
-    fn test_install_rejects_llm_proxy_port() {
-        let no_existing: Vec<PluginManifest> = vec![];
-        let err = validate_plugin_port(consts::PORT_LLM_PROXY, "test", &no_existing)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("LLM proxy"),
-            "PORT_LLM_PROXY should be reserved, got: {err}"
         );
     }
 
@@ -2858,7 +2748,7 @@ mod tests {
             slug: "test-rw".to_string(),
             version: "1.0.0".to_string(),
             description: "test".to_string(),
-            port: Some(5000),
+            port: None,
             image_tag: None,
             resources: vec![],
             token_mount: TokenMount::ReadWrite {

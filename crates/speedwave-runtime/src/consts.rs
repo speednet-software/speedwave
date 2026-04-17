@@ -5,9 +5,22 @@ pub const LIMA_SUBDIR: &str = "lima";
 pub const DATA_DIR: &str = ".speedwave";
 pub const CLI_BINARY: &str = "speedwave";
 pub const COMPOSE_PREFIX: &str = "speedwave";
+/// Port on which `mcp-hub` listens inside the compose network.
+///
+/// This is the single external contract: the `claude` container reaches the
+/// hub at `http://mcp-hub:4000`. See ADR-038.
 pub const PORT_BASE: u16 = 4000;
-/// Port reserved for the optional LLM proxy container (PORT_BASE + 9).
-pub const PORT_LLM_PROXY: u16 = PORT_BASE + 9;
+
+/// Port on which every MCP worker listens inside its own container.
+///
+/// All workers — built-in services (slack, sharepoint, redmine, gitlab),
+/// the optional `llm-proxy`, and plugin workers — share this port. Each
+/// container has its own network namespace, so port reuse is safe; the
+/// compose network disambiguates by DNS service name
+/// (`http://mcp-slack:3000`, `http://mcp-gitlab:3000`, etc.).
+///
+/// See ADR-038 for the rationale behind the single-internal-port model.
+pub const PORT_WORKER: u16 = 3000;
 pub const MCP_OS_AUTH_TOKEN_FILE: &str = "mcp-os-auth-token";
 pub const MCP_OS_PORT_FILE: &str = "mcp-os-port";
 pub const MCP_OS_PID_FILE: &str = "mcp-os-pid";

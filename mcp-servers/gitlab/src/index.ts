@@ -10,7 +10,7 @@ import { createMCPServer, ts, notConfiguredMessage, retryAsync } from '@speedwav
 import { initializeGitLabClient } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 
-const PORT = parseInt(process.env.PORT || '3004', 10);
+const PORT = parseInt(process.env.PORT || '3000', 10);
 const SERVER_NAME = 'mcp-gitlab';
 const AUTH_TOKEN = process.env.MCP_GITLAB_AUTH_TOKEN;
 

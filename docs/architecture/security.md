@@ -54,6 +54,8 @@ When implementing any feature, ask these questions:
 - **Container ↔ Container**: per-project network isolation (`speedwave_<project>_network`)
 - **Worker ↔ Worker**: token isolation — each worker has access only to its own service credentials
 
+All MCP workers listen on the same internal port (`PORT_WORKER`, see [ADR-038](../adr/ADR-038-single-internal-worker-port.md)) inside their own container namespaces; the hub disambiguates workers by DNS service name. Port numbers carry no security weight — the three pillars above (token, network, hardening) do not depend on per-worker port uniqueness.
+
 ## Executor Sandbox (MCP Hub)
 
 The MCP Hub executes model-generated JavaScript in a restricted `AsyncFunction` sandbox. Security is provided by multiple layers:

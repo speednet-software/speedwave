@@ -14,7 +14,7 @@ import { createToolDefinitions } from './tools/index.js';
 // Configuration
 //═══════════════════════════════════════════════════════════════════════════════
 
-const PORT = parseInt(process.env.PORT || '3001', 10);
+const PORT = parseInt(process.env.PORT || '3000', 10);
 const SERVER_NAME = 'mcp-slack';
 const SERVER_VERSION = '1.0.0';
 const AUTH_TOKEN = process.env.MCP_SLACK_AUTH_TOKEN;
