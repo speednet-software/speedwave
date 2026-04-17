@@ -1072,7 +1072,7 @@ describe('http-bridge', () => {
     });
 
     it('should reject external hostname in isWorkerAvailable', async () => {
-      process.env.WORKER_SLACK_URL = 'http://evil.com:4001';
+      process.env.WORKER_SLACK_URL = 'http://evil.com:3000';
 
       const result = await isWorkerAvailable('slack');
 
@@ -1081,7 +1081,7 @@ describe('http-bridge', () => {
     });
 
     it('should reject URL with pathname in callWorker', async () => {
-      process.env.WORKER_REDMINE_URL = 'http://mcp-redmine:4001/admin/exec';
+      process.env.WORKER_REDMINE_URL = 'http://mcp-redmine:3000/admin/exec';
 
       await expect(callWorker('redmine', 'list_issues', {})).rejects.toThrow(
         'Unknown service: redmine'

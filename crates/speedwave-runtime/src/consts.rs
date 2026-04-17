@@ -13,11 +13,11 @@ pub const PORT_BASE: u16 = 4000;
 
 /// Port on which every MCP worker listens inside its own container.
 ///
-/// All workers — built-in services (slack, sharepoint, redmine, gitlab,
-/// playwright), the optional `llm-proxy`, and plugin workers — share this
-/// port. Each container has its own network namespace, so port reuse is safe;
-/// the compose network disambiguates by DNS service name
-/// (`http://mcp-slack:3000`, `http://mcp-playwright:3000`, etc.).
+/// All workers — built-in services (slack, sharepoint, redmine, gitlab),
+/// the optional `llm-proxy`, and plugin workers — share this port. Each
+/// container has its own network namespace, so port reuse is safe; the
+/// compose network disambiguates by DNS service name
+/// (`http://mcp-slack:3000`, `http://mcp-gitlab:3000`, etc.).
 ///
 /// See ADR-038 for the rationale behind the single-internal-port model.
 pub const PORT_WORKER: u16 = 3000;

@@ -374,31 +374,31 @@ describe('security', () => {
     });
 
     it('rejects IPv4 loopback', () => {
-      expect(validateWorkerUrl('http://127.0.0.1:4001')).toBe(false);
+      expect(validateWorkerUrl('http://127.0.0.1:3000')).toBe(false);
     });
 
     it('rejects IPv6 loopback', () => {
-      expect(validateWorkerUrl('http://[::1]:4001')).toBe(false);
+      expect(validateWorkerUrl('http://[::1]:3000')).toBe(false);
     });
 
     it('rejects unspecified address', () => {
-      expect(validateWorkerUrl('http://0.0.0.0:4001')).toBe(false);
+      expect(validateWorkerUrl('http://0.0.0.0:3000')).toBe(false);
     });
 
     it('rejects raw private IP', () => {
-      expect(validateWorkerUrl('http://192.168.1.1:4001')).toBe(false);
+      expect(validateWorkerUrl('http://192.168.1.1:3000')).toBe(false);
     });
 
     it('rejects external hostname', () => {
-      expect(validateWorkerUrl('http://evil.example.com:4001')).toBe(false);
+      expect(validateWorkerUrl('http://evil.example.com:3000')).toBe(false);
     });
 
     it('rejects https protocol', () => {
-      expect(validateWorkerUrl('https://mcp-slack:4001')).toBe(false);
+      expect(validateWorkerUrl('https://mcp-slack:3000')).toBe(false);
     });
 
     it('rejects ftp protocol', () => {
-      expect(validateWorkerUrl('ftp://mcp-slack:4001')).toBe(false);
+      expect(validateWorkerUrl('ftp://mcp-slack:3000')).toBe(false);
     });
 
     it('rejects container URL without port', () => {
@@ -410,23 +410,23 @@ describe('security', () => {
     });
 
     it('rejects trailing hyphen in hostname', () => {
-      expect(validateWorkerUrl('http://mcp-:4001')).toBe(false);
+      expect(validateWorkerUrl('http://mcp-:3000')).toBe(false);
     });
 
     it('rejects hostname not starting with mcp-', () => {
-      expect(validateWorkerUrl('http://-mcp:4001')).toBe(false);
+      expect(validateWorkerUrl('http://-mcp:3000')).toBe(false);
     });
 
     it('rejects uppercase hostname', () => {
-      expect(validateWorkerUrl('http://MCP-SLACK:4001')).toBe(false);
+      expect(validateWorkerUrl('http://MCP-SLACK:3000')).toBe(false);
     });
 
     it('rejects underscore in hostname', () => {
-      expect(validateWorkerUrl('http://mcp_slack:4001')).toBe(false);
+      expect(validateWorkerUrl('http://mcp_slack:3000')).toBe(false);
     });
 
     it('rejects space in hostname', () => {
-      expect(validateWorkerUrl('http://mcp slack:4001')).toBe(false);
+      expect(validateWorkerUrl('http://mcp slack:3000')).toBe(false);
     });
 
     it('rejects port 0', () => {
@@ -446,23 +446,23 @@ describe('security', () => {
     });
 
     it('rejects pathname beyond /', () => {
-      expect(validateWorkerUrl('http://mcp-slack:4001/admin')).toBe(false);
+      expect(validateWorkerUrl('http://mcp-slack:3000/admin')).toBe(false);
     });
 
     it('rejects query string', () => {
-      expect(validateWorkerUrl('http://mcp-slack:4001?redirect=http://evil.com')).toBe(false);
+      expect(validateWorkerUrl('http://mcp-slack:3000?redirect=http://evil.com')).toBe(false);
     });
 
     it('rejects hostname not on allowlist', () => {
-      expect(validateWorkerUrl('http://host.other.internal:4001')).toBe(false);
+      expect(validateWorkerUrl('http://host.other.internal:3000')).toBe(false);
     });
 
     it('rejects URL with auth credentials', () => {
-      expect(validateWorkerUrl('http://user:pass@mcp-slack:4001')).toBe(false);
+      expect(validateWorkerUrl('http://user:pass@mcp-slack:3000')).toBe(false);
     });
 
     it('rejects URL with fragment', () => {
-      expect(validateWorkerUrl('http://mcp-slack:4001#frag')).toBe(false);
+      expect(validateWorkerUrl('http://mcp-slack:3000#frag')).toBe(false);
     });
   });
 

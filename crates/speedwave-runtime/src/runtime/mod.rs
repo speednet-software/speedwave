@@ -798,8 +798,10 @@ mod tests {
 
     #[test]
     fn parse_real_nerdctl_output() {
-        // Real output from `limactl shell speedwave sudo nerdctl compose ps --format json`
-        let input = r#"[{"ID":"076c","Name":"speedwave_myproject_mcp_redmine","Image":"speedwave-mcp-redmine:latest","Command":"docker-entrypoint.sh node dist/index.js","Project":"myproject","Service":"mcp-redmine","State":"running","Health":"","ExitCode":0,"Publishers":[{"URL":"127.0.0.1","TargetPort":4003,"PublishedPort":4003,"Protocol":"tcp"}]},{"ID":"40c1","Name":"speedwave_myproject_claude","Image":"speedwave-claude:latest","Command":"/usr/local/bin/entrypoint.sh","Project":"myproject","Service":"claude","State":"exited","Health":"","ExitCode":1,"Publishers":[]}]"#;
+        // Real output from `limactl shell speedwave sudo nerdctl compose ps --format json`.
+        // Since ADR-038 every worker listens on PORT_WORKER (3000); the test only
+        // checks Name and State so the exact port is immaterial.
+        let input = r#"[{"ID":"076c","Name":"speedwave_myproject_mcp_redmine","Image":"speedwave-mcp-redmine:latest","Command":"docker-entrypoint.sh node dist/index.js","Project":"myproject","Service":"mcp-redmine","State":"running","Health":"","ExitCode":0,"Publishers":[{"URL":"127.0.0.1","TargetPort":3000,"PublishedPort":3000,"Protocol":"tcp"}]},{"ID":"40c1","Name":"speedwave_myproject_claude","Image":"speedwave-claude:latest","Command":"/usr/local/bin/entrypoint.sh","Project":"myproject","Service":"claude","State":"exited","Health":"","ExitCode":1,"Publishers":[]}]"#;
         let result = parse_compose_ps_json(input);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0]["Name"], "speedwave_myproject_mcp_redmine");
