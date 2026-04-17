@@ -47,7 +47,7 @@ The `.github/workflows/test.yml` workflow runs on every push to `main`/`dev` and
 
 1. **lint** — Rust clippy + format, Prettier, MCP type-check (tsc), MCP ESLint
 2. **test** — Rust tests, MCP tests with coverage enforcement, entrypoint tests (bats)
-3. **desktop** — Desktop clippy, Angular ESLint, Angular tests with coverage enforcement, Tauri build check
+3. **desktop** — Desktop clippy, Angular ESLint, Angular tests with coverage enforcement, updater config + version-consistency bats (`test-desktop-config`), release-gate bats with `gh` shim (`test-release-gate`), desktop bats (`test-desktop-build`), Tauri build check
 4. **audit** — npm audit + cargo audit for all workspaces
 5. **swift** (PRs only) — Builds native macOS CLI binaries as universal binaries (`scripts/build-native-macos.sh`) and runs Swift tests on `macos-latest`. Catches xcbuild/`@main` attribute issues that `swift build` (llbuild) tolerates locally
 

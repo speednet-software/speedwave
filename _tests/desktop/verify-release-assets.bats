@@ -244,3 +244,53 @@ setup() {
   [ "$status" -ne 0 ]
   [[ "$output" =~ "version 'v0.8.1' != expected '0.8.1'" ]]
 }
+
+# ── Case 10: latest.json missing 'notes' field ────────────────────────────────
+
+@test "latest.json missing 'notes' field fails" {
+  export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
+  export FIXTURE_LATEST_JSON="$FIXTURES/latest-missing-notes.json"
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "latest.json missing field: notes" ]]
+}
+
+# ── Case 11: empty platforms dict ─────────────────────────────────────────────
+
+@test "latest.json empty platforms dict fails" {
+  export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
+  export FIXTURE_LATEST_JSON="$FIXTURES/latest-empty-platforms.json"
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "latest.json platforms is empty" ]]
+}
+
+# ── Case 12: missing required platform key ────────────────────────────────────
+
+@test "latest.json missing required platform key fails" {
+  export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
+  export FIXTURE_LATEST_JSON="$FIXTURES/latest-missing-platform-key.json"
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "latest.json missing required platform key: darwin-x86_64" ]]
+}
+
+# ── Case 13: empty platform signature ─────────────────────────────────────────
+
+@test "latest.json empty platform signature fails" {
+  export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
+  export FIXTURE_LATEST_JSON="$FIXTURES/latest-empty-signature.json"
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "latest.json platforms.darwin-aarch64.signature is empty" ]]
+}
+
+# ── Case 14: wrong URL prefix on platform entry ───────────────────────────────
+
+@test "latest.json wrong URL prefix fails" {
+  export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
+  export FIXTURE_LATEST_JSON="$FIXTURES/latest-wrong-url-prefix.json"
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "does not start with https://github.com/test/repo/releases/" ]]
+}
