@@ -294,3 +294,13 @@ setup() {
   [ "$status" -ne 0 ]
   [[ "$output" =~ "does not start with https://github.com/test/repo/releases/" ]]
 }
+
+# ── Case 15: empty platform url ───────────────────────────────────────────────
+
+@test "latest.json empty platform url fails" {
+  export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
+  export FIXTURE_LATEST_JSON="$FIXTURES/latest-empty-url.json"
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "latest.json platforms.darwin-aarch64.url is empty" ]]
+}
