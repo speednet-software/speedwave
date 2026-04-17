@@ -71,9 +71,9 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 gh release download "$TAG_NAME" --repo "$REPO" --pattern "latest.json" --dir "$TMP"
-python3 - "$TMP/latest.json" "$V" <<'PY' || fail "latest.json validation failed"
+python3 - "$TMP/latest.json" "$V" "$REPO" <<'PY' 2> "$TMP/py.err" || { sed 's/^/::error::/' "$TMP/py.err" >&2; fail "latest.json validation failed"; }
 import json, sys
-path, expected = sys.argv[1], sys.argv[2]
+path, expected, repo = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as f:
     data = json.load(f)
 for field in ("version", "notes", "pub_date", "platforms"):
@@ -82,8 +82,28 @@ for field in ("version", "notes", "pub_date", "platforms"):
 # Bare semver expected — no `v` prefix. If tauri-action ever prefixes, update here.
 if data["version"] != expected:
     sys.exit(f"latest.json version '{data['version']}' != expected '{expected}'")
-if not isinstance(data["platforms"], dict) or not data["platforms"]:
+platforms = data["platforms"]
+if not isinstance(platforms, dict) or not platforms:
     sys.exit("latest.json platforms is empty")
+# Linux is excluded: updater.rs disables auto-update on Linux.
+# Missing keys = auto-update broken for that platform. Extra keys are allowed.
+required_keys = (
+    "darwin-x86_64", "darwin-x86_64-app",
+    "darwin-aarch64", "darwin-aarch64-app",
+    "windows-x86_64", "windows-x86_64-msi", "windows-x86_64-nsis",
+)
+url_prefix = f"https://github.com/{repo}/releases/"
+for key in required_keys:
+    entry = platforms.get(key)
+    if not entry:
+        sys.exit(f"latest.json missing required platform key: {key}")
+    if not entry.get("signature"):
+        sys.exit(f"latest.json platforms.{key}.signature is empty")
+    url = entry.get("url", "")
+    if not url:
+        sys.exit(f"latest.json platforms.{key}.url is empty")
+    if not url.startswith(url_prefix):
+        sys.exit(f"latest.json platforms.{key}.url does not start with {url_prefix}: {url}")
 PY
 
 # Download each .sig explicitly by name — never a glob, never `*.sig`.

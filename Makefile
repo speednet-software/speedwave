@@ -369,7 +369,6 @@ test-desktop-build: build-angular build-mcp
 	bats _tests/desktop/sign-bundled-binaries.bats
 	bats _tests/desktop/release-workflow-signing.bats
 	bats _tests/desktop/info-plist.bats
-	bats _tests/desktop/updater-config.bats
 	@echo "✅ Desktop build tests passed"
 
 # Fast config validation — stable, runs in `make test`.
