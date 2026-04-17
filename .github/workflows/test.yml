@@ -215,6 +215,12 @@ jobs:
       - name: Install bats
         run: sudo apt-get update && sudo apt-get install -y bats
 
+      - name: Desktop config tests (fast)
+        run: make test-desktop-config
+
+      - name: Release-gate tests (gh shim)
+        run: make test-release-gate
+
       - name: Desktop bats tests
         # Runs make test-desktop-build which has build-angular + build-mcp
         # as dependencies. desktop-build.bats checks that the Angular

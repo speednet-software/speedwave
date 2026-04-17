@@ -4,19 +4,21 @@ Speedwave's test strategy covers Rust crates, MCP servers, CLI, desktop, and end
 
 ## Running Tests
 
-| Command                   | What it runs                                                            |
-| ------------------------- | ----------------------------------------------------------------------- |
-| `make test`               | All tests (Rust + Angular + MCP + entrypoint + desktop-build + desktop) |
-| `make test-rust`          | Rust unit/integration tests (`speedwave-runtime` + `speedwave-cli`)     |
-| `make test-cli`           | CLI-specific tests                                                      |
-| `make test-mcp`           | All MCP workspace tests (shared, hub, slack, gitlab, etc.)              |
-| `make test-os`            | OS MCP server tests only                                                |
-| `make test-angular`       | Angular desktop UI tests (`vitest run`)                                 |
-| `make test-e2e`           | End-to-end CLI tests (requires `bats-core`)                             |
-| `make test-entrypoint`    | Container entrypoint script tests (requires `bats-core`)                |
-| `make test-swift`         | Swift tests for native macOS CLI packages (macOS only)                  |
-| `make test-desktop`       | Desktop integration tests (builds CLI, Angular, MCP, OS CLI first)      |
-| `make test-desktop-build` | Verifies desktop Tauri build succeeds                                   |
+| Command                    | What it runs                                                                     |
+| -------------------------- | -------------------------------------------------------------------------------- |
+| `make test`                | All tests (Rust + Angular + MCP + entrypoint + config + desktop-build + desktop) |
+| `make test-rust`           | Rust unit/integration tests (`speedwave-runtime` + `speedwave-cli`)              |
+| `make test-cli`            | CLI-specific tests                                                               |
+| `make test-mcp`            | All MCP workspace tests (shared, hub, slack, gitlab, etc.)                       |
+| `make test-os`             | OS MCP server tests only                                                         |
+| `make test-angular`        | Angular desktop UI tests (`vitest run`)                                          |
+| `make test-e2e`            | End-to-end CLI tests (requires `bats-core`)                                      |
+| `make test-entrypoint`     | Container entrypoint script tests (requires `bats-core`)                         |
+| `make test-swift`          | Swift tests for native macOS CLI packages (macOS only)                           |
+| `make test-desktop`        | Desktop integration tests (builds CLI, Angular, MCP, OS CLI first)               |
+| `make test-desktop-build`  | Verifies desktop Tauri build succeeds                                            |
+| `make test-desktop-config` | Fast static checks: updater config fields + version consistency (local + CI)     |
+| `make test-release-gate`   | Release asset verification using `gh` shim (CI-only, not in `make test`)         |
 
 ## Coverage
 
@@ -45,7 +47,7 @@ The `.github/workflows/test.yml` workflow runs on every push to `main`/`dev` and
 
 1. **lint** — Rust clippy + format, Prettier, MCP type-check (tsc), MCP ESLint
 2. **test** — Rust tests, MCP tests with coverage enforcement, entrypoint tests (bats)
-3. **desktop** — Desktop clippy, Angular ESLint, Angular tests with coverage enforcement, Tauri build check
+3. **desktop** — Desktop clippy, Angular ESLint, Angular tests with coverage enforcement, updater config + version-consistency bats (`test-desktop-config`), release-gate bats with `gh` shim (`test-release-gate`), desktop bats (`test-desktop-build`), Tauri build check
 4. **audit** — npm audit + cargo audit for all workspaces
 5. **swift** (PRs only) — Builds native macOS CLI binaries as universal binaries (`scripts/build-native-macos.sh`) and runs Swift tests on `macos-latest`. Catches xcbuild/`@main` attribute issues that `swift build` (llbuild) tolerates locally
 
@@ -166,6 +168,10 @@ All interactive elements use `data-testid` attributes. Convention: `data-testid=
 In E2E tests: `await $('[data-testid="setup-start-btn"]').click()`.
 
 See [ADR-024](../adr/ADR-024-e2e-testing-strategy.md) for full architectural rationale.
+
+## Updater Pipeline Coverage
+
+Three BATS files guard the release pipeline against silent failures (Issue #26). `updater-config.bats` statically validates `tauri.conf.json` fields (`createUpdaterArtifacts`, `endpoints`, `pubkey`, and bundle targets) using intentionally broken fixtures in `_tests/desktop/fixtures/`. `version-consistency.bats` reads `release-please-config.json` dynamically and asserts every version-bearing file matches `.release-please-manifest.json`, catching version drift before a release ships. `verify-release-assets.bats` tests `scripts/verify-release-assets.sh` end-to-end by shimming `gh` — the script checks that all 20 expected assets (including 6 `.sig` companions and `latest.json`) are present and valid. The split between `test-desktop-config` (in `make test`) and `test-release-gate` (CI-only) keeps the `gh` shim surface away from everyday development builds.
 
 ## See Also
 

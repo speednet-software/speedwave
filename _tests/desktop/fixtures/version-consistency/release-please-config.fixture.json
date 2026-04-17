@@ -1,0 +1,10 @@
+{
+  "packages": {
+    ".": {
+      "extra-files": [
+        "mcp-servers/hub/package.json",
+        {"type": "toml", "path": "crates/speedwave-runtime/Cargo.toml"}
+      ]
+    }
+  }
+}
