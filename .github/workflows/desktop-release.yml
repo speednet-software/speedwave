@@ -525,7 +525,7 @@ jobs:
           REPO: ${{ github.repository }}
           RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
         run: |
-          set -e
+          set -euo pipefail
           RID="$RELEASE_ID"
           if [ -z "$RID" ]; then
             RID=$(gh release view "$TAG_NAME" --repo "$REPO" --json databaseId --jq '.databaseId')

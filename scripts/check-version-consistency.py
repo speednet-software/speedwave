@@ -15,11 +15,25 @@ import re
 import sys
 
 
+def _load_json(path: pathlib.Path) -> dict:
+    if not path.exists():
+        sys.exit(f"{path}: file not found")
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        sys.exit(f"{path}: invalid JSON: {e}")
+
+
 def find_errors(root: pathlib.Path) -> list[str]:
-    manifest = json.loads((root / ".release-please-manifest.json").read_text())
+    manifest = _load_json(root / ".release-please-manifest.json")
+    if "." not in manifest:
+        sys.exit(".release-please-manifest.json: missing '.' root-package key")
     expected = manifest["."]
-    config = json.loads((root / "release-please-config.json").read_text())
-    extra_files = config["packages"]["."]["extra-files"]
+    config = _load_json(root / "release-please-config.json")
+    try:
+        extra_files = config["packages"]["."]["extra-files"]
+    except KeyError as e:
+        sys.exit(f"release-please-config.json: missing key {e}")
 
     errors: list[str] = []
     for entry in extra_files:
