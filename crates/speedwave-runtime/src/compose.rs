@@ -52,10 +52,7 @@ pub fn render_compose(
     let network_name = format!("{}_{}_network", consts::compose_prefix(), project_name);
 
     let port_hub = consts::PORT_BASE;
-    let port_slack = consts::PORT_BASE + 1;
-    let port_sharepoint = consts::PORT_BASE + 2;
-    let port_redmine = consts::PORT_BASE + 3;
-    let port_gitlab = consts::PORT_BASE + 4;
+    let port_worker = consts::PORT_WORKER;
     let bundle_manifest = bundle::load_current_bundle_manifest()?;
 
     let mut yaml = COMPOSE_TEMPLATE.to_string();
@@ -68,10 +65,7 @@ pub fn render_compose(
     yaml = yaml.replace("${NETWORK_NAME}", &network_name);
     yaml = yaml.replace("${CLAUDE_VERSION}", defaults::CLAUDE_VERSION);
     yaml = yaml.replace("${PORT_HUB}", &port_hub.to_string());
-    yaml = yaml.replace("${PORT_SLACK}", &port_slack.to_string());
-    yaml = yaml.replace("${PORT_SHAREPOINT}", &port_sharepoint.to_string());
-    yaml = yaml.replace("${PORT_REDMINE}", &port_redmine.to_string());
-    yaml = yaml.replace("${PORT_GITLAB}", &port_gitlab.to_string());
+    yaml = yaml.replace("${PORT_WORKER}", &port_worker.to_string());
     yaml = yaml.replace(
         "${IMAGE_CLAUDE}",
         &build::image_ref(build::IMAGE_CLAUDE, &bundle_manifest.bundle_id),
@@ -261,7 +255,7 @@ fn apply_llm_config(yaml: &str, project_name: &str, llm: &LlmConfig) -> anyhow::
         _ => {
             // External provider: add llm-proxy container (LiteLLM)
             let proxy_token = uuid::Uuid::new_v4().to_string();
-            let proxy_port = consts::PORT_LLM_PROXY;
+            let proxy_port = consts::PORT_WORKER;
 
             let secrets_dir = consts::data_dir().join("secrets").join(project_name);
             let llm_env_file = secrets_dir.join("llm.env");
@@ -383,12 +377,25 @@ fn apply_plugins(
                     service_value,
                 );
             }
-            // Inject WORKER_*_URL into hub
+            // Inject WORKER_*_URL into hub. All workers share PORT_WORKER —
+            // each container has its own network namespace, so port reuse is
+            // safe and DNS disambiguates. See ADR-038.
+            if let Some(declared) = manifest.port {
+                if declared != consts::PORT_WORKER {
+                    log::warn!(
+                        "plugin '{}' sets deprecated 'port' field ({}); ignored — \
+                         all workers use port {}. See ADR-038",
+                        slug,
+                        declared,
+                        consts::PORT_WORKER
+                    );
+                }
+            }
             let worker_env = plugin::derive_worker_env(sid);
             let url = format!(
                 "http://{}:{}",
                 plugin::derive_compose_name(sid),
-                manifest.port.unwrap_or(0)
+                consts::PORT_WORKER
             );
             inject_worker_env(&mut doc, &worker_env, &url);
         }
@@ -2207,10 +2214,10 @@ services:
       - /tmp:noexec,nosuid,size=64m
     environment:
       - PORT=4000
-      - WORKER_SLACK_URL=http://mcp-slack:4001
-      - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:4002
-      - WORKER_REDMINE_URL=http://mcp-redmine:4003
-      - WORKER_GITLAB_URL=http://mcp-gitlab:4004
+      - WORKER_SLACK_URL=http://mcp-slack:3000
+      - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:3000
+      - WORKER_REDMINE_URL=http://mcp-redmine:3000
+      - WORKER_GITLAB_URL=http://mcp-gitlab:3000
     networks:
       - speedwave_test_network
 
@@ -2225,7 +2232,7 @@ services:
     volumes:
       - /home/user/.speedwave/tokens/test/slack:/tokens:ro
     environment:
-      - PORT=4001
+      - PORT=3000
     networks:
       - speedwave_test_network
 
@@ -2596,6 +2603,176 @@ services:
             yaml.contains(&expected),
             "MCP_HUB_PORT must equal PORT_BASE ({})",
             crate::consts::PORT_BASE
+        );
+    }
+
+    /// ADR-038: every non-hub service in the rendered compose must listen on
+    /// `PORT_WORKER` (3000). The hub itself is exempt — it listens on
+    /// `PORT_BASE` (4000).
+    #[test]
+    fn test_all_workers_use_port_worker() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig::default(),
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &all_enabled_integrations(),
+            None,
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let services = doc
+            .get("services")
+            .and_then(|s| s.as_mapping())
+            .expect("services mapping");
+
+        let worker_port_line = format!("PORT={}", crate::consts::PORT_WORKER);
+        for (name_value, svc) in services {
+            let name = name_value.as_str().unwrap_or("");
+            // Only workers have PORT=; claude does not define PORT.
+            if name == "claude" || name == "mcp-hub" {
+                continue;
+            }
+            let env = svc
+                .get("environment")
+                .and_then(|e| e.as_sequence())
+                .unwrap_or_else(|| panic!("service '{name}' missing environment"));
+            let has_worker_port = env
+                .iter()
+                .any(|v| v.as_str().is_some_and(|s| s == worker_port_line));
+            assert!(
+                has_worker_port,
+                "service '{name}' must set {worker_port_line}, got: {env:?}"
+            );
+        }
+    }
+
+    /// ADR-038: every WORKER_*_URL entry in mcp-hub environment must point at
+    /// `:{PORT_WORKER}`.
+    #[test]
+    fn test_hub_worker_urls_use_port_worker() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig::default(),
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &all_enabled_integrations(),
+            None,
+        )
+        .unwrap();
+
+        let expected_suffix = format!(":{}", crate::consts::PORT_WORKER);
+        for entry in get_hub_env_seq(&serde_yaml_ng::from_str(&yaml).unwrap()) {
+            if let Some((key, value)) = entry.split_once('=') {
+                if key.starts_with("WORKER_") && key.ends_with("_URL") {
+                    assert!(
+                        value.ends_with(&expected_suffix),
+                        "{key} must point at :{} (ADR-038), got: {value}",
+                        crate::consts::PORT_WORKER
+                    );
+                }
+            }
+        }
+    }
+
+    /// ADR-038: the llm-proxy container, when added for external providers,
+    /// must also listen on `PORT_WORKER` and be reached by claude at that port.
+    #[test]
+    fn test_llm_proxy_uses_port_worker() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig {
+                provider: Some("openai".to_string()),
+                base_url: Some("https://api.openai.com/v1".to_string()),
+                ..Default::default()
+            },
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        )
+        .unwrap();
+
+        let worker_port = crate::consts::PORT_WORKER;
+        assert!(
+            yaml.contains(&format!("PORT={worker_port}")),
+            "llm-proxy must set PORT={worker_port}"
+        );
+        assert!(
+            yaml.contains(&format!("http://llm-proxy:{worker_port}")),
+            "ANTHROPIC_BASE_URL must point at http://llm-proxy:{worker_port}"
+        );
+    }
+
+    /// ADR-038: `plugin.json.port` is deprecated and ignored. A plugin
+    /// manifest that requests a non-`PORT_WORKER` port must still be wired up
+    /// at `:{PORT_WORKER}` without failing.
+    #[test]
+    fn test_plugin_manifest_port_is_ignored() {
+        use crate::plugin::{generate_plugin_service, PluginManifest, TokenMount};
+
+        let manifest = PluginManifest {
+            name: "Legacy".to_string(),
+            service_id: Some("legacy".to_string()),
+            slug: "legacy".to_string(),
+            version: "1.0.0".to_string(),
+            description: "legacy port".to_string(),
+            port: Some(9999), // deprecated, must be ignored
+            image_tag: Some("speedwave-mcp-legacy:latest".to_string()),
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+        };
+
+        let tokens_dir = std::path::Path::new("/home/user/.speedwave/tokens/test-project");
+        let service = generate_plugin_service(
+            &manifest,
+            "test-project",
+            "speedwave_test-project_network",
+            tokens_dir,
+            "/home/user/projects/test",
+        )
+        .unwrap();
+
+        let env = service
+            .get("environment")
+            .and_then(|v| v.as_sequence())
+            .expect("plugin service must have environment");
+        let has_worker_port = env.iter().any(|v| {
+            v.as_str()
+                .is_some_and(|s| s == format!("PORT={}", crate::consts::PORT_WORKER))
+        });
+        assert!(
+            has_worker_port,
+            "plugin service must use PORT={} regardless of manifest.port (ADR-038)",
+            crate::consts::PORT_WORKER
+        );
+        let has_deprecated_port = env.iter().any(|v| {
+            v.as_str()
+                .is_some_and(|s| s == format!("PORT={}", manifest.port.unwrap()))
+        });
+        assert!(
+            !has_deprecated_port,
+            "plugin service must not honour deprecated manifest.port"
         );
     }
 
@@ -3376,7 +3553,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     environment:
       - PORT=4000
-      - WORKER_SLACK_URL=http://mcp-slack:4001
+      - WORKER_SLACK_URL=http://mcp-slack:3000
       - SLACK_TOKEN=xoxb-12345
 "#;
         let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
@@ -3817,7 +3994,7 @@ services:
     security_opt: [no-new-privileges:true]
     tmpfs: ["/tmp:noexec,nosuid,size=64m"]
     environment:
-      - PORT=4001
+      - PORT=3000
 "#;
         let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
         assert!(
@@ -5193,10 +5370,10 @@ services:
       - /tmp:noexec,nosuid,size=64m
     environment:
       - PORT=4000
-      - WORKER_SLACK_URL=http://mcp-slack:4001
-      - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:4002
-      - WORKER_REDMINE_URL=http://mcp-redmine:4003
-      - WORKER_GITLAB_URL=http://mcp-gitlab:4004
+      - WORKER_SLACK_URL=http://mcp-slack:3000
+      - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:3000
+      - WORKER_REDMINE_URL=http://mcp-redmine:3000
+      - WORKER_GITLAB_URL=http://mcp-gitlab:3000
     networks:
       - speedwave_test_network
 
@@ -5211,7 +5388,7 @@ services:
     volumes:
       - /home/user/.speedwave/tokens/test/slack:/tokens:ro
     environment:
-      - PORT=4001
+      - PORT=3000
     networks:
       - speedwave_test_network
 
@@ -5227,7 +5404,7 @@ services:
       - /home/user/.speedwave/tokens/test/sharepoint:/tokens:rw
       - /home/user/projects/test:/workspace:rw
     environment:
-      - PORT=4002
+      - PORT=3000
     networks:
       - speedwave_test_network
 
@@ -5242,7 +5419,7 @@ services:
     volumes:
       - /home/user/.speedwave/tokens/test/redmine:/tokens:ro
     environment:
-      - PORT=4003
+      - PORT=3000
     networks:
       - speedwave_test_network
 
@@ -5257,7 +5434,7 @@ services:
     volumes:
       - /home/user/.speedwave/tokens/test/gitlab:/tokens:ro
     environment:
-      - PORT=4004
+      - PORT=3000
     networks:
       - speedwave_test_network
 

@@ -334,13 +334,15 @@ describe('security', () => {
 
   describe('validateWorkerUrl', () => {
     it('accepts core container worker URLs', () => {
-      expect(validateWorkerUrl('http://mcp-slack:4001')).toBe(true);
-      expect(validateWorkerUrl('http://mcp-gitlab:4004')).toBe(true);
+      // ADR-038: all workers share PORT_WORKER (3000) internally.
+      expect(validateWorkerUrl('http://mcp-slack:3000')).toBe(true);
+      expect(validateWorkerUrl('http://mcp-gitlab:3000')).toBe(true);
     });
 
-    it('accepts addon container worker URLs', () => {
-      expect(validateWorkerUrl('http://mcp-presale:4006')).toBe(true);
-      expect(validateWorkerUrl('http://mcp-my-addon:5000')).toBe(true);
+    it('accepts plugin worker URLs', () => {
+      // Plugins also use PORT_WORKER; URLs differ only by DNS service name.
+      expect(validateWorkerUrl('http://mcp-presale:3000')).toBe(true);
+      expect(validateWorkerUrl('http://mcp-my-addon:3000')).toBe(true);
     });
 
     it('accepts minimal valid container URL', () => {
