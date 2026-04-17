@@ -382,6 +382,7 @@ test-desktop-config:
 # edge cases from breaking unrelated PRs.
 test-release-gate:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	@command -v jq >/dev/null 2>&1 || { echo "❌ jq not found. Install: brew install jq"; exit 1; }
 	bats _tests/desktop/verify-release-assets.bats
 	@echo "✅ Release-gate tests passed"
 
