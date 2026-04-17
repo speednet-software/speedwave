@@ -335,6 +335,13 @@ CODE_REVIEW_SCHEMA="$(cat "$CODE_REVIEW_SCHEMA_FILE")"
 TMPDIR_LOOP=$(mktemp -d)
 RESULT_FILE="$TMPDIR_LOOP/result.json"
 
+# Per-run npm cache — avoids EINTEGRITY/ENOTEMPTY races from concurrent npm ci
+# across parallel plan-loops, regardless of --no-worktree/--impl-only mode.
+# Stored in TMPDIR_LOOP (unique per run via mktemp -d, auto-cleaned on exit).
+# CARGO_TARGET_DIR intentionally not overridden: Makefile hard-codes
+# ./target/debug/ paths in cp rules.
+export NPM_CONFIG_CACHE="$TMPDIR_LOOP/.npm-cache"
+
 WRITER_SESSION_ID=""
 IMPL_SESSION_ID=""
 

@@ -451,7 +451,14 @@ Breakdown by platform:
 
 **Total: 20 assets, 6 `.sig` companions.**
 
-Asset names use `assetNamePattern: [name]_[version]_{arch_label}[setup][ext]` from `tauri-apps/tauri-action` (see `.github/workflows/desktop-release.yml`). The `publish-release` job runs `scripts/verify-release-assets.sh` before and after publishing, which checks every named asset and downloads each `.sig` to confirm it is non-empty. It also validates that `latest.json` reports the expected bare semver version (no `v` prefix).
+Asset names use `assetNamePattern: [name]_[version]_{arch_label}[setup][ext]` from `tauri-apps/tauri-action` (see `.github/workflows/desktop-release.yml`).
+
+The `publish-release` job runs two complementary gates:
+
+1. `scripts/verify-release-assets.sh` (pre-publish) — checks every named asset and downloads each `.sig` to confirm it is non-empty. Also validates that `latest.json` reports the expected bare semver version (no `v` prefix).
+2. Inline checks in the publish step — **fails** if fewer than 17 assets are found (that threshold catches platform failures: with 9, half the platforms could be missing), verifies each required updater archive has a non-empty `.sig` partner, and asserts `latest.json.platforms` contains the 7 required keys (`darwin-*`, `windows-*`).
+
+At PR time, `_tests/desktop/updater-config.bats` enforces `tauri.conf.json` updater-plugin shape (`createUpdaterArtifacts`, `endpoints`, `pubkey`) and anti-drift between all release-please-managed version sources.
 
 ### Changing release artifact naming or target set
 
