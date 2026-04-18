@@ -75,6 +75,10 @@ claude-opus-4-6[1m] │ CTX ██░░░ 2% │ Limit ░░░░░ 30% res
 
 **Context window size.** Read from `modelUsage.<model>.contextWindow` — typically `200000` for base models and `1000000` for `[1m]` extended-context variants. Defaults to `200000` if absent.
 
+### Stopping a conversation
+
+While Claude is responding, press **Esc** or click the red **Stop** button next to the message input to interrupt the current turn. The partial response is preserved in the conversation history, in-flight tools are stopped, and the input is immediately re-enabled so you can send the next message. **Esc is ignored while an "ask user" question is visible** — answer or dismiss that prompt first; the Stop button still works in that case and will drop the question.
+
 ## System Tray
 
 <!-- Content to be written: macOS/Windows click-toggle, Linux menu-only, libappindicator requirement -->

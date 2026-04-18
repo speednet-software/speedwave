@@ -86,6 +86,11 @@ pub struct UsageInfo {
 /// Tool name constant for the AskUserQuestion tool.
 const ASK_USER_TOOL_NAME: &str = "AskUserQuestion";
 
+// Stream-json protocol literals — see claude-agent-sdk-python types.py
+// (SDKControlRequest / SDKControlInterruptRequest).
+const MSG_TYPE_CONTROL_REQUEST: &str = "control_request";
+const CTRL_SUBTYPE_INTERRUPT: &str = "interrupt";
+
 /// Parsed control_request from Claude stdout.
 /// Also used as the pending request storage — keyed by `tool_use_id` in the HashMap.
 #[derive(Debug, Clone)]
@@ -700,6 +705,31 @@ pub fn claude_container_name(project: &str) -> String {
     format!("{}_{}_claude", consts::compose_prefix(), project)
 }
 
+/// Build the stream-json `control_request` payload for an interrupt.
+fn build_interrupt_payload(request_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": MSG_TYPE_CONTROL_REQUEST,
+        "request_id": request_id,
+        "request": { "subtype": CTRL_SUBTYPE_INTERRUPT },
+    })
+}
+
+/// Monotonic interrupt request_id (Claude requires uniqueness; we never
+/// correlate the response, so a counter is enough — no UUID dependency).
+fn next_interrupt_request_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    format!("req_interrupt_{}", COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Write a control_request payload + flush. Extracted so tests can assert
+/// the exact bytes against an in-memory writer.
+fn write_interrupt<W: Write>(w: &mut W, payload: &serde_json::Value) -> anyhow::Result<()> {
+    writeln!(w, "{}", payload)?;
+    w.flush()?;
+    Ok(())
+}
+
 /// Manages a Claude Code subprocess running inside the container.
 /// Claude is launched via `container_exec` from the ContainerRuntime trait,
 /// which abstracts limactl/nerdctl/wsl.exe differences.
@@ -1018,7 +1048,7 @@ impl ChatSession {
         let shared = self
             .shared_stdin
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("stdin not available"))?;
+            .ok_or_else(|| anyhow::anyhow!("no active session"))?;
         let input = build_user_message(message);
         let mut stdin = shared
             .lock()
@@ -1059,7 +1089,7 @@ impl ChatSession {
         let shared = self
             .shared_stdin
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("stdin not available"))?;
+            .ok_or_else(|| anyhow::anyhow!("no active session"))?;
         let mut stdin = shared
             .lock()
             .map_err(|e| anyhow::anyhow!("stdin lock poisoned: {e}"))?;
@@ -1084,7 +1114,45 @@ impl ChatSession {
         Ok(())
     }
 
-    /// Stop the Claude subprocess.
+    /// Cancel the current turn without killing the session.
+    ///
+    /// Writes a stream-json `control_request` with `subtype: "interrupt"` to
+    /// Claude's stdin (protocol: `SDKControlInterruptRequest` in
+    /// https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/types.py).
+    /// Claude aborts the in-flight turn, emits a `result` with
+    /// `subtype: "error_during_execution"`, and stays ready for the next user
+    /// message on the same stdin — session, context, MCP hub, and history
+    /// preserved.
+    pub fn interrupt(&mut self) -> anyhow::Result<()> {
+        // Mirror send_message/answer_question: detect a child that has already
+        // exited so we surface a clean "session exited" error instead of a
+        // confusing broken-pipe write failure.
+        if let Some(child) = self.child.as_mut() {
+            if let Some(status) = child.try_wait()? {
+                self.child = None;
+                anyhow::bail!("session exited ({status})");
+            }
+        }
+        let shared = self
+            .shared_stdin
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no active session"))?;
+        let request_id = next_interrupt_request_id();
+        let payload = build_interrupt_payload(&request_id);
+        let mut stdin = shared
+            .lock()
+            .map_err(|e| anyhow::anyhow!("stdin lock poisoned: {e}"))?;
+        if let Err(e) = write_interrupt(&mut *stdin, &payload) {
+            log::error!(
+                "interrupt: failed to write control_request (request_id={request_id}): {e}"
+            );
+            return Err(e);
+        }
+        log::info!("interrupt: control_request sent (request_id={request_id})");
+        Ok(())
+    }
+
+    /// Stop the Claude subprocess entirely (session end, not turn cancel).
     pub fn stop(&mut self) -> anyhow::Result<()> {
         // Drop stdin first to signal EOF to the child
         self.shared_stdin = None;
@@ -1150,6 +1218,113 @@ pub type SharedChatSession = Arc<Mutex<ChatSession>>;
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    // -- interrupt protocol tests (behavioural via free helpers) --
+
+    #[test]
+    fn interrupt_without_active_session_errors() {
+        let mut s = ChatSession::new("test-project");
+        let err = s
+            .interrupt()
+            .expect_err("expected 'no active session' when stdin not set");
+        assert!(
+            err.to_string().contains("no active session"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn build_interrupt_payload_matches_sdk_protocol() {
+        // Wire format per SDKControlInterruptRequest in claude-agent-sdk-python.
+        let v = build_interrupt_payload("req_interrupt_42");
+        assert_eq!(v["type"], "control_request");
+        assert_eq!(v["request_id"], "req_interrupt_42");
+        assert_eq!(v["request"]["subtype"], "interrupt");
+        // Defensive: no extra top-level keys leak in.
+        let obj = v.as_object().expect("object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["request", "request_id", "type"]);
+    }
+
+    #[test]
+    fn next_interrupt_request_id_is_unique_and_prefixed() {
+        let a = next_interrupt_request_id();
+        let b = next_interrupt_request_id();
+        assert_ne!(a, b);
+        assert!(a.starts_with("req_interrupt_"));
+        assert!(b.starts_with("req_interrupt_"));
+    }
+
+    #[test]
+    fn write_interrupt_emits_single_ndjson_line() {
+        let payload = build_interrupt_payload("req_interrupt_test");
+        let mut buf: Vec<u8> = Vec::new();
+        write_interrupt(&mut buf, &payload).expect("write");
+        let s = String::from_utf8(buf).expect("utf8");
+        // Exactly one trailing newline (NDJSON framing) and one parse-able value.
+        assert!(s.ends_with('\n'), "must end with newline, got: {s:?}");
+        let line = s.trim_end_matches('\n');
+        assert!(!line.contains('\n'), "must be single line, got: {s:?}");
+        let parsed: serde_json::Value = serde_json::from_str(line).expect("valid json");
+        assert_eq!(parsed["request"]["subtype"], "interrupt");
+    }
+
+    #[test]
+    fn write_interrupt_propagates_io_errors() {
+        // Writer that always fails on first write — verifies the error path
+        // (the production code logs and returns this error to the caller).
+        struct FailWriter;
+        impl Write for FailWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "boom"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let payload = build_interrupt_payload("req_interrupt_err");
+        let err = write_interrupt(&mut FailWriter, &payload).expect_err("expected error");
+        assert!(err.to_string().contains("boom"), "got: {err}");
+    }
+
+    // -- ChatSession::stop() tests --
+
+    #[test]
+    fn stop_is_idempotent_when_no_session_running() {
+        let mut s = ChatSession::new("test-project");
+        assert!(s.stop().is_ok());
+        assert!(s.stop().is_ok());
+        assert!(s.child.is_none());
+        assert!(s.shared_stdin.is_none());
+        assert!(s.drain_handles.is_empty());
+        assert!(s.session_log_path.is_none());
+    }
+
+    #[test]
+    fn stop_clears_pending_requests() {
+        let mut s = ChatSession::new("test-project");
+        s.pending_requests.lock().unwrap().insert(
+            "tool-1".to_string(),
+            ControlRequest {
+                request_id: "r1".to_string(),
+                tool_name: ASK_USER_TOOL_NAME.to_string(),
+                input: serde_json::json!({}),
+                tool_use_id: "tool-1".to_string(),
+            },
+        );
+        assert!(s.stop().is_ok());
+        assert!(s.pending_requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn second_session_can_be_created_after_stop() {
+        let mut s1 = ChatSession::new("test-project");
+        assert!(s1.stop().is_ok());
+        drop(s1);
+        let mut s2 = ChatSession::new("test-project");
+        assert!(s2.stop().is_ok());
+    }
 
     /// Convenience: parse a JSON string and call `parser.parse_line`.
     /// Returns only the StreamChunk (for backward-compatible test assertions).
@@ -1722,7 +1897,7 @@ mod tests {
 
     #[test]
     fn parse_system_init_produces_log_entry() {
-        let mut parser = StreamParser::new();
+        let parser = StreamParser::new();
         let line = r#"{"type":"system","subtype":"init","model":"claude-opus-4-6"}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
         let (chunk, log_entry) = parser.parse_system_message(&parsed);
