@@ -1034,4 +1034,285 @@ describe('ChatStateService', () => {
       expect(service.isStreaming).toBe(false);
     });
   });
+
+  describe('stopConversation', () => {
+    it('stopConversation finalizes text blocks and resets isStreaming', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.isStreaming = true;
+      service._setState({ currentBlocks: [{ type: 'text', content: 'partial' }] });
+      await service.stopConversation();
+      expect(invokeSpy).toHaveBeenCalledWith('stop_chat');
+      expect(invokeSpy).toHaveBeenCalledTimes(1);
+      expect(service.isStreaming).toBe(false);
+      expect(service.currentBlocks).toEqual([]);
+      expect(service.messages).toHaveLength(1);
+      expect(service.messages[0].role).toBe('assistant');
+      expect(service.messages[0].blocks).toEqual([{ type: 'text', content: 'partial' }]);
+    });
+
+    it('stopConversation drops unanswered ask_user blocks when finalizing', async () => {
+      service.isStreaming = true;
+      service._setState({
+        currentBlocks: [
+          { type: 'text', content: 'Let me ask:' },
+          {
+            type: 'ask_user',
+            question: {
+              tool_id: 't1',
+              question: 'q?',
+              options: [],
+              header: '',
+              multi_select: false,
+              answered: false,
+              selected_values: [],
+            },
+          },
+        ],
+      });
+      await service.stopConversation();
+      expect(service.messages).toHaveLength(1);
+      expect(service.messages[0].blocks).toEqual([{ type: 'text', content: 'Let me ask:' }]);
+    });
+
+    it('stopConversation skips appending an assistant message if only ask_user was pending', async () => {
+      service.isStreaming = true;
+      service._setState({
+        currentBlocks: [
+          {
+            type: 'ask_user',
+            question: {
+              tool_id: 't1',
+              question: 'q?',
+              options: [],
+              header: '',
+              multi_select: false,
+              answered: false,
+              selected_values: [],
+            },
+          },
+        ],
+      });
+      await service.stopConversation();
+      expect(service.messages).toHaveLength(0);
+      expect(service.isStreaming).toBe(false);
+    });
+
+    it('stopConversation called twice only invokes stop_chat once', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.isStreaming = true;
+      const p1 = service.stopConversation();
+      const p2 = service.stopConversation();
+      await Promise.all([p1, p2]);
+      expect(invokeSpy.mock.calls.filter((c) => c[0] === 'stop_chat')).toHaveLength(1);
+    });
+
+    it('stopConversation is a no-op when not streaming', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.isStreaming = false;
+      await service.stopConversation();
+      expect(invokeSpy).not.toHaveBeenCalled();
+    });
+
+    it('stopConversation resets state and surfaces a real backend failure to the user', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'stop_chat') throw new Error('ipc broken');
+        return undefined;
+      };
+      service.isStreaming = true;
+      service._setState({ currentBlocks: [{ type: 'text', content: 'x' }] });
+      await service.stopConversation();
+      expect(service.isStreaming).toBe(false);
+      // partial assistant + error block from the failed stop = 2 messages.
+      expect(service.messages).toHaveLength(2);
+      const errorBlock = service.messages[1].blocks[0];
+      expect(errorBlock.type).toBe('error');
+      expect((errorBlock as { type: 'error'; content: string }).content).toContain('Stop failed');
+    });
+
+    it('stopConversation suppresses benign "no active session" without surfacing an error', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'stop_chat') throw new Error('no active session');
+        return undefined;
+      };
+      service.isStreaming = true;
+      service._setState({ currentBlocks: [{ type: 'text', content: 'x' }] });
+      await service.stopConversation();
+      expect(service.isStreaming).toBe(false);
+      // Only the partial assistant message — no extra error block.
+      expect(service.messages).toHaveLength(1);
+    });
+
+    it('stopConversation increments _turnId so late stream chunks are dropped', async () => {
+      service.isStreaming = true;
+      const before = service.turnId;
+      await service.stopConversation();
+      expect(service.turnId).toBeGreaterThan(before);
+    });
+
+    it('stop_chat reuses the existing session — next sendMessage skips start_chat / resume_conversation', async () => {
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        return undefined;
+      };
+
+      service.isStreaming = true;
+      service._setState({ currentBlocks: [{ type: 'text', content: 'partial' }] });
+      await service.stopConversation();
+
+      expect(calls).toContain('stop_chat');
+      expect(calls).not.toContain('resume_conversation');
+      expect(calls).not.toContain('start_chat');
+
+      await service.sendMessage('next turn on same session');
+      expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
+    });
+
+    it('late content chunks arriving after stopConversation are dropped via _turnId guard', async () => {
+      mockTauri.isRunningInTauri = () => true;
+      await service.init();
+      service.isStreaming = true;
+      await service.stopConversation();
+      // Simulate a buffered chunk from the dying turn arriving after stop.
+      mockTauri.dispatchEvent('chat_stream', {
+        chunk_type: 'Text',
+        data: { content: 'late content from stopped turn' },
+      });
+      expect(service.isStreaming).toBe(false);
+      expect(service.currentBlocks).toEqual([]);
+      // Must not be appended — only the (empty) partial-then-stop noop ran.
+      const lateText = service.messages.some((m) =>
+        m.blocks.some((b) => b.type === 'text' && b.content === 'late content from stopped turn')
+      );
+      expect(lateText).toBe(false);
+    });
+
+    it('RateLimit chunk dispatched after Result still updates sessionStats.rate_limit', async () => {
+      mockTauri.isRunningInTauri = () => true;
+      await service.init();
+      service.isStreaming = true;
+      mockTauri.dispatchEvent('chat_stream', {
+        chunk_type: 'Result',
+        data: {
+          session_id: 's1',
+          total_cost: 0.01,
+          usage: { output_tokens: 10 },
+          result_text: null,
+          context_window_size: 200_000,
+        },
+      });
+      expect(service.isStreaming).toBe(false);
+      expect(service.sessionStats).not.toBeNull();
+      const before = service.sessionStats;
+      mockTauri.dispatchEvent('chat_stream', {
+        chunk_type: 'RateLimit',
+        data: { status: 'ok', utilization: 0.42, resets_at: '2026-04-18T12:00:00Z' },
+      });
+      expect(service.sessionStats).not.toBe(before);
+      expect(service.sessionStats?.rate_limit).toEqual({
+        status: 'ok',
+        utilization: 0.42,
+        resets_at: '2026-04-18T12:00:00Z',
+      });
+    });
+
+    it('SystemInit chunk dispatched between turns updates the model', async () => {
+      mockTauri.isRunningInTauri = () => true;
+      await service.init();
+      expect(service.isStreaming).toBe(false);
+      mockTauri.dispatchEvent('chat_stream', {
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-7' },
+      });
+      service.isStreaming = true;
+      mockTauri.dispatchEvent('chat_stream', {
+        chunk_type: 'Result',
+        data: {
+          session_id: 's2',
+          total_cost: 0,
+          usage: null,
+          result_text: null,
+          context_window_size: 200_000,
+        },
+      });
+      expect(service.sessionStats?.model).toBe('claude-opus-4-7');
+    });
+
+    it('drops late Text chunks after stopConversation — _messages and _sessionStats unchanged', async () => {
+      mockTauri.isRunningInTauri = () => true;
+      await service.init();
+      service.isStreaming = true;
+      service._setState({ currentBlocks: [{ type: 'text', content: 'first' }] });
+      await service.stopConversation();
+      const messagesBefore = service.messages;
+      const statsBefore = service.sessionStats;
+      mockTauri.dispatchEvent('chat_stream', {
+        chunk_type: 'Text',
+        data: { content: 'LATE' },
+      });
+      expect(service.messages).toBe(messagesBefore);
+      expect(service.sessionStats).toBe(statsBefore);
+      expect(service.currentBlocks).toEqual([]);
+      expect(service.isStreaming).toBe(false);
+    });
+
+    it('drops late Result chunks after stopConversation — _messages length and _sessionStats identity unchanged', async () => {
+      mockTauri.isRunningInTauri = () => true;
+      await service.init();
+      service.isStreaming = true;
+      await service.stopConversation();
+      const lengthBefore = service.messages.length;
+      const statsBefore = service.sessionStats;
+      mockTauri.dispatchEvent('chat_stream', {
+        chunk_type: 'Result',
+        data: {
+          session_id: 'late',
+          total_cost: 99,
+          usage: null,
+          result_text: 'late',
+          context_window_size: 200_000,
+        },
+      });
+      expect(service.messages.length).toBe(lengthBefore);
+      expect(service.sessionStats).toBe(statsBefore);
+      expect(service.isStreaming).toBe(false);
+    });
+
+    it('answerQuestion: stopConversation wins the race, no error block is appended', async () => {
+      mockTauri.isRunningInTauri = () => true;
+      await service.init();
+      service.isStreaming = true;
+      service._setState({
+        currentBlocks: [
+          {
+            type: 'ask_user',
+            question: {
+              tool_id: 't1',
+              question: 'q?',
+              options: [{ value: 'a', label: 'A' }],
+              header: '',
+              multi_select: false,
+              answered: false,
+              selected_values: [],
+            },
+          },
+        ],
+      });
+      let rejectAnswer: (err: Error) => void = () => {};
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'answer_question') {
+          return new Promise<undefined>((_, rej) => {
+            rejectAnswer = rej;
+          });
+        }
+        return undefined;
+      };
+      const answerPromise = service.answerQuestion('t1', ['a']);
+      await service.stopConversation();
+      rejectAnswer(new Error('Broken pipe'));
+      await answerPromise;
+      expect(service.messages.every((m) => m.blocks.every((b) => b.type !== 'error'))).toBe(true);
+      expect(service.currentBlocks).toEqual([]);
+    });
+  });
 });

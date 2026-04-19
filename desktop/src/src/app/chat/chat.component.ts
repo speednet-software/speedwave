@@ -94,6 +94,29 @@ export class ChatComponent implements OnInit, OnDestroy {
     });
   }
 
+  /** True if the current turn is paused on an unanswered AskUserQuestion. */
+  private hasUnansweredQuestion(): boolean {
+    return this.chat.currentBlocks.some((b) => b.type === 'ask_user' && !b.question.answered);
+  }
+
+  /**
+   * Handles ESC key to stop the current turn. Ignored when an unanswered
+   * AskUserQuestion block is visible — ESC semantics belong to that block.
+   * @param event - The keyboard event from the document.
+   */
+  @HostListener('document:keydown.escape', ['$event'])
+  onEscape(event: Event): void {
+    if (!this.chat.isStreaming) return;
+    if (this.hasUnansweredQuestion()) return; // let the block own ESC semantics
+    event.preventDefault();
+    this.chat.stopConversation();
+  }
+
+  /** Handles the Stop button click. Stops the current turn unconditionally. */
+  async onStopClicked(): Promise<void> {
+    await this.chat.stopConversation();
+  }
+
   /** Sends the current input text as a user message and invokes the backend. */
   async sendMessage(): Promise<void> {
     const text = this.inputText.trim();
