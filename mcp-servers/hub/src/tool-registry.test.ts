@@ -23,6 +23,7 @@ import {
   stopBackgroundRefresh,
   initializeRegistry,
   refreshServiceTools,
+  _setDiscoveryRetryDelaysForTesting,
 } from './tool-registry.js';
 import { TIMEOUTS } from '@speedwave/mcp-shared';
 import type { ToolMetadata } from './hub-types.js';
@@ -40,6 +41,10 @@ describe('tool-registry', () => {
   beforeEach(() => {
     _resetRegistryForTesting();
     populateRegistryWithMockTools();
+    // Skip the up-to-7 s production backoff (1+2+4 s delays) so tests don't wait
+    // every time discovery returns zero tools. The retry logic itself is
+    // covered by a dedicated test in this file.
+    _setDiscoveryRetryDelaysForTesting([0, 0, 0]);
   });
 
   afterEach(() => {
@@ -578,6 +583,39 @@ describe('tool-registry', () => {
 
       expect(TOOL_REGISTRY['redmine']['createItem']).toBeDefined();
       expect(TOOL_REGISTRY['redmine']['listItems']).toBeUndefined();
+    });
+  });
+
+  describe('discoverWithStartupRetry', () => {
+    it('retries discovery when first attempt returns zero tools', async () => {
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      const mockDiscover = vi.mocked(discoverAndMergeService);
+
+      _resetRegistryForTesting();
+      mockDiscover.mockClear();
+      _setDiscoveryRetryDelaysForTesting([0, 0, 0]);
+      resetServiceCaches();
+      process.env.ENABLED_SERVICES = 'gitlab';
+      process.env.WORKER_GITLAB_URL = 'http://mcp-gitlab:3000';
+
+      const toolsOnSecondAttempt: Record<string, ToolMetadata> = {
+        listBranches: {
+          name: 'listBranches',
+          workerToolName: 'list_branches',
+          description: 'List branches',
+          keywords: ['git'],
+          inputSchema: { type: 'object', properties: {} },
+          example: '',
+          service: 'gitlab',
+        } as ToolMetadata,
+      };
+
+      mockDiscover.mockResolvedValueOnce({}).mockResolvedValueOnce(toolsOnSecondAttempt);
+
+      await initializeRegistry();
+
+      expect(mockDiscover).toHaveBeenCalledTimes(2);
+      expect(Object.keys(TOOL_REGISTRY['gitlab'] ?? {}).length).toBe(1);
     });
   });
 });

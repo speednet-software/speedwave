@@ -34,7 +34,7 @@ Container memory limits are defined in `containers/compose.template.yml`. The Cl
 
 - **Claude container:** adaptive (`${CLAUDE_MEMORY}` — see scaling below)
 - **MCP Hub:** 512 MiB (fixed)
-- **MCP workers:** 128 MiB each (fixed)
+- **MCP workers:** 128 MiB each (fixed), except `mcp-playwright` which uses 2048 MiB (`cpus: 2.0`) due to Chromium requirements
 
 **Minimum requirement:** 8 GiB RAM. Speedwave warns at startup if the host has less than 8 GiB.
 

@@ -57,6 +57,7 @@ services:
       - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:${PORT_WORKER}
       - WORKER_REDMINE_URL=http://mcp-redmine:${PORT_WORKER}
       - WORKER_GITLAB_URL=http://mcp-gitlab:${PORT_WORKER}
+      - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:${PORT_WORKER}
     networks:
       - ${NETWORK_NAME}
     deploy:
@@ -163,6 +164,42 @@ services:
         limits:
           cpus: '0.5'
           memory: 128m
+
+  mcp-playwright:
+    image: ${IMAGE_MCP_PLAYWRIGHT}
+    pull_policy: never
+    container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_playwright
+    read_only: true
+    # NOTE: Playwright image pre-creates pwuser (UID 1000); CONTAINER_USER is set
+    # via substitution for consistency with other workers.
+    user: "${CONTAINER_USER}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Chromium uses /tmp for page caches and screenshot compositing.
+    # tmpfs lives in RAM — keep it lean. Heavy screenshots return inline
+    # as base64, not via /tmp.
+    tmpfs:
+      - /tmp:noexec,nosuid,size=1g
+    # Chromium IPC shared-memory requirement; the 64 MiB default causes ENOMEM
+    # at page load time.
+    shm_size: 2g
+    # No /tokens mount — Playwright accesses only public URLs and has no credentials.
+    # No /workspace mount in v1 — outputs return as base64 to shrink attack surface.
+    environment:
+      - PORT=${PORT_WORKER}
+      # Enable MCP-level request/response logging (uses the `debug` npm package;
+      # output goes to stderr, captured by `nerdctl logs`). Covers every
+      # tools/call, tool responses, and errors. Set to `pw:*` for full verbosity.
+      - DEBUG=pw:mcp:*
+    networks:
+      - ${NETWORK_NAME}
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2048m
 
 networks:
   ${NETWORK_NAME}:

@@ -300,6 +300,19 @@ mod tests {
     fn toggleable_services_have_auth_fields() {
         for svc in speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES {
             let fields = get_auth_fields(svc.config_key);
+            // Credential-less services (e.g. Playwright) declare `auth_fields: &[]`
+            // in their descriptor; `get_auth_fields` faithfully returns an empty vec.
+            // Only fail if the descriptor says the service has auth fields but the
+            // getter returns nothing — a real bug.
+            if svc.auth_fields.is_empty() {
+                assert!(
+                    fields.is_empty(),
+                    "service '{}' has no descriptor auth_fields but get_auth_fields returned {}",
+                    svc.config_key,
+                    fields.len()
+                );
+                continue;
+            }
             assert!(
                 !fields.is_empty(),
                 "TOGGLEABLE service '{}' has no auth_fields defined",

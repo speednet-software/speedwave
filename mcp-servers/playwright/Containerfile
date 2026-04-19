@@ -1,0 +1,111 @@
+# Speedwave MCP Playwright Worker
+#
+# Shared browser automation service — wraps Microsoft's official @playwright/mcp
+# package in a Speedwave-hardened container. Consumed by the `figma`,
+# `accessibility-audit`, `visual-regression`, and `site-analyzer` plugins (and
+# directly from Claude).
+#
+# Security profile:
+# - No /tokens mount (Playwright has no credentials).
+# - No /workspace mount in v1 (outputs returned as base64 to reduce attack
+#   surface). Will be revisited if a concrete use case requires it.
+# - --no-sandbox is safe: Lima/WSL2 VM + container cap_drop:ALL replace
+#   Chromium's sandbox, per ADR-004.
+# - --user-data-dir redirects Chromium's profile to tmpfs; container restart
+#   wipes /tmp, giving the same ephemeral-profile guarantee as --isolated.
+# - shm_size=2g set in compose (Chromium IPC needs more than the 64 MB default
+#   or it crashes on startup with ENOMEM).
+
+# Pinned digest for reproducible builds.
+# Tag: v1.59.1-jammy — tracks Playwright core 1.59.1.
+# Refresh the digest with:
+#   curl -sI -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+#     https://mcr.microsoft.com/v2/playwright/manifests/v1.59.1-jammy | grep -i digest
+FROM mcr.microsoft.com/playwright:v1.59.1-jammy@sha256:8a0360d39d1973be506dd59002904a774f6d697d4946c94063b3fd006461c8ff
+
+# @playwright/mcp is Microsoft's official MCP server for Playwright.
+# Version is pinned; bump deliberately as part of a regular dependency-update cadence.
+ARG PLAYWRIGHT_MCP_VERSION=0.0.70
+
+# Install the MCP server globally. The image already ships Chromium + OS deps
+# (libnss, fonts, etc.) matching the Playwright core version installed here.
+RUN npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
+    && npm cache clean --force
+
+# Disable the Streamable-HTTP heartbeat (ping every 3 s, 5 s kill timeout).
+# playwright-mcp's heartbeat assumes a persistent bidirectional SSE channel
+# that the Hub does not maintain — the ping has nowhere to land, so after
+# 5 s the server calls close() and the in-flight tools/call response is
+# truncated to 0 bytes. The sed flips the only `true` (Streamable HTTP) to
+# `false`; the SSE transport on line 106 already passes `false`.
+# Pinned to @playwright/mcp 0.0.70 — re-verify on version bumps.
+RUN sed -i 's/mcpServer\.connect(serverBackendFactory, transport, true)/mcpServer.connect(serverBackendFactory, transport, false)/' \
+       /usr/lib/node_modules/@playwright/mcp/node_modules/playwright-core/lib/tools/utils/mcp/http.js \
+    && grep -q 'mcpServer.connect(serverBackendFactory, transport, false)' \
+       /usr/lib/node_modules/@playwright/mcp/node_modules/playwright-core/lib/tools/utils/mcp/http.js \
+    || (echo "FATAL: heartbeat patch did not apply — verify path for @playwright/mcp ${PLAYWRIGHT_MCP_VERSION}" && exit 1)
+
+# Non-root user pre-created by the base image (UID 1000).
+USER pwuser
+
+WORKDIR /home/pwuser
+
+ENV PORT=3000 \
+    NODE_ENV=production
+
+EXPOSE 3000
+
+# Invoke the installed binary directly — do NOT use `npx` here. Under the
+# hardened compose profile (`read_only: true`) any attempt by npm/npx to
+# create `~/.npm` (cache/logs) fails with ENOENT and the container exits
+# with code 1. The global npm install above placed `playwright-mcp` in
+# /usr/bin/, so we call it unambiguously with an absolute path.
+#
+# --host 0.0.0.0:        reachable by mcp-hub on the compose network.
+# --port 3000:           conforms to ADR-038 (PORT_WORKER).
+# --browser chromium:    use the Chromium build preinstalled in the Microsoft
+#                        Playwright base image (/ms-playwright/chromium-*).
+#                        Without this flag playwright-mcp defaults to the
+#                        `chrome` channel (Google Chrome stable), which is
+#                        NOT bundled in the base image — we'd need a second
+#                        `npx playwright install chrome` step and a writable
+#                        home directory for the browser cache, which the
+#                        hardened compose profile (read_only rootfs) makes
+#                        impossible.
+# --allowed-hosts mcp-hub: restrict to hub hostname. Other containers on the
+#                        compose network cannot call Playwright directly.
+# --headless:            no display server inside the container.
+# --no-sandbox:          required because the container drops all capabilities;
+#                        the VM + container hardening layer takes over
+#                        Chromium's in-process sandboxing role. See ADR-004.
+# Path to the preinstalled Chrome Headless Shell. Regular Chromium requires
+# CAP_SYS_ADMIN / dbus to bootstrap its own crashpad + IPC plumbing, which
+# would force us to drop `cap_drop: ALL` from the compose profile. The
+# headless shell is a stripped-down Chromium build that needs none of that
+# and runs cleanly under our hardened profile (no capabilities, no-new-
+# privileges, read-only rootfs). Same browser engine, same web platform
+# APIs — just no GPU/dbus/audio stack.
+#
+# Version number (`1217`) is pinned via the base image tag above; when you
+# bump `v1.59.1-jammy` keep this path's version in sync or the launch
+# will fail with ENOENT.
+
+# --user-data-dir / --output-dir:
+#   playwright-mcp defaults to $HOME/.playwright-mcp and $HOME/.playwright-mcp-output
+#   for its cache and file outputs. With `read_only: true` on the root
+#   filesystem these mkdirs fail with ENOENT, so we redirect both to /tmp
+#   (backed by a compose tmpfs, so the data is still ephemeral). Note that
+#   `--user-data-dir` is mutually exclusive with `--isolated` — playwright-mcp
+#   crashes on startup if both are set. We go with the user-data-dir path
+#   because restarting the container already wipes /tmp, which gives us the
+#   same "fresh profile on restart" guarantee isolated mode advertises.
+CMD ["/usr/bin/playwright-mcp", \
+     "--host", "0.0.0.0", \
+     "--port", "3000", \
+     "--browser", "chromium", \
+     "--executable-path", "/ms-playwright/chromium_headless_shell-1217/chrome-linux/headless_shell", \
+     "--user-data-dir", "/tmp/playwright-mcp-userdata", \
+     "--output-dir", "/tmp/playwright-mcp-output", \
+     "--allowed-hosts", "mcp-hub", \
+     "--headless", \
+     "--no-sandbox"]

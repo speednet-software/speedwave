@@ -424,6 +424,16 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         ],
         credential_files: &["token", "host_url"],
     },
+    McpServiceDescriptor {
+        config_key: "playwright",
+        compose_name: "mcp-playwright",
+        worker_env: "WORKER_PLAYWRIGHT_URL",
+        display_name: "Playwright",
+        description: "Headless browser automation (Chromium via Playwright)",
+        // Playwright has no credentials — it scrapes public URLs only.
+        auth_fields: &[],
+        credential_files: &[],
+    },
 ];
 
 /// Descriptor for a toggleable OS integration service (macOS only).
@@ -494,11 +504,19 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
     "mcp-sharepoint",
     "mcp-redmine",
     "mcp-gitlab",
+    "mcp-playwright",
 ];
 
 /// Built-in service IDs (logical names, not compose names).
 /// Used by plugin install to prevent slug collisions.
-pub const BUILT_IN_SERVICE_IDS: &[&str] = &["slack", "sharepoint", "redmine", "gitlab", "os"];
+pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
+    "slack",
+    "sharepoint",
+    "redmine",
+    "gitlab",
+    "playwright",
+    "os",
+];
 
 /// Pure, testable function for resolving the data directory.
 /// `env_val` = None or empty string → `home.join(DATA_DIR)` (empty string treated as unset)
@@ -687,12 +705,13 @@ mod tests {
         let resolved = crate::config::ResolvedIntegrationsConfig::default();
         // Explicit field enumeration — update this when adding/removing MCP fields.
         // Using a const to force a compile-time reminder when struct changes.
-        const EXPECTED_MCP_FIELDS: usize = 4; // slack, sharepoint, redmine, gitlab
+        const EXPECTED_MCP_FIELDS: usize = 5; // slack, sharepoint, redmine, gitlab, playwright
         let _ = (
             resolved.slack,
             resolved.sharepoint,
             resolved.redmine,
             resolved.gitlab,
+            resolved.playwright,
         );
         assert_eq!(
             TOGGLEABLE_MCP_SERVICES.len(),
@@ -761,6 +780,7 @@ mod tests {
             ("sharepoint", 6),
             ("redmine", 3),
             ("gitlab", 2),
+            ("playwright", 0),
         ];
         for &(key, count) in expected {
             let svc =
@@ -776,9 +796,24 @@ mod tests {
         }
     }
 
+    /// Services that intentionally have no credentials — they access only
+    /// public resources (e.g. Playwright scrapes public URLs). Kept as a
+    /// small explicit allowlist so forgetting to declare auth for a new
+    /// service that actually needs it still fails this test.
+    const CREDENTIAL_LESS_SERVICES: &[&str] = &["playwright"];
+
     #[test]
     fn test_every_service_has_auth_fields() {
         for svc in TOGGLEABLE_MCP_SERVICES {
+            if CREDENTIAL_LESS_SERVICES.contains(&svc.config_key) {
+                assert!(
+                    svc.auth_fields.is_empty(),
+                    "service '{}' is in CREDENTIAL_LESS_SERVICES but declares auth fields — \
+                     move it out of the allowlist or remove the fields",
+                    svc.config_key
+                );
+                continue;
+            }
             assert!(
                 !svc.auth_fields.is_empty(),
                 "service '{}' must have at least one auth field",
@@ -790,6 +825,14 @@ mod tests {
     #[test]
     fn test_every_service_has_credential_files() {
         for svc in TOGGLEABLE_MCP_SERVICES {
+            if CREDENTIAL_LESS_SERVICES.contains(&svc.config_key) {
+                assert!(
+                    svc.credential_files.is_empty(),
+                    "service '{}' is in CREDENTIAL_LESS_SERVICES but declares credential files",
+                    svc.config_key
+                );
+                continue;
+            }
             assert!(
                 !svc.credential_files.is_empty(),
                 "service '{}' must have at least one credential file",
