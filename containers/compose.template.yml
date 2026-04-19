@@ -189,9 +189,9 @@ services:
     # No /workspace mount in v1 — outputs return as base64 to shrink attack surface.
     environment:
       - PORT=${PORT_WORKER}
-      # Enable MCP-level request/response logging (uses the `debug` npm package;
-      # output goes to stderr, captured by `nerdctl logs`). Covers every
-      # tools/call, tool responses, and errors. Set to `pw:*` for full verbosity.
+      # MCP-level request/response logging (uses the `debug` npm package;
+      # output goes to stderr, visible in Desktop UI → System Health logs).
+      # Covers tools/call, tool responses, and errors. Set to `pw:*` for full verbosity.
       - DEBUG=pw:mcp:*
     networks:
       - ${NETWORK_NAME}

@@ -1,4 +1,4 @@
-# Speedwave MCP Playwright Worker
+# Speedwave MCP Playwright Worker — see ADR-039 in docs/adr/
 #
 # Shared browser automation service — wraps Microsoft's official @playwright/mcp
 # package in a Speedwave-hardened container. Consumed by the `figma`,

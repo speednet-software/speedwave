@@ -736,7 +736,7 @@ mod tests {
 
     #[test]
     fn set_service_all_known_keys() {
-        for key in &["slack", "sharepoint", "redmine", "gitlab"] {
+        for key in &["slack", "sharepoint", "redmine", "gitlab", "playwright"] {
             let mut cfg = config::IntegrationsConfig::default();
             let ic = config::IntegrationConfig {
                 enabled: Some(true),
