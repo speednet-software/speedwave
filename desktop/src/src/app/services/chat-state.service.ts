@@ -360,11 +360,32 @@ export class ChatStateService {
     //    isStreaming=false and early-return (prevents double invoke of stop_chat).
     this.isStreaming = false;
 
-    // 3. Preserve the partial assistant reply but drop ask_user blocks. The
-    //    interrupt aborts the in-flight turn; Claude will not answer any
-    //    rendered question (the matching tool_use_id is abandoned), so the
-    //    block is unanswerable.
-    const keptBlocks = this._currentBlocks.filter((b) => b.type !== 'ask_user');
+    // 3. Preserve the partial assistant reply but drop ask_user blocks and
+    //    finalize running tool_use blocks. The interrupt aborts the in-flight
+    //    turn; Claude will not answer any rendered question (the matching
+    //    tool_use_id is abandoned), so ask_user is unanswerable. Running tools
+    //    would otherwise render a permanent "running" spinner inside a closed
+    //    message — flip them to status: 'error' with an "Interrupted" marker.
+    const keptBlocks = this._currentBlocks
+      .filter((b) => b.type !== 'ask_user')
+      .map((b) => {
+        if (b.type === 'tool_use' && b.tool.status === 'running') {
+          return {
+            ...b,
+            tool: {
+              type: 'tool_use' as const,
+              tool_id: b.tool.tool_id,
+              tool_name: b.tool.tool_name,
+              input_json: b.tool.input_json,
+              status: 'error' as const,
+              result: 'Interrupted',
+              result_is_error: true as const,
+              collapsed: b.tool.collapsed,
+            },
+          };
+        }
+        return b;
+      });
     if (keptBlocks.length > 0) {
       this._messages = [
         ...this._messages,
@@ -593,13 +614,12 @@ export class ChatStateService {
           return;
         }
         // Content-bearing chunks belong to a specific turn. If isStreaming is
-        // false (stopConversation already ran), drop the chunk so it cannot
-        // write into _messages or flip isStreaming back on. Use _turnId as an
-        // additional guard: a new turn bumps _turnId so stale chunks from the
-        // previous turn, still in the Tauri event queue, are also dropped.
-        const capturedTurn = this._turnId;
+        // false (stopConversation already ran, or the turn already finished),
+        // drop the chunk so it cannot write into _messages or flip isStreaming
+        // back on. That single check is sufficient in single-threaded JS:
+        // stopConversation sets isStreaming = false synchronously before any
+        // await, so every subsequent event-loop tick observes the reset.
         if (!this.isStreaming) return;
-        if (capturedTurn !== this._turnId) return;
         this.handleStreamChunk(chunk);
       });
     } catch (err) {

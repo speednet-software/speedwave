@@ -997,6 +997,12 @@ impl ChatSession {
                 ) || msg_type == "system"
                 {
                     got_result = true;
+                    // Clear StreamParser per-turn state. message_stop also
+                    // triggers reset inside parse_line, but an interrupted
+                    // turn may emit Result without a preceding message_stop,
+                    // leaving active_blocks entries that could misroute
+                    // ToolInputDelta events in the next turn.
+                    parser.reset();
                 }
                 if let Some(chunk) = chunk {
                     if let Err(e) = app_handle.emit("chat_stream", chunk) {
@@ -1125,11 +1131,14 @@ impl ChatSession {
     /// preserved.
     pub fn interrupt(&mut self) -> anyhow::Result<()> {
         // Mirror send_message/answer_question: detect a child that has already
-        // exited so we surface a clean "session exited" error instead of a
-        // confusing broken-pipe write failure.
+        // exited so we surface a clean "session exited" (or OOM) error instead
+        // of a confusing broken-pipe write failure.
         if let Some(child) = self.child.as_mut() {
             if let Some(status) = child.try_wait()? {
                 self.child = None;
+                if speedwave_runtime::resources::is_oom_exit(&status) {
+                    anyhow::bail!("{}", speedwave_runtime::resources::OOM_MESSAGE);
+                }
                 anyhow::bail!("session exited ({status})");
             }
         }

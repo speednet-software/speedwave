@@ -95,7 +95,7 @@ The frontend accumulates `MessageBlock[]` in `currentBlocks` during an assistant
 
 **Interactive questions (AskUserQuestion flow).** When Claude needs user confirmation (e.g., permission to run a tool), it sends a `control_request` via `--permission-prompt-tool stdio`. The backend parses this into an `AskUserQuestion` chunk containing the question text, selectable options, and a `tool_id`. The frontend renders the question with option buttons. When the user selects an answer, the frontend calls the `answer_question` Tauri command with the `tool_use_id` and selected value(s). The backend writes a `control_result` JSON message to Claude's stdin, and Claude resumes execution.
 
-**Stop / interrupt (turn cancel).** Pressing Esc or the Stop button calls the `stop_chat` Tauri command. The backend writes a `control_request` with `subtype: "interrupt"` to Claude's stdin (matching `SDKControlInterruptRequest` in claude-agent-sdk-python). Claude aborts the in-flight turn, emits a `result` with `subtype: "error_during_execution"`, and stays ready for the next user message on the same stdin — session, context, MCP hub, and history are preserved. The next `send_message` continues the same conversation; no `start_chat` or `resume_conversation` is needed. Killing the host-side `nerdctl exec` would not propagate any signal to the Claude process inside the container, so the protocol-level interrupt is the only reliable cancel mechanism.
+**Stop / interrupt (turn cancel).** Pressing Esc or the Stop button calls the `stop_chat` Tauri command. The backend writes a `control_request` with `subtype: "interrupt"` to Claude's stdin (matching `SDKControlInterruptRequest` in claude-agent-sdk-python[^47]). Claude aborts the in-flight turn, emits a `result` with `subtype: "error_during_execution"`[^48], and stays ready for the next user message on the same stdin — session, context, MCP hub, and history are preserved. The next `send_message` continues the same conversation; no `start_chat` or `resume_conversation` is needed. Killing the host-side `nerdctl exec` would not propagate any signal to the Claude process inside the container, so the protocol-level interrupt is the only reliable cancel mechanism.
 
 **Auto-retry on session death.** If `send_message` fails with "session exited", "no active session", or "Broken pipe", the frontend transparently restarts the Claude subprocess via `start_chat` and retries the message — the user sees no interruption. (The interrupt path above never triggers this retry — the session is still alive after a stop.)
 
@@ -136,3 +136,7 @@ Session IDs are validated as lowercase UUID v4 hex strings before any file acces
 [^45]: [Claude Code CLI reference — --include-partial-messages](https://code.claude.com/docs/en/cli-reference)
 
 [^46]: [Claude Agent SDK — Streaming vs Single Mode, input message format](https://platform.claude.com/docs/en/agent-sdk/streaming-vs-single-mode)
+
+[^47]: [claude-agent-sdk-python — SDKControlInterruptRequest in types.py](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/types.py)
+
+[^48]: [claude-agent-sdk-python — interrupt() emits result with subtype "error_during_execution"](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/client.py)
