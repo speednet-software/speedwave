@@ -241,6 +241,23 @@ async fn answer_question(
     .map_err(|e| e.to_string())?
 }
 
+fn stop_chat_inner(session_arc: SharedChatSession) -> Result<(), String> {
+    let mut session = session_arc
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    session.interrupt().map_err(|e| e.to_string())
+}
+
+/// Tauri command — delegates to [`ChatSession::interrupt`].
+#[tauri::command]
+async fn stop_chat(state: tauri::State<'_, SharedChatSession>) -> Result<(), String> {
+    log::info!("stop_chat: interrupting turn");
+    let session_arc = state.inner().clone();
+    tokio::task::spawn_blocking(move || stop_chat_inner(session_arc))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 // ---------------------------------------------------------------------------
 // Chat history commands
 // ---------------------------------------------------------------------------
@@ -1341,6 +1358,7 @@ fn main() {
             start_chat,
             send_message,
             answer_question,
+            stop_chat,
             // Chat history
             list_conversations,
             get_conversation,
@@ -1982,5 +2000,48 @@ mod tests {
             "first handle must be stashed into empty slot"
         );
         stashed.unwrap().join().expect("test thread must not panic");
+    }
+
+    // -- stop_chat_inner tests --
+
+    #[test]
+    fn stop_chat_inner_without_active_session_errors() {
+        // interrupt() requires an active stdin (shared_stdin=Some). A freshly
+        // constructed ChatSession has no stdin, so interrupt — and therefore
+        // stop_chat_inner — returns "no active session" instead of panicking.
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("test-project")));
+        let err = stop_chat_inner(session_arc).expect_err("expected error on idle session");
+        assert!(
+            err.contains("no active session"),
+            "expected 'no active session' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn stop_chat_inner_poisoned_mutex_returns_lock_poisoned_error() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("test-project")));
+        let arc_clone = session_arc.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = arc_clone.lock().unwrap();
+            panic!("poison the mutex");
+        })
+        .join();
+        let result = stop_chat_inner(session_arc);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Lock poisoned"),
+            "expected 'Lock poisoned' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn stop_chat_uses_spawn_blocking() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "async fn stop_chat(");
+        assert!(
+            body.contains("spawn_blocking"),
+            "stop_chat must use spawn_blocking to avoid blocking the main thread"
+        );
     }
 }
