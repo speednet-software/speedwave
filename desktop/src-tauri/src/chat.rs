@@ -1572,6 +1572,44 @@ mod tests {
         assert!(parser.active_blocks.is_empty());
     }
 
+    /// Regression test for the interrupt path: an interrupted turn can emit
+    /// `result` without a preceding `message_stop`, so the stdout-reader
+    /// calls `parser.reset()` after every terminal chunk. Without that
+    /// reset, stale `active_blocks` entries would misroute
+    /// `ToolInputDelta` events in the next turn when Claude reuses the
+    /// same content-block index for a different tool.
+    #[test]
+    fn reset_after_result_prevents_stale_tool_contamination() {
+        let mut parser = StreamParser::new();
+
+        // Turn 1: a tool starts at index 0 and receives a partial input delta.
+        let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_OLD","name":"Read","input":{}}}}"#;
+        parse_line_str(&mut parser, start);
+        assert!(parser.active_blocks.contains_key(&0));
+
+        // Interrupt emits a `result` directly — no preceding `message_stop`.
+        // The stdout-reader loop calls `parser.reset()` after this chunk, so
+        // simulate that here (parse_line alone does not reset on `result`).
+        let result = r#"{"type":"result","subtype":"error_during_execution","session_id":"s","total_cost_usd":0.0,"usage":{}}"#;
+        parse_line_str(&mut parser, result);
+        parser.reset();
+
+        assert!(parser.active_blocks.is_empty());
+        assert!(parser.tool_input.is_empty());
+
+        // Turn 2: Claude reuses index 0 for a different tool. Without the
+        // reset above, an input delta at index 0 would still route to the
+        // OLD tool_id; after reset the new tool_id takes over cleanly.
+        let start2 = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_NEW","name":"Edit","input":{}}}}"#;
+        parse_line_str(&mut parser, start2);
+        let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file\":\"x\"}"}}}"#;
+        let chunk = parse_line_str(&mut parser, delta).expect("expected ToolInputDelta");
+        match chunk {
+            StreamChunk::ToolInputDelta { tool_id, .. } => assert_eq!(tool_id, "toolu_NEW"),
+            other => panic!("expected ToolInputDelta for toolu_NEW, got {other:?}"),
+        }
+    }
+
     // ── StreamParser: user tool_result ────────────────────────────────
 
     #[test]

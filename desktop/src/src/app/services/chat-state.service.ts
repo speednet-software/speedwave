@@ -57,7 +57,13 @@ export class ChatStateService {
   private _totalOutputTokens = 0;
   private _contextWindowSize = 200_000;
 
-  /** Monotonically increasing turn id — bumped by stopConversation to invalidate late/buffered stream events. */
+  /**
+   * Monotonically increasing turn id. Bumped by both `sendMessage` (new turn
+   * starts) and `stopConversation` (turn cancelled). Used across awaits by
+   * `answerQuestion` to detect whether the turn it was answering has since
+   * been superseded, so late backend errors from the dying turn can be
+   * suppressed.
+   */
   private _turnId = 0;
   /** Test-only read access. */
   get turnId(): number {
