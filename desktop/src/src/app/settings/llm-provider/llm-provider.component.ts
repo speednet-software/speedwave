@@ -130,16 +130,10 @@ export class LlmProviderComponent implements OnInit {
 
   /** Returns a fallback base URL placeholder when backend default_base_url is unavailable. */
   baseUrlPlaceholder(): string {
-    switch (this.provider) {
-      case 'ollama':
-        return 'http://host.docker.internal:11434';
-      case 'lmstudio':
-        return 'http://host.docker.internal:1234';
-      case 'llamacpp':
-        return 'http://host.docker.internal:8080';
-      default:
-        return 'http://host.docker.internal:11434';
-    }
+    // No meaningful default for 'custom' — user must supply their own URL.
+    // Backend is SSOT for known-provider defaults (see default_base_url in compose.rs);
+    // this is just a fallback hint if the backend response arrives late.
+    return '';
   }
 
   /** Notifies parent when the provider selection changes. */

@@ -118,7 +118,7 @@ pub fn render_compose(
     yaml = inject_claude_env(&yaml, &resolved_config.env);
 
     // Handle LLM provider switching
-    yaml = apply_llm_config(&yaml, project_name, &resolved_config.llm)?;
+    yaml = apply_llm_config(&yaml, &resolved_config.llm)?;
 
     // Ensure plugin images exist (builds pending and missing) before compose generation.
     // Scoped to plugins enabled for this project — a broken plugin in another project
@@ -247,7 +247,7 @@ fn inject_claude_env(yaml: &str, env: &std::collections::HashMap<String, String>
     serde_yaml_ng::to_string(&doc).unwrap_or_else(|_| yaml.to_string())
 }
 
-fn apply_llm_config(yaml: &str, _project_name: &str, llm: &LlmConfig) -> anyhow::Result<String> {
+fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
     let provider = llm.provider.as_deref().unwrap_or("anthropic");
     match provider {
         "anthropic" => Ok(yaml.to_string()),
@@ -265,7 +265,13 @@ fn apply_llm_config(yaml: &str, _project_name: &str, llm: &LlmConfig) -> anyhow:
                 .ok_or_else(|| anyhow::anyhow!("Provider '{}' requires a base_url.", provider))?;
             let base_url = strip_trailing_v1(&base_url);
             validate_base_url(&base_url)?;
-            let model = llm.model.as_deref().unwrap_or("local-model");
+            let model = llm.model.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Provider '{}' requires a model name. \
+                     Configure it in Settings → LLM Provider → Model.",
+                    provider
+                )
+            })?;
             let extra_env = std::collections::HashMap::from([
                 ("ANTHROPIC_BASE_URL".to_string(), base_url),
                 (
@@ -303,7 +309,7 @@ fn strip_trailing_v1(url: &str) -> String {
     if let Some(without_v1) = stripped.strip_suffix("/v1") {
         without_v1.to_string()
     } else {
-        url.to_string()
+        stripped.to_string()
     }
 }
 
@@ -3268,7 +3274,7 @@ services:
             flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
             llm: LlmConfig {
                 provider: Some("ollama".to_string()),
-                model: None,
+                model: Some("llama3.3".to_string()),
                 base_url: None,
             },
         };
@@ -3284,6 +3290,36 @@ services:
         assert!(
             yaml.contains("ANTHROPIC_BASE_URL=http://host.docker.internal:11434"),
             "Ollama provider should set ANTHROPIC_BASE_URL to host.docker.internal:11434 (no /v1)"
+        );
+    }
+
+    #[test]
+    fn test_local_provider_requires_model() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig {
+                provider: Some("ollama".to_string()),
+                model: None,
+                base_url: None,
+            },
+        };
+        let result = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("requires a model name"),
+            "Error must mention model requirement, got: {msg}"
+        );
+        assert!(
+            msg.contains("ollama"),
+            "Error must mention the provider, got: {msg}"
         );
     }
 
@@ -3524,6 +3560,11 @@ services:
         assert_eq!(strip_trailing_v1("http://x:8080"), "http://x:8080");
         assert_eq!(strip_trailing_v1(""), "");
         assert_eq!(strip_trailing_v1("http://x:8080/v1/v1"), "http://x:8080/v1");
+        // Regression: trailing slash without /v1 must be stripped too,
+        // otherwise ANTHROPIC_BASE_URL ends with '/' and produces
+        // double-slash request paths.
+        assert_eq!(strip_trailing_v1("http://x:8080/"), "http://x:8080");
+        assert_eq!(strip_trailing_v1("http://x:8080///"), "http://x:8080");
     }
 
     #[test]
@@ -3533,8 +3574,8 @@ services:
             model: Some("llama3.3".to_string()),
             base_url: None,
         };
-        let result1 = apply_llm_config(COMPOSE_TEMPLATE, "proj", &llm).unwrap();
-        let result2 = apply_llm_config(&result1, "proj", &llm).unwrap();
+        let result1 = apply_llm_config(COMPOSE_TEMPLATE, &llm).unwrap();
+        let result2 = apply_llm_config(&result1, &llm).unwrap();
         assert_eq!(
             result1, result2,
             "apply_llm_config must be idempotent (no UUID injection)"
@@ -3600,8 +3641,8 @@ services:
         };
         let llm_anthropic = LlmConfig::default();
 
-        let with_ollama = apply_llm_config(COMPOSE_TEMPLATE, "proj", &llm_ollama).unwrap();
-        let with_anthropic = apply_llm_config(COMPOSE_TEMPLATE, "proj", &llm_anthropic).unwrap();
+        let with_ollama = apply_llm_config(COMPOSE_TEMPLATE, &llm_ollama).unwrap();
+        let with_anthropic = apply_llm_config(COMPOSE_TEMPLATE, &llm_anthropic).unwrap();
 
         let env_ollama = get_claude_env(&with_ollama);
         let env_anthropic = get_claude_env(&with_anthropic);
