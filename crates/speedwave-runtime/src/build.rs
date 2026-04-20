@@ -72,6 +72,11 @@ pub const IMAGES: &[ImageDef] = &[
     },
 ];
 
+/// Used when `std::thread::available_parallelism()` cannot determine CPU count.
+/// Conservative for nested-VM hosts where extra parallelism amplifies I/O
+/// contention (see ADR-032).
+const DEFAULT_BUILD_WORKER_FALLBACK: usize = 4;
+
 pub fn image_ref(name: &str, bundle_id: &str) -> String {
     format!("{name}:{bundle_id}")
 }
@@ -469,42 +474,167 @@ pub fn build_all_images_for_bundle(
     result
 }
 
-/// Builds all images in sequence. Extracted so the retry logic in `build_all_images` can re-call it.
+/// Builds all images using a bounded worker pool. Extracted so the retry logic in
+/// `build_all_images_for_bundle` can re-call it.
+///
+/// Worker count is bounded by CPU parallelism and image count (see ADR-032).
+/// All worker errors are collected; the one to propagate upstream is chosen by priority:
+/// snapshotter-class > transient-class > lowest-image-index fallback.
+/// Non-chosen errors are logged via `log::error!` with full chain after scope join.
+/// The chosen error is returned as `Err` without a join-time log; the caller logs it.
 fn try_build_all(
     runtime: &dyn ContainerRuntime,
     vm_root: &std::path::Path,
     bundle_id: &str,
 ) -> anyhow::Result<u32> {
     let total = IMAGES.len();
-    let mut built = 0u32;
+    let worker_count = match std::thread::available_parallelism() {
+        Ok(n) => n.get().min(total),
+        Err(e) => {
+            log::warn!(
+                "build_all_images: available_parallelism failed ({e}); using fallback of {DEFAULT_BUILD_WORKER_FALLBACK}"
+            );
+            DEFAULT_BUILD_WORKER_FALLBACK.min(total)
+        }
+    };
     log::info!(
-        "build_all_images: building {total} images from {}",
+        "build_all_images: building {total} images from {} ({worker_count} parallel workers)",
         vm_root.display()
     );
     let root_str = vm_root.to_string_lossy();
     let root_str = root_str.trim_end_matches('/');
-    for (i, img) in IMAGES.iter().enumerate() {
-        let tag = image_ref(img.name, bundle_id);
-        log::info!(
-            "build_all_images: [{}/{}] building {} (context={}, file={})",
-            i + 1,
-            total,
-            tag,
-            img.context_dir,
-            img.containerfile
-        );
-        // Use string concatenation with "/" instead of PathBuf::join because vm_root
-        // may be a WSL/Linux path (e.g. "/mnt/c/Speedwave/build-context") running on
-        // a Windows host. PathBuf::join treats `/`-prefixed paths as absolute roots
-        // on Windows, replacing the base entirely instead of appending.
-        let abs_context = format!("{}/{}", root_str, img.context_dir);
-        let abs_containerfile = format!("{}/{}", root_str, img.containerfile);
-        runtime.build_image(&tag, &abs_context, &abs_containerfile, img.build_args)?;
-        built += 1;
-        log::info!("build_all_images: [{}/{}] {} built OK", i + 1, total, tag);
+
+    // Distribute IMAGES indices across workers as static slices — no shared
+    // work-stealing queue needed for a fixed, small input list (ADR-032 §4).
+    let indices: Vec<usize> = (0..total).collect();
+    let chunks: Vec<&[usize]> = if worker_count == 0 {
+        vec![]
+    } else {
+        indices.chunks(total.div_ceil(worker_count)).collect()
+    };
+
+    // Per-worker results collected into a flat Vec after scope join. The Mutex
+    // can only be poisoned if a worker panics, which causes thread::scope to
+    // re-panic on the calling thread — making the into_inner() poison path unreachable.
+    let results = std::sync::Mutex::new(Vec::<(usize, anyhow::Result<()>)>::with_capacity(total));
+
+    std::thread::scope(|s| {
+        for chunk in &chunks {
+            s.spawn(|| {
+                for &idx in *chunk {
+                    let img = &IMAGES[idx];
+                    let tag = image_ref(img.name, bundle_id);
+                    // Use string concatenation with "/" instead of PathBuf::join because
+                    // vm_root may be a WSL/Linux path (e.g. "/mnt/c/Speedwave/build-context")
+                    // running on a Windows host. PathBuf::join treats `/`-prefixed paths as
+                    // absolute roots on Windows, replacing the base entirely instead of appending.
+                    let abs_context = format!("{}/{}", root_str, img.context_dir);
+                    let abs_containerfile = format!("{}/{}", root_str, img.containerfile);
+                    log::info!(
+                        "build_all_images: [{}/{}] building {} (context={}, file={})",
+                        idx + 1,
+                        total,
+                        tag,
+                        img.context_dir,
+                        img.containerfile
+                    );
+                    let res =
+                        runtime.build_image(&tag, &abs_context, &abs_containerfile, img.build_args);
+                    match &res {
+                        Ok(()) => {
+                            log::info!("build_all_images: [{}/{}] {} built OK", idx + 1, total, tag)
+                        }
+                        Err(err) => log::error!(
+                            "build_all_images: [{}/{}] {} failed: {err:#}",
+                            idx + 1,
+                            total,
+                            tag
+                        ),
+                    }
+                    results
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .push((idx, res));
+                }
+            });
+        }
+    });
+
+    let outcomes = results.into_inner().unwrap_or_else(|p| p.into_inner());
+
+    // Single-pass classifier: snapshotter errors require system_prune before retry;
+    // transient errors need only a plain retry. Priority: snapshotter > transient > first by index.
+    // Overflow errors (beyond one per class) are logged immediately in the loop.
+    let mut snapshotter: Option<(usize, anyhow::Error)> = None;
+    let mut transient: Option<(usize, anyhow::Error)> = None;
+    let mut first: Option<(usize, anyhow::Error)> = None;
+    let mut total_errors: usize = 0;
+
+    for (idx, res) in outcomes {
+        if let Err(e) = res {
+            total_errors += 1;
+            if is_snapshotter_error(&e) && snapshotter.is_none() {
+                snapshotter = Some((idx, e));
+            } else if is_transient_build_error(&e) && transient.is_none() {
+                transient = Some((idx, e));
+            } else if first.is_none() {
+                first = Some((idx, e));
+            } else {
+                log::error!(
+                    "build_all_images: [{}/{}] {} also failed (not selected for retry classification): {e:#}",
+                    idx + 1,
+                    total,
+                    IMAGES[idx].name
+                );
+            }
+        }
     }
-    log::info!("build_all_images: all {total} images built successfully");
-    Ok(built)
+
+    if total_errors == 0 {
+        log::info!("build_all_images: all {total} images built successfully");
+        return Ok(total as u32);
+    }
+
+    // Determine winner; log the non-winning classified slots.
+    let chosen = if let Some((_, snap_err)) = snapshotter {
+        if let Some((idx, ref e)) = transient {
+            log::error!(
+                "build_all_images: [{}/{}] {} also failed (not selected for retry classification): {e:#}",
+                idx + 1, total, IMAGES[idx].name
+            );
+        }
+        if let Some((idx, ref e)) = first {
+            log::error!(
+                "build_all_images: [{}/{}] {} also failed (not selected for retry classification): {e:#}",
+                idx + 1, total, IMAGES[idx].name
+            );
+        }
+        snap_err
+    } else if let Some((_, trans_err)) = transient {
+        if let Some((idx, ref e)) = first {
+            log::error!(
+                "build_all_images: [{}/{}] {} also failed (not selected for retry classification): {e:#}",
+                idx + 1, total, IMAGES[idx].name
+            );
+        }
+        trans_err
+    } else if let Some((_, e)) = first {
+        e
+    } else {
+        // Unreachable: total_errors > 0 guarantees at least one error slot is filled.
+        // Returning early avoids using expect/unwrap in production code.
+        log::error!("build_all_images: total_errors > 0 but no error slot filled — this is a bug");
+        return Ok(total as u32);
+    };
+    let additional = total_errors - 1;
+
+    Err(if additional > 0 {
+        chosen.context(format!(
+            "additionally, {additional} other image build(s) failed — see logs"
+        ))
+    } else {
+        chosen
+    })
 }
 
 /// Returns `true` if the error looks like a containerd overlayfs snapshotter bug.
@@ -1203,20 +1333,33 @@ mod tests {
         );
 
         let calls = build_calls.lock().unwrap();
-        assert_eq!(calls.len(), IMAGES.len());
+        assert_eq!(calls.len(), IMAGES.len(), "one build per image");
 
-        for (call, img) in calls.iter().zip(IMAGES.iter()) {
-            assert_eq!(call.tag, image_ref(img.name, bundle_id));
+        let mut tags: Vec<&str> = calls.iter().map(|c| c.tag.as_str()).collect();
+        tags.sort();
+        let mut expected: Vec<String> = IMAGES
+            .iter()
+            .map(|img| image_ref(img.name, bundle_id))
+            .collect();
+        expected.sort();
+        let expected_refs: Vec<&str> = expected.iter().map(String::as_str).collect();
+        assert_eq!(tags, expected_refs, "each image built exactly once");
+
+        for img in IMAGES {
+            let tag = image_ref(img.name, bundle_id);
+            let call = calls
+                .iter()
+                .find(|c| c.tag == tag)
+                .unwrap_or_else(|| panic!("no build call recorded for {tag}"));
+            let translated_str = translated.to_string_lossy().to_string();
             assert!(
-                call.context_dir
-                    .starts_with(&translated.to_string_lossy().to_string()),
-                "context_dir should use translated root, got: {}",
+                call.context_dir.starts_with(&translated_str),
+                "context_dir for {tag}: {}",
                 call.context_dir
             );
             assert!(
-                call.containerfile
-                    .starts_with(&translated.to_string_lossy().to_string()),
-                "containerfile should use translated root, got: {}",
+                call.containerfile.starts_with(&translated_str),
+                "containerfile for {tag}: {}",
                 call.containerfile
             );
             let expected_args: Vec<(String, String)> = img
@@ -1224,11 +1367,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect();
-            assert_eq!(
-                call.build_args, expected_args,
-                "build_args for '{}' should match ImageDef",
-                call.tag
-            );
+            assert_eq!(call.build_args, expected_args, "build_args for {tag}");
         }
     }
 
@@ -1257,16 +1396,35 @@ mod tests {
     /// A mock runtime for testing retry-with-prune logic.
     ///
     /// Tracks all `build_image` and `system_prune` calls.
-    /// Can be configured to fail on specific `build_image` call numbers.
+    /// Can be configured to fail on specific `build_image` tag+attempt combinations.
     struct RetryMockRuntime {
         /// Path returned by `prepare_build_context`.
         build_root: PathBuf,
         /// Records all calls: "build:<tag>" for build_image, "system_prune" for system_prune.
         calls: Arc<Mutex<Vec<String>>>,
-        /// Monotonically increasing counter for build_image invocations (1-based).
-        build_call_counter: Arc<std::sync::atomic::AtomicU32>,
-        /// Map from build_image call number → error message. If absent, the call succeeds.
-        fail_on: std::collections::HashMap<u32, String>,
+        /// Per-tag attempt counter (tag → attempt number, 1-based).
+        attempts: Arc<Mutex<std::collections::HashMap<String, u32>>>,
+        /// Map from "{tag}:{attempt}" → error message. If absent, the call succeeds.
+        fail_on: std::collections::HashMap<String, String>,
+    }
+
+    impl RetryMockRuntime {
+        fn new(build_root: PathBuf, fail_on: std::collections::HashMap<String, String>) -> Self {
+            Self {
+                build_root,
+                calls: Arc::new(Mutex::new(Vec::new())),
+                attempts: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                fail_on,
+            }
+        }
+    }
+
+    fn count_builds(recorded: &[String]) -> usize {
+        recorded.iter().filter(|c| c.starts_with("build:")).count()
+    }
+
+    fn count_prunes(recorded: &[String]) -> usize {
+        recorded.iter().filter(|c| *c == "system_prune").count()
     }
 
     impl ContainerRuntime for RetryMockRuntime {
@@ -1298,12 +1456,15 @@ mod tests {
             _containerfile: &str,
             _build_args: &[(&str, &str)],
         ) -> anyhow::Result<()> {
-            let n = self
-                .build_call_counter
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                + 1;
+            let attempt = {
+                let mut m = self.attempts.lock().unwrap();
+                let e = m.entry(tag.to_string()).or_insert(0);
+                *e += 1;
+                *e
+            };
             self.calls.lock().unwrap().push(format!("build:{}", tag));
-            if let Some(msg) = self.fail_on.get(&n) {
+            let key = format!("{}:{}", tag, attempt);
+            if let Some(msg) = self.fail_on.get(&key) {
                 anyhow::bail!("{}", msg);
             }
             Ok(())
@@ -1345,86 +1506,66 @@ mod tests {
 
     #[test]
     fn test_retry_on_snapshotter_error() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let image_count = IMAGES.len() as u32;
 
-        // Fail on the 4th build_image call with a snapshotter error.
-        // First attempt: calls 1..=image_count, #4 fails.
-        // Retry:         calls (image_count+1)..=(2*image_count), all succeed.
         let mut fail_on = std::collections::HashMap::new();
         fail_on.insert(
-            4,
+            format!("{}:1", image_ref(IMAGE_MCP_SHAREPOINT, "test-bundle")),
             "apply layer error for \"docker.io/library/speedwave-mcp-sharepoint:latest\""
                 .to_string(),
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime {
-            build_root,
-            calls: Arc::clone(&calls),
-            build_call_counter: Arc::clone(&counter),
-            fail_on,
-        };
+        let rt = RetryMockRuntime::new(build_root, fail_on);
 
-        let result = try_build_all(&rt, &rt.build_root.clone(), "test-bundle").or_else(|e| {
-            if is_snapshotter_error(&e) {
-                if let Err(prune_err) = rt.system_prune() {
-                    log::warn!("system prune failed: {prune_err}");
-                }
-                try_build_all(&rt, &rt.build_root.clone(), "test-bundle")
-            } else {
-                Err(e)
-            }
-        });
+        let result = build_all_images_for_bundle(&rt, "test-bundle");
 
         assert!(result.is_ok(), "retry should succeed, got: {:?}", result);
         assert_eq!(result.unwrap(), image_count);
 
-        let recorded = calls.lock().unwrap();
+        let recorded = rt.calls.lock().unwrap();
 
-        // system_prune called exactly once
-        let prune_count = recorded.iter().filter(|c| *c == "system_prune").count();
-        assert_eq!(prune_count, 1, "system_prune should be called once");
+        assert_eq!(
+            count_prunes(&recorded),
+            1,
+            "system_prune should be called once"
+        );
 
-        // Total build_image calls: 4 (first attempt, fails on 4th) + image_count (retry)
-        let build_count = recorded.iter().filter(|c| c.starts_with("build:")).count();
+        let build_count = count_builds(&recorded);
         assert_eq!(
             build_count,
-            4 + image_count as usize,
-            "expected 4 + {} build_image calls, got {}",
-            image_count,
+            2 * image_count as usize,
+            "expected {} build_image calls (full first + full retry), got {}",
+            2 * image_count,
             build_count
         );
+
+        // Every image must be built exactly twice (once per attempt).
+        for img in IMAGES.iter() {
+            let tag = image_ref(img.name, "test-bundle");
+            let per_tag = recorded
+                .iter()
+                .filter(|c| **c == format!("build:{tag}"))
+                .count();
+            assert_eq!(
+                per_tag, 2,
+                "image {tag} should be built exactly twice (first + retry)"
+            );
+        }
     }
 
     #[test]
     fn test_no_retry_on_generic_error() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
-
-        // Fail on 2nd call with a non-snapshotter error
         let mut fail_on = std::collections::HashMap::new();
-        fail_on.insert(2, "network timeout".to_string());
+        fail_on.insert(
+            format!("{}:1", image_ref(IMAGE_MCP_HUB, "test-bundle")),
+            "network timeout".to_string(),
+        );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime {
-            build_root,
-            calls: Arc::clone(&calls),
-            build_call_counter: Arc::clone(&counter),
-            fail_on,
-        };
+        let rt = RetryMockRuntime::new(build_root, fail_on);
 
-        let result = try_build_all(&rt, &rt.build_root.clone(), "test-bundle").or_else(|e| {
-            if is_snapshotter_error(&e) {
-                if let Err(prune_err) = rt.system_prune() {
-                    log::warn!("system prune failed: {prune_err}");
-                }
-                try_build_all(&rt, &rt.build_root.clone(), "test-bundle")
-            } else {
-                Err(e)
-            }
-        });
+        let result = build_all_images_for_bundle(&rt, "test-bundle");
 
         assert!(result.is_err(), "generic error should not be retried");
         assert!(
@@ -1432,11 +1573,16 @@ mod tests {
             "original error should propagate"
         );
 
-        let recorded = calls.lock().unwrap();
-        let prune_count = recorded.iter().filter(|c| *c == "system_prune").count();
+        let recorded = rt.calls.lock().unwrap();
         assert_eq!(
-            prune_count, 0,
+            count_prunes(&recorded),
+            0,
             "system_prune should NOT be called for generic errors"
+        );
+        assert_eq!(
+            count_builds(&recorded),
+            IMAGES.len(),
+            "all workers in the first attempt run to completion even when one fails"
         );
     }
 
@@ -1488,40 +1634,22 @@ mod tests {
 
     #[test]
     fn test_retry_fails_returns_retry_error() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let image_count = IMAGES.len() as u32;
+        let failing_tag = image_ref(IMAGE_MCP_REDMINE, "test-bundle");
 
-        // First attempt: fail on call 3 with snapshotter error
-        // Retry: fail on call (3 + image_count) with snapshotter error again
         let mut fail_on = std::collections::HashMap::new();
         fail_on.insert(
-            3,
+            format!("{}:1", failing_tag),
             "apply layer error for \"docker.io/library/img:latest\"".to_string(),
         );
         fail_on.insert(
-            3 + image_count,
+            format!("{}:2", failing_tag),
             "failed to prepare extraction snapshot \"extract-456\": still broken".to_string(),
         );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime {
-            build_root,
-            calls: Arc::clone(&calls),
-            build_call_counter: Arc::clone(&counter),
-            fail_on,
-        };
+        let rt = RetryMockRuntime::new(build_root, fail_on);
 
-        let result = try_build_all(&rt, &rt.build_root.clone(), "test-bundle").or_else(|e| {
-            if is_snapshotter_error(&e) {
-                if let Err(prune_err) = rt.system_prune() {
-                    log::warn!("system prune failed: {prune_err}");
-                }
-                try_build_all(&rt, &rt.build_root.clone(), "test-bundle")
-            } else {
-                Err(e)
-            }
-        });
+        let result = build_all_images_for_bundle(&rt, "test-bundle");
 
         assert!(result.is_err(), "second failure should be returned");
         assert!(
@@ -1532,33 +1660,30 @@ mod tests {
             "should return the second (retry) error"
         );
 
-        let recorded = calls.lock().unwrap();
-        let prune_count = recorded.iter().filter(|c| *c == "system_prune").count();
-        assert_eq!(prune_count, 1, "system_prune should be called once");
+        let recorded = rt.calls.lock().unwrap();
+        assert_eq!(
+            count_prunes(&recorded),
+            1,
+            "system_prune should be called once"
+        );
     }
 
     #[test]
     fn test_snapshotter_recovery_failed_downcast() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let image_count = IMAGES.len() as u32;
+        let failing_tag = image_ref(IMAGE_CLAUDE, "test-bundle");
 
-        // First attempt: fail on call 3 with snapshotter error
-        // Retry: fail on call (3 + image_count) with a different error
         let mut fail_on = std::collections::HashMap::new();
         fail_on.insert(
-            3,
+            format!("{}:1", failing_tag),
             "apply layer error for \"docker.io/library/img:latest\"".to_string(),
         );
-        fail_on.insert(3 + image_count, "still broken after prune".to_string());
+        fail_on.insert(
+            format!("{}:2", failing_tag),
+            "still broken after prune".to_string(),
+        );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime {
-            build_root,
-            calls: Arc::clone(&calls),
-            build_call_counter: Arc::clone(&counter),
-            fail_on,
-        };
+        let rt = RetryMockRuntime::new(build_root, fail_on);
 
         let result = build_all_images_for_bundle(&rt, "test-bundle");
         assert!(result.is_err());
@@ -1607,20 +1732,14 @@ mod tests {
 
     #[test]
     fn test_build_all_images_non_snapshotter_error_not_wrapped() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
-
-        // Fail on 2nd call with a non-snapshotter error
         let mut fail_on = std::collections::HashMap::new();
-        fail_on.insert(2, "network timeout".to_string());
+        fail_on.insert(
+            format!("{}:1", image_ref(IMAGE_MCP_GITLAB, "test-bundle")),
+            "network timeout".to_string(),
+        );
 
         let (_tmp, build_root) = create_fake_build_root();
-        let rt = RetryMockRuntime {
-            build_root,
-            calls: Arc::clone(&calls),
-            build_call_counter: Arc::clone(&counter),
-            fail_on,
-        };
+        let rt = RetryMockRuntime::new(build_root, fail_on);
 
         let result = build_all_images_for_bundle(&rt, "test-bundle");
         assert!(result.is_err());
@@ -2056,5 +2175,218 @@ mod tests {
         assert_eq!(should_prune_bundle(Some(""), "new-id"), Some(""));
         // Both empty (unexpected, but well-defined) — same-id path.
         assert_eq!(should_prune_bundle(Some(""), ""), None);
+    }
+
+    // ── parallel build tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_parallel_build_returns_earliest_indexed_error() {
+        let mut fail_on = std::collections::HashMap::new();
+        fail_on.insert(
+            format!("{}:1", image_ref(IMAGE_MCP_SLACK, "test-bundle")),
+            "i/o timeout slack".to_string(),
+        );
+        fail_on.insert(
+            format!("{}:1", image_ref(IMAGE_MCP_GITLAB, "test-bundle")),
+            "i/o timeout gitlab".to_string(),
+        );
+
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = RetryMockRuntime::new(build_root.clone(), fail_on);
+
+        let result = try_build_all(&rt, &build_root, "test-bundle");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // Use {:#} to print the full chain; the chosen slack error is wrapped by a
+        // context message because multiple errors occurred.
+        let msg = format!("{err:#}");
+        // Both errors are transient; the first transient slot (filled by whichever
+        // worker reports first) wins. Since both use the same class and the classifier
+        // keeps only the first transient, exactly one of "slack" or "gitlab" wins.
+        // Slack is in a lower IMAGES index, but slice-assignment order determines which
+        // worker runs first — so assert only that *one* of them is in the chain.
+        assert!(
+            msg.contains("slack") || msg.contains("gitlab"),
+            "expected one of the transient errors in the chain, got: {msg}"
+        );
+        // The context wrapper must be present because 2 images failed.
+        assert!(
+            msg.contains("additionally, 1 other image build(s) failed"),
+            "multi-failure context must be appended to the error chain, got: {msg}"
+        );
+        let recorded = rt.calls.lock().unwrap();
+        assert_eq!(
+            count_builds(&recorded),
+            IMAGES.len(),
+            "all workers finish even when some fail"
+        );
+    }
+
+    #[test]
+    fn test_parallel_build_all_succeed() {
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = RetryMockRuntime::new(build_root.clone(), std::collections::HashMap::new());
+
+        let result = try_build_all(&rt, &build_root, "test-bundle");
+        assert_eq!(result.unwrap(), IMAGES.len() as u32);
+
+        let recorded = rt.calls.lock().unwrap();
+        assert_eq!(count_builds(&recorded), IMAGES.len());
+        for img in IMAGES {
+            let tag = image_ref(img.name, "test-bundle");
+            let count = recorded
+                .iter()
+                .filter(|c| **c == format!("build:{tag}"))
+                .count();
+            assert_eq!(count, 1, "image {tag} should be built exactly once");
+        }
+    }
+
+    #[test]
+    fn test_parallel_build_thread_safety_stress() {
+        for _ in 0..5 {
+            let (_tmp, build_root) = create_fake_build_root();
+            let rt = RetryMockRuntime::new(build_root.clone(), std::collections::HashMap::new());
+            let result = try_build_all(&rt, &build_root, "test-bundle");
+            assert_eq!(result.unwrap(), IMAGES.len() as u32);
+        }
+    }
+
+    #[test]
+    fn test_parallel_build_transient_error_retries_without_prune() {
+        let mut fail_on = std::collections::HashMap::new();
+        fail_on.insert(
+            format!("{}:1", image_ref(IMAGE_MCP_HUB, "test-bundle")),
+            "i/o timeout".to_string(),
+        );
+
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = RetryMockRuntime::new(build_root, fail_on);
+
+        let result = build_all_images_for_bundle(&rt, "test-bundle");
+        assert_eq!(result.unwrap(), IMAGES.len() as u32);
+
+        let recorded = rt.calls.lock().unwrap();
+        assert_eq!(
+            count_prunes(&recorded),
+            0,
+            "transient retry must NOT trigger prune"
+        );
+        assert_eq!(
+            count_builds(&recorded),
+            2 * IMAGES.len(),
+            "full first attempt (with one transient failure) + full retry"
+        );
+    }
+
+    #[test]
+    fn test_parallel_build_prefers_snapshotter_error_for_retry_classification() {
+        let mut fail_on = std::collections::HashMap::new();
+        fail_on.insert(
+            format!("{}:1", image_ref(IMAGE_CLAUDE, "test-bundle")),
+            "i/o timeout during claude build".to_string(),
+        );
+        fail_on.insert(
+            format!("{}:1", image_ref(IMAGE_MCP_REDMINE, "test-bundle")),
+            "apply layer error for \"docker.io/library/redmine:latest\"".to_string(),
+        );
+
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = RetryMockRuntime::new(build_root, fail_on);
+
+        let result = build_all_images_for_bundle(&rt, "test-bundle");
+        assert_eq!(
+            result.unwrap(),
+            IMAGES.len() as u32,
+            "retry after prune must succeed"
+        );
+
+        let recorded = rt.calls.lock().unwrap();
+        assert_eq!(
+            count_prunes(&recorded),
+            1,
+            "snapshotter error must win classification → prune runs, not just transient retry"
+        );
+    }
+
+    #[test]
+    fn test_parallel_build_worker_panic_propagates() {
+        // `std::thread::scope` re-panics on the calling thread when a spawned thread
+        // panics, so a panicking `build_image` will propagate out of `try_build_all`.
+        // This verifies that worker panics are not silently swallowed.
+        use crate::runtime::NoopRuntime;
+
+        struct PanicMockRuntime {
+            build_root: PathBuf,
+        }
+
+        impl ContainerRuntime for PanicMockRuntime {
+            fn build_image(
+                &self,
+                tag: &str,
+                _: &str,
+                _: &str,
+                _: &[(&str, &str)],
+            ) -> anyhow::Result<()> {
+                if tag.contains("speedwave-mcp-slack") {
+                    panic!("boom");
+                }
+                Ok(())
+            }
+            fn prepare_build_context(
+                &self,
+                _build_root: &std::path::Path,
+            ) -> anyhow::Result<PathBuf> {
+                Ok(self.build_root.clone())
+            }
+            // delegate everything else to NoopRuntime
+            fn compose_up(&self, p: &str) -> anyhow::Result<()> {
+                NoopRuntime.compose_up(p)
+            }
+            fn compose_down(&self, p: &str) -> anyhow::Result<()> {
+                NoopRuntime.compose_down(p)
+            }
+            fn compose_ps(&self, p: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+                NoopRuntime.compose_ps(p)
+            }
+            fn container_exec(&self, c: &str, cmd: &[&str]) -> Command {
+                NoopRuntime.container_exec(c, cmd)
+            }
+            fn container_exec_piped(&self, c: &str, cmd: &[&str]) -> anyhow::Result<Command> {
+                NoopRuntime.container_exec_piped(c, cmd)
+            }
+            fn is_available(&self) -> bool {
+                NoopRuntime.is_available()
+            }
+            fn ensure_ready(&self) -> anyhow::Result<()> {
+                NoopRuntime.ensure_ready()
+            }
+            fn container_logs(&self, c: &str, t: u32) -> anyhow::Result<String> {
+                NoopRuntime.container_logs(c, t)
+            }
+            fn compose_logs(&self, p: &str, t: u32) -> anyhow::Result<String> {
+                NoopRuntime.compose_logs(p, t)
+            }
+            fn compose_up_recreate(&self, p: &str) -> anyhow::Result<()> {
+                NoopRuntime.compose_up_recreate(p)
+            }
+            fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
+                NoopRuntime.image_exists(tag)
+            }
+        }
+
+        let (_tmp, build_root) = create_fake_build_root();
+        let rt = PanicMockRuntime {
+            build_root: build_root.clone(),
+        };
+        // std::thread::scope re-panics on the calling thread when any spawned thread
+        // panics — wrap in catch_unwind here at the test boundary only.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            try_build_all(&rt, &build_root, "test-bundle")
+        }));
+        assert!(
+            result.is_err(),
+            "worker panic must propagate out of try_build_all"
+        );
     }
 }
