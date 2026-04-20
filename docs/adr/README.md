@@ -24,7 +24,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-015](ADR-015-plugin-system.md)                                    | Plugin System                                           | Accepted              |
 | [ADR-016](ADR-016-cross-platform-cli-path.md)                          | Cross-Platform CLI PATH                                 | Accepted              |
 | [ADR-017](ADR-017-claude-code-in-container-via-entrypoint.md)          | Claude Code in Container via entrypoint.sh              | Accepted              |
-| [ADR-018](ADR-018-llm-provider-switching-proxy-as-container.md)        | LLM Provider Switching — Proxy as Container             | Accepted              |
+| [ADR-018](ADR-018-llm-provider-switching-proxy-as-container.md)        | LLM Provider Switching — Proxy as Container             | Superseded by ADR-040 |
 | [ADR-019](ADR-019-git-branching-model-and-release-flow.md)             | Git Branching Model and Release Flow                    | Accepted              |
 | [ADR-020](ADR-020-legal-compliance-and-license-analysis.md)            | Legal Compliance & License Analysis                     | Accepted              |
 | [ADR-021](ADR-021-bundled-dependencies-and-zero-install-strategy.md)   | Bundled Dependencies and Zero-Install Strategy          | Accepted              |
@@ -46,6 +46,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-037](ADR-037-code-signing-and-bundled-binary-signing.md)          | Code Signing and Bundled Binary Signing                 | Accepted              |
 | [ADR-038](ADR-038-single-internal-worker-port.md)                      | Single Internal Worker Port                             | Accepted              |
 | [ADR-039](ADR-039-playwright-shared-browser-service.md)                | Playwright Shared Browser Service                       | Accepted              |
+| [ADR-040](ADR-040-remove-litellm-direct-provider-injection.md)         | Remove LiteLLM — Direct Local Provider Injection        | Accepted              |
 
 ## Creating a New ADR
 

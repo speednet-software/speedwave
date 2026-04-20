@@ -81,11 +81,10 @@ All 6 built-in services use `user: "${CONTAINER_USER}"` instead of `user: "1000:
 
 ### Substitution sites
 
-The `${CONTAINER_USER}` variable is resolved in three locations:
+The `${CONTAINER_USER}` variable is resolved in two locations:
 
 1. **`render_compose()`** — main compose template rendering, where all `${CONTAINER_USER}` placeholders in `compose.template.yml` are replaced.
-2. **`apply_llm_config()`** — dynamically created `llm-proxy` service, which injects `user: "{container_user}"` directly into the inline YAML.
-3. **`apply_plugins()`** — plugin compose generation, where `${CONTAINER_USER}` is resolved when generating plugin service containers.
+2. **`apply_plugins()`** — plugin compose generation, where `${CONTAINER_USER}` is resolved when generating plugin service containers.
 
 ### SecurityCheck: `check_container_user`
 

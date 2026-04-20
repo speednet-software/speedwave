@@ -101,22 +101,12 @@ import { AuthTerminalComponent } from '../auth-terminal.component';
         </div>
       </section>
     }
-    @if (llmProvider === 'ollama') {
+    @if (isLocalProvider()) {
       <section class="mb-6">
         <h2 class="text-[15px] text-sw-text m-0 mb-3">Authentication</h2>
         <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-4">
           <p class="text-[11px] text-sw-text-faint mt-2 mb-0" data-testid="auth-note">
-            No authentication needed for Ollama.
-          </p>
-        </div>
-      </section>
-    }
-    @if (llmProvider === 'external') {
-      <section class="mb-6">
-        <h2 class="text-[15px] text-sw-text m-0 mb-3">Authentication</h2>
-        <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-4">
-          <p class="text-[11px] text-sw-text-faint mt-2 mb-0" data-testid="auth-note">
-            Uses API key env var from LLM Provider settings above.
+            No authentication needed for local model providers.
           </p>
         </div>
       </section>
@@ -139,6 +129,11 @@ export class AuthSectionComponent implements OnChanges {
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
+
+  /** Returns true if the selected provider is a local model (no Anthropic auth needed). */
+  isLocalProvider(): boolean {
+    return ['ollama', 'lmstudio', 'llamacpp', 'custom'].includes(this.llmProvider);
+  }
 
   /**
    * Reloads auth status when the active project changes.

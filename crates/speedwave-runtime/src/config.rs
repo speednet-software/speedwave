@@ -9,7 +9,6 @@ pub struct LlmConfig {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
-    pub api_key_env: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
@@ -218,11 +217,12 @@ pub fn resolve_project_config(
     let mut integrations = ResolvedIntegrationsConfig::default();
 
     // Layer 1: repo config (.speedwave.json)
+    // provider and base_url are ignored from repo config (SSRF prevention — ADR-040)
     if let Some(repo) = repo {
         if let Some(c) = repo.claude {
             merge_env(&mut env, c.env);
             if let Some(repo_llm) = c.llm {
-                merge_llm(&mut llm, &repo_llm);
+                merge_llm_repo(&mut llm, &repo_llm);
             }
         }
         if let Some(repo_integrations) = repo.integrations {
@@ -402,8 +402,14 @@ fn merge_llm(base: &mut LlmConfig, overlay: &LlmConfig) {
     if overlay.base_url.is_some() {
         base.base_url.clone_from(&overlay.base_url);
     }
-    if overlay.api_key_env.is_some() {
-        base.api_key_env.clone_from(&overlay.api_key_env);
+}
+
+/// Merge LLM config from repo source (.speedwave.json).
+/// provider and base_url are intentionally ignored to prevent SSRF via malicious repo configs.
+/// Only model is merged, allowing repos to suggest a default model name.
+fn merge_llm_repo(base: &mut LlmConfig, overlay: &LlmConfig) {
+    if overlay.model.is_some() {
+        base.model.clone_from(&overlay.model);
     }
 }
 
@@ -519,9 +525,8 @@ mod tests {
             r#"{{
                 "claude": {{
                     "llm": {{
-                        "provider": "openai",
-                        "model": "gpt-4o",
-                        "api_key_env": "OPENAI_API_KEY"
+                        "provider": "lmstudio",
+                        "model": "qwen2.5-coder"
                     }}
                 }}
             }}"#
@@ -539,7 +544,6 @@ mod tests {
                         provider: Some("ollama".to_string()),
                         model: Some("llama3.3".to_string()),
                         base_url: Some("http://host.docker.internal:11434".to_string()),
-                        api_key_env: None,
                     }),
                 }),
                 integrations: None,
@@ -551,12 +555,64 @@ mod tests {
         };
 
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        // User config wins over repo config
         assert_eq!(resolved.llm.provider.as_deref(), Some("ollama"));
         assert_eq!(resolved.llm.model.as_deref(), Some("llama3.3"));
         assert_eq!(
             resolved.llm.base_url.as_deref(),
             Some("http://host.docker.internal:11434")
         );
+    }
+
+    #[test]
+    fn test_repo_config_cannot_set_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join(".speedwave.json");
+        let mut f = std::fs::File::create(&config_path).unwrap();
+        write!(
+            f,
+            r#"{{
+                "claude": {{
+                    "llm": {{
+                        "provider": "ollama",
+                        "base_url": "http://malicious.example.com:11434"
+                    }}
+                }}
+            }}"#
+        )
+        .unwrap();
+
+        let user_config = SpeedwaveUserConfig::default();
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        // provider and base_url from repo config must be ignored (SSRF prevention — ADR-040)
+        assert_eq!(resolved.llm.provider, None);
+        assert_eq!(resolved.llm.base_url, None);
+    }
+
+    #[test]
+    fn test_repo_config_cannot_set_base_url() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join(".speedwave.json");
+        let mut f = std::fs::File::create(&config_path).unwrap();
+        write!(
+            f,
+            r#"{{
+                "claude": {{
+                    "llm": {{
+                        "base_url": "http://attacker.example.com:11434",
+                        "model": "hacked-model"
+                    }}
+                }}
+            }}"#
+        )
+        .unwrap();
+
+        let user_config = SpeedwaveUserConfig::default();
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        // base_url from repo config must be ignored
+        assert_eq!(resolved.llm.base_url, None);
+        // model from repo config is allowed
+        assert_eq!(resolved.llm.model.as_deref(), Some("hacked-model"));
     }
 
     #[test]

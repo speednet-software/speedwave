@@ -215,7 +215,6 @@ pub fn save_compose(project: &str, yaml: &str) -> anyhow::Result<()> {
 }
 
 fn inject_claude_env(yaml: &str, env: &std::collections::HashMap<String, String>) -> String {
-    // Parse YAML, find claude service, inject env vars
     let mut doc: serde_yaml_ng::Value = match serde_yaml_ng::from_str(yaml) {
         Ok(v) => v,
         Err(_) => return yaml.to_string(),
@@ -226,7 +225,19 @@ fn inject_claude_env(yaml: &str, env: &std::collections::HashMap<String, String>
             if let Some(environment) = claude.get_mut("environment") {
                 if let Some(env_seq) = environment.as_sequence_mut() {
                     for (key, value) in env {
-                        env_seq.push(serde_yaml_ng::Value::String(format!("{}={}", key, value)));
+                        let new_entry = format!("{}={}", key, value);
+                        let existing = env_seq.iter().position(|v| {
+                            v.as_str()
+                                .is_some_and(|s| s.split('=').next() == Some(key.as_str()))
+                        });
+                        match existing {
+                            Some(idx) => {
+                                env_seq[idx] = serde_yaml_ng::Value::String(new_entry);
+                            }
+                            None => {
+                                env_seq.push(serde_yaml_ng::Value::String(new_entry));
+                            }
+                        }
                     }
                 }
             }
@@ -236,98 +247,97 @@ fn inject_claude_env(yaml: &str, env: &std::collections::HashMap<String, String>
     serde_yaml_ng::to_string(&doc).unwrap_or_else(|_| yaml.to_string())
 }
 
-fn apply_llm_config(yaml: &str, project_name: &str, llm: &LlmConfig) -> anyhow::Result<String> {
+fn apply_llm_config(yaml: &str, _project_name: &str, llm: &LlmConfig) -> anyhow::Result<String> {
     let provider = llm.provider.as_deref().unwrap_or("anthropic");
-
     match provider {
-        "anthropic" => {
-            // Default — no proxy needed, Claude Code connects directly to api.anthropic.com
-            Ok(yaml.to_string())
+        "anthropic" => Ok(yaml.to_string()),
+        "custom" if llm.base_url.is_none() => {
+            anyhow::bail!(
+                "Custom provider requires a base_url. \
+                 Configure it in Settings → LLM Provider → Base URL."
+            );
         }
-        "ollama" => {
-            // Ollama: direct connection without proxy
+        _ => {
             let base_url = llm
                 .base_url
-                .as_deref()
-                .unwrap_or("http://host.docker.internal:11434");
+                .clone()
+                .or_else(|| default_base_url(provider))
+                .ok_or_else(|| anyhow::anyhow!("Provider '{}' requires a base_url.", provider))?;
+            let base_url = strip_trailing_v1(&base_url);
+            validate_base_url(&base_url)?;
+            let model = llm.model.as_deref().unwrap_or("local-model");
             let extra_env = std::collections::HashMap::from([
-                ("ANTHROPIC_BASE_URL".to_string(), format!("{}/v1", base_url)),
-                ("ANTHROPIC_AUTH_TOKEN".to_string(), "ollama".to_string()),
+                ("ANTHROPIC_BASE_URL".to_string(), base_url),
+                (
+                    "ANTHROPIC_AUTH_TOKEN".to_string(),
+                    "sk-no-key-required".to_string(),
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+                    model.to_string(),
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
+                    model.to_string(),
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+                    model.to_string(),
+                ),
+                (
+                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
+                    "1".to_string(),
+                ),
+                (
+                    "CLAUDE_CODE_ATTRIBUTION_HEADER".to_string(),
+                    "0".to_string(),
+                ),
             ]);
             Ok(inject_claude_env(yaml, &extra_env))
         }
-        _ => {
-            // External provider: add llm-proxy container (LiteLLM)
-            let proxy_token = uuid::Uuid::new_v4().to_string();
-            let proxy_port = consts::PORT_WORKER;
-
-            let secrets_dir = consts::data_dir().join("secrets").join(project_name);
-            let llm_env_file = secrets_dir.join("llm.env");
-            let network_name = format!("{}_{}_network", consts::compose_prefix(), project_name);
-
-            // Parse existing YAML and add llm-proxy service
-            let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
-
-            let proxy_service = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&format!(
-                r#"
-image: ghcr.io/berriai/litellm:latest
-container_name: {prefix}_{project}_llm_proxy
-user: "{container_user}"
-cap_drop:
-  - ALL
-security_opt:
-  - no-new-privileges:true
-read_only: true
-tmpfs:
-  - /tmp:noexec,nosuid,size=64m
-ports:
-  - "127.0.0.1:{port}:{port}"
-env_file:
-  - {env_file}
-environment:
-  - PORT={port}
-  - LITELLM_MASTER_KEY={token}
-networks:
-  - {network}
-deploy:
-  resources:
-    limits:
-      cpus: '0.5'
-      memory: 512m
-"#,
-                prefix = consts::compose_prefix(),
-                project = project_name,
-                container_user = container_user(),
-                port = proxy_port,
-                env_file = to_engine_path(&llm_env_file)?,
-                token = proxy_token,
-                network = network_name,
-            ))?;
-
-            if let Some(services) = doc.get_mut("services") {
-                if let Some(services_map) = services.as_mapping_mut() {
-                    services_map.insert(
-                        serde_yaml_ng::Value::String("llm-proxy".to_string()),
-                        proxy_service,
-                    );
-                }
-            }
-
-            let mut result = serde_yaml_ng::to_string(&doc)?;
-
-            // Inject proxy URL into claude container
-            let extra_env = std::collections::HashMap::from([
-                (
-                    "ANTHROPIC_BASE_URL".to_string(),
-                    format!("http://llm-proxy:{}", proxy_port),
-                ),
-                ("ANTHROPIC_AUTH_TOKEN".to_string(), proxy_token),
-            ]);
-            result = inject_claude_env(&result, &extra_env);
-
-            Ok(result)
-        }
     }
+}
+
+fn strip_trailing_v1(url: &str) -> String {
+    let stripped = url.trim_end_matches('/');
+    if let Some(without_v1) = stripped.strip_suffix("/v1") {
+        without_v1.to_string()
+    } else {
+        url.to_string()
+    }
+}
+
+/// Returns the default base URL for a known local model provider.
+/// Used by the frontend to show a placeholder without duplicating the URL logic.
+pub fn default_base_url(provider: &str) -> Option<String> {
+    match provider {
+        "ollama" => Some("http://host.docker.internal:11434".to_string()),
+        "lmstudio" => Some("http://host.docker.internal:1234".to_string()),
+        "llamacpp" => Some("http://host.docker.internal:8080".to_string()),
+        _ => None,
+    }
+}
+
+/// Validates a base URL for local model providers. Rejects non-HTTP schemes,
+/// credentials, paths, query strings, and fragments.
+pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
+    let parsed =
+        url::Url::parse(raw).map_err(|e| anyhow::anyhow!("Invalid base_url '{}': {}", raw, e))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        s => anyhow::bail!("base_url must use http:// or https://, got: {}", s),
+    }
+    if parsed.username() != "" || parsed.password().is_some() {
+        anyhow::bail!("base_url must not contain credentials");
+    }
+    let path = parsed.path();
+    if path != "/" && !path.is_empty() {
+        anyhow::bail!("base_url must not contain a path (got '{}')", path);
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        anyhow::bail!("base_url must not contain query or fragment");
+    }
+    Ok(())
 }
 
 // --- Plugin integration ---
@@ -1217,7 +1227,7 @@ impl SecurityCheck {
             Self::check_tmpfs_noexec(&doc),
             Self::check_no_tokens_in_claude(&doc),
             Self::check_no_tokens_in_hub(&doc),
-            // PORTS_LOCALHOST: any exposed port must bind 127.0.0.1 (plugins, llm-proxy)
+            // PORTS_LOCALHOST: any exposed port must bind 127.0.0.1 (plugins)
             Self::check_ports_localhost_only(&doc),
             Self::check_claude_no_socket(&doc),
             Self::check_no_external_llm_keys_claude(&doc),
@@ -1552,7 +1562,9 @@ impl SecurityCheck {
     }
 
     /// claude container must not have external LLM API keys
-    /// (OPENAI_*, GEMINI_*, DEEPSEEK_*, OPENROUTER_* — these belong in the proxy)
+    /// (OPENAI_*, GEMINI_*, DEEPSEEK_*, OPENROUTER_* — these prefixes are forbidden because
+    /// external LLM API keys must never enter the claude container. Only the dummy
+    /// ANTHROPIC_AUTH_TOKEN (sk-no-key-required) is permitted for local model providers.)
     fn check_no_external_llm_keys_claude(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
         let mut violations = Vec::new();
         let services = match get_services(doc) {
@@ -1581,7 +1593,7 @@ impl SecurityCheck {
                                     var_name
                                 ),
                                 remediation:
-                                    "External LLM keys belong in the llm-proxy container, not in claude.",
+                                    "External LLM API keys must not be injected into the claude container. Use a local model provider instead.",
                             });
                         }
                     }
@@ -1592,7 +1604,7 @@ impl SecurityCheck {
     }
 
     /// MCP workers and hub must NOT expose ports to the host.
-    /// Only dynamically-injected services (llm-proxy, addons) may map ports.
+    /// Only dynamically-injected services (addons) may map ports.
     /// All inter-container communication uses Docker DNS.
     fn check_no_ports_on_workers(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
         let mut violations = Vec::new();
@@ -2903,39 +2915,6 @@ services:
         }
     }
 
-    /// ADR-038: the llm-proxy container, when added for external providers,
-    /// must also listen on `PORT_WORKER` and be reached by claude at that port.
-    #[test]
-    fn test_llm_proxy_uses_port_worker() {
-        let config = ResolvedClaudeConfig {
-            env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
-            llm: LlmConfig {
-                provider: Some("openai".to_string()),
-                base_url: Some("https://api.openai.com/v1".to_string()),
-                ..Default::default()
-            },
-        };
-        let yaml = render_compose(
-            "test-project",
-            "/home/user/projects/test",
-            &config,
-            &ResolvedIntegrationsConfig::default(),
-            None,
-        )
-        .unwrap();
-
-        let worker_port = crate::consts::PORT_WORKER;
-        assert!(
-            yaml.contains(&format!("PORT={worker_port}")),
-            "llm-proxy must set PORT={worker_port}"
-        );
-        assert!(
-            yaml.contains(&format!("http://llm-proxy:{worker_port}")),
-            "ANTHROPIC_BASE_URL must point at http://llm-proxy:{worker_port}"
-        );
-    }
-
     /// ADR-038: `plugin.json.port` is deprecated and ignored. A plugin
     /// manifest that requests a non-`PORT_WORKER` port must still be wired up
     /// at `:{PORT_WORKER}` without failing.
@@ -3291,7 +3270,6 @@ services:
                 provider: Some("ollama".to_string()),
                 model: None,
                 base_url: None,
-                api_key_env: None,
             },
         };
         let yaml = render_compose(
@@ -3302,37 +3280,10 @@ services:
             None,
         )
         .unwrap();
-        // Ollama should inject ANTHROPIC_BASE_URL pointing to Ollama's OpenAI-compatible endpoint
+        // Ollama: direct injection at host.docker.internal:11434 (no /v1 suffix — ADR-040)
         assert!(
-            yaml.contains("11434/v1"),
-            "Ollama provider should set ANTHROPIC_BASE_URL with 11434/v1 port"
-        );
-    }
-
-    #[test]
-    fn test_render_compose_openai_provider() {
-        let config = ResolvedClaudeConfig {
-            env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
-            llm: LlmConfig {
-                provider: Some("openai".to_string()),
-                model: Some("gpt-4o".to_string()),
-                base_url: None,
-                api_key_env: Some("OPENAI_API_KEY".to_string()),
-            },
-        };
-        let yaml = render_compose(
-            "test-project",
-            "/home/user/projects/test",
-            &config,
-            &ResolvedIntegrationsConfig::default(),
-            None,
-        )
-        .unwrap();
-        // External provider should add an llm-proxy (LiteLLM) service
-        assert!(
-            yaml.contains("llm-proxy") || yaml.contains("llm_proxy"),
-            "OpenAI provider should add llm-proxy service"
+            yaml.contains("ANTHROPIC_BASE_URL=http://host.docker.internal:11434"),
+            "Ollama provider should set ANTHROPIC_BASE_URL to host.docker.internal:11434 (no /v1)"
         );
     }
 
@@ -3356,6 +3307,14 @@ services:
             !yaml.contains("llm-proxy"),
             "Default anthropic provider should not add llm-proxy"
         );
+        assert!(
+            !yaml.contains("litellm"),
+            "Default anthropic provider should not reference litellm"
+        );
+        assert!(
+            !yaml.contains("ghcr.io/berriai"),
+            "Default anthropic provider should not reference litellm image"
+        );
         // Should not contain base_url override (unless explicitly configured)
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         let claude_env = doc
@@ -3371,6 +3330,301 @@ services:
         assert!(
             !has_base_url,
             "Default anthropic should not set ANTHROPIC_BASE_URL"
+        );
+    }
+
+    fn get_claude_env(yaml: &str) -> Vec<String> {
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        doc.get("services")
+            .and_then(|s| s.get("claude"))
+            .and_then(|c| c.get("environment"))
+            .and_then(|e| e.as_sequence())
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn test_ollama_direct_injection() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig {
+                provider: Some("ollama".to_string()),
+                model: Some("llama3.3".to_string()),
+                base_url: None,
+            },
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter().any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:11434"),
+            "Ollama must set ANTHROPIC_BASE_URL to host.docker.internal:11434 (no /v1), got: {env:?}"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_AUTH_TOKEN=sk-no-key-required"),
+            "Ollama must set dummy auth token"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_DEFAULT_SONNET_MODEL=llama3.3"),
+            "Ollama must set default sonnet model"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_DEFAULT_OPUS_MODEL=llama3.3"),
+            "Ollama must set default opus model"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_DEFAULT_HAIKU_MODEL=llama3.3"),
+            "Ollama must set default haiku model"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e == "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"),
+            "Ollama must disable nonessential traffic"
+        );
+        assert!(
+            env.iter().any(|e| e == "CLAUDE_CODE_ATTRIBUTION_HEADER=0"),
+            "Ollama must disable attribution header"
+        );
+        assert!(!yaml.contains("llm-proxy"), "Ollama must not add llm-proxy");
+        assert!(
+            !yaml.contains("litellm"),
+            "Ollama must not reference litellm"
+        );
+    }
+
+    #[test]
+    fn test_lmstudio_default_url() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig {
+                provider: Some("lmstudio".to_string()),
+                model: Some("qwen2.5-coder".to_string()),
+                base_url: None,
+            },
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:1234"),
+            "LM Studio must use port 1234, got: {env:?}"
+        );
+    }
+
+    #[test]
+    fn test_llamacpp_default_url() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig {
+                provider: Some("llamacpp".to_string()),
+                model: Some("deepseek-r1".to_string()),
+                base_url: None,
+            },
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:8080"),
+            "llama.cpp must use port 8080, got: {env:?}"
+        );
+    }
+
+    #[test]
+    fn test_custom_provider_with_base_url() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig {
+                provider: Some("custom".to_string()),
+                model: Some("my-model".to_string()),
+                base_url: Some("http://host.docker.internal:9999".to_string()),
+            },
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:9999"),
+            "Custom provider must use the specified base_url, got: {env:?}"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_AUTH_TOKEN=sk-no-key-required"),
+            "Custom provider must set dummy auth token"
+        );
+    }
+
+    #[test]
+    fn test_custom_provider_requires_base_url() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig {
+                provider: Some("custom".to_string()),
+                model: None,
+                base_url: None,
+            },
+        };
+        let result = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Custom provider requires a base_url"),
+            "Error must mention custom requires base_url, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_strip_trailing_v1() {
+        assert_eq!(strip_trailing_v1("http://x:8080/v1"), "http://x:8080");
+        assert_eq!(strip_trailing_v1("http://x:8080/v1/"), "http://x:8080");
+        assert_eq!(strip_trailing_v1("http://x:8080"), "http://x:8080");
+        assert_eq!(strip_trailing_v1(""), "");
+        assert_eq!(strip_trailing_v1("http://x:8080/v1/v1"), "http://x:8080/v1");
+    }
+
+    #[test]
+    fn test_idempotent_render() {
+        let llm = LlmConfig {
+            provider: Some("ollama".to_string()),
+            model: Some("llama3.3".to_string()),
+            base_url: None,
+        };
+        let result1 = apply_llm_config(COMPOSE_TEMPLATE, "proj", &llm).unwrap();
+        let result2 = apply_llm_config(&result1, "proj", &llm).unwrap();
+        assert_eq!(
+            result1, result2,
+            "apply_llm_config must be idempotent (no UUID injection)"
+        );
+    }
+
+    #[test]
+    fn test_base_url_rejects_non_http_schemes() {
+        for bad_url in &["javascript:alert(1)", "file:///etc/passwd", "ftp://x:21"] {
+            assert!(
+                validate_base_url(bad_url).is_err(),
+                "Must reject scheme: {bad_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_base_url_rejects_credentials() {
+        assert!(
+            validate_base_url("http://user:pass@host.docker.internal:11434").is_err(),
+            "Must reject credentials in URL"
+        );
+    }
+
+    #[test]
+    fn test_base_url_rejects_path() {
+        assert!(
+            validate_base_url("http://host.docker.internal:11434/api/v1/").is_err(),
+            "Must reject URL with path"
+        );
+    }
+
+    #[test]
+    fn test_base_url_accepts_remote_host() {
+        assert!(
+            validate_base_url("http://192.168.1.100:11434").is_ok(),
+            "Must accept remote IP (LLM on another machine in LAN)"
+        );
+    }
+
+    #[test]
+    fn test_base_url_accepts_localhost() {
+        assert!(
+            validate_base_url("http://localhost:11434").is_ok(),
+            "Must accept localhost"
+        );
+    }
+
+    #[test]
+    fn test_compose_template_includes_host_docker_internal() {
+        assert!(
+            COMPOSE_TEMPLATE.contains("host.docker.internal"),
+            "compose.template.yml must map host.docker.internal (needed by default_base_url hardcode)"
+        );
+    }
+
+    #[test]
+    fn test_switching_provider_ollama_to_anthropic() {
+        let llm_ollama = LlmConfig {
+            provider: Some("ollama".to_string()),
+            model: Some("llama3.3".to_string()),
+            base_url: None,
+        };
+        let llm_anthropic = LlmConfig::default();
+
+        let with_ollama = apply_llm_config(COMPOSE_TEMPLATE, "proj", &llm_ollama).unwrap();
+        let with_anthropic = apply_llm_config(COMPOSE_TEMPLATE, "proj", &llm_anthropic).unwrap();
+
+        let env_ollama = get_claude_env(&with_ollama);
+        let env_anthropic = get_claude_env(&with_anthropic);
+
+        assert!(
+            env_ollama
+                .iter()
+                .any(|e| e.starts_with("ANTHROPIC_BASE_URL=")),
+            "Ollama must set ANTHROPIC_BASE_URL"
+        );
+        assert!(
+            !env_anthropic
+                .iter()
+                .any(|e| e.starts_with("ANTHROPIC_BASE_URL=")),
+            "Anthropic must not set ANTHROPIC_BASE_URL, got: {env_anthropic:?}"
+        );
+        assert!(
+            !env_anthropic
+                .iter()
+                .any(|e| e == "CLAUDE_CODE_ATTRIBUTION_HEADER=0"),
+            "Anthropic must NOT disable attribution header — it is only stripped \
+             for local providers to avoid breaking llama.cpp/Ollama KV cache. \
+             Got: {env_anthropic:?}"
         );
     }
 
@@ -4225,29 +4479,6 @@ services:
     }
 
     #[test]
-    fn test_security_llm_proxy_ports_allowed() {
-        let yaml = r#"
-version: "3"
-services:
-  llm-proxy:
-    image: ghcr.io/berriai/litellm:latest
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    tmpfs: ["/tmp:noexec,nosuid,size=64m"]
-    ports:
-      - "127.0.0.1:4010:4010"
-"#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
-        assert!(
-            !violations
-                .iter()
-                .any(|v| v.rule == SecurityRule::NoPortsWorkers),
-            "llm-proxy is allowed to expose ports"
-        );
-    }
-
-    #[test]
     fn test_internal_only_covers_all_template_services() {
         // Self-enforcing: parse compose.template.yml and verify every built-in
         // service (claude + mcp-*) is listed in consts::BUILT_IN_SERVICES.
@@ -4705,40 +4936,6 @@ services:
                 expected
             );
         }
-    }
-
-    #[test]
-    fn test_render_compose_llm_proxy_has_container_user() {
-        let config = ResolvedClaudeConfig {
-            env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
-            llm: LlmConfig {
-                provider: Some("openai".to_string()),
-                model: Some("gpt-4o".to_string()),
-                base_url: None,
-                api_key_env: Some("OPENAI_API_KEY".to_string()),
-            },
-        };
-        let yaml = render_compose(
-            "test-project",
-            "/home/user/projects/test",
-            &config,
-            &ResolvedIntegrationsConfig::default(),
-            None,
-        )
-        .unwrap();
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
-        let proxy_user = doc
-            .get("services")
-            .and_then(|s| s.get("llm-proxy"))
-            .and_then(|p| p.get("user"))
-            .and_then(|u| u.as_str());
-        assert_eq!(
-            proxy_user,
-            Some(container_user()),
-            "llm-proxy service must have user: \"{}\"",
-            container_user()
-        );
     }
 
     // ── Plugin SecurityCheck tests ───────────────────────────────────────
