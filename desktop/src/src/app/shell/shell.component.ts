@@ -131,12 +131,35 @@ import { ProjectStateService } from '../services/project-state.service';
       }
       <app-update-notification />
       <header
-        class="flex items-center justify-between px-4 py-2 bg-sw-bg-dark border-b border-sw-border"
+        class="grid grid-cols-3 items-center px-4 py-2 bg-sw-bg-dark border-b border-sw-border"
       >
-        <span class="font-mono text-[16px] font-bold text-sw-accent" data-testid="shell-title"
-          >Speedwave</span
+        <span
+          class="flex items-center justify-self-start"
+          data-testid="shell-title"
+          aria-label="Speedwave"
         >
-        <nav class="flex gap-4" data-testid="app-nav">
+          <svg
+            viewBox="0 0 82 80"
+            class="h-[36px] w-auto"
+            aria-hidden="true"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <path
+              d="M82 27.4473L68.4717 52.2275L24.4268 80L0 66.2764V9.62598L33.1777 0L82 27.4473Z"
+              fill="#000000"
+            />
+            <path
+              d="M31 51H39.5L50 38V47H53.5L61 33H57.1631L53.5 39.5L53.5811 33H48.5L39 45L45.5 33L43 29L31 51Z"
+              fill="#FFFFFF"
+            />
+            <path
+              d="M10 41.5H27.5L26.2695 43.7061H8.85254L7 47H29.0293L33.8281 38.3525H16.7383L17.9121 36.2939H35L37 33H15L10 41.5Z"
+              fill="#FFFFFF"
+            />
+          </svg>
+        </span>
+        <nav class="flex gap-4 justify-self-center" data-testid="app-nav">
           @if (projectState.status === 'ready' || projectState.status === 'error') {
             <a
               routerLink="/chat"
@@ -168,7 +191,9 @@ import { ProjectStateService } from '../services/project-state.service';
             >Settings</a
           >
         </nav>
-        <app-project-switcher />
+        <div class="justify-self-end">
+          <app-project-switcher />
+        </div>
       </header>
       <main class="flex-1 overflow-y-auto overflow-x-hidden">
         <router-outlet />
