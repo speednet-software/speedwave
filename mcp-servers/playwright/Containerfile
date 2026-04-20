@@ -72,8 +72,22 @@ EXPOSE 3000
 #                        home directory for the browser cache, which the
 #                        hardened compose profile (read_only rootfs) makes
 #                        impossible.
-# --allowed-hosts mcp-hub: restrict to hub hostname. Other containers on the
-#                        compose network cannot call Playwright directly.
+# --allowed-hosts "*":   disable playwright-mcp's Host-header check.
+#                        This flag is designed against DNS rebinding on
+#                        loopback-bound dev servers — irrelevant here:
+#                        (a) the container has no published ports
+#                            (enforced by check_no_ports_on_workers in
+#                            compose.rs — built-in workers cannot expose
+#                            ports), so no browser can reach us;
+#                        (b) any container already on the compose network
+#                            can set an arbitrary Host header and bypass
+#                            the check in one line — it does not
+#                            authenticate the caller.
+#                        Real isolation comes from the compose network +
+#                        cap_drop:ALL + read-only rootfs, not from this
+#                        string match. Pinning to a specific hostname just
+#                        breaks the Hub's legitimate calls (fetch sets
+#                        Host: mcp-playwright:3000, not the caller's name).
 # --headless:            no display server inside the container.
 # --no-sandbox:          required because the container drops all capabilities;
 #                        the VM + container hardening layer takes over
@@ -106,6 +120,6 @@ CMD ["/usr/bin/playwright-mcp", \
      "--executable-path", "/ms-playwright/chromium_headless_shell-1217/chrome-linux/headless_shell", \
      "--user-data-dir", "/tmp/playwright-mcp-userdata", \
      "--output-dir", "/tmp/playwright-mcp-output", \
-     "--allowed-hosts", "mcp-hub", \
+     "--allowed-hosts", "*", \
      "--headless", \
      "--no-sandbox"]

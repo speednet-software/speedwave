@@ -85,7 +85,7 @@
         >
           @for (msg of viewingTranscript.messages; track $index) {
             <div
-              class="max-w-[85%] px-4 py-3 rounded-lg leading-normal break-words"
+              class="w-fit max-w-[85%] px-4 py-3 rounded-lg leading-normal break-words"
               [class.self-end]="msg.role === 'user'"
               [class.bg-sw-bg-navy]="msg.role === 'user'"
               [class.self-start]="msg.role === 'assistant'"

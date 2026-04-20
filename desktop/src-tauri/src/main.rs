@@ -16,8 +16,10 @@ mod diagnostics;
 mod fs_perms;
 mod health;
 mod history;
+mod http_util;
 mod ide_bridge;
 mod integrations_cmd;
+mod llm_cmd;
 mod log_file;
 mod logging_cmd;
 mod mcp_os_process;
@@ -1341,7 +1343,9 @@ fn main() {
             // Settings
             containers_cmd::factory_reset,
             containers_cmd::get_llm_config,
+            containers_cmd::get_default_base_url,
             containers_cmd::update_llm_config,
+            llm_cmd::discover_llm_models,
             // Authentication
             auth_commands::save_api_key,
             auth_commands::delete_api_key,

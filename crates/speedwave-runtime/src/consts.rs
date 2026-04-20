@@ -38,6 +38,17 @@ pub const LIMA_HOST: &str = "host.lima.internal";
 pub const NERDCTL_LINUX_HOST: &str = "host.docker.internal";
 /// Hostname reachable from inside WSL2/nerdctl containers pointing to the Windows host.
 pub const WSL_HOST: &str = "host.speedwave.internal";
+/// Podman-compatibility alias injected via `extra_hosts` in compose.template.yml.
+/// Containers use this when built for environments that expect the Podman convention.
+pub const CONTAINERS_HOST: &str = "host.containers.internal";
+
+/// All hostnames resolved inside containers to the host gateway via `extra_hosts`
+/// in `compose.template.yml`. Used by host-side code (Desktop settings) that needs
+/// to probe the same endpoint a container would hit: each alias is rewritten to
+/// `127.0.0.1` before a local HTTP probe because the aliases are not present in
+/// the host's resolver (Lima/WSL2/rootless nerdctl inject them only inside the VM).
+pub const CONTAINER_HOST_ALIASES: &[&str] =
+    &[LIMA_HOST, NERDCTL_LINUX_HOST, WSL_HOST, CONTAINERS_HOST];
 
 /// IP of the macOS host as seen from inside nerdctl containers in the Lima vzNAT network.
 /// Lima vzNAT always assigns 192.168.5.2 to the host — this is static, not DHCP.
@@ -129,6 +140,12 @@ pub const NESTED_VIRT_WARNING_MSG: &str = "\
     - Increase VM memory to at least 8 GB\n\
     - Enable nested virtualization in VM settings (VT-x/EPT or AMD-V/RVI)\n\
     - Close other memory-intensive applications";
+
+/// Path inside the container to the system prompt file used when running a
+/// local LLM (Ollama, LM Studio, llama.cpp). The slim prompt replaces
+/// Claude Code's built-in ~16k-token prompt which exceeds local model context
+/// windows. See ADR-040.
+pub const LOCAL_LLM_SYSTEM_PROMPT_PATH: &str = "/speedwave/resources/system-prompts/local-llm.md";
 
 /// Error prefix used by backend when SecurityCheck or OS prereqs fail.
 /// Frontend matches on this string to distinguish blocking (check_failed)
@@ -1311,5 +1328,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_container_host_aliases_contains_all_named_hosts() {
+        // Alignment guard: CONTAINER_HOST_ALIASES is composed from the per-platform
+        // host constants. If someone adds a new alias to `extra_hosts` in
+        // compose.template.yml and forgets to name it here, this test doesn't catch
+        // that (separate template test does). This test catches the inverse:
+        // renaming one of the named hosts without updating the composition.
+        assert!(CONTAINER_HOST_ALIASES.contains(&LIMA_HOST));
+        assert!(CONTAINER_HOST_ALIASES.contains(&NERDCTL_LINUX_HOST));
+        assert!(CONTAINER_HOST_ALIASES.contains(&WSL_HOST));
+        assert!(CONTAINER_HOST_ALIASES.contains(&CONTAINERS_HOST));
+        assert_eq!(
+            CONTAINER_HOST_ALIASES.len(),
+            4,
+            "expected exactly 4 container host aliases; update this test if you added a new platform alias to compose.template.yml"
+        );
     }
 }

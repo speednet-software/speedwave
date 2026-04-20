@@ -199,7 +199,7 @@ impl SpeedwaveUserConfig {
 #[derive(Debug, Clone)]
 pub struct ResolvedClaudeConfig {
     pub env: HashMap<String, String>,
-    pub flags: Vec<&'static str>,
+    pub flags: Vec<String>,
     pub llm: LlmConfig,
 }
 
@@ -243,12 +243,45 @@ pub fn resolve_project_config(
         }
     }
 
-    let claude = ResolvedClaudeConfig {
-        env,
-        flags: defaults::DEFAULT_FLAGS.to_vec(),
-        llm,
-    };
+    let mut flags: Vec<String> = defaults::DEFAULT_FLAGS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    // Local LLMs usually can't fit Claude Code's ~16k-token built-in system
+    // prompt into their context window without severe quality loss. Replace
+    // it with a slimmed-down Speedwave-authored prompt that still teaches the
+    // model the MCP tool_use protocol (without which it cannot call any tool)
+    // but drops the Anthropic-specific guidance, examples, and persona text.
+    // Anthropic-hosted models keep the full built-in prompt unchanged.
+    // See ADR-040.
+    if is_local_provider(llm.provider.as_deref()) {
+        push_flag_pair(
+            &mut flags,
+            "--system-prompt-file",
+            crate::consts::LOCAL_LLM_SYSTEM_PROMPT_PATH,
+        );
+        // Default Claude Code to the user's local model so the chat statusline
+        // and the `/model` picker agree with Settings out of the box (without
+        // this, Claude Code starts on Sonnet 4.6 and the user has to manually
+        // switch via /model). `ANTHROPIC_CUSTOM_MODEL_OPTION` registers the
+        // model as a picker option; `--model` selects it as the default.
+        if let Some(model) = llm.model.as_deref() {
+            push_flag_pair(&mut flags, "--model", model);
+        }
+    }
+
+    let claude = ResolvedClaudeConfig { env, flags, llm };
     (claude, integrations)
+}
+
+/// Returns true for provider values that point at a local LLM server
+/// (Ollama, LM Studio, or llama.cpp).
+/// `None` / `Some("anthropic")` → false (Anthropic-hosted models).
+pub fn is_local_provider(provider: Option<&str>) -> bool {
+    matches!(
+        provider,
+        Some("ollama") | Some("lmstudio") | Some("llamacpp")
+    )
 }
 
 /// Merges: defaults -> repo config (.speedwave.json) -> user config (~/.speedwave/config.json).
@@ -384,6 +417,18 @@ where
     with_config_lock_in(crate::consts::data_dir(), f)
 }
 
+/// Appends a `--flag value` pair to `flags`.
+/// Panics in debug builds if `value` is empty, preventing silent "flag without
+/// a value" bugs (e.g. pushing `"--model"` and then forgetting the model string).
+fn push_flag_pair(flags: &mut Vec<String>, flag: &'static str, value: &str) {
+    debug_assert!(
+        !value.is_empty(),
+        "flag value for '{flag}' must not be empty"
+    );
+    flags.push(flag.to_string());
+    flags.push(value.to_string());
+}
+
 fn merge_env(base: &mut HashMap<String, String>, overlay: Option<HashMap<String, String>>) {
     if let Some(overlay) = overlay {
         for (key, value) in overlay {
@@ -434,10 +479,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
         assert_eq!(resolved.env.get("ANTHROPIC_MODEL"), None);
-        assert!(resolved.flags.contains(&"--dangerously-skip-permissions"));
-        assert!(resolved.flags.contains(&"--mcp-config"));
-        assert!(resolved.flags.contains(&defaults::MCP_CONFIG_PATH));
-        assert!(resolved.flags.contains(&"--strict-mcp-config"));
+        assert!(resolved
+            .flags
+            .iter()
+            .any(|f| f == "--dangerously-skip-permissions"));
+        assert!(resolved.flags.iter().any(|f| f == "--mcp-config"));
+        assert!(resolved
+            .flags
+            .iter()
+            .any(|f| f == defaults::MCP_CONFIG_PATH));
+        assert!(resolved.flags.iter().any(|f| f == "--strict-mcp-config"));
     }
 
     #[test]
@@ -792,6 +843,121 @@ mod tests {
         let json = r#"{"projects":[],"active_project":null,"selected_ide":null}"#;
         let parsed: SpeedwaveUserConfig = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.log_level, None);
+    }
+
+    // ── resolve_project_config: local-provider flag injection (ADR-040) ──
+
+    fn make_ollama_user_config(
+        tmp_dir: &std::path::Path,
+        model: Option<&str>,
+    ) -> SpeedwaveUserConfig {
+        SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "test-project".to_string(),
+                dir: tmp_dir.to_string_lossy().to_string(),
+                claude: Some(ClaudeOverrides {
+                    env: None,
+                    settings: None,
+                    llm: Some(LlmConfig {
+                        provider: Some("ollama".to_string()),
+                        model: model.map(|m| m.to_string()),
+                        base_url: Some("http://host.docker.internal:11434".to_string()),
+                    }),
+                }),
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        }
+    }
+
+    #[test]
+    fn resolve_injects_system_prompt_flag_for_ollama() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = make_ollama_user_config(tmp.path(), Some("llama3.3"));
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let flags = &resolved.flags;
+        let pos = flags.iter().position(|f| f == "--system-prompt-file");
+        assert!(
+            pos.is_some(),
+            "expected --system-prompt-file flag for ollama provider; flags: {flags:?}"
+        );
+        assert_eq!(
+            flags.get(pos.unwrap() + 1).map(|s| s.as_str()),
+            Some("/speedwave/resources/system-prompts/local-llm.md"),
+            "expected local-llm.md path after --system-prompt-file; flags: {flags:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_injects_model_flag_when_model_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = make_ollama_user_config(tmp.path(), Some("llama3.3"));
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let flags = &resolved.flags;
+        let pos = flags.iter().position(|f| f == "--model");
+        assert!(
+            pos.is_some(),
+            "expected --model flag for ollama provider with model set; flags: {flags:?}"
+        );
+        assert_eq!(
+            flags.get(pos.unwrap() + 1).map(|s| s.as_str()),
+            Some("llama3.3"),
+            "expected model value after --model flag; flags: {flags:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_inject_model_flag_when_model_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = make_ollama_user_config(tmp.path(), None);
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let flags = &resolved.flags;
+        assert!(
+            !flags.iter().any(|f| f == "--model"),
+            "expected no --model flag when model is None; flags: {flags:?}"
+        );
+        assert!(
+            flags.iter().any(|f| f == "--system-prompt-file"),
+            "expected --system-prompt-file flag even without model; flags: {flags:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_inject_local_flags_for_anthropic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "test-project".to_string(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: Some(ClaudeOverrides {
+                    env: None,
+                    settings: None,
+                    llm: Some(LlmConfig {
+                        provider: Some("anthropic".to_string()),
+                        model: None,
+                        base_url: None,
+                    }),
+                }),
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        };
+        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let flags = &resolved.flags;
+        assert!(
+            !flags.iter().any(|f| f == "--system-prompt-file"),
+            "expected no --system-prompt-file for anthropic provider; flags: {flags:?}"
+        );
+        assert!(
+            !flags.iter().any(|f| f == "--model"),
+            "expected no --model flag for anthropic provider; flags: {flags:?}"
+        );
     }
 
     fn assert_all_integrations_disabled(r: &ResolvedIntegrationsConfig) {

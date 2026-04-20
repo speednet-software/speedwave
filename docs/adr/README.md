@@ -47,6 +47,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-038](ADR-038-single-internal-worker-port.md)                      | Single Internal Worker Port                             | Accepted              |
 | [ADR-039](ADR-039-playwright-shared-browser-service.md)                | Playwright Shared Browser Service                       | Accepted              |
 | [ADR-040](ADR-040-remove-litellm-direct-provider-injection.md)         | Remove LiteLLM — Direct Local Provider Injection        | Accepted              |
+| [ADR-041](ADR-041-local-llm-model-discovery.md)                        | Local LLM Model Discovery and SSRF Policy               | Accepted              |
 
 ## Creating a New ADR
 

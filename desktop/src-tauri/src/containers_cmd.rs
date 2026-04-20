@@ -581,12 +581,36 @@ pub fn get_llm_config() -> Result<LlmConfigResponse, String> {
     let default_url = provider
         .as_deref()
         .and_then(speedwave_runtime::compose::default_base_url);
+    let base_url = llm.and_then(|l| l.base_url.clone());
+
+    // Non-destructive migration: if a previously-stored base_url no longer
+    // satisfies the current SSRF policy (e.g. someone saved `http://169.254.169.254`
+    // before the policy was introduced), log a warning. The value is still
+    // returned so the UI can show it in the input; the Save path will reject
+    // it on the user's next edit. See ADR-041.
+    if let Some(ref url) = base_url {
+        let normalized = speedwave_runtime::compose::strip_trailing_v1(url);
+        if let Err(e) = crate::llm_cmd::validate_llm_base_url(&normalized) {
+            log::warn!("get_llm_config: stored base_url '{url}' fails current SSRF policy: {e}");
+        }
+    }
+
     Ok(LlmConfigResponse {
         provider,
         model: llm.and_then(|l| l.model.clone()),
-        base_url: llm.and_then(|l| l.base_url.clone()),
+        base_url,
         default_base_url: default_url,
     })
+}
+
+/// Returns the backend-authoritative default base URL for a given provider.
+///
+/// Delegates to `speedwave_runtime::compose::default_base_url` so the frontend
+/// never needs to duplicate URL strings. Returns `None` for unknown providers
+/// (e.g. `"anthropic"` has no local server URL).
+#[tauri::command]
+pub fn get_default_base_url(provider: String) -> Result<Option<String>, String> {
+    Ok(speedwave_runtime::compose::default_base_url(&provider))
 }
 
 /// Applies LLM config to the active project in-memory. Extracted for testability.
@@ -633,6 +657,11 @@ pub fn update_llm_config(
         // render time is also accepted at save time (Ollama docs commonly use
         // `http://…/v1` suffixes; we strip that before validating).
         let normalized = speedwave_runtime::compose::strip_trailing_v1(url);
+        // SSRF guard — same policy as LLM discovery probe. Blocks link-local,
+        // metadata, IPv6-mapped bypasses, embedded credentials, query/fragment.
+        // See ADR-041.
+        crate::llm_cmd::validate_llm_base_url(&normalized).map_err(|e| e.to_string())?;
+        // Belt-and-suspenders syntactic validation from the runtime crate.
         speedwave_runtime::compose::validate_base_url(&normalized).map_err(|e| e.to_string())?;
     }
     config::with_config_lock(|| {
@@ -847,15 +876,17 @@ mod tests {
     #[test]
     fn update_llm_config_rejects_invalid_base_url() {
         let result = update_llm_config(
-            Some("custom".to_string()),
+            Some("ollama".to_string()),
             None,
             Some("javascript:alert(1)".to_string()),
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
+        // Either the new SSRF guard (scheme denylist) or the runtime syntactic
+        // validator rejects this; both mention the allowed schemes.
         assert!(
-            err.contains("http://") || err.contains("https://") || err.contains("base_url"),
-            "Error must mention http/https scheme requirement, got: {err}"
+            err.to_lowercase().contains("http"),
+            "Error must reference the allowed http(s) scheme, got: {err}"
         );
     }
 
@@ -867,7 +898,7 @@ mod tests {
         // We only check the URL-validation path here — a config-save error is fine,
         // what we require is that the error (if any) is NOT the path rejection.
         let result = update_llm_config(
-            Some("custom".to_string()),
+            Some("ollama".to_string()),
             Some("llama3.3".to_string()),
             Some("http://localhost:11434/v1".to_string()),
         );
@@ -877,6 +908,139 @@ mod tests {
                 "`/v1` suffix must be stripped before validation, got: {err}"
             );
         }
+    }
+
+    // ── Save-path SSRF coverage (ADR-041) ────────────────────────────────
+    //
+    // Before these tests, `update_llm_config` ran only compose::validate_base_url,
+    // which accepts `http://169.254.169.254` and friends. The new
+    // `llm_cmd::validate_llm_base_url` guard closes that hole — these tests
+    // exercise it at the command boundary. Validation fails before the config
+    // file is touched, so no fixture/lock setup is required.
+
+    fn url_rejection_err(url: &str) -> String {
+        update_llm_config(Some("ollama".to_string()), None, Some(url.to_string())).unwrap_err()
+    }
+
+    #[test]
+    fn update_llm_config_rejects_metadata_ip() {
+        let err = url_rejection_err("http://169.254.169.254:8080");
+        assert!(
+            err.to_lowercase().contains("private") || err.to_lowercase().contains("reserved"),
+            "metadata IP must be rejected with a private/reserved error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn update_llm_config_rejects_link_local_ipv6() {
+        let err = url_rejection_err("http://[fe80::1]");
+        assert!(
+            err.to_lowercase().contains("private") || err.to_lowercase().contains("reserved"),
+            "IPv6 link-local must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn update_llm_config_rejects_credentials() {
+        let err = url_rejection_err("http://user:pass@localhost:11434");
+        assert!(
+            err.to_lowercase().contains("credentials"),
+            "embedded credentials must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn update_llm_config_rejects_query_string() {
+        let err = url_rejection_err("http://localhost:11434?foo=bar");
+        assert!(
+            err.to_lowercase().contains("query"),
+            "query string must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn update_llm_config_accepts_loopback_via_validation() {
+        // `update_llm_config` may fail later (no active project) — we just need
+        // the error (if any) NOT to be a URL rejection.
+        let result = update_llm_config(
+            Some("ollama".to_string()),
+            Some("llama3.3".to_string()),
+            Some("http://127.0.0.1:11434".to_string()),
+        );
+        if let Err(err) = result {
+            assert!(
+                !err.to_lowercase().contains("private")
+                    && !err.to_lowercase().contains("blocked")
+                    && !err.to_lowercase().contains("credentials"),
+                "loopback must NOT be rejected by URL validation, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_llm_config_accepts_rfc1918_via_validation() {
+        let result = update_llm_config(
+            Some("ollama".to_string()),
+            Some("llama3.3".to_string()),
+            Some("http://192.168.1.50:11434".to_string()),
+        );
+        if let Err(err) = result {
+            assert!(
+                !err.to_lowercase().contains("private") && !err.to_lowercase().contains("blocked"),
+                "RFC1918 must NOT be rejected by URL validation, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_llm_config_accepts_public_domain_via_validation() {
+        // Per ADR-041: user-written URL == user's threat model (align with Redmine).
+        let result = update_llm_config(
+            Some("ollama".to_string()),
+            Some("x".to_string()),
+            Some("http://my-ollama.company.com".to_string()),
+        );
+        if let Err(err) = result {
+            assert!(
+                !err.to_lowercase().contains("blocked"),
+                "public domain must NOT be rejected by URL validation, got: {err}"
+            );
+        }
+    }
+
+    // -- get_default_base_url tests --
+
+    #[test]
+    fn get_default_base_url_returns_ollama_url() {
+        let result = get_default_base_url("ollama".to_string()).unwrap();
+        assert_eq!(
+            result,
+            Some("http://host.docker.internal:11434".to_string())
+        );
+    }
+
+    #[test]
+    fn get_default_base_url_returns_lmstudio_url() {
+        let result = get_default_base_url("lmstudio".to_string()).unwrap();
+        assert_eq!(result, Some("http://host.docker.internal:1234".to_string()));
+    }
+
+    #[test]
+    fn get_default_base_url_returns_llamacpp_url() {
+        let result = get_default_base_url("llamacpp".to_string()).unwrap();
+        assert_eq!(result, Some("http://host.docker.internal:8080".to_string()));
+    }
+
+    #[test]
+    fn get_default_base_url_returns_none_for_anthropic() {
+        let result = get_default_base_url("anthropic".to_string()).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn get_default_base_url_returns_none_for_unknown_provider() {
+        let result = get_default_base_url("openai".to_string()).unwrap();
+        assert_eq!(result, None);
     }
 
     // -- MockRuntime for switch/teardown tests --

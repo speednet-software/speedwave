@@ -7,7 +7,9 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-const MAX_RESPONSE_BODY_BYTES: usize = 5 * 1024 * 1024; // 5 MiB
+use crate::http_util::read_body_limited;
+#[cfg(test)]
+use crate::http_util::MAX_RESPONSE_BODY_BYTES;
 
 // ---------------------------------------------------------------------------
 // Response DTOs
@@ -113,8 +115,12 @@ fn validate_redmine_host_url(url: &str) -> Result<String, String> {
     let candidate: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
 
     // If private on-premise address (RFC1918 or IPv6 ULA), skip base validation
-    // (which blocks all private IPs) and validate scheme/host ourselves
-    let parsed = if is_private_on_premise(&candidate) {
+    // (which blocks all private IPs) and validate scheme/host ourselves.
+    // Redmine policy blocks loopback — use `PrivatePolicy::BlockLoopback`.
+    let parsed = if crate::url_validation::is_private_on_premise(
+        &candidate,
+        crate::url_validation::PrivatePolicy::BlockLoopback,
+    ) {
         match candidate.scheme() {
             "http" | "https" => {}
             scheme => {
@@ -154,65 +160,8 @@ fn validate_redmine_host_url(url: &str) -> Result<String, String> {
     Ok(result)
 }
 
-/// Returns `true` if the URL's host is a private on-premise address:
-/// RFC1918 IPv4 (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) or
-/// IPv6 Unique Local Address (fc00::/7, RFC 4193).
-/// Returns `false` for loopback, link-local, unspecified, or any other reserved range.
-fn is_private_on_premise(url: &url::Url) -> bool {
-    match url.host() {
-        Some(url::Host::Ipv4(ipv4)) => {
-            ipv4.is_private()
-                && !ipv4.is_loopback()
-                && !ipv4.is_link_local()
-                && !ipv4.is_unspecified()
-        }
-        Some(url::Host::Ipv6(ipv6)) => {
-            // fc00::/7 — IPv6 Unique Local Address (RFC 4193)
-            (ipv6.segments()[0] & 0xfe00) == 0xfc00
-        }
-        _ => false,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// HTTP body reader with size guard
-// ---------------------------------------------------------------------------
-
-/// Reads a response body chunk-by-chunk, aborting if the accumulated size
-/// exceeds `MAX_RESPONSE_BODY_BYTES`. Prevents OOM from rogue servers using
-/// chunked transfer encoding (no Content-Length header).
-async fn read_body_limited(resp: reqwest::Response, label: &str) -> Result<Vec<u8>, String> {
-    if let Some(len) = resp.content_length() {
-        if len > MAX_RESPONSE_BODY_BYTES as u64 {
-            return Err(format!(
-                "{label} response too large ({len} bytes, limit {MAX_RESPONSE_BODY_BYTES})"
-            ));
-        }
-    }
-
-    let mut buf = Vec::with_capacity(
-        resp.content_length()
-            .map(|l| l as usize)
-            .unwrap_or(4096)
-            .min(MAX_RESPONSE_BODY_BYTES),
-    );
-
-    let mut stream = resp;
-    while let Some(chunk) = stream
-        .chunk()
-        .await
-        .map_err(|e| format!("Failed to read {label} response chunk: {e}"))?
-    {
-        if buf.len().saturating_add(chunk.len()) > MAX_RESPONSE_BODY_BYTES {
-            return Err(format!(
-                "{label} response too large (exceeded {MAX_RESPONSE_BODY_BYTES} byte limit)"
-            ));
-        }
-        buf.extend_from_slice(&chunk);
-    }
-
-    Ok(buf)
-}
+// read_body_limited + MAX_RESPONSE_BODY_BYTES moved to `crate::http_util`
+// (Rule of Three: the LLM discovery command is the second consumer).
 
 // ---------------------------------------------------------------------------
 // HTTP client helper
@@ -1169,72 +1118,10 @@ mod tests {
         );
     }
 
-    // ── is_private_on_premise helper tests ──────────────────────────────
-
-    #[test]
-    fn private_on_premise_identifies_10_range() {
-        let url: url::Url = "http://10.0.0.1/".parse().unwrap();
-        assert!(is_private_on_premise(&url));
-    }
-
-    #[test]
-    fn private_on_premise_identifies_172_16_range() {
-        let url: url::Url = "http://172.16.0.1/".parse().unwrap();
-        assert!(is_private_on_premise(&url));
-    }
-
-    #[test]
-    fn private_on_premise_identifies_192_168_range() {
-        let url: url::Url = "http://192.168.1.1/".parse().unwrap();
-        assert!(is_private_on_premise(&url));
-    }
-
-    #[test]
-    fn private_on_premise_rejects_ipv4_loopback() {
-        let url: url::Url = "http://127.0.0.1/".parse().unwrap();
-        assert!(
-            !is_private_on_premise(&url),
-            "Loopback is not private on-premise"
-        );
-    }
-
-    #[test]
-    fn private_on_premise_rejects_ipv4_link_local() {
-        let url: url::Url = "http://169.254.1.1/".parse().unwrap();
-        assert!(
-            !is_private_on_premise(&url),
-            "Link-local is not private on-premise"
-        );
-    }
-
-    #[test]
-    fn private_on_premise_rejects_domain() {
-        let url: url::Url = "http://example.com/".parse().unwrap();
-        assert!(
-            !is_private_on_premise(&url),
-            "Domain is not private on-premise"
-        );
-    }
-
-    // ── IPv6 ULA tests ───────────────────────────────────────────────────
-
-    #[test]
-    fn private_on_premise_identifies_ipv6_ula_fd() {
-        let url: url::Url = "http://[fd12:3456:789a::1]/".parse().unwrap();
-        assert!(
-            is_private_on_premise(&url),
-            "fd::/8 (ULA) should be private on-premise"
-        );
-    }
-
-    #[test]
-    fn private_on_premise_identifies_ipv6_ula_fc() {
-        let url: url::Url = "http://[fc00::1]/".parse().unwrap();
-        assert!(
-            is_private_on_premise(&url),
-            "fc00::/8 (ULA) should be private on-premise"
-        );
-    }
+    // Note: is_private_on_premise helper + its coverage moved to url_validation.rs
+    // as part of the consolidation for LLM model discovery (ADR-041). Redmine uses
+    // PrivatePolicy::BlockLoopback; LLM discovery uses PrivatePolicy::AllowLoopback.
+    // See url_validation::tests for private_on_premise_*_policy tests.
 
     #[test]
     fn validate_url_allows_ipv6_ula_for_redmine() {
@@ -1243,56 +1130,6 @@ mod tests {
             result.is_ok(),
             "IPv6 ULA should be allowed for on-premise Redmine: {:?}",
             result.err()
-        );
-    }
-
-    #[test]
-    fn private_on_premise_rejects_ipv6_loopback() {
-        let url: url::Url = "http://[::1]/".parse().unwrap();
-        assert!(
-            !is_private_on_premise(&url),
-            "IPv6 loopback is not private on-premise"
-        );
-    }
-
-    #[test]
-    fn private_on_premise_rejects_ipv6_link_local() {
-        let url: url::Url = "http://[fe80::1]/".parse().unwrap();
-        assert!(
-            !is_private_on_premise(&url),
-            "IPv6 link-local is not private on-premise"
-        );
-    }
-
-    #[test]
-    fn private_on_premise_rejects_ipv6_global() {
-        let url: url::Url = "http://[2001:db8::1]/".parse().unwrap();
-        assert!(
-            !is_private_on_premise(&url),
-            "IPv6 global address is not private on-premise"
-        );
-    }
-
-    #[test]
-    fn private_on_premise_rejects_ipv6_just_outside_ula() {
-        // fe00:: — 0xfe00 & 0xfe00 = 0xfe00 ≠ 0xfc00, so NOT ULA
-        let url: url::Url = "http://[fe00::1]/".parse().unwrap();
-        assert!(
-            !is_private_on_premise(&url),
-            "fe00:: is just outside ULA range fc00::/7"
-        );
-    }
-
-    #[test]
-    fn private_on_premise_rejects_ipv6_mapped_rfc1918() {
-        // ::ffff:10.0.0.1 — IPv6-mapped IPv4 private. The url crate represents
-        // this as Host::Ipv6 with first segment 0x0000, which does NOT match
-        // the fc00::/7 check. This documents the design intent: IPv6-mapped
-        // IPv4 private addresses are NOT handled by the IPv6 ULA arm.
-        let url: url::Url = "http://[::ffff:10.0.0.1]/".parse().unwrap();
-        assert!(
-            !is_private_on_premise(&url),
-            "IPv6-mapped RFC1918 is not matched by the ULA arm"
         );
     }
 
