@@ -652,6 +652,15 @@ pub fn update_llm_config(
     model: Option<String>,
     base_url: Option<String>,
 ) -> Result<(), String> {
+    if let Some(ref m) = model {
+        // A model name starting with `--` (or `-`) would be interpreted as
+        // a flag by Claude Code's argument parser when rendered as
+        // `--model <name>`. Reject at save time so the free-text input can't
+        // smuggle flags into the CLI invocation.
+        if m.starts_with("--") || m.starts_with('-') {
+            return Err("Model name must not start with '-' (CLI flag collision)".to_string());
+        }
+    }
     if let Some(ref url) = base_url {
         // Normalize the same way apply_llm_config does, so a value accepted at
         // render time is also accepted at save time (Ollama docs commonly use
@@ -661,7 +670,8 @@ pub fn update_llm_config(
         // metadata, IPv6-mapped bypasses, embedded credentials, query/fragment.
         // See ADR-041.
         crate::llm_cmd::validate_llm_base_url(&normalized).map_err(|e| e.to_string())?;
-        // Belt-and-suspenders syntactic validation from the runtime crate.
+        // validate_base_url also rejects path components (http://host/path),
+        // which validate_llm_base_url does not check.
         speedwave_runtime::compose::validate_base_url(&normalized).map_err(|e| e.to_string())?;
     }
     config::with_config_lock(|| {
@@ -871,6 +881,53 @@ mod tests {
         let beta_llm = beta.claude.as_ref().unwrap().llm.as_ref().unwrap();
         assert_eq!(beta_llm.provider.as_deref(), Some("anthropic"));
         assert_eq!(beta_llm.model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn update_llm_config_rejects_model_with_flag_prefix() {
+        // Regression: a model name starting with `--` would be rendered as
+        // `--model --dangerously-skip-permissions` in the Claude Code
+        // invocation; argument parsers may treat the value as another flag.
+        let result = update_llm_config(
+            Some("ollama".to_string()),
+            Some("--dangerously-skip-permissions".to_string()),
+            Some("http://localhost:11434".to_string()),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_lowercase().contains("flag"),
+            "Error must reference the flag collision, got: {err}"
+        );
+    }
+
+    #[test]
+    fn update_llm_config_rejects_model_with_single_dash_prefix() {
+        let result = update_llm_config(
+            Some("ollama".to_string()),
+            Some("-h".to_string()),
+            Some("http://localhost:11434".to_string()),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_llm_config_accepts_model_with_dash_in_middle() {
+        // Common model names contain dashes (e.g. `llama-3.3`, `qwen-coder`).
+        // The guard only rejects leading dashes.
+        let result = update_llm_config(
+            Some("ollama".to_string()),
+            Some("llama-3.3".to_string()),
+            Some("http://localhost:11434".to_string()),
+        );
+        // The save itself may fail for project-config reasons in the test env,
+        // but the model-name check must not be the reason.
+        if let Err(e) = result {
+            assert!(
+                !e.to_lowercase().contains("flag collision"),
+                "Middle-dash model must not trigger flag-collision guard, got: {e}"
+            );
+        }
     }
 
     #[test]

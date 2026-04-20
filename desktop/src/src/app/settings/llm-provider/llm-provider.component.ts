@@ -357,17 +357,15 @@ export class LlmProviderComponent implements OnInit {
       });
       // Stale-discard: drop responses whose id doesn't match the latest trigger.
       if (this.discoveryState.kind !== 'in-flight' || this.discoveryState.id !== id) return;
-      if (models.length > 0) {
-        this.discoveryState = { kind: 'ready', url: effectiveUrl, models };
-        // Auto-select the first discovered model when the current value is
-        // blank or not on the list — otherwise the <select> renders with no
-        // active <option> and Save would persist an empty model name.
-        if (!this.model || !models.includes(this.model)) {
-          this.model = models[0];
-        }
-      } else {
-        // Defensive — backend already maps empty to Err("empty"), but be safe.
-        this.discoveryState = { kind: 'failed', url: effectiveUrl, reason: 'other' };
+      // Invariant: do_discover_llm_models maps empty lists to Err("empty"),
+      // so a resolved Ok always carries a non-empty array — the success path
+      // never observes length === 0.
+      this.discoveryState = { kind: 'ready', url: effectiveUrl, models };
+      // Auto-select the first discovered model when the current value is
+      // blank or not on the list — otherwise the <select> renders with no
+      // active <option> and Save would persist an empty model name.
+      if (!this.model || !models.includes(this.model)) {
+        this.model = models[0];
       }
     } catch (e: unknown) {
       if (this.discoveryState.kind !== 'in-flight' || this.discoveryState.id !== id) return;

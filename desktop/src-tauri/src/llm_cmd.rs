@@ -122,9 +122,9 @@ pub(crate) fn validate_llm_base_url(url: &str) -> Result<url::Url, String> {
                     ))
                 }
             }
-            if candidate.host().is_none() {
-                return Err("URL has no host".to_string());
-            }
+            // Host is guaranteed present here: host_is_localhost requires
+            // Some(Domain("localhost")); is_private_on_premise returns true
+            // only for Some(Ipv4) or Some(Ipv6). No None path reaches this arm.
             let host = candidate.host_str().unwrap_or("unknown");
             if host_is_localhost || is_loopback_host(&candidate) {
                 log::warn!("Allowing loopback address for local LLM: {}", host);
