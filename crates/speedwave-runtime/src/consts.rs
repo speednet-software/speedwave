@@ -1293,4 +1293,23 @@ mod tests {
             "LIMA_VM_STOP_TIMEOUT_SECS must be positive"
         );
     }
+
+    #[test]
+    fn test_playwright_has_beta_badge() {
+        let svc = find_mcp_service("playwright").expect("playwright service must exist");
+        assert_eq!(svc.badge, Some("BETA"));
+    }
+
+    #[test]
+    fn test_credential_services_have_no_badge() {
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            if !svc.auth_fields.is_empty() {
+                assert_eq!(
+                    svc.badge, None,
+                    "service '{}' with credentials should not have a badge",
+                    svc.config_key
+                );
+            }
+        }
+    }
 }

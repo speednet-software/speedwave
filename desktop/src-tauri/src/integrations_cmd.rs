@@ -1373,6 +1373,30 @@ mod tests {
     }
 
     #[test]
+    fn badge_propagated_for_playwright() {
+        let svc_desc = speedwave_runtime::consts::find_mcp_service("playwright")
+            .expect("playwright must exist");
+        assert_eq!(
+            svc_desc.badge,
+            Some("BETA"),
+            "playwright must have BETA badge"
+        );
+    }
+
+    #[test]
+    fn badge_none_for_credential_services() {
+        for key in &["slack", "sharepoint", "redmine", "gitlab"] {
+            let svc_desc = speedwave_runtime::consts::find_mcp_service(key)
+                .unwrap_or_else(|| panic!("service '{}' must exist", key));
+            assert_eq!(
+                svc_desc.badge, None,
+                "service '{}' should have no badge",
+                key
+            );
+        }
+    }
+
+    #[test]
     fn credential_files_allowlist_covers_legacy_project_name_file() {
         // project_name was removed from auth_fields (UI no longer shows it),
         // but credential_files still includes it so delete_integration_credentials
