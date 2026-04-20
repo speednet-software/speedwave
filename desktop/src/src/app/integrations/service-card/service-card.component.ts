@@ -31,6 +31,14 @@ export interface SaveCredentialsEvent {
           <span class="font-semibold text-base" data-testid="service-name">{{
             svc.display_name
           }}</span>
+          @if (svc.badge) {
+            <span
+              class="text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase tracking-wide bg-amber-500/20 text-amber-400 border border-amber-500/30"
+              data-testid="service-badge"
+            >
+              {{ svc.badge }}
+            </span>
+          }
           <span
             class="text-[11px] px-2 py-0.5 rounded font-medium"
             data-testid="badge"

@@ -202,6 +202,7 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
             auth_fields: auth_fields.clone(),
             current_values,
             mappings,
+            badge: svc_desc.badge.map(|b| b.to_string()),
         });
     }
 

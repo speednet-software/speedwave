@@ -64,6 +64,7 @@ pub(crate) struct IntegrationStatusEntry {
     pub(crate) auth_fields: Vec<AuthField>,
     pub(crate) current_values: std::collections::HashMap<String, String>,
     pub(crate) mappings: Option<std::collections::HashMap<String, serde_json::Value>>,
+    pub(crate) badge: Option<String>,
 }
 
 #[derive(Serialize, Clone)]

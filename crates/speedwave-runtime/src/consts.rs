@@ -236,6 +236,8 @@ pub struct McpServiceDescriptor {
     /// Credential file names allowed for this service (superset of auth field keys,
     /// may include extra files like "config.json").
     pub credential_files: &'static [&'static str],
+    /// Optional UI badge label (e.g. "BETA", "NEW"). `None` = no badge.
+    pub badge: Option<&'static str>,
 }
 
 /// Toggleable MCP services — Single Source of Truth for service metadata.
@@ -270,6 +272,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             },
         ],
         credential_files: &["bot_token", "user_token"],
+        badge: None,
     },
     McpServiceDescriptor {
         config_key: "sharepoint",
@@ -347,6 +350,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             "site_id",
             "base_path",
         ],
+        badge: None,
     },
     McpServiceDescriptor {
         config_key: "redmine",
@@ -393,6 +397,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             "project_id",
             "project_name",
         ],
+        badge: None,
     },
     McpServiceDescriptor {
         config_key: "gitlab",
@@ -423,6 +428,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             },
         ],
         credential_files: &["token", "host_url"],
+        badge: None,
     },
     McpServiceDescriptor {
         config_key: "playwright",
@@ -433,6 +439,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         // Playwright has no credentials — it scrapes public URLs only.
         auth_fields: &[],
         credential_files: &[],
+        badge: Some("BETA"),
     },
 ];
 
