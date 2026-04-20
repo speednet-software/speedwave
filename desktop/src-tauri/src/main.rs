@@ -1141,10 +1141,7 @@ fn main() {
             // Build system tray.
             let tray_menu = tray::build_tray_menu(app.handle(), &None)?;
             let update_version_tray = update_version_setup.clone();
-            let tray_icon = app
-                .default_window_icon()
-                .cloned()
-                .ok_or("No default window icon")?;
+            let tray_icon = tray::load_tray_icon()?;
 
             #[cfg_attr(target_os = "linux", allow(unused_mut))]
             let mut tray_builder = TrayIconBuilder::with_id("main-tray")
