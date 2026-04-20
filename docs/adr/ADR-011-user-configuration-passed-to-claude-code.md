@@ -58,14 +58,13 @@ Different projects require different Claude Code settings (model selection, cust
 
 #### Per-project Claude overrides (`claude.*`)
 
-| Field                    | Rust type                         | Description                                                                     |
-| ------------------------ | --------------------------------- | ------------------------------------------------------------------------------- |
-| `claude.env`             | `Option<HashMap<String, String>>` | Environment variables injected into the Claude Code process[^1]                 |
-| `claude.llm`             | `Option<LlmConfig>`               | LLM provider switching — see ADR-018                                            |
-| `claude.llm.provider`    | `Option<String>`                  | `anthropic`, `openai`, `gemini`, `deepseek`, `openrouter`, `ollama`, `lmstudio` |
-| `claude.llm.model`       | `Option<String>`                  | Model name for the target provider                                              |
-| `claude.llm.base_url`    | `Option<String>`                  | Custom API endpoint (required for `ollama`, `lmstudio`)                         |
-| `claude.llm.api_key_env` | `Option<String>`                  | Name of the env var holding the API key (e.g. `OPENAI_API_KEY`)                 |
+| Field                 | Rust type                         | Description                                                                                                                                                               |
+| --------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude.env`          | `Option<HashMap<String, String>>` | Environment variables injected into the Claude Code process[^1]                                                                                                           |
+| `claude.llm`          | `Option<LlmConfig>`               | Local LLM provider configuration — see ADR-040                                                                                                                            |
+| `claude.llm.provider` | `Option<String>`                  | `anthropic` (default), `ollama`, `lmstudio`, `llamacpp`, `custom`                                                                                                         |
+| `claude.llm.model`    | `Option<String>`                  | Model name for the local provider (also accepted from repo config)                                                                                                        |
+| `claude.llm.base_url` | `Option<String>`                  | Custom API endpoint (required for `custom`; optional override for known providers). **Not accepted from repo config** — only from user config (SSRF prevention, ADR-040). |
 
 #### Global config fields
 

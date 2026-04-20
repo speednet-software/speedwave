@@ -35,7 +35,7 @@ pub(crate) struct LlmConfigResponse {
     pub(crate) provider: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) base_url: Option<String>,
-    pub(crate) api_key_env: Option<String>,
+    pub(crate) default_base_url: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]

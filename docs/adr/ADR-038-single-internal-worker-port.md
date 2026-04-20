@@ -15,9 +15,8 @@ Speedwave's compose emitter currently assigns a unique TCP port to every MCP wor
 | `mcp-sharepoint` | 4002 |
 | `mcp-redmine`    | 4003 |
 | `mcp-gitlab`     | 4004 |
-| `llm-proxy`      | 4009 |
 
-Plugin workers declared a `port` field in `plugin.json` and Speedwave reserved the range `PORT_BASE..=(PORT_BASE + len(TOGGLEABLE_MCP_SERVICES))` plus `PORT_LLM_PROXY` for built-ins, rejecting any plugin manifest whose port overlapped[^1]. Every new built-in service therefore shifted the reserved range, breaking plugin manifests that happened to claim a port in the newly reserved slice[^2].
+Plugin workers declared a `port` field in `plugin.json` and Speedwave reserved the range `PORT_BASE..=(PORT_BASE + len(TOGGLEABLE_MCP_SERVICES))` for built-ins, rejecting any plugin manifest whose port overlapped[^1]. Every new built-in service therefore shifted the reserved range, breaking plugin manifests that happened to claim a port in the newly reserved slice[^2].
 
 The question this ADR answers: **does per-worker port uniqueness carry any security weight, or can we collapse every worker onto a single internal port and let DNS disambiguate?**
 
@@ -42,8 +41,7 @@ Keeping unique ports therefore costs complexity (template variables, emitter bra
 Collapse worker ports to a single internal constant.
 
 - `PORT_BASE = 4000` — **renamed in docs as `PORT_HUB`** but kept under the same symbol for compatibility. This is the external contract: the `claude` container dials `http://mcp-hub:4000`.
-- `PORT_WORKER = 3000` — every MCP worker listens on this port inside its own container. This includes built-in services (`mcp-slack`, `mcp-sharepoint`, `mcp-redmine`, `mcp-gitlab`, future `mcp-playwright`), the optional `llm-proxy` service, and plugin workers.
-- `PORT_LLM_PROXY` — removed; llm-proxy listens on `PORT_WORKER` like any other worker. Claude reaches it via `ANTHROPIC_BASE_URL=http://llm-proxy:3000`.
+- `PORT_WORKER = 3000` — every MCP worker listens on this port inside its own container. This includes built-in services (`mcp-slack`, `mcp-sharepoint`, `mcp-redmine`, `mcp-gitlab`, future `mcp-playwright`) and plugin workers.
 - `plugin.json.port` — deprecated and ignored. The field remains in `PluginManifest` as `Option<u16>` so existing signed manifests still deserialize; setting a non-`PORT_WORKER` value merely emits a `log::warn!` pointing to this ADR. `validate_plugin_port()` is deleted along with the reserved-range logic.
 
 ### Impact on plugin contract
@@ -59,7 +57,7 @@ Summarised against the plugin contract table in `CLAUDE.md`:
 
 ### Reserved ranges (Variant B)
 
-Retain unique ports but carve out a stable reservation: `4001–4019` for built-ins, `4020` for llm-proxy, `4021–4029` for future core services, `4030+` for plugins. This fixes plugin contract drift (the lower bound of the plugin range becomes a stable constant instead of `len(TOGGLEABLE_MCP_SERVICES)`) without touching the per-service port matrix.
+Retain unique ports but carve out a stable reservation: `4001–4019` for built-ins, `4021–4029` for future core services, `4030+` for plugins. This fixes plugin contract drift (the lower bound of the plugin range becomes a stable constant instead of `len(TOGGLEABLE_MCP_SERVICES)`) without touching the per-service port matrix.
 
 Rejected because it only _delays_ the complexity: every built-in addition still requires a reservation decision, the emitter still branches per service, and `plugin.json.port` remains a required field. It trades a rolling breaking change for a structural one, with no compensating benefit in the current threat model.
 
@@ -87,7 +85,6 @@ Rejected because it adds a discovery mechanism (the hub needs to learn which por
 
 - `test_all_workers_use_port_worker` — renders a full compose with every integration enabled and asserts every worker service (excluding `claude` and `mcp-hub`) has `PORT=3000` in its environment.
 - `test_hub_worker_urls_use_port_worker` — asserts every `WORKER_*_URL` entry in the hub environment ends with `:3000`.
-- `test_llm_proxy_uses_port_worker` — enables an external LLM provider, asserts `llm-proxy` listens on `PORT=3000` and Claude's `ANTHROPIC_BASE_URL=http://llm-proxy:3000`.
 - `test_plugin_manifest_port_is_ignored` — constructs a plugin manifest with `port: Some(9999)`, calls `generate_plugin_service()`, asserts the resulting service uses `PORT=3000`.
 - `test_mcp_plugin_without_port_is_accepted` — validates a plugin manifest with `port: None` and confirms it passes validation.
 

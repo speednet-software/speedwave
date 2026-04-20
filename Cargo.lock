@@ -1732,6 +1732,7 @@ dependencies = [
  "serde_yaml_ng",
  "sha2 0.11.0",
  "tempfile",
+ "url",
  "uuid",
  "zip 8.5.1",
 ]

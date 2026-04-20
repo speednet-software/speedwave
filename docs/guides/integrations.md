@@ -195,9 +195,47 @@ Plugins that declare `requires_integrations` (e.g. `["sharepoint"]`) display the
 
 Plugin authors should set `speedwave_compat` in `plugin.json` to declare which Speedwave versions the plugin supports — for example, `"speedwave_compat": ">=0.8, <1"` for plugins targeting the 0.8 series. If the field is present and the running Speedwave version does not satisfy the declared range, installation is rejected with a clear error. Omit the field to disable the check. See [ADR-015](../adr/ADR-015-plugin-system.md) for details on the enforcement model and version-requirement syntax.
 
+## Local LLM Setup
+
+You can run Claude Code inside Speedwave against a local LLM server instead of Anthropic's cloud API. Go to **Settings → LLM Provider** to select a provider.
+
+### Ollama (requires 0.14.0+)
+
+1. Install Ollama and pull a model:
+
+   ```bash
+   OLLAMA_HOST=0.0.0.0 ollama serve   # must bind to 0.0.0.0, not 127.0.0.1
+   ollama pull llama3.3
+   ```
+
+   > **Important:** Ollama binds to `127.0.0.1` by default. The `claude` container cannot reach the loopback interface — set `OLLAMA_HOST=0.0.0.0` before starting `ollama serve`.
+
+2. In Speedwave Settings → LLM Provider → select **Ollama**
+3. Set **Model** to the model you pulled (e.g. `llama3.3`)
+4. Leave **Base URL** empty to use the default (`http://host.docker.internal:11434`)
+5. Restart containers
+
+### LM Studio (requires 0.4.1+)
+
+1. In LM Studio, load a model and enable the **Local Server**
+2. In Speedwave Settings → LLM Provider → select **LM Studio**
+3. Leave Base URL empty for the default port (`http://host.docker.internal:1234`)
+4. Restart containers
+
+### llama.cpp (requires January 2026 build or later)
+
+1. Start `llama-server` with the Anthropic API server enabled
+2. Select **llama.cpp** in Settings → LLM Provider
+3. Default port: `http://host.docker.internal:8080`
+
+### Custom endpoint
+
+Select **Custom endpoint** if your LLM server is at a non-standard address (e.g. another machine on your LAN at `http://192.168.1.100:11434`). Enter the full URL including port in the **Base URL** field. The URL must use `http://` or `https://` and must not include a path.
+
 ## See Also
 
 - [ADR-010: mcp-os as Host Process Per Platform](../adr/ADR-010-mcp-os-as-host-process-per-platform.md)
 - [ADR-013: mcp-os as Host Process — Implementation Details](../adr/ADR-013-mcp-os-as-host-process-implementation.md)
 - [ADR-015: Plugin System](../adr/ADR-015-plugin-system.md)
 - [ADR-036: Self-Declaring Worker Policy](../adr/ADR-036-self-declaring-worker-policy.md)
+- [ADR-040: Remove LiteLLM — Direct Local Provider Injection](../adr/ADR-040-remove-litellm-direct-provider-injection.md)

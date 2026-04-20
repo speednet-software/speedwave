@@ -61,18 +61,22 @@ describe('AuthSectionComponent', () => {
     expect(methodSelect).not.toBeNull();
   });
 
-  it('shows ollama message when llmProvider is ollama', () => {
+  it('shows local provider note when llmProvider is ollama', () => {
     component.llmProvider = 'ollama';
     fixture.detectChanges();
     const note = fixture.nativeElement.querySelector('[data-testid="auth-note"]');
-    expect(note?.textContent).toContain('No authentication needed for Ollama');
+    expect(note?.textContent).toContain('No authentication needed for local model providers');
   });
 
-  it('shows external message when llmProvider is external', () => {
-    component.llmProvider = 'external';
-    fixture.detectChanges();
-    const note = fixture.nativeElement.querySelector('[data-testid="auth-note"]');
-    expect(note?.textContent).toContain('Uses API key env var');
+  it.each([
+    ['ollama', true],
+    ['lmstudio', true],
+    ['llamacpp', true],
+    ['custom', true],
+    ['anthropic', false],
+  ])('isLocalProvider() returns %s for provider %s', (provider, expected) => {
+    component.llmProvider = provider;
+    expect(component.isLocalProvider()).toBe(expected);
   });
 
   it('loads auth status when activeProject changes', async () => {

@@ -36,10 +36,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         allow_stubs,
     )?;
 
-    let manifest = speedwave_runtime::bundle::generate_bundle_manifest(
-        env!("CARGO_PKG_VERSION"),
-        &hash_root,
-    )?;
+    let manifest =
+        speedwave_runtime::bundle::generate_bundle_manifest(env!("CARGO_PKG_VERSION"), &hash_root)?;
     std::fs::create_dir_all(&build_context)?;
     let manifest_json = serde_json::to_vec_pretty(&manifest)?;
     std::fs::write(
@@ -61,15 +59,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "cargo:rerun-if-changed={}",
-        repo_root.join("scripts").join("bundle-build-context.sh").display()
+        repo_root
+            .join("scripts")
+            .join("bundle-build-context.sh")
+            .display()
     );
     println!(
         "cargo:rerun-if-changed={}",
-        repo_root.join("scripts").join("build-native-macos.sh").display()
+        repo_root
+            .join("scripts")
+            .join("build-native-macos.sh")
+            .display()
     );
     println!(
         "cargo:rerun-if-changed={}",
-        repo_root.join("scripts").join("bundle-native-assets.sh").display()
+        repo_root
+            .join("scripts")
+            .join("bundle-native-assets.sh")
+            .display()
     );
     println!("cargo:rerun-if-changed={}", build_context.display());
     println!(

@@ -577,11 +577,15 @@ pub fn get_llm_config() -> Result<LlmConfigResponse, String> {
         .active_project_entry()
         .and_then(|p| p.claude.as_ref())
         .and_then(|c| c.llm.as_ref());
+    let provider = llm.and_then(|l| l.provider.clone());
+    let default_url = provider
+        .as_deref()
+        .and_then(speedwave_runtime::compose::default_base_url);
     Ok(LlmConfigResponse {
-        provider: llm.and_then(|l| l.provider.clone()),
+        provider,
         model: llm.and_then(|l| l.model.clone()),
         base_url: llm.and_then(|l| l.base_url.clone()),
-        api_key_env: llm.and_then(|l| l.api_key_env.clone()),
+        default_base_url: default_url,
     })
 }
 
@@ -591,7 +595,6 @@ fn apply_llm_config(
     provider: Option<String>,
     model: Option<String>,
     base_url: Option<String>,
-    api_key_env: Option<String>,
 ) -> anyhow::Result<()> {
     let active = user_config
         .active_project
@@ -605,7 +608,6 @@ fn apply_llm_config(
         provider,
         model,
         base_url,
-        api_key_env,
     };
     match &mut project.claude {
         Some(c) => c.llm = Some(llm),
@@ -625,11 +627,17 @@ pub fn update_llm_config(
     provider: Option<String>,
     model: Option<String>,
     base_url: Option<String>,
-    api_key_env: Option<String>,
 ) -> Result<(), String> {
+    if let Some(ref url) = base_url {
+        // Normalize the same way apply_llm_config does, so a value accepted at
+        // render time is also accepted at save time (Ollama docs commonly use
+        // `http://…/v1` suffixes; we strip that before validating).
+        let normalized = speedwave_runtime::compose::strip_trailing_v1(url);
+        speedwave_runtime::compose::validate_base_url(&normalized).map_err(|e| e.to_string())?;
+    }
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
-        apply_llm_config(&mut user_config, provider, model, base_url, api_key_env)?;
+        apply_llm_config(&mut user_config, provider, model, base_url)?;
         config::save_user_config(&user_config)
     })
     .map_err(|e| e.to_string())
@@ -665,7 +673,6 @@ mod tests {
                             provider: Some("anthropic".to_string()),
                             model: Some("claude-sonnet-4-6".to_string()),
                             base_url: None,
-                            api_key_env: None,
                         }),
                     }),
                     integrations: None,
@@ -688,19 +695,17 @@ mod tests {
 
         let result = apply_llm_config(
             &mut cfg,
-            Some("openai".to_string()),
-            Some("gpt-4o".to_string()),
-            Some("http://localhost:8080".to_string()),
-            Some("OPENAI_KEY".to_string()),
+            Some("ollama".to_string()),
+            Some("llama3.3".to_string()),
+            Some("http://localhost:11434".to_string()),
         );
         assert!(result.is_ok());
 
         let project = cfg.find_project("alpha").unwrap();
         let llm = project.claude.as_ref().unwrap().llm.as_ref().unwrap();
-        assert_eq!(llm.provider.as_deref(), Some("openai"));
-        assert_eq!(llm.model.as_deref(), Some("gpt-4o"));
-        assert_eq!(llm.base_url.as_deref(), Some("http://localhost:8080"));
-        assert_eq!(llm.api_key_env.as_deref(), Some("OPENAI_KEY"));
+        assert_eq!(llm.provider.as_deref(), Some("ollama"));
+        assert_eq!(llm.model.as_deref(), Some("llama3.3"));
+        assert_eq!(llm.base_url.as_deref(), Some("http://localhost:11434"));
     }
 
     #[test]
@@ -714,7 +719,6 @@ mod tests {
             Some("ollama".to_string()),
             Some("llama3.3".to_string()),
             None,
-            None,
         );
         assert!(result.is_ok());
 
@@ -723,7 +727,6 @@ mod tests {
         assert_eq!(llm.provider.as_deref(), Some("ollama"));
         assert_eq!(llm.model.as_deref(), Some("llama3.3"));
         assert_eq!(llm.base_url, None);
-        assert_eq!(llm.api_key_env, None);
     }
 
     #[test]
@@ -731,7 +734,7 @@ mod tests {
         let mut cfg = make_config_with_active_project();
         cfg.active_project = Some("beta".to_string());
 
-        let result = apply_llm_config(&mut cfg, None, None, None, None);
+        let result = apply_llm_config(&mut cfg, None, None, None);
         assert!(result.is_ok());
 
         let project = cfg.find_project("beta").unwrap();
@@ -739,7 +742,6 @@ mod tests {
         assert!(llm.provider.is_none());
         assert!(llm.model.is_none());
         assert!(llm.base_url.is_none());
-        assert!(llm.api_key_env.is_none());
     }
 
     #[test]
@@ -757,7 +759,7 @@ mod tests {
             log_level: None,
         };
 
-        let result = apply_llm_config(&mut cfg, Some("openai".to_string()), None, None, None);
+        let result = apply_llm_config(&mut cfg, Some("ollama".to_string()), None, None);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -781,7 +783,7 @@ mod tests {
             log_level: None,
         };
 
-        let result = apply_llm_config(&mut cfg, Some("openai".to_string()), None, None, None);
+        let result = apply_llm_config(&mut cfg, Some("ollama".to_string()), None, None);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -812,7 +814,7 @@ mod tests {
             log_level: None,
         };
 
-        apply_llm_config(&mut cfg, Some("openai".to_string()), None, None, None).unwrap();
+        apply_llm_config(&mut cfg, Some("ollama".to_string()), None, None).unwrap();
 
         let project = cfg.find_project("proj").unwrap();
         let claude = project.claude.as_ref().unwrap();
@@ -824,7 +826,7 @@ mod tests {
         assert!(claude.settings.is_some(), "settings should be preserved");
         assert_eq!(
             claude.llm.as_ref().unwrap().provider.as_deref(),
-            Some("openai")
+            Some("ollama")
         );
     }
 
@@ -833,13 +835,48 @@ mod tests {
         let mut cfg = make_config_with_active_project();
         // active_project is "alpha"
 
-        apply_llm_config(&mut cfg, Some("openai".to_string()), None, None, None).unwrap();
+        apply_llm_config(&mut cfg, Some("ollama".to_string()), None, None).unwrap();
 
         // beta should be unchanged
         let beta = cfg.find_project("beta").unwrap();
         let beta_llm = beta.claude.as_ref().unwrap().llm.as_ref().unwrap();
         assert_eq!(beta_llm.provider.as_deref(), Some("anthropic"));
         assert_eq!(beta_llm.model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn update_llm_config_rejects_invalid_base_url() {
+        let result = update_llm_config(
+            Some("custom".to_string()),
+            None,
+            Some("javascript:alert(1)".to_string()),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("http://") || err.contains("https://") || err.contains("base_url"),
+            "Error must mention http/https scheme requirement, got: {err}"
+        );
+    }
+
+    #[test]
+    fn update_llm_config_accepts_v1_suffix() {
+        // Regression: a `…/v1` URL (common in Ollama/LiteLLM docs) must be accepted
+        // at save time because compose rendering strips the suffix before validating.
+        // Previously this produced a false "base_url must not contain a path" error.
+        // We only check the URL-validation path here — a config-save error is fine,
+        // what we require is that the error (if any) is NOT the path rejection.
+        let result = update_llm_config(
+            Some("custom".to_string()),
+            Some("llama3.3".to_string()),
+            Some("http://localhost:11434/v1".to_string()),
+        );
+        if let Err(err) = result {
+            assert!(
+                !err.contains("must not contain a path"),
+                "`/v1` suffix must be stripped before validation, got: {err}"
+            );
+        }
     }
 
     // -- MockRuntime for switch/teardown tests --

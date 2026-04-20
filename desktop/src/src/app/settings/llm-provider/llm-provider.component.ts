@@ -10,12 +10,13 @@ import {
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { TauriService } from '../../services/tauri.service';
+import { ProjectStateService } from '../../services/project-state.service';
 
 interface LlmConfigResponse {
   provider: string | null;
   model: string | null;
   base_url: string | null;
-  api_key_env: string | null;
+  default_base_url: string | null;
 }
 
 /** Manages LLM provider selection and configuration. */
@@ -40,22 +41,26 @@ interface LlmConfigResponse {
             data-testid="settings-llm-provider"
           >
             <option value="anthropic">Anthropic (default)</option>
-            <option value="ollama">Ollama (local)</option>
-            <option value="external">External (LiteLLM proxy)</option>
+            <option value="ollama">Ollama (local) — requires 0.14.0+</option>
+            <option value="lmstudio">LM Studio (local) — requires 0.4.1+</option>
+            <option value="llamacpp">llama.cpp (local) — requires Jan 2026+</option>
+            <option value="custom">Custom endpoint</option>
           </select>
         </div>
-        <div class="flex justify-between items-center py-2 border-t border-sw-border">
-          <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="llm-model">Model</label>
-          <input
-            id="llm-model"
-            type="text"
-            [(ngModel)]="model"
-            [placeholder]="modelPlaceholder()"
-            class="flex-1 max-w-[340px] px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
-            data-testid="settings-llm-model"
-          />
-        </div>
-        @if (provider === 'ollama' || provider === 'external') {
+        @if (provider !== 'anthropic') {
+          <div class="flex justify-between items-center py-2 border-t border-sw-border">
+            <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="llm-model"
+              >Model</label
+            >
+            <input
+              id="llm-model"
+              type="text"
+              [(ngModel)]="model"
+              [placeholder]="modelPlaceholder()"
+              class="flex-1 max-w-[340px] px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
+              data-testid="settings-llm-model"
+            />
+          </div>
           <div class="flex justify-between items-center py-2 border-t border-sw-border">
             <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="llm-base-url"
               >Base URL</label
@@ -64,24 +69,9 @@ interface LlmConfigResponse {
               id="llm-base-url"
               type="text"
               [(ngModel)]="baseUrl"
-              placeholder="http://host.docker.internal:11434"
+              [placeholder]="defaultBaseUrl || baseUrlPlaceholder()"
               class="flex-1 max-w-[340px] px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
               data-testid="settings-llm-base-url"
-            />
-          </div>
-        }
-        @if (provider === 'external') {
-          <div class="flex justify-between items-center py-2 border-t border-sw-border">
-            <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="llm-api-key-env"
-              >API Key env var</label
-            >
-            <input
-              id="llm-api-key-env"
-              type="text"
-              [(ngModel)]="apiKeyEnv"
-              placeholder="OPENAI_API_KEY"
-              class="flex-1 max-w-[340px] px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
-              data-testid="settings-llm-api-key-env"
             />
           </div>
         }
@@ -98,9 +88,6 @@ interface LlmConfigResponse {
             <span class="text-sw-success text-[13px]" data-testid="settings-llm-saved">Saved!</span>
           }
         </div>
-        <p class="text-[11px] text-sw-text-faint mt-2 mb-0">
-          Changes take effect on next container restart.
-        </p>
       </div>
     </section>
   `,
@@ -109,7 +96,7 @@ export class LlmProviderComponent implements OnInit {
   provider = 'anthropic';
   model = '';
   baseUrl = '';
-  apiKeyEnv = '';
+  defaultBaseUrl = '';
   saving = false;
   saved = false;
 
@@ -118,6 +105,7 @@ export class LlmProviderComponent implements OnInit {
 
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
+  private projectState = inject(ProjectStateService);
 
   /** Loads the LLM configuration from the backend on init. */
   ngOnInit(): void {
@@ -129,15 +117,28 @@ export class LlmProviderComponent implements OnInit {
     switch (this.provider) {
       case 'ollama':
         return 'llama3.3';
-      case 'external':
-        return 'gpt-4o';
+      case 'lmstudio':
+        return 'qwen2.5-coder';
+      case 'llamacpp':
+        return 'deepseek-r1';
+      case 'custom':
+        return 'your-model-name';
       default:
         return 'claude-sonnet-4-6';
     }
   }
 
+  /** Returns a fallback base URL placeholder when backend default_base_url is unavailable. */
+  baseUrlPlaceholder(): string {
+    // No meaningful default for 'custom' — user must supply their own URL.
+    // Backend is SSOT for known-provider defaults (see default_base_url in compose.rs);
+    // this is just a fallback hint if the backend response arrives late.
+    return '';
+  }
+
   /** Notifies parent when the provider selection changes. */
   onProviderChange(): void {
+    this.defaultBaseUrl = '';
     this.providerChange.emit(this.provider);
   }
 
@@ -150,10 +151,10 @@ export class LlmProviderComponent implements OnInit {
         provider: this.provider,
         model: this.model || null,
         baseUrl: this.baseUrl || null,
-        apiKeyEnv: this.apiKeyEnv || null,
       });
       this.saved = true;
       this.providerChange.emit(this.provider);
+      this.projectState.requestRestart();
       setTimeout(() => {
         this.saved = false;
         this.cdr.markForCheck();
@@ -171,7 +172,7 @@ export class LlmProviderComponent implements OnInit {
       this.provider = config.provider || 'anthropic';
       this.model = config.model || '';
       this.baseUrl = config.base_url || '';
-      this.apiKeyEnv = config.api_key_env || '';
+      this.defaultBaseUrl = config.default_base_url || '';
       this.providerChange.emit(this.provider);
     } catch {
       // Not running inside Tauri or no config yet

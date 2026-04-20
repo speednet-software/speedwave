@@ -19,9 +19,8 @@ The user-level config file stores project definitions, the active project, IDE s
         },
         "llm": {
           "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
-          "base_url": null,
-          "api_key_env": null
+          "model": null,
+          "base_url": null
         }
       },
       "integrations": {
@@ -49,7 +48,7 @@ The user-level config file stores project definitions, the active project, IDE s
 A `.speedwave.json` file in the project repository root provides repo-level defaults. These are overridden by the user-level config:
 
 - `claude.env` — environment variables passed to Claude Code inside the container
-- `claude.llm` — LLM provider, model, base URL, and API key env var name
+- `claude.llm` — LLM provider (`anthropic`, `ollama`, `lmstudio`, `llamacpp`, `custom`), model name, and optional base URL. See [ADR-040](../adr/ADR-040-remove-litellm-direct-provider-injection.md) for provider details.
 - `integrations` — enable/disable individual integrations per project
 
 ## Environment Variables
