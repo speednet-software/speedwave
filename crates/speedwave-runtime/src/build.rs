@@ -497,21 +497,25 @@ fn try_build_all(
             DEFAULT_BUILD_WORKER_FALLBACK.min(total)
         }
     };
-    log::info!(
-        "build_all_images: building {total} images from {} ({worker_count} parallel workers)",
-        vm_root.display()
-    );
     let root_str = vm_root.to_string_lossy();
     let root_str = root_str.trim_end_matches('/');
 
     // Distribute IMAGES indices across workers as static slices — no shared
     // work-stealing queue needed for a fixed, small input list (ADR-032 §4).
+    // `chunks.len()` can be less than `worker_count` when `total / worker_count`
+    // does not divide evenly (e.g. 6 images on 4 cores → chunk_size=2 → 3 chunks),
+    // so we log the actual thread count, not the upper bound.
     let indices: Vec<usize> = (0..total).collect();
     let chunks: Vec<&[usize]> = if worker_count == 0 {
         vec![]
     } else {
         indices.chunks(total.div_ceil(worker_count)).collect()
     };
+    log::info!(
+        "build_all_images: building {total} images from {} ({} parallel workers)",
+        vm_root.display(),
+        chunks.len()
+    );
 
     // Per-worker results collected into a flat Vec after scope join. The Mutex
     // can only be poisoned if a worker panics, which causes thread::scope to
@@ -560,7 +564,13 @@ fn try_build_all(
         }
     });
 
-    let outcomes = results.into_inner().unwrap_or_else(|p| p.into_inner());
+    let mut outcomes = results.into_inner().unwrap_or_else(|p| p.into_inner());
+
+    // Sort by IMAGES index so the classifier picks the lowest-indexed error in each
+    // priority class, independent of thread completion order. Without this sort,
+    // "the first transient error" would mean "whichever worker happened to finish
+    // first", which is non-deterministic across runs and breaks the doc claim below.
+    outcomes.sort_by_key(|(idx, _)| *idx);
 
     // Single-pass classifier: snapshotter errors require system_prune before retry;
     // transient errors need only a plain retry. Priority: snapshotter > transient > first by index.
@@ -622,9 +632,11 @@ fn try_build_all(
         e
     } else {
         // Unreachable: total_errors > 0 guarantees at least one error slot is filled.
-        // Returning early avoids using expect/unwrap in production code.
-        log::error!("build_all_images: total_errors > 0 but no error slot filled — this is a bug");
-        return Ok(total as u32);
+        // Returning Err (not Ok) protects callers from acting on a broken build tree
+        // if this invariant is ever violated by a future refactor.
+        return Err(anyhow::anyhow!(
+            "internal bug: build_all_images recorded {total_errors} error(s) but no error slot was filled"
+        ));
     };
     let additional = total_errors - 1;
 
@@ -2200,14 +2212,16 @@ mod tests {
         // Use {:#} to print the full chain; the chosen slack error is wrapped by a
         // context message because multiple errors occurred.
         let msg = format!("{err:#}");
-        // Both errors are transient; the first transient slot (filled by whichever
-        // worker reports first) wins. Since both use the same class and the classifier
-        // keeps only the first transient, exactly one of "slack" or "gitlab" wins.
-        // Slack is in a lower IMAGES index, but slice-assignment order determines which
-        // worker runs first — so assert only that *one* of them is in the chain.
+        // Both errors are transient. After sorting outcomes by IMAGES index, the
+        // lowest-indexed transient error wins deterministically. Slack (index 2)
+        // beats GitLab (index 5).
         assert!(
-            msg.contains("slack") || msg.contains("gitlab"),
-            "expected one of the transient errors in the chain, got: {msg}"
+            msg.contains("slack"),
+            "expected earliest-indexed transient error (slack) to win, got: {msg}"
+        );
+        assert!(
+            !msg.contains("i/o timeout gitlab"),
+            "gitlab's specific error should not be the chosen one, got: {msg}"
         );
         // The context wrapper must be present because 2 images failed.
         assert!(
@@ -2243,7 +2257,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parallel_build_thread_safety_stress() {
+    fn test_parallel_build_repeated_correct_result() {
         for _ in 0..5 {
             let (_tmp, build_root) = create_fake_build_root();
             let rt = RetryMockRuntime::new(build_root.clone(), std::collections::HashMap::new());
