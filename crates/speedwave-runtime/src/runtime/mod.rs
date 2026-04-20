@@ -1537,3 +1537,48 @@ services:
         );
     }
 }
+
+/// Test-only no-op runtime: every method succeeds and does nothing.
+/// Use as a base for mocks that only need to override one or two methods.
+#[cfg(test)]
+pub(crate) struct NoopRuntime;
+
+#[cfg(test)]
+impl ContainerRuntime for NoopRuntime {
+    fn compose_up(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn compose_down(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+        Ok(vec![])
+    }
+    fn container_exec(&self, _: &str, _: &[&str]) -> std::process::Command {
+        std::process::Command::new("true")
+    }
+    fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<std::process::Command> {
+        Ok(std::process::Command::new("true"))
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+    fn ensure_ready(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn build_image(&self, _: &str, _: &str, _: &str, _: &[(&str, &str)]) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+        Ok(String::new())
+    }
+    fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+        Ok(String::new())
+    }
+    fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+    fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
