@@ -111,7 +111,7 @@ describe('LlmProviderComponent', () => {
     expect(component.modelPlaceholder()).toBe('deepseek-r1');
 
     component.provider = 'custom';
-    expect(component.modelPlaceholder()).toBe('local-model');
+    expect(component.modelPlaceholder()).toBe('your-model-name');
   });
 
   it('saves config and sets saved flag', async () => {

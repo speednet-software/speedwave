@@ -122,7 +122,7 @@ export class LlmProviderComponent implements OnInit {
       case 'llamacpp':
         return 'deepseek-r1';
       case 'custom':
-        return 'local-model';
+        return 'your-model-name';
       default:
         return 'claude-sonnet-4-6';
     }

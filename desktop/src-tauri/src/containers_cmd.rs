@@ -629,7 +629,11 @@ pub fn update_llm_config(
     base_url: Option<String>,
 ) -> Result<(), String> {
     if let Some(ref url) = base_url {
-        speedwave_runtime::compose::validate_base_url(url).map_err(|e| e.to_string())?;
+        // Normalize the same way apply_llm_config does, so a value accepted at
+        // render time is also accepted at save time (Ollama docs commonly use
+        // `http://…/v1` suffixes; we strip that before validating).
+        let normalized = speedwave_runtime::compose::strip_trailing_v1(url);
+        speedwave_runtime::compose::validate_base_url(&normalized).map_err(|e| e.to_string())?;
     }
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
@@ -853,6 +857,26 @@ mod tests {
             err.contains("http://") || err.contains("https://") || err.contains("base_url"),
             "Error must mention http/https scheme requirement, got: {err}"
         );
+    }
+
+    #[test]
+    fn update_llm_config_accepts_v1_suffix() {
+        // Regression: a `…/v1` URL (common in Ollama/LiteLLM docs) must be accepted
+        // at save time because compose rendering strips the suffix before validating.
+        // Previously this produced a false "base_url must not contain a path" error.
+        // We only check the URL-validation path here — a config-save error is fine,
+        // what we require is that the error (if any) is NOT the path rejection.
+        let result = update_llm_config(
+            Some("custom".to_string()),
+            Some("llama3.3".to_string()),
+            Some("http://localhost:11434/v1".to_string()),
+        );
+        if let Err(err) = result {
+            assert!(
+                !err.contains("must not contain a path"),
+                "`/v1` suffix must be stripped before validation, got: {err}"
+            );
+        }
     }
 
     // -- MockRuntime for switch/teardown tests --

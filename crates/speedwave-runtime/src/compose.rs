@@ -138,8 +138,19 @@ pub fn render_compose(
         &tokens_dir,
     )?;
 
-    // Inject Anthropic API key from secrets if configured
-    yaml = apply_auth_config(&yaml, project_name)?;
+    // Inject Anthropic API key from secrets if configured.
+    // Skipped when a local LLM provider is active — the dummy
+    // ANTHROPIC_AUTH_TOKEN=sk-no-key-required is all Claude Code needs, and
+    // leaking the real key into a container pointed at a local server would
+    // violate least-privilege for no benefit.
+    let provider = resolved_config
+        .llm
+        .provider
+        .as_deref()
+        .unwrap_or("anthropic");
+    if provider == "anthropic" {
+        yaml = apply_auth_config(&yaml, project_name)?;
+    }
 
     // Inject mcp-os config into hub if auth token exists
     yaml = apply_mcp_os_config(&yaml)?;
@@ -257,7 +268,7 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
                  Configure it in Settings → LLM Provider → Base URL."
             );
         }
-        _ => {
+        "ollama" | "lmstudio" | "llamacpp" | "custom" => {
             let base_url = llm
                 .base_url
                 .clone()
@@ -301,10 +312,17 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
             ]);
             Ok(inject_claude_env(yaml, &extra_env))
         }
+        other => anyhow::bail!(
+            "Unsupported LLM provider '{other}'. \
+             Supported: anthropic, ollama, lmstudio, llamacpp, custom."
+        ),
     }
 }
 
-fn strip_trailing_v1(url: &str) -> String {
+/// Strips any trailing `/v1` and trailing slashes from a base URL.
+/// Exposed so `update_llm_config` can normalize before validating, keeping
+/// save-time and render-time acceptance consistent.
+pub fn strip_trailing_v1(url: &str) -> String {
     let stripped = url.trim_end_matches('/');
     if let Some(without_v1) = stripped.strip_suffix("/v1") {
         without_v1.to_string()
@@ -1568,8 +1586,9 @@ impl SecurityCheck {
     }
 
     /// claude container must not have external LLM API keys
-    /// (OPENAI_*, GEMINI_*, DEEPSEEK_*, OPENROUTER_* — these prefixes are forbidden because
-    /// external LLM API keys must never enter the claude container. Only the dummy
+    /// (OPENAI_*, AZURE_OPENAI_*, GEMINI_*, DEEPSEEK_*, OPENROUTER_*, COHERE_*,
+    /// MISTRAL_*, TOGETHER_*, GROQ_* — these prefixes are forbidden because external
+    /// LLM API keys must never enter the claude container. Only the dummy
     /// ANTHROPIC_AUTH_TOKEN (sk-no-key-required) is permitted for local model providers.)
     fn check_no_external_llm_keys_claude(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
         let mut violations = Vec::new();
@@ -1580,7 +1599,17 @@ impl SecurityCheck {
 
         if let Some((_name, service)) = services.iter().find(|(n, _)| n == "claude") {
             if let Some(env_seq) = service.get("environment").and_then(|v| v.as_sequence()) {
-                let forbidden_prefixes = ["OPENAI_", "GEMINI_", "DEEPSEEK_", "OPENROUTER_"];
+                let forbidden_prefixes = [
+                    "OPENAI_",
+                    "AZURE_OPENAI_",
+                    "GEMINI_",
+                    "DEEPSEEK_",
+                    "OPENROUTER_",
+                    "COHERE_",
+                    "MISTRAL_",
+                    "TOGETHER_",
+                    "GROQ_",
+                ];
 
                 for item in env_seq {
                     if let Some(env_str) = item.as_str() {
@@ -2481,6 +2510,49 @@ services:
         assert!(violations
             .iter()
             .any(|v| v.rule == SecurityRule::NoExternalLlmKeysClaude));
+    }
+
+    #[test]
+    fn test_security_check_external_llm_keys_covers_major_providers() {
+        // Each prefix on its own line — one violation per leaked key. We assert the
+        // rule fires for every major third-party LLM vendor, not just the four
+        // originally hard-coded.
+        for key in [
+            "OPENAI_API_KEY=sk-x",
+            "AZURE_OPENAI_API_KEY=az-x",
+            "GEMINI_API_KEY=g-x",
+            "DEEPSEEK_API_KEY=ds-x",
+            "OPENROUTER_API_KEY=or-x",
+            "COHERE_API_KEY=co-x",
+            "MISTRAL_API_KEY=mi-x",
+            "TOGETHER_API_KEY=to-x",
+            "GROQ_API_KEY=gq-x",
+        ] {
+            let yaml = format!(
+                r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - {key}
+"#
+            );
+            let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.rule == SecurityRule::NoExternalLlmKeysClaude),
+                "must flag {key} as an external LLM key"
+            );
+        }
     }
 
     #[test]
@@ -3492,6 +3564,32 @@ services:
             env.iter()
                 .any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:8080"),
             "llama.cpp must use port 8080, got: {env:?}"
+        );
+    }
+
+    #[test]
+    fn test_unsupported_provider_rejected() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig {
+                provider: Some("openrouter".to_string()),
+                model: Some("some-model".to_string()),
+                base_url: Some("http://host.docker.internal:9999".to_string()),
+            },
+        };
+        let result = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Unsupported LLM provider") && msg.contains("openrouter"),
+            "Error must mention unsupported provider, got: {msg}"
         );
     }
 
