@@ -16,6 +16,7 @@ import { ToolMetadata, TimeoutClass } from './hub-types.js';
 import { getAllServiceNames } from './service-list.js';
 import { discoverAndMergeService } from './tool-discovery.js';
 import { ts, TIMEOUTS } from '@speedwave/mcp-shared';
+import { STARTUP_RETRY_DELAYS_MS } from './http-bridge.js';
 
 /**
  * Escape special regex characters in a string to prevent regex injection.
@@ -72,13 +73,75 @@ export let SERVICE_NAMES: readonly string[] = [];
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
+ * Retry backoff for initial tool discovery. Matches `STARTUP_RETRY_DELAYS_MS`
+ * in http-bridge.ts so a slow-starting worker (e.g. mcp-playwright needs a
+ * few seconds to bring Chromium up) has the same window to become reachable
+ * for discovery as it has for health checks. Without this, discovery ran
+ * exactly once at hub boot — if the worker was not listening yet, the
+ * service ended up with an empty registry until the next background refresh
+ * (every 5 minutes).
+ *
+ * Tests can override with `[0, 0, 0]` via `_setDiscoveryRetryDelaysForTesting`
+ * so the suite doesn't pay the 7 s real wall-clock of the production schedule.
+ */
+let discoveryRetryDelays: readonly number[] = STARTUP_RETRY_DELAYS_MS;
+
+/**
+ * Test-only hook: swap the discovery retry schedule so unit tests don't sleep
+ * for up to 7 s. Keep the production value intact otherwise.
+ * @param delaysMs - Array of delays in ms; `[]` disables retries entirely.
+ * @internal
+ */
+export function _setDiscoveryRetryDelaysForTesting(delaysMs: readonly number[]): void {
+  discoveryRetryDelays = delaysMs;
+}
+
+/**
+ * Discover tools for a single service with retry + backoff.
+ * Only retries when discovery returned zero tools — a non-empty registry
+ * is considered authoritative even if it is smaller than expected.
+ * @param service - Service name to discover
+ */
+async function discoverWithStartupRetry(service: string): Promise<Record<string, ToolMetadata>> {
+  const attempts = discoveryRetryDelays.length + 1;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const tools = await discoverAndMergeService(service);
+      if (Object.keys(tools).length > 0) return tools;
+    } catch (error) {
+      console.warn(
+        `${ts()} [tool-registry] ${service}: discovery attempt ${attempt + 1} failed — ` +
+          (error instanceof Error ? error.message : String(error))
+      );
+    }
+
+    const delay = discoveryRetryDelays[attempt];
+    if (delay === undefined) break;
+    console.log(
+      `${ts()} [tool-registry] ${service}: retrying discovery in ${delay / 1000}s (${attempt + 1}/${discoveryRetryDelays.length})...`
+    );
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+  console.warn(
+    `${ts()} [tool-registry] ${service}: registry empty after ${discoveryRetryDelays.length + 1} attempts — will populate on next background refresh`
+  );
+  return {};
+}
+
+/**
  * Initialize the registry from workers.
  * Called once at startup before initializeBridges().
  *
  * For each service:
  * 1. Try to discover tools from worker (JSON-RPC tools/list)
- * 2. Merge tool data including _meta fields
- * 3. If worker unavailable, service gets empty registry entry
+ * 2. Retry with backoff if the first attempt returns zero tools — a
+ *    slow-starting worker (e.g. `mcp-playwright` spinning up Chromium)
+ *    may not be ready when the hub boots, and without the retry the
+ *    service's registry stays empty until the next background refresh
+ *    five minutes later.
+ * 3. Merge tool data including `_meta` fields.
+ * 4. If the worker is still unavailable after retries, the service gets
+ *    an empty registry entry; background refresh will populate it later.
  */
 export async function initializeRegistry(): Promise<void> {
   if (_initialized) return;
@@ -97,17 +160,9 @@ export async function initializeRegistry(): Promise<void> {
       continue;
     }
 
-    try {
-      const tools = await discoverAndMergeService(service);
-      _registry[service] = tools;
-      console.log(`${ts()} [tool-registry] ${service}: ${Object.keys(tools).length} tools loaded`);
-    } catch (error) {
-      console.warn(
-        `${ts()} [tool-registry] ${service}: discovery failed, empty registry`,
-        error instanceof Error ? error.message : error
-      );
-      _registry[service] = {};
-    }
+    const tools = await discoverWithStartupRetry(service);
+    _registry[service] = tools;
+    console.log(`${ts()} [tool-registry] ${service}: ${Object.keys(tools).length} tools loaded`);
   }
 
   // Start background refresh (every 5 minutes)
@@ -408,12 +463,19 @@ export function buildServiceBridge(
 
   for (const methodName of Object.keys(tools)) {
     const metadata = tools[methodName];
+    // The JS bridge surface uses `methodName` (camelCase, e.g. `browserNavigate`)
+    // but the actual `tools/call` request must carry the worker's own tool
+    // name (often snake_case, e.g. `browser_navigate` for `@playwright/mcp`).
+    // Fall back to `methodName` for legacy metadata that was built without
+    // `workerToolName` — covers all in-house workers whose tool names
+    // already match the camelCase convention.
+    const workerToolName = metadata.workerToolName ?? methodName;
     bridge[methodName] = (params?: Record<string, unknown>) => {
       const perToolTimeout = metadata.timeoutMs;
       const remainingTimeout = getTimeoutMs?.();
       const timeoutMs = perToolTimeout ?? remainingTimeout;
       const options = timeoutMs ? { timeoutMs } : undefined;
-      return callWorker(service, methodName, params || {}, options);
+      return callWorker(service, workerToolName, params || {}, options);
     };
   }
 

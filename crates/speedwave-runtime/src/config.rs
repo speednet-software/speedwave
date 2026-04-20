@@ -53,6 +53,7 @@ pub struct IntegrationsConfig {
     pub sharepoint: Option<IntegrationConfig>,
     pub redmine: Option<IntegrationConfig>,
     pub gitlab: Option<IntegrationConfig>,
+    pub playwright: Option<IntegrationConfig>,
     pub os: Option<OsIntegrationsConfig>,
     #[serde(default)]
     pub plugins: Option<HashMap<String, IntegrationConfig>>,
@@ -67,6 +68,7 @@ impl IntegrationsConfig {
             "sharepoint" => self.sharepoint = Some(cfg),
             "redmine" => self.redmine = Some(cfg),
             "gitlab" => self.gitlab = Some(cfg),
+            "playwright" => self.playwright = Some(cfg),
             _ => return false,
         }
         true
@@ -92,6 +94,7 @@ pub struct ResolvedIntegrationsConfig {
     pub sharepoint: bool,
     pub redmine: bool,
     pub gitlab: bool,
+    pub playwright: bool,
     pub os_reminders: bool,
     pub os_calendar: bool,
     pub os_mail: bool,
@@ -110,6 +113,7 @@ impl ResolvedIntegrationsConfig {
             "sharepoint" => Some(self.sharepoint),
             "redmine" => Some(self.redmine),
             "gitlab" => Some(self.gitlab),
+            "playwright" => Some(self.playwright),
             _ => None,
         }
     }
@@ -279,6 +283,7 @@ fn apply_integrations_layer(result: &mut ResolvedIntegrationsConfig, layer: &Int
     apply_toggle(&mut result.sharepoint, &layer.sharepoint);
     apply_toggle(&mut result.redmine, &layer.redmine);
     apply_toggle(&mut result.gitlab, &layer.gitlab);
+    apply_toggle(&mut result.playwright, &layer.playwright);
     if let Some(ref os) = layer.os {
         apply_toggle(&mut result.os_reminders, &os.reminders);
         apply_toggle(&mut result.os_calendar, &os.calendar);
@@ -738,6 +743,7 @@ mod tests {
         assert!(!r.sharepoint, "sharepoint should be disabled");
         assert!(!r.redmine, "redmine should be disabled");
         assert!(!r.gitlab, "gitlab should be disabled");
+        assert!(!r.playwright, "playwright should be disabled");
         assert!(!r.os_reminders, "os_reminders should be disabled");
         assert!(!r.os_calendar, "os_calendar should be disabled");
         assert!(!r.os_mail, "os_mail should be disabled");
@@ -748,6 +754,128 @@ mod tests {
     fn test_default_integrations_all_disabled() {
         let resolved = ResolvedIntegrationsConfig::default();
         assert_all_integrations_disabled(&resolved);
+    }
+
+    /// Regression guard: `apply_integrations_layer` must propagate *every*
+    /// service listed in `TOGGLEABLE_MCP_SERVICES` to the resolved config.
+    /// If a new descriptor is added to `consts::TOGGLEABLE_MCP_SERVICES` but
+    /// its corresponding `apply_toggle` call is forgotten in
+    /// `apply_integrations_layer`, the toggle gets saved to disk but is
+    /// silently ignored at compose-render time — the exact bug that hit
+    /// Playwright in PR2.
+    #[test]
+    fn test_apply_integrations_layer_propagates_every_toggleable_service() {
+        for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
+            let mut layer = IntegrationsConfig::default();
+            assert!(
+                layer.set_service(
+                    svc.config_key,
+                    IntegrationConfig {
+                        enabled: Some(true),
+                    }
+                ),
+                "IntegrationsConfig::set_service does not know '{}'",
+                svc.config_key
+            );
+
+            let mut resolved = ResolvedIntegrationsConfig::default();
+            apply_integrations_layer(&mut resolved, &layer);
+
+            let enabled = resolved
+                .is_service_enabled(svc.config_key)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "ResolvedIntegrationsConfig::is_service_enabled returns None for '{}'",
+                        svc.config_key
+                    )
+                });
+            assert!(
+                enabled,
+                "apply_integrations_layer did not propagate '{}' → compose emitter will skip it",
+                svc.config_key
+            );
+        }
+    }
+
+    /// Upgrade path: a user on an older Speedwave version has a `config.json`
+    /// that pre-dates the `playwright` field. After update, deserializing that
+    /// config must still succeed (with `playwright: None`), the UI toggle must
+    /// be able to flip it to enabled, and the save → load round-trip must
+    /// preserve the new value.
+    ///
+    /// If this test breaks, every existing user loses their config on upgrade
+    /// — a silent regression.
+    #[test]
+    fn test_existing_user_config_accepts_new_integration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+
+        // Simulate an on-disk config written by an older Speedwave that had no
+        // `playwright` field. Only slack is configured.
+        let legacy_json = r#"{
+            "projects": [
+                {
+                    "name": "acme-corp",
+                    "dir": "/Users/user/projects/acme-corp",
+                    "claude": null,
+                    "integrations": {
+                        "slack": {"enabled": true},
+                        "redmine": {"enabled": false},
+                        "os": null
+                    },
+                    "plugin_settings": null
+                }
+            ],
+            "active_project": "acme-corp",
+            "selected_ide": null,
+            "log_level": null
+        }"#;
+        std::fs::write(&config_path, legacy_json).unwrap();
+
+        // Loading must not fail even though `playwright` is absent.
+        let mut cfg = load_user_config_from(&config_path).unwrap();
+        let project = cfg.find_project_mut("acme-corp").unwrap();
+        let integrations = project.integrations.as_ref().unwrap();
+        assert!(integrations.playwright.is_none());
+        // Existing fields preserved:
+        assert_eq!(
+            integrations.slack.as_ref().unwrap().enabled,
+            Some(true),
+            "legacy slack setting must survive deserialisation"
+        );
+
+        // UI enables Playwright for this project.
+        let integrations = project.integrations.as_mut().unwrap();
+        assert!(integrations.set_service(
+            "playwright",
+            IntegrationConfig {
+                enabled: Some(true),
+            },
+        ));
+
+        // Persist and reload.
+        save_user_config_to(&cfg, &config_path).unwrap();
+        let reloaded = load_user_config_from(&config_path).unwrap();
+        let reloaded_integrations = reloaded
+            .find_project("acme-corp")
+            .unwrap()
+            .integrations
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(
+            reloaded_integrations
+                .playwright
+                .as_ref()
+                .and_then(|c| c.enabled),
+            Some(true),
+            "playwright toggle must persist after upgrade → enable → save → reload"
+        );
+        assert_eq!(
+            reloaded_integrations.slack.as_ref().unwrap().enabled,
+            Some(true),
+            "existing slack setting must still be present after save"
+        );
     }
 
     #[test]
@@ -761,6 +889,7 @@ mod tests {
                 enabled: Some(true),
             }),
             gitlab: None,
+            playwright: None,
             os: Some(OsIntegrationsConfig {
                 reminders: Some(IntegrationConfig {
                     enabled: Some(false),
@@ -814,6 +943,7 @@ mod tests {
                     sharepoint: None,
                     redmine: None,
                     gitlab: None,
+                    playwright: None,
                     os: None,
                     plugins: None,
                 }),
@@ -842,6 +972,7 @@ mod tests {
                     sharepoint: None,
                     redmine: None,
                     gitlab: None,
+                    playwright: None,
                     os: Some(OsIntegrationsConfig {
                         reminders: Some(IntegrationConfig {
                             enabled: Some(false),
@@ -883,6 +1014,7 @@ mod tests {
                     sharepoint: None,
                     redmine: None,
                     gitlab: None,
+                    playwright: None,
                     os: None,
                     plugins: None,
                 }),
@@ -1144,6 +1276,7 @@ mod tests {
                     sharepoint: None,
                     redmine: None,
                     gitlab: None,
+                    playwright: None,
                     os: None,
                     plugins: Some(HashMap::from([(
                         "presale".to_string(),

@@ -25,6 +25,7 @@ pub const IMAGE_MCP_SLACK: &str = "speedwave-mcp-slack";
 pub const IMAGE_MCP_SHAREPOINT: &str = "speedwave-mcp-sharepoint";
 pub const IMAGE_MCP_REDMINE: &str = "speedwave-mcp-redmine";
 pub const IMAGE_MCP_GITLAB: &str = "speedwave-mcp-gitlab";
+pub const IMAGE_MCP_PLAYWRIGHT: &str = "speedwave-mcp-playwright";
 
 pub const IMAGES: &[ImageDef] = &[
     ImageDef {
@@ -61,6 +62,12 @@ pub const IMAGES: &[ImageDef] = &[
         name: IMAGE_MCP_GITLAB,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/gitlab/Dockerfile",
+        build_args: &[],
+    },
+    ImageDef {
+        name: IMAGE_MCP_PLAYWRIGHT,
+        context_dir: "mcp-servers",
+        containerfile: "mcp-servers/playwright/Containerfile",
         build_args: &[],
     },
 ];
@@ -1022,7 +1029,7 @@ mod tests {
 
     #[test]
     fn test_images_count() {
-        assert_eq!(IMAGES.len(), 6);
+        assert_eq!(IMAGES.len(), 7);
     }
 
     #[test]

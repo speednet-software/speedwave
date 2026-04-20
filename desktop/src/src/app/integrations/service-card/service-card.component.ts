@@ -31,6 +31,14 @@ export interface SaveCredentialsEvent {
           <span class="font-semibold text-base" data-testid="service-name">{{
             svc.display_name
           }}</span>
+          @if (svc.badge) {
+            <span
+              class="text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase tracking-wide bg-amber-500/20 text-amber-400 border border-amber-500/30"
+              data-testid="service-badge"
+            >
+              {{ svc.badge }}
+            </span>
+          }
           <span
             class="text-[11px] px-2 py-0.5 rounded font-medium"
             data-testid="badge"
@@ -63,7 +71,7 @@ export interface SaveCredentialsEvent {
         {{ svc.description }}
       </p>
 
-      @if (!svc.configured && !expanded) {
+      @if (!svc.configured && !expanded && hasConfigurableFields) {
         <p
           class="px-5 pb-3 text-sw-accent text-[12px] m-0 cursor-pointer"
           data-testid="setup-hint"
@@ -77,7 +85,7 @@ export interface SaveCredentialsEvent {
         </p>
       }
 
-      @if (expanded) {
+      @if (expanded && hasConfigurableFields) {
         <div class="px-5 pb-5 border-t border-sw-border" data-testid="card-body">
           <form (submit)="onSave($event)">
             @for (field of svc.auth_fields; track field.key) {
@@ -221,6 +229,17 @@ export class ServiceCardComponent {
   @Output() openVerificationUrl = new EventEmitter<string>();
 
   editedValues: Record<string, string> = {};
+
+  /**
+   * Whether this service has anything the user can configure in the card body.
+   * Services with an empty `auth_fields` list (e.g. Playwright, which only
+   * reaches public URLs) have nothing to enter — the toggle header is the
+   * entire UI surface, so we hide the form, setup hint, and the Save / Remove
+   * Credentials buttons to avoid nonsensical empty prompts.
+   */
+  get hasConfigurableFields(): boolean {
+    return this.svc.auth_fields.length > 0;
+  }
 
   /**
    * Returns whether any auth fields use the OAuth flow.

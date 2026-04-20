@@ -45,6 +45,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-036](ADR-036-self-declaring-worker-policy.md)                     | Self-Declaring Worker Policy via `_meta`                | Accepted              |
 | [ADR-037](ADR-037-code-signing-and-bundled-binary-signing.md)          | Code Signing and Bundled Binary Signing                 | Accepted              |
 | [ADR-038](ADR-038-single-internal-worker-port.md)                      | Single Internal Worker Port                             | Accepted              |
+| [ADR-039](ADR-039-playwright-shared-browser-service.md)                | Playwright Shared Browser Service                       | Accepted              |
 
 ## Creating a New ADR
 

@@ -4,13 +4,14 @@ Speedwave connects Claude Code with external services through MCP (Model Context
 
 ## Available Integrations
 
-| Integration | Service        | Container                            | Token Path                                  |
-| ----------- | -------------- | ------------------------------------ | ------------------------------------------- |
-| Slack       | Messaging      | `speedwave_<project>_mcp_slack`      | `~/.speedwave/tokens/<project>/slack/`      |
-| SharePoint  | Documents      | `speedwave_<project>_mcp_sharepoint` | `~/.speedwave/tokens/<project>/sharepoint/` |
-| GitLab      | Code hosting   | `speedwave_<project>_mcp_gitlab`     | `~/.speedwave/tokens/<project>/gitlab/`     |
-| Redmine     | Issue tracking | `speedwave_<project>_mcp_redmine`    | `~/.speedwave/tokens/<project>/redmine/`    |
-| OS          | Host services  | mcp-os (host process)                | N/A (runs on host)                          |
+| Integration | Service            | Container                            | Token Path                                  |
+| ----------- | ------------------ | ------------------------------------ | ------------------------------------------- |
+| Slack       | Messaging          | `speedwave_<project>_mcp_slack`      | `~/.speedwave/tokens/<project>/slack/`      |
+| SharePoint  | Documents          | `speedwave_<project>_mcp_sharepoint` | `~/.speedwave/tokens/<project>/sharepoint/` |
+| GitLab      | Code hosting       | `speedwave_<project>_mcp_gitlab`     | `~/.speedwave/tokens/<project>/gitlab/`     |
+| Redmine     | Issue tracking     | `speedwave_<project>_mcp_redmine`    | `~/.speedwave/tokens/<project>/redmine/`    |
+| Playwright  | Browser automation | `speedwave_<project>_mcp_playwright` | N/A (no credentials)                        |
+| OS          | Host services      | mcp-os (host process)                | N/A (runs on host)                          |
 
 OS sub-integrations (Reminders, Calendar, Mail, Notes) run via mcp-os on the host — they access native APIs directly (EventKit on macOS, CalDAV/zbus on Linux, WinRT/MAPI on Windows).
 
@@ -84,6 +85,7 @@ Each MCP integration requires specific credentials to function. Fields marked as
 | SharePoint  | `client_id`, `tenant_id`, `site_id`, `base_path` + OAuth tokens | —                                                    |
 | GitLab      | `token`, `host_url`                                             | —                                                    |
 | Redmine     | `api_key`, `host_url`                                           | `project_id` (scope operations to a default project) |
+| Playwright  | _(none — no credentials required)_                              | —                                                    |
 
 ### Redmine Configuration Wizard
 
@@ -98,6 +100,39 @@ The wizard shows up to 100 projects. For Redmine instances with more projects, f
 Existing configurations with `project_name` in `config.json` continue to work — the MCP server reads it if present and auto-fetches it from the API when absent. Manual `config.json` editing remains supported for power users.
 
 **Troubleshooting:** Corporate environments with custom certificate authorities or HTTP proxies may see TLS or connection errors during credential validation. This is a known limitation shared with SharePoint OAuth — the Desktop app uses bundled CA roots (`rustls-tls`), not the OS certificate store, and does not auto-detect system proxy settings.
+
+### Playwright — Browser Automation
+
+Playwright runs a headless Chromium inside a hardened container and exposes it through Microsoft's official [`@playwright/mcp`](https://github.com/microsoft/playwright-mcp) server. It is a **shared service**: both Claude directly and any plugin can use the same browser — Chromium is not duplicated per plugin.
+
+#### When to use Playwright vs `WebFetch`
+
+- `WebFetch` is built into Claude and suits **static HTML** — a GET + HTML-to-markdown conversion. Use it for docs, READMEs, blog posts, anything server-rendered.
+- Playwright runs a real browser and suits **dynamic pages** — JavaScript-rendered SPAs, pages behind a login flow, pages that require waiting for XHR-driven content, or any task that needs screenshots, accessibility snapshots, DOM interaction, or computed styles.
+
+Prefer `WebFetch` when it works; drop to Playwright only when it does not. A Chromium context is an order of magnitude more expensive than a `WebFetch` call.
+
+#### Security profile
+
+Playwright is unique among the built-in integrations in three ways:
+
+- **No credentials.** It accesses only public URLs; there is no `/tokens` mount and no credential file. Enabling the integration requires no configuration.
+- **No `/workspace` mount.** Screenshots, PDFs, and page dumps are returned to Claude as base64 payloads rather than written to the project. This keeps a compromised Chromium from exfiltrating repo contents.
+- **Higher resource limits.** `shm_size: 2g` (Chromium IPC needs it), `tmpfs /tmp: 1g` (Chromium caches heavily), `cpus: 2.0`, `memory: 2048m` — noticeably larger than the 128 MiB budget given to HTTP-only workers.
+
+Container hardening is otherwise identical to every other MCP worker: `cap_drop: ALL`, `no-new-privileges:true`, `read_only: true` root filesystem, `noexec,nosuid` on `/tmp`. Chromium runs with `--no-sandbox` because the Lima/WSL2 VM + container capability-drop layer replaces its in-process sandbox (see [ADR-004](../adr/ADR-004-wsl2-and-nerdctl-on-windows.md)). Each container restart wipes `/tmp` (tmpfs-backed), giving the same ephemeral-profile guarantee as `--isolated` — no cookies, no storage state persist between invocations.
+
+#### Tool surface
+
+`@playwright/mcp` exposes roughly 70 tools grouped into:
+
+- **Navigation** — `browser_navigate`, `browser_navigate_back`, `browser_tabs`.
+- **Extraction** — `browser_snapshot` (accessibility tree, token-efficient), `browser_take_screenshot`, `browser_pdf_save`, `browser_evaluate`, `browser_network_requests`, `browser_console_messages`.
+- **Interaction** — `browser_click`, `browser_type`, `browser_fill_form`, `browser_select_option`, `browser_press_key`, `browser_hover`, `browser_drag`.
+- **Assertions and codegen** — `browser_verify_element_visible`, `browser_verify_text_visible`, `browser_generate_locator`, `browser_pick_locator`.
+- **Tracing** — `browser_start_tracing`, `browser_start_video`, `browser_stop_tracing` (gated behind `--caps devtools` when explicitly enabled).
+
+Refer to the [upstream README](https://github.com/microsoft/playwright-mcp) for the full list and parameter schemas.
 
 ## MCP Hub Architecture
 

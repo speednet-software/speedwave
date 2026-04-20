@@ -90,6 +90,10 @@ pub fn render_compose(
         "${IMAGE_MCP_GITLAB}",
         &build::image_ref(build::IMAGE_MCP_GITLAB, &bundle_manifest.bundle_id),
     );
+    yaml = yaml.replace(
+        "${IMAGE_MCP_PLAYWRIGHT}",
+        &build::image_ref(build::IMAGE_MCP_PLAYWRIGHT, &bundle_manifest.bundle_id),
+    );
 
     // Bridge writes lock files directly to ~/.speedwave/ide-bridge/
     // Mount it as /home/speedwave/.claude/ide/ — no copying needed.
@@ -2218,6 +2222,7 @@ services:
       - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:3000
       - WORKER_REDMINE_URL=http://mcp-redmine:3000
       - WORKER_GITLAB_URL=http://mcp-gitlab:3000
+      - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:3000
     networks:
       - speedwave_test_network
 
@@ -2231,6 +2236,23 @@ services:
       - no-new-privileges:true
     volumes:
       - /home/user/.speedwave/tokens/test/slack:/tokens:ro
+    environment:
+      - PORT=3000
+    networks:
+      - speedwave_test_network
+
+  mcp-playwright:
+    image: speedwave-mcp-playwright:latest
+    container_name: speedwave_test_mcp_playwright
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=1g
+    shm_size: 2g
     environment:
       - PORT=3000
     networks:
@@ -2553,6 +2575,203 @@ services:
                 .filter(|l| l.contains("/workspace"))
                 .collect::<Vec<_>>()
                 .join("\n")
+        );
+    }
+
+    /// mcp-playwright appears in a rendered compose when the toggle is enabled,
+    /// carries the hardening profile (cap_drop: ALL, read_only, no-new-privileges,
+    /// shm_size: 2g), and has `PORT=PORT_WORKER`.
+    #[test]
+    fn test_render_compose_playwright_service_present() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig::default(),
+        };
+        let integrations = ResolvedIntegrationsConfig {
+            playwright: true,
+            ..Default::default()
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &integrations,
+            None,
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let pw = doc
+            .get("services")
+            .and_then(|s| s.get("mcp-playwright"))
+            .expect("mcp-playwright service must be present when enabled");
+
+        assert!(
+            pw.get("read_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            "mcp-playwright must set read_only: true"
+        );
+        assert_eq!(
+            pw.get("shm_size").and_then(|v| v.as_str()),
+            Some("2g"),
+            "mcp-playwright must set shm_size: 2g for Chromium IPC"
+        );
+        let cap_drop = pw
+            .get("cap_drop")
+            .and_then(|v| v.as_sequence())
+            .expect("cap_drop must be present");
+        assert!(cap_drop.iter().any(|c| c.as_str() == Some("ALL")));
+        let sec_opt = pw
+            .get("security_opt")
+            .and_then(|v| v.as_sequence())
+            .expect("security_opt must be present");
+        assert!(sec_opt
+            .iter()
+            .any(|s| s.as_str() == Some("no-new-privileges:true")));
+        let env = pw
+            .get("environment")
+            .and_then(|e| e.as_sequence())
+            .expect("environment must be present");
+        let port_line = format!("PORT={}", crate::consts::PORT_WORKER);
+        assert!(
+            env.iter().any(|v| v.as_str() == Some(port_line.as_str())),
+            "mcp-playwright must set PORT={}",
+            crate::consts::PORT_WORKER
+        );
+    }
+
+    /// mcp-playwright has no credentials — the generated compose must not mount
+    /// any `/tokens` volume (attack-surface reduction per ADR).
+    #[test]
+    fn test_render_compose_playwright_no_token_mount() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig::default(),
+        };
+        let integrations = ResolvedIntegrationsConfig {
+            playwright: true,
+            ..Default::default()
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &integrations,
+            None,
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let pw = doc
+            .get("services")
+            .and_then(|s| s.get("mcp-playwright"))
+            .expect("mcp-playwright must be present");
+
+        // Playwright block has no `volumes:` key at all.
+        assert!(
+            pw.get("volumes").is_none(),
+            "mcp-playwright must not declare any volumes; got: {:?}",
+            pw.get("volumes")
+        );
+    }
+
+    /// v1 explicitly refuses the `/workspace` mount — outputs return as base64
+    /// so a compromised Chromium cannot exfiltrate repo contents.
+    #[test]
+    fn test_render_compose_playwright_no_workspace_mount() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig::default(),
+        };
+        let integrations = ResolvedIntegrationsConfig {
+            playwright: true,
+            ..Default::default()
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &integrations,
+            None,
+        )
+        .unwrap();
+
+        // Scan the mcp-playwright block specifically rather than the whole
+        // document — claude and mcp-sharepoint legitimately mount /workspace.
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let pw_yaml = serde_yaml_ng::to_string(
+            doc.get("services")
+                .and_then(|s| s.get("mcp-playwright"))
+                .expect("mcp-playwright must be present"),
+        )
+        .unwrap();
+        assert!(
+            !pw_yaml.contains("/workspace"),
+            "mcp-playwright must not mount /workspace in v1; got block:\n{pw_yaml}"
+        );
+    }
+
+    /// Hub must know where to reach the Playwright worker. The URL is injected
+    /// from the compose template and must point at `:PORT_WORKER`.
+    #[test]
+    fn test_playwright_worker_url_in_hub_env() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            llm: LlmConfig::default(),
+        };
+        let integrations = ResolvedIntegrationsConfig {
+            playwright: true,
+            ..Default::default()
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &integrations,
+            None,
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let hub_env = get_hub_env_seq(&doc);
+        let expected = format!(
+            "WORKER_PLAYWRIGHT_URL=http://mcp-playwright:{}",
+            crate::consts::PORT_WORKER
+        );
+        assert!(
+            hub_env.iter().any(|s| s == &expected),
+            "hub must have '{expected}' in environment; got: {hub_env:?}"
+        );
+    }
+
+    /// Disabling the Playwright toggle must remove both the service block and
+    /// the WORKER_PLAYWRIGHT_URL hub env entry.
+    #[test]
+    fn test_apply_integrations_filter_disables_playwright() {
+        let mut integrations = ResolvedIntegrationsConfig::default();
+        integrations.playwright = false;
+
+        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
+
+        let services = doc.get("services").and_then(|s| s.as_mapping()).unwrap();
+        assert!(
+            !services.contains_key(&serde_yaml_ng::Value::String("mcp-playwright".into())),
+            "mcp-playwright must be removed when disabled"
+        );
+
+        let hub_env = get_hub_env_seq(&doc);
+        let has_pw_url = hub_env
+            .iter()
+            .any(|s| s.starts_with("WORKER_PLAYWRIGHT_URL="));
+        assert!(
+            !has_pw_url,
+            "WORKER_PLAYWRIGHT_URL must be removed from hub env when disabled; got: {hub_env:?}"
         );
     }
 
@@ -4464,6 +4683,7 @@ services:
             sharepoint: true,
             redmine: true,
             gitlab: true,
+            playwright: true,
             ..ResolvedIntegrationsConfig::default()
         };
         let result =
@@ -5374,6 +5594,7 @@ services:
       - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:3000
       - WORKER_REDMINE_URL=http://mcp-redmine:3000
       - WORKER_GITLAB_URL=http://mcp-gitlab:3000
+      - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:3000
     networks:
       - speedwave_test_network
 
@@ -5438,6 +5659,23 @@ services:
     networks:
       - speedwave_test_network
 
+  mcp-playwright:
+    image: speedwave-mcp-playwright:latest
+    container_name: speedwave_test_mcp_playwright
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=1g
+    shm_size: 2g
+    environment:
+      - PORT=3000
+    networks:
+      - speedwave_test_network
+
 networks:
   speedwave_test_network:
     driver: bridge
@@ -5449,6 +5687,7 @@ networks:
             sharepoint: true,
             redmine: true,
             gitlab: true,
+            playwright: true,
             ..Default::default()
         }
     }
