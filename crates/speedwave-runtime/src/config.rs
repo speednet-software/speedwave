@@ -274,14 +274,16 @@ pub fn resolve_project_config(
     (claude, integrations)
 }
 
+/// Provider names that route through a local LLM server (no Anthropic API
+/// call). SSOT for code that enumerates the set (e.g. tests that exercise
+/// every local provider). `is_local_provider` is the matching predicate.
+pub const LOCAL_PROVIDERS: &[&str] = &["ollama", "lmstudio", "llamacpp"];
+
 /// Returns true for provider values that point at a local LLM server
 /// (Ollama, LM Studio, or llama.cpp).
 /// `None` / `Some("anthropic")` → false (Anthropic-hosted models).
 pub fn is_local_provider(provider: Option<&str>) -> bool {
-    matches!(
-        provider,
-        Some("ollama") | Some("lmstudio") | Some("llamacpp")
-    )
+    provider.is_some_and(|p| LOCAL_PROVIDERS.contains(&p))
 }
 
 /// Merges: defaults -> repo config (.speedwave.json) -> user config (~/.speedwave/config.json).
@@ -471,6 +473,24 @@ mod tests {
             Some(&"0".to_string())
         );
         assert_eq!(defaults.get("DISABLE_AUTOUPDATER"), Some(&"1".to_string()));
+    }
+
+    #[test]
+    fn test_is_local_provider_matches_local_providers_const() {
+        // Regression guard: `is_local_provider` and `LOCAL_PROVIDERS` must
+        // stay in sync. Callers (e.g. the `update_llm_config` model-required
+        // guard in desktop/src-tauri/src/containers_cmd.rs) iterate the
+        // const and expect every element to satisfy the predicate.
+        for name in LOCAL_PROVIDERS {
+            assert!(
+                is_local_provider(Some(name)),
+                "LOCAL_PROVIDERS lists '{name}' but is_local_provider rejects it"
+            );
+        }
+        assert!(!is_local_provider(None));
+        assert!(!is_local_provider(Some("anthropic")));
+        assert!(!is_local_provider(Some("")));
+        assert!(!is_local_provider(Some("Ollama"))); // case-sensitive
     }
 
     #[test]

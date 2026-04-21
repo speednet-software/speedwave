@@ -60,6 +60,7 @@ load setup
 
 @test "speedwave plugin install with nonexistent file shows error" {
     run "$SPEEDWAVE_BIN" plugin install /nonexistent/path/plugin.zip 2>&1
+    [ "$status" -ne 0 ]
     [[ "$output" == *"error"* ]] || [[ "$output" == *"Error"* ]] || [[ "$output" == *"No such file"* ]] || [[ "$output" == *"not found"* ]]
 }
 

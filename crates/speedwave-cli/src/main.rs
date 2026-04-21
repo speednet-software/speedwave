@@ -368,6 +368,11 @@ fn main() -> anyhow::Result<()> {
     // `--help` / `-h` / `help` must print usage without touching the runtime
     // so users can discover commands when Desktop isn't running (or while
     // troubleshooting a broken setup).
+    //
+    // NOTE: `main_handles_help_before_runtime_check` in the tests below
+    // asserts that the literal string `if action == CliAction::Help` appears
+    // before any `runtime_not_available()` call site inside `fn main()`. If
+    // you rename either identifier, update the test assertion too.
     if action == CliAction::Help {
         print_help();
         std::process::exit(0);

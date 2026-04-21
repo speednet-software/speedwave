@@ -1500,6 +1500,12 @@ fn main() {
                 // would be orphaned. Spawn cleanup inline as a last resort.
                 // `CLEANUP_ONCE` inside `run_exit_cleanup` makes this
                 // idempotent with the other entry points.
+                //
+                // NOTE: `exit_arm_runs_cleanup_when_handle_slot_is_empty` in
+                // the tests below asserts that this arm contains the literal
+                // strings `run_exit_cleanup(&cleanup_ctx_runevent)` and
+                // `hide_main_window(app_handle)` — if you rename either
+                // identifier, update the test assertions too.
                 let handle = match exit_cleanup_handle_runevent.lock() {
                     Ok(mut slot) => slot.take(),
                     Err(e) => {

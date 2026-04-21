@@ -443,10 +443,7 @@ impl StreamParser {
                     "parse_result: is_error=true but result text is empty; \
                      returning placeholder error chunk"
                 );
-                log::debug!(
-                    "parse_result: empty-error payload: {parsed}",
-                    parsed = parsed
-                );
+                log::debug!("parse_result: empty-error payload: {parsed}");
                 return (
                     Some(StreamChunk::Error {
                         content: "The LLM returned an error without details. \
@@ -1220,11 +1217,16 @@ impl ChatSession {
         // `BufReader::lines()` -> loop exit -> the `is_finished` flag. A
         // naive `is_finished()` check right after `kill()` therefore
         // produces noisy "still running, detaching" warnings even on the
-        // happy path. Give each handle a brief grace window (polled at
-        // 10 ms) so the flag has time to flip before we classify it.
+        // happy path. Give the readers a brief grace window (polled at
+        // 10 ms) so the flag has time to flip before we classify them.
         //
-        // The window only adds latency when a reader genuinely is stuck
-        // (then we wait up to READER_GRACE_MS and give up); in the common
+        // The deadline is shared across ALL reader handles, not per-handle —
+        // stdout and stderr from the same child both receive EOF at the same
+        // instant (when the child exits), so one shared window covers them.
+        // If the first handle is genuinely stuck and burns the full window,
+        // the second handle still gets at least one poll before classification.
+        // The window only adds latency when a reader is actually stuck (then
+        // we wait up to READER_GRACE_MS total and give up); in the common
         // case each handle is finished on the very first poll.
         const READER_GRACE_MS: u64 = 200;
         const READER_POLL_MS: u64 = 10;
@@ -1399,9 +1401,10 @@ mod tests {
         assert!(s.stop().is_ok());
         let elapsed = start.elapsed();
         assert!(s.drain_handles.is_empty(), "handle must be drained");
-        // Upper bound: grace window is 200ms per handle, with one handle
-        // here. 1000ms leaves plenty of room for CI jitter while still
-        // catching a regression to an unbounded join.
+        // Upper bound: the grace window is 200ms total (shared across all
+        // handles, not per-handle) — stop() must detach the stuck reader
+        // within that window and return. 1000ms leaves plenty of room for
+        // CI jitter while still catching a regression to an unbounded join.
         assert!(
             elapsed < std::time::Duration::from_millis(1000),
             "stop() took {elapsed:?} — a stuck reader must be detached within the grace window, not joined"

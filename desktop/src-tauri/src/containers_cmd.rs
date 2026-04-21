@@ -900,16 +900,24 @@ mod tests {
 
     #[test]
     fn update_llm_config_rejects_local_provider_without_model() {
-        // Local providers (ollama/lmstudio/llamacpp) can't start a session
-        // without a model — `compose::apply_llm_config` would reject the
-        // compose render. Catching it at save time prevents the config from
-        // persisting a state that only fails when the user tries to run.
-        for provider in ["ollama", "lmstudio", "llamacpp"] {
+        // Local providers can't start a session without a model —
+        // `compose::apply_llm_config` would reject the compose render.
+        // Catching it at save time prevents the config from persisting a
+        // state that only fails when the user tries to run.
+        //
+        // Enumerate every local provider via the SSOT const so a future
+        // addition (a fourth local backend) is automatically covered.
+        assert!(
+            !config::LOCAL_PROVIDERS.is_empty(),
+            "LOCAL_PROVIDERS must list at least one provider — this test \
+             iterates it"
+        );
+        for provider in config::LOCAL_PROVIDERS {
             // Empty string also counts as "no model" — matches the frontend
             // guard in llm-provider.component.ts.
             for model in [None, Some(String::new())] {
                 let result = update_llm_config(
-                    Some(provider.to_string()),
+                    Some((*provider).to_string()),
                     model.clone(),
                     Some("http://localhost:11434".to_string()),
                 );
