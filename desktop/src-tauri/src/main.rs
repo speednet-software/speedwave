@@ -1489,6 +1489,23 @@ fn main() {
                 // `WindowEvent::Destroyed` or `RunEvent::ExitRequested` so
                 // `limactl stop` finishes before Tauri returns from `.run()`
                 // and the process exits.
+                //
+                // Fallback: on macOS, Cmd+Q / app-menu-Quit delivers
+                // `applicationWillTerminate`, which tao maps to
+                // `Event::LoopDestroyed`, which tauri-runtime-wry maps
+                // directly to `RunEvent::Exit` — bypassing
+                // `RunEvent::ExitRequested` and (for a hidden tray-mode
+                // window) `WindowEvent::Destroyed` entirely. If neither
+                // earlier arm ran, the slot is empty here and the Lima VM
+                // would be orphaned. Spawn cleanup inline as a last resort.
+                // `CLEANUP_ONCE` inside `run_exit_cleanup` makes this
+                // idempotent with the other entry points.
+                //
+                // NOTE: `exit_arm_runs_cleanup_when_handle_slot_is_empty` in
+                // the tests below asserts that this arm contains the literal
+                // strings `run_exit_cleanup(&cleanup_ctx_runevent)` and
+                // `hide_main_window(app_handle)` — if you rename either
+                // identifier, update the test assertions too.
                 let handle = match exit_cleanup_handle_runevent.lock() {
                     Ok(mut slot) => slot.take(),
                     Err(e) => {
@@ -1496,6 +1513,10 @@ fn main() {
                         None
                     }
                 };
+                let handle = handle.or_else(|| {
+                    hide_main_window(app_handle);
+                    reconcile::run_exit_cleanup(&cleanup_ctx_runevent)
+                });
                 if let Some(handle) = handle {
                     join_with_exit_watchdog(handle);
                 }
@@ -1980,6 +2001,41 @@ mod tests {
             "the ExitRequested arm must call stash_cleanup_handle to \
              store the JoinHandle — direct slot manipulation would bypass the \
              write-once safety logic in the helper"
+        );
+    }
+
+    /// Regression guard: the `RunEvent::Exit` arm must have a fallback that
+    /// calls `run_exit_cleanup` when the handle slot is empty. On macOS,
+    /// Cmd+Q / app-menu-Quit delivers `applicationWillTerminate`, which tao
+    /// maps to `Event::LoopDestroyed`, which tauri-runtime-wry maps directly
+    /// to `RunEvent::Exit` — bypassing `RunEvent::ExitRequested` and (for a
+    /// hidden tray-mode window) `WindowEvent::Destroyed`. Without the
+    /// fallback, the slot stays empty, nothing is joined, and the Lima VM
+    /// is orphaned after quit.
+    #[test]
+    fn exit_arm_runs_cleanup_when_handle_slot_is_empty() {
+        let source = include_str!("main.rs");
+        let arm_start = source
+            .find("tauri::RunEvent::Exit =>")
+            .expect("Exit arm must exist");
+        let after_arm = &source[arm_start..];
+        let arm_end = after_arm
+            .find("\n            _ => {}")
+            .unwrap_or(after_arm.len());
+        let exit_arm = &after_arm[..arm_end];
+        assert!(
+            exit_arm.contains("run_exit_cleanup(&cleanup_ctx_runevent)"),
+            "the RunEvent::Exit arm must fall back to \
+             run_exit_cleanup(&cleanup_ctx_runevent) when the handle slot is \
+             empty — otherwise macOS Cmd+Q (which delivers \
+             applicationWillTerminate and bypasses ExitRequested) orphans \
+             the Lima VM"
+        );
+        assert!(
+            exit_arm.contains("hide_main_window(app_handle)"),
+            "the RunEvent::Exit arm must hide the main window before \
+             spawning the fallback cleanup to avoid a beachball during \
+             limactl stop"
         );
     }
 

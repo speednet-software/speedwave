@@ -652,6 +652,21 @@ pub fn update_llm_config(
     model: Option<String>,
     base_url: Option<String>,
 ) -> Result<(), String> {
+    // Local providers (ollama, lmstudio, llamacpp) cannot start a session
+    // without a model — `compose::apply_llm_config` rejects the compose
+    // render, which only surfaces when the user tries to run Claude.
+    // Enforce the same requirement at save time so the config never reaches
+    // that failure mode. The frontend performs the same check, but a
+    // malformed Tauri call (or future callers bypassing the UI) could still
+    // persist `provider=<local>, model=null` without this guard.
+    if config::is_local_provider(provider.as_deref()) && model.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(format!(
+            "Provider '{}' requires a model name. \
+             Configure it in Settings → LLM Provider → Model.",
+            provider.as_deref().unwrap_or("")
+        ));
+    }
     if let Some(ref m) = model {
         // A model name starting with `--` (or `-`) would be interpreted as
         // a flag by Claude Code's argument parser when rendered as
@@ -884,6 +899,59 @@ mod tests {
     }
 
     #[test]
+    fn update_llm_config_rejects_local_provider_without_model() {
+        // Local providers can't start a session without a model —
+        // `compose::apply_llm_config` would reject the compose render.
+        // Catching it at save time prevents the config from persisting a
+        // state that only fails when the user tries to run.
+        //
+        // Enumerate every local provider via the SSOT const so a future
+        // addition (a fourth local backend) is automatically covered.
+        assert!(
+            !config::LOCAL_PROVIDERS.is_empty(),
+            "LOCAL_PROVIDERS must list at least one provider — this test \
+             iterates it"
+        );
+        for provider in config::LOCAL_PROVIDERS {
+            // Empty string also counts as "no model" — matches the frontend
+            // guard in llm-provider.component.ts.
+            for model in [None, Some(String::new())] {
+                let result = update_llm_config(
+                    Some((*provider).to_string()),
+                    model.clone(),
+                    Some("http://localhost:11434".to_string()),
+                );
+                let err = result.expect_err(&format!(
+                    "provider={provider}, model={model:?} must be rejected \
+                     but save succeeded"
+                ));
+                assert!(
+                    err.contains("requires a model name"),
+                    "provider={provider}, model={model:?} must fail with \
+                     model-required error, got: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn update_llm_config_accepts_anthropic_without_model() {
+        // Anthropic is not a local provider — the model-required guard must
+        // not fire. The Anthropic path has its own default model handling.
+        let result = update_llm_config(Some("anthropic".to_string()), None, None);
+        // Either succeeds or fails for project-config reasons in the test env
+        // (no active project) — what we require is that the error is NOT the
+        // model-required one.
+        if let Err(err) = result {
+            assert!(
+                !err.contains("requires a model name"),
+                "Anthropic with no model must not trigger the local-provider \
+                 model-required guard, got: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn update_llm_config_rejects_model_with_flag_prefix() {
         // Regression: a model name starting with `--` would be rendered as
         // `--model --dangerously-skip-permissions` in the Claude Code
@@ -932,9 +1000,12 @@ mod tests {
 
     #[test]
     fn update_llm_config_rejects_invalid_base_url() {
+        // Non-empty model so the model-required guard doesn't short-circuit
+        // before URL validation runs — this test exercises URL scheme
+        // rejection, not model handling.
         let result = update_llm_config(
             Some("ollama".to_string()),
-            None,
+            Some("placeholder-model".to_string()),
             Some("javascript:alert(1)".to_string()),
         );
         assert!(result.is_err());
@@ -975,8 +1046,16 @@ mod tests {
     // exercise it at the command boundary. Validation fails before the config
     // file is touched, so no fixture/lock setup is required.
 
+    /// Helper for SSRF URL-validation tests. Passes a placeholder model so the
+    /// model-required guard doesn't short-circuit before the URL is validated
+    /// — these tests exercise URL validation specifically, not model handling.
     fn url_rejection_err(url: &str) -> String {
-        update_llm_config(Some("ollama".to_string()), None, Some(url.to_string())).unwrap_err()
+        update_llm_config(
+            Some("ollama".to_string()),
+            Some("placeholder-model".to_string()),
+            Some(url.to_string()),
+        )
+        .unwrap_err()
     }
 
     #[test]
