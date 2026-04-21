@@ -387,6 +387,13 @@ export class LlmProviderComponent implements OnInit {
 
   /** Persists the LLM provider configuration to the backend. */
   async saveConfig(): Promise<void> {
+    // Surface the model-required error at Save time. compose::apply_llm_config
+    // also rejects this, but its error only surfaces at container start —
+    // a user who clicks Save sees no immediate feedback otherwise.
+    if (this.provider !== 'anthropic' && !this.model) {
+      this.errorOccurred.emit('A model name is required for local providers');
+      return;
+    }
     this.saving = true;
     this.saved = false;
     try {

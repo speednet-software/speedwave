@@ -168,6 +168,7 @@ describe('LlmProviderComponent', () => {
     const spy = vi.fn();
     component.providerChange.subscribe(spy);
     component.provider = 'ollama';
+    component.model = 'llama3.3';
 
     await component.saveConfig();
 
@@ -178,6 +179,7 @@ describe('LlmProviderComponent', () => {
     const projectState = TestBed.inject(ProjectStateService);
     projectState.needsRestart = false;
     component.provider = 'ollama';
+    component.model = 'llama3.3';
 
     await component.saveConfig();
 
@@ -747,5 +749,52 @@ describe('LlmProviderComponent', () => {
     expect(invokedArgs['baseUrl']).toBe('http://host.docker.internal:11434');
     expect(invokedArgs['baseUrl']).not.toBeNull();
     expect(invokedArgs['baseUrl']).not.toBe('');
+  });
+
+  it('save_rejects_local_provider_with_empty_model', async () => {
+    // UX guard: compose::apply_llm_config rejects a null model for local
+    // providers, but that error only surfaces at container start. Catching
+    // it at Save time gives immediate feedback.
+    let invokeCalled = false;
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'update_llm_config') {
+        invokeCalled = true;
+      }
+      return undefined;
+    };
+
+    let emittedError = '';
+    component.errorOccurred.subscribe((msg: string) => {
+      emittedError = msg;
+    });
+
+    component.provider = 'ollama';
+    component.baseUrl = 'http://localhost:11434';
+    component.model = '';
+
+    await component.saveConfig();
+
+    expect(invokeCalled).toBe(false);
+    expect(emittedError).toContain('model name is required');
+  });
+
+  it('save_allows_anthropic_with_empty_model', async () => {
+    // Anthropic infers the model from ANTHROPIC_MODEL env or Claude's
+    // default — no model in config is legal.
+    let invokeCalled = false;
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'update_llm_config') {
+        invokeCalled = true;
+      }
+      return undefined;
+    };
+
+    component.provider = 'anthropic';
+    component.baseUrl = '';
+    component.model = '';
+
+    await component.saveConfig();
+
+    expect(invokeCalled).toBe(true);
   });
 });
