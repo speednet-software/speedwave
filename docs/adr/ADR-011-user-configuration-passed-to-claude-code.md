@@ -58,13 +58,13 @@ Different projects require different Claude Code settings (model selection, cust
 
 #### Per-project Claude overrides (`claude.*`)
 
-| Field                 | Rust type                         | Description                                                                                                                                                               |
-| --------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `claude.env`          | `Option<HashMap<String, String>>` | Environment variables injected into the Claude Code process[^1]                                                                                                           |
-| `claude.llm`          | `Option<LlmConfig>`               | Local LLM provider configuration — see ADR-040                                                                                                                            |
-| `claude.llm.provider` | `Option<String>`                  | `anthropic` (default), `ollama`, `lmstudio`, `llamacpp`, `custom`                                                                                                         |
-| `claude.llm.model`    | `Option<String>`                  | Model name for the local provider (also accepted from repo config)                                                                                                        |
-| `claude.llm.base_url` | `Option<String>`                  | Custom API endpoint (required for `custom`; optional override for known providers). **Not accepted from repo config** — only from user config (SSRF prevention, ADR-040). |
+| Field                 | Rust type                         | Description                                                                                                                          |
+| --------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `claude.env`          | `Option<HashMap<String, String>>` | Environment variables injected into the Claude Code process[^1]                                                                      |
+| `claude.llm`          | `Option<LlmConfig>`               | Local LLM provider configuration — see ADR-040                                                                                       |
+| `claude.llm.provider` | `Option<String>`                  | `anthropic` (default), `ollama`, `lmstudio`, `llamacpp`                                                                              |
+| `claude.llm.model`    | `Option<String>`                  | Model name for the local provider (also accepted from repo config)                                                                   |
+| `claude.llm.base_url` | `Option<String>`                  | Optional; overrides the provider default port. **Not accepted from repo config** — only from user config (SSRF prevention, ADR-040). |
 
 #### Global config fields
 

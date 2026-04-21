@@ -232,6 +232,32 @@ The Desktop app includes two Tauri commands that make HTTP requests to external 
 - No automatic system proxy detection (`default-features = false` in reqwest). Corporate users behind HTTP proxies may see connection timeouts.
 - HTTP cleartext warning logged when `http://` scheme is used (credentials transmitted without encryption).
 
+## LLM Model Discovery Commands
+
+The Desktop app includes a Tauri command `discover_llm_models` that probes a local LLM server during Settings configuration, and a companion validator `validate_llm_base_url` reused by `update_llm_config` (the save path). Both run on the Desktop host process, not inside containers — see ADR-041 for the full threat model.
+
+**SSRF mitigations:**
+
+- Shared validator `validate_llm_base_url` (`desktop/src-tauri/src/llm_cmd.rs`) is called by BOTH the discovery probe and the save path. One policy, two callsites — a future tightening of URL validation reaches both automatically.
+- **Blocked:** link-local / metadata IPs (169.254.0.0/16, fe80::/10, IPv6-mapped variants), RFC 5737 TEST-NET, RFC 2544 benchmarking, RFC 3849 documentation prefix, RFC 6666 discard prefix, multicast, unspecified (0.0.0.0, ::).
+- **Allowed with warning:** loopback (127.0.0.0/8, ::1), RFC 1918 private IPv4, IPv6 ULA (fc00::/7), public IPs, public domains — consistent with the user-input threat model applied to Redmine (self-written URLs are user's own decision).
+- Redirects blocked via `reqwest::redirect::Policy::none()` — `302 Location: http://169.254.169.254/` cannot bypass the classifier.
+- Response body capped at 5 MiB via shared `http_util::read_body_limited` (same helper as Redmine).
+- 5-second request timeout; mid-load models fall back to the free-text input.
+- Case-insensitive `Content-Type` check rejects `text/html` responses (user pointed at a non-LLM URL).
+- Fixed endpoints per provider (`/api/tags` for Ollama, `/v1/models` for OpenAI-compatible servers) — never arbitrary paths.
+- Response shape validated via typed deserialization (`OllamaTagsResponse`, `OpenAIModelsResponse`) — non-matching JSON rejected.
+- No cookies, no auth headers, custom `User-Agent` header.
+
+**Policy divergence from Redmine:** both commands share 95% of the policy. Redmine blocks loopback (`PrivatePolicy::BlockLoopback`) because a self-hosted Redmine on 127.0.0.1 is unusual and likely a misconfiguration. LLM discovery allows loopback (`PrivatePolicy::AllowLoopback`) because `default_base_url` for every local provider resolves to `host.docker.internal` (rewritten to `127.0.0.1` on the host side — see `rewrite_container_alias_to_loopback`). Both policies share a single implementation (`url_validation::is_private_on_premise` with a `PrivatePolicy` parameter) so future IP-classification tightening reaches both.
+
+**Residual risk, documented and accepted** (see ADR-041):
+
+- DNS rebinding — a user-written hostname whose first DNS lookup returns a public IP but subsequent connects return a metadata IP can bypass the validator. Mitigation: probe output is a typed `Vec<String>` rendered as `<option>` text (no pivot); user-initiated only; 5s timeout bounds the race.
+- Save-path public-domain SSRF — analogous to Redmine. User-written URL is user's own threat. If a codepath ever allows URL injection without user consent, this decision must revisit.
+
+**SecurityCheck scope:** Same as Redmine — these commands run on the Desktop host process, outside SecurityCheck's compose validation scope. SSRF protection is implemented directly in the command handlers.
+
 ## Authentication Gate
 
 Claude Code must be authenticated (OAuth or API key) before the app allows

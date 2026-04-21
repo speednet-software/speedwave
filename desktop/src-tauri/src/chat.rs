@@ -674,7 +674,7 @@ fn build_ask_user_response(request: &ControlRequest, selected_label: &str) -> se
 ///
 /// When `resume_session_id` is `Some`, adds `--resume <id>` to resume an
 /// existing conversation.
-pub fn build_claude_args(resume_session_id: Option<&str>, flags: &[&str]) -> Vec<String> {
+pub fn build_claude_args(resume_session_id: Option<&str>, flags: &[String]) -> Vec<String> {
     let mut args = vec![
         consts::CLAUDE_BINARY.to_string(),
         "-p".to_string(),
@@ -694,7 +694,7 @@ pub fn build_claude_args(resume_session_id: Option<&str>, flags: &[&str]) -> Vec
     }
 
     for flag in flags {
-        args.push(flag.to_string());
+        args.push(flag.clone());
     }
 
     args
@@ -2111,7 +2111,7 @@ mod tests {
 
     #[test]
     fn build_claude_args_includes_flags() {
-        let args = build_claude_args(None, &["--dangerously-skip-permissions"]);
+        let args = build_claude_args(None, &["--dangerously-skip-permissions".to_string()]);
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
     }
 

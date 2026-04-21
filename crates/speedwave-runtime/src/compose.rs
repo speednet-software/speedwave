@@ -262,13 +262,7 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
     let provider = llm.provider.as_deref().unwrap_or("anthropic");
     match provider {
         "anthropic" => Ok(yaml.to_string()),
-        "custom" if llm.base_url.is_none() => {
-            anyhow::bail!(
-                "Custom provider requires a base_url. \
-                 Configure it in Settings → LLM Provider → Base URL."
-            );
-        }
-        "ollama" | "lmstudio" | "llamacpp" | "custom" => {
+        "ollama" | "lmstudio" | "llamacpp" => {
             let base_url = llm
                 .base_url
                 .clone()
@@ -290,16 +284,16 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
                     "sk-no-key-required".to_string(),
                 ),
                 (
-                    "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+                    "ANTHROPIC_CUSTOM_MODEL_OPTION".to_string(),
                     model.to_string(),
                 ),
                 (
-                    "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
-                    model.to_string(),
+                    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".to_string(),
+                    custom_model_display_name(provider, model),
                 ),
                 (
-                    "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
-                    model.to_string(),
+                    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION".to_string(),
+                    custom_model_description(provider),
                 ),
                 (
                     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
@@ -314,7 +308,7 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
         }
         other => anyhow::bail!(
             "Unsupported LLM provider '{other}'. \
-             Supported: anthropic, ollama, lmstudio, llamacpp, custom."
+             Supported: anthropic, ollama, lmstudio, llamacpp."
         ),
     }
 }
@@ -340,6 +334,29 @@ pub fn default_base_url(provider: &str) -> Option<String> {
         "llamacpp" => Some("http://host.docker.internal:8080".to_string()),
         _ => None,
     }
+}
+
+/// Human-readable label for a local LLM provider.
+///
+/// Invariant: the only callers (`custom_model_display_name` and
+/// `custom_model_description`) are reached only after `apply_llm_config`
+/// narrows the provider to one of the three local values below. Any other
+/// value at this point indicates a programmer error in `apply_llm_config`.
+fn provider_display_label(provider: &str) -> &'static str {
+    match provider {
+        "ollama" => "Ollama",
+        "lmstudio" => "LM Studio",
+        "llamacpp" => "llama.cpp",
+        other => unreachable!("provider_display_label called with unsupported provider '{other}'"),
+    }
+}
+
+fn custom_model_display_name(provider: &str, model: &str) -> String {
+    format!("{} ({})", model, provider_display_label(provider))
+}
+
+fn custom_model_description(provider: &str) -> String {
+    format!("Local model served by {}", provider_display_label(provider))
 }
 
 /// Validates a base URL for local model providers. Rejects non-HTTP schemes,
@@ -2199,6 +2216,13 @@ fn get_services(doc: &serde_yaml_ng::Value) -> Option<Vec<(String, &serde_yaml_n
 mod tests {
     use super::*;
 
+    fn default_flags() -> Vec<String> {
+        crate::defaults::DEFAULT_FLAGS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
     fn get_hub_env_seq(doc: &serde_yaml_ng::Value) -> Vec<String> {
         doc.get("services")
             .and_then(|s| s.get("mcp-hub"))
@@ -2568,7 +2592,7 @@ services:
     fn test_render_compose_substitution() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let result = render_compose(
@@ -2602,7 +2626,7 @@ services:
     fn test_render_compose_uses_bundle_scoped_image_refs() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let manifest = bundle::load_current_bundle_manifest().unwrap();
@@ -2647,7 +2671,7 @@ services:
     fn test_rendered_compose_has_sharepoint_workspace_mount() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -2675,7 +2699,7 @@ services:
     fn test_render_compose_playwright_service_present() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let integrations = ResolvedIntegrationsConfig {
@@ -2738,7 +2762,7 @@ services:
     fn test_render_compose_playwright_no_token_mount() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let integrations = ResolvedIntegrationsConfig {
@@ -2774,7 +2798,7 @@ services:
     fn test_render_compose_playwright_no_workspace_mount() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let integrations = ResolvedIntegrationsConfig {
@@ -2811,7 +2835,7 @@ services:
     fn test_playwright_worker_url_in_hub_env() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let integrations = ResolvedIntegrationsConfig {
@@ -2869,7 +2893,7 @@ services:
     fn test_rendered_compose_has_mcp_hub_port() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -2896,7 +2920,7 @@ services:
         // If these drift apart, entrypoint.sh generates wrong mcp-config.json URL.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -2922,7 +2946,7 @@ services:
     fn test_all_workers_use_port_worker() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -2967,7 +2991,7 @@ services:
     fn test_hub_worker_urls_use_port_worker() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -3058,7 +3082,7 @@ services:
         // MCP_HUB_PORT must survive the parse → serialize roundtrip.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -3085,7 +3109,7 @@ services:
         // not somewhere else in the compose file.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -3150,7 +3174,7 @@ services:
     fn test_rendered_compose_passes_security_check() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -3343,7 +3367,7 @@ services:
     fn test_render_compose_ollama_provider() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig {
                 provider: Some("ollama".to_string()),
                 model: Some("llama3.3".to_string()),
@@ -3369,7 +3393,7 @@ services:
     fn test_local_provider_requires_model() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig {
                 provider: Some("ollama".to_string()),
                 model: None,
@@ -3399,7 +3423,7 @@ services:
     fn test_render_compose_default_anthropic() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(), // provider = None → defaults to "anthropic"
         };
         let yaml = render_compose(
@@ -3457,7 +3481,7 @@ services:
     fn test_ollama_direct_injection() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig {
                 provider: Some("ollama".to_string()),
                 model: Some("llama3.3".to_string()),
@@ -3484,18 +3508,28 @@ services:
         );
         assert!(
             env.iter()
-                .any(|e| e == "ANTHROPIC_DEFAULT_SONNET_MODEL=llama3.3"),
-            "Ollama must set default sonnet model"
+                .any(|e| e == "ANTHROPIC_CUSTOM_MODEL_OPTION=llama3.3"),
+            "Ollama must set ANTHROPIC_CUSTOM_MODEL_OPTION to the user model, got: {env:?}"
         );
         assert!(
             env.iter()
-                .any(|e| e == "ANTHROPIC_DEFAULT_OPUS_MODEL=llama3.3"),
-            "Ollama must set default opus model"
+                .any(|e| e == "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=llama3.3 (Ollama)"),
+            "Ollama must set ANTHROPIC_CUSTOM_MODEL_OPTION_NAME with provider label, got: {env:?}"
         );
         assert!(
             env.iter()
-                .any(|e| e == "ANTHROPIC_DEFAULT_HAIKU_MODEL=llama3.3"),
-            "Ollama must set default haiku model"
+                .any(|e| e
+                    == "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION=Local model served by Ollama"),
+            "Ollama must set ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION, got: {env:?}"
+        );
+        assert!(
+            !env
+                .iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_SONNET_MODEL=")
+                    || e.starts_with("ANTHROPIC_DEFAULT_OPUS_MODEL=")
+                    || e.starts_with("ANTHROPIC_DEFAULT_HAIKU_MODEL=")),
+            "Local providers must not override Anthropic alias models — use ANTHROPIC_CUSTOM_MODEL_OPTION \
+             so the /model picker shows a single explicit entry. Got: {env:?}"
         );
         assert!(
             env.iter()
@@ -3517,7 +3551,7 @@ services:
     fn test_lmstudio_default_url() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig {
                 provider: Some("lmstudio".to_string()),
                 model: Some("qwen2.5-coder".to_string()),
@@ -3544,7 +3578,7 @@ services:
     fn test_llamacpp_default_url() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig {
                 provider: Some("llamacpp".to_string()),
                 model: Some("deepseek-r1".to_string()),
@@ -3571,7 +3605,7 @@ services:
     fn test_unsupported_provider_rejected() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig {
                 provider: Some("openrouter".to_string()),
                 model: Some("some-model".to_string()),
@@ -3594,46 +3628,18 @@ services:
     }
 
     #[test]
-    fn test_custom_provider_with_base_url() {
+    fn test_custom_provider_rejected_after_removal() {
+        // Regression guard: the `custom` provider value was removed end-to-end.
+        // Any lingering config that still sets `provider = "custom"` must now
+        // fall through to the same unknown-provider path used by any other
+        // unsupported value (e.g. `openrouter`), not a bespoke `custom` branch.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig {
                 provider: Some("custom".to_string()),
                 model: Some("my-model".to_string()),
                 base_url: Some("http://host.docker.internal:9999".to_string()),
-            },
-        };
-        let yaml = render_compose(
-            "test-project",
-            "/home/user/projects/test",
-            &config,
-            &ResolvedIntegrationsConfig::default(),
-            None,
-        )
-        .unwrap();
-        let env = get_claude_env(&yaml);
-        assert!(
-            env.iter()
-                .any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:9999"),
-            "Custom provider must use the specified base_url, got: {env:?}"
-        );
-        assert!(
-            env.iter()
-                .any(|e| e == "ANTHROPIC_AUTH_TOKEN=sk-no-key-required"),
-            "Custom provider must set dummy auth token"
-        );
-    }
-
-    #[test]
-    fn test_custom_provider_requires_base_url() {
-        let config = ResolvedClaudeConfig {
-            env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
-            llm: LlmConfig {
-                provider: Some("custom".to_string()),
-                model: None,
-                base_url: None,
             },
         };
         let result = render_compose(
@@ -3646,8 +3652,12 @@ services:
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("Custom provider requires a base_url"),
-            "Error must mention custom requires base_url, got: {msg}"
+            msg.contains("Unsupported LLM provider") && msg.contains("custom"),
+            "Error must treat 'custom' as unsupported, got: {msg}"
+        );
+        assert!(
+            !msg.contains("Custom provider requires a base_url"),
+            "The legacy 'custom requires base_url' error must be gone, got: {msg}"
         );
     }
 
@@ -3723,11 +3733,55 @@ services:
     }
 
     #[test]
-    fn test_compose_template_includes_host_docker_internal() {
-        assert!(
-            COMPOSE_TEMPLATE.contains("host.docker.internal"),
-            "compose.template.yml must map host.docker.internal (needed by default_base_url hardcode)"
-        );
+    fn test_compose_template_contains_all_container_host_aliases() {
+        // compose.template.yml injects all aliases from CONTAINER_HOST_ALIASES via
+        // extra_hosts. Iterating the constant (rather than asserting on a literal)
+        // keeps the test in sync with the SSOT — adding a new alias to the const
+        // without updating the template will fail here.
+        for alias in consts::CONTAINER_HOST_ALIASES {
+            assert!(
+                COMPOSE_TEMPLATE.contains(alias),
+                "compose.template.yml must map {} (named in CONTAINER_HOST_ALIASES)",
+                alias
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_template_aliases_are_in_container_host_aliases() {
+        // Inverse guard: every "host.*.internal" hostname that appears in the
+        // extra_hosts block of compose.template.yml must be named in
+        // CONTAINER_HOST_ALIASES.  Without this check, adding an alias to the
+        // template without updating the constant would silently break host-side
+        // code that uses CONTAINER_HOST_ALIASES to rewrite aliases to loopback.
+        let mut in_extra_hosts = false;
+        for line in COMPOSE_TEMPLATE.lines() {
+            let trimmed = line.trim();
+            if trimmed == "extra_hosts:" {
+                in_extra_hosts = true;
+                continue;
+            }
+            // A non-indented, non-list line signals the end of the extra_hosts block.
+            if in_extra_hosts && !trimmed.starts_with('-') && !trimmed.is_empty() {
+                in_extra_hosts = false;
+            }
+            if !in_extra_hosts {
+                continue;
+            }
+            // Lines look like: - "host.lima.internal:${HOST_GATEWAY}"
+            if let Some(alias) = trimmed
+                .strip_prefix("- \"")
+                .and_then(|s| s.split(':').next())
+                .filter(|h| h.starts_with("host.") && h.ends_with(".internal"))
+            {
+                assert!(
+                    consts::CONTAINER_HOST_ALIASES.contains(&alias),
+                    "compose.template.yml extra_hosts contains '{}' which is not in \
+                     CONTAINER_HOST_ALIASES — add it to the const in consts.rs",
+                    alias
+                );
+            }
+        }
     }
 
     #[test]
@@ -3765,6 +3819,67 @@ services:
              for local providers to avoid breaking llama.cpp/Ollama KV cache. \
              Got: {env_anthropic:?}"
         );
+        assert!(
+            !env_anthropic
+                .iter()
+                .any(|e| e.starts_with("ANTHROPIC_CUSTOM_MODEL_OPTION")),
+            "Anthropic provider must NOT inject ANTHROPIC_CUSTOM_MODEL_OPTION — it is only \
+             set for local providers. Got: {env_anthropic:?}"
+        );
+    }
+
+    #[test]
+    fn test_llamacpp_custom_model_option_labels() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig {
+                provider: Some("llamacpp".to_string()),
+                model: Some("deepseek-r1".to_string()),
+                base_url: None,
+            },
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=deepseek-r1 (llama.cpp)"),
+            "llamacpp display name must use 'llama.cpp' label, got: {env:?}"
+        );
+    }
+
+    #[test]
+    fn test_lmstudio_custom_model_option_labels() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig {
+                provider: Some("lmstudio".to_string()),
+                model: Some("qwen2.5-coder".to_string()),
+                base_url: None,
+            },
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=qwen2.5-coder (LM Studio)"),
+            "lmstudio display name must use 'LM Studio' label, got: {env:?}"
+        );
     }
 
     #[test]
@@ -3772,7 +3887,7 @@ services:
         // Regression guard: CLAUDE_VERSION must be the pinned semver from defaults.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -3804,7 +3919,7 @@ services:
         // This guards against accidentally adding :ro to the workspace mount.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -4288,7 +4403,7 @@ services:
         // Read-only — container only reads the lock file; Speedwave host writes it.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -4463,7 +4578,7 @@ services:
         // CLAUDE_CODE_IDE_HOST_OVERRIDE must be in the claude service environment.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -4497,7 +4612,7 @@ services:
     fn test_claude_env_has_no_flicker() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -4531,7 +4646,7 @@ services:
     fn test_claude_env_has_effort_level() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -4663,7 +4778,7 @@ services:
     fn test_render_compose_rejects_invalid_project_name() {
         let resolved = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let integrations = ResolvedIntegrationsConfig::default();
@@ -4852,7 +4967,7 @@ services:
     fn test_render_compose_with_mixed_enabled_disabled_end_to_end() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let mut integrations = ResolvedIntegrationsConfig::default();

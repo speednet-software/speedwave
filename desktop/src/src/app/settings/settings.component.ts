@@ -30,8 +30,9 @@ import { ProjectList } from '../models/update';
     UpdateSectionComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block bg-sw-bg-darkest min-h-screen p-6 text-sw-text' },
   template: `
-    <div class="max-w-[700px] mx-auto mt-8 px-6">
+    <div>
       <h1 class="text-xl text-sw-accent m-0 mb-6">Settings</h1>
 
       @if (error) {

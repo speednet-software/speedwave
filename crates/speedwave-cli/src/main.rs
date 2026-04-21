@@ -636,7 +636,7 @@ fn main() -> anyhow::Result<()> {
 
     // exec -it -> interactive Claude terminal inside container
     let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
-    exec_cmd.extend_from_slice(&resolved.flags);
+    exec_cmd.extend(resolved.flags.iter().map(String::as_str));
     let status = runtime
         .container_exec(&container_name, &exec_cmd)
         .status()?;

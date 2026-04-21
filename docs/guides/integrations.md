@@ -211,7 +211,7 @@ You can run Claude Code inside Speedwave against a local LLM server instead of A
    > **Important:** Ollama binds to `127.0.0.1` by default. The `claude` container cannot reach the loopback interface — set `OLLAMA_HOST=0.0.0.0` before starting `ollama serve`.
 
 2. In Speedwave Settings → LLM Provider → select **Ollama**
-3. Set **Model** to the model you pulled (e.g. `llama3.3`)
+3. The Settings UI fetches the model list from Ollama's `/api/tags` endpoint and pre-selects one automatically. You only need to type the model name manually if the Ollama server is offline when you open Settings.
 4. Leave **Base URL** empty to use the default (`http://host.docker.internal:11434`)
 5. Restart containers
 
@@ -228,9 +228,9 @@ You can run Claude Code inside Speedwave against a local LLM server instead of A
 2. Select **llama.cpp** in Settings → LLM Provider
 3. Default port: `http://host.docker.internal:8080`
 
-### Custom endpoint
+### Non-standard addresses
 
-Select **Custom endpoint** if your LLM server is at a non-standard address (e.g. another machine on your LAN at `http://192.168.1.100:11434`). Enter the full URL including port in the **Base URL** field. The URL must use `http://` or `https://` and must not include a path.
+The `custom` provider no longer exists. If your LLM server is at a non-standard address (e.g. another machine on your LAN at `http://192.168.1.100:11434`), pick the closest matching provider (Ollama, LM Studio, or llama.cpp) and override the **Base URL** field to point at your server. The URL must use `http://` or `https://` and must not include a path.
 
 ## See Also
 
@@ -239,3 +239,4 @@ Select **Custom endpoint** if your LLM server is at a non-standard address (e.g.
 - [ADR-015: Plugin System](../adr/ADR-015-plugin-system.md)
 - [ADR-036: Self-Declaring Worker Policy](../adr/ADR-036-self-declaring-worker-policy.md)
 - [ADR-040: Remove LiteLLM — Direct Local Provider Injection](../adr/ADR-040-remove-litellm-direct-provider-injection.md)
+- [ADR-041: Local LLM Model Discovery and SSRF Policy](../adr/ADR-041-local-llm-model-discovery.md)
