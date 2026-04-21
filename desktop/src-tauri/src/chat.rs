@@ -430,8 +430,31 @@ impl StreamParser {
         if is_error {
             let result_text = parsed["result"].as_str().unwrap_or("");
             if result_text.trim().is_empty() {
-                log::warn!("parse_result: is_error=true but result text is empty");
-                return (None, None);
+                // An `is_error=true` message with no `result` text is a protocol
+                // anomaly observed in the wild when a local LLM provider (e.g.
+                // llama.cpp/Qwen) returns a bare error response. Previously the
+                // chunk was dropped silently, leaving the user with an empty
+                // message bubble and no indication that anything went wrong.
+                //
+                // Surface a placeholder so the user sees *something*, and log
+                // the full response at DEBUG so a later troubleshooting session
+                // has the server payload to dig into.
+                log::warn!(
+                    "parse_result: is_error=true but result text is empty; \
+                     returning placeholder error chunk"
+                );
+                log::debug!(
+                    "parse_result: empty-error payload: {parsed}",
+                    parsed = parsed
+                );
+                return (
+                    Some(StreamChunk::Error {
+                        content: "The LLM returned an error without details. \
+                             Check the provider server logs or try a different model."
+                            .to_string(),
+                    }),
+                    None,
+                );
             }
             return (
                 Some(StreamChunk::Error {
@@ -1760,19 +1783,34 @@ mod tests {
     }
 
     #[test]
-    fn parse_result_error_with_empty_result_returns_none() {
+    fn parse_result_error_with_empty_result_returns_placeholder_error() {
+        // Regression guard: an `is_error=true` message with empty/missing
+        // `result` text used to be swallowed silently, leaving the user
+        // with a blank bubble and no indication of failure. Local LLM
+        // providers (e.g. llama.cpp + Qwen) hit this path frequently, so
+        // the parser now surfaces a placeholder Error chunk so the UI
+        // always shows *something*.
         let mut parser = StreamParser::new();
-        let line = r#"{"type":"result","is_error":true,"result":""}"#;
-        assert!(
-            parse_line_str(&mut parser, line).is_none(),
-            "empty error result should be skipped"
-        );
-
-        let line_no_key = r#"{"type":"result","is_error":true}"#;
-        assert!(
-            parse_line_str(&mut parser, line_no_key).is_none(),
-            "missing result key with is_error should be skipped"
-        );
+        for line in [
+            r#"{"type":"result","is_error":true,"result":""}"#,
+            // Missing `result` key entirely — same semantics as empty.
+            r#"{"type":"result","is_error":true}"#,
+        ] {
+            let chunk = parse_line_str(&mut parser, line).unwrap_or_else(|| {
+                panic!(
+                    "empty/missing error result must now produce a chunk, not be dropped: {line}"
+                )
+            });
+            match chunk {
+                StreamChunk::Error { content } => {
+                    assert!(
+                        !content.trim().is_empty(),
+                        "placeholder content must be non-empty so the UI has something to render"
+                    );
+                }
+                other => panic!("expected Error chunk, got {other:?}"),
+            }
+        }
     }
 
     #[test]
