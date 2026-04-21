@@ -1212,12 +1212,36 @@ impl ChatSession {
         }
         // Join already-finished reader threads; detach any still running.
         // Pipes may still be open if the child didn't exit in time.
+        //
+        // When the child exits cleanly (the common case, including the
+        // 5 s wait above), the kernel closes its pipe ends immediately,
+        // which unblocks the reader's `read_line` with EOF — but the Rust
+        // thread still needs a short moment to propagate that through
+        // `BufReader::lines()` -> loop exit -> the `is_finished` flag. A
+        // naive `is_finished()` check right after `kill()` therefore
+        // produces noisy "still running, detaching" warnings even on the
+        // happy path. Give each handle a brief grace window (polled at
+        // 10 ms) so the flag has time to flip before we classify it.
+        //
+        // The window only adds latency when a reader genuinely is stuck
+        // (then we wait up to READER_GRACE_MS and give up); in the common
+        // case each handle is finished on the very first poll.
+        const READER_GRACE_MS: u64 = 200;
+        const READER_POLL_MS: u64 = 10;
+        let reader_grace_deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(READER_GRACE_MS);
         for handle in self.drain_handles.drain(..) {
+            while !handle.is_finished() && std::time::Instant::now() < reader_grace_deadline {
+                std::thread::sleep(std::time::Duration::from_millis(READER_POLL_MS));
+            }
             let name = format!("{:?}", handle.thread().id());
-            // Detach — thread will exit on its own when pipes close.
-            // We can't block here because the child may not have exited.
             if !handle.is_finished() {
-                log::warn!("stop: reader thread {name} still running, detaching");
+                // Pipe is genuinely wedged — typically because an upstream
+                // in the SSH -> nerdctl chain didn't close its end. Detach
+                // so `stop()` still returns to the caller in a bounded time.
+                log::warn!(
+                    "stop: reader thread {name} still running after {READER_GRACE_MS}ms grace, detaching"
+                );
                 continue;
             }
             if let Err(e) = handle.join() {
@@ -1331,6 +1355,57 @@ mod tests {
         assert!(s.shared_stdin.is_none());
         assert!(s.drain_handles.is_empty());
         assert!(s.session_log_path.is_none());
+    }
+
+    #[test]
+    fn stop_grace_period_joins_reader_that_finishes_late() {
+        // Regression: `stop()` used to check `handle.is_finished()` the
+        // instant after `child.kill()` + `wait`, which races the reader
+        // thread's EOF propagation through BufReader::lines(). The flag
+        // would often read `false` for a reader that was about to exit
+        // cleanly anyway, producing noisy "still running, detaching"
+        // warnings even on the happy path.
+        //
+        // Simulate a reader that finishes after ~50ms (well below the
+        // 200ms grace window). `stop()` must join it instead of
+        // classifying it as "still running".
+        let mut s = ChatSession::new("test-project");
+        s.drain_handles.push(std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }));
+        let start = std::time::Instant::now();
+        assert!(s.stop().is_ok());
+        let elapsed = start.elapsed();
+        assert!(s.drain_handles.is_empty(), "handle must be drained");
+        // Upper bound: grace window is 200ms; joining a 50ms thread must
+        // finish well inside it. The generous ceiling absorbs CI jitter.
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "stop() took {elapsed:?} — grace window should have joined the reader well under 500ms"
+        );
+    }
+
+    #[test]
+    fn stop_grace_period_gives_up_on_genuinely_stuck_reader() {
+        // When a reader is truly wedged (pipe upstream didn't close), the
+        // grace window must still be bounded so `stop()` returns to the
+        // caller in a predictable time. We simulate a stuck reader by
+        // spawning a thread that sleeps longer than the grace window.
+        let mut s = ChatSession::new("test-project");
+        s.drain_handles.push(std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+        }));
+        let start = std::time::Instant::now();
+        assert!(s.stop().is_ok());
+        let elapsed = start.elapsed();
+        assert!(s.drain_handles.is_empty(), "handle must be drained");
+        // Upper bound: grace window is 200ms per handle, with one handle
+        // here. 1000ms leaves plenty of room for CI jitter while still
+        // catching a regression to an unbounded join.
+        assert!(
+            elapsed < std::time::Duration::from_millis(1000),
+            "stop() took {elapsed:?} — a stuck reader must be detached within the grace window, not joined"
+        );
     }
 
     #[test]
