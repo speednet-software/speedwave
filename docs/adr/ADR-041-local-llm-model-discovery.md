@@ -17,21 +17,22 @@ Add a Tauri command `discover_llm_models(provider, base_url) -> Vec<String>` tha
 
 **Single SSRF policy, two callsites:**
 
-| Address class                            | Policy      | Rationale                                                                 |
-| ---------------------------------------- | ----------- | ------------------------------------------------------------------------- |
-| Loopback (127.0.0.0/8, ::1)              | Allow, warn | `default_base_url` resolves here after container-alias rewrite            |
-| RFC 1918 private (IPv4)[^3]              | Allow, warn | LAN LLM servers, self-hosted Ollama on a private address                  |
-| IPv6 ULA (`fc00::/7`, RFC 4193)[^4]      | Allow, warn | Same rationale as RFC 1918 for IPv6 networks                              |
-| Link-local (169.254.0.0/16, `fe80::/10`) | Block       | Cloud metadata endpoints[^11][^12] live here; never a legitimate LLM host |
-| RFC 5737 TEST-NET[^5], RFC 2544[^6]      | Block       | Reserved documentation/benchmarking ranges                                |
-| RFC 3849 IPv6 documentation prefix[^8]   | Block       | Reserved documentation range                                              |
-| RFC 6666 IPv6 discard prefix[^9]         | Block       | Reserved                                                                  |
-| Multicast, unspecified (`0.0.0.0`, `::`) | Block       | Not valid HTTP destinations                                               |
-| Public IP / public domain                | Allow, warn | User-written URL is user's threat; same as Redmine                        |
-| `http://` scheme on private address      | Allow, warn | Local LAN; cleartext on loopback/RFC1918 is acceptable                    |
-| Embedded credentials (`user:pass@`)      | Block       | Credentials do not belong in base URLs                                    |
-| Query string / fragment                  | Block       | LLM endpoints are canonical paths                                         |
-| Non-`http`/`https` scheme                | Block       | `file://`, `javascript:`, `ssh://`, `ftp://`, `data:` all rejected        |
+| Address class                            | Policy      | Rationale                                                                         |
+| ---------------------------------------- | ----------- | --------------------------------------------------------------------------------- |
+| Loopback (127.0.0.0/8, ::1)              | Allow, warn | `default_base_url` resolves here after container-alias rewrite                    |
+| RFC 1918 private (IPv4)[^3]              | Allow, warn | LAN LLM servers, self-hosted Ollama on a private address                          |
+| RFC 6598 CGNAT (100.64.0.0/10)[^7]       | Allow, warn | Tailscale / carrier NAT shared address space; functionally equivalent to RFC 1918 |
+| IPv6 ULA (`fc00::/7`, RFC 4193)[^4]      | Allow, warn | Same rationale as RFC 1918 for IPv6 networks                                      |
+| Link-local (169.254.0.0/16, `fe80::/10`) | Block       | Cloud metadata endpoints[^11][^12] live here; never a legitimate LLM host         |
+| RFC 5737 TEST-NET[^5], RFC 2544[^6]      | Block       | Reserved documentation/benchmarking ranges                                        |
+| RFC 3849 IPv6 documentation prefix[^8]   | Block       | Reserved documentation range                                                      |
+| RFC 6666 IPv6 discard prefix[^9]         | Block       | Reserved                                                                          |
+| Multicast, unspecified (`0.0.0.0`, `::`) | Block       | Not valid HTTP destinations                                                       |
+| Public IP / public domain                | Allow, warn | User-written URL is user's threat; same as Redmine                                |
+| `http://` scheme on private address      | Allow, warn | Local LAN; cleartext on loopback/RFC1918 is acceptable                            |
+| Embedded credentials (`user:pass@`)      | Block       | Credentials do not belong in base URLs                                            |
+| Query string / fragment                  | Block       | LLM endpoints are canonical paths                                                 |
+| Non-`http`/`https` scheme                | Block       | `file://`, `javascript:`, `ssh://`, `ftp://`, `data:` all rejected                |
 
 IPv6-mapped IPv4 bypasses (`::ffff:169.254.169.254`) are handled by the underlying `url_validation::validate_url`, which checks `Ipv6Addr::to_ipv4_mapped()` against the same classifier.[^16]
 
@@ -51,7 +52,10 @@ Empty model lists return `Err("empty")` so the UI falls back to the free-text in
 
 **Container-host alias rewrite.** The `host.*.internal` aliases injected into `extra_hosts` (`compose.template.yml`) do not resolve from the Desktop host process — Speedwave does not bundle Docker Desktop, so Docker's /etc/hosts injection does not happen. A new helper `speedwave_runtime::compose::rewrite_container_alias_to_loopback` rewrites `host.docker.internal`, `host.lima.internal`, `host.containers.internal`, `host.speedwave.internal` to `127.0.0.1` before the probe. All four aliases live in a single `CONTAINER_HOST_ALIASES` constant composed from the existing per-platform `LIMA_HOST`, `NERDCTL_LINUX_HOST`, `WSL_HOST`, `CONTAINERS_HOST` named consts — one SSOT.
 
-**Delta vs Redmine policy.** The only difference between `validate_redmine_host_url` (ADR sibling documented at[^18]) and the new `validate_llm_base_url` is loopback: Redmine blocks loopback because a self-hosted Redmine on 127.0.0.1 is an unusual config likely to indicate a mistake; LLM discovery needs loopback because the default base URLs all resolve there. This delta is implemented with a single enum parameter `PrivatePolicy::{BlockLoopback, AllowLoopback}` on the shared helper `url_validation::is_private_on_premise`.
+**Delta vs Redmine policy.** Two differences between `validate_redmine_host_url` (ADR sibling documented at[^18]) and the new `validate_llm_base_url`:
+
+1. **Loopback** — `AllowLoopback` for LLM (default base URLs resolve to 127.0.0.1), `BlockLoopback` for Redmine (a self-hosted Redmine on 127.0.0.1 is an unusual config likely to indicate a mistake). Implemented via `PrivatePolicy::{BlockLoopback, AllowLoopback}` on the shared helper.
+2. **CGNAT (100.64.0.0/10)** — classified as on-premise for **both** paths. Previously the Redmine-local `is_private_on_premise` used `ipv4.is_private()` which covers only RFC 1918, so CGNAT fell through to `validate_url` → `is_private_or_reserved` → rejected. The new shared helper explicitly accepts CGNAT because it is non-routable on the public internet and legitimate for Tailscale-hosted instances.
 
 ## Consequences
 
