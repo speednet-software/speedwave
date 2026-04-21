@@ -14,27 +14,63 @@ load setup
     [[ "$output" == *"runtime"* ]] || [[ "$output" == *"setup"* ]] || [[ "$output" == *"Speedwave"* ]]
 }
 
-@test "speedwave check with no compose file shows error" {
-    cd "$TEST_TEMP_DIR"
-    run "$SPEEDWAVE_BIN" check 2>&1 || true
-    # Should fail since there's no project/compose to check
-    [ "$status" -ne 0 ] || [[ "$output" == *"error"* ]] || [[ "$output" == *"Error"* ]] || [[ "$output" == *"runtime"* ]]
+@test "speedwave --help prints usage without touching runtime" {
+    run "$SPEEDWAVE_BIN" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"USAGE"* ]]
+    [[ "$output" == *"speedwave check"* ]]
+    [[ "$output" == *"plugin install"* ]]
+    # Must NOT show the runtime-not-running banner
+    [[ "$output" != *"runtime is not running"* ]]
 }
 
-@test "speedwave addon install with nonexistent file shows error" {
-    run "$SPEEDWAVE_BIN" addon install /nonexistent/path/addon.zip 2>&1
-    [ "$status" -ne 0 ]
+@test "speedwave -h is equivalent to --help" {
+    run "$SPEEDWAVE_BIN" -h
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"USAGE"* ]]
+    [[ "$output" != *"runtime is not running"* ]]
+}
+
+@test "speedwave help (subcommand form) prints usage" {
+    run "$SPEEDWAVE_BIN" help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"USAGE"* ]]
+    [[ "$output" != *"runtime is not running"* ]]
+}
+
+@test "speedwave check produces a structured verdict" {
+    # `speedwave check` renders compose in-memory from the resolved project
+    # config (no compose file is required on disk) and must terminate with
+    # one of three structured verdicts:
+    #   - "speedwave check OK"           — all security + OS checks passed
+    #   - "speedwave check FAILED"       — at least one security violation
+    #   - "runtime is not running"       — Desktop isn't up, CLI short-circuits
+    # Any other outcome (panic, bare Rust error, silent exit) indicates a
+    # regression in the check pipeline.
+    cd "$TEST_TEMP_DIR"
+    run "$SPEEDWAVE_BIN" check 2>&1 || true
+    [[ "$output" == *"speedwave check OK"* ]] \
+        || [[ "$output" == *"speedwave check FAILED"* ]] \
+        || [[ "$output" == *"runtime is not running"* ]]
+    # Must not crash with a panic — those are real regressions, not expected
+    # failure modes.
+    [[ "$output" != *"panicked"* ]]
+    [[ "$output" != *"PANIC"* ]]
+}
+
+@test "speedwave plugin install with nonexistent file shows error" {
+    run "$SPEEDWAVE_BIN" plugin install /nonexistent/path/plugin.zip 2>&1
     [[ "$output" == *"error"* ]] || [[ "$output" == *"Error"* ]] || [[ "$output" == *"No such file"* ]] || [[ "$output" == *"not found"* ]]
 }
 
-@test "speedwave addon without subcommand shows usage" {
-    run "$SPEEDWAVE_BIN" addon 2>&1
+@test "speedwave plugin without subcommand shows usage" {
+    run "$SPEEDWAVE_BIN" plugin 2>&1
     [ "$status" -ne 0 ]
-    [[ "$output" == *"usage"* ]] || [[ "$output" == *"Usage"* ]] || [[ "$output" == *"addon install"* ]]
+    [[ "$output" == *"usage"* ]] || [[ "$output" == *"Usage"* ]] || [[ "$output" == *"plugin install"* ]]
 }
 
-@test "speedwave addon install without path shows usage" {
-    run "$SPEEDWAVE_BIN" addon install 2>&1
+@test "speedwave plugin install without path shows usage" {
+    run "$SPEEDWAVE_BIN" plugin install 2>&1
     [ "$status" -ne 0 ]
     [[ "$output" == *"usage"* ]] || [[ "$output" == *"Usage"* ]] || [[ "$output" == *"zip-path"* ]]
 }
