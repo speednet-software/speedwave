@@ -12,14 +12,15 @@ describe('Navigation', function () {
     const shellTitle = await $('[data-testid="shell-title"]');
     await shellTitle.waitForExist({
       timeout: 15_000,
-      timeoutMsg: 'Shell not found — spec 02 (setup wizard) must complete successfully before navigation tests can run',
+      timeoutMsg:
+        'Shell not found — spec 02 (setup wizard) must complete successfully before navigation tests can run',
     });
   });
 
   it('should display Speedwave title in the shell header', async function () {
     this.timeout(15_000);
     const title = await $('[data-testid="shell-title"]');
-    expect((await title.getText()).trim()).toBe('Speedwave');
+    expect(await title.getAttribute('aria-label')).toBe('Speedwave');
   });
 
   it('should have Integrations and Settings nav links (Chat conditional on auth)', async function () {
@@ -51,7 +52,10 @@ describe('Navigation', function () {
         async () =>
           (await $('[data-testid="chat-messages"]').isExisting()) ||
           (await $('[data-testid="chat-status-overlay"]').isExisting()),
-        { timeout: 20_000, timeoutMsg: 'Chat view did not render (neither messages nor status overlay found)' },
+        {
+          timeout: 20_000,
+          timeoutMsg: 'Chat view did not render (neither messages nor status overlay found)',
+        }
       );
     }
   });
@@ -62,7 +66,10 @@ describe('Navigation', function () {
     await integrations.click();
 
     const section = await $('[data-testid="integrations-services"]');
-    await section.waitForExist({ timeout: 10_000, timeoutMsg: 'Integrations services section did not appear after clicking Integrations link' });
+    await section.waitForExist({
+      timeout: 10_000,
+      timeoutMsg: 'Integrations services section did not appear after clicking Integrations link',
+    });
     expect(await section.isDisplayed()).toBe(true);
   });
 
@@ -72,14 +79,20 @@ describe('Navigation', function () {
     await settings.click();
 
     const activeProject = await $('[data-testid="settings-active-project"]');
-    await activeProject.waitForExist({ timeout: 10_000, timeoutMsg: 'Settings active project did not appear after clicking Settings link' });
+    await activeProject.waitForExist({
+      timeout: 10_000,
+      timeoutMsg: 'Settings active project did not appear after clicking Settings link',
+    });
     expect(await activeProject.isDisplayed()).toBe(true);
   });
 
   it('should show project switcher with e2e-test project', async function () {
     this.timeout(15_000);
     const switcher = await $('[data-testid="project-switcher-btn"]');
-    await switcher.waitForExist({ timeout: 5_000, timeoutMsg: 'Project switcher button not found — expected e2e-test project to be active' });
+    await switcher.waitForExist({
+      timeout: 5_000,
+      timeoutMsg: 'Project switcher button not found — expected e2e-test project to be active',
+    });
     const text = await switcher.getText();
     expect(text).toContain('e2e-test');
   });

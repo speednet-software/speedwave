@@ -66,7 +66,7 @@ async function waitForStepTerminal(index: number, timeout: number): Promise<stri
         }
         return false;
       },
-      { timeout, timeoutMsg: `Step ${index} did not reach terminal state within ${timeout}ms` },
+      { timeout, timeoutMsg: `Step ${index} did not reach terminal state within ${timeout}ms` }
     );
   } catch (e) {
     // DOM poll timed out — check Tauri state as fallback.
@@ -87,7 +87,9 @@ async function assertStepDone(index: number, timeout: number): Promise<void> {
   const status = await waitForStepTerminal(index, timeout);
   if (status === 'error') {
     const errorBanner = await $('[data-testid="setup-error"]');
-    const errorText = (await errorBanner.isExisting()) ? await errorBanner.getText() : 'unknown error';
+    const errorText = (await errorBanner.isExisting())
+      ? await errorBanner.getText()
+      : 'unknown error';
     throw new Error(`Step ${index} failed: ${errorText}`);
   }
   expect(status).toBe('done');
@@ -118,10 +120,10 @@ describe('Setup Wizard — Full Flow', function () {
     // Use setup-step elements (data-status attribute) rather than nested step-title
     // because msedge WebDriver intermittently fails to resolve child text nodes
     // inside Angular @for loops on Windows.
-    await browser.waitUntil(
-      async () => (await $$('[data-testid="setup-step"]')).length === 6,
-      { timeout: 30_000, timeoutMsg: 'Expected 6 setup steps but not all rendered' },
-    );
+    await browser.waitUntil(async () => (await $$('[data-testid="setup-step"]')).length === 6, {
+      timeout: 30_000,
+      timeoutMsg: 'Expected 6 setup steps but not all rendered',
+    });
     const stepElements = await $$('[data-testid="setup-step"]');
     expect(stepElements.length).toBe(6);
 
@@ -192,10 +194,10 @@ describe('Setup Wizard — Full Flow', function () {
 
     const createBtn = await $('[data-testid="setup-create-project-btn"]');
     // Button should now be enabled
-    await browser.waitUntil(
-      async () => await createBtn.isEnabled(),
-      { timeout: 5_000, timeoutMsg: 'Create Project button did not become enabled' },
-    );
+    await browser.waitUntil(async () => await createBtn.isEnabled(), {
+      timeout: 5_000,
+      timeoutMsg: 'Create Project button did not become enabled',
+    });
 
     await createBtn.click();
 
@@ -230,6 +232,6 @@ describe('Setup Wizard — Full Flow', function () {
 
     const shellTitle = await $('[data-testid="shell-title"]');
     await shellTitle.waitForExist({ timeout: 15_000 });
-    expect((await shellTitle.getText()).trim()).toBe('Speedwave');
+    expect(await shellTitle.getAttribute('aria-label')).toBe('Speedwave');
   });
 });

@@ -13,7 +13,8 @@ describe('Navigation', function () {
     const shellTitle = await $('[data-testid="shell-title"]');
     await shellTitle.waitForExist({
       timeout: 15_000,
-      timeoutMsg: 'Shell not found — spec 02 (setup wizard) must complete successfully before navigation tests can run',
+      timeoutMsg:
+        'Shell not found — spec 02 (setup wizard) must complete successfully before navigation tests can run',
     });
     // Fail fast if project is in error state — gives a clear message instead
     // of letting every navigation test individually time out.
@@ -37,7 +38,7 @@ describe('Navigation', function () {
   it('should display Speedwave title in the shell header', async function () {
     this.timeout(15_000);
     const title = await $('[data-testid="shell-title"]');
-    expect((await title.getText()).trim()).toBe('Speedwave');
+    expect(await title.getAttribute('aria-label')).toBe('Speedwave');
   });
 
   it('should have Integrations and Settings nav links (Chat conditional on auth)', async function () {
