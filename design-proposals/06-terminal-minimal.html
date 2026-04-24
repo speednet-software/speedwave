@@ -7,7 +7,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link
       rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
     />
     <style>
       :root {
@@ -77,6 +77,11 @@
         font-family: 'JetBrains Mono', ui-monospace, monospace;
         font-variant-ligatures: none;
       }
+      .view-title {
+        font-family: 'IBM Plex Sans', 'Inter', sans-serif;
+        font-weight: 500;
+        letter-spacing: -0.005em;
+      }
       .view {
         display: none;
       }
@@ -108,6 +113,18 @@
       select:focus {
         outline: none;
         border-color: var(--accent) !important;
+      }
+      select {
+        -webkit-appearance: none;
+        -moz-appearance: none;
+        appearance: none;
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10' fill='none' stroke='%23596177' stroke-width='1.5'><path d='M2 4l3 3 3-3'/></svg>");
+        background-repeat: no-repeat;
+        background-position: right 8px center;
+        padding-right: 24px !important;
+      }
+      select::-ms-expand {
+        display: none;
       }
       .kbd {
         display: inline-flex;
@@ -260,22 +277,45 @@
         opacity: 1;
       }
 
-      /* Collapsible sidebars */
+      /* Conversations sidebar — always a left overlay drawer, hidden by default */
       .collapsible-sidebar {
-        transition: width 0.18s ease, opacity 0.15s ease, border-color 0.15s ease;
-        overflow: hidden;
-      }
-      body.sidebar-collapsed .collapsible-sidebar {
-        width: 0 !important;
-        opacity: 0;
-        border-right-width: 0;
-        pointer-events: none;
-      }
-      body.sidebar-collapsed #rail-collapse-icon {
-        transform: scaleX(-1);
-      }
-      #rail-collapse-icon {
+        position: absolute;
+        z-index: 40;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 16rem;
+        box-shadow: 8px 0 24px rgba(0, 0, 0, 0.4);
         transition: transform 0.18s ease;
+        transform: translateX(-100%);
+      }
+      body.sidebar-drawer-open .collapsible-sidebar {
+        transform: translateX(0);
+      }
+      body.sidebar-drawer-open::before {
+        content: '';
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 30;
+      }
+      /* Memory panel — right overlay drawer, hidden by default */
+      #memory-panel:not(.hidden) {
+        position: absolute;
+        z-index: 40;
+        top: 0;
+        bottom: 0;
+        right: 0;
+        width: min(22rem, 90vw);
+        box-shadow: -8px 0 24px rgba(0, 0, 0, 0.4);
+        display: flex;
+      }
+      body.memory-open::before {
+        content: '';
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 30;
       }
 
       /* Command palette */
@@ -345,16 +385,8 @@
           <img src="assets/speedwave-mark-white@2x.png" alt="Speedwave" class="h-7 w-7" />
         </div>
 
-        <!-- Sidebar collapse toggle -->
-        <button onclick="toggleSidebar()" id="rail-collapse" class="rail-btn mt-2" title="Toggle sidebar">
-          <svg id="rail-collapse-icon" class="h-[16px] w-[16px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M11 19l-7-7 7-7m8 14l-7-7 7-7"/></svg>
-          <span class="tooltip">Toggle sidebar <span class="kbd ml-1">⌘B</span></span>
-        </button>
-
-        <div class="my-2 h-px w-6 bg-[var(--line)]"></div>
-
         <!-- Primary nav -->
-        <nav class="flex flex-col gap-1">
+        <nav class="mt-4 flex flex-col gap-1">
           <button onclick="showView('chat')" class="rail-btn active" data-nav="chat" title="Chat">
             <svg class="h-[18px] w-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 0 1-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
             <span class="tooltip">Chat <span class="kbd ml-1">⌘1</span></span>
@@ -377,7 +409,7 @@
           </button>
         </nav>
 
-        <!-- Bottom: project + palette trigger + theme + avatar -->
+        <!-- Bottom: palette trigger -->
         <div class="mt-auto flex flex-col gap-1 pb-3">
           <button onclick="togglePalette()" class="rail-btn" title="Command palette">
             <svg class="h-[18px] w-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h7"/></svg>
@@ -390,14 +422,14 @@
       <!-- MAIN AREA -->
       <div class="flex flex-1 flex-col overflow-hidden">
         <!-- ====================== CHAT VIEW ====================== -->
-        <section id="view-chat" class="view active flex-1 overflow-hidden">
+        <section id="view-chat" class="view active flex-1 overflow-hidden relative">
           <!-- History sidebar -->
-          <aside class="collapsible-sidebar flex w-64 flex-col border-r border-[var(--line)] bg-[var(--bg-1)]">
+          <aside class="collapsible-sidebar flex w-64 flex-shrink-0 flex-col border-r border-[var(--line)] bg-[var(--bg-1)]">
             <div class="flex h-11 items-center gap-2 border-b border-[var(--line)] px-3">
               <span class="mono text-[11px] text-[var(--ink-mute)]">conversations</span>
               <span class="pill accent">14</span>
               <button class="ml-auto text-[var(--ink-mute)] hover:text-[var(--ink)]" title="New conversation">
-                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
               </button>
             </div>
             <div class="border-b border-[var(--line)] p-2">
@@ -453,12 +485,18 @@
           <!-- Chat main -->
           <div class="flex flex-1 flex-col overflow-hidden">
             <!-- Chat header: minimal -->
-            <div class="flex h-11 items-center gap-3 border-b border-[var(--line)] bg-[var(--bg-1)] px-5">
-              <span class="text-[13px] text-[var(--ink)]">Refactoring container runtime</span>
-              <span class="pill">14 msgs</span>
-              <span class="pill teal">opus-4.7</span>
-              <div class="ml-auto flex items-center gap-3">
-                <button onclick="toggleMemory()" class="mono text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]">memory</button>
+            <div class="flex h-11 flex-shrink-0 items-center gap-3 border-b border-[var(--line)] bg-[var(--bg-1)] px-4 md:px-6">
+              <button data-sidebar-trigger onclick="toggleSidebar()" class="flex-shrink-0 text-[var(--ink-mute)] hover:text-[var(--ink)]" title="Conversations (⌘B)">
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h10M4 18h16"/></svg>
+              </button>
+              <button class="flex-shrink-0 text-[var(--ink-mute)] hover:text-[var(--ink)]" title="New conversation (⌘N)">
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+              </button>
+              <h1 class="view-title truncate text-[14px] text-[var(--ink)]">Refactoring container runtime</h1>
+              <div class="ml-auto flex flex-shrink-0 items-center gap-3">
+                <button onclick="toggleMemory()" class="flex-shrink-0 text-[var(--ink-mute)] hover:text-[var(--ink)]" title="Memory (38 entries)">
+                  <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
+                </button>
                 <span class="text-[var(--line-strong)]">·</span>
                 <button onclick="toggleProjectSwitcher()" class="mono flex items-center gap-1.5 text-[11px] text-[var(--ink)] hover:text-[var(--accent)]" title="Switch project">
                   <span class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-[var(--violet)] text-[8px] font-bold text-[#07090f]">sw</span>
@@ -468,7 +506,7 @@
             </div>
 
             <div class="flex flex-1 overflow-hidden">
-              <div class="flex-1 overflow-y-auto px-10 py-8">
+              <div class="flex-1 overflow-y-auto p-4 md:p-6">
                 <div class="mx-auto max-w-3xl space-y-8">
 
 
@@ -508,7 +546,7 @@
 
 
                   <!-- Thinking — collapsed -->
-                  <details class="border-l border-[var(--violet)]/40 pl-4">
+                  <details class="border-l-2 border-[var(--violet)]/50 pl-4">
                     <summary class="mono flex cursor-pointer items-center gap-2 text-[11px] text-[var(--violet)]/80 hover:text-[var(--violet)]">
                       <svg class="h-3 w-3 transition" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
                       thinking
@@ -520,7 +558,7 @@
                   </details>
 
                   <!-- Thinking — expanded (open) -->
-                  <details open class="border-l border-[var(--violet)]/40 pl-4">
+                  <details open class="border-l-2 border-[var(--violet)]/50 pl-4">
                     <summary class="mono flex cursor-pointer items-center gap-2 text-[11px] text-[var(--violet)]">
                       <svg class="h-3 w-3 rotate-90 transition" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
                       thinking
@@ -543,7 +581,7 @@
                   </div>
 
                   <!-- Tool · success (Read) — collapsed -->
-                  <div class="border-l-2 border-[var(--green)]/40 pl-4">
+                  <div class="border-l-2 border-[var(--green)]/50 pl-4">
                     <div class="mono flex items-center gap-2 text-[11px]">
                       <span class="text-[var(--green)]">✓ Read</span>
                       <span class="text-[var(--teal)]">docs/architecture/security.md</span>
@@ -552,7 +590,7 @@
                   </div>
 
                   <!-- Tool · success (Edit) — expanded with diff -->
-                  <div class="border-l-2 border-[var(--green)]/40 pl-4">
+                  <div class="border-l-2 border-[var(--green)]/50 pl-4">
                     <div class="mono flex items-center gap-2 text-[11px]">
                       <span class="text-[var(--green)]">✓ Edit</span>
                       <span class="text-[var(--teal)]">compose.template.yml</span>
@@ -566,7 +604,7 @@
                   </div>
 
                   <!-- Tool · success (Bash) — with output -->
-                  <div class="border-l-2 border-[var(--green)]/40 pl-4">
+                  <div class="border-l-2 border-[var(--green)]/50 pl-4">
                     <div class="mono flex items-center gap-2 text-[11px]">
                       <span class="text-[var(--green)]">✓ Bash</span>
                       <span class="text-[var(--ink-dim)]">$ nerdctl ps</span>
@@ -579,7 +617,7 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                   </div>
 
                   <!-- Tool · success (TodoWrite) — checklist -->
-                  <div class="border-l-2 border-[var(--green)]/40 pl-4">
+                  <div class="border-l-2 border-[var(--green)]/50 pl-4">
                     <div class="mono flex items-center gap-2 text-[11px]">
                       <span class="text-[var(--green)]">✓ TodoWrite</span>
                       <span class="text-[var(--ink-mute)]">· 4 tasks updated</span>
@@ -594,7 +632,7 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                   </div>
 
                   <!-- Tool · error -->
-                  <div class="border-l-2 border-red-500/40 pl-4">
+                  <div class="border-l-2 border-red-500/50 pl-4">
                     <div class="mono flex items-center gap-2 text-[11px]">
                       <span class="text-red-400">✗ Bash</span>
                       <span class="text-[var(--ink-dim)]">$ cargo test --all</span>
@@ -608,7 +646,7 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                   </div>
 
                   <!-- Tool · interrupted -->
-                  <div class="border-l-2 border-[var(--ink-mute)]/40 pl-4 opacity-70">
+                  <div class="border-l-2 border-[var(--ink-mute)]/50 pl-4 opacity-70">
                     <div class="mono flex items-center gap-2 text-[11px]">
                       <span class="text-[var(--ink-mute)]">⊘ WebFetch</span>
                       <span class="text-[var(--ink-dim)]">https://docs.lima-vm.io/...</span>
@@ -630,8 +668,8 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                     </div>
                   </div>
 
-                  <div class="mono overflow-hidden rounded border border-[var(--line)]">
-                    <div class="flex items-center justify-between border-b border-[var(--line)] bg-[var(--bg-1)] px-3 py-1 text-[11px] text-[var(--ink-mute)]">
+                  <div class="mono overflow-hidden rounded ring-1 ring-[var(--line)]">
+                    <div class="flex items-center justify-between bg-[var(--bg-1)] px-3 py-1 text-[11px] text-[var(--ink-mute)]">
                       <span>containers/compose.template.yml</span>
                       <button class="hover:text-[var(--ink)]">copy</button>
                     </div>
@@ -682,7 +720,7 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
 
 
                   <!-- Error · rate limit -->
-                  <div class="mono rounded border-l-2 border-red-500/50 bg-red-500/5 p-3 text-[12.5px] text-red-300">
+                  <div class="mono border-l-2 border-red-500/50 pl-4 text-[12.5px] text-red-300">
                     <div class="flex items-center gap-2">
                       <span class="text-red-400">⚠ rate_limit</span>
                       <span class="text-[var(--ink-mute)]">· api.anthropic.com</span>
@@ -692,31 +730,31 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                   </div>
 
                   <!-- Error · network -->
-                  <div class="mono rounded border-l-2 border-red-500/50 bg-red-500/5 p-3 text-[12.5px] text-red-300">
+                  <div class="mono border-l-2 border-red-500/50 pl-4 text-[12.5px] text-red-300">
                     <span class="text-red-400">⚠ network_error</span> · connection to <span class="text-red-200">api.anthropic.com</span> timed out after 30s
                   </div>
 
                   <!-- Error · session exited -->
-                  <div class="mono rounded border-l-2 border-red-500/50 bg-red-500/5 p-3 text-[12.5px] text-red-300">
+                  <div class="mono border-l-2 border-red-500/50 pl-4 text-[12.5px] text-red-300">
                     <span class="text-red-400">⚠ session_exited</span> · Claude Code container stopped unexpectedly
                     <button class="ml-2 text-[var(--accent)] hover:underline">restart container →</button>
                   </div>
 
                   <!-- Error · broken pipe -->
-                  <div class="mono rounded border-l-2 border-red-500/50 bg-red-500/5 p-3 text-[12.5px] text-red-300">
+                  <div class="mono border-l-2 border-red-500/50 pl-4 text-[12.5px] text-red-300">
                     <span class="text-red-400">⚠ broken_pipe</span> · stream disconnected mid-message
                     <button class="ml-2 text-[var(--accent)] hover:underline">retry →</button>
                   </div>
 
                   <!-- Error · no active project -->
-                  <div class="mono rounded border-l-2 border-[var(--amber)]/50 bg-[var(--amber)]/5 p-3 text-[12.5px] text-[var(--amber)]">
+                  <div class="mono border-l-2 border-[var(--amber)]/50 pl-4 text-[12.5px] text-[var(--amber)]">
                     <span class="font-medium">no active project</span> · select or add a project first
                     <button class="ml-2 text-[var(--accent)] hover:underline">switch project →</button>
                   </div>
 
 
                   <!-- Stopped by user -->
-                  <div class="mono rounded border border-[var(--ink-mute)]/20 bg-[var(--bg-1)] p-3 text-[12.5px] text-[var(--ink-mute)]">
+                  <div class="mono border-l-2 border-[var(--ink-mute)]/50 pl-4 text-[12.5px] text-[var(--ink-mute)]">
                     <span class="text-[var(--ink-dim)]">■ stopped by user</span> · turn cancelled at 2:36 PM · 2 tools rolled back
                   </div>
 
@@ -766,7 +804,7 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                     </div>
                     <div>
                       <div class="text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">project</div>
-                      <div class="mt-1 text-[var(--ink-dim)]">Speedwave v2.0.0. Tauri + Angular 19. Lima on macOS, WSL2 on Windows, rootless on Linux.</div>
+                      <div class="mt-1 text-[var(--ink-dim)]">Speedwave v2.0.0. Tauri + Angular 21. Lima on macOS, WSL2 on Windows, rootless on Linux.</div>
                     </div>
                     <div>
                       <div class="text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">feedback</div>
@@ -782,35 +820,186 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
             </div>
 
             <!-- Composer -->
-            <div class="border-t border-[var(--line)] bg-[var(--bg-2)] px-10 pt-3">
-              <div class="mx-auto max-w-3xl">
+            <div class="border-t border-[var(--line)] bg-[var(--bg-2)] px-4 pt-3 md:px-6">
+              <div class="mx-auto max-w-3xl relative">
+                <!-- Slash menu (popover shown when user types / in textarea or clicks the / toolbar button) -->
+                <div id="slash-menu" class="absolute bottom-full left-0 right-0 mb-2 hidden overflow-hidden rounded border border-[var(--line-strong)] bg-[var(--bg-1)] shadow-[0_16px_40px_rgba(0,0,0,0.5)]">
+                  <div class="flex items-center gap-2 border-b border-[var(--line)] px-3 py-2">
+                    <span class="mono text-[12px] text-[var(--accent)]">/</span>
+                    <input id="slash-query" class="mono w-full bg-transparent text-[12px] text-[var(--ink)] placeholder-[var(--ink-mute)] focus:outline-none" placeholder="search skills &amp; commands..." />
+                    <span class="mono hidden text-[10px] text-[var(--ink-mute)] sm:inline">12 matches</span>
+                    <button onclick="toggleSlashMenu()" class="text-[var(--ink-mute)] hover:text-[var(--ink)]" title="Close (esc)">×</button>
+                  </div>
+                  <div class="max-h-72 overflow-y-auto py-1">
+                    <!-- Skills group -->
+                    <div class="mono px-3 py-1 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">skills · 4</div>
+                    <button class="flex w-full items-start gap-3 border-l-2 border-[var(--accent)] bg-[var(--bg-2)] px-3 py-1.5 text-left">
+                      <span class="mono text-[11px] text-[var(--accent)]">/</span>
+                      <div class="min-w-0 flex-1">
+                        <div class="mono flex items-center gap-2 text-[12px] text-[var(--ink)]">
+                          review
+                          <span class="pill teal">skill</span>
+                          <span class="mono text-[10px] text-[var(--ink-mute)]">built-in</span>
+                        </div>
+                        <div class="mt-0.5 text-[11.5px] text-[var(--ink-dim)]">Review a pull request against project guidelines.</div>
+                      </div>
+                      <span class="kbd flex-shrink-0">↵</span>
+                    </button>
+                    <button class="hover-bg flex w-full items-start gap-3 border-l-2 border-transparent px-3 py-1.5 text-left">
+                      <span class="mono text-[11px] text-[var(--ink-mute)]">/</span>
+                      <div class="min-w-0 flex-1">
+                        <div class="mono flex items-center gap-2 text-[12px] text-[var(--ink)]">
+                          security-review
+                          <span class="pill teal">skill</span>
+                        </div>
+                        <div class="mt-0.5 text-[11.5px] text-[var(--ink-dim)]">Run a security review on pending changes.</div>
+                      </div>
+                    </button>
+                    <button class="hover-bg flex w-full items-start gap-3 border-l-2 border-transparent px-3 py-1.5 text-left">
+                      <span class="mono text-[11px] text-[var(--ink-mute)]">/</span>
+                      <div class="min-w-0 flex-1">
+                        <div class="mono flex items-center gap-2 text-[12px] text-[var(--ink)]">
+                          simplify
+                          <span class="pill teal">skill</span>
+                        </div>
+                        <div class="mt-0.5 text-[11.5px] text-[var(--ink-dim)]">Simplify changed code for clarity and consistency.</div>
+                      </div>
+                    </button>
+                    <button class="hover-bg flex w-full items-start gap-3 border-l-2 border-transparent px-3 py-1.5 text-left">
+                      <span class="mono text-[11px] text-[var(--ink-mute)]">/</span>
+                      <div class="min-w-0 flex-1">
+                        <div class="mono flex items-center gap-2 text-[12px] text-[var(--ink)]">
+                          init
+                          <span class="pill teal">skill</span>
+                        </div>
+                        <div class="mt-0.5 text-[11.5px] text-[var(--ink-dim)]">Generate a CLAUDE.md for this codebase.</div>
+                      </div>
+                    </button>
+
+                    <!-- Slash commands group -->
+                    <div class="mono mt-1 px-3 py-1 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">slash commands · 5</div>
+                    <button class="hover-bg flex w-full items-start gap-3 border-l-2 border-transparent px-3 py-1.5 text-left">
+                      <span class="mono text-[11px] text-[var(--ink-mute)]">/</span>
+                      <div class="min-w-0 flex-1">
+                        <div class="mono flex items-center gap-2 text-[12px] text-[var(--ink)]">
+                          clear
+                          <span class="pill">cmd</span>
+                        </div>
+                        <div class="mt-0.5 text-[11.5px] text-[var(--ink-dim)]">Clear the current conversation.</div>
+                      </div>
+                    </button>
+                    <button class="hover-bg flex w-full items-start gap-3 border-l-2 border-transparent px-3 py-1.5 text-left">
+                      <span class="mono text-[11px] text-[var(--ink-mute)]">/</span>
+                      <div class="min-w-0 flex-1">
+                        <div class="mono flex items-center gap-2 text-[12px] text-[var(--ink)]">
+                          compact
+                          <span class="pill">cmd</span>
+                        </div>
+                        <div class="mt-0.5 text-[11.5px] text-[var(--ink-dim)]">Summarize and compact conversation history.</div>
+                      </div>
+                    </button>
+                    <button class="hover-bg flex w-full items-start gap-3 border-l-2 border-transparent px-3 py-1.5 text-left">
+                      <span class="mono text-[11px] text-[var(--ink-mute)]">/</span>
+                      <div class="min-w-0 flex-1">
+                        <div class="mono flex items-center gap-2 text-[12px] text-[var(--ink)]">
+                          model
+                          <span class="pill">cmd</span>
+                          <span class="mono text-[10px] text-[var(--ink-mute)]">&lt;name&gt;</span>
+                        </div>
+                        <div class="mt-0.5 text-[11.5px] text-[var(--ink-dim)]">Switch the active model for this conversation.</div>
+                      </div>
+                    </button>
+                    <button class="hover-bg flex w-full items-start gap-3 border-l-2 border-transparent px-3 py-1.5 text-left">
+                      <span class="mono text-[11px] text-[var(--ink-mute)]">/</span>
+                      <div class="min-w-0 flex-1">
+                        <div class="mono flex items-center gap-2 text-[12px] text-[var(--ink)]">
+                          loop
+                          <span class="pill">cmd</span>
+                          <span class="mono text-[10px] text-[var(--ink-mute)]">&lt;interval&gt; &lt;prompt&gt;</span>
+                        </div>
+                        <div class="mt-0.5 text-[11.5px] text-[var(--ink-dim)]">Run a prompt on a recurring interval.</div>
+                      </div>
+                    </button>
+                    <button class="hover-bg flex w-full items-start gap-3 border-l-2 border-transparent px-3 py-1.5 text-left">
+                      <span class="mono text-[11px] text-[var(--ink-mute)]">/</span>
+                      <div class="min-w-0 flex-1">
+                        <div class="mono flex items-center gap-2 text-[12px] text-[var(--ink)]">
+                          help
+                          <span class="pill">cmd</span>
+                        </div>
+                        <div class="mt-0.5 text-[11.5px] text-[var(--ink-dim)]">Show available commands and keyboard shortcuts.</div>
+                      </div>
+                    </button>
+
+                    <!-- Plugin commands group -->
+                    <div class="mono mt-1 px-3 py-1 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">from plugins · 3</div>
+                    <button class="hover-bg flex w-full items-start gap-3 border-l-2 border-transparent px-3 py-1.5 text-left">
+                      <span class="mono text-[11px] text-[var(--ink-mute)]">/</span>
+                      <div class="min-w-0 flex-1">
+                        <div class="mono flex items-center gap-2 text-[12px] text-[var(--ink)]">
+                          <span class="text-[var(--violet)]">code-review-pack:</span>kiss-check
+                          <span class="pill teal">skill</span>
+                        </div>
+                        <div class="mt-0.5 text-[11.5px] text-[var(--ink-dim)]">Detect KISS violations in the current diff.</div>
+                      </div>
+                    </button>
+                    <button class="hover-bg flex w-full items-start gap-3 border-l-2 border-transparent px-3 py-1.5 text-left">
+                      <span class="mono text-[11px] text-[var(--ink-mute)]">/</span>
+                      <div class="min-w-0 flex-1">
+                        <div class="mono flex items-center gap-2 text-[12px] text-[var(--ink)]">
+                          <span class="text-[var(--violet)]">jira-bridge:</span>triage
+                          <span class="pill teal">skill</span>
+                        </div>
+                        <div class="mt-0.5 text-[11.5px] text-[var(--ink-dim)]">Triage open Jira issues assigned to me.</div>
+                      </div>
+                    </button>
+                    <button class="hover-bg flex w-full items-start gap-3 border-l-2 border-transparent px-3 py-1.5 text-left">
+                      <span class="mono text-[11px] text-[var(--ink-mute)]">/</span>
+                      <div class="min-w-0 flex-1">
+                        <div class="mono flex items-center gap-2 text-[12px] text-[var(--ink)]">
+                          <span class="text-[var(--violet)]">linear-mcp:</span>sprint-report
+                          <span class="pill teal">skill</span>
+                          <span class="mono text-[10px] text-[var(--amber)]">disabled</span>
+                        </div>
+                        <div class="mt-0.5 text-[11.5px] text-[var(--ink-dim)]">Generate a sprint summary. Plugin is disabled — enable in Plugins.</div>
+                      </div>
+                    </button>
+                  </div>
+                  <div class="mono flex items-center gap-4 border-t border-[var(--line)] px-3 py-1.5 text-[10px] text-[var(--ink-mute)]">
+                    <span><span class="kbd">↑↓</span> navigate</span>
+                    <span><span class="kbd">↵</span> select</span>
+                    <span><span class="kbd">tab</span> complete</span>
+                    <span class="ml-auto"><span class="kbd">esc</span> close</span>
+                  </div>
+                </div>
+
                 <div class="rounded border border-[var(--line)] bg-[var(--bg-1)] focus-within:border-[var(--accent)]">
-                  <textarea rows="2" class="w-full resize-none border-0 bg-transparent px-3 py-2.5 text-[14px] leading-relaxed text-[var(--ink)] placeholder-[var(--ink-mute)] focus:outline-none" placeholder="message speedwave..."></textarea>
-                  <div class="mono flex items-center gap-3 border-t border-[var(--line)] px-3 py-1.5 text-[11px] text-[var(--ink-mute)]">
-                    <button class="hover:text-[var(--ink)]">@ mention</button>
-                    <button class="hover:text-[var(--ink)]">+ attach</button>
-                    <button class="hover:text-[var(--ink)]">/ skill</button>
-                    <span class="mx-1 text-[var(--line-strong)]">·</span>
-                    <span class="text-[var(--teal)]">opus-4.7</span>
-                    <span class="text-[var(--ink-mute)]">128k</span>
-                    <div class="ml-auto flex items-center gap-2">
-                      <span>⌘+↵</span>
+                  <textarea id="chat-textarea" rows="2" class="w-full resize-none border-0 bg-transparent px-3 py-2.5 text-[14px] leading-relaxed text-[var(--ink)] placeholder-[var(--ink-mute)] focus:outline-none" placeholder="message speedwave..."></textarea>
+                  <div class="mono flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--line)] px-3 py-1.5 text-[11px] text-[var(--ink-mute)]">
+                    <button class="hover:text-[var(--ink)]">@<span class="hidden sm:inline"> mention</span></button>
+                    <button class="hover:text-[var(--ink)]">+<span class="hidden sm:inline"> attach</span></button>
+                    <button onclick="toggleSlashMenu()" class="hover:text-[var(--ink)]">/<span class="hidden sm:inline"> skill</span></button>
+                    <span class="mx-1 hidden text-[var(--line-strong)] md:inline">·</span>
+                    <span class="hidden text-[var(--teal)] md:inline">opus-4.7</span>
+                    <span class="hidden text-[var(--ink-mute)] lg:inline">128k</span>
+                    <div class="ml-auto flex flex-shrink-0 items-center gap-2">
+                      <span class="hidden sm:inline">⌘+↵</span>
                       <button class="rounded bg-[var(--accent)] px-2.5 py-0.5 font-medium text-[var(--on-accent)] hover:opacity-90">send →</button>
                     </div>
                   </div>
                 </div>
                 <!-- Stats panel -->
-                <div class="mono flex items-center gap-3 px-1 py-3 text-[10px] text-[var(--ink-mute)]">
+                <div class="mono flex flex-wrap items-center gap-x-3 gap-y-1 px-1 py-3 text-[10px] text-[var(--ink-mute)]">
                   <span>in: <span class="text-[var(--teal)]">8,241</span></span>
                   <span>out: <span class="text-[var(--accent)]">1,243</span></span>
-                  <span>ctx: <span class="text-[var(--ink-dim)]">9,484 / 128k</span> · 7.4%</span>
+                  <span class="hidden sm:inline">ctx: <span class="text-[var(--ink-dim)]">9,484 / 128k</span> · 7.4%</span>
                   <span class="ml-auto flex items-center gap-1.5">
                     <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.75"><circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="8" r="2"/><path stroke-linecap="round" d="M6 8v8m0-8a6 6 0 0 0 6 6h4"/></svg>
                     <span class="text-[var(--ink-dim)]">main</span>
                     <span>↑2</span>
                   </span>
-                  <span>·</span>
-                  <span>session: $0.018</span>
+                  <span class="hidden sm:inline">·</span>
+                  <span class="hidden sm:inline">session: $0.018</span>
                 </div>
               </div>
             </div>
@@ -818,14 +1007,22 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
         </section>
 
         <!-- ====================== INTEGRATIONS VIEW ====================== -->
-        <section id="view-integrations" class="view flex-1 overflow-hidden">
-          <div class="flex flex-1 overflow-hidden">
-            <div class="flex-1 overflow-y-auto p-6">
-              <div class="mb-5 flex items-end justify-between">
-                <h1 class="text-[18px] text-[var(--ink)]">Service integrations</h1>
-                <div class="mono text-[11px] text-[var(--ink-mute)]">6 services · 2 running</div>
+        <section id="view-integrations" class="view flex-1 flex-col overflow-hidden">
+            <!-- Header -->
+            <div class="flex h-11 flex-shrink-0 items-center gap-3 border-b border-[var(--line)] bg-[var(--bg-1)] px-4 md:px-6">
+              <h1 class="view-title truncate text-[14px] text-[var(--ink)]">Service integrations</h1>
+              <div class="ml-auto flex flex-shrink-0 items-center gap-3">
+                <span class="mono hidden text-[11px] text-[var(--ink-mute)] md:inline">6 services · 2 running</span>
+                <span class="hidden text-[var(--line-strong)] md:inline">·</span>
+                <button onclick="toggleProjectSwitcher()" class="mono flex items-center gap-1.5 text-[11px] text-[var(--ink)] hover:text-[var(--accent)]" title="Switch project">
+                  <span class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-[var(--violet)] text-[8px] font-bold text-[#07090f]">sw</span>
+                  <span>speedwave</span>
+                </button>
               </div>
+            </div>
 
+            <div class="flex-1 overflow-y-auto p-4 md:p-6">
+              <div class="mx-auto max-w-3xl">
               <!-- table-like list -->
               <div class="overflow-hidden rounded border border-[var(--line)]">
                 <table class="w-full text-[13px]">
@@ -833,9 +1030,9 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                     <tr>
                       <th class="px-4 py-2 text-left font-normal">service</th>
                       <th class="px-4 py-2 text-left font-normal">status</th>
-                      <th class="px-4 py-2 text-left font-normal">ver</th>
-                      <th class="px-4 py-2 text-left font-normal">latency</th>
-                      <th class="px-4 py-2 text-left font-normal">mount</th>
+                      <th class="hidden px-4 py-2 text-left font-normal md:table-cell">ver</th>
+                      <th class="hidden px-4 py-2 text-left font-normal lg:table-cell">latency</th>
+                      <th class="hidden px-4 py-2 text-left font-normal lg:table-cell">mount</th>
                       <th class="px-4 py-2 text-right font-normal">on</th>
                     </tr>
                   </thead>
@@ -843,49 +1040,49 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                     <tr class="hover-bg">
                       <td class="px-4 py-2.5"><div class="flex items-center gap-2"><span class="text-[var(--accent)]">●</span><span class="text-[var(--ink)]">redmine</span></div></td>
                       <td class="px-4 py-2.5"><span class="pill green">running</span></td>
-                      <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">v2.1.4</td>
-                      <td class="mono px-4 py-2.5 text-[var(--ink-dim)]">142ms</td>
-                      <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">:ro</td>
+                      <td class="hidden md:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">v2.1.4</td>
+                      <td class="hidden lg:table-cell mono px-4 py-2.5 text-[var(--ink-dim)]">142ms</td>
+                      <td class="hidden lg:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">:ro</td>
                       <td class="px-4 py-2.5 text-right"><div class="toggle on ml-auto" onclick="this.classList.toggle('on')"></div></td>
                     </tr>
                     <tr class="hover-bg">
                       <td class="px-4 py-2.5"><div class="flex items-center gap-2"><span class="text-[var(--violet)]">●</span><span class="text-[var(--ink)]">slack</span></div></td>
                       <td class="px-4 py-2.5"><span class="pill green">running</span></td>
-                      <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">v1.8.0</td>
-                      <td class="mono px-4 py-2.5 text-[var(--ink-dim)]">89ms</td>
-                      <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">:ro</td>
+                      <td class="hidden md:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">v1.8.0</td>
+                      <td class="hidden lg:table-cell mono px-4 py-2.5 text-[var(--ink-dim)]">89ms</td>
+                      <td class="hidden lg:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">:ro</td>
                       <td class="px-4 py-2.5 text-right"><div class="toggle on ml-auto" onclick="this.classList.toggle('on')"></div></td>
                     </tr>
                     <tr class="hover-bg">
                       <td class="px-4 py-2.5"><div class="flex items-center gap-2"><span class="text-[var(--teal)]">●</span><span class="text-[var(--ink)]">sharepoint</span></div></td>
                       <td class="px-4 py-2.5"><span class="pill amber">starting</span></td>
-                      <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">v3.0.1</td>
-                      <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">—</td>
-                      <td class="mono px-4 py-2.5 text-[var(--accent)]">:rw</td>
+                      <td class="hidden md:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">v3.0.1</td>
+                      <td class="hidden lg:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">—</td>
+                      <td class="hidden lg:table-cell mono px-4 py-2.5 text-[var(--accent)]">:rw</td>
                       <td class="px-4 py-2.5 text-right"><div class="toggle on ml-auto" onclick="this.classList.toggle('on')"></div></td>
                     </tr>
                     <tr class="hover-bg">
                       <td class="px-4 py-2.5"><div class="flex items-center gap-2"><span class="text-[var(--amber)]">●</span><span class="text-[var(--ink)]">gitlab</span></div></td>
                       <td class="px-4 py-2.5"><span class="pill">disabled</span></td>
-                      <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">v2.0.0</td>
-                      <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">—</td>
-                      <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">:ro</td>
+                      <td class="hidden md:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">v2.0.0</td>
+                      <td class="hidden lg:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">—</td>
+                      <td class="hidden lg:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">:ro</td>
                       <td class="px-4 py-2.5 text-right"><div class="toggle ml-auto" onclick="this.classList.toggle('on')"></div></td>
                     </tr>
                     <tr class="hover-bg">
                       <td class="px-4 py-2.5"><div class="flex items-center gap-2"><span class="text-[var(--ink-mute)]">○</span><span class="text-[var(--ink-dim)]">mail</span></div></td>
                       <td class="px-4 py-2.5"><button class="pill accent hover:bg-[var(--accent-soft)]">configure →</button></td>
-                      <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">v1.4.2</td>
-                      <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">—</td>
-                      <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">—</td>
+                      <td class="hidden md:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">v1.4.2</td>
+                      <td class="hidden lg:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">—</td>
+                      <td class="hidden lg:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">—</td>
                       <td class="px-4 py-2.5 text-right"><div class="toggle ml-auto" onclick="this.classList.toggle('on')"></div></td>
                     </tr>
                     <tr class="hover-bg">
                       <td class="px-4 py-2.5"><div class="flex items-center gap-2"><span class="text-[var(--ink-mute)]">○</span><span class="text-[var(--ink-dim)]">calendar</span></div></td>
                       <td class="px-4 py-2.5"><button class="pill accent hover:bg-[var(--accent-soft)]">configure →</button></td>
-                      <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">v1.2.0</td>
-                      <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">—</td>
-                      <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">—</td>
+                      <td class="hidden md:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">v1.2.0</td>
+                      <td class="hidden lg:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">—</td>
+                      <td class="hidden lg:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">—</td>
                       <td class="px-4 py-2.5 text-right"><div class="toggle ml-auto" onclick="this.classList.toggle('on')"></div></td>
                     </tr>
                   </tbody>
@@ -893,8 +1090,8 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
               </div>
 
               <!-- Expanded Redmine config (inline) -->
-              <div class="mt-6 rounded border border-[var(--accent-dim)]">
-                <div class="flex items-center justify-between border-b border-[var(--line)] bg-[var(--bg-1)] px-4 py-2">
+              <div class="mt-6 overflow-hidden rounded ring-1 ring-[var(--accent-dim)]">
+                <div class="flex items-center justify-between bg-[var(--bg-1)] px-4 py-2">
                   <div class="mono flex items-center gap-2 text-[12px]">
                     <span class="text-[var(--accent)]">▼</span>
                     <span class="text-[var(--ink)]">redmine</span>
@@ -905,7 +1102,7 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                     <button class="mono rounded bg-[var(--accent)] px-2 py-0.5 text-[11px] font-medium text-[var(--on-accent)]">save</button>
                   </div>
                 </div>
-                <div class="grid grid-cols-2 gap-4 p-4">
+                <div class="grid grid-cols-1 gap-4 p-4 md:grid-cols-2">
                   <div>
                     <label class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">base_url</label>
                     <input class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1 text-[12px] text-[var(--ink)]" value="https://redmine.speednet.pl" />
@@ -957,27 +1154,36 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                   </div>
                 </div>
               </div>
+              </div>
             </div>
-          </div>
         </section>
 
         <!-- ====================== PLUGINS VIEW ====================== -->
-        <section id="view-plugins" class="view flex-1 overflow-y-auto p-6">
-          <div class="mx-auto max-w-5xl">
-            <div class="mb-5 flex items-end justify-between">
-              <h1 class="text-[18px] text-[var(--ink)]">Installed plugins</h1>
-              <button class="mono rounded border border-[var(--accent-dim)] bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-[var(--on-accent)] hover:opacity-90">$ install plugin</button>
+        <section id="view-plugins" class="view flex-1 flex-col overflow-hidden">
+          <!-- Header -->
+          <div class="flex h-11 flex-shrink-0 items-center gap-3 border-b border-[var(--line)] bg-[var(--bg-1)] px-4 md:px-6">
+            <h1 class="view-title truncate text-[14px] text-[var(--ink)]">Installed plugins</h1>
+            <div class="ml-auto flex flex-shrink-0 items-center gap-3">
+              <button class="mono hidden rounded border border-[var(--accent-dim)] bg-[var(--accent)] px-2.5 py-0.5 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 md:inline-flex">$ install plugin</button>
+              <span class="hidden text-[var(--line-strong)] md:inline">·</span>
+              <button onclick="toggleProjectSwitcher()" class="mono flex items-center gap-1.5 text-[11px] text-[var(--ink)] hover:text-[var(--accent)]" title="Switch project">
+                <span class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-[var(--violet)] text-[8px] font-bold text-[#07090f]">sw</span>
+                <span>speedwave</span>
+              </button>
             </div>
+          </div>
 
+          <div class="flex-1 overflow-y-auto p-4 md:p-6">
+            <div class="mx-auto max-w-3xl">
             <div class="overflow-hidden rounded border border-[var(--line)]">
               <table class="w-full text-[13px]">
                 <thead class="mono border-b border-[var(--line)] bg-[var(--bg-1)] text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
                   <tr>
                     <th class="px-4 py-2 text-left font-normal">plugin</th>
                     <th class="px-4 py-2 text-left font-normal">type</th>
-                    <th class="px-4 py-2 text-left font-normal">ver</th>
-                    <th class="px-4 py-2 text-left font-normal">tools</th>
-                    <th class="px-4 py-2 text-left font-normal">signed</th>
+                    <th class="hidden px-4 py-2 text-left font-normal md:table-cell">ver</th>
+                    <th class="hidden px-4 py-2 text-left font-normal md:table-cell">tools</th>
+                    <th class="hidden px-4 py-2 text-left font-normal lg:table-cell">signed</th>
                     <th class="px-4 py-2 text-right font-normal">on</th>
                   </tr>
                 </thead>
@@ -993,12 +1199,12 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                       </div>
                     </td>
                     <td class="px-4 py-2.5"><span class="pill teal">mcp</span></td>
-                    <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">v0.3.2</td>
-                    <td class="mono px-4 py-2.5 text-[var(--ink-dim)]">7</td>
-                    <td class="px-4 py-2.5"><span class="pill green">✓ ed25519</span></td>
+                    <td class="hidden md:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">v0.3.2</td>
+                    <td class="hidden md:table-cell mono px-4 py-2.5 text-[var(--ink-dim)]">7</td>
+                    <td class="hidden lg:table-cell px-4 py-2.5"><span class="pill green">✓ ed25519</span></td>
                     <td class="px-4 py-2.5 text-right"><div class="toggle on ml-auto" onclick="event.stopPropagation(); this.classList.toggle('on')"></div></td>
                   </tr>
-                  <tr class="hover-bg cursor-pointer">
+                  <tr class="hover-bg cursor-pointer" onclick="showView('plugin-detail')">
                     <td class="px-4 py-2.5">
                       <div class="flex items-center gap-2">
                         <span class="text-[var(--violet)]">●</span>
@@ -1009,12 +1215,12 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                       </div>
                     </td>
                     <td class="px-4 py-2.5"><span class="pill">resource</span></td>
-                    <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">v1.1.0</td>
-                    <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">—</td>
-                    <td class="px-4 py-2.5"><span class="pill green">✓ ed25519</span></td>
+                    <td class="hidden md:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">v1.1.0</td>
+                    <td class="hidden md:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">—</td>
+                    <td class="hidden lg:table-cell px-4 py-2.5"><span class="pill green">✓ ed25519</span></td>
                     <td class="px-4 py-2.5 text-right"><div class="toggle on ml-auto" onclick="event.stopPropagation(); this.classList.toggle('on')"></div></td>
                   </tr>
-                  <tr class="hover-bg cursor-pointer">
+                  <tr class="hover-bg cursor-pointer" onclick="showView('plugin-detail')">
                     <td class="px-4 py-2.5">
                       <div class="flex items-center gap-2">
                         <span class="text-[var(--teal)]">●</span>
@@ -1025,50 +1231,49 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                       </div>
                     </td>
                     <td class="px-4 py-2.5"><span class="pill teal">mcp</span></td>
-                    <td class="mono px-4 py-2.5 text-[var(--ink-mute)]">v0.5.0</td>
-                    <td class="mono px-4 py-2.5 text-[var(--ink-dim)]">4</td>
-                    <td class="px-4 py-2.5"><span class="pill green">✓ ed25519</span></td>
+                    <td class="hidden md:table-cell mono px-4 py-2.5 text-[var(--ink-mute)]">v0.5.0</td>
+                    <td class="hidden md:table-cell mono px-4 py-2.5 text-[var(--ink-dim)]">4</td>
+                    <td class="hidden lg:table-cell px-4 py-2.5"><span class="pill green">✓ ed25519</span></td>
                     <td class="px-4 py-2.5 text-right"><div class="toggle ml-auto" onclick="event.stopPropagation(); this.classList.toggle('on')"></div></td>
                   </tr>
                 </tbody>
               </table>
             </div>
+            </div>
           </div>
         </section>
 
         <!-- ====================== PLUGIN DETAIL VIEW ====================== -->
-        <section id="view-plugin-detail" class="view flex-1 overflow-y-auto p-6">
-          <div class="mx-auto max-w-4xl">
-            <button onclick="showView('plugins')" class="mono mb-4 text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]">← all plugins</button>
-
-            <div class="mb-5 flex items-end justify-between border-b border-[var(--line)] pb-4">
-              <div>
-                <div class="flex items-center gap-3">
-                  <div class="flex h-12 w-12 items-center justify-center rounded border border-[var(--line)] bg-[var(--bg-2)] text-xl font-bold text-[var(--accent)]">J</div>
-                  <div>
-                    <h1 class="text-[20px] text-[var(--ink)]">jira-bridge</h1>
-                    <div class="mono mt-0.5 flex items-center gap-2 text-[11px] text-[var(--ink-mute)]">
-                      <span>v0.3.2</span>
-                      <span>·</span>
-                      <span>by @speedwave-community</span>
-                      <span>·</span>
-                      <span class="pill green">✓ ed25519</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
+        <section id="view-plugin-detail" class="view flex-1 flex-col overflow-hidden">
+          <!-- Header -->
+          <div class="flex h-11 flex-shrink-0 items-center gap-3 border-b border-[var(--line)] bg-[var(--bg-1)] px-4 md:px-6">
+            <button onclick="showView('plugins')" class="mono flex-shrink-0 text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]" title="Back to plugins">←<span class="hidden md:inline"> all plugins</span></button>
+            <span class="hidden flex-shrink-0 text-[var(--line-strong)] md:inline">·</span>
+            <h1 class="view-title truncate text-[14px] text-[var(--ink)]">jira-bridge</h1>
+            <span class="mono hidden flex-shrink-0 text-[11px] text-[var(--ink-mute)] md:inline">v0.3.2</span>
+            <span class="hidden flex-shrink-0 text-[var(--line-strong)] md:inline">·</span>
+            <span class="pill green hidden flex-shrink-0 md:inline-flex">✓ ed25519</span>
+            <div class="ml-auto flex flex-shrink-0 items-center gap-3">
               <div class="toggle on" onclick="this.classList.toggle('on')"></div>
+              <span class="hidden text-[var(--line-strong)] md:inline">·</span>
+              <button onclick="toggleProjectSwitcher()" class="mono flex items-center gap-1.5 text-[11px] text-[var(--ink)] hover:text-[var(--accent)]" title="Switch project">
+                <span class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-[var(--violet)] text-[8px] font-bold text-[#07090f]">sw</span>
+                <span>speedwave</span>
+              </button>
             </div>
+          </div>
 
+          <div class="flex-1 overflow-y-auto p-4 md:p-6">
+            <div class="mx-auto max-w-3xl">
             <!-- tabs -->
-            <div class="mono mb-4 flex items-center gap-5 border-b border-[var(--line)] text-[12px]">
+            <div class="mono mb-4 flex items-center gap-4 overflow-x-auto whitespace-nowrap border-b border-[var(--line)] text-[12px] sm:gap-5">
               <button class="relative border-b-[2px] border-[var(--accent)] px-1 pb-2 text-[var(--ink)]">dashboard</button>
               <button class="border-b-[2px] border-transparent px-1 pb-2 text-[var(--ink-mute)] hover:text-[var(--ink)]">settings</button>
               <button class="border-b-[2px] border-transparent px-1 pb-2 text-[var(--ink-mute)] hover:text-[var(--ink)]">tools · 7</button>
               <button class="border-b-[2px] border-transparent px-1 pb-2 text-[var(--ink-mute)] hover:text-[var(--ink)]">logs</button>
             </div>
 
-            <div class="grid grid-cols-2 gap-4">
+            <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
               <div class="rounded border border-[var(--line)] bg-[var(--bg-1)] p-4">
                 <div class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">status</div>
                 <div class="mt-1 flex items-center gap-2 text-[15px] text-[var(--green)]">
@@ -1093,33 +1298,117 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                 <div class="mono flex items-center gap-3 px-4 py-2 text-[12px]"><span class="text-[var(--accent)]">fn</span><span class="text-[var(--teal)]">jira_add_comment</span><span class="ml-auto text-[var(--ink-mute)]">22 calls · 0 err</span></div>
               </div>
             </div>
+            </div>
           </div>
         </section>
 
         <!-- ====================== SETTINGS VIEW ====================== -->
-        <section id="view-settings" class="view flex-1 overflow-hidden">
-          <div class="flex flex-1 overflow-hidden">
-            <aside class="collapsible-sidebar w-52 border-r border-[var(--line)] bg-[var(--bg-1)] overflow-y-auto">
-              <button onclick="scrollToSection('appearance')" data-section-link="appearance" class="settings-link mono flex h-11 w-full items-center gap-2 border-b border-l-2 border-[var(--accent)] border-b-[var(--line)] bg-[var(--bg-2)] px-3.5 text-left text-[12px] text-[var(--ink)]">appearance</button>
-              <button onclick="scrollToSection('llm-provider')" data-section-link="llm-provider" class="settings-link mono hover-bg flex w-full items-center gap-2 border-l-2 border-transparent px-3.5 py-1.5 pt-2 text-left text-[12px] text-[var(--ink-dim)]">llm provider</button>
-              <button onclick="scrollToSection('authentication')" data-section-link="authentication" class="settings-link mono hover-bg flex w-full items-center gap-2 border-l-2 border-transparent px-3.5 py-1.5 text-left text-[12px] text-[var(--ink-dim)]">authentication</button>
-              <button onclick="scrollToSection('updates')" data-section-link="updates" class="settings-link mono hover-bg flex w-full items-center gap-2 border-l-2 border-transparent px-3.5 py-1.5 text-left text-[12px] text-[var(--ink-dim)]">updates</button>
-              <button onclick="scrollToSection('danger')" data-section-link="danger" class="settings-link mono hover-bg flex w-full items-center gap-2 border-l-2 border-transparent px-3.5 py-1.5 text-left text-[12px] text-red-400">danger zone</button>
+        <section id="view-settings" class="view flex-1 flex-col overflow-hidden">
+            <!-- Header -->
+            <div class="flex h-11 flex-shrink-0 items-center gap-3 border-b border-[var(--line)] bg-[var(--bg-1)] px-4 md:px-6">
+              <h1 class="view-title truncate text-[14px] text-[var(--ink)]">Settings</h1>
+              <div class="ml-auto flex flex-shrink-0 items-center gap-3">
+                <button onclick="showView('logs')" class="mono hidden text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)] md:inline">system health →</button>
+                <span class="hidden text-[var(--line-strong)] md:inline">·</span>
+                <button onclick="toggleProjectSwitcher()" class="mono flex items-center gap-1.5 text-[11px] text-[var(--ink)] hover:text-[var(--accent)]" title="Switch project">
+                  <span class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-[var(--violet)] text-[8px] font-bold text-[#07090f]">sw</span>
+                  <span>speedwave</span>
+                </button>
+              </div>
+            </div>
 
-              <div class="my-3 mx-4 h-px bg-[var(--line)]"></div>
+            <div class="flex-1 overflow-y-auto p-4 md:p-6">
+              <div class="mx-auto max-w-3xl space-y-8">
+                <!-- LLM Provider -->
+                <section id="section-llm-provider">
+                  <h2 class="view-title text-[16px] text-[var(--ink)]">LLM provider</h2>
+                  <p class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]">Where Claude Code routes model requests. Local providers keep everything on-device.</p>
 
-              <button onclick="showView('logs')" class="mono hover-bg flex w-full items-center gap-2 border-l-2 border-transparent px-3.5 py-1.5 text-left text-[12px] text-[var(--ink-dim)]">system health →</button>
-            </aside>
+                  <div class="mt-4 grid grid-cols-2 gap-2 lg:grid-cols-4">
+                    <button class="rounded border border-[var(--accent-dim)] bg-[var(--accent-soft)] px-3 py-2 text-left">
+                      <div class="mono text-[11px] font-medium text-[var(--accent)]">anthropic</div>
+                      <div class="mono mt-0.5 text-[10px] text-[var(--ink-mute)]">cloud · default</div>
+                    </button>
+                    <button class="rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2 text-left hover:border-[var(--line-strong)]">
+                      <div class="mono text-[11px] text-[var(--ink-dim)]">ollama</div>
+                      <div class="mono mt-0.5 text-[10px] text-[var(--ink-mute)]">local</div>
+                    </button>
+                    <button class="rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2 text-left hover:border-[var(--line-strong)]">
+                      <div class="mono text-[11px] text-[var(--ink-dim)]">lm studio</div>
+                      <div class="mono mt-0.5 text-[10px] text-[var(--ink-mute)]">local</div>
+                    </button>
+                    <button class="rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2 text-left hover:border-[var(--line-strong)]">
+                      <div class="mono text-[11px] text-[var(--ink-dim)]">llama.cpp</div>
+                      <div class="mono mt-0.5 text-[10px] text-[var(--ink-mute)]">local</div>
+                    </button>
+                  </div>
 
-            <div class="flex-1 overflow-y-auto p-6">
-              <div class="mx-auto max-w-2xl space-y-6">
+                  <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+                    <div>
+                      <label class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">base_url</label>
+                      <input class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]" value="https://api.anthropic.com" />
+                    </div>
+                    <div>
+                      <label class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">default_model</label>
+                      <select class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]">
+                        <option>claude-opus-4-7</option>
+                        <option>claude-sonnet-4-6</option>
+                        <option>claude-haiku-4-5</option>
+                      </select>
+                    </div>
+                  </div>
+                  <button class="mono mt-3 text-[11px] text-[var(--accent)] hover:underline">↻ discover models</button>
+                </section>
+
+                <!-- Authentication -->
+                <section id="section-authentication" class="border-t border-[var(--line)] pt-6">
+                  <h2 class="view-title text-[16px] text-[var(--ink)]">Authentication</h2>
+                  <div class="mt-3 flex rounded border border-[var(--line)] overflow-hidden">
+                    <button class="mono flex-1 border-r border-[var(--line)] bg-[var(--bg-2)] px-3 py-2 text-[11px] text-[var(--ink)]">api key</button>
+                    <button class="mono flex-1 px-3 py-2 text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]">oauth (claude.ai)</button>
+                  </div>
+                  <div class="mt-3">
+                    <label class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">anthropic_api_key</label>
+                    <input type="password" class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]" value="sk-ant-api03-••••••••••••" />
+                    <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]">stored in keychain · never logged</p>
+                  </div>
+                </section>
+
+                <!-- Updates -->
+                <section id="section-updates" class="border-t border-[var(--line)] pt-6">
+                  <h2 class="view-title text-[16px] text-[var(--ink)]">Updates</h2>
+                  <div class="mt-3 rounded border border-[var(--line)]">
+                    <div class="flex items-center justify-between border-b border-[var(--line)] px-4 py-3">
+                      <div>
+                        <div class="mono text-[12px] text-[var(--ink)]">speedwave v2.0.0</div>
+                        <div class="mono mt-0.5 text-[11px] text-[var(--green)]">✓ up to date · checked 2m ago</div>
+                      </div>
+                      <button class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]">check now</button>
+                    </div>
+                    <div class="flex items-center justify-between px-4 py-3">
+                      <div>
+                        <div class="mono text-[12px] text-[var(--ink-dim)]">containers</div>
+                        <div class="mono mt-0.5 text-[11px] text-[var(--amber)]">⚠ 2 updates available</div>
+                      </div>
+                      <div class="flex gap-2">
+                        <button class="mono rounded border border-[var(--line)] px-3 py-1 text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]">rollback</button>
+                        <button class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90">update</button>
+                      </div>
+                    </div>
+                  </div>
+                  <label class="mono mt-3 flex cursor-pointer items-center gap-2 text-[12px] text-[var(--ink-dim)]">
+                    <div class="toggle on" onclick="this.classList.toggle('on')"></div>
+                    <span>auto-check every 24h</span>
+                  </label>
+                </section>
+
                 <!-- Appearance -->
-                <section id="section-appearance">
-                  <h1 class="text-[18px] text-[var(--ink)]">Appearance</h1>
+                <section id="section-appearance" class="border-t border-[var(--line)] pt-6">
+                  <h2 class="view-title text-[16px] text-[var(--ink)]">Appearance</h2>
                   <p class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]">Choose an accent color for buttons, links and syntax highlighting. Backgrounds stay dark across all themes.</p>
 
-                  <div class="mono mt-4 mb-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">accent color</div>
-                  <div class="grid grid-cols-3 gap-2">
+                  <div class="mono mb-2 mt-4 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">accent color</div>
+                  <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
                     <button onclick="setTheme('crimson')" data-theme-btn="crimson" class="theme-card flex items-center gap-3 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2 text-left hover:border-[var(--line-strong)]">
                       <span class="inline-flex gap-0.5 rounded border border-[var(--line)] p-0.5"><span style="width:12px;height:18px;background:#07090f"></span><span style="width:12px;height:18px;background:#ff4d6d"></span></span>
                       <span class="mono text-[12px] text-[var(--ink)]">crimson</span>
@@ -1154,92 +1443,9 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                   <p class="mono mt-3 text-[10px] text-[var(--ink-mute)]">shortcut: <span class="kbd">⌘T</span> cycles themes</p>
                 </section>
 
-                <!-- LLM Provider -->
-                <section id="section-llm-provider" class="border-t border-[var(--line)] pt-6">
-                  <h2 class="text-[16px] text-[var(--ink)]">LLM provider</h2>
-                  <p class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]">Where Claude Code routes model requests. Local providers keep everything on-device.</p>
-
-                  <div class="mt-4 grid grid-cols-4 gap-2">
-                    <button class="rounded border border-[var(--accent-dim)] bg-[var(--accent-soft)] px-3 py-2 text-left">
-                      <div class="mono text-[11px] font-medium text-[var(--accent)]">anthropic</div>
-                      <div class="mono mt-0.5 text-[10px] text-[var(--ink-mute)]">cloud · default</div>
-                    </button>
-                    <button class="rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2 text-left hover:border-[var(--line-strong)]">
-                      <div class="mono text-[11px] text-[var(--ink-dim)]">ollama</div>
-                      <div class="mono mt-0.5 text-[10px] text-[var(--ink-mute)]">local</div>
-                    </button>
-                    <button class="rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2 text-left hover:border-[var(--line-strong)]">
-                      <div class="mono text-[11px] text-[var(--ink-dim)]">lm studio</div>
-                      <div class="mono mt-0.5 text-[10px] text-[var(--ink-mute)]">local</div>
-                    </button>
-                    <button class="rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2 text-left hover:border-[var(--line-strong)]">
-                      <div class="mono text-[11px] text-[var(--ink-dim)]">llama.cpp</div>
-                      <div class="mono mt-0.5 text-[10px] text-[var(--ink-mute)]">local</div>
-                    </button>
-                  </div>
-
-                  <div class="mt-4 grid grid-cols-2 gap-3">
-                    <div>
-                      <label class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">base_url</label>
-                      <input class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]" value="https://api.anthropic.com" />
-                    </div>
-                    <div>
-                      <label class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">default_model</label>
-                      <select class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]">
-                        <option>claude-opus-4-7</option>
-                        <option>claude-sonnet-4-6</option>
-                        <option>claude-haiku-4-5</option>
-                      </select>
-                    </div>
-                  </div>
-                  <button class="mono mt-3 text-[11px] text-[var(--accent)] hover:underline">↻ discover models</button>
-                </section>
-
-                <!-- Authentication -->
-                <section id="section-authentication" class="border-t border-[var(--line)] pt-6">
-                  <h2 class="text-[16px] text-[var(--ink)]">Authentication</h2>
-                  <div class="mt-3 flex rounded border border-[var(--line)] overflow-hidden">
-                    <button class="mono flex-1 border-r border-[var(--line)] bg-[var(--bg-2)] px-3 py-2 text-[11px] text-[var(--ink)]">api key</button>
-                    <button class="mono flex-1 px-3 py-2 text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]">oauth (claude.ai)</button>
-                  </div>
-                  <div class="mt-3">
-                    <label class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">anthropic_api_key</label>
-                    <input type="password" class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]" value="sk-ant-api03-••••••••••••" />
-                    <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]">stored in keychain · never logged</p>
-                  </div>
-                </section>
-
-                <!-- Updates -->
-                <section id="section-updates" class="border-t border-[var(--line)] pt-6">
-                  <h2 class="text-[16px] text-[var(--ink)]">Updates</h2>
-                  <div class="mt-3 rounded border border-[var(--line)]">
-                    <div class="flex items-center justify-between border-b border-[var(--line)] px-4 py-3">
-                      <div>
-                        <div class="mono text-[12px] text-[var(--ink)]">speedwave v2.0.0</div>
-                        <div class="mono mt-0.5 text-[11px] text-[var(--green)]">✓ up to date · checked 2m ago</div>
-                      </div>
-                      <button class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]">check now</button>
-                    </div>
-                    <div class="flex items-center justify-between px-4 py-3">
-                      <div>
-                        <div class="mono text-[12px] text-[var(--ink-dim)]">containers</div>
-                        <div class="mono mt-0.5 text-[11px] text-[var(--amber)]">⚠ 2 updates available</div>
-                      </div>
-                      <div class="flex gap-2">
-                        <button class="mono rounded border border-[var(--line)] px-3 py-1 text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]">rollback</button>
-                        <button class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90">update</button>
-                      </div>
-                    </div>
-                  </div>
-                  <label class="mono mt-3 flex cursor-pointer items-center gap-2 text-[12px] text-[var(--ink-dim)]">
-                    <div class="toggle on" onclick="this.classList.toggle('on')"></div>
-                    <span>auto-check every 24h</span>
-                  </label>
-                </section>
-
                 <!-- Danger zone -->
                 <section id="section-danger" class="border-t border-red-500/20 pt-6">
-                  <h2 class="text-[16px] text-red-300">Danger zone</h2>
+                  <h2 class="view-title text-[16px] text-red-300">Danger zone</h2>
                   <div class="mt-3 rounded border border-red-500/30 bg-red-500/5 p-4">
                     <div class="mono text-[12px] text-red-200">factory reset</div>
                     <div class="mt-1 text-[12px] leading-relaxed text-[var(--ink-dim)]">Removes all tokens, conversations, plugins and configs. Containers will be rebuilt on next start.</div>
@@ -1248,22 +1454,26 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                 </section>
               </div>
             </div>
-          </div>
         </section>
 
         <!-- ====================== LOGS / HEALTH VIEW ====================== -->
-        <section id="view-logs" class="view flex-1 overflow-hidden">
-          <div class="flex flex-1 flex-col overflow-hidden">
-            <!-- Top: health grid -->
-            <div class="border-b border-[var(--line)] bg-[var(--bg-1)] px-6 py-4">
-              <div class="flex items-end justify-between">
-                <h1 class="text-[18px] text-[var(--ink)]">System health</h1>
-                <div class="flex items-center gap-3">
-                  <span class="mono text-[11px] text-[var(--ink-mute)]">auto-refresh 5s</span>
-                  <button class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]">↻ refresh</button>
-                </div>
+        <section id="view-logs" class="view flex-1 flex-col overflow-hidden">
+            <!-- Header -->
+            <div class="flex h-11 flex-shrink-0 items-center gap-3 border-b border-[var(--line)] bg-[var(--bg-1)] px-4 md:px-6">
+              <h1 class="view-title truncate text-[14px] text-[var(--ink)]">System health</h1>
+              <div class="ml-auto flex flex-shrink-0 items-center gap-3">
+                <span class="mono hidden text-[11px] text-[var(--ink-mute)] md:inline">auto-refresh 5s</span>
+                <span class="hidden text-[var(--line-strong)] md:inline">·</span>
+                <button onclick="toggleProjectSwitcher()" class="mono flex items-center gap-1.5 text-[11px] text-[var(--ink)] hover:text-[var(--accent)]" title="Switch project">
+                  <span class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-[var(--violet)] text-[8px] font-bold text-[#07090f]">sw</span>
+                  <span>speedwave</span>
+                </button>
               </div>
-              <div class="mt-4 grid grid-cols-4 gap-3">
+            </div>
+
+            <!-- Top: health grid -->
+            <div class="border-b border-[var(--line)] bg-[var(--bg-1)] px-4 py-4 md:px-6">
+              <div class="mx-auto grid max-w-3xl grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <div class="rounded border border-[var(--line)] bg-[var(--bg-2)] p-3">
                   <div class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">overall</div>
                   <div class="mt-1 flex items-center gap-2 text-[14px] text-[var(--green)]"><span class="dot bg-[var(--green)]"></span> healthy</div>
@@ -1288,47 +1498,39 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
             </div>
 
             <!-- Log filters -->
-            <div class="flex items-center gap-3 border-b border-[var(--line)] bg-[var(--bg-1)] px-6 py-2">
-              <div class="mono flex rounded border border-[var(--line)] overflow-hidden text-[11px]">
-                <button class="bg-[var(--bg-2)] px-2.5 py-1 text-[var(--ink)]">all · 1,284</button>
-                <button class="px-2.5 py-1 text-[var(--ink-mute)] hover:text-[var(--ink)]">info · 1,102</button>
-                <button class="px-2.5 py-1 text-[var(--amber)] hover:bg-[var(--bg-2)]">warn · 42</button>
-                <button class="px-2.5 py-1 text-red-400 hover:bg-[var(--bg-2)]">error · 3</button>
+            <div class="border-b border-[var(--line)] bg-[var(--bg-1)] px-4 py-2 md:px-6">
+              <div class="mx-auto flex max-w-3xl items-center gap-2">
+                <div class="mono flex overflow-hidden rounded border border-[var(--line)] text-[11px]">
+                  <button class="bg-[var(--bg-2)] px-2.5 py-1 text-[var(--ink)]">hub</button>
+                  <button class="px-2.5 py-1 text-[var(--ink-mute)] hover:text-[var(--ink)]">redmine</button>
+                  <button class="px-2.5 py-1 text-[var(--ink-mute)] hover:text-[var(--ink)]">slack</button>
+                  <button class="px-2.5 py-1 text-[var(--ink-mute)] hover:text-[var(--ink)]">sharepoint</button>
+                  <button class="px-2.5 py-1 text-[var(--ink-mute)] hover:text-[var(--ink)]">lima</button>
+                </div>
+                <button class="mono ml-auto flex-shrink-0 rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]" title="Refresh">↻<span class="hidden sm:inline"> refresh</span></button>
+                <button class="mono flex-shrink-0 rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]">export diagnostics</button>
               </div>
-              <div class="mono flex rounded border border-[var(--line)] overflow-hidden text-[11px]">
-                <button class="bg-[var(--bg-2)] px-2.5 py-1 text-[var(--ink)]">hub</button>
-                <button class="px-2.5 py-1 text-[var(--ink-mute)] hover:text-[var(--ink)]">redmine</button>
-                <button class="px-2.5 py-1 text-[var(--ink-mute)] hover:text-[var(--ink)]">slack</button>
-                <button class="px-2.5 py-1 text-[var(--ink-mute)] hover:text-[var(--ink)]">sharepoint</button>
-                <button class="px-2.5 py-1 text-[var(--ink-mute)] hover:text-[var(--ink)]">lima</button>
-              </div>
-              <div class="relative ml-auto flex items-center gap-2 rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1">
-                <span class="mono text-[11px] text-[var(--ink-mute)]">/</span>
-                <input class="mono w-48 bg-transparent text-[11px] text-[var(--ink)] focus:outline-none" placeholder="filter logs..." />
-              </div>
-              <button class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)]">export diagnostics</button>
             </div>
 
             <!-- Logs -->
-            <div class="flex-1 overflow-y-auto bg-[var(--bg)] font-mono text-[12px]">
-              <div class="divide-y divide-[var(--line)]/50">
-                <div class="flex gap-3 px-6 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:34:02.814</span><span class="text-[var(--teal)] w-16 flex-shrink-0">hub</span><span class="text-[var(--ink-mute)] w-14 flex-shrink-0">INFO</span><span class="text-[var(--ink-dim)]">Dispatched tool call <span class="text-[var(--teal)]">redmine_create_issue</span> → worker:4001 (142ms)</span></div>
-                <div class="flex gap-3 px-6 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:34:01.672</span><span class="text-[var(--teal)] w-16 flex-shrink-0">redmine</span><span class="text-[var(--ink-mute)] w-14 flex-shrink-0">INFO</span><span class="text-[var(--ink-dim)]">POST /projects/speedwave/issues → <span class="text-[var(--green)]">201</span></span></div>
-                <div class="flex gap-3 px-6 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:58.440</span><span class="text-[var(--amber)] w-16 flex-shrink-0">sharepoint</span><span class="text-[var(--amber)] w-14 flex-shrink-0">WARN</span><span class="text-[var(--ink-dim)]">OAuth token expires in <span class="text-[var(--amber)]">4m</span>, refreshing...</span></div>
-                <div class="flex gap-3 px-6 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:57.182</span><span class="text-[var(--teal)] w-16 flex-shrink-0">hub</span><span class="text-[var(--ink-mute)] w-14 flex-shrink-0">INFO</span><span class="text-[var(--ink-dim)]">Registered worker <span class="text-[var(--teal)]">slack</span> at :4002 (6 tools)</span></div>
-                <div class="flex gap-3 px-6 py-1 bg-red-500/5 hover:bg-red-500/10"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:42.018</span><span class="text-red-400 w-16 flex-shrink-0">slack</span><span class="text-red-400 w-14 flex-shrink-0">ERROR</span><span class="text-red-300">rate_limited: channels.history (retry after 2.4s)</span></div>
-                <div class="flex gap-3 px-6 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:40.001</span><span class="text-[var(--teal)] w-16 flex-shrink-0">lima</span><span class="text-[var(--ink-mute)] w-14 flex-shrink-0">INFO</span><span class="text-[var(--ink-dim)]">VM started successfully (boot: 2.1s)</span></div>
-                <div class="flex gap-3 px-6 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:39.884</span><span class="text-[var(--teal)] w-16 flex-shrink-0">hub</span><span class="text-[var(--ink-mute)] w-14 flex-shrink-0">INFO</span><span class="text-[var(--ink-dim)]">Bootstrap: discovering ENABLED_SERVICES=[redmine,slack,sharepoint]</span></div>
-                <div class="flex gap-3 px-6 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:38.112</span><span class="text-[var(--teal)] w-16 flex-shrink-0">hub</span><span class="text-[var(--ink-mute)] w-14 flex-shrink-0">INFO</span><span class="text-[var(--ink-dim)]">MCP Hub listening on :4000 (zero-tokens mode)</span></div>
-                <div class="flex gap-3 px-6 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:35.502</span><span class="text-[var(--teal)] w-16 flex-shrink-0">claude</span><span class="text-[var(--ink-mute)] w-14 flex-shrink-0">INFO</span><span class="text-[var(--ink-dim)]">Claude Code v2.0.1 installed inside container (cap_drop: ALL)</span></div>
-                <div class="flex gap-3 px-6 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:30.000</span><span class="text-[var(--teal)] w-16 flex-shrink-0">runtime</span><span class="text-[var(--ink-mute)] w-14 flex-shrink-0">INFO</span><span class="text-[var(--ink-dim)]">render_compose(project=speedwave) → containers/compose.generated.yml</span></div>
-                <div class="flex gap-3 px-6 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:29.811</span><span class="text-[var(--teal)] w-16 flex-shrink-0">tauri</span><span class="text-[var(--ink-mute)] w-14 flex-shrink-0">INFO</span><span class="text-[var(--ink-dim)]">Main window created (Angular build: hash a4c7f9e)</span></div>
-              </div>
-              <div class="p-6 text-center">
-                <span class="mono text-[11px] text-[var(--ink-mute)]">▼ streaming · <span class="text-[var(--accent)]">live</span><span class="caret ml-1"></span></span>
+            <div class="flex-1 overflow-y-auto bg-[var(--bg)] p-4 text-[12px] md:p-6">
+              <div class="mono mx-auto max-w-3xl">
+                <div class="flex gap-3 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:34:02.814</span><span class="text-[var(--teal)] hidden w-16 flex-shrink-0 md:inline-block">hub</span><span class="text-[var(--ink-mute)] w-12 flex-shrink-0 md:w-14">INFO</span><span class="min-w-0 break-words text-[var(--ink-dim)]">Dispatched tool call <span class="text-[var(--teal)]">redmine_create_issue</span> → worker:4001 (142ms)</span></div>
+                <div class="flex gap-3 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:34:01.672</span><span class="text-[var(--teal)] hidden w-16 flex-shrink-0 md:inline-block">redmine</span><span class="text-[var(--ink-mute)] w-12 flex-shrink-0 md:w-14">INFO</span><span class="min-w-0 break-words text-[var(--ink-dim)]">POST /projects/speedwave/issues → <span class="text-[var(--green)]">201</span></span></div>
+                <div class="flex gap-3 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:58.440</span><span class="text-[var(--amber)] hidden w-16 flex-shrink-0 md:inline-block">sharepoint</span><span class="text-[var(--amber)] w-12 flex-shrink-0 md:w-14">WARN</span><span class="min-w-0 break-words text-[var(--ink-dim)]">OAuth token expires in <span class="text-[var(--amber)]">4m</span>, refreshing...</span></div>
+                <div class="flex gap-3 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:57.182</span><span class="text-[var(--teal)] hidden w-16 flex-shrink-0 md:inline-block">hub</span><span class="text-[var(--ink-mute)] w-12 flex-shrink-0 md:w-14">INFO</span><span class="min-w-0 break-words text-[var(--ink-dim)]">Registered worker <span class="text-[var(--teal)]">slack</span> at :4002 (6 tools)</span></div>
+                <div class="flex gap-3 py-1 bg-red-500/5 hover:bg-red-500/10"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:42.018</span><span class="text-red-400 hidden w-16 flex-shrink-0 md:inline-block">slack</span><span class="text-red-400 w-12 flex-shrink-0 md:w-14">ERROR</span><span class="min-w-0 break-words text-red-300">rate_limited: channels.history (retry after 2.4s)</span></div>
+                <div class="flex gap-3 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:40.001</span><span class="text-[var(--teal)] hidden w-16 flex-shrink-0 md:inline-block">lima</span><span class="text-[var(--ink-mute)] w-12 flex-shrink-0 md:w-14">INFO</span><span class="min-w-0 break-words text-[var(--ink-dim)]">VM started successfully (boot: 2.1s)</span></div>
+                <div class="flex gap-3 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:39.884</span><span class="text-[var(--teal)] hidden w-16 flex-shrink-0 md:inline-block">hub</span><span class="text-[var(--ink-mute)] w-12 flex-shrink-0 md:w-14">INFO</span><span class="min-w-0 break-words text-[var(--ink-dim)]">Bootstrap: discovering ENABLED_SERVICES=[redmine,slack,sharepoint]</span></div>
+                <div class="flex gap-3 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:38.112</span><span class="text-[var(--teal)] hidden w-16 flex-shrink-0 md:inline-block">hub</span><span class="text-[var(--ink-mute)] w-12 flex-shrink-0 md:w-14">INFO</span><span class="min-w-0 break-words text-[var(--ink-dim)]">MCP Hub listening on :4000 (zero-tokens mode)</span></div>
+                <div class="flex gap-3 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:35.502</span><span class="text-[var(--teal)] hidden w-16 flex-shrink-0 md:inline-block">claude</span><span class="text-[var(--ink-mute)] w-12 flex-shrink-0 md:w-14">INFO</span><span class="min-w-0 break-words text-[var(--ink-dim)]">Claude Code v2.0.1 installed inside container (cap_drop: ALL)</span></div>
+                <div class="flex gap-3 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:30.000</span><span class="text-[var(--teal)] hidden w-16 flex-shrink-0 md:inline-block">runtime</span><span class="text-[var(--ink-mute)] w-12 flex-shrink-0 md:w-14">INFO</span><span class="min-w-0 break-words text-[var(--ink-dim)]">render_compose(project=speedwave) → containers/compose.generated.yml</span></div>
+                <div class="flex gap-3 py-1 hover:bg-[var(--bg-1)]"><span class="text-[var(--ink-mute)] w-24 flex-shrink-0">14:33:29.811</span><span class="text-[var(--teal)] hidden w-16 flex-shrink-0 md:inline-block">tauri</span><span class="text-[var(--ink-mute)] w-12 flex-shrink-0 md:w-14">INFO</span><span class="min-w-0 break-words text-[var(--ink-dim)]">Main window created (Angular build: hash a4c7f9e)</span></div>
+                <div class="py-6 text-center">
+                  <span class="text-[11px] text-[var(--ink-mute)]">▼ streaming · <span class="text-[var(--accent)]">live</span><span class="caret ml-1"></span></span>
+                </div>
               </div>
             </div>
-          </div>
         </section>
 
         <!-- ====================== SETUP WIZARD ====================== -->
@@ -1345,7 +1547,7 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
           <div class="mb-6 flex items-center gap-3">
             <img src="assets/speedwave-mark-white@2x.png" alt="Speedwave" class="h-9 w-9" />
             <div>
-              <div class="text-[22px] text-[var(--ink)]">Welcome to Speedwave.<span class="caret ml-1"></span></div>
+              <div class="view-title text-[22px] text-[var(--ink)]">Welcome to Speedwave.<span class="caret ml-1"></span></div>
               <div class="mono mt-1 text-[12px] text-[var(--ink-dim)]">first-run setup · ~2 minutes</div>
             </div>
           </div>
@@ -1394,7 +1596,7 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
             </div>
           </div>
 
-          <div class="mono mt-4 flex items-center justify-between text-[11px] text-[var(--ink-mute)]">
+          <div class="mono mt-4 flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--ink-mute)]">
             <span>step 3 of 5 · ~60s remaining</span>
             <div class="flex gap-4">
               <button class="hover:text-[var(--ink)]">view logs →</button>
@@ -1406,7 +1608,7 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
     </div>
 
     <!-- PROJECT SWITCHER (dropdown overlay) -->
-    <div id="project-switcher" class="fixed right-4 top-14 z-[1001] hidden w-72 rounded border border-[var(--line-strong)] bg-[var(--bg-1)] shadow-2xl">
+    <div id="project-switcher" class="fixed right-2 top-12 z-[1001] hidden w-[calc(100vw-1rem)] max-w-xs rounded border border-[var(--line-strong)] bg-[var(--bg-1)] shadow-2xl sm:right-4 sm:top-14 sm:w-72">
       <div class="border-b border-[var(--line)] p-2">
         <div class="flex items-center gap-2 rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1">
           <span class="mono text-[11px] text-[var(--ink-mute)]">&gt;</span>
@@ -1527,9 +1729,9 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
 
     <!-- OVERLAY: Restart required -->
     <div id="overlay-restart" class="overlay-backdrop" onclick="if(event.target===this) closeOverlay('restart')">
-      <div class="w-96 rounded border border-[var(--line-strong)] bg-[var(--bg-1)] p-5">
+      <div class="w-[min(24rem,calc(100vw-2rem))] rounded border border-[var(--line-strong)] bg-[var(--bg-1)] p-5">
         <div class="mono text-[11px] uppercase tracking-widest text-[var(--amber)]">⚠ restart required</div>
-        <h3 class="mt-1 text-[16px] text-[var(--ink)]">Container config changed</h3>
+        <h3 class="view-title mt-1 text-[16px] text-[var(--ink)]">Container config changed</h3>
         <p class="mt-2 text-[13px] leading-relaxed text-[var(--ink-dim)]">Enabling/disabling services needs a container restart. Running conversations will pause briefly.</p>
         <div class="mono mt-3 rounded border border-[var(--line)] bg-[var(--bg)] p-2 text-[11px] text-[var(--ink-mute)]">estimated: ~8s · lima keeps running</div>
         <div class="mt-4 flex justify-end gap-2">
@@ -1541,9 +1743,9 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
 
     <!-- OVERLAY: Update available -->
     <div id="overlay-update" class="overlay-backdrop" onclick="if(event.target===this) closeOverlay('update')">
-      <div class="w-96 rounded border border-[var(--line-strong)] bg-[var(--bg-1)] p-5">
+      <div class="w-[min(24rem,calc(100vw-2rem))] rounded border border-[var(--line-strong)] bg-[var(--bg-1)] p-5">
         <div class="mono text-[11px] uppercase tracking-widest text-[var(--green)]">↑ update available</div>
-        <h3 class="mt-1 text-[16px] text-[var(--ink)]">Speedwave v2.1.0</h3>
+        <h3 class="view-title mt-1 text-[16px] text-[var(--ink)]">Speedwave v2.1.0</h3>
         <p class="mt-2 text-[13px] leading-relaxed text-[var(--ink-dim)]">New: Linear MCP bundled · fixed Windows WSL2 network detection · 12 bug fixes.</p>
         <div class="mono mt-3 space-y-1 rounded border border-[var(--line)] bg-[var(--bg)] p-2 text-[11px] text-[var(--ink-mute)]">
           <div>current: <span class="text-[var(--ink-dim)]">v2.0.0</span></div>
@@ -1558,9 +1760,9 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
 
     <!-- OVERLAY: Error -->
     <div id="overlay-error" class="overlay-backdrop" onclick="if(event.target===this) closeOverlay('error')">
-      <div class="w-[480px] rounded border border-red-500/30 bg-[var(--bg-1)] p-5">
+      <div class="w-[min(480px,calc(100vw-2rem))] rounded border border-red-500/30 bg-[var(--bg-1)] p-5">
         <div class="mono text-[11px] uppercase tracking-widest text-red-400">✕ system check failed</div>
-        <h3 class="mt-1 text-[16px] text-[var(--ink)]">Cannot start Lima VM</h3>
+        <h3 class="view-title mt-1 text-[16px] text-[var(--ink)]">Cannot start Lima VM</h3>
         <p class="mt-2 text-[13px] leading-relaxed text-[var(--ink-dim)]">Virtualization.framework is not available. This usually means another hypervisor (VMware, Parallels) is holding the HV_VMM entitlement.</p>
         <div class="mono mt-3 overflow-hidden rounded border border-red-500/20 bg-red-500/5">
           <div class="border-b border-red-500/20 px-3 py-1 text-[10px] uppercase tracking-widest text-red-400">stderr</div>
@@ -1576,15 +1778,15 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
     </div>
 
     <script>
-      // Adjust body for bottom status bar
-      document.body.style.paddingBottom = '24px';
-
       function showView(name) {
         document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
         const el = document.getElementById('view-' + name);
         if (el) el.classList.add('active');
         document.querySelectorAll('.rail-btn[data-nav]').forEach((n) => n.classList.remove('active'));
         document.querySelectorAll('.rail-btn[data-nav="' + name + '"]').forEach((n) => n.classList.add('active'));
+        document.body.classList.remove('sidebar-drawer-open', 'memory-open');
+        const mem = document.getElementById('memory-panel');
+        if (mem) mem.classList.add('hidden');
       }
       function togglePalette() {
         const p = document.getElementById('palette');
@@ -1597,23 +1799,61 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
         document.getElementById('project-switcher').classList.toggle('hidden');
       }
       function toggleMemory() {
-        document.getElementById('memory-panel').classList.toggle('hidden');
+        const panel = document.getElementById('memory-panel');
+        panel.classList.toggle('hidden');
+        document.body.classList.toggle('memory-open', !panel.classList.contains('hidden'));
       }
       function toggleSidebar() {
-        document.body.classList.toggle('sidebar-collapsed');
+        document.body.classList.toggle('sidebar-drawer-open');
       }
-      function scrollToSection(name) {
-        const el = document.getElementById('section-' + name);
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        document.querySelectorAll('[data-section-link]').forEach((b) => {
-          const active = b.dataset.sectionLink === name;
-          b.classList.toggle('border-[var(--accent)]', active);
-          b.classList.toggle('border-transparent', !active);
-          b.classList.toggle('bg-[var(--bg-2)]', active);
-          b.classList.toggle('text-[var(--ink)]', active);
-          b.classList.toggle('text-[var(--ink-dim)]', !active && b.dataset.sectionLink !== 'danger');
-        });
+      function openSlashMenu(query) {
+        const el = document.getElementById('slash-menu');
+        if (!el) return;
+        el.classList.remove('hidden');
+        const q = document.getElementById('slash-query');
+        if (q && typeof query === 'string') q.value = query;
       }
+      function closeSlashMenu() {
+        const el = document.getElementById('slash-menu');
+        if (!el) return;
+        el.classList.add('hidden');
+      }
+      function toggleSlashMenu() {
+        const el = document.getElementById('slash-menu');
+        if (!el) return;
+        if (el.classList.contains('hidden')) {
+          openSlashMenu('');
+          setTimeout(() => {
+            const q = document.getElementById('slash-query');
+            if (q) q.focus();
+          }, 10);
+        } else {
+          closeSlashMenu();
+        }
+      }
+      // Open slash menu automatically when user types / in the composer
+      // (as the first character of the line or after whitespace).
+      document.addEventListener('input', (e) => {
+        const ta = e.target;
+        if (!ta || ta.id !== 'chat-textarea') return;
+        const pos = ta.selectionStart;
+        const value = ta.value.slice(0, pos);
+        const match = value.match(/(?:^|\s)\/([\w:-]*)$/);
+        if (match) {
+          openSlashMenu(match[1]);
+        } else {
+          closeSlashMenu();
+        }
+      });
+      document.addEventListener('click', (e) => {
+        if (document.body.classList.contains('sidebar-drawer-open')) {
+          const sidebar = document.querySelector('.collapsible-sidebar');
+          const trigger = e.target.closest('[data-sidebar-trigger]');
+          if (sidebar && !sidebar.contains(e.target) && !trigger) {
+            document.body.classList.remove('sidebar-drawer-open');
+          }
+        }
+      });
       function showSetup() {
         const el = document.getElementById('setup-overlay');
         el.classList.remove('hidden');
@@ -1666,6 +1906,8 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
           document.getElementById('palette').classList.remove('open');
           document.querySelectorAll('.overlay-backdrop').forEach((o) => o.classList.remove('open'));
           document.getElementById('project-switcher').classList.add('hidden');
+          const slash = document.getElementById('slash-menu');
+          if (slash) slash.classList.add('hidden');
         } else if ((e.metaKey || e.ctrlKey) && e.key === '1') { e.preventDefault(); showView('chat'); }
         else if ((e.metaKey || e.ctrlKey) && e.key === '2') { e.preventDefault(); showView('integrations'); }
         else if ((e.metaKey || e.ctrlKey) && e.key === '3') { e.preventDefault(); showView('plugins'); }
