@@ -87,13 +87,32 @@ describe('ChatMessageComponent', () => {
     expect(el.textContent).toContain('Thinking');
   });
 
-  it('applies user styling for user role', () => {
+  it('dispatches to app-user-message when role is user', () => {
     component.blocks = [{ type: 'text', content: 'hi' }];
     component.role = 'user';
     fixture.detectChanges();
 
     const msg = fixture.nativeElement.querySelector('[data-testid="chat-message"]');
     expect(msg?.getAttribute('data-role')).toBe('user');
+    const userMsg = fixture.nativeElement.querySelector('app-user-message');
+    expect(userMsg).not.toBeNull();
+    expect(fixture.nativeElement.textContent).toContain('hi');
+    // No assistant-style bubble on user messages.
+    expect(fixture.nativeElement.querySelector('.bg-sw-bg-dark')).toBeNull();
+  });
+
+  it('forwards editedAt and timestamp to app-user-message', () => {
+    component.blocks = [{ type: 'text', content: 'hi' }];
+    component.role = 'user';
+    component.editedAt = 1_700_000_000_000;
+    const ts = new Date(2026, 3, 25, 9, 30, 0, 0).getTime();
+    component.timestamp = ts;
+    fixture.detectChanges();
+
+    const edited = fixture.nativeElement.querySelector('[data-testid="user-message-edited"]');
+    expect(edited).not.toBeNull();
+    const time = fixture.nativeElement.querySelector('[data-testid="user-message-time"]');
+    expect(time?.textContent?.trim()).toBe('09:30');
   });
 
   it('host right-aligns user messages via justify-end', () => {

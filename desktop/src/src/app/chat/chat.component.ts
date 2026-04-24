@@ -18,7 +18,8 @@ import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import type { ChatMessage, ConversationSummary, ConversationTranscript } from '../models/chat';
-import { ChatMessageComponent } from './message/chat-message.component';
+import { ChatHeaderComponent } from './header/chat-header.component';
+import { ChatMessageListComponent } from './message-list/chat-message-list.component';
 import { SessionStatsComponent } from './session-stats/session-stats.component';
 import { TextBlockComponent } from './blocks/text-block.component';
 import { MemoryPanelComponent } from './memory-panel/memory-panel.component';
@@ -31,7 +32,8 @@ import { ConversationsSidebarComponent } from './conversations-sidebar/conversat
   imports: [
     CommonModule,
     FormsModule,
-    ChatMessageComponent,
+    ChatHeaderComponent,
+    ChatMessageListComponent,
     SessionStatsComponent,
     TextBlockComponent,
     MemoryPanelComponent,

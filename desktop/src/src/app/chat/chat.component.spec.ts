@@ -61,6 +61,32 @@ describe('ChatComponent', () => {
     chatState.isStreaming = false;
   });
 
+  // ── Composition — shell sub-components ─────────────────────────────────────
+
+  describe('shell composition', () => {
+    it('renders app-chat-header and app-chat-message-list once project is ready', async () => {
+      projectState.activeProject = 'test';
+      projectState.status = 'ready';
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('app-chat-header')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('app-chat-message-list')).toBeTruthy();
+    });
+
+    it('does not render the message list while a transcript is being viewed', async () => {
+      projectState.activeProject = 'test';
+      projectState.status = 'ready';
+      await component.ngOnInit();
+      component.viewingTranscript = { session_id: 's1', messages: [] };
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('app-chat-message-list')).toBeNull();
+      // Chat header stays visible while viewing a transcript.
+      expect(fixture.nativeElement.querySelector('app-chat-header')).toBeTruthy();
+    });
+  });
+
   // ── handleStreamChunk: 'Text' ──────────────────────────────────────────────
 
   describe('handleStreamChunk Text', () => {
