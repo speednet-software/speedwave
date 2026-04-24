@@ -533,6 +533,49 @@
                     </div>
                   </div>
 
+                  <!-- Assistant — with markdown table (GFM) -->
+                  <div>
+                    <div class="mono mb-1 flex items-center gap-2 text-[11px]">
+                      <span class="text-[var(--accent)]">speedwave</span>
+                      <span class="text-[var(--ink-mute)]">· 2:34 PM</span>
+                    </div>
+                    <div class="text-[14px] leading-[1.7] text-[var(--ink)]">
+                      <p class="mb-2">Here is the per-platform isolation stack:</p>
+                      <div class="overflow-hidden rounded ring-1 ring-[var(--line)]">
+                        <table class="mono w-full border-collapse text-[12.5px]">
+                          <thead>
+                            <tr class="bg-[var(--bg-1)] text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
+                              <th class="px-3 py-2 text-left font-medium">platform</th>
+                              <th class="px-3 py-2 text-left font-medium">vm layer</th>
+                              <th class="px-3 py-2 text-left font-medium">container runtime</th>
+                              <th class="px-3 py-2 text-left font-medium">uid</th>
+                            </tr>
+                          </thead>
+                          <tbody class="divide-y divide-[var(--line)]">
+                            <tr>
+                              <td class="px-3 py-2 text-[var(--ink)]">macOS</td>
+                              <td class="px-3 py-2 text-[var(--ink-dim)]">Lima (virtualization.framework)</td>
+                              <td class="px-3 py-2 text-[var(--teal)]">nerdctl</td>
+                              <td class="px-3 py-2 text-[var(--ink-dim)]">1000</td>
+                            </tr>
+                            <tr>
+                              <td class="px-3 py-2 text-[var(--ink)]">Windows</td>
+                              <td class="px-3 py-2 text-[var(--ink-dim)]">WSL2</td>
+                              <td class="px-3 py-2 text-[var(--teal)]">nerdctl</td>
+                              <td class="px-3 py-2 text-[var(--ink-dim)]">1000</td>
+                            </tr>
+                            <tr>
+                              <td class="px-3 py-2 text-[var(--ink)]">Linux</td>
+                              <td class="px-3 py-2 text-[var(--ink-dim)]">rootless namespace</td>
+                              <td class="px-3 py-2 text-[var(--teal)]">nerdctl</td>
+                              <td class="px-3 py-2 text-[var(--ink-dim)]">0 (userns)</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+
                   <!-- Assistant — streaming (partial, with cursor) -->
                   <div>
                     <div class="mono mb-1 flex items-center gap-2 text-[11px]">
@@ -594,13 +637,58 @@
                     <div class="mono flex items-center gap-2 text-[11px]">
                       <span class="text-[var(--green)]">✓ Edit</span>
                       <span class="text-[var(--teal)]">compose.template.yml</span>
-                      <span class="text-[var(--ink-mute)]">· 2 lines</span>
+                      <span class="text-[var(--ink-mute)]">· 2 changes</span>
                       <span class="ml-auto text-[var(--ink-mute)]">88ms</span>
                     </div>
-                    <pre class="mono mt-2 overflow-x-auto rounded border border-[var(--line)] bg-[var(--bg-1)] p-3 text-[11.5px] leading-[1.6]"><span class="text-red-400">- read_only: false</span>
-<span class="text-[var(--green)]">+ read_only: true</span>
-<span class="text-red-400">- cap_drop: []</span>
-<span class="text-[var(--green)]">+ cap_drop: [ALL]</span></pre>
+                    <div class="mono mt-2 overflow-x-auto overflow-hidden rounded ring-1 ring-[var(--line)] bg-[var(--bg-1)] py-1.5 text-[11.5px] leading-[1.5] [&amp;>div]:whitespace-pre">
+                      <div class="px-3 text-[var(--ink-dim)]" data-testid="diff-ctx">  services:</div>
+                      <div class="px-3 text-[var(--ink-dim)]" data-testid="diff-ctx">    claude:</div>
+                      <div class="bg-red-500/15 px-3 text-red-300" data-testid="diff-remove">- <span class="text-red-200/60">      read_only: false</span></div>
+                      <div class="bg-[var(--green)]/15 px-3 text-[var(--green)]" data-testid="diff-add">+       read_only: true</div>
+                      <div class="bg-red-500/15 px-3 text-red-300" data-testid="diff-remove">-       cap_drop: []</div>
+                      <div class="bg-[var(--green)]/15 px-3 text-[var(--green)]" data-testid="diff-add">+       cap_drop: [ALL]</div>
+                      <div class="px-3 text-[var(--ink-dim)]" data-testid="diff-ctx">      security_opt:</div>
+                    </div>
+                  </div>
+
+                  <!-- Tool · success (Write) — new file, all additions -->
+                  <div class="border-l-2 border-[var(--green)]/50 pl-4">
+                    <div class="mono flex items-center gap-2 text-[11px]">
+                      <span class="text-[var(--green)]">✓ Write</span>
+                      <span class="text-[var(--teal)]">crates/speedwave-runtime/src/plugin.rs</span>
+                      <span class="text-[var(--ink-mute)]">· new file · 6 lines</span>
+                      <span class="ml-auto text-[var(--ink-mute)]">14ms</span>
+                    </div>
+                    <div class="mono mt-2 overflow-x-auto overflow-hidden rounded ring-1 ring-[var(--line)] bg-[var(--bg-1)] py-1.5 text-[11.5px] leading-[1.5] [&amp;>div]:whitespace-pre">
+                      <div class="bg-[var(--green)]/15 px-3 text-[var(--green)]" data-testid="diff-add">+ use serde::Deserialize;</div>
+                      <div class="bg-[var(--green)]/15 px-3 text-[var(--green)]" data-testid="diff-add">+</div>
+                      <div class="bg-[var(--green)]/15 px-3 text-[var(--green)]" data-testid="diff-add">+ #[derive(Debug, Deserialize)]</div>
+                      <div class="bg-[var(--green)]/15 px-3 text-[var(--green)]" data-testid="diff-add">+ pub struct PluginManifest {</div>
+                      <div class="bg-[var(--green)]/15 px-3 text-[var(--green)]" data-testid="diff-add">+     pub slug: String,</div>
+                      <div class="bg-[var(--green)]/15 px-3 text-[var(--green)]" data-testid="diff-add">+     pub version: String,</div>
+                      <div class="bg-[var(--green)]/15 px-3 text-[var(--green)]" data-testid="diff-add">+ }</div>
+                    </div>
+                  </div>
+
+                  <!-- Tool · success (Edit) — large diff, truncated -->
+                  <div class="border-l-2 border-[var(--green)]/50 pl-4">
+                    <div class="mono flex items-center gap-2 text-[11px]">
+                      <span class="text-[var(--green)]">✓ Edit</span>
+                      <span class="text-[var(--teal)]">crates/speedwave-runtime/src/compose.rs</span>
+                      <span class="text-[var(--ink-mute)]">· 247 changes</span>
+                      <span class="ml-auto text-[var(--ink-mute)]">142ms</span>
+                    </div>
+                    <div class="mono mt-2 overflow-x-auto overflow-hidden rounded ring-1 ring-[var(--line)] bg-[var(--bg-1)] py-1.5 text-[11.5px] leading-[1.5] [&amp;>div]:whitespace-pre">
+                      <div class="bg-red-500/15 px-3 text-red-300" data-testid="diff-remove">- fn apply_plugins(cfg: &amp;Config) -&gt; Result&lt;Vec&lt;Service&gt;&gt; {</div>
+                      <div class="bg-[var(--green)]/15 px-3 text-[var(--green)]" data-testid="diff-add">+ fn apply_plugins(cfg: &amp;Config, project: &amp;Project) -&gt; Result&lt;Vec&lt;Service&gt;&gt; {</div>
+                      <div class="px-3 text-[var(--ink-dim)]" data-testid="diff-ctx">      let mut services = Vec::new();</div>
+                      <div class="bg-red-500/15 px-3 text-red-300" data-testid="diff-remove">-     for plugin in cfg.plugins.iter() {</div>
+                      <div class="bg-[var(--green)]/15 px-3 text-[var(--green)]" data-testid="diff-add">+     for plugin in cfg.enabled_plugins() {</div>
+                      <div class="border-t border-[var(--line)] bg-[var(--bg-2)] px-3 py-1 text-center text-[var(--ink-mute)]">··· 239 lines omitted ···</div>
+                      <div class="px-3 text-[var(--ink-dim)]" data-testid="diff-ctx">      Ok(services)</div>
+                      <div class="px-3 text-[var(--ink-dim)]" data-testid="diff-ctx">  }</div>
+                    </div>
+                    <button class="mono mt-1 text-[11px] text-[var(--accent)] hover:underline">expand full diff →</button>
                   </div>
 
                   <!-- Tool · success (Bash) — with output -->
@@ -651,6 +739,57 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                       <span class="text-[var(--ink-mute)]">⊘ WebFetch</span>
                       <span class="text-[var(--ink-dim)]">https://docs.lima-vm.io/...</span>
                       <span class="ml-auto text-[var(--ink-mute)]">interrupted · 3.1s</span>
+                    </div>
+                  </div>
+
+                  <!-- Tool · success (Glob) -->
+                  <div class="border-l-2 border-[var(--green)]/50 pl-4">
+                    <div class="mono flex items-center gap-2 text-[11px]">
+                      <span class="text-[var(--green)]">✓ Glob</span>
+                      <span class="text-[var(--ink-mute)]">pattern:</span>
+                      <span class="text-[var(--teal)]">crates/**/*.rs</span>
+                      <span class="ml-auto text-[var(--ink-mute)]">47 matches · 38ms</span>
+                    </div>
+                  </div>
+
+                  <!-- Tool · success (Grep) -->
+                  <div class="border-l-2 border-[var(--green)]/50 pl-4">
+                    <div class="mono flex items-center gap-2 text-[11px]">
+                      <span class="text-[var(--green)]">✓ Grep</span>
+                      <span class="text-[var(--ink-mute)]">pattern:</span>
+                      <span class="text-[var(--teal)]">cap_drop</span>
+                      <span class="text-[var(--ink-mute)]">· in *.yml</span>
+                      <span class="ml-auto text-[var(--ink-mute)]">3 hits · 92ms</span>
+                    </div>
+                  </div>
+
+                  <!-- Tool · success (WebSearch) -->
+                  <div class="border-l-2 border-[var(--green)]/50 pl-4">
+                    <div class="mono flex items-center gap-2 text-[11px]">
+                      <span class="text-[var(--green)]">✓ WebSearch</span>
+                      <span class="text-[var(--ink-mute)]">query:</span>
+                      <span class="text-[var(--teal)]">"Lima VM macOS isolation"</span>
+                      <span class="ml-auto text-[var(--ink-mute)]">8 results · 1.4s</span>
+                    </div>
+                  </div>
+
+                  <!-- Tool · success (WebFetch) -->
+                  <div class="border-l-2 border-[var(--green)]/50 pl-4">
+                    <div class="mono flex items-center gap-2 text-[11px]">
+                      <span class="text-[var(--green)]">✓ WebFetch</span>
+                      <span class="text-[var(--ink-mute)]">url:</span>
+                      <span class="text-[var(--teal)]">https://lima-vm.io/docs/</span>
+                      <span class="ml-auto text-[var(--ink-mute)]">12.4kb · 820ms</span>
+                    </div>
+                  </div>
+
+                  <!-- Tool · running (Agent / subagent) -->
+                  <div class="border-l-2 border-[var(--amber)]/50 pl-4">
+                    <div class="mono flex items-center gap-2 text-[11px]">
+                      <svg class="spin h-3 w-3 text-[var(--amber)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 0 0 4.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 0 1-15.357-2m15.357 2H15"/></svg>
+                      <span class="text-[var(--amber)]">Agent</span>
+                      <span class="text-[var(--ink-dim)]">explore compose.rs for token-mount logic</span>
+                      <span class="ml-auto text-[var(--ink-mute)]">running · 4s</span>
                     </div>
                   </div>
 
@@ -750,6 +889,18 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                   <div class="mono border-l-2 border-[var(--amber)]/50 pl-4 text-[12.5px] text-[var(--amber)]">
                     <span class="font-medium">no active project</span> · select or add a project first
                     <button class="ml-2 text-[var(--accent)] hover:underline">switch project →</button>
+                  </div>
+
+                  <!-- Error · session starting (containers restarting) -->
+                  <div class="mono border-l-2 border-[var(--amber)]/50 pl-4 text-[12.5px] text-[var(--amber)]">
+                    <span class="font-medium">session starting</span> · containers may be restarting — please try again in a moment
+                    <button class="ml-2 text-[var(--accent)] hover:underline">retry →</button>
+                  </div>
+
+                  <!-- Error · auth required -->
+                  <div class="mono border-l-2 border-[var(--amber)]/50 pl-4 text-[12.5px] text-[var(--amber)]">
+                    <span class="font-medium">auth required</span> · sign in to Anthropic or configure an API key
+                    <button class="ml-2 text-[var(--accent)] hover:underline">open settings →</button>
                   </div>
 
 
@@ -992,7 +1143,30 @@ c6f4e8d7        speedwave/slack    Up 4 minutes</pre>
                 <div class="mono flex flex-wrap items-center gap-x-3 gap-y-1 px-1 py-3 text-[10px] text-[var(--ink-mute)]">
                   <span>in: <span class="text-[var(--teal)]">8,241</span></span>
                   <span>out: <span class="text-[var(--accent)]">1,243</span></span>
-                  <span class="hidden sm:inline">ctx: <span class="text-[var(--ink-dim)]">9,484 / 128k</span> · 7.4%</span>
+                  <span class="hidden items-center gap-1.5 sm:inline-flex">
+                    ctx
+                    <span class="flex gap-px" aria-hidden="true">
+                      <span class="h-1.5 w-1.5 bg-[var(--green)]"></span>
+                      <span class="h-1.5 w-1.5 bg-[var(--green)]"></span>
+                      <span class="h-1.5 w-1.5 bg-[var(--green)]"></span>
+                      <span class="h-1.5 w-1.5 bg-[var(--line-strong)]"></span>
+                      <span class="h-1.5 w-1.5 bg-[var(--line-strong)]"></span>
+                    </span>
+                    <span class="text-[var(--ink-dim)]">58%</span>
+                    <span>· 116k/200k</span>
+                  </span>
+                  <span class="hidden items-center gap-1.5 md:inline-flex">
+                    limit
+                    <span class="flex gap-px" aria-hidden="true">
+                      <span class="h-1.5 w-1.5 bg-[var(--amber)]"></span>
+                      <span class="h-1.5 w-1.5 bg-[var(--amber)]"></span>
+                      <span class="h-1.5 w-1.5 bg-[var(--amber)]"></span>
+                      <span class="h-1.5 w-1.5 bg-[var(--amber)]"></span>
+                      <span class="h-1.5 w-1.5 bg-[var(--line-strong)]"></span>
+                    </span>
+                    <span class="text-[var(--ink-dim)]">74%</span>
+                    <span>· resets 14:42</span>
+                  </span>
                   <span class="ml-auto flex items-center gap-1.5">
                     <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.75"><circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="8" r="2"/><path stroke-linecap="round" d="M6 8v8m0-8a6 6 0 0 0 6 6h4"/></svg>
                     <span class="text-[var(--ink-dim)]">main</span>
