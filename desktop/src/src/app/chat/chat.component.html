@@ -1,51 +1,14 @@
 @if (projectState.status === 'ready') {
-  <div class="flex flex-row h-full bg-sw-bg-darkest">
-    @if (showHistory) {
-      <aside
-        class="w-[280px] min-w-[280px] bg-sw-bg-darker border-r border-sw-border flex flex-col overflow-hidden"
-      >
-        <button
-          class="m-3 px-4 py-2.5 border border-sw-border rounded-md bg-sw-bg-dark text-sw-text text-sm font-semibold cursor-pointer transition-colors hover:bg-sw-bg-navy"
-          data-testid="chat-new-conversation"
-          (click)="newConversation()"
-        >
-          + New Conversation
-        </button>
-        @if (historyError) {
-          <div
-            class="px-3 py-2 mx-3 my-2 bg-sw-error-bg border border-sw-error rounded text-sw-error text-xs"
-            data-testid="chat-history-error"
-          >
-            {{ historyError }}
-          </div>
-        }
-        @if (historyLoading) {
-          <div class="p-4 text-sw-text-muted text-[13px] text-center">Loading...</div>
-        } @else {
-          <div class="flex-1 overflow-y-auto px-2 pb-2">
-            @for (conv of conversations; track conv.session_id) {
-              <div
-                class="px-3 py-2.5 rounded-md cursor-pointer transition-colors mb-0.5 hover:bg-sw-bg-dark"
-                [class.bg-sw-bg-navy]="viewingTranscript?.session_id === conv.session_id"
-                (click)="viewConversation(conv.session_id)"
-              >
-                <div
-                  class="text-sw-text text-[13px] leading-[1.4] whitespace-nowrap overflow-hidden text-ellipsis"
-                >
-                  {{ conv.preview }}
-                </div>
-                <div class="flex justify-between mt-1 text-[11px] text-sw-text-muted">
-                  <span>{{ conv.timestamp }}</span>
-                  <span>{{ conv.message_count }} msgs</span>
-                </div>
-              </div>
-            } @empty {
-              <div class="p-4 text-sw-text-muted text-[13px] text-center">No conversations yet</div>
-            }
-          </div>
-        }
-      </aside>
-    }
+  <div class="flex flex-row h-full bg-sw-bg-darkest relative">
+    <app-conversations-sidebar
+      [open]="ui.sidebarOpen()"
+      [conversations]="conversations"
+      [currentSessionId]="currentViewSessionId"
+      (closed)="ui.closeSidebar()"
+      (newConversation)="newConversation()"
+      (viewConversation)="viewConversation($event.session_id)"
+      (resumeConversation)="resumeConversation($event.session_id)"
+    ></app-conversations-sidebar>
 
     <div class="flex flex-col flex-1 min-w-0 relative">
       <div class="flex gap-1 px-3 py-1.5 bg-sw-bg-dark border-b border-sw-border">
@@ -69,6 +32,14 @@
         </button>
       </div>
 
+      @if (historyError) {
+        <div
+          class="px-3 py-2 mx-3 my-2 bg-sw-error-bg border border-sw-error rounded text-sw-error text-xs"
+          data-testid="chat-history-error"
+        >
+          {{ historyError }}
+        </div>
+      }
       @if (viewError) {
         <div
           class="px-3 py-2 mx-3 my-2 bg-sw-error-bg border border-sw-error rounded text-sw-error text-xs"
@@ -170,27 +141,11 @@
         </div>
       }
 
-      @if (showMemory) {
-        <div
-          class="absolute top-[40px] right-0 bottom-0 w-[320px] bg-sw-bg-darker border-l border-sw-border flex flex-col z-10"
-        >
-          <div
-            class="flex justify-between items-center px-4 py-3 border-b border-sw-border text-sw-text font-semibold text-sm"
-          >
-            <span>Project Memory</span>
-            <button
-              class="bg-transparent border-none text-sw-text-muted text-sm cursor-pointer px-1.5 py-0.5 hover:text-sw-text"
-              data-testid="chat-memory-close"
-              (click)="toggleMemory()"
-            >
-              X
-            </button>
-          </div>
-          <div class="flex-1 overflow-y-auto p-4 text-sw-text text-[13px] leading-relaxed">
-            <app-text-block [content]="projectMemory" />
-          </div>
-        </div>
-      }
+      <app-memory-panel
+        [open]="ui.memoryOpen()"
+        [markdown]="projectMemory"
+        (closed)="ui.closeMemory()"
+      ></app-memory-panel>
     </div>
   </div>
 }

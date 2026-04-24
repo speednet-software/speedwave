@@ -15,10 +15,13 @@ import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { UiStateService } from '../services/ui-state.service';
 import type { ChatMessage, ConversationSummary, ConversationTranscript } from '../models/chat';
 import { ChatMessageComponent } from './message/chat-message.component';
 import { SessionStatsComponent } from './session-stats/session-stats.component';
 import { TextBlockComponent } from './blocks/text-block.component';
+import { MemoryPanelComponent } from './memory-panel/memory-panel.component';
+import { ConversationsSidebarComponent } from './conversations-sidebar/conversations-sidebar.component';
 
 /** Chat component that handles message rendering, user input, and streaming responses from Claude. */
 @Component({
@@ -30,6 +33,8 @@ import { TextBlockComponent } from './blocks/text-block.component';
     ChatMessageComponent,
     SessionStatsComponent,
     TextBlockComponent,
+    MemoryPanelComponent,
+    ConversationsSidebarComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './chat.component.html',
@@ -40,23 +45,51 @@ export class ChatComponent implements OnInit, OnDestroy {
   inputText = '';
 
   conversations: ConversationSummary[] = [];
-  showHistory = false;
   viewingTranscript: ConversationTranscript | null = null;
   historyLoading = false;
   historyError = '';
   projectMemory = '';
-  showMemory = false;
   viewError = '';
   private resumeInProgress = false;
 
   readonly chat = inject(ChatStateService);
   readonly projectState = inject(ProjectStateService);
+  readonly ui = inject(UiStateService);
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private router = inject(Router);
   private unsubChange: (() => void) | null = null;
   private unsubProjectReady: (() => void) | null = null;
   private unsubAuthWatch: (() => void) | null = null;
+
+  /** True if the conversations sidebar is open. Backed by UiStateService. */
+  get showHistory(): boolean {
+    return this.ui.sidebarOpen();
+  }
+  /**
+   * Sets the conversations-sidebar visibility by toggling the shared UI state signal.
+   * @param value - True to open the sidebar, false to close it.
+   */
+  set showHistory(value: boolean) {
+    if (value !== this.ui.sidebarOpen()) this.ui.toggleSidebar();
+  }
+
+  /** True if the memory panel is open. Backed by UiStateService. */
+  get showMemory(): boolean {
+    return this.ui.memoryOpen();
+  }
+  /**
+   * Sets the memory-panel visibility by toggling the shared UI state signal.
+   * @param value - True to open the panel, false to close it.
+   */
+  set showMemory(value: boolean) {
+    if (value !== this.ui.memoryOpen()) this.ui.toggleMemory();
+  }
+
+  /** Session id currently being viewed in the transcript overlay, or null. */
+  get currentViewSessionId(): string | null {
+    return this.viewingTranscript?.session_id ?? null;
+  }
 
   /** Subscribes to state changes from the service. */
   constructor() {
@@ -150,8 +183,8 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** Toggles the history sidebar and loads conversations when opening. */
   async toggleHistory(): Promise<void> {
-    this.showHistory = !this.showHistory;
-    if (this.showHistory) {
+    this.ui.toggleSidebar();
+    if (this.ui.sidebarOpen()) {
       await this.loadConversations();
     }
     this.cdr.markForCheck();
@@ -222,7 +255,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     // the backend resumes the session (which may take seconds).
     this.chat.loadMessages(messages);
     this.viewingTranscript = null;
-    this.showHistory = false;
+    this.ui.closeSidebar();
     this.cdr.markForCheck();
 
     try {
@@ -261,8 +294,8 @@ export class ChatComponent implements OnInit, OnDestroy {
   async newConversation(): Promise<void> {
     this.inputText = '';
     this.viewingTranscript = null;
-    this.showHistory = false;
-    this.showMemory = false;
+    this.ui.closeSidebar();
+    this.ui.closeMemory();
     this.chat.resetForNewConversation();
     this.cdr.markForCheck();
     await this.chat.init();
@@ -276,8 +309,8 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** Toggles the project memory panel and loads memory on open. */
   async toggleMemory(): Promise<void> {
-    this.showMemory = !this.showMemory;
-    if (this.showMemory) {
+    this.ui.toggleMemory();
+    if (this.ui.memoryOpen()) {
       await this.loadProjectMemory();
     }
     this.cdr.markForCheck();

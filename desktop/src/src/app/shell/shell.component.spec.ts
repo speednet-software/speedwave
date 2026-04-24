@@ -4,6 +4,7 @@ import { Router, RouterModule } from '@angular/router';
 import { ShellComponent } from './shell.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { UiStateService } from '../services/ui-state.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 
 describe('ShellComponent', () => {
@@ -40,6 +41,10 @@ describe('ShellComponent', () => {
     fixture = TestBed.createComponent(ShellComponent);
     component = fixture.componentInstance;
     projectState = TestBed.inject(ProjectStateService);
+    // Reset shared UI state so ⌘B keybinding tests start from a clean slate.
+    const ui = TestBed.inject(UiStateService);
+    ui.closeSidebar();
+    ui.closeMemory();
     fixture.detectChanges();
   });
 
@@ -410,6 +415,53 @@ describe('ShellComponent', () => {
       fixture.detectChanges();
 
       expect(fixture.nativeElement.querySelector('[data-testid="restart-overlay"]')).not.toBeNull();
+    });
+  });
+
+  describe('Cmd+B / Ctrl+B keyboard shortcut', () => {
+    it('toggles the conversations sidebar on Cmd+B', () => {
+      const ui = TestBed.inject(UiStateService);
+      expect(ui.sidebarOpen()).toBe(false);
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', metaKey: true }));
+
+      expect(ui.sidebarOpen()).toBe(true);
+    });
+
+    it('toggles the conversations sidebar on Ctrl+B', () => {
+      const ui = TestBed.inject(UiStateService);
+      expect(ui.sidebarOpen()).toBe(false);
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'B', ctrlKey: true }));
+
+      expect(ui.sidebarOpen()).toBe(true);
+    });
+
+    it('flips the sidebar back closed on a second Cmd+B', () => {
+      const ui = TestBed.inject(UiStateService);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', metaKey: true }));
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', metaKey: true }));
+
+      expect(ui.sidebarOpen()).toBe(false);
+    });
+
+    it('ignores plain `b` keypress without modifier', () => {
+      const ui = TestBed.inject(UiStateService);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b' }));
+      expect(ui.sidebarOpen()).toBe(false);
+    });
+
+    it('ignores Cmd+other keys', () => {
+      const ui = TestBed.inject(UiStateService);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', metaKey: true }));
+      expect(ui.sidebarOpen()).toBe(false);
+    });
+
+    it('does not fire after the component is destroyed', () => {
+      const ui = TestBed.inject(UiStateService);
+      fixture.destroy();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', metaKey: true }));
+      expect(ui.sidebarOpen()).toBe(false);
     });
   });
 });

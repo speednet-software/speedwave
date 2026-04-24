@@ -2,26 +2,43 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  computed,
   inject,
   OnDestroy,
   OnInit,
+  signal,
 } from '@angular/core';
-import { RouterOutlet, RouterLink, RouterLinkActive } from '@angular/router';
+import { NavigationEnd, Router, RouterOutlet } from '@angular/router';
+import type { Subscription } from 'rxjs';
+import { filter } from 'rxjs/operators';
 import { ProjectSwitcherComponent } from '../project-switcher/project-switcher.component';
 import { UpdateNotificationComponent } from '../update-notification/update-notification.component';
 import { ProjectStateService } from '../services/project-state.service';
+import { UiStateService } from '../services/ui-state.service';
+import {
+  ViewSwitcherComponent,
+  type ViewSwitcherEntry,
+} from './view-switcher/view-switcher.component';
 
-/** Main application shell with header navigation and project switcher. */
+/**
+ * Main application shell with header navigation and project switcher.
+ *
+ * Hosts the terminal-minimal top nav via `<app-view-switcher>` and wires the
+ * ⌘B / Ctrl+B keyboard shortcut to toggle the conversations sidebar through
+ * `UiStateService`. Per the terminal-minimal prompt (Signals architecture),
+ * the sidebar's open-state lives in the singleton `UiStateService`, not
+ * locally — shell binds the keybinding, chat consumes the signal.
+ */
 @Component({
   selector: 'app-shell',
   standalone: true,
   imports: [
     RouterOutlet,
-    RouterLink,
-    RouterLinkActive,
     ProjectSwitcherComponent,
     UpdateNotificationComponent,
+    ViewSwitcherComponent,
   ],
+  host: { '(document:keydown)': 'onKeydown($event)' },
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="flex flex-col h-screen bg-sw-bg-darkest text-sw-text">
@@ -159,37 +176,8 @@ import { ProjectStateService } from '../services/project-state.service';
             />
           </svg>
         </span>
-        <nav class="flex gap-4 justify-self-center" data-testid="app-nav">
-          @if (projectState.status === 'ready' || projectState.status === 'error') {
-            <a
-              routerLink="/chat"
-              routerLinkActive="!text-sw-accent font-bold"
-              class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
-              data-testid="nav-chat"
-              >Chat</a
-            >
-          }
-          <a
-            routerLink="/integrations"
-            routerLinkActive="!text-sw-accent font-bold"
-            class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
-            data-testid="nav-integrations"
-            >Integrations</a
-          >
-          <a
-            routerLink="/plugins"
-            routerLinkActive="!text-sw-accent font-bold"
-            class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
-            data-testid="nav-plugins"
-            >Plugins</a
-          >
-          <a
-            routerLink="/settings"
-            routerLinkActive="!text-sw-accent font-bold"
-            class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
-            data-testid="nav-settings"
-            >Settings</a
-          >
+        <nav class="justify-self-center" data-testid="app-nav">
+          <app-view-switcher [views]="visibleViews" [activeId]="activeViewId()" />
         </nav>
         <div class="justify-self-end">
           <app-project-switcher />
@@ -203,8 +191,34 @@ import { ProjectStateService } from '../services/project-state.service';
 })
 export class ShellComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
+  readonly ui = inject(UiStateService);
   private cdr = inject(ChangeDetectorRef);
+  private router = inject(Router);
   private unsubscribe: (() => void) | null = null;
+  private routerSub: Subscription | null = null;
+
+  private readonly viewCatalog: readonly ViewSwitcherEntry[] = [
+    { id: 'chat', label: 'Chat', route: '/chat' },
+    { id: 'integrations', label: 'Integrations', route: '/integrations' },
+    { id: 'plugins', label: 'Plugins', route: '/plugins' },
+    { id: 'settings', label: 'Settings', route: '/settings' },
+  ];
+
+  private readonly currentUrlSignal = signal<string>(this.router.url);
+
+  /** Views visible in the top nav — hides `chat` until auth is settled. */
+  get visibleViews(): readonly ViewSwitcherEntry[] {
+    const status = this.projectState.status;
+    const hideChat = status !== 'ready' && status !== 'error';
+    return hideChat ? this.viewCatalog.filter((v) => v.id !== 'chat') : this.viewCatalog;
+  }
+
+  /** The currently-active view id, derived from the router URL. */
+  readonly activeViewId = computed(() => {
+    const url = this.currentUrlSignal();
+    const match = this.viewCatalog.find((v) => url.startsWith(v.route));
+    return match?.id ?? '';
+  });
 
   /** Human-readable status message for the blocking overlay. */
   get statusMessage(): string {
@@ -232,6 +246,21 @@ export class ShellComponent implements OnInit, OnDestroy {
     this.unsubscribe = this.projectState.onChange(() => {
       this.cdr.markForCheck();
     });
+    this.routerSub = this.router.events
+      .pipe(filter((e): e is NavigationEnd => e instanceof NavigationEnd))
+      .subscribe((e) => this.currentUrlSignal.set(e.urlAfterRedirects));
+  }
+
+  /**
+   * Global document keydown handler. Handles:
+   * - ⌘B / Ctrl+B → toggle the conversations sidebar.
+   * @param event - The keyboard event dispatched on the document.
+   */
+  onKeydown(event: KeyboardEvent): void {
+    const isCmdB = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'b';
+    if (!isCmdB) return;
+    event.preventDefault();
+    this.ui.toggleSidebar();
   }
 
   /** Retries container lifecycle check. */
@@ -265,6 +294,10 @@ export class ShellComponent implements OnInit, OnDestroy {
     if (this.unsubscribe) {
       this.unsubscribe();
       this.unsubscribe = null;
+    }
+    if (this.routerSub) {
+      this.routerSub.unsubscribe();
+      this.routerSub = null;
     }
   }
 }
