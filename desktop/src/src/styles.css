@@ -1,7 +1,106 @@
-@import "tailwindcss";
+@import 'tailwindcss';
 
-/* ── Speedwave custom theme ── */
+/* ── Speedwave design-system tokens ──
+ *
+ * Ported from design-proposals/06-terminal-minimal.html. Canonical color
+ * tokens for the terminal-minimal visual layer. New components MUST use
+ * --bg / --ink / --accent / --teal / --amber / --green / --violet / --line
+ * (and their variants) — never hex literals, never the legacy --color-sw-*
+ * tokens below.
+ */
+:root {
+  color-scheme: dark;
+
+  /* Backgrounds — deepest to lightest */
+  --bg: #07090f;
+  --bg-1: #0b0e18;
+  --bg-2: #10141f;
+  --bg-3: #161b2a;
+
+  /* Dividers */
+  --line: #1a2030;
+  --line-strong: #252c42;
+
+  /* Text */
+  --ink: #e8edf7;
+  --ink-dim: #9aa3ba;
+  --ink-mute: #707a96;
+
+  /* Primary accent — rose by default; themes below override. */
+  --accent: #ff4d6d;
+  --accent-dim: #c9304e;
+  --accent-soft: rgba(255, 77, 109, 0.1);
+  --on-accent: #07090f;
+
+  /* Semantic colors (stable across themes) */
+  --teal: #22d3b7;
+  --amber: #f5b942;
+  --green: #34d399;
+  --violet: #a78bfa;
+}
+
+/* Accent themes share the neutral crimson backgrounds; only the accent and
+ * its derived alphas change. Switched via `data-theme` on the root element.
+ */
+
+[data-theme='mint'] {
+  --accent: #5eead4;
+  --accent-dim: #2dd4bf;
+  --accent-soft: rgba(94, 234, 212, 0.1);
+}
+
+[data-theme='amber'] {
+  --accent: #f5b942;
+  --accent-dim: #d99a24;
+  --accent-soft: rgba(245, 185, 66, 0.1);
+}
+
+[data-theme='iris'] {
+  --accent: #a78bfa;
+  --accent-dim: #8b5cf6;
+  --accent-soft: rgba(167, 139, 250, 0.12);
+}
+
+[data-theme='cyan'] {
+  --accent: #38bdf8;
+  --accent-dim: #0ea5e9;
+  --accent-soft: rgba(56, 189, 248, 0.1);
+}
+
+[data-theme='sand'] {
+  --accent: #d4a574;
+  --accent-dim: #a97f4e;
+  --accent-soft: rgba(212, 165, 116, 0.1);
+}
+
+/* Expose design-system tokens as Tailwind utilities so components can write
+ * bg-bg-1, text-ink, text-accent, ring-line, etc. — no hex literals in markup.
+ */
 @theme {
+  /* Design-system tokens — primary set for new components. */
+  --color-bg: var(--bg);
+  --color-bg-1: var(--bg-1);
+  --color-bg-2: var(--bg-2);
+  --color-bg-3: var(--bg-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-dim: var(--ink-dim);
+  --color-ink-mute: var(--ink-mute);
+  --color-accent: var(--accent);
+  --color-accent-dim: var(--accent-dim);
+  --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
+  --color-teal: var(--teal);
+  --color-amber: var(--amber);
+  --color-green: var(--green);
+  --color-violet: var(--violet);
+
+  /* Legacy tokens — superseded by the design-system tokens above.
+   * Do NOT use in new code. Removed in a follow-up sweep once all existing
+   * components have migrated.
+   */
+
   /* Background palette */
   --color-sw-bg-darkest: #1a1a2e;
   --color-sw-bg-darker: #12122a;
@@ -86,16 +185,20 @@
   --animate-blink: blink 1s step-end infinite;
 
   @keyframes sw-spin {
-    to { transform: rotate(360deg); }
+    to {
+      transform: rotate(360deg);
+    }
   }
   @keyframes blink {
-    50% { opacity: 0; }
+    50% {
+      opacity: 0;
+    }
   }
 }
 
-/* ── Base styles ── */
 @layer base {
-  html, body {
+  html,
+  body {
     height: 100%;
     font-family: var(--font-mono);
     font-size: 14px;
@@ -121,35 +224,158 @@
     font-family: inherit;
   }
 
-  code, pre {
+  code,
+  pre {
     font-family: var(--font-mono);
+  }
+
+  /* Global focus ring — double-ring ensures visibility on any background.
+   * Inner 2px = accent; outer 2px = page background carves a gap against
+   * sibling content. Components MUST NOT add their own focus rings.
+   */
+  :focus-visible {
+    outline: none;
+    box-shadow:
+      0 0 0 2px var(--accent),
+      0 0 0 4px var(--bg);
+  }
+}
+
+/* Two shapes for every message/block in the mockup:
+ *
+ *   .timeline-event — passive status (tool use, thinking, errors, stopped):
+ *     2px accent left border + 16px left padding; no background, no ring.
+ *
+ *   .callout-box — requires user attention (permission, ask_user, cards):
+ *     rounded + 1px accent ring + tinted background + 12px padding.
+ *
+ * Color is driven by `--shape-color` (defaulting to --accent). Semantic
+ * variants just override that property; the shape itself is defined once.
+ */
+@layer components {
+  .timeline-event {
+    --shape-color: var(--accent);
+    border-left: 2px solid color-mix(in oklab, var(--shape-color) 50%, transparent);
+    padding-left: 1rem;
+  }
+
+  .timeline-event-accent {
+    --shape-color: var(--accent);
+  }
+  .timeline-event-teal {
+    --shape-color: var(--teal);
+  }
+  .timeline-event-amber {
+    --shape-color: var(--amber);
+  }
+  .timeline-event-green {
+    --shape-color: var(--green);
+  }
+  .timeline-event-violet {
+    --shape-color: var(--violet);
+  }
+
+  .callout-box {
+    --shape-color: var(--accent);
+    border-radius: 0.25rem;
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--shape-color) 40%, transparent);
+    background-color: color-mix(in oklab, var(--shape-color) 6%, transparent);
+    padding: 0.75rem;
+    overflow: hidden;
+  }
+
+  .callout-box-accent {
+    --shape-color: var(--accent);
+  }
+  .callout-box-teal {
+    --shape-color: var(--teal);
+  }
+  .callout-box-amber {
+    --shape-color: var(--amber);
+  }
+  .callout-box-green {
+    --shape-color: var(--green);
+  }
+  .callout-box-violet {
+    --shape-color: var(--violet);
   }
 }
 
 /* ── Prose layer for rendered markdown (innerHTML) ── */
 @layer components {
   /* Collapse margins at container edges */
-  .prose-sw :first-child { margin-top: 0; }
-  .prose-sw :last-child  { margin-bottom: 0; }
+  .prose-sw :first-child {
+    margin-top: 0;
+  }
+  .prose-sw :last-child {
+    margin-bottom: 0;
+  }
 
   /* Headings */
-  .prose-sw h1 { font-size: 1.75em; font-weight: 700; color: var(--color-sw-text); margin: 24px 0 12px; }
-  .prose-sw h2 { font-size: 1.5em;  font-weight: 700; color: var(--color-sw-text); margin: 20px 0 10px; }
-  .prose-sw h3 { font-size: 1.25em; font-weight: 600; color: var(--color-sw-text); margin: 16px 0 8px; }
-  .prose-sw h4 { font-size: 1.1em;  font-weight: 600; color: var(--color-sw-text); margin: 14px 0 6px; }
-  .prose-sw h5 { font-size: 1em;    font-weight: 600; color: var(--color-sw-text); margin: 12px 0 4px; }
-  .prose-sw h6 { font-size: 0.9em;  font-weight: 600; color: var(--color-sw-text-dim); margin: 12px 0 4px; }
+  .prose-sw h1 {
+    font-size: 1.75em;
+    font-weight: 700;
+    color: var(--color-sw-text);
+    margin: 24px 0 12px;
+  }
+  .prose-sw h2 {
+    font-size: 1.5em;
+    font-weight: 700;
+    color: var(--color-sw-text);
+    margin: 20px 0 10px;
+  }
+  .prose-sw h3 {
+    font-size: 1.25em;
+    font-weight: 600;
+    color: var(--color-sw-text);
+    margin: 16px 0 8px;
+  }
+  .prose-sw h4 {
+    font-size: 1.1em;
+    font-weight: 600;
+    color: var(--color-sw-text);
+    margin: 14px 0 6px;
+  }
+  .prose-sw h5 {
+    font-size: 1em;
+    font-weight: 600;
+    color: var(--color-sw-text);
+    margin: 12px 0 4px;
+  }
+  .prose-sw h6 {
+    font-size: 0.9em;
+    font-weight: 600;
+    color: var(--color-sw-text-dim);
+    margin: 12px 0 4px;
+  }
 
   /* Paragraphs */
-  .prose-sw p { color: var(--color-sw-text); line-height: 1.6; margin: 8px 0; }
+  .prose-sw p {
+    color: var(--color-sw-text);
+    line-height: 1.6;
+    margin: 8px 0;
+  }
 
   /* Lists */
   .prose-sw ul,
-  .prose-sw ol { margin: 8px 0; padding-left: 24px; color: var(--color-sw-text); }
-  .prose-sw ul { list-style-type: disc; }
-  .prose-sw ol { list-style-type: decimal; }
-  .prose-sw li { margin: 4px 0; line-height: 1.6; }
-  .prose-sw li::marker { color: var(--color-sw-text-muted); }
+  .prose-sw ol {
+    margin: 8px 0;
+    padding-left: 24px;
+    color: var(--color-sw-text);
+  }
+  .prose-sw ul {
+    list-style-type: disc;
+  }
+  .prose-sw ol {
+    list-style-type: decimal;
+  }
+  .prose-sw li {
+    margin: 4px 0;
+    line-height: 1.6;
+  }
+  .prose-sw li::marker {
+    color: var(--color-sw-text-muted);
+  }
 
   /* Code blocks */
   .prose-sw pre {
@@ -190,25 +416,57 @@
   }
 
   /* Links */
-  .prose-sw a { color: var(--color-sw-accent); text-decoration: none; }
-  .prose-sw a:hover { text-decoration: underline; }
+  .prose-sw a {
+    color: var(--color-sw-accent);
+    text-decoration: none;
+  }
+  .prose-sw a:hover {
+    text-decoration: underline;
+  }
 
   /* Tables */
-  .prose-sw table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  .prose-sw table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 12px 0;
+  }
   .prose-sw th,
-  .prose-sw td { border: 1px solid var(--color-sw-border); padding: 8px 12px; text-align: left; }
-  .prose-sw th { background: var(--color-sw-bg-abyss); color: var(--color-sw-text); font-weight: 600; }
-  .prose-sw td { color: var(--color-sw-text-dim); }
+  .prose-sw td {
+    border: 1px solid var(--color-sw-border);
+    padding: 8px 12px;
+    text-align: left;
+  }
+  .prose-sw th {
+    background: var(--color-sw-bg-abyss);
+    color: var(--color-sw-text);
+    font-weight: 600;
+  }
+  .prose-sw td {
+    color: var(--color-sw-text-dim);
+  }
 
   /* Horizontal rule */
-  .prose-sw hr { border: none; border-top: 1px solid var(--color-sw-border); margin: 16px 0; }
+  .prose-sw hr {
+    border: none;
+    border-top: 1px solid var(--color-sw-border);
+    margin: 16px 0;
+  }
 
   /* Emphasis */
-  .prose-sw strong { color: var(--color-sw-text); font-weight: 700; }
-  .prose-sw em { font-style: italic; }
+  .prose-sw strong {
+    color: var(--color-sw-text);
+    font-weight: 700;
+  }
+  .prose-sw em {
+    font-style: italic;
+  }
 
   /* Images */
-  .prose-sw img { max-width: 100%; border-radius: 6px; margin: 12px 0; }
+  .prose-sw img {
+    max-width: 100%;
+    border-radius: 6px;
+    margin: 12px 0;
+  }
 }
 
 /* ── Scrollbar (not supported by Tailwind) ── */
