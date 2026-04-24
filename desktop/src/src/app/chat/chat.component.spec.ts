@@ -201,18 +201,15 @@ describe('ChatComponent', () => {
 
   describe('sendMessage guards', () => {
     it('does not send when input text is empty', async () => {
-      component.inputText = '   ';
-
-      await component.sendMessage();
+      await component.sendMessage('   ');
 
       expect(chatState.messages).toHaveLength(0);
     });
 
     it('does not send when isStreaming is true', async () => {
-      component.inputText = 'Hello';
       chatState.isStreaming = true;
 
-      await component.sendMessage();
+      await component.sendMessage('Hello');
 
       expect(chatState.messages).toHaveLength(0);
     });
@@ -221,18 +218,15 @@ describe('ChatComponent', () => {
   // ── sendMessage success ────────────────────────────────────────────────────
 
   describe('sendMessage success', () => {
-    it('adds user message, clears input, and sets isStreaming', async () => {
+    it('adds user message and sets isStreaming', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       invokeSpy.mockResolvedValue(undefined);
 
-      component.inputText = 'Hello Claude';
-
-      await component.sendMessage();
+      await component.sendMessage('Hello Claude');
 
       expect(chatState.messages).toHaveLength(1);
       expect(chatState.messages[0].role).toBe('user');
       expect(chatState.messages[0].blocks[0]).toEqual({ type: 'text', content: 'Hello Claude' });
-      expect(component.inputText).toBe('');
       expect(chatState.isStreaming).toBe(true);
       expect(invokeSpy).toHaveBeenCalledWith('send_message', { message: 'Hello Claude' });
     });
@@ -245,8 +239,7 @@ describe('ChatComponent', () => {
         return undefined;
       };
 
-      component.inputText = 'Hello';
-      await component.sendMessage();
+      await component.sendMessage('Hello');
 
       expect(chatState.isStreaming).toBe(false);
       expect(chatState.messages).toHaveLength(2);
@@ -255,29 +248,12 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── onEnter ────────────────────────────────────────────────────────────────
-
-  describe('onEnter', () => {
-    it('calls sendMessage when Enter is pressed without Shift', () => {
-      const sendSpy = vi.spyOn(component, 'sendMessage').mockResolvedValue();
-      const event = new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false });
-      const preventSpy = vi.spyOn(event, 'preventDefault');
-
-      component.onEnter(event);
-
-      expect(preventSpy).toHaveBeenCalled();
-      expect(sendSpy).toHaveBeenCalled();
-    });
-
-    it('does NOT call sendMessage when Shift+Enter is pressed', () => {
-      const sendSpy = vi.spyOn(component, 'sendMessage').mockResolvedValue();
-      const event = new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true });
-      const preventSpy = vi.spyOn(event, 'preventDefault');
-
-      component.onEnter(event);
-
-      expect(preventSpy).not.toHaveBeenCalled();
-      expect(sendSpy).not.toHaveBeenCalled();
+  // ── composer integration ─────────────────────────────────────────────────
+  describe('composer integration', () => {
+    it('mounts app-composer when a live session is active', async () => {
+      projectState.status = 'ready';
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('app-composer')).toBeTruthy();
     });
   });
 
@@ -631,7 +607,6 @@ describe('ChatComponent', () => {
         messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
         currentBlocks: [{ type: 'text', content: 'stream' }],
       });
-      component.inputText = 'partial';
       chatState.isStreaming = true;
       component.viewingTranscript = { session_id: 's1', messages: [] };
       uiState.toggleSidebar();
@@ -640,7 +615,6 @@ describe('ChatComponent', () => {
       await component.newConversation();
 
       expect(chatState.messages).toEqual([]);
-      expect(component.inputText).toBe('');
       expect(chatState.isStreaming).toBe(false);
       expect(chatState.currentBlocks).toEqual([]);
       expect(component.viewingTranscript).toBeNull();
