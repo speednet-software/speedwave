@@ -26,9 +26,15 @@ base64 = "0.22"
 rand = "0.8"
 semver = "1"
 url = "2"
+json-patch = "4"
+tokio = { version = "1", default-features = false, features = ["sync"] }
+futures-core = "0.3"
+async-stream = "0.3"
+parking_lot = "0.12"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true
