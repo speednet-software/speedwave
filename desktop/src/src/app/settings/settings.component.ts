@@ -6,7 +6,6 @@ import {
   OnInit,
   inject,
 } from '@angular/core';
-import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -22,7 +21,6 @@ import { ProjectList } from '../models/update';
   selector: 'app-settings',
   standalone: true,
   imports: [
-    CommonModule,
     LlmProviderComponent,
     AuthSectionComponent,
     SystemHealthComponent,
@@ -30,37 +28,57 @@ import { ProjectList } from '../models/update';
     UpdateSectionComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  host: { class: 'block bg-sw-bg-darkest min-h-screen p-6 text-sw-text' },
+  host: {
+    class: 'block min-h-screen bg-[var(--bg)] text-[var(--ink)] p-4 md:p-6',
+  },
   template: `
-    <div>
-      <h1 class="text-xl text-sw-accent m-0 mb-6">Settings</h1>
+    <div class="mx-auto max-w-3xl space-y-8">
+      <h1 class="mono text-[14px] text-[var(--ink)] m-0" data-testid="settings-title">Settings</h1>
 
       @if (error) {
         <div
-          class="mb-4 px-3 py-2 bg-sw-error-bg border border-sw-error rounded text-sw-error text-[13px]"
+          class="rounded ring-1 ring-red-500/40 bg-red-500/[0.06] px-3 py-2 text-[12px] text-red-300"
           data-testid="settings-error"
+          role="alert"
         >
           {{ error }}
         </div>
       }
 
       <!-- Active project info -->
-      <section class="mb-6">
-        <h2 class="text-[15px] text-sw-text m-0 mb-3">Project</h2>
-        <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-4">
-          <div class="flex justify-between items-center py-2">
-            <span class="text-[13px] text-sw-text-muted">Active project</span>
-            <span class="text-[13px] text-sw-text" data-testid="settings-active-project">{{
-              activeProject || 'None'
-            }}</span>
-          </div>
-          <div class="flex justify-between items-center py-2 border-t border-sw-border">
-            <span class="text-[13px] text-sw-text-muted">Directory</span>
-            <span class="text-[13px] font-mono text-sw-text-dim">{{ projectDir || '—' }}</span>
-          </div>
-          <div class="flex justify-between items-center py-2 border-t border-sw-border">
-            <span class="text-[13px] text-sw-text-muted">Data directory</span>
-            <span class="text-[13px] font-mono text-sw-text-dim">~/.speedwave/</span>
+      <section data-testid="settings-section-project">
+        <h2
+          class="mono mb-3 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+          data-testid="settings-section-project-heading"
+        >
+          project
+        </h2>
+        <div class="overflow-hidden rounded ring-1 ring-[var(--line)] bg-[var(--bg-1)]">
+          <div class="divide-y divide-[var(--line)]">
+            <div class="flex items-center justify-between gap-3 px-4 py-3">
+              <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                >active project</span
+              >
+              <span
+                class="mono text-[12px] text-[var(--ink)]"
+                data-testid="settings-active-project"
+                >{{ activeProject || 'None' }}</span
+              >
+            </div>
+            <div class="flex items-center justify-between gap-3 px-4 py-3">
+              <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                >directory</span
+              >
+              <span class="mono truncate text-[12px] text-[var(--ink-dim)]">{{
+                projectDir || '—'
+              }}</span>
+            </div>
+            <div class="flex items-center justify-between gap-3 px-4 py-3">
+              <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                >data directory</span
+              >
+              <span class="mono text-[12px] text-[var(--ink-dim)]">~/.speedwave/</span>
+            </div>
           </div>
         </div>
       </section>
@@ -80,8 +98,10 @@ import { ProjectList } from '../models/update';
 
       <!-- System Health -->
       @if (activeProject) {
-        <section class="mb-6">
-          <h2 class="text-[15px] text-sw-text m-0 mb-3">System Health</h2>
+        <section data-testid="settings-section-health">
+          <h2 class="mono mb-3 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
+            system health
+          </h2>
           <app-system-health [project]="activeProject" />
         </section>
       }

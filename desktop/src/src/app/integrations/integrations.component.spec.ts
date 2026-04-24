@@ -655,6 +655,42 @@ describe('IntegrationsComponent', () => {
     expect(ideBridge).not.toBeNull();
   });
 
+  describe('terminal-minimal restyle', () => {
+    it('renders the header with mono 14px title per mockup', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const title = fixture.nativeElement.querySelector('[data-testid="integrations-title"]');
+      expect(title).not.toBeNull();
+      expect(title.textContent).toContain('Service integrations');
+      expect(title.classList.contains('mono')).toBe(true);
+    });
+
+    it('section headings use uppercase tracking-widest mono labels', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const heading = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-services-heading"]'
+      );
+      expect(heading).not.toBeNull();
+      expect(heading.classList.contains('uppercase')).toBe(true);
+      expect(heading.classList.contains('tracking-widest')).toBe(true);
+    });
+
+    it('service cards use ring-1 wrapper (no border) per Borders & rings rule', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const card = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-service-gitlab"]'
+      );
+      expect(card).not.toBeNull();
+      expect(card.classList.contains('ring-1')).toBe(true);
+      expect(card.classList.contains('border')).toBe(false);
+    });
+  });
+
   // -- OAuth flow tests --
 
   describe('handleStartOAuth()', () => {

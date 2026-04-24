@@ -1,0 +1,63 @@
+<section class="flex flex-1 flex-col overflow-hidden" data-testid="skills-view">
+  <div
+    class="flex h-11 flex-shrink-0 items-center gap-3 border-b border-[var(--line)] bg-[var(--bg-1)] px-4 md:px-6"
+  >
+    <h1 class="truncate text-[14px] text-[var(--ink)]">Skills &amp; commands</h1>
+    <span class="mono ml-auto text-[11px] text-[var(--ink-mute)]" data-testid="skills-count">
+      {{ total() }} entries
+    </span>
+  </div>
+
+  <div class="flex-1 overflow-y-auto p-4 md:p-6">
+    <div class="mx-auto max-w-3xl">
+      @if (empty()) {
+        <div
+          class="overflow-hidden rounded ring-1 ring-[var(--line)] bg-[var(--bg-1)] p-6 text-center"
+          data-testid="skills-empty"
+        >
+          <p class="mono text-[12px] text-[var(--ink-dim)]">No slash commands discovered yet.</p>
+          <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]">
+            The catalog will populate once the active project reports its commands.
+          </p>
+        </div>
+      } @else {
+        <div
+          class="overflow-hidden rounded ring-1 ring-[var(--line)]"
+          data-testid="skills-table-wrapper"
+        >
+          <table class="mono w-full border-collapse" data-testid="skills-table">
+            <caption class="sr-only">Slash commands, skills, and agents</caption>
+            <thead
+              class="bg-[var(--bg-1)] text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+            >
+              <tr>
+                <th class="px-3 py-2 text-left font-medium">name</th>
+                <th class="px-3 py-2 text-left font-medium">source</th>
+                <th class="px-3 py-2 text-left font-medium">description</th>
+                <th class="px-3 py-2 text-left font-medium">args</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-[var(--line)]">
+              @for (skill of items(); track skill.id) {
+                <tr class="text-[12px]" data-testid="skills-row">
+                  <td class="px-3 py-2 text-[var(--accent)]" data-testid="skills-row-name">
+                    /{{ skill.name }}
+                  </td>
+                  <td class="px-3 py-2" data-testid="skills-row-source">
+                    <span [class]="badgeClass(skill)">{{ badgeLabel(skill) }}</span>
+                  </td>
+                  <td class="px-3 py-2 text-[var(--ink-dim)]" data-testid="skills-row-description">
+                    {{ skill.description || '—' }}
+                  </td>
+                  <td class="px-3 py-2 text-[var(--ink-mute)]" data-testid="skills-row-args">
+                    {{ skill.argumentHint || '' }}
+                  </td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      }
+    </div>
+  </div>
+</section>

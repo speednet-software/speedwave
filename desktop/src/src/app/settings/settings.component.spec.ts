@@ -152,4 +152,41 @@ describe('SettingsComponent', () => {
       (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
     ).toBeNull();
   });
+
+  describe('terminal-minimal restyle', () => {
+    it('renders the title with mono 14px per mockup', () => {
+      fixture.detectChanges();
+      const title = fixture.nativeElement.querySelector('[data-testid="settings-title"]');
+      expect(title).not.toBeNull();
+      expect(title.textContent).toContain('Settings');
+      expect(title.classList.contains('mono')).toBe(true);
+    });
+
+    it('section labels use uppercase tracking-widest mono text', () => {
+      fixture.detectChanges();
+      const heading = fixture.nativeElement.querySelector(
+        '[data-testid="settings-section-project-heading"]'
+      );
+      expect(heading).not.toBeNull();
+      expect(heading.classList.contains('uppercase')).toBe(true);
+      expect(heading.classList.contains('tracking-widest')).toBe(true);
+      // section label uses mono per tokens spec
+      expect(heading.classList.contains('mono')).toBe(true);
+    });
+
+    it('project section uses ring-1 callout wrapper without inner border-b', () => {
+      fixture.detectChanges();
+      const section = fixture.nativeElement.querySelector(
+        '[data-testid="settings-section-project"]'
+      );
+      expect(section).not.toBeNull();
+      const wrapper = section.querySelector('.ring-1');
+      expect(wrapper).not.toBeNull();
+      // Must not use border on the rounded ring wrapper
+      expect(wrapper.classList.contains('border')).toBe(false);
+      // Rows are separated via divide-y — not via border-b inside the wrapper
+      const divider = wrapper.querySelector('.divide-y');
+      expect(divider).not.toBeNull();
+    });
+  });
 });
