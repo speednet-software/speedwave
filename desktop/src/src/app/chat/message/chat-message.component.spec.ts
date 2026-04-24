@@ -47,7 +47,7 @@ describe('ChatMessageComponent', () => {
 
     const el = fixture.nativeElement as HTMLElement;
     expect(el.querySelector('[data-testid="thinking-content"]')).toBeNull();
-    expect(el.textContent).toContain('Thinking...');
+    expect(el.textContent).toContain('Thinking');
   });
 
   it('renders tool_use block', () => {
@@ -84,7 +84,7 @@ describe('ChatMessageComponent', () => {
     const el = fixture.nativeElement as HTMLElement;
     expect(el.textContent).toContain('First');
     expect(el.textContent).toContain('Second');
-    expect(el.textContent).toContain('Thinking...');
+    expect(el.textContent).toContain('Thinking');
   });
 
   it('applies user styling for user role', () => {

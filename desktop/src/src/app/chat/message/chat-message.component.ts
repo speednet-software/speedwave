@@ -41,7 +41,7 @@ import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
             <app-text-block [content]="block.content" />
           }
           @case ('thinking') {
-            <app-thinking-block [content]="block.content" [collapsed]="block.collapsed" />
+            <app-thinking-block [content]="block.content" [collapsedDefault]="block.collapsed" />
           }
           @case ('tool_use') {
             <app-tool-block [tool]="asToolBlock(block).tool" />
