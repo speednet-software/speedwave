@@ -135,15 +135,26 @@ describe('ChatMessageComponent', () => {
     expect(host.classList.contains('justify-end')).toBe(false);
   });
 
-  it('bubble shrinks to content width (w-fit) with 85% cap', () => {
+  it('user role dispatches to <app-user-message> (terminal-minimal: no bubble)', () => {
+    // After Unit 8 (refactor: extract chat header, list, user-message), user
+    // messages render via <app-user-message> in terminal-minimal style — no
+    // sized "bubble" with w-fit/max-w-[85%]. This replaces the prior bubble
+    // test which assumed both roles shared the same wrapper styling.
     component.blocks = [{ type: 'text', content: 'ok' }];
     component.role = 'user';
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('app-user-message')).not.toBeNull();
+  });
+
+  it('assistant role keeps the bubble (max-w-[85%])', () => {
+    component.blocks = [{ type: 'text', content: 'ok' }];
+    component.role = 'assistant';
     fixture.detectChanges();
 
     const bubble = fixture.nativeElement.querySelector(
       '[data-testid="chat-message"]'
     ) as HTMLElement;
-    expect(bubble.classList.contains('w-fit')).toBe(true);
     expect(bubble.classList.contains('max-w-[85%]')).toBe(true);
   });
 
