@@ -7,6 +7,7 @@ import {
   OnDestroy,
   OnInit,
   ViewChild,
+  effect,
   inject,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
@@ -62,28 +63,12 @@ export class ChatComponent implements OnInit, OnDestroy {
   private unsubProjectReady: (() => void) | null = null;
   private unsubAuthWatch: (() => void) | null = null;
 
-  /** True if the conversations sidebar is open. Backed by UiStateService. */
+  /** Read-only aliases over the UI-state signals; the template binds these. */
   get showHistory(): boolean {
     return this.ui.sidebarOpen();
   }
-  /**
-   * Sets the conversations-sidebar visibility by toggling the shared UI state signal.
-   * @param value - True to open the sidebar, false to close it.
-   */
-  set showHistory(value: boolean) {
-    if (value !== this.ui.sidebarOpen()) this.ui.toggleSidebar();
-  }
-
-  /** True if the memory panel is open. Backed by UiStateService. */
   get showMemory(): boolean {
     return this.ui.memoryOpen();
-  }
-  /**
-   * Sets the memory-panel visibility by toggling the shared UI state signal.
-   * @param value - True to open the panel, false to close it.
-   */
-  set showMemory(value: boolean) {
-    if (value !== this.ui.memoryOpen()) this.ui.toggleMemory();
   }
 
   /** Session id currently being viewed in the transcript overlay, or null. */
@@ -96,6 +81,16 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.unsubChange = this.chat.onChange(() => {
       this.cdr.markForCheck();
       this.scrollToBottom();
+    });
+
+    // Decouple data loading from the toggle source so the keyboard shortcut
+    // (⌘B in shell.component, which only flips the signal) loads data the
+    // same way the History button does.
+    effect(() => {
+      if (this.ui.sidebarOpen()) void this.loadConversations();
+    });
+    effect(() => {
+      if (this.ui.memoryOpen()) void this.loadProjectMemory();
     });
   }
 
@@ -240,20 +235,24 @@ export class ChatComponent implements OnInit, OnDestroy {
    * @param sessionId - The UUID of the conversation to resume.
    */
   async resumeConversation(sessionId: string): Promise<void> {
-    if (!this.viewingTranscript || this.resumeInProgress) return;
+    if (this.resumeInProgress) return;
     this.resumeInProgress = true;
     console.debug('[chat] resumeConversation: sessionId=%s', sessionId);
-    const messages: ChatMessage[] = this.viewingTranscript.messages.map((msg) => ({
-      role: msg.role as 'user' | 'assistant',
-      blocks: normalizeHistoryBlocks(
-        msg.blocks ?? [{ type: 'text' as const, content: msg.content }]
-      ),
-      timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
-    }));
 
-    // Load transcript messages immediately so the user sees history while
-    // the backend resumes the session (which may take seconds).
-    this.chat.loadMessages(messages);
+    // If we already viewed this transcript, surface its messages locally
+    // for instant feedback. When invoked directly from the sidebar (no
+    // prior view), skip — the backend will stream the full history once
+    // resume_conversation completes.
+    if (this.viewingTranscript && this.viewingTranscript.session_id === sessionId) {
+      const messages: ChatMessage[] = this.viewingTranscript.messages.map((msg) => ({
+        role: msg.role as 'user' | 'assistant',
+        blocks: normalizeHistoryBlocks(
+          msg.blocks ?? [{ type: 'text' as const, content: msg.content }]
+        ),
+        timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
+      }));
+      this.chat.loadMessages(messages);
+    }
     this.viewingTranscript = null;
     this.ui.closeSidebar();
     this.cdr.markForCheck();

@@ -6,6 +6,7 @@ import { ChatComponent } from './chat.component';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { UiStateService } from '../services/ui-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
 describe('ChatComponent', () => {
@@ -14,6 +15,7 @@ describe('ChatComponent', () => {
   let mockTauri: MockTauriService;
   let chatState: ChatStateService;
   let projectState: ProjectStateService;
+  let uiState: UiStateService;
 
   beforeEach(async () => {
     mockTauri = new MockTauriService();
@@ -52,6 +54,7 @@ describe('ChatComponent', () => {
     component = fixture.componentInstance;
     chatState = TestBed.inject(ChatStateService);
     projectState = TestBed.inject(ProjectStateService);
+    uiState = TestBed.inject(UiStateService);
 
     // Reset service state between tests
     chatState._setState({ messages: [], currentBlocks: [], sessionStats: null });
@@ -569,7 +572,7 @@ describe('ChatComponent', () => {
         session_id: 's1',
         messages: [{ role: 'user', content: 'Hi', timestamp: null }],
       };
-      component.showHistory = true;
+      uiState.toggleSidebar();
       projectState.activeProject = 'test';
 
       await component.resumeConversation('s1');
@@ -590,8 +593,8 @@ describe('ChatComponent', () => {
       component.inputText = 'partial';
       chatState.isStreaming = true;
       component.viewingTranscript = { session_id: 's1', messages: [] };
-      component.showHistory = true;
-      component.showMemory = true;
+      uiState.toggleSidebar();
+      uiState.toggleMemory();
 
       await component.newConversation();
 
@@ -808,7 +811,7 @@ describe('ChatComponent', () => {
 
       await projectState.init();
       await component.ngOnInit();
-      component.showHistory = true;
+      uiState.toggleSidebar();
       component.conversations = [
         { session_id: 's1', timestamp: '2026-03-06T10:00:00Z', preview: 'old', message_count: 1 },
       ];
