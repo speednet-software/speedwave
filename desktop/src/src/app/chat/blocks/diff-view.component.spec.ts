@@ -46,6 +46,17 @@ describe('computeLineDiff', () => {
       { kind: 'ctx', text: 'c' },
     ]);
   });
+
+  it('strips trailing CR so CRLF and LF inputs compare equal', () => {
+    // Files saved on Windows arrive as CRLF; the same content from a Unix
+    // tool is LF-only. Without CRLF stripping every line would diff.
+    const result = computeLineDiff('a\r\nb\r\nc', 'a\nb\nc');
+    expect(result).toEqual([
+      { kind: 'ctx', text: 'a' },
+      { kind: 'ctx', text: 'b' },
+      { kind: 'ctx', text: 'c' },
+    ]);
+  });
 });
 
 describe('DiffViewComponent', () => {

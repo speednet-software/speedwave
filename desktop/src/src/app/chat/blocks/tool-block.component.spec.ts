@@ -104,6 +104,20 @@ describe('ToolBlockComponent', () => {
       ).toBe('⊘');
     });
 
+    it('uses a gray timeline rail when stopped (overrides the error red)', () => {
+      component.tool = makeTool({
+        status: 'error',
+        result: 'Stopped by user',
+        result_is_error: true,
+      });
+      fixture.detectChanges();
+
+      // borderClass is applied to the outer wrapper [class]; assert it
+      // contains the gray rail and not the red one.
+      expect(component.borderClass).toContain('border-line-strong');
+      expect(component.borderClass).not.toContain('red');
+    });
+
     it('renders an inline summary for the tool', () => {
       component.tool = makeTool();
       fixture.detectChanges();

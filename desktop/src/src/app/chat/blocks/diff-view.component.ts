@@ -21,8 +21,10 @@ type DiffSegment = { type: 'line'; line: DiffLine } | { type: 'omitted'; count: 
  * @param newStr - Replacement text content (lines separated by "\n").
  */
 export function computeLineDiff(oldStr: string, newStr: string): DiffLine[] {
-  const oldLines = oldStr === '' ? [] : oldStr.split('\n');
-  const newLines = newStr === '' ? [] : newStr.split('\n');
+  // Strip trailing \r so CRLF-terminated lines don't show as diff changes
+  // when compared with LF-only lines.
+  const oldLines = oldStr === '' ? [] : oldStr.split('\n').map((l) => l.replace(/\r$/, ''));
+  const newLines = newStr === '' ? [] : newStr.split('\n').map((l) => l.replace(/\r$/, ''));
   const m = oldLines.length;
   const n = newLines.length;
 

@@ -268,6 +268,9 @@ export class ToolBlockComponent {
 
   /** Tailwind border-color class for the timeline left rail, keyed by tool status. */
   get borderClass(): string {
+    // Stopped tools surface as status="error" but visually use a neutral gray
+    // rail (matches the "stopped gray" rule in the design-system spec).
+    if (this.isStopped) return 'border-l-2 border-line-strong/50 pl-4';
     return STATUS_BORDER[this.tool.status];
   }
 
