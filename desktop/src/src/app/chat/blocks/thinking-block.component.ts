@@ -5,6 +5,7 @@ let nextId = 0;
 /** Collapsible block showing Claude's internal reasoning (timeline-event styling). */
 @Component({
   selector: 'app-thinking-block',
+  standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block my-2' },
   template: `
@@ -18,7 +19,7 @@ let nextId = 0;
         class="mono flex cursor-pointer items-center gap-2 text-[11px] bg-transparent p-0 border-0"
         [style.color]="'var(--violet, #a78bfa)'"
         [attr.aria-expanded]="!collapsed()"
-        [attr.aria-controls]="panelId"
+        [attr.aria-controls]="!collapsed() ? panelId : null"
         (click)="toggle()"
       >
         <span aria-hidden="true">{{ collapsed() ? '▶' : '▼' }}</span>

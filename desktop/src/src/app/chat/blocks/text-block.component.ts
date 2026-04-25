@@ -22,6 +22,7 @@ import { marked } from 'marked';
  */
 @Component({
   selector: 'app-text-block',
+  standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
     class: 'block text-[14px] leading-[1.7]',

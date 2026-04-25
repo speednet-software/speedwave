@@ -38,7 +38,7 @@ import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
       @for (block of blocks; track $index) {
         @switch (block.type) {
           @case ('text') {
-            <app-text-block [content]="block.content" />
+            <app-text-block [content]="block.content" [streaming]="streaming && $last" />
           }
           @case ('thinking') {
             <app-thinking-block [content]="block.content" [collapsedDefault]="block.collapsed" />

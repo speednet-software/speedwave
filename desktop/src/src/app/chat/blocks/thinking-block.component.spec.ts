@@ -122,6 +122,17 @@ describe('ThinkingBlockComponent', () => {
     expect(content.id).toBe(controls);
   });
 
+  it('omits aria-controls when collapsed (target element absent from DOM)', () => {
+    // ARIA forbids aria-controls referencing a non-existent element.
+    component.content = 'x';
+    component.collapsedDefault = true;
+    fixture.detectChanges();
+
+    const toggle = el.querySelector('[data-testid="thinking-toggle"]') as HTMLButtonElement;
+    expect(toggle.getAttribute('aria-controls')).toBeNull();
+    expect(el.querySelector('[data-testid="thinking-content"]')).toBeNull();
+  });
+
   it('renders the toggle as a <button type="button">', () => {
     component.content = 'x';
     fixture.detectChanges();
