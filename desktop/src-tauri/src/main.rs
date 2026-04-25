@@ -29,6 +29,7 @@ mod reconcile;
 mod redmine_api_cmd;
 mod retry_cmd;
 mod setup_wizard;
+mod slash_cmd;
 mod tray;
 mod types;
 mod update_commands;
@@ -1424,6 +1425,9 @@ fn main() {
             plugin_cmd::delete_plugin_credentials,
             plugin_cmd::plugin_save_settings,
             plugin_cmd::plugin_load_settings,
+            // Slash menu discovery
+            slash_cmd::list_slash_commands,
+            slash_cmd::invalidate_slash_cache,
         ])
         .on_window_event(move |window, event| {
             match event {
