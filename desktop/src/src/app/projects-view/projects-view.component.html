@@ -34,9 +34,10 @@
         <ul class="space-y-3" data-testid="projects-list">
           @for (project of projects(); track project.name) {
             <li
-              class="rounded ring-1 bg-[var(--bg-1)]"
-              [class.ring-[var(--accent-dim)]]="isActive(project.name)"
-              [class.ring-[var(--line)]]="!isActive(project.name)"
+              [class]="
+                'rounded ring-1 bg-[var(--bg-1)] ' +
+                  (isActive(project.name) ? 'ring-[var(--accent-dim)]' : 'ring-[var(--line)]')
+              "
               [attr.data-testid]="'projects-card-' + project.name"
               [attr.data-active]="isActive(project.name) ? 'true' : null"
             >

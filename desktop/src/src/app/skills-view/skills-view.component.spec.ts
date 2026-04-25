@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { signal, type WritableSignal } from '@angular/core';
 import { SkillsViewComponent } from './skills-view.component';
-import { SkillsService, type Skill } from '../services/skills.service';
+import { SkillsService, HARDCODED_FALLBACK, type Skill } from '../services/skills.service';
 import { TauriService } from '../services/tauri.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
@@ -18,21 +19,39 @@ function testSkill(overrides: Partial<Skill>): Skill {
   };
 }
 
+/**
+ * Test stub that mirrors the SkillsService public API. Tests drive state
+ * via the writable `discovered` signal directly — no reaching into private
+ * fields, no type casts.
+ */
+class SkillsServiceStub {
+  readonly discovered: WritableSignal<readonly Skill[]> = signal<readonly Skill[]>([]);
+  refreshResult: readonly Skill[] = [];
+  async refresh(): Promise<readonly Skill[]> {
+    this.discovered.set(this.refreshResult);
+    return this.refreshResult;
+  }
+}
+
 describe('SkillsViewComponent', () => {
   let component: SkillsViewComponent;
   let fixture: ComponentFixture<SkillsViewComponent>;
   let mockTauri: MockTauriService;
+  let svc: SkillsServiceStub;
 
   beforeEach(async () => {
     mockTauri = new MockTauriService();
+    svc = new SkillsServiceStub();
+    // Default to the production fallback so the empty-state and table tests
+    // reflect the real consumer contract.
+    svc.refreshResult = HARDCODED_FALLBACK;
     await TestBed.configureTestingModule({
       imports: [SkillsViewComponent],
-      providers: [{ provide: TauriService, useValue: mockTauri }],
+      providers: [
+        { provide: TauriService, useValue: mockTauri },
+        { provide: SkillsService, useValue: svc },
+      ],
     }).compileComponents();
-
-    // Reset the singleton's signal between tests so state does not leak.
-    const svc = TestBed.inject(SkillsService);
-    (svc as unknown as { _discovered: { set(v: readonly Skill[]): void } })._discovered.set([]);
 
     fixture = TestBed.createComponent(SkillsViewComponent);
     component = fixture.componentInstance;
@@ -44,12 +63,8 @@ describe('SkillsViewComponent', () => {
   });
 
   it('renders the empty-state placeholder when the catalog is empty', async () => {
-    // Stub SkillsService.refresh to keep the internal signal empty.
-    const svc = TestBed.inject(SkillsService);
-    svc.refresh = async () => [];
-    (svc as unknown as { _discovered: { set(v: readonly Skill[]): void } })._discovered.set([]);
+    svc.refreshResult = [];
     await component.ngOnInit();
-    (svc as unknown as { _discovered: { set(v: readonly Skill[]): void } })._discovered.set([]);
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
     expect(svc.discovered().length).toBe(0);
@@ -145,16 +160,7 @@ describe('SkillsViewComponent', () => {
   });
 
   it('shows a dash for empty descriptions', async () => {
-    // Stub refresh so ngOnInit leaves the custom list intact, and seed a single
-    // entry with an empty description.
-    const svc = TestBed.inject(SkillsService);
-    const modified: readonly Skill[] = [
-      testSkill({ id: 'no-desc', name: 'no-desc', description: '' }),
-    ];
-    svc.refresh = async () => modified;
-    (svc as unknown as { _discovered: { set(v: readonly Skill[]): void } })._discovered.set(
-      modified
-    );
+    svc.refreshResult = [testSkill({ id: 'no-desc', name: 'no-desc', description: '' })];
     await component.ngOnInit();
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();

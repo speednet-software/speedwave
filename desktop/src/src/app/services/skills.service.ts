@@ -29,7 +29,7 @@ export interface Skill {
  * Mirrors Feature 1 fallback in the terminal-minimal implementation prompt so
  * the UI always has something to render before the real discovery lands.
  */
-const HARDCODED_FALLBACK: readonly Skill[] = [
+export const HARDCODED_FALLBACK: readonly Skill[] = [
   {
     id: 'help',
     name: 'help',
