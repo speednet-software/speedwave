@@ -7,18 +7,7 @@ import {
   computed,
   signal,
 } from '@angular/core';
-
-/** Discriminates visual treatment and action behaviour for an error block. */
-export type ErrorBlockKind =
-  | 'rate_limit'
-  | 'network'
-  | 'session_exited'
-  | 'broken_pipe'
-  | 'no_active_project'
-  | 'session_starting'
-  | 'auth_required'
-  | 'stopped_by_user'
-  | 'generic';
+import type { ErrorBlockKind } from '../../models/chat';
 
 /** Visual shape for an error block — drives which CSS classes get applied. */
 type ErrorShape = 'red-timeline' | 'gray-timeline' | 'amber-callout';
@@ -48,25 +37,7 @@ const ERROR_META: Record<ErrorBlockKind, { shape: ErrorShape; label: string; act
   },
 };
 
-/**
- * Renders a chat error in one of three shapes:
- *   - passive-red timeline-event for rate_limit / network / session_exited /
- *     broken_pipe / generic (no background, no ring, left border only).
- *   - amber callout-box for no_active_project / session_starting / auth_required
- *     with an inline action button (emits `actioned`).
- *   - muted gray timeline-event for stopped_by_user (informational only).
- *
- * ARIA: wrapper carries `role="alert"` and `aria-live="assertive"` so screen readers
- * announce the error as soon as it appears.
- *
- * Note on API shape: classical `@Input` / `@Output` decorators are used so the
- * current `npx vitest run` harness can resolve inputs without the Angular
- * compiler plugin. See the `AskUserBlockComponent` docstring for context.
- *
- * Wave 1 design-system tokens (`--amber`, `--ink-mute`, `--ink-dim`, `--accent`,
- * `--line`) may not yet be merged into the global stylesheet — fallback hex
- * values keep the component usable in isolation.
- */
+/** Renders a chat error in one of three shapes: red timeline (passive), amber callout (actionable), gray timeline (muted). */
 @Component({
   selector: 'app-error-block',
   standalone: true,

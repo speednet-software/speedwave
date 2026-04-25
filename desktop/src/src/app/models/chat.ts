@@ -47,12 +47,10 @@ export interface UsageInfo {
 }
 
 /**
- * Optional discriminator for error-block visual variants. The full set of
- * recognised values lives in `chat/blocks/error-block.component.ts`'s
- * `ErrorBlockKind` type — keep them in sync. `undefined` (or any unknown
- * value) renders as the generic red-timeline variant.
+ * Optional discriminator for error-block visual variants. `undefined` (or any
+ * unknown value) renders as the generic red-timeline variant.
  */
-export type MessageBlockErrorKind =
+export type ErrorBlockKind =
   | 'rate_limit'
   | 'network'
   | 'session_exited'
@@ -69,7 +67,7 @@ export type MessageBlock =
   | { type: 'thinking'; content: string; collapsed: boolean }
   | { type: 'tool_use'; tool: ToolUseBlock }
   | { type: 'ask_user'; question: AskUserQuestionBlock }
-  | { type: 'error'; content: string; kind?: MessageBlockErrorKind }
+  | { type: 'error'; content: string; kind?: ErrorBlockKind }
   | {
       type: 'permission_prompt';
       command: string;

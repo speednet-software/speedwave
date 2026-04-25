@@ -177,6 +177,36 @@ describe('AskUserBlockComponent', () => {
     expect(spy).toHaveBeenCalledWith({ toolId: 'toolu_ask1', values: ['apple'] });
   });
 
+  it('shows visual hint and mutes textarea when option is selected and freeform is non-empty', () => {
+    setQuestion(makeQuestion({ multi_select: false }));
+    component.toggleOption('apple');
+    component.freeformText.set('typed text');
+    fixture.detectChanges();
+
+    expect(component.freeformSilenced()).toBe(true);
+    expect(el().querySelector('[data-testid="ask-freeform-hint"]')).toBeTruthy();
+    const textarea = el().querySelector('[data-testid="ask-input"]') as HTMLTextAreaElement | null;
+    expect(textarea?.classList.contains('freeform-muted')).toBe(true);
+  });
+
+  it('hides freeform hint when only the option is selected (no freeform text)', () => {
+    setQuestion(makeQuestion({ multi_select: false }));
+    component.toggleOption('apple');
+    fixture.detectChanges();
+
+    expect(component.freeformSilenced()).toBe(false);
+    expect(el().querySelector('[data-testid="ask-freeform-hint"]')).toBeNull();
+  });
+
+  it('hides freeform hint when only freeform is filled (no option selected)', () => {
+    setQuestion(makeQuestion({ multi_select: false }));
+    component.freeformText.set('typed');
+    fixture.detectChanges();
+
+    expect(component.freeformSilenced()).toBe(false);
+    expect(el().querySelector('[data-testid="ask-freeform-hint"]')).toBeNull();
+  });
+
   it('onFreeformEnter submits on plain Enter', () => {
     setQuestion(makeQuestion({ options: [] }));
     const spy = vi.fn();

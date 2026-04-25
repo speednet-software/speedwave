@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { ErrorBlockComponent, type ErrorBlockKind } from './error-block.component';
+import { ErrorBlockComponent } from './error-block.component';
+import type { ErrorBlockKind } from '../../models/chat';
 
 describe('ErrorBlockComponent', () => {
   let component: ErrorBlockComponent;

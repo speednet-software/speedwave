@@ -143,6 +143,30 @@ describe('ChatMessageComponent', () => {
     expect(el.textContent).toContain('Pick a fruit');
   });
 
+  it('renders permission_prompt block', () => {
+    component.blocks = [{ type: 'permission_prompt', command: 'rm -rf /tmp' }];
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="permission-prompt"]')).not.toBeNull();
+  });
+
+  it('emits permissionDecided when child emits decided', () => {
+    let emitted:
+      | { blockIndex: number; decision: 'allow_once' | 'allow_always' | 'deny' }
+      | undefined;
+    component.permissionDecided.subscribe(
+      (evt: { blockIndex: number; decision: 'allow_once' | 'allow_always' | 'deny' }) => {
+        emitted = evt;
+      }
+    );
+    component.blocks = [{ type: 'permission_prompt', command: 'rm -rf /tmp' }];
+    fixture.detectChanges();
+    const allowOnce = fixture.nativeElement.querySelector(
+      '[data-testid="permission-allow-once"]'
+    ) as HTMLButtonElement;
+    allowOnce.click();
+    expect(emitted).toEqual({ blockIndex: 0, decision: 'allow_once' });
+  });
+
   it('emits questionAnswered when ask_user child emits answered', () => {
     const blocks: MessageBlock[] = [
       {

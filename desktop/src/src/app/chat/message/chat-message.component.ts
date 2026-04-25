@@ -78,25 +78,26 @@ export class ChatMessageComponent {
     decision: 'allow_once' | 'allow_always' | 'deny';
   }>();
 
-  /** Forwards permission-prompt decisions upstream with the block index. */
-  onPermissionDecided(
-    blockIndex: number,
-    decision: 'allow_once' | 'allow_always' | 'deny'
-  ): void {
+  /**
+   * Forwards a permission decision upstream tagged with the block's index.
+   * @param blockIndex - Index of the permission_prompt block in the parent's blocks array.
+   * @param decision - The decision the user pressed (allow_once, allow_always, or deny).
+   */
+  onPermissionDecided(blockIndex: number, decision: 'allow_once' | 'allow_always' | 'deny'): void {
     this.permissionDecided.emit({ blockIndex, decision });
   }
 
   /**
-   * Narrows to tool_use.
-   * @param block - The message block to narrow.
+   * Type guard cast: narrows a MessageBlock to its `tool_use` variant for the template.
+   * @param block - The block to narrow.
    */
   asToolBlock(block: MessageBlock): Extract<MessageBlock, { type: 'tool_use' }> {
     return block as Extract<MessageBlock, { type: 'tool_use' }>;
   }
 
   /**
-   * Narrows to ask_user.
-   * @param block - The message block to narrow.
+   * Type guard cast: narrows a MessageBlock to its `ask_user` variant for the template.
+   * @param block - The block to narrow.
    */
   asAskUserBlock(block: MessageBlock): Extract<MessageBlock, { type: 'ask_user' }> {
     return block as Extract<MessageBlock, { type: 'ask_user' }>;

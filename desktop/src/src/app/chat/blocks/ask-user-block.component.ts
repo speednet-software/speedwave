@@ -9,30 +9,7 @@ import {
 } from '@angular/core';
 import type { AskUserQuestionBlock } from '../../models/chat';
 
-/**
- * Interactive question prompt from Claude — violet callout-box per the terminal-minimal
- * design system. Renders three variants:
- *   - multi-select: options are toggle buttons; submit with "Send".
- *   - single + freeform: option buttons plus textarea; submit either the chosen option
- *     or the freeform text.
- *   - answered: disabled controls and locked badges showing the user's selection.
- *
- * ARIA: `<fieldset>` + `<legend>` groups the question with its controls; option buttons
- * expose `aria-pressed` for toggle semantics.
- *
- * Note on API shape: this component uses classical `@Input` / `@Output` decorators
- * even though best-practices.md prefers the newer `input()` / `output()` signal APIs.
- * The project's current `npx vitest run` setup does not run the Angular compiler,
- * which means `fixture.componentRef.setInput(...)` and template-driven signal inputs
- * are not recognised at runtime. Once the test harness adopts the Angular vitest
- * plugin, this component (and the sibling error / permission components) can move
- * to the signal API in a follow-up sweep.
- *
- * Wave 1 design-system tokens (`--violet`, `--ink`, `--ink-dim`, `--line`,
- * `--line-strong`, `--bg-1`, `--bg-2`, `--accent`, `--on-accent`) may not yet be
- * merged into the global stylesheet — fallback hex values keep the component
- * usable in isolation.
- */
+/** Interactive question prompt — renders multi-select, single+freeform, or answered (locked) variants and emits `answered`. */
 @Component({
   selector: 'app-ask-user-block',
   standalone: true,
@@ -95,6 +72,13 @@ import type { AskUserQuestionBlock } from '../../models/chat';
         border: 1px solid var(--line, #1a2030);
         background-color: var(--bg-2, #10141f);
         color: var(--ink, #e8edf7);
+      }
+      .freeform-muted {
+        opacity: 0.5;
+        border-color: var(--line-strong, #252c42);
+      }
+      .freeform-hint {
+        color: var(--ink-mute, #707a96);
       }
       .send-btn {
         background-color: var(--accent, #ff4d6d);
@@ -179,12 +163,21 @@ import type { AskUserQuestionBlock } from '../../models/chat';
               data-testid="ask-input"
               [id]="freeformId"
               class="freeform mono w-full rounded px-3 py-1 text-[12px] resize-y min-h-[2.25rem]"
+              [class.freeform-muted]="freeformSilenced()"
               rows="1"
               placeholder="or type your own answer..."
               [value]="freeformText()"
               (input)="onFreeformInput($event)"
               (keydown.enter)="onFreeformEnter($event)"
             ></textarea>
+            @if (freeformSilenced()) {
+              <span
+                data-testid="ask-freeform-hint"
+                class="freeform-hint mono mt-1 block text-[11px]"
+              >
+                freeform input ignored when option selected
+              </span>
+            }
           </div>
         }
 
@@ -251,6 +244,11 @@ export class AskUserBlockComponent {
     const v = this.variant();
     return v === 'single-freeform' || v === 'freeform';
   });
+
+  /** Freeform value will be silently dropped on submit because an option is also selected. */
+  readonly freeformSilenced = computed(
+    () => this.selected().size > 0 && this.freeformText().trim().length > 0
+  );
 
   /** Whether the Send button may fire. */
   readonly canSend = computed(() => {

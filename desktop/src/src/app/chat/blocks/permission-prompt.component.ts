@@ -10,26 +10,7 @@ import {
 /** Decision emitted by the permission prompt. */
 export type PermissionDecision = 'allow_once' | 'allow_always' | 'deny';
 
-/**
- * Amber callout asking the user to authorise a potentially dangerous tool invocation.
- * Renders the command in a monospaced code block and three buttons: allow once (primary),
- * allow always (secondary), deny (destructive).
- *
- * ARIA: `role="alertdialog"` with `aria-labelledby` (the header) and
- * `aria-describedby` (the command pre), so screen readers announce the
- * prompt as an action-required interruption inline in the chat list.
- * Focus management is left to the parent — typical usage mounts one prompt at a time
- * inside the chat list, and the parent handles focus after decision.
- *
- * Note on API shape: classical `@Input` / `@Output` decorators are used so the
- * current `npx vitest run` harness can resolve inputs without the Angular
- * compiler plugin. See the `AskUserBlockComponent` docstring for context.
- *
- * Wave 1 design-system tokens (`--amber`, `--line`, `--line-strong`, `--bg-1`,
- * `--bg-2`, `--bg-3`, `--accent`, `--on-accent`, `--ink`, `--ink-dim`) may not yet
- * be merged into the global stylesheet — fallback hex values keep the component
- * usable in isolation.
- */
+/** Amber callout asking the user to authorise a tool invocation; emits `decided` with allow_once / allow_always / deny. */
 @Component({
   selector: 'app-permission-prompt',
   standalone: true,
