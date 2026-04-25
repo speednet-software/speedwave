@@ -94,7 +94,7 @@ The frontend calls this on chat-init for the active session. Internally it resol
 
 ### Neutral
 
-- Requires one `Arc<MsgStore>` kept alive per active session. At 100 MB per session and a typical user running 1–3 sessions simultaneously, that is ≤300 MB in the worst case — acceptable for a desktop app with multi-GB RAM budgets.
+- Requires one `Arc<MsgStore>` kept alive per active session. At 100 MiB per session and a typical user running 1–3 sessions simultaneously, that is ≤300 MiB in the worst case — acceptable for a desktop app with multi-GB RAM budgets.
 - Adds a dependency on `futures::stream::BoxStream`[^4] to type-erase the chained history-then-live stream — standard pattern, no new dependency family.
 
 ### Negative

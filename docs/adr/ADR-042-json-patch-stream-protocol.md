@@ -51,7 +51,7 @@ Never hand-craft a `Patch` inline in a handler; every call site goes through a t
 - `ConversationPatch::set_streaming(is_streaming) -> Patch`
 - `ConversationPatch::set_pending_queue(queued) -> Patch` (ADR-045)
 
-Future-wave additions (state-tree fields already present, helpers to be added alongside the feature): a `set_session_totals(totals)` helper once ADR-042 Feature 3 lands, and block-level permission-approval helpers once interactive permission prompts ship. Both follow the same pattern — one helper per state-tree path, no hand-crafted paths at call sites.
+Future-wave additions (state-tree fields already present, helpers to be added alongside the feature): a `set_session_totals(totals)` helper once Feature 3 lands, and block-level permission-approval helpers once interactive permission prompts ship. Both follow the same pattern — one helper per state-tree path, no hand-crafted paths at call sites.
 
 These mirror vibe-kanban's `ConversationPatch::{add_normalized_entry, replace, remove}` helpers[^3] with Speedwave-specific paths. Each helper returns a well-formed `Patch`; callers cannot construct an invalid path by accident.
 
