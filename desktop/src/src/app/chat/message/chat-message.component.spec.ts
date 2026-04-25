@@ -128,14 +128,40 @@ describe('ChatMessageComponent', () => {
     expect(bubble.classList.contains('max-w-[85%]')).toBe(true);
   });
 
-  it('shows streaming cursor when streaming', () => {
-    component.blocks = [{ type: 'text', content: 'partial...' }];
+  it('shows the block-level cursor when streaming and last block is NOT text', () => {
+    // The per-text-block streaming caret renders inside <app-text-block>;
+    // the parent block-level cursor is suppressed when the last block is a
+    // text block to avoid a double-cursor visual bug.
+    component.blocks = [
+      {
+        type: 'tool_use',
+        tool: {
+          type: 'tool_use',
+          tool_id: 't1',
+          tool_name: 'Read',
+          input_json: '{}',
+          status: 'running',
+          collapsed: true,
+        },
+      },
+    ];
     component.role = 'assistant';
     component.streaming = true;
     fixture.detectChanges();
 
     const cursor = fixture.nativeElement.querySelector('[data-testid="cursor"]');
     expect(cursor).not.toBeNull();
+  });
+
+  it('hides the block-level cursor when streaming and last block IS text (per-block caret takes over)', () => {
+    component.blocks = [{ type: 'text', content: 'partial...' }];
+    component.role = 'assistant';
+    component.streaming = true;
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-testid="cursor"]')).toBeNull();
+    // The per-text-block caret is the one visible during text streaming.
+    expect(fixture.nativeElement.querySelector('[data-testid="streaming-caret"]')).not.toBeNull();
   });
 
   it('does not show cursor when not streaming', () => {

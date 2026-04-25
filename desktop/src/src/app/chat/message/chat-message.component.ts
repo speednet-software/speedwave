@@ -57,7 +57,7 @@ import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
           }
         }
       }
-      @if (streaming) {
+      @if (streaming && !lastBlockIsText) {
         <span data-testid="cursor" class="inline-block animate-blink text-sw-accent">&#x2588;</span>
       }
     </div>
@@ -68,6 +68,15 @@ export class ChatMessageComponent {
   @Input() role: 'user' | 'assistant' = 'assistant';
   @Input() streaming = false;
   @Output() questionAnswered = new EventEmitter<{ toolId: string; values: string[] }>();
+
+  /**
+   * True when the last block is a text block — the per-text-block streaming
+   * caret already renders inside it, so the parent block-level cursor must
+   * be suppressed to avoid a double-cursor visual bug during streaming.
+   */
+  get lastBlockIsText(): boolean {
+    return this.blocks.length > 0 && this.blocks[this.blocks.length - 1].type === 'text';
+  }
 
   /**
    * Narrows to tool_use.

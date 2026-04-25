@@ -1,7 +1,5 @@
 import { ChangeDetectionStrategy, Component, Input, OnInit, signal } from '@angular/core';
 
-let nextId = 0;
-
 /** Collapsible block showing Claude's internal reasoning (timeline-event styling). */
 @Component({
   selector: 'app-thinking-block',
@@ -11,7 +9,7 @@ let nextId = 0;
   template: `
     <div
       class="border-l-2 pl-4"
-      style="border-color: color-mix(in srgb, var(--violet, #a78bfa) 50%, transparent);"
+      style="border-color: rgba(167,139,250,0.5); border-color: color-mix(in srgb, var(--violet, #a78bfa) 50%, transparent);"
     >
       <button
         type="button"
@@ -44,8 +42,10 @@ export class ThinkingBlockComponent implements OnInit {
   /** Initial collapsed state. Defaults to collapsed. */
   @Input() collapsedDefault = true;
 
+  /** Class-scoped counter avoids module-level mutable state that survives test runs. */
+  private static instanceCounter = 0;
   /** Stable DOM id so aria-controls on the toggle pairs with the content region. */
-  readonly panelId = `thinking-panel-${++nextId}`;
+  readonly panelId = `thinking-panel-${++ThinkingBlockComponent.instanceCounter}`;
 
   /** Reactive collapsed state; seeded from collapsedDefault, toggled on click. */
   readonly collapsed = signal<boolean>(true);
