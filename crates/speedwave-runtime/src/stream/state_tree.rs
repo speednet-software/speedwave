@@ -11,7 +11,11 @@ use serde::{Deserialize, Serialize};
 /// Every Tauri event emitted from Rust is a `json_patch::Patch` applied to a
 /// value of this type (see ADR-042). Reducer must stay pure: history replay +
 /// patch sequence must converge on the same state regardless of delivery time.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+/// Manual `Debug` is implemented below to redact `session_id`; per
+/// `.claude/rules/logging.md`, structs containing per-session identifiers
+/// must redact them in `Debug` output so accidental `format!("{state:?}")`
+/// calls cannot leak them to logs.
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq)]
 pub struct ConversationState {
     /// Claude Code session identifier. `None` before the first `SystemInit`.
     #[serde(default)]
@@ -33,6 +37,19 @@ pub struct ConversationState {
     /// `true` while a turn is being streamed from Claude Code.
     #[serde(default)]
     pub is_streaming: bool,
+}
+
+impl std::fmt::Debug for ConversationState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConversationState")
+            .field("session_id", &self.session_id.as_ref().map(|_| "…"))
+            .field("entries", &self.entries)
+            .field("session_totals", &self.session_totals)
+            .field("pending_queue", &self.pending_queue)
+            .field("model", &self.model)
+            .field("is_streaming", &self.is_streaming)
+            .finish()
+    }
 }
 
 /// One entry in the conversation — user or assistant. Tool uses and errors

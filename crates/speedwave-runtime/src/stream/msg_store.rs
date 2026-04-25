@@ -35,7 +35,14 @@ const BROADCAST_CAPACITY: usize = 1024;
 /// — a newtype over `Vec<PatchOperation>` that serializes as a JSON array.
 /// Internally tagged enums cannot embed a tag field into an array; the
 /// `JsonPatch` variant would silently fail to serialize otherwise.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `Debug` is implemented manually rather than derived: `session_id`
+/// values are not secrets in the sense of API keys, but they are
+/// per-session identifiers that have no place in diagnostic logs (per
+/// `.claude/rules/logging.md`). The manual impl redacts `session_id` to
+/// `"…"` so accidental `format!("{msg:?}")` calls in handlers, panic
+/// hooks, or test assertions cannot leak it.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum LogMsg {
     /// A JSON-Patch to apply to the current `ConversationState`.
@@ -49,6 +56,20 @@ pub enum LogMsg {
     },
     /// Session lifecycle marker — the session has ended.
     SessionEnded,
+}
+
+impl std::fmt::Debug for LogMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::JsonPatch(p) => f.debug_tuple("JsonPatch").field(p).finish(),
+            Self::Resync(_) => f.debug_tuple("Resync").field(&"<state>").finish(),
+            Self::SessionStarted { .. } => f
+                .debug_struct("SessionStarted")
+                .field("session_id", &"…")
+                .finish(),
+            Self::SessionEnded => f.write_str("SessionEnded"),
+        }
+    }
 }
 
 /// Approximate the serialized byte cost of a message for the history cap.
