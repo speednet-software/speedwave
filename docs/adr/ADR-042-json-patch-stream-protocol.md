@@ -43,14 +43,15 @@ The Rust type is authoritative. The TypeScript equivalent is generated via `ts-r
 
 Never hand-craft a `Patch` inline in a handler; every call site goes through a typed builder that knows the correct path for each mutation:
 
-- `ConversationPatch::add_entry(index, entry) -> Patch`
-- `ConversationPatch::replace_entry(index, entry) -> Patch`
-- `ConversationPatch::append_text(index, delta) -> Patch` (token streaming — `Replace` at `/entries/<index>/blocks/<last>/content`)
-- `ConversationPatch::remove_entry(index) -> Patch` (retry — ADR-046)
-- `ConversationPatch::set_pending(index, approval) -> Patch`
-- `ConversationPatch::set_entry_meta(index, meta) -> Patch` (Feature 3)
-- `ConversationPatch::set_session_totals(totals) -> Patch`
+- `ConversationPatch::add_entry(entry_idx, entry) -> Patch`
+- `ConversationPatch::replace_entry(entry_idx, entry) -> Patch`
+- `ConversationPatch::replace_text(entry_idx, block_idx, full_text) -> Patch` (token streaming — `Replace` at `/entries/<entry_idx>/blocks/<block_idx>/content`; RFC 6902 has no "append" op, so the caller accumulates the full text and passes it; the helper does not infer either coordinate)
+- `ConversationPatch::remove_entry(entry_idx) -> Patch` (retry — ADR-046, trailing entries only)
+- `ConversationPatch::replace_meta(entry_idx, meta) -> Patch` (Feature 3)
+- `ConversationPatch::set_streaming(is_streaming) -> Patch`
 - `ConversationPatch::set_pending_queue(queued) -> Patch` (ADR-045)
+
+Future-wave additions (state-tree fields already present, helpers to be added alongside the feature): a `set_session_totals(totals)` helper once ADR-042 Feature 3 lands, and block-level permission-approval helpers once interactive permission prompts ship. Both follow the same pattern — one helper per state-tree path, no hand-crafted paths at call sites.
 
 These mirror vibe-kanban's `ConversationPatch::{add_normalized_entry, replace, remove}` helpers[^3] with Speedwave-specific paths. Each helper returns a well-formed `Patch`; callers cannot construct an invalid path by accident.
 
@@ -101,14 +102,14 @@ Patches arrive via the MsgStore subscription (ADR-043), are passed to a single p
 ### Negative
 
 - JSON Patch is order-sensitive: applying a list of patches out of order can corrupt the tree. Relying on the ordered stream from MsgStore (ADR-043) — `tokio::broadcast`[^9] delivers messages in send order to each receiver — preserves the guarantee, but a future transport change (UDP, multi-source merge) would break it. If that day comes, patches need a monotonic `seq` field.
-- Pure-`Replace` patches at large paths (replacing a whole block tree) are O(depth) in both encode and apply cost. For Speedwave's entry sizes this is negligible, but a runaway tool result (100 MB JSON) could slow the UI. Guarded by the MsgStore 100 MB history cap (ADR-043) and the established block size limits in the normalizer.
+- Pure-`Replace` patches at large paths (replacing a whole block tree) are O(depth) in both encode and apply cost. For Speedwave's entry sizes this is negligible, but a runaway tool result (100 MiB JSON) could slow the UI. Guarded by the MsgStore 100 MiB history cap (ADR-043) and the established block size limits in the normalizer.
 - The stream still emits `Finished` and `SessionReset` envelopes alongside `JsonPatch`. These are genuinely out-of-band (end-of-stream signals, not state mutations) so collapsing them into patches would complicate the reducer for no gain — accepted asymmetry.
 
 ## Known Limitations
 
 - `json-patch` 4.x (current latest) is used on Rust.[^4] Any future major version with changed error semantics requires re-running the conformance tests.
 - `fast-json-patch`[^5] has known performance hotspots in `applyOperation` for very large arrays; Speedwave's per-message block arrays are short, but if an assistant turn ever emits thousands of blocks, consider `rfc6902`[^10] as an alternative.
-- Binary/large-blob block content (images, file contents) must be pre-chunked in the state-tree (e.g. a blob reference, not an inline base64 string in the patch). Otherwise a single patch can blow the 100 MB history cap in one shot.
+- Binary/large-blob block content (images, file contents) must be pre-chunked in the state-tree (e.g. a blob reference, not an inline base64 string in the patch). Otherwise a single patch can blow the 100 MiB history cap in one shot.
 
 ## References
 

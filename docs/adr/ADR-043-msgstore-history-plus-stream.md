@@ -14,9 +14,9 @@ The stream of JSON Patches emitted by a live Claude Code session (ADR-042) must 
 
 A naive design — one `tokio::mpsc` channel per session — handles the live case but fails the others: a late subscriber sees nothing before its subscription, and there is no way to replay. A naive broadcast-only design with `tokio::broadcast`[^1] handles multi-consumer but the channel is bounded and a slow consumer causes `RecvError::Lagged`[^1] — with no replay, the lagged consumer's state-tree is now inconsistent with the publisher.
 
-BloopAI/vibe-kanban's solution is a small store that combines both: a `tokio::broadcast`[^1] sender for live events and a bounded `VecDeque` for replay, exposed as `history_plus_stream()` which yields history first and then seamlessly transitions to live.[^2] The history is capped by serialized byte budget (100 MB in vibe-kanban[^2]), not entry count, because individual entries vary from a few hundred bytes (a text delta) to several megabytes (a large tool result). Lagged subscribers receive an explicit `Resync` patch (a snapshot of the current state-tree) rather than a crash.
+BloopAI/vibe-kanban's solution is a small store that combines both: a `tokio::broadcast`[^1] sender for live events and a bounded `VecDeque` for replay, exposed as `history_plus_stream()` which yields history first and then seamlessly transitions to live.[^2] The history is capped by a serialized byte budget (`HISTORY_BYTES = 100_000 * 1024` ≈ 97.7 MiB in vibe-kanban[^2]), not entry count, because individual entries vary from a few hundred bytes (a text delta) to several megabytes (a large tool result). Lagged subscribers receive an explicit `Resync` patch (a snapshot of the current state-tree) rather than a crash.
 
-Speedwave adopts this design verbatim: same API shape, same 100 MB cap, same lag-handling strategy.
+Speedwave adopts the same design with a round 100 MiB cap (`100 * 1024 * 1024` = 104,857,600 bytes) — close to vibe-kanban's value but a more natural constant. Same API shape, same lag-handling strategy.
 
 ## Decision
 
@@ -45,8 +45,11 @@ impl MsgStore {
     // atomically under the history lock so no message is missed between
     // the last history entry and the first live event.
 
-    pub fn subscribe_live(&self) -> broadcast::Receiver<LogMsg>;
-    // Live-only subscription. Used internally; most callers want history_plus_stream.
+    pub(crate) fn subscribe_live(&self) -> broadcast::Receiver<LogMsg>;
+    // Live-only subscription — visibility restricted to the runtime crate.
+    // External callers must use `history_plus_stream` to avoid missing replay
+    // on (re)connect; a direct broadcast receiver sees only events sent after
+    // `subscribe` and would silently drop everything already in history.
 
     pub fn finish(&self);
     // Emits LogMsg::Finished on the broadcast channel. Drops the sender; new
@@ -56,7 +59,7 @@ impl MsgStore {
 
 `LogMsg` is defined in ADR-042.
 
-**History cap — 100 MB.** Matching vibe-kanban's `HISTORY_BYTES = 100_000 * 1024` constant[^2]. Sized per serialized `LogMsg` bytes (via `serde_json::to_vec` length at push time — cheap because the payload is already JSON). On overflow, drop from the front (oldest first) until under the cap. Never drop from the middle; never drop a patch that mutates state without also dropping all preceding patches to that path (dropping from the front preserves this invariant because patches are ordered).
+**History cap — 100 MiB (`DEFAULT_HISTORY_BYTES = 100 * 1024 * 1024` = 104,857,600 bytes).** Close to — but not identical to — vibe-kanban's `HISTORY_BYTES = 100_000 * 1024` (~97.7 MiB)[^2]; Speedwave rounds to a power-of-two MiB for readability in logs and debugging. Sized per serialized `LogMsg` bytes (via `serde_json::to_vec` length at push time — cheap because the payload is already JSON). On overflow, drop from the front (oldest first) until under the cap. Never drop from the middle; never drop a patch that mutates state without also dropping all preceding patches to that path (dropping from the front preserves this invariant because patches are ordered).
 
 **Lag handling — Resync patch.** A frontend subscriber that lags beyond the broadcast channel capacity receives `broadcast::error::RecvError::Lagged(n)`[^1]. The subscription wrapper catches it and:
 
@@ -85,7 +88,7 @@ The frontend calls this on chat-init for the active session. Internally it resol
 
 - Second desktop windows, tab reopens, and diagnostic exports all work out of the box — each caller gets a consistent snapshot through the same API.
 - Backpressure is explicit and recoverable: slow consumers degrade gracefully via `Resync` rather than crashing or silently drifting from the publisher's state.
-- The 100 MB cap bounds memory per session regardless of conversation length or tool-output size. A runaway tool that emits 500 MB of patches fills history up to the cap and then rolls, leaving the live stream unaffected.
+- The 100 MiB cap bounds memory per session regardless of conversation length or tool-output size. A runaway tool that emits 500 MiB of patches fills history up to the cap and then rolls, leaving the live stream unaffected.
 - Cleanly layered: ADR-042 defines the patch payload, ADR-043 defines the transport, ADR-044 defines the addressing — each can be understood in isolation.
 - Direct parallel to a production implementation (vibe-kanban `MsgStore`[^2]) — when we hit a corner case the reference is readable, and divergences from their behavior are intentional and documented.
 
@@ -104,7 +107,7 @@ The frontend calls this on chat-init for the active session. Internally it resol
 
 - `broadcast::Receiver::recv`[^1] returns `Lagged(n)` once per lag event and then resumes; the subscription wrapper must call `recv` in a loop to observe and handle the lag. An inattentive implementation that unwraps the error will panic — the wrapper is mandatory, not optional.
 - The store does not persist across process restarts. On app relaunch, sessions that were active at quit are not replayable. Persistence is deliberately out of scope; if a user needs a transcript, export from the active session is the supported path.
-- `finish()` must be called exactly once per session; a double-finish drops the `Sender` twice (second drop is a no-op in practice, but assert in debug). Not an `FnOnce` API because the session owner may call it from a `Drop` impl and from an explicit shutdown path — make the implementation idempotent.
+- `finish()` may be called from both a `Drop` impl and an explicit shutdown path; the implementation is idempotent — the second call is a no-op. Callers should not rely on double-calling as a feature.
 
 ## References
 
