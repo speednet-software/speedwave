@@ -139,8 +139,13 @@ pub async fn retry_last_turn(
     app_handle: AppHandle,
     state: tauri::State<'_, SharedChatSession>,
 ) -> Result<(), RetryError> {
+    // Log only a short prefix of the session id to address CodeQL
+    // 'cleartext-logging': the desktop log file is readable by any
+    // process running as the same user, so a full UUID lets a co-resident
+    // process resume an arbitrary session.
     log::info!(
-        "retry_last_turn: session={session_id} user_uuid_len={}",
+        "retry_last_turn: session_prefix={} user_uuid_len={}",
+        &session_id[..8.min(session_id.len())],
         user_uuid.len()
     );
     let session_arc = state.inner().clone();

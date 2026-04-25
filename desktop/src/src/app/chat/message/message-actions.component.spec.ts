@@ -126,7 +126,11 @@ describe('MessageActionsComponent', () => {
   });
 
   it('disables retry button when chat.isStreaming is true', () => {
+    // The real ChatStateService.canRetryLastAssistant() returns false while
+    // streaming (it walks through findRetryAnchor() which has the guard).
+    // Mirror that contract in the stub.
     chat.isStreaming = true;
+    chat.canRetryLastAssistant = vi.fn().mockReturnValue(false);
     refresh();
     expect(retryButton()?.disabled).toBe(true);
   });

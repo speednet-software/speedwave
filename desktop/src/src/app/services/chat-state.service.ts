@@ -660,7 +660,12 @@ export class ChatStateService {
    * `null` when no such pair exists, when streaming, or when the session id
    * is missing.
    */
-  private findRetryAnchor(): { sessionId: string; userUuid: string } | null {
+  private findRetryAnchor(): {
+    sessionId: string;
+    userUuid: string;
+    lastAssistantIdx: number;
+    userIdx: number;
+  } | null {
     if (this.isStreaming) return null;
     const sessionId = this._sessionStats?.session_id;
     if (!sessionId) return null;
@@ -678,7 +683,7 @@ export class ChatStateService {
       const m = this._messages[i];
       if (m.role !== 'user') continue;
       if (!m.uuid || (m.uuid_status && m.uuid_status !== 'Committed')) return null;
-      return { sessionId, userUuid: m.uuid };
+      return { sessionId, userUuid: m.uuid, lastAssistantIdx, userIdx: i };
     }
     return null;
   }
@@ -696,23 +701,7 @@ export class ChatStateService {
   async retryLastAssistant(): Promise<void> {
     const anchor = this.findRetryAnchor();
     if (!anchor) return;
-    const { sessionId, userUuid } = anchor;
-
-    let lastAssistantIdx = -1;
-    for (let i = this._messages.length - 1; i >= 0; i -= 1) {
-      if (this._messages[i].role === 'assistant') {
-        lastAssistantIdx = i;
-        break;
-      }
-    }
-    let userIdx = -1;
-    for (let i = lastAssistantIdx - 1; i >= 0; i -= 1) {
-      if (this._messages[i].role === 'user' && this._messages[i].uuid === userUuid) {
-        userIdx = i;
-        break;
-      }
-    }
-    if (userIdx < 0) return;
+    const { sessionId, userUuid, lastAssistantIdx, userIdx } = anchor;
 
     const trimmed = this._messages.slice(0, lastAssistantIdx);
     trimmed[userIdx] = { ...trimmed[userIdx], edited_at: Date.now() };
