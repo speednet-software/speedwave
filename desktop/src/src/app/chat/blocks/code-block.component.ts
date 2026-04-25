@@ -1,27 +1,6 @@
 import { ChangeDetectionStrategy, Component, Input, OnDestroy, signal } from '@angular/core';
 
-/**
- * Renders a terminal-minimal code block.
- *
- * Layout follows the mockup's `overflow-hidden rounded ring-1 ring-line bg-bg-1`
- * wrapper with an optional file-header row (no internal `border-b` — rings clip
- * cleanly at the corners without it).
- *
- * The `code` input is rendered verbatim inside a `<pre><code>` pair; no syntax
- * highlighting is applied here (the marked pipeline in `text-block.component`
- * already handles fenced code blocks in prose — this component is for callers
- * that need a standalone snippet with a file path and copy button).
- *
- * When `copyable` is true, clicking the copy button writes `code` to the
- * clipboard and shows a "copied" confirmation for 1.5s via a local signal.
- *
- * Note on inputs: `@Input()` decorators are used rather than signal-based
- * `input()` because the repo's vitest harness (desktop/src/vitest.config.ts)
- * does not run Angular's compiler plugin, so signal-input metadata is
- * invisible to `ComponentRef.setInput` and template bindings at test time.
- * Every existing component in this codebase uses `@Input()` for the same
- * reason; switching to signal inputs is a separate infrastructure change.
- */
+/** Terminal-minimal code block with optional filename header and copy button. */
 @Component({
   standalone: true,
   selector: 'app-code-block',
@@ -75,12 +54,7 @@ export class CodeBlockComponent implements OnDestroy {
 
   private copiedTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /**
-   * Writes `code` to the clipboard and flashes the "copied" confirmation.
-   * On clipboard failure (permission denied, missing API in non-browser
-   * contexts) the error is logged and `justCopied` stays false so the UI
-   * never shows a false success.
-   */
+  /** Writes `code` to the clipboard and flashes the "copied" confirmation for 1.5s. */
   async copy(): Promise<void> {
     try {
       await navigator.clipboard.writeText(this.code);
