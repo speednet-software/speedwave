@@ -234,6 +234,7 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
                 [class.border-l-sw-accent]="selectedContainer === container.name"
                 (click)="selectContainer(container.name)"
                 (keydown.enter)="selectContainer(container.name)"
+                (keydown.space)="$event.preventDefault(); selectContainer(container.name)"
                 tabindex="0"
                 role="button"
                 data-testid="container-row"

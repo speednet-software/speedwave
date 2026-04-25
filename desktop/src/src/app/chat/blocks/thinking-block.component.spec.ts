@@ -140,4 +140,34 @@ describe('ThinkingBlockComponent', () => {
     expect(toggle.tagName).toBe('BUTTON');
     expect(toggle.getAttribute('type')).toBe('button');
   });
+
+  it('toggles on Enter key (ARIA 1.1 button activation)', () => {
+    component.content = 'enter activates';
+    component.collapsed = true;
+    fixture.detectChanges();
+
+    const toggle = fixture.nativeElement.querySelector(
+      '[data-testid="thinking-toggle"]'
+    ) as HTMLElement;
+    toggle.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    fixture.detectChanges();
+
+    expect(component.collapsed).toBe(false);
+  });
+
+  it('toggles on Space key and calls preventDefault to suppress page scroll', () => {
+    component.content = 'space activates';
+    component.collapsed = true;
+    fixture.detectChanges();
+
+    const toggle = fixture.nativeElement.querySelector(
+      '[data-testid="thinking-toggle"]'
+    ) as HTMLElement;
+    const event = new KeyboardEvent('keydown', { key: ' ', cancelable: true });
+    toggle.dispatchEvent(event);
+    fixture.detectChanges();
+
+    expect(component.collapsed).toBe(false);
+    expect(event.defaultPrevented).toBe(true);
+  });
 });
