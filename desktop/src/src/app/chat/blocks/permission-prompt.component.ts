@@ -15,8 +15,9 @@ export type PermissionDecision = 'allow_once' | 'allow_always' | 'deny';
  * Renders the command in a monospaced code block and three buttons: allow once (primary),
  * allow always (secondary), deny (destructive).
  *
- * ARIA: `role="dialog"` plus `aria-labelledby` pointing at the "permission required"
- * header, so screen readers announce the prompt as a modal-style interruption.
+ * ARIA: `role="alertdialog"` with `aria-labelledby` (the header) and
+ * `aria-describedby` (the command pre), so screen readers announce the
+ * prompt as an action-required interruption inline in the chat list.
  * Focus management is left to the parent — typical usage mounts one prompt at a time
  * inside the chat list, and the parent handles focus after decision.
  *

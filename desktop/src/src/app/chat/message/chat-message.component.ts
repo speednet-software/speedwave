@@ -5,6 +5,7 @@ import { ThinkingBlockComponent } from '../blocks/thinking-block.component';
 import { ToolBlockComponent } from '../blocks/tool-block.component';
 import { ErrorBlockComponent } from '../blocks/error-block.component';
 import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
+import { PermissionPromptComponent } from '../blocks/permission-prompt.component';
 
 /** Renders a single chat message as a sequence of typed blocks (text, tool, thinking, etc.). */
 @Component({
@@ -16,6 +17,7 @@ import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
     ToolBlockComponent,
     ErrorBlockComponent,
     AskUserBlockComponent,
+    PermissionPromptComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
@@ -49,7 +51,14 @@ import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
             />
           }
           @case ('error') {
-            <app-error-block [content]="block.content" />
+            <app-error-block [content]="block.content" [kind]="block.kind ?? 'generic'" />
+          }
+          @case ('permission_prompt') {
+            <app-permission-prompt
+              [command]="block.command"
+              [description]="block.description ?? ''"
+              (decided)="onPermissionDecided($index, $event)"
+            />
           }
         }
       }
@@ -64,6 +73,18 @@ export class ChatMessageComponent {
   @Input() role: 'user' | 'assistant' = 'assistant';
   @Input() streaming = false;
   @Output() questionAnswered = new EventEmitter<{ toolId: string; values: string[] }>();
+  @Output() permissionDecided = new EventEmitter<{
+    blockIndex: number;
+    decision: 'allow_once' | 'allow_always' | 'deny';
+  }>();
+
+  /** Forwards permission-prompt decisions upstream with the block index. */
+  onPermissionDecided(
+    blockIndex: number,
+    decision: 'allow_once' | 'allow_always' | 'deny'
+  ): void {
+    this.permissionDecided.emit({ blockIndex, decision });
+  }
 
   /**
    * Narrows to tool_use.

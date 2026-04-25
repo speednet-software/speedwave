@@ -46,13 +46,36 @@ export interface UsageInfo {
   cache_write_tokens?: number;
 }
 
+/**
+ * Optional discriminator for error-block visual variants. The full set of
+ * recognised values lives in `chat/blocks/error-block.component.ts`'s
+ * `ErrorBlockKind` type — keep them in sync. `undefined` (or any unknown
+ * value) renders as the generic red-timeline variant.
+ */
+export type MessageBlockErrorKind =
+  | 'rate_limit'
+  | 'network'
+  | 'session_exited'
+  | 'broken_pipe'
+  | 'no_active_project'
+  | 'session_starting'
+  | 'auth_required'
+  | 'stopped_by_user'
+  | 'generic';
+
 /** A block within a chat message */
 export type MessageBlock =
   | { type: 'text'; content: string }
   | { type: 'thinking'; content: string; collapsed: boolean }
   | { type: 'tool_use'; tool: ToolUseBlock }
   | { type: 'ask_user'; question: AskUserQuestionBlock }
-  | { type: 'error'; content: string };
+  | { type: 'error'; content: string; kind?: MessageBlockErrorKind }
+  | {
+      type: 'permission_prompt';
+      command: string;
+      description?: string;
+      decided?: 'allow_once' | 'allow_always' | 'deny';
+    };
 
 /** State for an interactive AskUserQuestion block within a message. */
 export interface AskUserQuestionBlock {
