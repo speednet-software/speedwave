@@ -386,7 +386,6 @@ export class ChatStateService {
               status: 'error' as const,
               result: 'Interrupted',
               result_is_error: true as const,
-              collapsed: b.tool.collapsed,
             },
           };
         }
@@ -454,7 +453,6 @@ export class ChatStateService {
           tool_name: chunk.data.tool_name,
           input_json: '',
           status: 'running',
-          collapsed: false,
         };
         this._currentBlocks = [...this._currentBlocks, { type: 'tool_use', tool: newTool }];
         break;
@@ -677,7 +675,6 @@ function completeToolBlock(
       tool_id: b.tool.tool_id,
       tool_name: b.tool.tool_name,
       input_json: b.tool.input_json,
-      collapsed: b.tool.collapsed,
     };
     const tool: ToolUseBlock = data.is_error
       ? { ...base, status: 'error', result: data.content, result_is_error: true }
