@@ -1119,4 +1119,59 @@ describe('ChatComponent', () => {
       expect(spy).not.toHaveBeenCalled();
     });
   });
+
+  // ── isLastAssistant: O(1) cached lookup ────────────────────────────────────
+
+  describe('isLastAssistant', () => {
+    it('returns false when there are no messages', () => {
+      chatState.loadMessages([]);
+      expect(component.isLastAssistant(0)).toBe(false);
+    });
+
+    it('returns true for the most recent assistant message', () => {
+      chatState.loadMessages([
+        { role: 'user', blocks: [{ type: 'text', content: 'hi' }], timestamp: 1 },
+        { role: 'assistant', blocks: [{ type: 'text', content: 'A1' }], timestamp: 2 },
+        { role: 'user', blocks: [{ type: 'text', content: 'next' }], timestamp: 3 },
+        { role: 'assistant', blocks: [{ type: 'text', content: 'A2' }], timestamp: 4 },
+      ]);
+      expect(component.isLastAssistant(3)).toBe(true);
+      expect(component.isLastAssistant(1)).toBe(false);
+    });
+
+    it('returns false for non-assistant rows even at the tail', () => {
+      chatState.loadMessages([
+        { role: 'assistant', blocks: [{ type: 'text', content: 'A1' }], timestamp: 1 },
+        { role: 'user', blocks: [{ type: 'text', content: 'after' }], timestamp: 2 },
+      ]);
+      expect(component.isLastAssistant(0)).toBe(true);
+      expect(component.isLastAssistant(1)).toBe(false);
+    });
+
+    it('returns false for every row when no assistant message exists', () => {
+      chatState.loadMessages([
+        { role: 'user', blocks: [{ type: 'text', content: 'q1' }], timestamp: 1 },
+        { role: 'user', blocks: [{ type: 'text', content: 'q2' }], timestamp: 2 },
+      ]);
+      expect(component.isLastAssistant(0)).toBe(false);
+      expect(component.isLastAssistant(1)).toBe(false);
+    });
+
+    it('updates the cached last index when new messages are appended', () => {
+      chatState.loadMessages([
+        { role: 'user', blocks: [{ type: 'text', content: 'q' }], timestamp: 1 },
+        { role: 'assistant', blocks: [{ type: 'text', content: 'A1' }], timestamp: 2 },
+      ]);
+      expect(component.isLastAssistant(1)).toBe(true);
+
+      chatState.loadMessages([
+        { role: 'user', blocks: [{ type: 'text', content: 'q' }], timestamp: 1 },
+        { role: 'assistant', blocks: [{ type: 'text', content: 'A1' }], timestamp: 2 },
+        { role: 'user', blocks: [{ type: 'text', content: 'q2' }], timestamp: 3 },
+        { role: 'assistant', blocks: [{ type: 'text', content: 'A2' }], timestamp: 4 },
+      ]);
+      expect(component.isLastAssistant(1)).toBe(false);
+      expect(component.isLastAssistant(3)).toBe(true);
+    });
+  });
 });

@@ -1170,9 +1170,9 @@ impl ChatSession {
                 // - StreamChunk::Result / Error from normal turns
                 // - system messages (including non-actionable ones that
                 //   return no chunk but still indicate normal lifecycle)
-                let is_terminal = chunks.iter().any(|c| {
-                    matches!(c, StreamChunk::Result { .. } | StreamChunk::Error { .. })
-                });
+                let is_terminal = chunks
+                    .iter()
+                    .any(|c| matches!(c, StreamChunk::Result { .. } | StreamChunk::Error { .. }));
                 if is_terminal || msg_type == "system" {
                     got_result = true;
                     // Clear StreamParser per-turn state. message_stop also
@@ -2105,7 +2105,8 @@ mod tests {
         // Regression: the parser must stash `message.id` when seeing an
         // `assistant` event so the next `Result` commits it.
         let mut parser = StreamParser::new();
-        let line = r#"{"type":"assistant","message":{"id":"msg_abc123","role":"assistant","content":[]}}"#;
+        let line =
+            r#"{"type":"assistant","message":{"id":"msg_abc123","role":"assistant","content":[]}}"#;
         let chunks = parse_line_all_str(&mut parser, line);
         assert!(chunks.is_empty(), "assistant event must not emit chunks");
         assert_eq!(parser.pending_assistant_uuid.as_deref(), Some("msg_abc123"));
@@ -2136,7 +2137,10 @@ mod tests {
         let chunk = parse_line_str(&mut parser, result2).unwrap();
         match chunk {
             StreamChunk::Result { assistant_uuid, .. } => {
-                assert!(assistant_uuid.is_none(), "stale uuid must not survive reset");
+                assert!(
+                    assistant_uuid.is_none(),
+                    "stale uuid must not survive reset"
+                );
             }
             other => panic!("expected Result, got {other:?}"),
         }
@@ -2151,8 +2155,7 @@ mod tests {
         let mut parser = StreamParser::new();
         let assistant =
             r#"{"type":"assistant","message":{"id":"msg_err","role":"assistant","content":[]}}"#;
-        let error_result =
-            r#"{"type":"result","is_error":true,"result":"something broke"}"#;
+        let error_result = r#"{"type":"result","is_error":true,"result":"something broke"}"#;
         parse_line_str(&mut parser, assistant);
         let chunk = parse_line_str(&mut parser, error_result).unwrap();
         assert!(matches!(chunk, StreamChunk::Error { .. }));
@@ -2188,6 +2191,22 @@ mod tests {
     }
 
     #[test]
+    fn user_message_mixed_text_and_tool_result_emits_tool_result_only() {
+        // Mixed content (Claude Code occasionally interleaves a narrative
+        // text block alongside a tool_result wrapper in the same user
+        // event). The text presence MUST NOT trigger a UserMessageCommit:
+        // the message is still a tool-result wrapper, not a real prompt.
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"id":"u_mix","role":"user","content":[{"type":"text","text":"here is the result"},{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#;
+        let chunks = parse_line_all_str(&mut parser, line);
+        assert_eq!(chunks.len(), 1);
+        assert!(
+            matches!(&chunks[0], StreamChunk::ToolResult { .. }),
+            "expected ToolResult, not UserMessageCommit, for mixed message"
+        );
+    }
+
+    #[test]
     fn user_message_commit_is_emitted_exactly_once() {
         // Duplicate user messages (observed on retry/resume) must not
         // emit the commit twice — only the first occurrence wins.
@@ -2204,7 +2223,8 @@ mod tests {
     #[test]
     fn user_message_without_id_is_silent() {
         let mut parser = StreamParser::new();
-        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        let line =
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
         assert!(parse_line_all_str(&mut parser, line).is_empty());
     }
 
@@ -2555,8 +2575,7 @@ mod tests {
 
     #[test]
     fn build_claude_args_includes_flags() {
-        let args =
-            build_claude_args(None, None, &["--dangerously-skip-permissions".to_string()]);
+        let args = build_claude_args(None, None, &["--dangerously-skip-permissions".to_string()]);
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
     }
 
@@ -3032,12 +3051,8 @@ mod tests {
             selected_ide: None,
             log_level: None,
         };
-        let result = ChatSession::prepare_args(
-            "test",
-            &user_config,
-            Some("../../../etc/passwd"),
-            None,
-        );
+        let result =
+            ChatSession::prepare_args("test", &user_config, Some("../../../etc/passwd"), None);
         assert!(result.is_err());
     }
 
@@ -3124,8 +3139,7 @@ mod tests {
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
         let uuid = "msg_retry_me";
-        let result =
-            ChatSession::prepare_args("proj", &user_config, Some(session_id), Some(uuid));
+        let result = ChatSession::prepare_args("proj", &user_config, Some(session_id), Some(uuid));
         assert!(result.is_ok());
         let (args, _) = result.unwrap();
         assert!(args.contains(&"--resume-session-at".to_string()));

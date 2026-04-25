@@ -17,13 +17,6 @@
 //! Errors are serialised as a tagged `RetryError` enum so the frontend can
 //! react (disable the button, show a banner, prompt re-auth, …) without
 //! string-matching error messages.
-//!
-//! The `PendingAssistant` variant is reserved for when the state-tree
-//! backbone from Unit 2 has merged — at that point the backend verifies the
-//! last assistant entry is `Committed` before spawning. Until then, the
-//! frontend's `canRetry` signal guards against retrying a pending assistant.
-
-use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
@@ -40,8 +33,6 @@ use crate::history::validate_session_id;
 pub enum RetryError {
     /// The conversation has no assistant turn yet — retry is meaningless.
     NoAssistantTurn,
-    /// The latest assistant entry is still streaming (pending Result).
-    PendingAssistant,
     /// The given session id is not known or malformed.
     SessionNotFound,
     /// Spawning Claude Code with `--resume-session-at` failed.
@@ -52,7 +43,6 @@ impl std::fmt::Display for RetryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoAssistantTurn => write!(f, "no assistant turn to retry"),
-            Self::PendingAssistant => write!(f, "last assistant turn is still streaming"),
             Self::SessionNotFound => write!(f, "session id not found or invalid"),
             Self::ResumeFailed(msg) => write!(f, "failed to spawn resume: {msg}"),
         }
@@ -183,11 +173,7 @@ mod tests {
                 None => Ok(()),
             }
         }
-        fn start_with_retry(
-            &mut self,
-            session_id: &str,
-            user_uuid: &str,
-        ) -> Result<(), String> {
+        fn start_with_retry(&mut self, session_id: &str, user_uuid: &str) -> Result<(), String> {
             self.start_calls
                 .push((session_id.to_string(), user_uuid.to_string()));
             match &self.start_err {
@@ -221,7 +207,10 @@ mod tests {
         let mut drv = MockDriver::default();
         let r = retry_last_turn_inner("not-a-uuid", VALID_UUID, &mut drv);
         assert_eq!(r, Err(RetryError::SessionNotFound));
-        assert_eq!(drv.stop_calls, 0, "stop must not be called on invalid input");
+        assert_eq!(
+            drv.stop_calls, 0,
+            "stop must not be called on invalid input"
+        );
         assert!(drv.start_calls.is_empty());
     }
 
@@ -263,7 +252,10 @@ mod tests {
         let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, &mut drv);
         assert!(matches!(r, Err(RetryError::ResumeFailed(m)) if m.contains("stop boom")));
         assert_eq!(drv.stop_calls, 1);
-        assert!(drv.start_calls.is_empty(), "start must not run after stop failure");
+        assert!(
+            drv.start_calls.is_empty(),
+            "start must not run after stop failure"
+        );
     }
 
     #[test]
@@ -273,9 +265,7 @@ mod tests {
             ..Default::default()
         };
         let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, &mut drv);
-        assert!(
-            matches!(r, Err(RetryError::ResumeFailed(m)) if m.contains("nerdctl exec failed"))
-        );
+        assert!(matches!(r, Err(RetryError::ResumeFailed(m)) if m.contains("nerdctl exec failed")));
         assert_eq!(drv.stop_calls, 1);
         assert_eq!(drv.start_calls.len(), 1);
     }
@@ -293,10 +283,18 @@ mod tests {
 
     #[test]
     fn retry_error_round_trips() {
-        let original = RetryError::PendingAssistant;
-        let json = serde_json::to_string(&original).unwrap();
-        let decoded: RetryError = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded, original);
+        // Round-trip every variant to prove the serde tag/content layout is
+        // stable for the frontend kind-matching.
+        let cases = [
+            RetryError::NoAssistantTurn,
+            RetryError::SessionNotFound,
+            RetryError::ResumeFailed("boom".into()),
+        ];
+        for original in cases {
+            let json = serde_json::to_string(&original).unwrap();
+            let decoded: RetryError = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, original);
+        }
     }
 
     // ── State invariant: file checksum ──────────────────────────────
