@@ -38,20 +38,22 @@ describe('PermissionPromptComponent', () => {
     expect(el().querySelector('[data-testid="permission-deny"]')).toBeTruthy();
   });
 
-  it('happy: each button emits the expected decision', () => {
-    setInputs('ls');
-    const events: PermissionDecision[] = [];
-    component.decided.subscribe((d) => events.push(d));
-
-    (
-      el().querySelector('[data-testid="permission-allow-once"]') as HTMLButtonElement | null
-    )?.click();
-    (
-      el().querySelector('[data-testid="permission-allow-always"]') as HTMLButtonElement | null
-    )?.click();
-    (el().querySelector('[data-testid="permission-deny"]') as HTMLButtonElement | null)?.click();
-
-    expect(events).toEqual(['allow_once', 'allow_always', 'deny']);
+  it('happy: each button emits the expected decision (separate components per click)', () => {
+    // After the self-protect guard lands (single emission per component), each
+    // button-decision pair needs its own component instance.
+    for (const expected of ['allow_once', 'allow_always', 'deny'] as const) {
+      const f = TestBed.createComponent(PermissionPromptComponent);
+      f.componentInstance.command = 'ls';
+      f.detectChanges();
+      const events: PermissionDecision[] = [];
+      f.componentInstance.decided.subscribe((d) => events.push(d));
+      (
+        f.nativeElement.querySelector(
+          `[data-testid="permission-${expected.replace('_', '-')}"]`
+        ) as HTMLButtonElement | null
+      )?.click();
+      expect(events).toEqual([expected]);
+    }
   });
 
   it('state: a single button click emits exactly once', () => {
@@ -83,10 +85,11 @@ describe('PermissionPromptComponent', () => {
     expect(el().querySelector('[data-testid="permission-command"]')?.textContent).toContain(long);
   });
 
-  it('ARIA: wrapper has role=dialog and aria-labelledby', () => {
+  it('ARIA: wrapper has role=alertdialog with aria-labelledby and aria-describedby', () => {
     setInputs('ls');
     const wrapper = el().querySelector('[data-testid="permission-prompt"]');
-    expect(wrapper?.getAttribute('role')).toBe('dialog');
+    expect(wrapper?.getAttribute('role')).toBe('alertdialog');
+    expect(wrapper?.getAttribute('aria-describedby')).toBeTruthy();
     const labelled = wrapper?.getAttribute('aria-labelledby');
     expect(labelled).toBeTruthy();
     if (labelled) {

@@ -119,7 +119,7 @@ const ERROR_META: Record<ErrorBlockKind, { shape: ErrorShape; label: string; act
     <div
       data-testid="error-block"
       role="alert"
-      aria-live="assertive"
+      [attr.aria-live]="isCallout() ? 'assertive' : 'polite'"
       [attr.data-kind]="kind"
       [class.err-timeline]="isTimeline()"
       [class.err-timeline-red]="isRedTimeline()"

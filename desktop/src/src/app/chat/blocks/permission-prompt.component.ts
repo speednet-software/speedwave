@@ -1,4 +1,11 @@
-import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  EventEmitter,
+  Input,
+  Output,
+  signal,
+} from '@angular/core';
 
 /** Decision emitted by the permission prompt. */
 export type PermissionDecision = 'allow_once' | 'allow_always' | 'deny';
@@ -78,9 +85,9 @@ export type PermissionDecision = 'allow_once' | 'allow_always' | 'deny';
     <div
       data-testid="permission-prompt"
       class="pp-wrapper"
-      role="dialog"
-      aria-modal="false"
+      role="alertdialog"
       [attr.aria-labelledby]="headerId"
+      [attr.aria-describedby]="commandId"
     >
       <div
         [id]="headerId"
@@ -98,6 +105,7 @@ export type PermissionDecision = 'allow_once' | 'allow_always' | 'deny';
       }
 
       <pre
+        [id]="commandId"
         data-testid="permission-command"
         class="pp-code mono mb-3 overflow-x-auto rounded p-2 text-[11.5px]"
         >{{ command }}</pre
@@ -107,7 +115,8 @@ export type PermissionDecision = 'allow_once' | 'allow_always' | 'deny';
         <button
           type="button"
           data-testid="permission-allow-once"
-          class="pp-primary mono rounded px-3 py-1 text-[12px] font-medium"
+          class="pp-primary mono rounded px-3 py-1 text-[12px] font-medium disabled:opacity-50"
+          [disabled]="hasDecided()"
           (click)="decide('allow_once')"
         >
           allow once
@@ -115,7 +124,8 @@ export type PermissionDecision = 'allow_once' | 'allow_always' | 'deny';
         <button
           type="button"
           data-testid="permission-allow-always"
-          class="pp-secondary mono rounded px-3 py-1 text-[12px]"
+          class="pp-secondary mono rounded px-3 py-1 text-[12px] disabled:opacity-50"
+          [disabled]="hasDecided()"
           (click)="decide('allow_always')"
         >
           allow always
@@ -123,7 +133,8 @@ export type PermissionDecision = 'allow_once' | 'allow_always' | 'deny';
         <button
           type="button"
           data-testid="permission-deny"
-          class="pp-deny mono rounded px-3 py-1 text-[12px]"
+          class="pp-deny mono rounded px-3 py-1 text-[12px] disabled:opacity-50"
+          [disabled]="hasDecided()"
           (click)="decide('deny')"
         >
           deny
@@ -144,12 +155,19 @@ export class PermissionPromptComponent {
 
   /** Stable DOM id for `aria-labelledby` on the dialog wrapper. */
   readonly headerId = `permission-header-${Math.random().toString(36).slice(2, 9)}`;
+  /** Stable DOM id for `aria-describedby` pointing at the command pre. */
+  readonly commandId = `permission-command-${Math.random().toString(36).slice(2, 9)}`;
+
+  /** Self-protection: once a decision is emitted, all buttons go disabled to absorb double-clicks. */
+  readonly hasDecided = signal(false);
 
   /**
    * Forwards a button click as a typed decision event.
    * @param decision - Which button the user pressed (allow-once, allow-always, or deny).
    */
   decide(decision: PermissionDecision): void {
+    if (this.hasDecided()) return;
+    this.hasDecided.set(true);
     this.decided.emit(decision);
   }
 }

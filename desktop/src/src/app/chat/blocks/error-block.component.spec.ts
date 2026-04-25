@@ -119,8 +119,15 @@ describe('ErrorBlockComponent', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it('ARIA: wrapper has role=alert and aria-live=assertive', () => {
-    setInputs('anything');
+  it('ARIA: wrapper has role=alert; aria-live is polite for passive timeline errors', () => {
+    setInputs('anything', 'rate_limit');
+    const wrapper = el().querySelector('[data-testid="error-block"]');
+    expect(wrapper?.getAttribute('role')).toBe('alert');
+    expect(wrapper?.getAttribute('aria-live')).toBe('polite');
+  });
+
+  it('ARIA: aria-live is assertive only for actionable callout variants', () => {
+    setInputs('pick', 'no_active_project');
     const wrapper = el().querySelector('[data-testid="error-block"]');
     expect(wrapper?.getAttribute('role')).toBe('alert');
     expect(wrapper?.getAttribute('aria-live')).toBe('assertive');
