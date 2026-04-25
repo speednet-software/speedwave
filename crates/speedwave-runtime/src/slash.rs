@@ -382,15 +382,22 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path) -> SlashDiscovery {
 
     for name in raw.slash_commands {
         let (clean_name, plugin) = split_plugin_prefix(&name);
-        let kind = classify_kind(clean_name, plugin.as_deref(), &raw.agents);
+        let mut kind = classify_kind(clean_name, plugin.as_deref(), &raw.agents);
 
-        let frontmatter = lookup_frontmatter(
+        let (frontmatter, origin) = lookup_frontmatter(
             clean_name,
             plugin.as_deref(),
             project_dir,
             personal_dir.as_deref(),
             &raw.plugins,
         );
+
+        // Promote Command -> Skill when the matching file lived under a
+        // skills/ directory. Plugin-prefixed entries keep SlashKind::Plugin
+        // (the badge already communicates the source).
+        if matches!(origin, Some(FrontmatterOrigin::Skill)) && kind == SlashKind::Command {
+            kind = SlashKind::Skill;
+        }
 
         // Skills with `user-invocable: false` are hidden. Note that
         // `disable-model-invocation: true` is the *opposite* flag and MUST
@@ -490,14 +497,18 @@ fn is_builtin_name(name: &str) -> bool {
 /// Priority: project `.claude/skills` → project `.claude/commands` →
 /// personal `~/.claude/skills` → personal `~/.claude/commands` →
 /// plugin-provided paths.
+///
+/// Returns the parsed frontmatter and a hint for whether the matched file
+/// lives under `skills/` (so the caller can promote `Command` → `Skill` in
+/// `classify_kind`) — `None` when no file matched.
 fn lookup_frontmatter(
     name: &str,
     plugin: Option<&str>,
     project_dir: &Path,
     personal_dir: Option<&Path>,
     plugins: &[PluginEntry],
-) -> SlashFrontmatter {
-    let mut candidates: Vec<PathBuf> = Vec::new();
+) -> (SlashFrontmatter, Option<FrontmatterOrigin>) {
+    let mut candidates: Vec<(PathBuf, FrontmatterOrigin)> = Vec::new();
 
     for base in [
         project_dir.join(".claude"),
@@ -517,19 +528,27 @@ fn lookup_frontmatter(
     }
     // Fallback: scan every plugin path for a matching skill/command even
     // when the command had no explicit plugin prefix (e.g. for plugins
-    // whose skills are exposed without namespacing).
+    // whose skills are exposed without namespacing). Skip plugins already
+    // scanned above to avoid duplicate file reads.
+    let already_scanned: Option<&str> = plugin;
     for plugin_entry in plugins {
+        if Some(plugin_entry.name.as_str()) == already_scanned {
+            continue;
+        }
         if let Some(path) = &plugin_entry.path {
             push_skill_candidates(path, name, &mut candidates);
         }
     }
 
-    for candidate in candidates {
+    for (candidate, origin) in candidates {
         match std::fs::read_to_string(&candidate) {
             Ok(contents) => {
                 if let Some(fm) = parse_frontmatter(&contents) {
-                    return fm;
+                    return (fm, Some(origin));
                 }
+                // The file exists but has no parseable frontmatter — still a
+                // hit for kind classification purposes.
+                return (SlashFrontmatter::default(), Some(origin));
             }
             Err(err) => {
                 if err.kind() != std::io::ErrorKind::NotFound {
@@ -542,12 +561,25 @@ fn lookup_frontmatter(
         }
     }
 
-    SlashFrontmatter::default()
+    (SlashFrontmatter::default(), None)
 }
 
-fn push_skill_candidates(base: &Path, name: &str, out: &mut Vec<PathBuf>) {
-    out.push(base.join("skills").join(name).join("SKILL.md"));
-    out.push(base.join("commands").join(format!("{name}.md")));
+/// Whether the matching file lived under a `skills/` directory or a `commands/` directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrontmatterOrigin {
+    Skill,
+    Command,
+}
+
+fn push_skill_candidates(base: &Path, name: &str, out: &mut Vec<(PathBuf, FrontmatterOrigin)>) {
+    out.push((
+        base.join("skills").join(name).join("SKILL.md"),
+        FrontmatterOrigin::Skill,
+    ));
+    out.push((
+        base.join("commands").join(format!("{name}.md")),
+        FrontmatterOrigin::Command,
+    ));
 }
 
 /// Returns the user's personal `.claude/` directory when the home
@@ -1094,7 +1126,33 @@ mod tests {
             path: Some(plugin_dir.clone()),
         }];
 
-        let fm = lookup_frontmatter("tool", Some("plugin-x"), &project_dir, None, &plugins);
+        let (fm, origin) = lookup_frontmatter("tool", Some("plugin-x"), &project_dir, None, &plugins);
         assert_eq!(fm.description.as_deref(), Some("from plugin"));
+        assert_eq!(origin, Some(FrontmatterOrigin::Skill));
+    }
+
+    #[test]
+    fn skills_origin_promotes_command_to_skill_kind() {
+        // A bare /tool name (no plugin prefix, not in agents/builtins) lands
+        // under the project's .claude/skills/<name>/SKILL.md — it must
+        // surface in the UI with kind=Skill, not the default kind=Command.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let skill_dir = project.join(".claude/skills/tool");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: a project skill\n---\n",
+        )
+        .unwrap();
+
+        let raw = RawDiscovery {
+            slash_commands: vec!["tool".into()],
+            plugins: vec![],
+            agents: vec![],
+        };
+        let discovery = enrich_and_filter(raw, &project);
+        assert_eq!(discovery.commands.len(), 1);
+        assert_eq!(discovery.commands[0].kind, SlashKind::Skill);
     }
 }
