@@ -136,9 +136,7 @@ impl TurnUsage {
     pub fn delta(current: &Self, previous: &Self) -> Self {
         Self {
             input_tokens: current.input_tokens.saturating_sub(previous.input_tokens),
-            output_tokens: current
-                .output_tokens
-                .saturating_sub(previous.output_tokens),
+            output_tokens: current.output_tokens.saturating_sub(previous.output_tokens),
             cache_read_tokens: current
                 .cache_read_tokens
                 .saturating_sub(previous.cache_read_tokens),
@@ -225,9 +223,10 @@ impl StreamParser {
         }
     }
 
-    /// Test-only: seeds the cumulative usage snapshot so the next `Result`
-    /// subtracts against the supplied baseline.
-    #[cfg(test)]
+    /// Seeds the cumulative usage snapshot so the next `Result` subtracts
+    /// against the supplied baseline. Called on resume with the snapshot
+    /// computed from the existing transcript, so the first turn after a
+    /// resume reports a correct delta instead of `cumulative - 0`.
     pub fn restore_session_snapshot(
         &mut self,
         usage: TurnUsage,
@@ -239,7 +238,8 @@ impl StreamParser {
         self.last_model = model;
     }
 
-    /// Current cumulative usage snapshot (test and introspection helper).
+    /// Current cumulative usage snapshot. Tests use this to assert that the
+    /// snapshot advances after each turn.
     #[cfg(test)]
     pub fn previous_session_usage(&self) -> TurnUsage {
         self.previous_session_usage
@@ -1257,9 +1257,37 @@ impl ChatSession {
         let stdin_for_reader = shared_stdin;
         let stdout_log_path = session_log_path;
 
+        // On resume: recover the cumulative session state from the existing
+        // transcript so the first turn after resume reports a real per-turn
+        // delta. Without this seed the parser would compare the next
+        // cumulative snapshot against zero and emit the entire session
+        // total as a single turn. Failures here are non-fatal — we log and
+        // proceed with a zero baseline (matches pre-resume-seed behaviour).
+        let resume_seed = resume_session_id.and_then(|id| {
+            match history::compute_resume_snapshot(&self.project_name, id) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    log::warn!("resume snapshot for session {id} unavailable: {e}");
+                    None
+                }
+            }
+        });
+
         // Background thread: parse Claude's stream-json and emit Tauri events
         let h = std::thread::spawn(move || {
             let mut parser = StreamParser::new();
+            if let Some(seed) = resume_seed {
+                parser.restore_session_snapshot(
+                    TurnUsage {
+                        input_tokens: seed.input_tokens,
+                        output_tokens: seed.output_tokens,
+                        cache_read_tokens: seed.cache_read_tokens,
+                        cache_write_tokens: seed.cache_write_tokens,
+                    },
+                    seed.total_cost,
+                    seed.model,
+                );
+            }
             let mut log_file = stdout_log_path
                 .as_deref()
                 .and_then(crate::log_file::open_log_file);
@@ -2603,7 +2631,7 @@ mod tests {
 
     #[test]
     fn parse_system_init_produces_log_entry() {
-        let parser = StreamParser::new();
+        let mut parser = StreamParser::new();
         let line = r#"{"type":"system","subtype":"init","model":"claude-opus-4-6"}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
         let (chunk, log_entry) = parser.parse_system_message(&parsed);
@@ -4156,5 +4184,56 @@ mod tests {
         assert!(json.contains("\"output_tokens\":2"));
         assert!(json.contains("\"cache_read_tokens\":3"));
         assert!(json.contains("\"cache_write_tokens\":4"));
+    }
+
+    #[test]
+    fn first_turn_after_resume_seed_emits_delta_not_cumulative() {
+        // End-to-end-ish coverage of the resume path: feed the parser a
+        // seed that mirrors what `compute_resume_snapshot` would return for
+        // a real prior transcript, then assert the first new `result` line
+        // produces the per-turn delta — not the entire cumulative total.
+        // Without `restore_session_snapshot` being invoked on the live
+        // resume path, this test would fail with delta == cumulative.
+        let mut parser = StreamParser::new();
+        parser.restore_session_snapshot(
+            TurnUsage {
+                input_tokens: 90,
+                output_tokens: 40,
+                cache_read_tokens: 150,
+                cache_write_tokens: 20,
+            },
+            Some(0.20),
+            Some("claude-opus-4-7".to_string()),
+        );
+
+        // First post-resume Result: cumulative jumps by {5 in, 3 out}.
+        // Without the seed the parser would report all 95/43 as the turn.
+        let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.27,"modelUsage":{"claude-opus-4-7":{"inputTokens":95,"outputTokens":43,"cacheReadInputTokens":150,"cacheCreationInputTokens":20}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                turn_usage,
+                turn_cost,
+                ..
+            } => {
+                let t = turn_usage.expect("turn_usage must be present");
+                assert_eq!(
+                    t.input_tokens, 5,
+                    "input delta must be 95-90, not full cumulative"
+                );
+                assert_eq!(
+                    t.output_tokens, 3,
+                    "output delta must be 43-40, not full cumulative"
+                );
+                assert_eq!(t.cache_read_tokens, 0);
+                assert_eq!(t.cache_write_tokens, 0);
+                let cost = turn_cost.expect("turn_cost must be present");
+                assert!(
+                    (cost - 0.07).abs() < 1e-9,
+                    "cost delta must be 0.27-0.20, got {cost}"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
     }
 }

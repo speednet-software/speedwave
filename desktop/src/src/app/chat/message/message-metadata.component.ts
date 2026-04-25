@@ -20,12 +20,13 @@ const TOKEN_FORMATTER = new Intl.NumberFormat('en-US');
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
+    @let label = modelLabel();
     <div
       data-testid="message-metadata"
       class="mt-1 text-[11px] text-sw-text-dim font-mono flex flex-wrap items-center gap-x-2 leading-none"
     >
-      @if (modelLabel()) {
-        <span data-testid="meta-model">{{ modelLabel() }}</span>
+      @if (label) {
+        <span data-testid="meta-model">{{ label }}</span>
       }
       @if (precedingEdited) {
         <span data-testid="meta-edited" aria-label="retried">· edited</span>

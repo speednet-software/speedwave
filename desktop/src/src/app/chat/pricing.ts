@@ -55,8 +55,13 @@ export const PRICING: Record<string, ModelPricing> = {
   'claude-haiku-4-7': { input: 1, cachedInput: 0.1, cacheWrite: 1.25, output: 5 },
 };
 
-/** Models seen without a PRICING entry — ensures one warning per id, not per turn. */
-const warnedUnknownModels = new Set<string>();
+/**
+ * Models seen without a PRICING entry — ensures one warning per id, not per
+ * turn. The underscore-prefixed export is module-internal: only the
+ * companion `pricing.testing.ts` should import it (so tests can reset the
+ * warning state between cases without polluting the production surface).
+ */
+export const _unknownModelWarningsForTest = new Set<string>();
 
 /**
  * Computes per-turn cost in USD for a given Claude model and token usage.
@@ -71,8 +76,8 @@ const warnedUnknownModels = new Set<string>();
 export function calculateCost(model: string, usage: TurnUsage): number | null {
   const pricing = PRICING[model];
   if (!pricing) {
-    if (!warnedUnknownModels.has(model)) {
-      warnedUnknownModels.add(model);
+    if (!_unknownModelWarningsForTest.has(model)) {
+      _unknownModelWarningsForTest.add(model);
       console.warn(`[pricing] Unknown model "${model}" — cost segment will be hidden.`);
     }
     return null;
@@ -87,14 +92,4 @@ export function calculateCost(model: string, usage: TurnUsage): number | null {
     (usage.cache_write_tokens * pricing.cacheWrite) / 1_000_000 +
     (usage.output_tokens * pricing.output) / 1_000_000
   );
-}
-
-/**
- * Test-only helper: resets the set of unknown models that have already
- * logged a warning, so subsequent calls log again. Intended exclusively
- * for unit tests.
- * @internal
- */
-export function _resetUnknownModelWarnings(): void {
-  warnedUnknownModels.clear();
 }

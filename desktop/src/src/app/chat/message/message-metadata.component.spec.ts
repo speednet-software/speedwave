@@ -258,4 +258,68 @@ describe('MessageMetadataComponent', () => {
     const el = fixture.nativeElement as HTMLElement;
     expect(el.querySelector('[data-testid="meta-cache"]')).toBeNull();
   });
+
+  // ── modelLabel: raw backend id transformations ──────────────────
+  // The CLI emits the canonical Anthropic id (e.g. "claude-opus-4-7"),
+  // but the design spec calls for the published name shape (e.g.
+  // "opus-4.7"). modelLabel() handles that mapping; the tests below
+  // verify the transformation runs end-to-end through the template.
+
+  it('strips claude- prefix and rewrites version dashes for raw backend ids (opus)', () => {
+    component.entry = baseAssistant({
+      meta: {
+        model: 'claude-opus-4-7',
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
+      },
+    });
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe('opus-4.7');
+  });
+
+  it('handles haiku version transformation', () => {
+    component.entry = baseAssistant({
+      meta: {
+        model: 'claude-haiku-4-5',
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
+      },
+    });
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe('haiku-4.5');
+  });
+
+  it('handles sonnet version transformation', () => {
+    component.entry = baseAssistant({
+      meta: { model: 'claude-sonnet-4-6' },
+    });
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe('sonnet-4.6');
+  });
+
+  it('renders an already-prettified id verbatim (no double transformation)', () => {
+    // The component must be idempotent: feeding it the published shape
+    // again must not strip or rewrite anything that is no longer there.
+    component.entry = baseAssistant({
+      meta: { model: 'opus-4.7' },
+    });
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe('opus-4.7');
+  });
 });

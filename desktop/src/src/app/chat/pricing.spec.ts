@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { calculateCost, PRICING, _resetUnknownModelWarnings } from './pricing';
+import { calculateCost, PRICING } from './pricing';
+import { _resetUnknownModelWarnings } from './pricing.testing';
 import type { TurnUsage } from '../models/chat';
 
 describe('calculateCost', () => {
