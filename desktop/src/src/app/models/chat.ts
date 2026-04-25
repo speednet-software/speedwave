@@ -23,6 +23,8 @@ export type StreamChunk =
         usage?: UsageInfo;
         result_text?: string;
         context_window_size?: number;
+        /** UUID of the assistant message that just completed (ADR-046). */
+        assistant_uuid?: string;
       };
     }
   | { chunk_type: 'Error'; data: { content: string } }
@@ -30,6 +32,11 @@ export type StreamChunk =
   | {
       chunk_type: 'RateLimit';
       data: { status: string; utilization: number | null; resets_at: number | null };
+    }
+  | {
+      /** Commits a retry-anchor UUID onto the most recent user entry (ADR-046). */
+      chunk_type: 'UserMessageCommit';
+      data: { uuid: string };
     };
 
 /** A single selectable option in an AskUserQuestion prompt. */
@@ -128,11 +135,28 @@ export type NormalizedToolInput =
   | { kind: 'agent'; description: string }
   | { kind: 'generic'; raw_json: string };
 
+/** Retry-anchor UUID commit state for a ChatMessage (ADR-046). */
+export type UuidStatus = 'Pending' | 'Committed';
+
 /** Replaces old flat ChatMessage — shared between live chat and transcript */
 export interface ChatMessage {
   role: 'user' | 'assistant';
   blocks: MessageBlock[];
   timestamp: number;
+  /**
+   * Retry-anchor UUID (ADR-046). User UUIDs commit immediately; assistant
+   * UUIDs stay `Pending` until the matching `Result` event commits them.
+   * Absent for legacy transcript messages and for local-LLM turns that
+   * omit `message.id` — those entries can't be used as retry targets.
+   */
+  uuid?: string;
+  /** Status of the above UUID. Defaults to `Committed` when `uuid` is set. */
+  uuid_status?: UuidStatus;
+  /**
+   * Epoch-ms timestamp of the most recent retry against this entry. Only
+   * set on user entries whose turn has been retried via `retry_last_turn`.
+   */
+  edited_at?: number;
 }
 
 /** Rate limit info from rate_limit_event. */

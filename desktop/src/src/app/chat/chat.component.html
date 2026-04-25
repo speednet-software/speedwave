@@ -73,6 +73,7 @@
           [messages]="chat.messages"
           [currentBlocks]="chat.currentBlocks"
           [isStreaming]="chat.isStreaming"
+          [lastAssistantIndex]="lastAssistantIndex"
           (questionAnswered)="onQuestionAnswered($event)"
         />
         <app-session-stats [stats]="chat.sessionStats" />

@@ -41,6 +41,11 @@ pub enum StreamChunk {
         result_text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         context_window_size: Option<u64>,
+        /// UUID of the assistant message that just completed (ADR-046). Stays
+        /// `None` for error turns and for local-LLM paths that omit `message.id`
+        /// — the frontend degrades to "no retry target" for those entries.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        assistant_uuid: Option<String>,
     },
     /// Interactive question from Claude (AskUserQuestion tool).
     /// The frontend must display the question and send the answer back via `answer_question`.
@@ -61,6 +66,10 @@ pub enum StreamChunk {
         utilization: Option<f64>,
         resets_at: Option<u64>,
     },
+    /// Commits a UUID onto the most recent user entry (ADR-046). Emitted when
+    /// the parser first sees `{"type":"user","message":{"id":"...",...}}` with
+    /// a text-bearing user prompt (not a tool_result wrapper).
+    UserMessageCommit { uuid: String },
 }
 
 /// A single option in an AskUserQuestion prompt.
@@ -109,6 +118,14 @@ pub struct LogEntry {
     pub message: String,
 }
 
+/// Adapts a legacy `(Option<StreamChunk>, Option<LogEntry>)` tuple into the
+/// `(Vec<StreamChunk>, Option<LogEntry>)` shape returned by `parse_line`.
+fn option_to_vec(
+    (chunk, log): (Option<StreamChunk>, Option<LogEntry>),
+) -> (Vec<StreamChunk>, Option<LogEntry>) {
+    (chunk.map(|c| vec![c]).unwrap_or_default(), log)
+}
+
 /// Stateful parser that tracks active content blocks across stream events.
 /// Maintains index→(tool_id, tool_name) map built from content_block_start events.
 pub struct StreamParser {
@@ -116,6 +133,15 @@ pub struct StreamParser {
     active_blocks: HashMap<u64, (String, String)>,
     /// Accumulated input_json per tool_id (built from ToolInputDelta chunks).
     tool_input: HashMap<String, String>,
+    /// Provisional assistant UUID tracked between `assistant` and `result`
+    /// events (ADR-046). Committed onto the `Result` chunk; `take`n when the
+    /// result arrives so a subsequent error turn cannot reuse a stale id.
+    pending_assistant_uuid: Option<String>,
+    /// UUIDs already emitted via `UserMessageCommit`, to guard against
+    /// duplicate commits when Claude Code re-emits a user message inside the
+    /// same turn (observed on retry/resume paths — the first user message
+    /// echoes back). A user prompt's UUID is committed exactly once.
+    committed_user_uuids: std::collections::HashSet<String>,
 }
 
 impl StreamParser {
@@ -124,25 +150,47 @@ impl StreamParser {
         Self {
             active_blocks: HashMap::new(),
             tool_input: HashMap::new(),
+            pending_assistant_uuid: None,
+            committed_user_uuids: std::collections::HashSet::new(),
         }
     }
 
     /// Parse a pre-parsed JSON value. Mutates internal state for block tracking.
-    /// Returns (chunk for frontend, optional log entry for session log).
+    /// Returns (chunks for frontend in emission order, optional log entry).
+    ///
+    /// The Vec lets a single stream-json line produce multiple UI chunks — for
+    /// example a `user` line with a text-bearing prompt AND a tool_result
+    /// wrapper (rare but possible) emits both `UserMessageCommit` and
+    /// `ToolResult`. Callers iterate and emit each chunk in order.
     pub fn parse_line(
         &mut self,
         parsed: &serde_json::Value,
-    ) -> (Option<StreamChunk>, Option<LogEntry>) {
+    ) -> (Vec<StreamChunk>, Option<LogEntry>) {
         let msg_type = parsed["type"].as_str().unwrap_or("");
 
         match msg_type {
-            "stream_event" => self.parse_stream_event(&parsed["event"]),
+            "stream_event" => option_to_vec(self.parse_stream_event(&parsed["event"])),
             "user" => self.parse_user_message(parsed),
-            "result" => self.parse_result(parsed),
-            // assistant — ignored (ADR-006: we stream via stream_event, finalize on result)
-            "system" => self.parse_system_message(parsed),
-            "rate_limit_event" => Self::parse_rate_limit_event(parsed),
-            _ => (None, None),
+            "result" => option_to_vec(self.parse_result(parsed)),
+            "assistant" => {
+                self.capture_assistant_uuid(parsed);
+                (Vec::new(), None)
+            }
+            "system" => option_to_vec(self.parse_system_message(parsed)),
+            "rate_limit_event" => option_to_vec(Self::parse_rate_limit_event(parsed)),
+            _ => (Vec::new(), None),
+        }
+    }
+
+    /// Capture the assistant message UUID (`message.id`) into
+    /// `pending_assistant_uuid`. The UUID is committed onto the next
+    /// `Result` chunk — see `parse_result`. Silently ignores missing/empty
+    /// ids (local LLMs without API-style ids still produce valid turns).
+    fn capture_assistant_uuid(&mut self, parsed: &serde_json::Value) {
+        if let Some(id) = parsed["message"]["id"].as_str() {
+            if !id.is_empty() {
+                self.pending_assistant_uuid = Some(id.to_string());
+            }
         }
     }
 
@@ -150,6 +198,10 @@ impl StreamParser {
     pub fn reset(&mut self) {
         self.active_blocks.clear();
         self.tool_input.clear();
+        self.pending_assistant_uuid = None;
+        // committed_user_uuids is NOT reset: it persists across turns for the
+        // lifetime of the session so a retry on an already-committed user
+        // UUID doesn't re-emit a duplicate commit chunk.
     }
 
     /// Check if a parsed JSON value is a control_request. Returns parsed data if so.
@@ -366,15 +418,46 @@ impl StreamParser {
     }
 
     fn parse_user_message(
-        &self,
+        &mut self,
         parsed: &serde_json::Value,
-    ) -> (Option<StreamChunk>, Option<LogEntry>) {
+    ) -> (Vec<StreamChunk>, Option<LogEntry>) {
         let message = &parsed["message"];
         let content = &message["content"];
         let blocks = match content.as_array() {
             Some(b) => b,
-            None => return (None, None),
+            None => return (Vec::new(), None),
         };
+
+        let mut has_text = false;
+        let mut has_tool_result = false;
+        for block in blocks {
+            match block["type"].as_str().unwrap_or("") {
+                "text" => has_text = true,
+                "tool_result" => has_tool_result = true,
+                _ => {}
+            }
+        }
+
+        // A user message carrying text (a user prompt, not a tool_result
+        // wrapper) commits its UUID once per session. Tool-result wrappers
+        // reuse the prompt's UUID or carry different ids — we only want to
+        // retry-point against actual prompts.
+        if has_text && !has_tool_result {
+            if let Some(id) = message["id"].as_str() {
+                if !id.is_empty() && !self.committed_user_uuids.contains(id) {
+                    self.committed_user_uuids.insert(id.to_string());
+                    return (
+                        vec![StreamChunk::UserMessageCommit {
+                            uuid: id.to_string(),
+                        }],
+                        Some(LogEntry {
+                            prefix: "USER",
+                            message: format!("commit uuid={id}"),
+                        }),
+                    );
+                }
+            }
+        }
 
         for block in blocks {
             let block_type = block["type"].as_str().unwrap_or("");
@@ -383,7 +466,7 @@ impl StreamParser {
                     Some(s) if !s.is_empty() => s.to_string(),
                     _ => {
                         log::warn!("parse_user_message: tool_result block missing 'tool_use_id'");
-                        return (None, None);
+                        return (Vec::new(), None);
                     }
                 };
                 let is_error = block["is_error"].as_bool().unwrap_or(false);
@@ -412,19 +495,22 @@ impl StreamParser {
                 });
 
                 return (
-                    Some(StreamChunk::ToolResult {
+                    vec![StreamChunk::ToolResult {
                         tool_id: tool_use_id,
                         content: result_content,
                         is_error,
-                    }),
+                    }],
                     log_entry,
                 );
             }
         }
-        (None, None)
+        (Vec::new(), None)
     }
 
-    fn parse_result(&self, parsed: &serde_json::Value) -> (Option<StreamChunk>, Option<LogEntry>) {
+    fn parse_result(
+        &mut self,
+        parsed: &serde_json::Value,
+    ) -> (Option<StreamChunk>, Option<LogEntry>) {
         let is_error = parsed["is_error"].as_bool().unwrap_or(false);
 
         if is_error {
@@ -507,6 +593,8 @@ impl StreamParser {
             message: "turn complete".to_string(),
         });
 
+        let assistant_uuid = self.pending_assistant_uuid.take();
+
         (
             Some(StreamChunk::Result {
                 session_id,
@@ -514,6 +602,7 @@ impl StreamParser {
                 usage,
                 result_text,
                 context_window_size,
+                assistant_uuid,
             }),
             log_entry,
         )
@@ -690,11 +779,42 @@ fn build_ask_user_response(request: &ControlRequest, selected_label: &str) -> se
     })
 }
 
+/// Validate a message UUID passed to `--resume-session-at`.
+///
+/// Claude Code's message ids take two shapes in the wild: Anthropic-API
+/// `msg_...` ids (alphanumeric with underscores) and UUID v4 strings.  Rather
+/// than enumerate both, we accept any bounded string whose characters are
+/// safe to pass as a CLI argument — no shell metacharacters, no whitespace,
+/// no path traversal. Empty strings are rejected so the caller can treat
+/// "no known retry target" as a distinct error condition.
+pub fn validate_retry_uuid(uuid: &str) -> anyhow::Result<()> {
+    if uuid.is_empty() {
+        anyhow::bail!("retry uuid must not be empty");
+    }
+    if uuid.len() > 128 {
+        anyhow::bail!("retry uuid too long (max 128 chars)");
+    }
+    // Allow [A-Za-z0-9_-] only — the two observed formats (API `msg_...`
+    // and UUID v4) fit within this set and it disallows shell injection.
+    for ch in uuid.chars() {
+        if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
+            anyhow::bail!("retry uuid contains invalid character: {ch:?}");
+        }
+    }
+    Ok(())
+}
+
 /// Build the argument list for Claude Code's stream-json mode.
 ///
 /// When `resume_session_id` is `Some`, adds `--resume <id>` to resume an
-/// existing conversation.
-pub fn build_claude_args(resume_session_id: Option<&str>, flags: &[String]) -> Vec<String> {
+/// existing conversation. When `resume_at_uuid` is `Some`, additionally
+/// rewinds the conversation to that user-message UUID (ADR-046) — Claude
+/// Code's native retry flag.
+pub fn build_claude_args(
+    resume_session_id: Option<&str>,
+    resume_at_uuid: Option<&str>,
+    flags: &[String],
+) -> Vec<String> {
     let mut args = vec![
         consts::CLAUDE_BINARY.to_string(),
         "-p".to_string(),
@@ -711,6 +831,11 @@ pub fn build_claude_args(resume_session_id: Option<&str>, flags: &[String]) -> V
     if let Some(id) = resume_session_id {
         args.push("--resume".to_string());
         args.push(id.to_string());
+    }
+
+    if let Some(uuid) = resume_at_uuid {
+        args.push("--resume-session-at".to_string());
+        args.push(uuid.to_string());
     }
 
     for flag in flags {
@@ -778,22 +903,37 @@ impl ChatSession {
         }
     }
 
-    /// Validate inputs and resolve config needed before spawning Claude.
-    /// Extracted from `start()` so validation logic is independently testable.
-    pub fn prepare_start(
+    /// Read-only accessor for the owning project name — required by the
+    /// retry command so it can re-construct an empty `ChatSession` after
+    /// stopping the old one.
+    pub fn project_name(&self) -> &str {
+        &self.project_name
+    }
+
+    /// Build the argv + container name for a Claude Code spawn.
+    ///
+    /// - `resume_session_id` adds `--resume <id>` (required for retry).
+    /// - `resume_at_uuid` adds `--resume-session-at <uuid>` (ADR-046 retry
+    ///   anchor). When both are `Some`, the spawn rewinds the session to the
+    ///   given user-message UUID and regenerates the assistant turn natively.
+    pub fn prepare_args(
         project_name: &str,
         user_config: &config::SpeedwaveUserConfig,
         resume_session_id: Option<&str>,
+        resume_at_uuid: Option<&str>,
     ) -> anyhow::Result<(Vec<String>, String)> {
         if let Some(id) = resume_session_id {
             history::validate_session_id(id)?;
+        }
+        if let Some(uuid) = resume_at_uuid {
+            validate_retry_uuid(uuid)?;
         }
 
         let project_dir = std::path::PathBuf::from(&user_config.require_project(project_name)?.dir);
 
         let resolved = config::resolve_claude_config(&project_dir, user_config, project_name);
 
-        let args = build_claude_args(resume_session_id, &resolved.flags);
+        let args = build_claude_args(resume_session_id, resume_at_uuid, &resolved.flags);
         let container = claude_container_name(project_name);
 
         Ok((args, container))
@@ -814,11 +954,30 @@ impl ChatSession {
         app_handle: AppHandle,
         resume_session_id: Option<&str>,
     ) -> anyhow::Result<()> {
+        self.start_with_retry(app_handle, resume_session_id, None)
+    }
+
+    /// Start (or resume+retry) a Claude Code session.
+    ///
+    /// When `resume_at_uuid` is `Some`, Claude Code rewinds the session to
+    /// the given user-message UUID and regenerates the assistant turn
+    /// natively (ADR-046). The caller MUST also pass `resume_session_id`;
+    /// retry without a session is nonsensical.
+    pub fn start_with_retry(
+        &mut self,
+        app_handle: AppHandle,
+        resume_session_id: Option<&str>,
+        resume_at_uuid: Option<&str>,
+    ) -> anyhow::Result<()> {
         let rt = runtime::detect_runtime();
         let user_config = config::load_user_config()?;
 
-        let (args, container) =
-            Self::prepare_start(&self.project_name, &user_config, resume_session_id)?;
+        let (args, container) = Self::prepare_args(
+            &self.project_name,
+            &user_config,
+            resume_session_id,
+            resume_at_uuid,
+        )?;
 
         let mut cmd = rt.container_exec_piped(
             &container,
@@ -1002,7 +1161,7 @@ impl ChatSession {
                 }
 
                 // 2. Normal stream events
-                let (chunk, log_entry) = parser.parse_line(&parsed);
+                let (chunks, log_entry) = parser.parse_line(&parsed);
                 if let Some(entry) = log_entry {
                     crate::log_file::write_log_line(&mut log_file, entry.prefix, &entry.message);
                 }
@@ -1011,11 +1170,10 @@ impl ChatSession {
                 // - StreamChunk::Result / Error from normal turns
                 // - system messages (including non-actionable ones that
                 //   return no chunk but still indicate normal lifecycle)
-                if matches!(
-                    chunk,
-                    Some(StreamChunk::Result { .. }) | Some(StreamChunk::Error { .. })
-                ) || msg_type == "system"
-                {
+                let is_terminal = chunks
+                    .iter()
+                    .any(|c| matches!(c, StreamChunk::Result { .. } | StreamChunk::Error { .. }));
+                if is_terminal || msg_type == "system" {
                     got_result = true;
                     // Clear StreamParser per-turn state. message_stop also
                     // triggers reset inside parse_line, but an interrupted
@@ -1024,7 +1182,7 @@ impl ChatSession {
                     // ToolInputDelta events in the next turn.
                     parser.reset();
                 }
-                if let Some(chunk) = chunk {
+                for chunk in chunks {
                     if let Err(e) = app_handle.emit("chat_stream", chunk) {
                         log::warn!("failed to emit chat_stream event: {e}");
                     }
@@ -1437,22 +1595,34 @@ mod tests {
     }
 
     /// Convenience: parse a JSON string and call `parser.parse_line`.
-    /// Returns only the StreamChunk (for backward-compatible test assertions).
+    /// Returns the first StreamChunk (for backward-compatible test assertions
+    /// against single-chunk emissions).
     fn parse_line_str(parser: &mut StreamParser, line: &str) -> Option<StreamChunk> {
         let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
+        parser.parse_line(&parsed).0.into_iter().next()
+    }
+
+    /// Convenience: parse a JSON string and return all emitted chunks.
+    fn parse_line_all_str(parser: &mut StreamParser, line: &str) -> Vec<StreamChunk> {
+        let parsed: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
         parser.parse_line(&parsed).0
     }
 
     /// Convenience: parse a JSON string and call `parser.parse_line`.
-    /// Returns the full tuple (chunk, log_entry) for log entry assertions.
+    /// Returns the full tuple (first chunk, log_entry) for log entry assertions.
     fn parse_line_full(
         parser: &mut StreamParser,
         line: &str,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
-        match serde_json::from_str::<serde_json::Value>(line) {
-            Ok(parsed) => parser.parse_line(&parsed),
-            Err(_) => (None, None),
-        }
+        let parsed = match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(v) => v,
+            Err(_) => return (None, None),
+        };
+        let (chunks, log) = parser.parse_line(&parsed);
+        (chunks.into_iter().next(), log)
     }
 
     /// Convenience: parse a JSON string and call `StreamParser::try_parse_control_request`.
@@ -1516,6 +1686,7 @@ mod tests {
             }),
             result_text: None,
             context_window_size: None,
+            assistant_uuid: Some("msg_test".to_string()),
         };
         let serialized = serde_json::to_string(&original).unwrap();
         let deserialized: StreamChunk = serde_json::from_str(&serialized).unwrap();
@@ -1768,6 +1939,7 @@ mod tests {
                 usage,
                 result_text,
                 context_window_size,
+                assistant_uuid,
             } => {
                 assert_eq!(session_id, "550e8400-e29b-41d4-a716-446655440000");
                 assert_eq!(total_cost, Some(0.015));
@@ -1778,6 +1950,10 @@ mod tests {
                 assert!(u.cache_write_tokens.is_none());
                 assert!(result_text.is_none(), "empty result should produce None");
                 assert!(context_window_size.is_none());
+                assert!(
+                    assistant_uuid.is_none(),
+                    "no preceding 'assistant' event should leave assistant_uuid empty"
+                );
             }
             other => panic!("expected Result, got {other:?}"),
         }
@@ -1910,10 +2086,162 @@ mod tests {
     // ── StreamParser: ignored types ──────────────────────────────────
 
     #[test]
-    fn parse_assistant_type_is_ignored() {
+    fn parse_assistant_type_emits_no_chunk() {
+        // Assistant messages don't emit chunks — content streams via
+        // `stream_event` deltas, and the final `Result` carries the UUID.
+        // An assistant line WITHOUT a `message.id` (local LLM) is silently
+        // ignored just like before.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#;
         assert!(parse_line_str(&mut parser, line).is_none());
+        assert!(
+            parser.pending_assistant_uuid.is_none(),
+            "missing message.id must leave pending_assistant_uuid empty"
+        );
+    }
+
+    #[test]
+    fn parse_assistant_with_id_captures_pending_uuid() {
+        // Regression: the parser must stash `message.id` when seeing an
+        // `assistant` event so the next `Result` commits it.
+        let mut parser = StreamParser::new();
+        let line =
+            r#"{"type":"assistant","message":{"id":"msg_abc123","role":"assistant","content":[]}}"#;
+        let chunks = parse_line_all_str(&mut parser, line);
+        assert!(chunks.is_empty(), "assistant event must not emit chunks");
+        assert_eq!(parser.pending_assistant_uuid.as_deref(), Some("msg_abc123"));
+    }
+
+    #[test]
+    fn result_commits_pending_assistant_uuid_and_clears_it() {
+        // The assistant UUID seen before a Result commits ONTO that Result
+        // (ADR-046: atomic commit on turn completion) and is cleared so the
+        // next turn doesn't recycle a stale id.
+        let mut parser = StreamParser::new();
+        let assistant =
+            r#"{"type":"assistant","message":{"id":"msg_turn1","role":"assistant","content":[]}}"#;
+        let result = r#"{"type":"result","session_id":"550e8400-e29b-41d4-a716-446655440000","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"is_error":false,"result":""}"#;
+
+        parse_line_str(&mut parser, assistant);
+        let chunk = parse_line_str(&mut parser, result).unwrap();
+        match chunk {
+            StreamChunk::Result { assistant_uuid, .. } => {
+                assert_eq!(assistant_uuid.as_deref(), Some("msg_turn1"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+
+        // Fresh turn: Result with no preceding assistant must have None.
+        parser.reset();
+        let result2 = r#"{"type":"result","session_id":"550e8400-e29b-41d4-a716-446655440000","total_cost_usd":0.01,"is_error":false,"result":""}"#;
+        let chunk = parse_line_str(&mut parser, result2).unwrap();
+        match chunk {
+            StreamChunk::Result { assistant_uuid, .. } => {
+                assert!(
+                    assistant_uuid.is_none(),
+                    "stale uuid must not survive reset"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assistant_uuid_does_not_leak_into_error_result() {
+        // An error turn also `take`s the pending UUID so a subsequent
+        // successful turn that arrives without its own `assistant` event
+        // (an edge protocol) cannot be mislabeled with the errored turn's
+        // identity.
+        let mut parser = StreamParser::new();
+        let assistant =
+            r#"{"type":"assistant","message":{"id":"msg_err","role":"assistant","content":[]}}"#;
+        let error_result = r#"{"type":"result","is_error":true,"result":"something broke"}"#;
+        parse_line_str(&mut parser, assistant);
+        let chunk = parse_line_str(&mut parser, error_result).unwrap();
+        assert!(matches!(chunk, StreamChunk::Error { .. }));
+        // pending_assistant_uuid stays set here because `parse_result`
+        // short-circuits on `is_error=true`; the stdout-reader loop calls
+        // `parser.reset()` after every terminal chunk which clears it. The
+        // reset() is exercised explicitly to prove the clear happens.
+        parser.reset();
+        assert!(parser.pending_assistant_uuid.is_none());
+    }
+
+    #[test]
+    fn user_message_with_text_and_id_emits_user_message_commit() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"id":"u_hello","role":"user","content":[{"type":"text","text":"hello"}]}}"#;
+        let chunks = parse_line_all_str(&mut parser, line);
+        assert_eq!(chunks.len(), 1);
+        match &chunks[0] {
+            StreamChunk::UserMessageCommit { uuid } => assert_eq!(uuid, "u_hello"),
+            other => panic!("expected UserMessageCommit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_message_tool_result_does_not_emit_commit() {
+        // Tool-result wrappers carry a user role but must NOT commit a
+        // retry-point UUID — they're not real user prompts.
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"id":"u_tr","role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#;
+        let chunks = parse_line_all_str(&mut parser, line);
+        assert_eq!(chunks.len(), 1);
+        assert!(matches!(&chunks[0], StreamChunk::ToolResult { .. }));
+    }
+
+    #[test]
+    fn user_message_mixed_text_and_tool_result_emits_tool_result_only() {
+        // Mixed content (Claude Code occasionally interleaves a narrative
+        // text block alongside a tool_result wrapper in the same user
+        // event). The text presence MUST NOT trigger a UserMessageCommit:
+        // the message is still a tool-result wrapper, not a real prompt.
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"id":"u_mix","role":"user","content":[{"type":"text","text":"here is the result"},{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#;
+        let chunks = parse_line_all_str(&mut parser, line);
+        assert_eq!(chunks.len(), 1);
+        assert!(
+            matches!(&chunks[0], StreamChunk::ToolResult { .. }),
+            "expected ToolResult, not UserMessageCommit, for mixed message"
+        );
+    }
+
+    #[test]
+    fn user_message_commit_is_emitted_exactly_once() {
+        // Duplicate user messages (observed on retry/resume) must not
+        // emit the commit twice — only the first occurrence wins.
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"id":"u_once","role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        assert_eq!(parse_line_all_str(&mut parser, line).len(), 1);
+        assert_eq!(
+            parse_line_all_str(&mut parser, line).len(),
+            0,
+            "second occurrence of same user UUID must not re-emit"
+        );
+    }
+
+    #[test]
+    fn user_message_without_id_is_silent() {
+        let mut parser = StreamParser::new();
+        let line =
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        assert!(parse_line_all_str(&mut parser, line).is_empty());
+    }
+
+    #[test]
+    fn user_message_commit_survives_reset() {
+        // Across a turn boundary (reset), a previously-committed user UUID
+        // must stay in the dedup set — otherwise the re-echoed prompt on a
+        // resume would commit a second time.
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"id":"u_persist","role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        assert_eq!(parse_line_all_str(&mut parser, line).len(), 1);
+        parser.reset();
+        assert_eq!(
+            parse_line_all_str(&mut parser, line).len(),
+            0,
+            "reset must not clear committed_user_uuids"
+        );
     }
 
     #[test]
@@ -2075,7 +2403,8 @@ mod tests {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","utilization":73.5,"resets_at":1738425600}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
-        let (chunk, log_entry) = parser.parse_line(&parsed);
+        let (chunks, log_entry) = parser.parse_line(&parsed);
+        let chunk = chunks.into_iter().next();
         match chunk {
             Some(StreamChunk::RateLimit {
                 status,
@@ -2098,7 +2427,8 @@ mod tests {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
-        let (chunk, _) = parser.parse_line(&parsed);
+        let (chunks, _) = parser.parse_line(&parsed);
+        let chunk = chunks.into_iter().next();
         match chunk {
             Some(StreamChunk::RateLimit {
                 status,
@@ -2118,7 +2448,8 @@ mod tests {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","utilization":100.0,"resets_at":1738430000}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
-        let (chunk, _) = parser.parse_line(&parsed);
+        let (chunks, _) = parser.parse_line(&parsed);
+        let chunk = chunks.into_iter().next();
         match chunk {
             Some(StreamChunk::RateLimit {
                 status,
@@ -2210,24 +2541,41 @@ mod tests {
 
     #[test]
     fn build_claude_args_without_resume() {
-        let args = build_claude_args(None, &[]);
+        let args = build_claude_args(None, None, &[]);
         assert!(args.contains(&consts::CLAUDE_BINARY.to_string()));
         assert!(args.contains(&"-p".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
+        assert!(!args.contains(&"--resume-session-at".to_string()));
         assert!(args.contains(&"--permission-prompt-tool".to_string()));
     }
 
     #[test]
     fn build_claude_args_with_resume() {
         let id = "550e8400-e29b-41d4-a716-446655440000";
-        let args = build_claude_args(Some(id), &[]);
+        let args = build_claude_args(Some(id), None, &[]);
         let resume_pos = args.iter().position(|a| a == "--resume").unwrap();
         assert_eq!(args[resume_pos + 1], id);
+        assert!(!args.contains(&"--resume-session-at".to_string()));
+    }
+
+    #[test]
+    fn build_claude_args_with_resume_and_uuid() {
+        // ADR-046: retry uses `--resume <session>` + `--resume-session-at <uuid>`.
+        let session = "550e8400-e29b-41d4-a716-446655440000";
+        let uuid = "msg_retry_anchor";
+        let args = build_claude_args(Some(session), Some(uuid), &[]);
+        let resume_pos = args.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(args[resume_pos + 1], session);
+        let at_pos = args
+            .iter()
+            .position(|a| a == "--resume-session-at")
+            .expect("--resume-session-at must be present");
+        assert_eq!(args[at_pos + 1], uuid);
     }
 
     #[test]
     fn build_claude_args_includes_flags() {
-        let args = build_claude_args(None, &["--dangerously-skip-permissions".to_string()]);
+        let args = build_claude_args(None, None, &["--dangerously-skip-permissions".to_string()]);
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
     }
 
@@ -2660,7 +3008,7 @@ mod tests {
 
     #[test]
     fn build_claude_args_includes_permission_prompt_tool() {
-        let args = build_claude_args(None, &[]);
+        let args = build_claude_args(None, None, &[]);
         let pos = args
             .iter()
             .position(|a| a == "--permission-prompt-tool")
@@ -2670,17 +3018,17 @@ mod tests {
 
     // ── Control request fixture test ────────────────────────────────
 
-    // ── prepare_start tests ─────────────────────────────────────────
+    // ── prepare_args tests ──────────────────────────────────────────
 
     #[test]
-    fn prepare_start_fails_when_project_not_in_config() {
+    fn prepare_args_fails_when_project_not_in_config() {
         let user_config = config::SpeedwaveUserConfig {
             projects: vec![],
             active_project: None,
             selected_ide: None,
             log_level: None,
         };
-        let result = ChatSession::prepare_start("nonexistent", &user_config, None);
+        let result = ChatSession::prepare_args("nonexistent", &user_config, None, None);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -2690,7 +3038,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_start_fails_with_invalid_resume_session_id() {
+    fn prepare_args_fails_with_invalid_resume_session_id() {
         let user_config = config::SpeedwaveUserConfig {
             projects: vec![config::ProjectUserEntry {
                 name: "test".to_string(),
@@ -2703,12 +3051,36 @@ mod tests {
             selected_ide: None,
             log_level: None,
         };
-        let result = ChatSession::prepare_start("test", &user_config, Some("../../../etc/passwd"));
+        let result =
+            ChatSession::prepare_args("test", &user_config, Some("../../../etc/passwd"), None);
         assert!(result.is_err());
     }
 
     #[test]
-    fn prepare_start_succeeds_with_valid_project() {
+    fn prepare_args_fails_with_malformed_retry_uuid() {
+        let user_config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "test".to_string(),
+                dir: "/tmp/test".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        };
+        let result = ChatSession::prepare_args(
+            "test",
+            &user_config,
+            Some("550e8400-e29b-41d4-a716-446655440000"),
+            Some("$(rm -rf /)"),
+        );
+        assert!(result.is_err(), "shell-injection uuid must be rejected");
+    }
+
+    #[test]
+    fn prepare_args_succeeds_with_valid_project() {
         let user_config = config::SpeedwaveUserConfig {
             projects: vec![config::ProjectUserEntry {
                 name: "myproject".to_string(),
@@ -2721,7 +3093,7 @@ mod tests {
             selected_ide: None,
             log_level: None,
         };
-        let result = ChatSession::prepare_start("myproject", &user_config, None);
+        let result = ChatSession::prepare_args("myproject", &user_config, None, None);
         assert!(result.is_ok());
         let (args, container) = result.unwrap();
         assert!(args.contains(&"-p".to_string()));
@@ -2729,7 +3101,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_start_with_resume_includes_resume_flag() {
+    fn prepare_args_with_resume_includes_resume_flag() {
         let user_config = config::SpeedwaveUserConfig {
             projects: vec![config::ProjectUserEntry {
                 name: "proj".to_string(),
@@ -2743,11 +3115,78 @@ mod tests {
             log_level: None,
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
-        let result = ChatSession::prepare_start("proj", &user_config, Some(session_id));
+        let result = ChatSession::prepare_args("proj", &user_config, Some(session_id), None);
         assert!(result.is_ok());
         let (args, _container) = result.unwrap();
         assert!(args.contains(&"--resume".to_string()));
         assert!(args.contains(&session_id.to_string()));
+        assert!(!args.contains(&"--resume-session-at".to_string()));
+    }
+
+    #[test]
+    fn prepare_args_with_retry_uuid_includes_resume_session_at_flag() {
+        let user_config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        };
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        let uuid = "msg_retry_me";
+        let result = ChatSession::prepare_args("proj", &user_config, Some(session_id), Some(uuid));
+        assert!(result.is_ok());
+        let (args, _) = result.unwrap();
+        assert!(args.contains(&"--resume-session-at".to_string()));
+        assert!(args.contains(&uuid.to_string()));
+    }
+
+    // ── validate_retry_uuid ──────────────────────────────────────────
+
+    #[test]
+    fn validate_retry_uuid_accepts_api_msg_ids() {
+        assert!(validate_retry_uuid("msg_01ABCdef_123").is_ok());
+    }
+
+    #[test]
+    fn validate_retry_uuid_accepts_uuid_v4() {
+        assert!(validate_retry_uuid("550e8400-e29b-41d4-a716-446655440000").is_ok());
+    }
+
+    #[test]
+    fn validate_retry_uuid_rejects_empty() {
+        assert!(validate_retry_uuid("").is_err());
+    }
+
+    #[test]
+    fn validate_retry_uuid_rejects_shell_metachars() {
+        for bad in ["a;b", "a b", "a|b", "`id`", "a$b", "a&b", "a'b", "a\"b"] {
+            assert!(
+                validate_retry_uuid(bad).is_err(),
+                "must reject shell-injection uuid: {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_retry_uuid_rejects_path_traversal() {
+        for bad in ["../x", "a/b", "a\\b"] {
+            assert!(
+                validate_retry_uuid(bad).is_err(),
+                "must reject path-traversal uuid: {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_retry_uuid_rejects_overlong() {
+        let too_long = "a".repeat(129);
+        assert!(validate_retry_uuid(&too_long).is_err());
     }
 
     // ── Silent failure prevention tests ──────────────────────────────
@@ -2931,6 +3370,7 @@ mod tests {
             usage: None,
             result_text: None,
             context_window_size: None,
+            assistant_uuid: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(
@@ -2940,6 +3380,10 @@ mod tests {
         assert!(
             !json.contains("context_window_size"),
             "context_window_size should be absent when None, got: {json}"
+        );
+        assert!(
+            !json.contains("assistant_uuid"),
+            "assistant_uuid should be absent when None, got: {json}"
         );
     }
 
@@ -2951,6 +3395,7 @@ mod tests {
             usage: None,
             result_text: None,
             context_window_size: Some(1_000_000),
+            assistant_uuid: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(

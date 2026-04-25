@@ -502,7 +502,7 @@ export class ChatStateService {
         }
         break;
 
-      case 'Result':
+      case 'Result': {
         if (chunk.data.result_text) {
           // Only append result_text when no streamed text blocks exist yet.
           // Claude Code always copies the full response into `result`, so for
@@ -517,10 +517,15 @@ export class ChatStateService {
           }
         }
         if (this._currentBlocks.length > 0) {
-          this._messages = [
-            ...this._messages,
-            { role: 'assistant', blocks: [...this._currentBlocks], timestamp: Date.now() },
-          ];
+          const assistantUuid = chunk.data.assistant_uuid;
+          const assistant: ChatMessage = {
+            role: 'assistant',
+            blocks: [...this._currentBlocks],
+            timestamp: Date.now(),
+            uuid: assistantUuid,
+            uuid_status: assistantUuid ? 'Committed' : undefined,
+          };
+          this._messages = [...this._messages, assistant];
           this._currentBlocks = [];
         }
         this.isStreaming = false;
@@ -540,6 +545,29 @@ export class ChatStateService {
           total_output_tokens: this._totalOutputTokens,
         };
         break;
+      }
+
+      case 'UserMessageCommit': {
+        // ADR-046: the parser has seen `user.message.id` for the most recent
+        // user prompt. Commit it onto the last user entry that still lacks a
+        // UUID — walking from the end handles out-of-order arrivals where the
+        // commit chunk lands after several intermediate events.
+        const uuid = chunk.data.uuid;
+        const idx = findLastUserIndexMissingUuid(this._messages);
+        if (idx >= 0) {
+          const updated: ChatMessage = {
+            ...this._messages[idx],
+            uuid,
+            uuid_status: 'Committed',
+          };
+          this._messages = [
+            ...this._messages.slice(0, idx),
+            updated,
+            ...this._messages.slice(idx + 1),
+          ];
+        }
+        break;
+      }
 
       case 'Error':
         this._currentBlocks = [
@@ -584,6 +612,125 @@ export class ChatStateService {
   loadMessages(msgs: ChatMessage[]): void {
     this._messages = msgs;
     this.notifyChange();
+  }
+
+  /**
+   * Copies the textual content of the message at `index` to the system
+   * clipboard. Returns `true` on success, `false` on failure (out-of-range
+   * index, missing `navigator.clipboard`, write rejection). Block kinds that
+   * carry no user-facing prose — `tool_use`, `thinking`, `ask_user` — are
+   * elided; `text` and `error` blocks are joined with a blank line.
+   *
+   * The component layer owns the "copied" indicator timing so this method can
+   * stay pure and testable.
+   * @param index - Index into `messages` of the entry to copy.
+   */
+  async copyMessage(index: number): Promise<boolean> {
+    const msg = this._messages[index];
+    if (!msg) return false;
+    const text = blocksToPlainText(msg.blocks);
+    if (!text) return false;
+    if (typeof navigator === 'undefined' || !navigator.clipboard) return false;
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (err) {
+      console.warn('[chat-state] copyMessage: clipboard write failed', err);
+      return false;
+    }
+  }
+
+  /**
+   * Returns whether the last assistant turn can be retried (ADR-046).
+   * Requires:
+   *   - not streaming (would race with the live turn),
+   *   - a session id from the most recent Result chunk,
+   *   - a user entry preceding the last assistant entry whose UUID is committed.
+   *
+   * The component layer reads this on every change-detection cycle to gate
+   * the retry button — it must be cheap and side-effect free.
+   */
+  canRetryLastAssistant(): boolean {
+    return this.findRetryAnchor() !== null;
+  }
+
+  /**
+   * Walks the message list from the end to find the retry anchor: the user
+   * entry immediately preceding the last committed assistant entry. Returns
+   * `null` when no such pair exists, when streaming, or when the session id
+   * is missing.
+   */
+  private findRetryAnchor(): {
+    sessionId: string;
+    userUuid: string;
+    lastAssistantIdx: number;
+    userIdx: number;
+  } | null {
+    if (this.isStreaming) return null;
+    const sessionId = this._sessionStats?.session_id;
+    if (!sessionId) return null;
+    let lastAssistantIdx = -1;
+    for (let i = this._messages.length - 1; i >= 0; i -= 1) {
+      if (this._messages[i].role === 'assistant') {
+        lastAssistantIdx = i;
+        break;
+      }
+    }
+    if (lastAssistantIdx < 0) return null;
+    const assistant = this._messages[lastAssistantIdx];
+    if (assistant.uuid_status && assistant.uuid_status !== 'Committed') return null;
+    for (let i = lastAssistantIdx - 1; i >= 0; i -= 1) {
+      const m = this._messages[i];
+      if (m.role !== 'user') continue;
+      if (!m.uuid || (m.uuid_status && m.uuid_status !== 'Committed')) return null;
+      return { sessionId, userUuid: m.uuid, lastAssistantIdx, userIdx: i };
+    }
+    return null;
+  }
+
+  /**
+   * Retries the last assistant turn via the backend `retry_last_turn` Tauri
+   * command (ADR-046). Trims the last assistant entry from local state,
+   * stamps `edited_at` on the anchor user entry, flips `isStreaming` so the
+   * input bar disables and the next stream chunks are accepted, and asks the
+   * backend to relaunch Claude Code with `--resume-session-at`.
+   *
+   * On backend failure the optimistic state changes are reverted and an error
+   * block is appended so the user sees what went wrong.
+   */
+  async retryLastAssistant(): Promise<void> {
+    const anchor = this.findRetryAnchor();
+    if (!anchor) return;
+    const { sessionId, userUuid, lastAssistantIdx, userIdx } = anchor;
+
+    const trimmed = this._messages.slice(0, lastAssistantIdx);
+    trimmed[userIdx] = { ...trimmed[userIdx], edited_at: Date.now() };
+    const before = this._messages;
+    this._messages = trimmed;
+    this._currentBlocks = [];
+    this.isStreaming = true;
+    this._turnId += 1;
+    this.notifyChange();
+
+    try {
+      await this.tauri.invoke('retry_last_turn', {
+        sessionId,
+        userUuid,
+      });
+    } catch (err) {
+      console.error('[chat-state] retryLastAssistant: invoke failed', err);
+      this._messages = [
+        ...before,
+        {
+          role: 'assistant',
+          blocks: [{ type: 'error', content: `Retry failed: ${err}` }],
+          timestamp: Date.now(),
+        },
+      ];
+      this._currentBlocks = [];
+      this.isStreaming = false;
+      this.notifyChange();
+    }
   }
 
   /**
@@ -681,4 +828,36 @@ function completeToolBlock(
       : { ...base, status: 'done', result: data.content, result_is_error: false };
     return { ...b, tool };
   });
+}
+
+/**
+ * Returns the index of the most recent user entry that has not yet had a UUID
+ * committed onto it (ADR-046). Returns -1 when no such entry exists. Walking
+ * from the end is correct because `UserMessageCommit` chunks always belong to
+ * the latest pending user prompt — earlier prompts already carry their UUIDs.
+ * @param msgs - Snapshot of `_messages` at the time the commit chunk arrives.
+ */
+function findLastUserIndexMissingUuid(msgs: readonly ChatMessage[]): number {
+  for (let i = msgs.length - 1; i >= 0; i -= 1) {
+    const m = msgs[i];
+    if (m.role === 'user' && !m.uuid) return i;
+  }
+  return -1;
+}
+
+/**
+ * Flattens a message's blocks into a copy-friendly plain-text string. Tool
+ * inputs and outputs are intentionally elided — the user wants the assistant's
+ * prose, not the JSON of every Bash command. Thinking blocks, ask_user, and
+ * tool_use are dropped; text and error contents are concatenated with a blank
+ * line between blocks for readability.
+ * @param blocks - The message blocks to flatten.
+ */
+export function blocksToPlainText(blocks: readonly MessageBlock[]): string {
+  const parts: string[] = [];
+  for (const b of blocks) {
+    if (b.type === 'text') parts.push(b.content);
+    else if (b.type === 'error') parts.push(b.content);
+  }
+  return parts.join('\n\n').trim();
 }

@@ -33,11 +33,13 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
       (scroll)="onScroll()"
     >
       <div class="mx-auto max-w-3xl space-y-8">
-        @for (msg of messages; track msg.timestamp) {
+        @for (msg of messages; track msg.timestamp; let i = $index) {
           <app-chat-message
             [blocks]="msg.blocks"
             [role]="msg.role"
             [timestamp]="msg.timestamp"
+            [entryIndex]="i"
+            [isLast]="i === lastAssistantIndex"
             (questionAnswered)="questionAnswered.emit($event)"
           />
         }
@@ -58,6 +60,12 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   @Input({ required: true }) messages!: readonly ChatMessage[];
   @Input() currentBlocks: readonly MessageBlock[] = [];
   @Input() isStreaming = false;
+  /**
+   * Index of the most recent assistant entry in `messages`; `-1` when none.
+   * Used to gate the per-message Retry button (only the latest assistant
+   * message is retryable).
+   */
+  @Input() lastAssistantIndex = -1;
 
   @Output() questionAnswered = new EventEmitter<{ toolId: string; values: string[] }>();
 
