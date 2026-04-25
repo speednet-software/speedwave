@@ -176,12 +176,9 @@ export class ChatComponent implements OnInit, OnDestroy {
     await this.chat.answerQuestion(event.toolId, event.values);
   }
 
-  /** Toggles the history sidebar and loads conversations when opening. */
-  async toggleHistory(): Promise<void> {
+  /** Toggles the history sidebar; data loads via the constructor effect on open. */
+  toggleHistory(): void {
     this.ui.toggleSidebar();
-    if (this.ui.sidebarOpen()) {
-      await this.loadConversations();
-    }
     this.cdr.markForCheck();
   }
 
@@ -306,12 +303,9 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
-  /** Toggles the project memory panel and loads memory on open. */
-  async toggleMemory(): Promise<void> {
+  /** Toggles the memory panel; data loads via the constructor effect on open. */
+  toggleMemory(): void {
     this.ui.toggleMemory();
-    if (this.ui.memoryOpen()) {
-      await this.loadProjectMemory();
-    }
     this.cdr.markForCheck();
   }
 
