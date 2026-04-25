@@ -1,4 +1,11 @@
-import { ChangeDetectionStrategy, Component, Input, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  Input,
+  OnChanges,
+  signal,
+  type SimpleChanges,
+} from '@angular/core';
 
 /** A single line in the rendered diff, tagged by semantic role. */
 export interface DiffLine {
@@ -138,13 +145,24 @@ export function computeLineDiff(oldStr: string, newStr: string): DiffLine[] {
     }
   `,
 })
-export class DiffViewComponent {
+export class DiffViewComponent implements OnChanges {
   @Input() oldString = '';
   @Input() newString = '';
   @Input() truncateLines = 20;
 
   /** Toggle set by the "expand full diff" button. */
   private readonly expanded = signal<boolean>(false);
+
+  /**
+   * Reset the user's expand-toggle when either input string changes — otherwise
+   * an instance reused for a different file (live tool block streaming an
+   * edit, recycled for a later edit) keeps the previous expand state.
+   */
+  ngOnChanges(changes: SimpleChanges): void {
+    if (changes['oldString'] || changes['newString']) {
+      this.expanded.set(false);
+    }
+  }
 
   /** Memoized diff — recomputes only when either input string reference changes. */
   private memoOld: string | null = null;
@@ -172,10 +190,13 @@ export class DiffViewComponent {
     if (!this.isTruncated) {
       return lines.map((line) => ({ type: 'line', line }));
     }
-    const half = Math.floor(this.truncateLines / 2);
-    const head = lines.slice(0, half);
-    const tail = lines.slice(lines.length - half);
-    const omitted = lines.length - half * 2;
+    // For odd truncateLines, give the extra line to head so the visible total
+    // matches the advertised count (e.g. 21 → head 11 + tail 10 = 21).
+    const headCount = Math.ceil(this.truncateLines / 2);
+    const tailCount = Math.floor(this.truncateLines / 2);
+    const head = lines.slice(0, headCount);
+    const tail = lines.slice(lines.length - tailCount);
+    const omitted = lines.length - headCount - tailCount;
     return [
       ...head.map<DiffSegment>((line) => ({ type: 'line', line })),
       { type: 'omitted', count: omitted },
