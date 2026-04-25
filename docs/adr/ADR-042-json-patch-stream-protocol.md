@@ -21,7 +21,7 @@ Every event emitted from the Rust runtime to the Angular frontend is a `json_pat
 ConversationState {
   session_id: String,
   entries: Vec<ConversationEntry>,        // addressed by /entries/<index>
-  pending_queue: Option<QueuedMessage>,   // ADR-045
+  pending_queue: Option<QueuedMessagePreview>,   // ADR-045
   session_totals: SessionUsage,           // cumulative cost, tokens
   streaming: bool,
 }
@@ -73,10 +73,11 @@ enum LogMsg {
 
 ```
 state = signal<ConversationState>(initialState);
-applyPatch(state, patch);   // pure function; returns new state
+const next = applyPatch(state(), patch.ops, /* validate */ false, /* mutateDocument */ false).newDocument;
+state.set(next);
 ```
 
-Patches arrive via the MsgStore subscription (ADR-043), are passed to a single pure `applyPatch(state, patch)` reducer (thin wrapper over `fast-json-patch`[^5]), and the result is assigned back to the signal. The reducer is trivially unit-testable against canned patch sequences. Property-based tests cover: idempotency of `Replace` on the same path; the monoid law `apply(apply(s, p1), p2) === apply(s, compose(p1, p2))` for non-conflicting patches.
+Patches arrive via the MsgStore subscription (ADR-043) and are passed to a thin wrapper over `fast-json-patch`'s `applyPatch`[^5]. By default `applyPatch` mutates its input document in place; the wrapper passes `mutateDocument = false` so the call returns a fresh `newDocument` without touching the previous signal value, and the new state is assigned back to the signal. The wrapper is treated as a pure function from the caller's perspective and is trivially unit-testable against canned patch sequences. Property-based tests cover: idempotency of `Replace` on the same path; the monoid law `apply(apply(s, p1), p2) === apply(s, compose(p1, p2))` for non-conflicting patches.
 
 **What this does NOT do:**
 

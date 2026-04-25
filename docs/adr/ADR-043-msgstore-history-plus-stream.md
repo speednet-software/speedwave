@@ -24,7 +24,7 @@ Speedwave adopts the same design with a round 100 MiB cap (`100 * 1024 * 1024` =
 
 One `MsgStore` instance per active session, keyed by `session_id`. The store owns:
 
-1. **A `tokio::broadcast::Sender<LogMsg>`**[^1] with a channel capacity sized for ~10 seconds of peak emit rate (100 000 messages, matching vibe-kanban's cap[^2] — above this a lagged receiver flips to `Resync` mode rather than blocking the publisher).
+1. **A `tokio::broadcast::Sender<LogMsg>`**[^1] with a channel capacity sized for ~10 seconds of peak emit rate (100 000 message slots — above this a lagged receiver flips to `Resync` mode rather than blocking the publisher). This channel capacity is a slot count and is independent of the 100 MiB byte cap on the replay buffer described below; the byte cap bounds memory in the `VecDeque`, the slot count bounds how far a live receiver may lag before resync.
 2. **A `Mutex<VecDeque<LogMsg>>`** replay buffer, sized by cumulative serialized payload bytes (not entry count).
 3. **A `usize` running byte total** for O(1) cap enforcement — increment on push, decrement on pop_front until under the cap.
 
