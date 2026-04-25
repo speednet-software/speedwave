@@ -269,8 +269,10 @@ export class ToolBlockComponent {
   /** Tailwind border-color class for the timeline left rail, keyed by tool status. */
   get borderClass(): string {
     // Stopped tools surface as status="error" but visually use a neutral gray
-    // rail (matches the "stopped gray" rule in the design-system spec).
-    if (this.isStopped) return 'border-l-2 border-line-strong/50 pl-4';
+    // rail (matches the "stopped gray" rule in the design-system spec). The
+    // host element already carries `border-l-2 pl-4`, so only the color
+    // class is returned here.
+    if (this.isStopped) return 'border-line-strong/50';
     return STATUS_BORDER[this.tool.status];
   }
 
@@ -398,7 +400,7 @@ export class ToolBlockComponent {
 
   /**
    * Narrows the normalized input to the bash variant for template usage.
-   * @param n - The normalized input to narrow.
+   * @param n - Normalized input to narrow.
    */
   asBash(n: NormalizedToolInput): Extract<NormalizedToolInput, { kind: 'bash' }> {
     return n as Extract<NormalizedToolInput, { kind: 'bash' }>;
@@ -406,7 +408,7 @@ export class ToolBlockComponent {
 
   /**
    * Narrows the normalized input to the read variant for template usage.
-   * @param n - The normalized input to narrow.
+   * @param n - Normalized input to narrow.
    */
   asRead(n: NormalizedToolInput): Extract<NormalizedToolInput, { kind: 'read' }> {
     return n as Extract<NormalizedToolInput, { kind: 'read' }>;
@@ -414,7 +416,7 @@ export class ToolBlockComponent {
 
   /**
    * Narrows the normalized input to the write variant for template usage.
-   * @param n - The normalized input to narrow.
+   * @param n - Normalized input to narrow.
    */
   asWrite(n: NormalizedToolInput): Extract<NormalizedToolInput, { kind: 'write' }> {
     return n as Extract<NormalizedToolInput, { kind: 'write' }>;
@@ -422,7 +424,7 @@ export class ToolBlockComponent {
 
   /**
    * Narrows the normalized input to the edit variant for template usage.
-   * @param n - The normalized input to narrow.
+   * @param n - Normalized input to narrow.
    */
   asEdit(n: NormalizedToolInput): Extract<NormalizedToolInput, { kind: 'edit' }> {
     return n as Extract<NormalizedToolInput, { kind: 'edit' }>;
@@ -430,7 +432,7 @@ export class ToolBlockComponent {
 
   /**
    * Narrows the normalized input to the glob variant for template usage.
-   * @param n - The normalized input to narrow.
+   * @param n - Normalized input to narrow.
    */
   asGlob(n: NormalizedToolInput): Extract<NormalizedToolInput, { kind: 'glob' }> {
     return n as Extract<NormalizedToolInput, { kind: 'glob' }>;
@@ -438,7 +440,7 @@ export class ToolBlockComponent {
 
   /**
    * Narrows the normalized input to the grep variant for template usage.
-   * @param n - The normalized input to narrow.
+   * @param n - Normalized input to narrow.
    */
   asGrep(n: NormalizedToolInput): Extract<NormalizedToolInput, { kind: 'grep' }> {
     return n as Extract<NormalizedToolInput, { kind: 'grep' }>;
@@ -446,7 +448,7 @@ export class ToolBlockComponent {
 
   /**
    * Narrows the normalized input to the web_search variant for template usage.
-   * @param n - The normalized input to narrow.
+   * @param n - Normalized input to narrow.
    */
   asWebSearch(n: NormalizedToolInput): Extract<NormalizedToolInput, { kind: 'web_search' }> {
     return n as Extract<NormalizedToolInput, { kind: 'web_search' }>;
@@ -454,7 +456,7 @@ export class ToolBlockComponent {
 
   /**
    * Narrows the normalized input to the web_fetch variant for template usage.
-   * @param n - The normalized input to narrow.
+   * @param n - Normalized input to narrow.
    */
   asWebFetch(n: NormalizedToolInput): Extract<NormalizedToolInput, { kind: 'web_fetch' }> {
     return n as Extract<NormalizedToolInput, { kind: 'web_fetch' }>;
@@ -462,7 +464,7 @@ export class ToolBlockComponent {
 
   /**
    * Narrows the normalized input to the agent variant for template usage.
-   * @param n - The normalized input to narrow.
+   * @param n - Normalized input to narrow.
    */
   asAgent(n: NormalizedToolInput): Extract<NormalizedToolInput, { kind: 'agent' }> {
     return n as Extract<NormalizedToolInput, { kind: 'agent' }>;
@@ -470,7 +472,7 @@ export class ToolBlockComponent {
 
   /**
    * Narrows the normalized input to the todo_write variant for template usage.
-   * @param n - The normalized input to narrow.
+   * @param n - Normalized input to narrow.
    */
   asTodoWrite(n: NormalizedToolInput): Extract<NormalizedToolInput, { kind: 'todo_write' }> {
     return n as Extract<NormalizedToolInput, { kind: 'todo_write' }>;
@@ -478,7 +480,7 @@ export class ToolBlockComponent {
 
   /**
    * Narrows the normalized input to the generic fallback variant for template usage.
-   * @param n - The normalized input to narrow.
+   * @param n - Normalized input to narrow.
    */
   asGeneric(n: NormalizedToolInput): Extract<NormalizedToolInput, { kind: 'generic' }> {
     return n as Extract<NormalizedToolInput, { kind: 'generic' }>;

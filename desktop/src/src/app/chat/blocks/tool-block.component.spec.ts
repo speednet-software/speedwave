@@ -22,7 +22,6 @@ describe('ToolBlockComponent', () => {
       tool_id: id,
       tool_name: 'Read',
       input_json: '{"file_path":"/src/main.rs"}',
-      collapsed: false,
     };
     if (overrides['status'] === 'running') {
       return { ...base, status: 'running', ...overrides } as ToolUseBlock;
@@ -112,10 +111,11 @@ describe('ToolBlockComponent', () => {
       });
       fixture.detectChanges();
 
-      // borderClass is applied to the outer wrapper [class]; assert it
-      // contains the gray rail and not the red one.
-      expect(component.borderClass).toContain('border-line-strong');
-      expect(component.borderClass).not.toContain('red');
+      // The border color class is applied to the outer wrapper; assert the
+      // rendered classes contain the gray rail and not the red one.
+      const region = fixture.nativeElement.querySelector('[role="region"]') as HTMLElement | null;
+      expect(region?.className).toContain('border-line-strong');
+      expect(region?.className).not.toContain('red');
     });
 
     it('renders an inline summary for the tool', () => {
@@ -486,12 +486,15 @@ describe('ToolBlockComponent', () => {
   describe('toggleCollapsed', () => {
     it('never mutates the @Input tool object', () => {
       const tool = makeTool();
+      const snapshot = { ...tool };
       component.tool = tool;
       fixture.detectChanges();
 
       component.toggleCollapsed();
 
-      expect(tool.collapsed).toBe(false);
+      // toggleCollapsed must not mutate the bound tool — the override lives
+      // in component-private state, so every original key must be unchanged.
+      expect(tool).toEqual(snapshot);
     });
 
     it('toggles the collapsed state on each call', () => {

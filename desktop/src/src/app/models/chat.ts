@@ -73,7 +73,6 @@ export type ToolUseBlock =
       tool_name: string;
       input_json: string;
       status: 'running';
-      collapsed: boolean;
     }
   | {
       type: 'tool_use';
@@ -83,7 +82,6 @@ export type ToolUseBlock =
       status: 'done';
       result: string;
       result_is_error: false;
-      collapsed: boolean;
     }
   | {
       type: 'tool_use';
@@ -93,7 +91,6 @@ export type ToolUseBlock =
       status: 'error';
       result: string;
       result_is_error: true;
-      collapsed: boolean;
     };
 
 /** Normalized tool input for display */

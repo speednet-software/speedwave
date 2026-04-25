@@ -386,7 +386,6 @@ function normalizeHistoryBlocks(
           status: 'done',
           result: '',
           result_is_error: false,
-          collapsed: true,
         },
       });
     } else if (block.type === 'tool_result') {

@@ -540,7 +540,6 @@ describe('ChatComponent', () => {
           status: 'done' as const,
           result: 'ok',
           result_is_error: false as const,
-          collapsed: false,
         },
       };
       component.viewingTranscript = {
