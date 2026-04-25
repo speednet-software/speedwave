@@ -127,7 +127,8 @@ export class LogsViewComponent implements OnInit, AfterViewChecked {
   readonly sources = computed<string[]>(() => {
     const distinct = new Set<string>();
     for (const line of this.lines()) distinct.add(line.source);
-    return ['all', ...Array.from(distinct).sort()];
+    // Filter 'all' from observed sources so the hard-coded chip is never duplicated.
+    return ['all', ...Array.from(distinct).filter((s) => s !== 'all').sort()];
   });
 
   /** Lines after applying the current filters. */

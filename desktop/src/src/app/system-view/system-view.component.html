@@ -90,13 +90,14 @@
                   class="mono text-[11px] text-sw-text-muted hover:text-sw-accent disabled:opacity-50 disabled:cursor-not-allowed"
                   data-testid="system-restart"
                   [disabled]="restarting.has(container.name)"
-                  [attr.aria-label]="'Restart ' + container.name"
+                  aria-label="Restart all project containers"
+                  title="Restarts all project containers (per-container restart not supported)"
                   (click)="restart(container.name)"
                 >
                   @if (restarting.has(container.name)) {
                     restarting…
                   } @else {
-                    restart
+                    restart all
                   }
                 </button>
               </td>
@@ -106,35 +107,34 @@
       </table>
     </div>
 
-    @if (report) {
-      <div
-        class="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3"
-        data-testid="system-summary"
-      >
-        <div class="rounded ring-1 ring-line bg-bg-1 p-3">
-          <div class="mono text-[10px] uppercase tracking-widest text-ink-mute">vm</div>
-          <div class="mono mt-1 text-[12px] text-sw-text" data-testid="system-vm">
-            {{ report.vm.vm_type }} · {{ report.vm.running ? 'running' : 'stopped' }}
-          </div>
-        </div>
-        <div class="rounded ring-1 ring-line bg-bg-1 p-3">
-          <div class="mono text-[10px] uppercase tracking-widest text-ink-mute">overall</div>
-          <div
-            class="mono mt-1 text-[12px]"
-            [class.text-sw-success]="report.overall_healthy"
-            [class.text-sw-accent]="!report.overall_healthy"
-            data-testid="system-overall"
-          >
-            {{ report.overall_healthy ? 'healthy' : 'degraded' }}
-          </div>
-        </div>
-        <div class="rounded ring-1 ring-line bg-bg-1 p-3">
-          <div class="mono text-[10px] uppercase tracking-widest text-ink-mute">ide_bridge</div>
-          <div class="mono mt-1 text-[12px] text-sw-text-dim" data-testid="system-bridge">
-            {{ report.ide_bridge.running ? 'connected' : 'disconnected' }}
-          </div>
+    <!-- Inside @else if (report && hasContainers) — report is guaranteed non-null here. -->
+    <div
+      class="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3"
+      data-testid="system-summary"
+    >
+      <div class="rounded ring-1 ring-line bg-bg-1 p-3">
+        <div class="mono text-[10px] uppercase tracking-widest text-ink-mute">vm</div>
+        <div class="mono mt-1 text-[12px] text-sw-text" data-testid="system-vm">
+          {{ report.vm.vm_type }} · {{ report.vm.running ? 'running' : 'stopped' }}
         </div>
       </div>
-    }
+      <div class="rounded ring-1 ring-line bg-bg-1 p-3">
+        <div class="mono text-[10px] uppercase tracking-widest text-ink-mute">overall</div>
+        <div
+          class="mono mt-1 text-[12px]"
+          [class.text-sw-success]="report.overall_healthy"
+          [class.text-sw-accent]="!report.overall_healthy"
+          data-testid="system-overall"
+        >
+          {{ report.overall_healthy ? 'healthy' : 'degraded' }}
+        </div>
+      </div>
+      <div class="rounded ring-1 ring-line bg-bg-1 p-3">
+        <div class="mono text-[10px] uppercase tracking-widest text-ink-mute">ide_bridge</div>
+        <div class="mono mt-1 text-[12px] text-sw-text-dim" data-testid="system-bridge">
+          {{ report.ide_bridge.running ? 'connected' : 'disconnected' }}
+        </div>
+      </div>
+    </div>
   }
 </div>

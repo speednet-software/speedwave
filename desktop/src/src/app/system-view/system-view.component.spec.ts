@@ -152,12 +152,15 @@ describe('SystemViewComponent', () => {
     expect(caption?.className).toContain('sr-only');
   });
 
-  it('adds aria-label on each restart action button', async () => {
+  it('adds an aria-label communicating the actual restart-all scope', async () => {
+    // The Tauri command recreates ALL project containers, not just the one
+    // whose row was clicked. The label must communicate the actual scope.
     await component.ngOnInit();
     fixture.detectChanges();
 
     const buttons = fixture.nativeElement.querySelectorAll('[data-testid="system-restart"]');
-    expect(buttons[0].getAttribute('aria-label')).toBe('Restart speedwave_test_claude');
+    expect(buttons[0].getAttribute('aria-label')).toBe('Restart all project containers');
+    expect(buttons[0].textContent?.trim()).toBe('restart all');
   });
 
   // -- Edge case: empty containers --

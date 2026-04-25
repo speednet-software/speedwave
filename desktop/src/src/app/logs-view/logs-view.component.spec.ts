@@ -270,4 +270,11 @@ describe('parseLogLine', () => {
     expect(line.source).toBe('log');
     expect(line.message).toBe('');
   });
+
+  it('parses an ISO-timestamp line via the ISO_TIME_RE branch', () => {
+    const line = parseLogLine('hub_1 | 2024-01-15T14:34:02.814Z INFO started');
+    expect(line.time).toBe('2024-01-15T14:34:02.814Z');
+    expect(line.level).toBe('info');
+    expect(line.message).toBe('started');
+  });
 });
