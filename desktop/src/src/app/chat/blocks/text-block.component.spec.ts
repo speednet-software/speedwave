@@ -152,11 +152,12 @@ describe('TextBlockComponent', () => {
   });
 
   it('toggles the caret reactively when streaming changes', () => {
-    fixture.componentRef.setInput('content', 'text');
-    fixture.componentRef.setInput('streaming', true);
+    component.content = 'text';
+    component.streaming = true;
     fixture.detectChanges();
     expect(el.querySelector('[data-testid="streaming-caret"]')).not.toBeNull();
 
+    // setInput is required here (not direct assignment) so OnPush re-renders the @if block.
     fixture.componentRef.setInput('streaming', false);
     fixture.detectChanges();
     expect(el.querySelector('[data-testid="streaming-caret"]')).toBeNull();

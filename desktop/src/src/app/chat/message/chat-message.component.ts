@@ -69,11 +69,7 @@ export class ChatMessageComponent {
   @Input() streaming = false;
   @Output() questionAnswered = new EventEmitter<{ toolId: string; values: string[] }>();
 
-  /**
-   * True when the last block is a text block — the per-text-block streaming
-   * caret already renders inside it, so the parent block-level cursor must
-   * be suppressed to avoid a double-cursor visual bug during streaming.
-   */
+  /** Suppresses the block-level cursor when the last block renders its own streaming caret. */
   get lastBlockIsText(): boolean {
     return this.blocks.length > 0 && this.blocks[this.blocks.length - 1].type === 'text';
   }

@@ -42,12 +42,11 @@ export class ThinkingBlockComponent implements OnInit {
   /** Initial collapsed state. Defaults to collapsed. */
   @Input() collapsedDefault = true;
 
-  /** Class-scoped counter avoids module-level mutable state that survives test runs. */
+  /** Incremented per-instance to generate unique panel IDs for aria-controls. */
   private static instanceCounter = 0;
   /** Stable DOM id so aria-controls on the toggle pairs with the content region. */
   readonly panelId = `thinking-panel-${++ThinkingBlockComponent.instanceCounter}`;
 
-  /** Reactive collapsed state; seeded from collapsedDefault, toggled on click. */
   readonly collapsed = signal<boolean>(true);
 
   /** Seeds the collapsed signal from the collapsedDefault input. */
