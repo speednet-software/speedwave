@@ -238,7 +238,7 @@ describe('SessionStatsComponent', () => {
         context_window_size: 200000, // 10%
         total_output_tokens: 0,
       };
-      expect(component.ctxBarColor()).toBe('bg-green');
+      expect(component.ctxBarColor()).toBe('bg-green-500');
     });
 
     it('applies amber for 50–76%', () => {
@@ -249,7 +249,7 @@ describe('SessionStatsComponent', () => {
         context_window_size: 200000,
         total_output_tokens: 0,
       };
-      expect(component.rlBarColor()).toBe('bg-amber');
+      expect(component.rlBarColor()).toBe('bg-amber-500');
     });
 
     it('applies amber at boundary 50', () => {
@@ -260,7 +260,7 @@ describe('SessionStatsComponent', () => {
         context_window_size: 200000,
         total_output_tokens: 0,
       };
-      expect(component.rlBarColor()).toBe('bg-amber');
+      expect(component.rlBarColor()).toBe('bg-amber-500');
     });
 
     it('applies red-500 for ≥77%', () => {

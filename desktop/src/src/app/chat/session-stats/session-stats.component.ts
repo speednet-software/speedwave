@@ -115,11 +115,6 @@ export class SessionStatsComponent {
     this.statsSignal.set(value);
   }
 
-  /** Current stats value, or null if no session is active. */
-  get stats(): SessionStats | null {
-    return this.statsSignal();
-  }
-
   /**
    * Total input tokens consumed from the context window (sum of `input`,
    * `cache_read`, `cache_write`). Matches the statusline.sh calculation —
@@ -135,7 +130,7 @@ export class SessionStatsComponent {
   readonly ctxPct = computed<number>(() => {
     const total = this.totalInput();
     if (total <= 0) return 0;
-    const windowSize = this.statsSignal()?.context_window_size || 200_000;
+    const windowSize = this.statsSignal()?.context_window_size ?? 200_000;
     return Math.min(100, Math.round((total / windowSize) * 100));
   });
 
@@ -149,7 +144,7 @@ export class SessionStatsComponent {
   readonly ctxUsedMax = computed<string>(() => {
     const total = this.totalInput();
     if (total <= 0) return '';
-    const windowSize = this.statsSignal()?.context_window_size || 200_000;
+    const windowSize = this.statsSignal()?.context_window_size ?? 200_000;
     return `${shortK(total)}/${shortK(windowSize)}`;
   });
 
@@ -187,9 +182,11 @@ export class SessionStatsComponent {
  * @param pct - Percentage in the range 0–100.
  */
 function barColor(pct: number): string {
+  // Buckets per the design-system spec (Tailwind v4 utilities resolve via
+  // the @theme block in styles.css: --color-amber, --color-green).
   if (pct >= 77) return 'bg-red-500';
-  if (pct >= 50) return 'bg-amber';
-  return 'bg-green';
+  if (pct >= 50) return 'bg-amber-500';
+  return 'bg-green-500';
 }
 
 /**

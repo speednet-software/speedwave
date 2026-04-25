@@ -60,19 +60,12 @@ const SLASH_AT_START = /^\s*\/[^\s/]*$/;
           class="w-full resize-none border-0 bg-transparent px-3 py-2.5 text-[14px] leading-relaxed text-ink placeholder-ink-mute focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
           [placeholder]="placeholder"
           [formControl]="text"
-          [attr.disabled]="disabled ? '' : null"
           (keydown.enter)="onEnter($event)"
           (input)="onInput($event)"
         ></textarea>
         <div
           class="mono flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line px-3 py-1.5 text-[11px] text-ink-mute"
         >
-          <button type="button" class="hover:text-ink">
-            &#64;<span class="hidden sm:inline"> mention</span>
-          </button>
-          <button type="button" class="hover:text-ink">
-            +<span class="hidden sm:inline"> attach</span>
-          </button>
           <button
             type="button"
             data-testid="composer-slash"
@@ -82,13 +75,13 @@ const SLASH_AT_START = /^\s*\/[^\s/]*$/;
             /<span class="hidden sm:inline"> skill</span>
           </button>
           <div class="ml-auto flex flex-shrink-0 items-center gap-2">
-            <span class="hidden sm:inline">&#8984;+&#8629;</span>
+            <span class="hidden sm:inline" data-testid="composer-shortcut">{{ shortcutLabel }}</span>
             <button
               type="button"
               data-testid="chat-send"
               aria-label="Send"
               class="rounded bg-accent px-2.5 py-0.5 font-medium text-on-accent hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-              [attr.disabled]="canSubmit() ? null : ''"
+              [disabled]="!canSubmit()"
               (click)="submit()"
             >
               send &rarr;
@@ -104,8 +97,16 @@ export class ComposerComponent {
   @ViewChild('textarea', { static: true })
   private textareaRef!: ElementRef<HTMLTextAreaElement>;
 
+  private _disabled = false;
   /** Disables input and suppresses submits while the turn is streaming. */
-  @Input() disabled = false;
+  get disabled(): boolean {
+    return this._disabled;
+  }
+  @Input() set disabled(value: boolean) {
+    this._disabled = value;
+    if (value) this.text.disable({ emitEvent: false });
+    else this.text.enable({ emitEvent: false });
+  }
 
   /** Placeholder shown in the textarea when it is empty. */
   @Input() placeholder = 'Message Claude...';
@@ -131,6 +132,12 @@ export class ComposerComponent {
 
   /** Reactive control holding the current textarea value. */
   readonly text = new FormControl<string>('', { nonNullable: true });
+
+  /**
+   * Platform-aware submit-shortcut label shown in the toolbar.
+   * macOS shows ⌘+↵; Windows / Linux show Ctrl+↵.
+   */
+  readonly shortcutLabel = isMacPlatform() ? '⌘+↵' : 'Ctrl+↵';
 
   /**
    * Text value as a signal — bridges `FormControl.valueChanges` (RxJS) into
@@ -192,4 +199,16 @@ export class ComposerComponent {
     });
     this.slashOpened.emit({ caretPos: newPos });
   }
+}
+
+/** Detects macOS for platform-aware keyboard hints (browser + jsdom safe). */
+function isMacPlatform(): boolean {
+  if (typeof navigator === "undefined") return false;
+  // navigator.userAgentData.platform is the modern signal; fall back to userAgent.
+  type NavigatorWithUA = Navigator & {
+    userAgentData?: { platform?: string };
+  };
+  const nav = navigator as NavigatorWithUA;
+  const platform = nav.userAgentData?.platform ?? nav.userAgent ?? "";
+  return /Mac|iPhone|iPad|iPod/i.test(platform);
 }
