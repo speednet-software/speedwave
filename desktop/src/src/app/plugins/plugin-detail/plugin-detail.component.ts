@@ -17,7 +17,6 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
 /** Detail page for a single plugin with Dashboard and Settings tabs. */
 @Component({
   selector: 'app-plugin-detail',
-  standalone: true,
   imports: [CommonModule, PluginSettingsFormComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
@@ -67,7 +66,8 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
         <div class="flex border-b border-sw-border mb-6" data-testid="tab-bar">
           <button
             class="bg-transparent border-none border-b-2 border-b-transparent text-sw-text-dim text-sm font-mono px-5 py-2 cursor-pointer transition-all duration-200 hover:text-sw-text"
-            [ngClass]="activeTab === 'dashboard' ? 'text-sw-accent! border-b-sw-accent!' : ''"
+            [class.text-sw-accent!]="activeTab === 'dashboard'"
+            [class.border-b-sw-accent!]="activeTab === 'dashboard'"
             (click)="activeTab = 'dashboard'"
             data-testid="tab-dashboard"
           >
@@ -75,7 +75,8 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
           </button>
           <button
             class="bg-transparent border-none border-b-2 border-b-transparent text-sw-text-dim text-sm font-mono px-5 py-2 cursor-pointer transition-all duration-200 hover:text-sw-text"
-            [ngClass]="activeTab === 'settings' ? 'text-sw-accent! border-b-sw-accent!' : ''"
+            [class.text-sw-accent!]="activeTab === 'settings'"
+            [class.border-b-sw-accent!]="activeTab === 'settings'"
             (click)="activeTab = 'settings'"
             data-testid="tab-settings"
           >
@@ -95,12 +96,13 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
                   <h3 class="text-sm text-sw-text-subtle m-0 mb-3">Required Integrations</h3>
                   @for (integration of plugin.requires_integrations; track integration) {
                     <div
-                      class="px-3.5 py-2.5 rounded-md text-[13px] mb-2"
-                      [ngClass]="
-                        integrationStatuses.get(integration)
-                          ? 'bg-sw-success-dark text-sw-success-text border border-sw-success-border'
-                          : 'bg-sw-error-bg text-sw-accent border border-sw-accent'
-                      "
+                      class="px-3.5 py-2.5 rounded-md text-[13px] mb-2 border"
+                      [class.bg-sw-success-dark]="integrationStatuses.get(integration)"
+                      [class.text-sw-success-text]="integrationStatuses.get(integration)"
+                      [class.border-sw-success-border]="integrationStatuses.get(integration)"
+                      [class.bg-sw-error-bg]="!integrationStatuses.get(integration)"
+                      [class.text-sw-accent]="!integrationStatuses.get(integration)"
+                      [class.border-sw-accent]="!integrationStatuses.get(integration)"
                       [attr.data-testid]="'integration-status-' + integration"
                     >
                       @if (integrationStatuses.get(integration)) {

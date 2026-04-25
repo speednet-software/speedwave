@@ -39,6 +39,7 @@ import { ConversationsSidebarComponent } from './conversations-sidebar/conversat
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './chat.component.html',
+  host: { '(click)': 'onLinkClick($event)' },
 })
 export class ChatComponent implements OnInit, OnDestroy {
   conversations: readonly ConversationSummary[] = [];
@@ -346,7 +347,6 @@ export class ChatComponent implements OnInit, OnDestroy {
    * Intercept anchor clicks so http(s) links open in the system browser, not in-app.
    * @param event - the click event; preventDefault is called when we route to open_url.
    */
-  @HostListener('click', ['$event'])
   onLinkClick(event: MouseEvent): void {
     const target = (event.target as HTMLElement).closest('a');
     if (!target) return;

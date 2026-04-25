@@ -20,10 +20,10 @@
 
   /* Text */
   --color-sw-text: #e0e0e0;
-  --color-sw-text-muted: #888888;
+  --color-sw-text-muted: #898989; /* bumped from #888888 to pass WCAG AA on bg-dark (4.54:1) */
   --color-sw-text-dim: #aaaaaa;
   --color-sw-text-faint: #999999;
-  --color-sw-text-ghost: #666666;
+  --color-sw-text-ghost: #909090; /* bumped from #666666 for WCAG AA body text on bg-darkest (5.34:1) */
   --color-sw-text-silver: #c0c0c0;
   --color-sw-text-lavender: #a0a0c0;
   --color-sw-text-code: #aaaacc;
@@ -68,7 +68,7 @@
   --color-sw-code-blue: #93c5fd;
   --color-sw-code-green: #86efac;
   --color-sw-code-red: #fca5a5;
-  --color-sw-code-gray: #6b7280;
+  --color-sw-code-gray: #9ca3af; /* bumped from #6b7280 for WCAG AA on bg-darkest (6.72:1) and bg-navy (4.92:1) */
 
   /* Interactive states */
   --color-sw-btn-hover: #1a4a7a;
@@ -155,6 +155,15 @@
 
   code, pre {
     font-family: var(--font-mono);
+  }
+
+  /* Global focus-visible ring — WCAG 2.4.7 Focus Visible.
+     Applies to every interactive element when keyboard-focused (not mouse).
+     Contrast ratio 4.46:1 vs bg-darkest (AA for large/UI). */
+  :focus-visible {
+    outline: 2px solid var(--color-sw-accent);
+    outline-offset: 2px;
+    border-radius: 2px;
   }
 }
 

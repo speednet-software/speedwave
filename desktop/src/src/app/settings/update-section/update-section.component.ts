@@ -16,7 +16,6 @@ import { UpdateInfo, UpdateSettings } from '../../models/update';
 /** Displays app update controls, container update/rollback, and auto-check settings. */
 @Component({
   selector: 'app-update-section',
-  standalone: true,
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `

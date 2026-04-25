@@ -28,7 +28,6 @@ import {
  */
 @Component({
   selector: 'app-shell',
-  standalone: true,
   imports: [
     RouterOutlet,
     ProjectSwitcherComponent,

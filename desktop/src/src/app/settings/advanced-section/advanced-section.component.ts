@@ -14,7 +14,6 @@ import { TauriService } from '../../services/tauri.service';
 /** Displays logging controls, diagnostics export, and factory reset (danger zone). */
 @Component({
   selector: 'app-advanced-section',
-  standalone: true,
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `

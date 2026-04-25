@@ -18,7 +18,6 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
 /** Displays real-time system health status including VM, containers, IDE bridge, and mcp-os. */
 @Component({
   selector: 'app-system-health',
-  standalone: true,
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `

@@ -6,7 +6,6 @@ import { JsonSchema } from '../../models/plugin';
 /** Renders a settings form dynamically from a JSON Schema definition. */
 @Component({
   selector: 'app-plugin-settings-form',
-  standalone: true,
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `

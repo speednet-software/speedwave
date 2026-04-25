@@ -37,7 +37,6 @@ type DiscoveryState =
 /** Manages LLM provider selection and configuration. */
 @Component({
   selector: 'app-llm-provider',
-  standalone: true,
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `

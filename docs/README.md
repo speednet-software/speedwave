@@ -29,6 +29,10 @@ Welcome to the Speedwave documentation. Speedwave is an AI platform that connect
 - [Testing](contributing/testing.md) — test strategy, coverage, CI
 - [Release Signing](contributing/release-signing.md) — macOS code signing, notarization, certificate rotation
 
+## Accessibility
+
+- [Contrast Report](accessibility/contrast-report.md) — WCAG AA ratios for every design token pair
+
 ## Architecture Decision Records
 
 - [ADR Index](adr/README.md) — all architectural decisions

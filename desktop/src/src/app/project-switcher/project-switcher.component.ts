@@ -16,7 +16,6 @@ import type { ProjectEntry, ProjectList } from '../models/update';
 /** Manages project switching and selection in the toolbar. */
 @Component({
   selector: 'app-project-switcher',
-  standalone: true,
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `

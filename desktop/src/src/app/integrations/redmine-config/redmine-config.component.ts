@@ -128,7 +128,6 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
 /** Wizard-based configuration component for the Redmine integration. */
 @Component({
   selector: 'app-redmine-config',
-  standalone: true,
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
@@ -151,11 +150,10 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
             class="text-[11px] px-2 py-0.5 rounded font-medium"
             data-testid="badge"
             [attr.data-status]="svc.configured ? 'configured' : 'not-configured'"
-            [ngClass]="
-              svc.configured
-                ? 'bg-sw-success-dark text-sw-success-text'
-                : 'bg-sw-error-badge text-sw-error-text'
-            "
+            [class.bg-sw-success-dark]="svc.configured"
+            [class.text-sw-success-text]="svc.configured"
+            [class.bg-sw-error-badge]="!svc.configured"
+            [class.text-sw-error-text]="!svc.configured"
           >
             {{ svc.configured ? 'Configured' : 'Not Configured' }}
           </span>
@@ -165,7 +163,8 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
             class="relative inline-block w-[44px] h-[24px]"
             data-testid="toggle"
             [attr.data-disabled]="!svc.configured"
-            [ngClass]="!svc.configured ? 'opacity-40 cursor-not-allowed' : ''"
+            [class.opacity-40]="!svc.configured"
+            [class.cursor-not-allowed]="!svc.configured"
             [title]="svc.configured ? '' : 'Configure credentials to enable'"
           >
             <input
@@ -175,7 +174,7 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
               [disabled]="!svc.configured"
               (change)="onToggle($event)"
               [attr.data-testid]="'integrations-toggle-' + svc.service"
-              [ngClass]="!svc.configured ? 'cursor-not-allowed' : ''"
+              [class.cursor-not-allowed]="!svc.configured"
             />
             <span
               class="absolute inset-0 bg-sw-slider rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-sw-accent before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"

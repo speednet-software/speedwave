@@ -19,7 +19,6 @@ import { ProjectList } from '../models/update';
 /** Displays application settings and provides factory reset functionality. */
 @Component({
   selector: 'app-settings',
-  standalone: true,
   imports: [
     LlmProviderComponent,
     AuthSectionComponent,
