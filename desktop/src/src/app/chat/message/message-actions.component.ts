@@ -66,7 +66,8 @@ export class MessageActionsComponent implements OnDestroy {
 
   /** Returns whether the retry button is currently enabled. */
   canRetry(): boolean {
-    return !this.chat.isStreaming && this.chat.canRetryLastAssistant();
+    // canRetryLastAssistant() already checks isStreaming via findRetryAnchor.
+    return this.chat.canRetryLastAssistant();
   }
 
   /** Click handler for the copy button. */

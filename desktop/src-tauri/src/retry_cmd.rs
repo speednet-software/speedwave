@@ -44,8 +44,6 @@ pub enum RetryError {
     PendingAssistant,
     /// The given session id is not known or malformed.
     SessionNotFound,
-    /// Another turn is currently streaming — retry would race with it.
-    Streaming,
     /// Spawning Claude Code with `--resume-session-at` failed.
     ResumeFailed(String),
 }
@@ -56,7 +54,6 @@ impl std::fmt::Display for RetryError {
             Self::NoAssistantTurn => write!(f, "no assistant turn to retry"),
             Self::PendingAssistant => write!(f, "last assistant turn is still streaming"),
             Self::SessionNotFound => write!(f, "session id not found or invalid"),
-            Self::Streaming => write!(f, "another turn is currently streaming"),
             Self::ResumeFailed(msg) => write!(f, "failed to spawn resume: {msg}"),
         }
     }
@@ -157,17 +154,6 @@ pub async fn retry_last_turn(
     })
     .await
     .map_err(|e| RetryError::ResumeFailed(format!("join error: {e}")))?
-}
-
-/// Helper used by the Tauri command's driver to read the project name out of
-/// a locked `ChatSession`. Defined as a free function on `ChatSession` via a
-/// dedicated accessor in `chat.rs`.
-///
-/// Exposed as a test hook: the trait `SessionDriver` remains the preferred
-/// test seam for new code.
-#[allow(dead_code)]
-pub(crate) fn _project_name_for_driver(arc: &Arc<Mutex<ChatSession>>) -> Option<String> {
-    arc.lock().ok().map(|g| g.project_name().to_string())
 }
 
 #[cfg(test)]
@@ -302,7 +288,7 @@ mod tests {
 
     #[test]
     fn retry_error_round_trips() {
-        let original = RetryError::Streaming;
+        let original = RetryError::PendingAssistant;
         let json = serde_json::to_string(&original).unwrap();
         let decoded: RetryError = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, original);
