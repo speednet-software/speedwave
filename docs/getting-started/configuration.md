@@ -19,9 +19,8 @@ The user-level config file stores project definitions, the active project, IDE s
         },
         "llm": {
           "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
-          "base_url": null,
-          "api_key_env": null
+          "model": null,
+          "base_url": null
         }
       },
       "integrations": {
@@ -49,8 +48,19 @@ The user-level config file stores project definitions, the active project, IDE s
 A `.speedwave.json` file in the project repository root provides repo-level defaults. These are overridden by the user-level config:
 
 - `claude.env` — environment variables passed to Claude Code inside the container
-- `claude.llm` — LLM provider, model, base URL, and API key env var name
+- `claude.llm` — LLM provider (`anthropic`, `ollama`, `lmstudio`, `llamacpp`), model name, and optional base URL. See [ADR-040](../adr/ADR-040-remove-litellm-direct-provider-injection.md) for provider details and [ADR-041](../adr/ADR-041-local-llm-model-discovery.md) for model auto-discovery.
 - `integrations` — enable/disable individual integrations per project
+
+### Model auto-discovery (local providers)
+
+When the selected provider is local (`ollama`, `lmstudio`, `llamacpp`) and a `base_url` is configured (or the provider default is reachable), the Settings → LLM Provider panel probes the server for the list of available models and presents them as a `<select>`:
+
+- `ollama` uses `GET /api/tags`.
+- `lmstudio`, `llamacpp` use `GET /v1/models` (OpenAI-compatible).
+- Anthropic is NOT probed — the model list is fixed.
+- If the server is offline or returns an unexpected response, the UI gracefully falls back to a free-text input so you can pre-configure the app before starting your server.
+- A Refresh button re-probes on demand (useful after pulling a new model).
+- The same URL validator runs on Save, rejecting `http://169.254.169.254`, `file://`, `http://user:pass@…`, URLs with query strings/fragments, etc. See [ADR-041](../adr/ADR-041-local-llm-model-discovery.md) for the full SSRF policy.
 
 ## Environment Variables
 

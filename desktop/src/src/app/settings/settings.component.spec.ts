@@ -15,7 +15,7 @@ function setupMockTauri(mockTauri: MockTauriService): void {
           active_project: 'test-project',
         };
       case 'get_llm_config':
-        return { provider: 'anthropic', model: null, base_url: null, api_key_env: null };
+        return { provider: 'anthropic', model: null, base_url: null, default_base_url: null };
       case 'get_update_settings':
         return { auto_check: true, check_interval_hours: 24 };
       case 'get_log_level':
@@ -79,6 +79,15 @@ describe('SettingsComponent', () => {
     fixture.detectChanges();
     const healthEl = fixture.nativeElement.querySelector('app-system-health');
     expect(healthEl).not.toBeNull();
+  });
+
+  it('renders LlmProviderComponent', async () => {
+    component.ngOnInit();
+    await fixture.whenStable();
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
+    const llmEl = fixture.nativeElement.querySelector('app-llm-provider');
+    expect(llmEl).not.toBeNull();
   });
 
   it('renders AuthSectionComponent', async () => {

@@ -41,6 +41,10 @@
   --color-sw-success-border: #2d6a4f;
   --color-sw-success-light: #34d399;
 
+  /* Destructive action (Stop button — distinct from accent #e94560) */
+  --color-sw-destructive: #b91c1c;
+  --color-sw-destructive-hover: #991b1b;
+
   /* Error */
   --color-sw-error: #e94560;
   --color-sw-error-bg: #3d0000;

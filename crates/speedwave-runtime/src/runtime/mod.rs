@@ -798,8 +798,10 @@ mod tests {
 
     #[test]
     fn parse_real_nerdctl_output() {
-        // Real output from `limactl shell speedwave sudo nerdctl compose ps --format json`
-        let input = r#"[{"ID":"076c","Name":"speedwave_myproject_mcp_redmine","Image":"speedwave-mcp-redmine:latest","Command":"docker-entrypoint.sh node dist/index.js","Project":"myproject","Service":"mcp-redmine","State":"running","Health":"","ExitCode":0,"Publishers":[{"URL":"127.0.0.1","TargetPort":4003,"PublishedPort":4003,"Protocol":"tcp"}]},{"ID":"40c1","Name":"speedwave_myproject_claude","Image":"speedwave-claude:latest","Command":"/usr/local/bin/entrypoint.sh","Project":"myproject","Service":"claude","State":"exited","Health":"","ExitCode":1,"Publishers":[]}]"#;
+        // Real output from `limactl shell speedwave sudo nerdctl compose ps --format json`.
+        // Since ADR-038 every worker listens on PORT_WORKER (3000); the test only
+        // checks Name and State so the exact port is immaterial.
+        let input = r#"[{"ID":"076c","Name":"speedwave_myproject_mcp_redmine","Image":"speedwave-mcp-redmine:latest","Command":"docker-entrypoint.sh node dist/index.js","Project":"myproject","Service":"mcp-redmine","State":"running","Health":"","ExitCode":0,"Publishers":[{"URL":"127.0.0.1","TargetPort":3000,"PublishedPort":3000,"Protocol":"tcp"}]},{"ID":"40c1","Name":"speedwave_myproject_claude","Image":"speedwave-claude:latest","Command":"/usr/local/bin/entrypoint.sh","Project":"myproject","Service":"claude","State":"exited","Health":"","ExitCode":1,"Publishers":[]}]"#;
         let result = parse_compose_ps_json(input);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0]["Name"], "speedwave_myproject_mcp_redmine");
@@ -1533,5 +1535,50 @@ services:
             1,
             "at most one thread should hold the lock at a time"
         );
+    }
+}
+
+/// Test-only no-op runtime: every method succeeds and does nothing.
+/// Use as a base for mocks that only need to override one or two methods.
+#[cfg(test)]
+pub(crate) struct NoopRuntime;
+
+#[cfg(test)]
+impl ContainerRuntime for NoopRuntime {
+    fn compose_up(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn compose_down(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+        Ok(vec![])
+    }
+    fn container_exec(&self, _: &str, _: &[&str]) -> std::process::Command {
+        std::process::Command::new("true")
+    }
+    fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<std::process::Command> {
+        Ok(std::process::Command::new("true"))
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+    fn ensure_ready(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn build_image(&self, _: &str, _: &str, _: &str, _: &[(&str, &str)]) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+        Ok(String::new())
+    }
+    fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+        Ok(String::new())
+    }
+    fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+    fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
     }
 }

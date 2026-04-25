@@ -98,7 +98,3 @@ All platforms use **WebdriverIO**[^4] as the test runner, connecting via the W3C
 [^8]: nerdctl rootless mode — requires systemd or similar init system. https://github.com/containerd/nerdctl/blob/main/docs/rootless.md
 
 [^9]: Parallels Desktop for Mac — Pro and Business editions. https://www.parallels.com/products/desktop/pro/
-
-[^10]: Parallels prlctl command-line reference — snapshot and exec operations. https://download.parallels.com/desktop/v19/docs/en_US/Parallels%20Desktop%20Pro%20Edition%20Command-Line%20Reference.pdf
-
-[^11]: Parallels Shared Folders — sharing files between Mac and VM. https://www.parallels.com/blogs/share-files-folders-mac-vm/

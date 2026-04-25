@@ -80,7 +80,7 @@ presale-1.2.0/
     }
   ],
   "settings_schema": null,
-  "speedwave_compat": ">=2.0.0",
+  "speedwave_compat": ">=0.8, <1",
   "extra_env": null,
   "mem_limit": "128m"
 }
@@ -100,23 +100,31 @@ presale-1.2.0/
 
 ### Field Reference
 
-| Field                   | Type     | Required | Description                                                                           |
-| ----------------------- | -------- | -------- | ------------------------------------------------------------------------------------- |
-| `name`                  | string   | Yes      | Human-readable display name                                                           |
-| `slug`                  | string   | Yes      | Unique identifier, `^[a-z][a-z0-9-]{0,63}$`                                           |
-| `service_id`            | string?  | MCP only | Must equal `slug` when present                                                        |
-| `version`               | string   | Yes      | Semantic version                                                                      |
-| `description`           | string   | Yes      | Short description                                                                     |
-| `port`                  | u16?     | MCP only | Container listening port                                                              |
-| `image_tag`             | string?  | No       | Custom image tag (default: `version`)                                                 |
-| `resources`             | string[] | No       | Subset of `["skills", "commands", "agents", "hooks"]`                                 |
-| `token_mount`           | object   | No       | `{"mode": "read_only"}` (default) or `{"mode": "read_write", "justification": "..."}` |
-| `auth_fields`           | object[] | No       | Credential field definitions for the Desktop UI                                       |
-| `settings_schema`       | JSON?    | No       | JSON Schema for per-project plugin settings                                           |
-| `speedwave_compat`      | string?  | No       | Required Speedwave version range                                                      |
-| `extra_env`             | map?     | No       | Additional environment variables for the container                                    |
-| `mem_limit`             | string?  | No       | Container memory limit (default: `128m`)                                              |
-| `requires_integrations` | string[] | No       | Core integrations the plugin depends on (e.g. `["sharepoint"]`)                       |
+| Field                   | Type     | Required | Description                                                                                   |
+| ----------------------- | -------- | -------- | --------------------------------------------------------------------------------------------- |
+| `name`                  | string   | Yes      | Human-readable display name                                                                   |
+| `slug`                  | string   | Yes      | Unique identifier, `^[a-z][a-z0-9-]{0,63}$`                                                   |
+| `service_id`            | string?  | MCP only | Must equal `slug` when present                                                                |
+| `version`               | string   | Yes      | Semantic version                                                                              |
+| `description`           | string   | Yes      | Short description                                                                             |
+| `port`                  | u16?     | MCP only | Container listening port                                                                      |
+| `image_tag`             | string?  | No       | Custom image tag (default: `version`)                                                         |
+| `resources`             | string[] | No       | Subset of `["skills", "commands", "agents", "hooks"]`                                         |
+| `token_mount`           | object   | No       | `{"mode": "read_only"}` (default) or `{"mode": "read_write", "justification": "..."}`         |
+| `auth_fields`           | object[] | No       | Credential field definitions for the Desktop UI                                               |
+| `settings_schema`       | JSON?    | No       | JSON Schema for per-project plugin settings                                                   |
+| `speedwave_compat`      | string?  | No       | Semver `VersionReq` (e.g. `">=0.8, <1"`). Validated at install; mismatch rejects the install. |
+| `extra_env`             | map?     | No       | Additional environment variables for the container                                            |
+| `mem_limit`             | string?  | No       | Container memory limit (default: `128m`)                                                      |
+| `requires_integrations` | string[] | No       | Core integrations the plugin depends on (e.g. `["sharepoint"]`)                               |
+
+### Compatibility enforcement
+
+The `speedwave_compat` field is optional. Omitting it disables the check and preserves backward compatibility for legacy plugins.
+
+If present, the value MUST NOT be empty or whitespace, and MUST parse as a `semver::VersionReq`[^11]. If the running Speedwave version does not satisfy the declared range, `install_plugin()` rejects the ZIP with a clear error before any file is copied into `~/.speedwave/plugins/`.
+
+**Recommended pattern for plugin authors:** declare `">=<current_minor>, <<next_major>"`. A plugin built and tested against Speedwave 0.8.x should declare `"speedwave_compat": ">=0.8, <1"`. Bump this range on every Speedwave major release, after re-testing the plugin against the new major. See Cargo version-requirement syntax[^12] for the full range language.
 
 ### auth_fields entry
 
@@ -511,3 +519,7 @@ Tauri commands: `get_plugins`, `install_plugin`, `remove_plugin`, `set_plugin_en
 [^8]: [Microsoft identity platform — OAuth 2.0 token refresh](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow#refresh-the-access-token)
 
 [^10]: [OCI Image Format Specification — Containerfile](https://github.com/containers/common/blob/main/docs/Containerfile.5.md)
+
+[^11]: https://docs.rs/semver/1/semver/struct.VersionReq.html
+
+[^12]: https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#version-requirement-syntax

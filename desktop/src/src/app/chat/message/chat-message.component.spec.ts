@@ -96,6 +96,38 @@ describe('ChatMessageComponent', () => {
     expect(msg?.getAttribute('data-role')).toBe('user');
   });
 
+  it('host right-aligns user messages via justify-end', () => {
+    component.blocks = [{ type: 'text', content: 'ok' }];
+    component.role = 'user';
+    fixture.detectChanges();
+
+    const host = fixture.nativeElement as HTMLElement;
+    expect(host.classList.contains('justify-end')).toBe(true);
+    expect(host.classList.contains('justify-start')).toBe(false);
+  });
+
+  it('host left-aligns assistant messages via justify-start', () => {
+    component.blocks = [{ type: 'text', content: 'hello' }];
+    component.role = 'assistant';
+    fixture.detectChanges();
+
+    const host = fixture.nativeElement as HTMLElement;
+    expect(host.classList.contains('justify-start')).toBe(true);
+    expect(host.classList.contains('justify-end')).toBe(false);
+  });
+
+  it('bubble shrinks to content width (w-fit) with 85% cap', () => {
+    component.blocks = [{ type: 'text', content: 'ok' }];
+    component.role = 'user';
+    fixture.detectChanges();
+
+    const bubble = fixture.nativeElement.querySelector(
+      '[data-testid="chat-message"]'
+    ) as HTMLElement;
+    expect(bubble.classList.contains('w-fit')).toBe(true);
+    expect(bubble.classList.contains('max-w-[85%]')).toBe(true);
+  });
+
   it('shows streaming cursor when streaming', () => {
     component.blocks = [{ type: 'text', content: 'partial...' }];
     component.role = 'assistant';
