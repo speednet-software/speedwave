@@ -144,6 +144,7 @@
       <app-memory-panel
         [open]="ui.memoryOpen()"
         [markdown]="projectMemory"
+        [error]="memoryError"
         (closed)="ui.closeMemory()"
       ></app-memory-panel>
     </div>

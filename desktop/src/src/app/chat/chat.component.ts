@@ -50,6 +50,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   historyLoading = false;
   historyError = '';
   projectMemory = '';
+  memoryError = '';
   viewError = '';
   private resumeInProgress = false;
 
@@ -113,6 +114,7 @@ export class ChatComponent implements OnInit, OnDestroy {
       const wasMemoryOpen = this.showMemory;
       this.conversations = [];
       this.projectMemory = '';
+      this.memoryError = '';
       this.cdr.markForCheck();
       if (wasHistoryOpen) {
         await this.loadConversations();
@@ -306,8 +308,9 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
-  /** Fetches the active project's CLAUDE.md; falls back to empty on missing project / error. */
+  /** Fetches the active project's CLAUDE.md; surfaces backend errors via `memoryError` (parity with `historyError`). */
   async loadProjectMemory(): Promise<void> {
+    this.memoryError = '';
     try {
       const project = this.projectState.activeProject;
       if (!project) {
@@ -318,6 +321,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     } catch (err) {
       console.error('loadProjectMemory failed:', err);
       this.projectMemory = '';
+      this.memoryError = `Failed to load memory: ${err}`;
     }
     this.cdr.markForCheck();
   }

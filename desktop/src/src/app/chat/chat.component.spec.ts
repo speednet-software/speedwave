@@ -704,6 +704,53 @@ describe('ChatComponent', () => {
 
       expect(component.projectMemory).toBe('');
     });
+
+    it('surfaces user-facing memoryError on backend failure (parity with historyError)', async () => {
+      projectState.activeProject = 'test';
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_project_memory') throw new Error('disk failure');
+        return undefined;
+      };
+
+      await component.loadProjectMemory();
+
+      expect(component.memoryError).toContain('Failed to load memory');
+      expect(component.memoryError).toContain('disk failure');
+      errorSpy.mockRestore();
+    });
+
+    it('clears memoryError on a subsequent successful load', async () => {
+      projectState.activeProject = 'test';
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let shouldFail = true;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_project_memory') {
+          if (shouldFail) throw new Error('first failure');
+          return '# recovered';
+        }
+        return undefined;
+      };
+
+      await component.loadProjectMemory();
+      expect(component.memoryError).not.toBe('');
+
+      shouldFail = false;
+      await component.loadProjectMemory();
+
+      expect(component.memoryError).toBe('');
+      expect(component.projectMemory).toBe('# recovered');
+      errorSpy.mockRestore();
+    });
+
+    it('does not set memoryError when no active project', async () => {
+      projectState.activeProject = null;
+      component.memoryError = 'stale';
+
+      await component.loadProjectMemory();
+
+      expect(component.memoryError).toBe('');
+    });
   });
 
   // ── closeTranscript ─────────────────────────────────────────────────────────

@@ -47,7 +47,14 @@ import { TextBlockComponent } from '../blocks/text-block.component';
           class="flex-1 overflow-y-auto p-3 text-[13px] leading-relaxed text-ink"
           data-testid="memory-panel-body"
         >
-          @if (markdown) {
+          @if (error) {
+            <p
+              class="font-mono text-[11.5px] text-sw-accent border border-sw-accent rounded px-2 py-1.5"
+              data-testid="memory-panel-error"
+            >
+              {{ error }}
+            </p>
+          } @else if (markdown) {
             <app-text-block [content]="markdown" />
           } @else {
             <p class="font-mono text-[11.5px] text-ink-mute" data-testid="memory-panel-empty">
@@ -62,5 +69,6 @@ import { TextBlockComponent } from '../blocks/text-block.component';
 export class MemoryPanelComponent {
   @Input() open = false;
   @Input() markdown = '';
+  @Input() error = '';
   @Output() readonly closed = new EventEmitter<void>();
 }

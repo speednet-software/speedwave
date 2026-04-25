@@ -7,11 +7,14 @@ import { MemoryPanelComponent } from './memory-panel.component';
   standalone: true,
   imports: [MemoryPanelComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  template: ` <app-memory-panel [open]="open" [markdown]="markdown" (closed)="onClosed()" /> `,
+  template: `
+    <app-memory-panel [open]="open" [markdown]="markdown" [error]="error" (closed)="onClosed()" />
+  `,
 })
 class HostComponent {
   open = false;
   markdown = '';
+  error = '';
   closedCount = 0;
 
   onClosed(): void {
@@ -98,6 +101,43 @@ describe('MemoryPanelComponent', () => {
       host.open = true;
       fixture.detectChanges();
       expect(host.closedCount).toBe(0);
+    });
+  });
+
+  describe('error rendering', () => {
+    it('shows the error banner and hides body content when error is set', () => {
+      host.open = true;
+      host.markdown = '# Should be hidden';
+      host.error = 'Failed to load memory: disk failure';
+      fixture.detectChanges();
+
+      const errorEl = fixture.nativeElement.querySelector('[data-testid="memory-panel-error"]');
+      expect(errorEl).not.toBeNull();
+      expect(errorEl.textContent).toContain('Failed to load memory');
+      expect(fixture.nativeElement.querySelector('app-text-block')).toBeNull();
+      expect(fixture.nativeElement.querySelector('[data-testid="memory-panel-empty"]')).toBeNull();
+    });
+
+    it('renders markdown (no error banner) when error is empty string', () => {
+      host.open = true;
+      host.markdown = '# Recovered';
+      host.error = '';
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('[data-testid="memory-panel-error"]')).toBeNull();
+      expect(fixture.nativeElement.querySelector('app-text-block')).not.toBeNull();
+    });
+
+    it('renders empty placeholder when both markdown and error are empty', () => {
+      host.open = true;
+      host.markdown = '';
+      host.error = '';
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('[data-testid="memory-panel-error"]')).toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="memory-panel-empty"]')
+      ).not.toBeNull();
     });
   });
 });
