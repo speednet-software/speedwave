@@ -52,6 +52,16 @@ export const routes: Routes = [
         loadComponent: () =>
           import('./settings/settings.component').then((m) => m.SettingsComponent),
       },
+      {
+        path: 'system',
+        loadComponent: () =>
+          import('./system-view/system-view.component').then((m) => m.SystemViewComponent),
+      },
+      {
+        path: 'logs',
+        loadComponent: () =>
+          import('./logs-view/logs-view.component').then((m) => m.LogsViewComponent),
+      },
     ],
   },
 ];

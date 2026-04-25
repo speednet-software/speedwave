@@ -1,0 +1,140 @@
+<div class="mx-auto max-w-4xl">
+  <div class="mb-4 flex items-center justify-between">
+    <h1 class="mono text-[14px] text-sw-text m-0">System health</h1>
+    <span class="mono text-[11px] text-sw-text-muted" data-testid="system-refresh-hint">
+      auto-refresh 5s
+    </span>
+  </div>
+
+  @if (error) {
+    <div
+      class="mb-4 px-3 py-2 bg-sw-error-bg border border-sw-accent rounded text-sw-accent text-[12px] mono"
+      data-testid="system-error"
+      role="alert"
+    >
+      {{ error }}
+    </div>
+  }
+
+  @if (loading && !report) {
+    <p
+      class="mono text-[12px] text-sw-text-muted py-8 text-center"
+      data-testid="system-loading"
+    >
+      Loading health…
+    </p>
+  } @else if (!hasContainers && !error) {
+    <p
+      class="mono text-[12px] text-sw-text-muted py-8 text-center"
+      data-testid="system-empty"
+    >
+      No containers reported. Start the project to see live status.
+    </p>
+  } @else if (report && hasContainers) {
+    <div
+      class="overflow-hidden rounded ring-1 ring-line"
+      data-testid="system-table-wrapper"
+    >
+      <table class="mono w-full border-collapse" data-testid="system-table">
+        <caption class="sr-only">System containers and health</caption>
+        <thead class="bg-bg-1 text-[10px] uppercase tracking-widest text-ink-mute font-medium">
+          <tr>
+            <th class="px-3 py-2 text-left w-6" scope="col">
+              <span class="sr-only">Status</span>
+            </th>
+            <th class="px-3 py-2 text-left" scope="col">container</th>
+            <th class="px-3 py-2 text-left" scope="col">state</th>
+            <th class="px-3 py-2 text-left" scope="col">healthy</th>
+            <th class="px-3 py-2 text-right" scope="col">
+              <span class="sr-only">actions</span>
+            </th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-line">
+          @for (container of report.containers; track container.name) {
+            <tr data-testid="system-row" class="text-[12px]">
+              <td class="px-3 py-2 align-middle">
+                @if (container.healthy) {
+                  <span
+                    class="text-sw-success"
+                    aria-label="healthy"
+                    data-testid="system-dot-healthy"
+                  >●</span>
+                } @else {
+                  <span
+                    class="text-sw-accent"
+                    aria-label="unhealthy"
+                    data-testid="system-dot-unhealthy"
+                  >○</span>
+                }
+              </td>
+              <td class="px-3 py-2 align-middle text-sw-text" data-testid="system-name">
+                {{ container.name }}
+              </td>
+              <td
+                class="px-3 py-2 align-middle text-sw-teal"
+                data-testid="system-state"
+              >
+                {{ container.status }}
+              </td>
+              <td class="px-3 py-2 align-middle text-sw-text-dim">
+                @if (container.healthy) {
+                  <span data-testid="system-healthy">yes</span>
+                } @else {
+                  <span data-testid="system-healthy">no</span>
+                }
+              </td>
+              <td class="px-3 py-2 align-middle text-right">
+                <button
+                  type="button"
+                  class="mono text-[11px] text-sw-text-muted hover:text-sw-accent disabled:opacity-50 disabled:cursor-not-allowed"
+                  data-testid="system-restart"
+                  [disabled]="restarting.has(container.name)"
+                  [attr.aria-label]="'Restart ' + container.name"
+                  (click)="restart(container.name)"
+                >
+                  @if (restarting.has(container.name)) {
+                    restarting…
+                  } @else {
+                    restart
+                  }
+                </button>
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+
+    @if (report) {
+      <div
+        class="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3"
+        data-testid="system-summary"
+      >
+        <div class="rounded ring-1 ring-line bg-bg-1 p-3">
+          <div class="mono text-[10px] uppercase tracking-widest text-ink-mute">vm</div>
+          <div class="mono mt-1 text-[12px] text-sw-text" data-testid="system-vm">
+            {{ report.vm.vm_type }} · {{ report.vm.running ? 'running' : 'stopped' }}
+          </div>
+        </div>
+        <div class="rounded ring-1 ring-line bg-bg-1 p-3">
+          <div class="mono text-[10px] uppercase tracking-widest text-ink-mute">overall</div>
+          <div
+            class="mono mt-1 text-[12px]"
+            [class.text-sw-success]="report.overall_healthy"
+            [class.text-sw-accent]="!report.overall_healthy"
+            data-testid="system-overall"
+          >
+            {{ report.overall_healthy ? 'healthy' : 'degraded' }}
+          </div>
+        </div>
+        <div class="rounded ring-1 ring-line bg-bg-1 p-3">
+          <div class="mono text-[10px] uppercase tracking-widest text-ink-mute">ide_bridge</div>
+          <div class="mono mt-1 text-[12px] text-sw-text-dim" data-testid="system-bridge">
+            {{ report.ide_bridge.running ? 'connected' : 'disconnected' }}
+          </div>
+        </div>
+      </div>
+    }
+  }
+</div>

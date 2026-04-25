@@ -198,6 +198,8 @@ export class ShellComponent implements OnInit, OnDestroy {
     { id: 'chat', label: 'Chat', route: '/chat' },
     { id: 'integrations', label: 'Integrations', route: '/integrations' },
     { id: 'plugins', label: 'Plugins', route: '/plugins' },
+    { id: 'system', label: 'System', route: '/system' },
+    { id: 'logs', label: 'Logs', route: '/logs' },
     { id: 'settings', label: 'Settings', route: '/settings' },
   ];
 

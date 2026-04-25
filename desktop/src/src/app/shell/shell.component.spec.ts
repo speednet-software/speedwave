@@ -236,7 +236,7 @@ describe('ShellComponent', () => {
     const nav = fixture.nativeElement.querySelector('[data-testid="app-nav"]');
     const links = Array.from(nav.querySelectorAll('a')) as HTMLAnchorElement[];
     const labels = links.map((a) => a.textContent?.trim());
-    expect(labels).toEqual(['Integrations', 'Plugins', 'Settings']);
+    expect(labels).toEqual(['Integrations', 'Plugins', 'System', 'Logs', 'Settings']);
     expect(labels).not.toContain('Chat');
   });
 
@@ -250,7 +250,7 @@ describe('ShellComponent', () => {
     const nav = fixture.nativeElement.querySelector('[data-testid="app-nav"]');
     const links = Array.from(nav.querySelectorAll('a')) as HTMLAnchorElement[];
     const labels = links.map((a) => a.textContent?.trim());
-    expect(labels).toEqual(['Chat', 'Integrations', 'Plugins', 'Settings']);
+    expect(labels).toEqual(['Chat', 'Integrations', 'Plugins', 'System', 'Logs', 'Settings']);
   });
 
   it('shows Chat nav link when status is error', async () => {
