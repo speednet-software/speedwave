@@ -140,4 +140,22 @@ describe('ThinkingBlockComponent', () => {
     expect(toggle.tagName).toBe('BUTTON');
     expect(toggle.getAttribute('type')).toBe('button');
   });
+
+  it('toggles when the button is activated (Enter/Space dispatch click on a native button)', () => {
+    // Native <button> elements receive a synthesised `click` from Enter/Space
+    // key presses; we assert the click pathway here, since browser-level
+    // key→click translation is provided by the platform, not our code.
+    component.content = 'click activates';
+    fixture.detectChanges();
+
+    const toggle = fixture.nativeElement.querySelector(
+      '[data-testid="thinking-toggle"]'
+    ) as HTMLButtonElement;
+    expect(toggle.tagName).toBe('BUTTON');
+    const before = component.collapsed();
+    toggle.click();
+    fixture.detectChanges();
+
+    expect(component.collapsed()).toBe(!before);
+  });
 });

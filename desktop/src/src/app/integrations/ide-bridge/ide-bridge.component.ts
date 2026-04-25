@@ -13,7 +13,6 @@ import { DetectedIde } from '../../models/health';
 /** Manages IDE Bridge detection, connection, and event display. */
 @Component({
   selector: 'app-ide-bridge',
-  standalone: true,
   imports: [CommonModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `

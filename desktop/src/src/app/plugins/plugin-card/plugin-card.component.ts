@@ -1,5 +1,4 @@
 import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
-import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { PluginStatusEntry } from '../../models/plugin';
 
@@ -12,8 +11,7 @@ export interface SavePluginCredentialsEvent {
 /** Reusable card for a single installed plugin. */
 @Component({
   selector: 'app-plugin-card',
-  standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -36,11 +34,10 @@ export interface SavePluginCredentialsEvent {
               class="text-[11px] px-2 py-0.5 rounded font-medium"
               data-testid="badge"
               [attr.data-status]="plugin.configured ? 'configured' : 'not-configured'"
-              [ngClass]="
-                plugin.configured
-                  ? 'bg-sw-success-dark text-sw-success-text'
-                  : 'bg-sw-error-badge text-sw-error-text'
-              "
+              [class.bg-sw-success-dark]="plugin.configured"
+              [class.text-sw-success-text]="plugin.configured"
+              [class.bg-sw-error-badge]="!plugin.configured"
+              [class.text-sw-error-text]="!plugin.configured"
             >
               {{ plugin.configured ? 'Configured' : 'Not Configured' }}
             </span>

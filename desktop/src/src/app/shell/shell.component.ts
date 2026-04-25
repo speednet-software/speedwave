@@ -28,7 +28,6 @@ import {
  */
 @Component({
   selector: 'app-shell',
-  standalone: true,
   imports: [
     RouterOutlet,
     ProjectSwitcherComponent,
@@ -147,15 +146,12 @@ import {
       <header
         class="grid grid-cols-3 items-center px-4 py-2 bg-sw-bg-dark border-b border-sw-border"
       >
-        <span
-          class="flex items-center justify-self-start"
-          data-testid="shell-title"
-          aria-label="Speedwave"
-        >
+        <span class="flex items-center justify-self-start" data-testid="shell-title">
           <svg
             viewBox="0 0 82 80"
             class="h-[36px] w-auto"
-            aria-hidden="true"
+            role="img"
+            aria-label="Speedwave"
             fill="none"
             xmlns="http://www.w3.org/2000/svg"
           >

@@ -20,7 +20,6 @@ import { open } from '@tauri-apps/plugin-dialog';
 /** Manages installed plugins: list, install, remove, enable/disable, credentials. */
 @Component({
   selector: 'app-plugins',
-  standalone: true,
   imports: [CommonModule, PluginCardComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `

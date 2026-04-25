@@ -22,7 +22,6 @@ interface SetupStep {
 /** Guides the user through initial environment setup and project creation. */
 @Component({
   selector: 'app-setup-wizard',
-  standalone: true,
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `

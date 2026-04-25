@@ -12,7 +12,6 @@ import { ProjectList, UpdateInfo } from '../models/update';
 /** Shows a banner when a new Speedwave version is available for install. */
 @Component({
   selector: 'app-update-notification',
-  standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (showUpdateBanner) {

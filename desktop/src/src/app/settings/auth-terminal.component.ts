@@ -18,7 +18,6 @@ import { TauriService } from '../services/tauri.service';
  */
 @Component({
   selector: 'app-auth-terminal',
-  standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="bg-sw-bg-darkest border border-sw-border rounded-lg p-4 mt-3">

@@ -12,7 +12,6 @@ import type { AskUserQuestionBlock } from '../../models/chat';
 /** Interactive question prompt — renders multi-select, single+freeform, or answered (locked) variants and emits `answered`. */
 @Component({
   selector: 'app-ask-user-block',
-  standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block my-2' },
   styles: [

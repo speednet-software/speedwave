@@ -18,7 +18,6 @@ import { AuthTerminalComponent } from '../auth-terminal.component';
 /** Displays authentication status and controls for API key / OAuth login. */
 @Component({
   selector: 'app-auth-section',
-  standalone: true,
   imports: [CommonModule, FormsModule, AuthTerminalComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
