@@ -1,0 +1,147 @@
+<div class="mx-auto max-w-4xl flex flex-col h-full">
+  <div class="mb-4 flex items-center justify-between">
+    <h2 class="mono text-[14px] text-sw-text m-0">Logs</h2>
+    <button
+      type="button"
+      class="mono text-[11px] text-sw-text-muted hover:text-sw-accent px-2 py-1 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+      data-testid="logs-refresh"
+      aria-label="Refresh logs"
+      [disabled]="loading()"
+      (click)="refresh()"
+    >
+      ↻ refresh
+    </button>
+  </div>
+
+  @if (error()) {
+    <div
+      class="mb-3 px-3 py-2 bg-sw-error-bg border border-sw-accent rounded text-sw-accent text-[12px] mono"
+      data-testid="logs-error"
+      role="alert"
+    >
+      {{ error() }}
+    </div>
+  }
+
+  <div
+    class="mb-3 flex flex-wrap items-center gap-2"
+    data-testid="logs-filters"
+    aria-label="Log filters"
+  >
+    <div
+      class="mono flex overflow-hidden rounded ring-1 ring-line text-[11px]"
+      role="group"
+      aria-label="Log level filter"
+      data-testid="logs-level-chips"
+    >
+      @for (lvl of levelChips; track lvl) {
+        <button
+          type="button"
+          class="px-2.5 py-1"
+          [class.bg-bg-2]="filters().level === lvl"
+          [class.text-sw-text]="filters().level === lvl"
+          [class.text-sw-text-muted]="filters().level !== lvl"
+          [attr.aria-pressed]="filters().level === lvl"
+          [attr.data-testid]="'logs-level-' + lvl"
+          (click)="setLevel(lvl)"
+        >
+          {{ lvl }}
+        </button>
+      }
+    </div>
+
+    @if (sources().length > 1) {
+      <div
+        class="mono flex overflow-x-auto rounded ring-1 ring-line text-[11px]"
+        role="group"
+        aria-label="Log source filter"
+        data-testid="logs-source-chips"
+      >
+        @for (src of sources(); track src) {
+          <button
+            type="button"
+            class="px-2.5 py-1 whitespace-nowrap"
+            [class.bg-bg-2]="filters().source === src"
+            [class.text-sw-text]="filters().source === src"
+            [class.text-sw-text-muted]="filters().source !== src"
+            [attr.aria-pressed]="filters().source === src"
+            [attr.data-testid]="'logs-source-' + src"
+            (click)="setSource(src)"
+          >
+            {{ src }}
+          </button>
+        }
+      </div>
+    }
+  </div>
+
+  <div
+    #logScroll
+    class="flex-1 min-h-[40vh] max-h-[70vh] overflow-y-auto overflow-x-hidden rounded ring-1 ring-line bg-bg-1"
+    data-testid="logs-scroll"
+    role="log"
+    aria-live="polite"
+    aria-label="Application logs"
+  >
+    @if (loading() && lines().length === 0) {
+      <p
+        class="mono text-[12px] text-sw-text-muted py-8 text-center"
+        data-testid="logs-loading"
+      >
+        Loading logs…
+      </p>
+    } @else if (visibleLines().length === 0) {
+      <p
+        class="mono text-[12px] text-sw-text-muted py-8 text-center"
+        data-testid="logs-empty"
+      >
+        @if (lines().length === 0) {
+          No logs captured yet.
+        } @else {
+          No log lines match the selected filters.
+        }
+      </p>
+    } @else {
+      <div class="mono p-3 text-[12px]" data-testid="logs-list">
+        @for (line of visibleLines(); track $index) {
+          <div
+            class="flex gap-3 py-1"
+            data-testid="logs-line"
+            [class.bg-sw-error-bg]="line.level === 'error'"
+          >
+            <span
+              class="text-sw-text-muted w-24 flex-shrink-0"
+              data-testid="logs-time"
+            >
+              {{ line.time }}
+            </span>
+            <span
+              class="text-sw-teal hidden w-16 flex-shrink-0 md:inline-block"
+              data-testid="logs-source"
+            >
+              {{ line.source }}
+            </span>
+            <span
+              class="w-12 flex-shrink-0 md:w-14"
+              [class.text-sw-accent]="line.level === 'error'"
+              [class.text-sw-warning]="line.level === 'warn'"
+              [class.text-sw-text]="line.level === 'info'"
+              [class.text-sw-text-muted]="line.level === 'debug'"
+              data-testid="logs-level"
+            >
+              {{ line.level }}
+            </span>
+            <span
+              class="min-w-0 break-words"
+              [class.text-sw-text-dim]="line.level !== 'error'"
+              [class.text-sw-error-text]="line.level === 'error'"
+              data-testid="logs-message"
+            >
+              {{ line.message }}
+            </span>
+          </div>
+        }
+      </div>
+    }
+  </div>
+</div>
