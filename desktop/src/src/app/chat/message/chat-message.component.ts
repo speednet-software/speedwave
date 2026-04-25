@@ -8,6 +8,7 @@ import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
 import { PermissionPromptComponent } from '../blocks/permission-prompt.component';
 import { UserMessageComponent } from './user-message.component';
 
+/** Renders a single chat message: user role uses a meta-line layout, assistant role uses a bubble. */
 @Component({
   selector: 'app-chat-message',
   imports: [
@@ -92,17 +93,27 @@ export class ChatMessageComponent {
     return this.blocks.length > 0 && this.blocks[this.blocks.length - 1].type === 'text';
   }
 
-  /** Forwards a permission decision upstream tagged with the block's index. */
+  /**
+   * Forwards a permission decision upstream tagged with the block's index.
+   * @param blockIndex - Index of the permission_prompt block in the parent's blocks array.
+   * @param decision - The decision the user pressed.
+   */
   onPermissionDecided(blockIndex: number, decision: 'allow_once' | 'allow_always' | 'deny'): void {
     this.permissionDecided.emit({ blockIndex, decision });
   }
 
-  /** Narrows a MessageBlock to its `tool_use` variant for the template. */
+  /**
+   * Narrows a MessageBlock to its `tool_use` variant for the template.
+   * @param block - The block to narrow.
+   */
   asToolBlock(block: MessageBlock): Extract<MessageBlock, { type: 'tool_use' }> {
     return block as Extract<MessageBlock, { type: 'tool_use' }>;
   }
 
-  /** Narrows a MessageBlock to its `ask_user` variant for the template. */
+  /**
+   * Narrows a MessageBlock to its `ask_user` variant for the template.
+   * @param block - The block to narrow.
+   */
   asAskUserBlock(block: MessageBlock): Extract<MessageBlock, { type: 'ask_user' }> {
     return block as Extract<MessageBlock, { type: 'ask_user' }>;
   }

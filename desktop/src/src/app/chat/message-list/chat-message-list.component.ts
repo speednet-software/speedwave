@@ -12,12 +12,10 @@ import {
 import type { ChatMessage, MessageBlock } from '../../models/chat';
 import { ChatMessageComponent } from '../message/chat-message.component';
 
-/**
- * NOTE on `track`: we use `msg.timestamp` until the state-tree lands
- * (ADR-044) because `ChatMessage` has no stable `index` yet. Timestamps
- * are assigned at message creation and are unique enough for the current
- * flows (one message per millisecond at most).
- */
+// `track` uses `msg.timestamp` until state-tree (ADR-044) gives `ChatMessage` a stable index.
+const SCROLL_BOTTOM_THRESHOLD_PX = 16;
+
+/** Scrollable message list with auto-scroll-to-bottom that pauses while the user reads earlier messages. */
 @Component({
   selector: 'app-chat-message-list',
   standalone: true,
@@ -73,10 +71,7 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
     return this.isStreaming && this.currentBlocks.length > 0;
   }
 
-  /**
-   * Marks that we need to sync the scroll position on the next
-   * `ngAfterViewChecked` — runs whenever any input changes.
-   */
+  /** Marks scroll position for sync on next `ngAfterViewChecked`. */
   ngOnChanges(): void {
     this.pendingScrollSync = true;
   }
@@ -85,7 +80,7 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   onScroll(): void {
     const el = this.scrollContainer?.nativeElement;
     if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 16;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_BOTTOM_THRESHOLD_PX;
     this.shouldAutoScroll = atBottom;
   }
 

@@ -45,10 +45,7 @@ export class UserMessageComponent {
     );
   }
 
-  /**
-   * Formats `timestamp` as `HH:MM` local time; returns empty string when
-   * the timestamp is zero (sentinel meaning "unknown").
-   */
+  /** Formats `timestamp` as `HH:MM` local time; empty when zero (unknown sentinel). */
   get formattedTime(): string {
     const ts = this.timestamp;
     if (!ts) return '';

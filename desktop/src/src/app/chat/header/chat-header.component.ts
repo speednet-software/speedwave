@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
 
-/** Uses decorator-based @Input/@Output: signal inputs require the Angular compiler plugin, unavailable in vitest setup. */
+/** Header strip with title, project tag, and toggle buttons for memory and history panels. */
+// Uses decorator-based @Input/@Output: signal inputs need the Angular compiler plugin, unavailable in vitest setup.
 @Component({
   selector: 'app-chat-header',
   standalone: true,
