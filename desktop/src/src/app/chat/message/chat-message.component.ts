@@ -40,10 +40,10 @@ import { PermissionPromptComponent } from '../blocks/permission-prompt.component
       @for (block of blocks; track $index) {
         @switch (block.type) {
           @case ('text') {
-            <app-text-block [content]="block.content" />
+            <app-text-block [content]="block.content" [streaming]="streaming && $last" />
           }
           @case ('thinking') {
-            <app-thinking-block [content]="block.content" [collapsed]="block.collapsed" />
+            <app-thinking-block [content]="block.content" [collapsedDefault]="block.collapsed" />
           }
           @case ('tool_use') {
             <app-tool-block [tool]="asToolBlock(block).tool" />
@@ -66,7 +66,7 @@ import { PermissionPromptComponent } from '../blocks/permission-prompt.component
           }
         }
       }
-      @if (streaming) {
+      @if (streaming && !lastBlockIsText) {
         <span data-testid="cursor" class="inline-block animate-blink text-sw-accent">&#x2588;</span>
       }
     </div>
@@ -81,6 +81,11 @@ export class ChatMessageComponent {
     blockIndex: number;
     decision: 'allow_once' | 'allow_always' | 'deny';
   }>();
+
+  /** Suppresses the block-level cursor when the last block renders its own streaming caret. */
+  get lastBlockIsText(): boolean {
+    return this.blocks.length > 0 && this.blocks[this.blocks.length - 1].type === 'text';
+  }
 
   /**
    * Forwards a permission decision upstream tagged with the block's index.

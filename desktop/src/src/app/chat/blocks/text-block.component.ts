@@ -2,7 +2,7 @@ import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
 import { marked } from 'marked';
 
 /**
- * Renders markdown-formatted text content as HTML.
+ * Renders markdown-formatted text content as HTML, with an optional streaming caret.
  *
  * Markdown is parsed by the `marked` library, which does NOT sanitize its HTML output.
  * XSS protection comes from Angular's built-in `DomSanitizer`, which runs automatically
@@ -24,11 +24,30 @@ import { marked } from 'marked';
   selector: 'app-text-block',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  host: { class: 'block' },
-  template: `<div class="prose-sw text-sw-text" [innerHTML]="rendered"></div>`,
+  host: {
+    class: 'block text-[14px] leading-[1.7]',
+    '[style.color]': "'var(--ink, #e8edf7)'",
+    '[attr.role]': "streaming ? 'status' : null",
+    '[attr.aria-live]': "streaming ? 'polite' : null",
+  },
+  template: `
+    <div class="prose-sw" [innerHTML]="rendered"></div>
+    @if (streaming) {
+      <span
+        data-testid="streaming-caret"
+        aria-hidden="true"
+        class="ml-0.5 inline-block animate-blink"
+        style="color: var(--accent, #ff4d6d)"
+        >&#x258E;</span
+      >
+    }
+  `,
 })
 export class TextBlockComponent {
+  /** Raw markdown content to render. */
   @Input({ required: true }) content!: string;
+  /** When true, renders a blinking caret and exposes aria-live status semantics. */
+  @Input() streaming = false;
 
   /** Returns unsanitized HTML from `marked`. Safe only when bound via `[innerHTML]` — see class doc. */
   get rendered(): string {
