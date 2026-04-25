@@ -1,11 +1,7 @@
 import { ChangeDetectionStrategy, Component, OnInit, computed, inject } from '@angular/core';
 import { SkillsService, type Skill } from '../services/skills.service';
 
-/**
- * Catalog of slash commands, skills, and agents available to the current
- * project. Data is wired to `SkillsService`, which returns the hardcoded
- * fallback until Unit 13 lands the live slash-discovery Tauri command.
- */
+/** Catalog view for slash commands, skills, and agents wired to `SkillsService`. */
 @Component({
   selector: 'app-skills-view',
   standalone: true,
@@ -33,20 +29,10 @@ export class SkillsViewComponent implements OnInit {
     await this.skills.refresh();
   }
 
-  /**
-   * Returns the short badge label shown next to each entry.
-   * Plugin-prefixed entries are tagged `plugin:<slug>`; everything else
-   * uses the semantic source verbatim.
-   * @param skill - the skill/command entry the badge is rendered for
-   */
   protected badgeLabel(skill: Skill): string {
     return skill.plugin ? `plugin:${skill.plugin}` : skill.source;
   }
 
-  /**
-   * Tailwind color class for the badge, tied to semantic source.
-   * @param skill - the skill/command entry the badge is rendered for
-   */
   protected badgeClass(skill: Skill): string {
     if (skill.plugin) return 'text-[var(--violet)]';
     switch (skill.source) {

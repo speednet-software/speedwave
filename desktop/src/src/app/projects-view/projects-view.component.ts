@@ -11,12 +11,7 @@ import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import type { ProjectEntry, ProjectList } from '../models/update';
 
-/**
- * Terminal-minimal project list view. Each project is rendered as a callout
- * card (ring-1 wrapper, no inner border-b) with a "switch" action that routes
- * through `ProjectStateService` — the single source of truth for project
- * lifecycle. The "current" pill highlights the active project.
- */
+/** Terminal-minimal project list view with switch action via `ProjectStateService`. */
 @Component({
   selector: 'app-projects-view',
   standalone: true,
@@ -64,9 +59,8 @@ export class ProjectsViewComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Switches to the given project via the shared state service. The switching
-   * banner is cleared automatically when the project-settled callback fires.
-   * @param name - Name of the project to switch to.
+   * Switches to the given project via the shared state service.
+   * @param name - project name to switch to
    */
   async switchTo(name: string): Promise<void> {
     if (this._switching() || name === this._active()) return;
@@ -80,18 +74,10 @@ export class ProjectsViewComponent implements OnInit, OnDestroy {
     }
   }
 
-  /**
-   * Returns true when the given project is currently active.
-   * @param name - Project name to compare.
-   */
   protected isActive(name: string): boolean {
     return this._active() === name;
   }
 
-  /**
-   * Returns true when a switch is in progress targeting the given project.
-   * @param name - Project name to compare.
-   */
   protected isSwitchingTo(name: string): boolean {
     return this._switching() === name;
   }

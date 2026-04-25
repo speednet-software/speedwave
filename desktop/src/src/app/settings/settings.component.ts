@@ -45,7 +45,6 @@ import { ProjectList } from '../models/update';
         </div>
       }
 
-      <!-- Active project info -->
       <section data-testid="settings-section-project">
         <h2
           class="mono mb-3 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
@@ -83,20 +82,16 @@ import { ProjectList } from '../models/update';
         </div>
       </section>
 
-      <!-- LLM Provider -->
       <app-llm-provider (providerChange)="llmProvider = $event" (errorOccurred)="error = $event" />
 
-      <!-- Authentication -->
       <app-auth-section
         [activeProject]="activeProject"
         [llmProvider]="llmProvider"
         (errorOccurred)="error = $event"
       />
 
-      <!-- Updates -->
       <app-update-section [activeProject]="activeProject" (errorOccurred)="error = $event" />
 
-      <!-- System Health -->
       @if (activeProject) {
         <section data-testid="settings-section-health">
           <h2 class="mono mb-3 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
@@ -106,7 +101,6 @@ import { ProjectList } from '../models/update';
         </section>
       }
 
-      <!-- Logging & Danger Zone -->
       <app-advanced-section
         [activeProject]="activeProject"
         [logLevel]="logLevel"

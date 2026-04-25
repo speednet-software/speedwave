@@ -24,11 +24,7 @@ export interface Skill {
   readonly plugin: string | null;
 }
 
-/**
- * Minimum set of built-ins to show when backend discovery is unavailable.
- * Mirrors Feature 1 fallback in the terminal-minimal implementation prompt so
- * the UI always has something to render before the real discovery lands.
- */
+/** Built-in fallback list shown until backend slash-discovery lands. */
 export const HARDCODED_FALLBACK: readonly Skill[] = [
   {
     id: 'help',
@@ -95,14 +91,7 @@ export const HARDCODED_FALLBACK: readonly Skill[] = [
   },
 ];
 
-/**
- * Catalog of slash commands, skills, and agents available to the current project.
- *
- * Until Feature 1 / Unit 13 lands the slash-discovery backend, this service
- * returns a hardcoded fallback list. When the real `list_slash_commands`
- * Tauri command ships, the body of `refresh()` can be swapped for a live call
- * without any consumer change.
- */
+/** Catalog of slash commands, skills, and agents for the current project. */
 @Injectable({ providedIn: 'root' })
 export class SkillsService {
   private readonly _discovered = signal<readonly Skill[]>([]);
@@ -110,11 +99,7 @@ export class SkillsService {
   /** Skills/commands currently known. Empty until `refresh()` is called. */
   readonly discovered = this._discovered.asReadonly();
 
-  /**
-   * Fetches the latest catalog. The current implementation returns the
-   * hardcoded fallback; Unit 13 will replace the body with the real
-   * `list_slash_commands` Tauri call without changing the public shape.
-   */
+  /** Fetches the latest catalog (currently the hardcoded fallback). */
   async refresh(): Promise<readonly Skill[]> {
     this._discovered.set(HARDCODED_FALLBACK);
     return HARDCODED_FALLBACK;

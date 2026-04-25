@@ -93,6 +93,11 @@
   }
 }
 
+/* ── Terminal-minimal palette tokens (used as plain CSS vars, not Tailwind) ── */
+:root {
+  --red: #ef4444;
+}
+
 /* ── Base styles ── */
 @layer base {
   html, body {

@@ -81,6 +81,7 @@ describe('ProjectsViewComponent', () => {
       '[data-testid="projects-card-speedwave"]'
     );
     expect(activeCard.getAttribute('data-active')).toBe('true');
+    expect(activeCard.className).toContain('ring-[var(--accent-dim)]');
 
     const badge = activeCard.querySelector('[data-testid="projects-current-badge"]');
     expect(badge).not.toBeNull();

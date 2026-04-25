@@ -265,7 +265,7 @@ export class ServiceCardComponent {
       case 'configuring':
         return 'var(--amber)';
       case 'error':
-        return '#ef4444';
+        return 'var(--red)';
       case 'disabled':
       default:
         return 'var(--ink-mute)';
