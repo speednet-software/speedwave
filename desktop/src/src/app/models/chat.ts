@@ -25,6 +25,12 @@ export type StreamChunk =
         context_window_size?: number;
         /** UUID of the assistant message that just completed (ADR-046). */
         assistant_uuid?: string;
+        /** Per-turn token usage delta (since the last Result). */
+        turn_usage?: TurnUsage;
+        /** Per-turn cost in USD — prefers CLI's authoritative total_cost_usd delta when available. */
+        turn_cost?: number;
+        /** Model name for this turn, if known at emission time. */
+        model?: string;
       };
     }
   | { chunk_type: 'Error'; data: { content: string } }
@@ -67,6 +73,28 @@ export type ErrorBlockKind =
   | 'auth_required'
   | 'stopped_by_user'
   | 'generic';
+
+/**
+ * Per-turn token usage. Unlike `UsageInfo`, all cache fields are required
+ * numbers (missing values are normalized to 0 by the backend).
+ */
+export interface TurnUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+}
+
+/**
+ * Per-turn metadata for an assistant message: model, token usage, and cost.
+ * Populated from `Result` chunks. Missing fields hide their corresponding
+ * rendered segment, not the whole row.
+ */
+export interface EntryMeta {
+  model?: string;
+  usage?: TurnUsage;
+  cost?: number;
+}
 
 /** A block within a chat message */
 export type MessageBlock =
@@ -153,8 +181,14 @@ export interface ChatMessage {
   /** Status of the above UUID. Defaults to `Committed` when `uuid` is set. */
   uuid_status?: UuidStatus;
   /**
-   * Epoch-ms timestamp of the most recent retry against this entry. Only
-   * set on user entries whose turn has been retried via `retry_last_turn`.
+   * Per-turn metadata (assistant messages only — undefined for user messages).
+   * Populated from the `Result` chunk that terminated the turn.
+   */
+  meta?: EntryMeta;
+  /**
+   * Epoch-ms timestamp of the most recent retry against this entry. Set on
+   * user entries whose turn has been retried via `retry_last_turn`. Surfaces
+   * as `· edited` in the metadata line of the assistant that follows.
    */
   edited_at?: number;
 }

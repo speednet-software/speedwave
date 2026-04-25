@@ -539,6 +539,150 @@ fn get_project_memory_impl(data_dir: &Path, project: &str) -> anyhow::Result<Str
 }
 
 // ---------------------------------------------------------------------------
+// Resume snapshot
+// ---------------------------------------------------------------------------
+
+/// Cumulative session state recovered from an existing transcript. Seeded
+/// into the `StreamParser` on resume so the first new turn reports a real
+/// delta instead of `cumulative - 0`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResumeSnapshot {
+    /// Cumulative input tokens across the session.
+    pub input_tokens: u64,
+    /// Cumulative output tokens across the session.
+    pub output_tokens: u64,
+    /// Cumulative cache-read tokens.
+    pub cache_read_tokens: u64,
+    /// Cumulative cache-write (creation) tokens.
+    pub cache_write_tokens: u64,
+    /// Cumulative cost in USD reported by the CLI in the most recent
+    /// `result` line (`total_cost_usd`, falling back to `total_cost`).
+    pub total_cost: Option<f64>,
+    /// Most recently observed model. Pulled from the latest `result`'s
+    /// `modelUsage` keys; falls back to the last `system init` model.
+    pub model: Option<String>,
+}
+
+/// Compute the cumulative session snapshot from an existing JSONL transcript.
+///
+/// The CLI emits `total_cost_usd` and `modelUsage` cumulatively in every
+/// `result` line, so the latest such values describe the full session
+/// state. Token counts are recovered preferring the latest `modelUsage`
+/// (already cumulative) and falling back to the running sum of per-step
+/// flat `usage` payloads — matching the parser's own snapshot accounting in
+/// `compute_turn_usage_from_result`. The model is taken from the most
+/// recent `modelUsage` key, or the last `system init` line if none.
+pub fn compute_resume_snapshot(project: &str, session_id: &str) -> anyhow::Result<ResumeSnapshot> {
+    compute_resume_snapshot_impl(consts::data_dir(), project, session_id)
+}
+
+fn compute_resume_snapshot_impl(
+    data_dir: &Path,
+    project: &str,
+    session_id: &str,
+) -> anyhow::Result<ResumeSnapshot> {
+    validate_session_id_impl(session_id)?;
+
+    let path = sessions_dir_impl(data_dir, project).join(format!("{session_id}.jsonl"));
+    let file = fs::File::open(&path)
+        .map_err(|e| anyhow::anyhow!("cannot read session {session_id}: {e}"))?;
+
+    const MAX_TRANSCRIPT_LINES: usize = 10_000;
+    let reader = BufReader::new(file);
+
+    // Running sum of flat `usage` blocks — used as a fallback when the
+    // session has no `modelUsage` (older CLI versions / partial payloads).
+    let mut summed = ResumeSnapshot::default();
+    // Cumulative snapshot from the most recent `result` carrying `modelUsage`.
+    let mut latest_cumulative: Option<ResumeSnapshot> = None;
+    let mut latest_cost: Option<f64> = None;
+    let mut latest_modelusage_model: Option<String> = None;
+    let mut latest_init_model: Option<String> = None;
+
+    for line in reader.lines().take(MAX_TRANSCRIPT_LINES) {
+        let line = line.map_err(|e| anyhow::anyhow!("io error reading session: {e}"))?;
+        let parsed: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        match parsed["type"].as_str().unwrap_or("") {
+            "result" => {
+                if let Some(cost) = parsed["total_cost_usd"]
+                    .as_f64()
+                    .or_else(|| parsed["total_cost"].as_f64())
+                {
+                    latest_cost = Some(cost);
+                }
+                if let Some(usage) = parsed.get("usage") {
+                    let read_u64 = |k: &str| usage.get(k).and_then(serde_json::Value::as_u64);
+                    summed.input_tokens = summed
+                        .input_tokens
+                        .saturating_add(read_u64("input_tokens").unwrap_or(0));
+                    summed.output_tokens = summed
+                        .output_tokens
+                        .saturating_add(read_u64("output_tokens").unwrap_or(0));
+                    summed.cache_read_tokens = summed.cache_read_tokens.saturating_add(
+                        read_u64("cache_read_input_tokens")
+                            .or_else(|| read_u64("cache_read_tokens"))
+                            .unwrap_or(0),
+                    );
+                    summed.cache_write_tokens = summed.cache_write_tokens.saturating_add(
+                        read_u64("cache_creation_input_tokens")
+                            .or_else(|| read_u64("cache_write_tokens"))
+                            .unwrap_or(0),
+                    );
+                }
+                if let Some(model_usage) = parsed.get("modelUsage").and_then(|v| v.as_object()) {
+                    if !model_usage.is_empty() {
+                        let mut cumulative = ResumeSnapshot::default();
+                        let mut any_field = false;
+                        for stats in model_usage.values() {
+                            for (key, target) in [
+                                ("inputTokens", &mut cumulative.input_tokens),
+                                ("outputTokens", &mut cumulative.output_tokens),
+                                ("cacheReadInputTokens", &mut cumulative.cache_read_tokens),
+                                (
+                                    "cacheCreationInputTokens",
+                                    &mut cumulative.cache_write_tokens,
+                                ),
+                            ] {
+                                if let Some(n) = stats.get(key).and_then(serde_json::Value::as_u64)
+                                {
+                                    *target = target.saturating_add(n);
+                                    any_field = true;
+                                }
+                            }
+                        }
+                        if any_field {
+                            latest_cumulative = Some(cumulative);
+                        }
+                        if let Some(first_key) = model_usage.keys().next() {
+                            latest_modelusage_model = Some(first_key.clone());
+                        }
+                    }
+                }
+            }
+            "system" => {
+                if parsed["subtype"].as_str() == Some("init") {
+                    if let Some(model) = parsed["model"].as_str() {
+                        if !model.is_empty() {
+                            latest_init_model = Some(model.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut snap = latest_cumulative.unwrap_or(summed);
+    snap.total_cost = latest_cost;
+    snap.model = latest_modelusage_model.or(latest_init_model);
+    Ok(snap)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1230,5 +1374,148 @@ mod tests {
         assert_eq!(result.messages[0].role, "user");
         assert_eq!(result.messages[1].role, "assistant");
         assert_eq!(result.messages[1].content, "I will read\n[Tool: Read]");
+    }
+
+    // ── compute_resume_snapshot ────────────────────────────────────
+
+    #[test]
+    fn compute_resume_snapshot_uses_latest_modelusage_for_tokens_and_cost() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        // Two turns: each result line carries cumulative `modelUsage` and
+        // cumulative `total_cost_usd`. The latest line is authoritative.
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"system","subtype":"init","model":"claude-opus-4-7"}"#,
+                r#"{"type":"result","session_id":"s","is_error":false,"result":"ok","total_cost_usd":0.05,"usage":{"input_tokens":10,"output_tokens":5},"modelUsage":{"claude-opus-4-7":{"inputTokens":10,"outputTokens":5,"cacheReadInputTokens":0,"cacheCreationInputTokens":2}}}"#,
+                r#"{"type":"result","session_id":"s","is_error":false,"result":"ok","total_cost_usd":0.18,"usage":{"input_tokens":7,"output_tokens":3},"modelUsage":{"claude-opus-4-7":{"inputTokens":17,"outputTokens":8,"cacheReadInputTokens":50,"cacheCreationInputTokens":2}}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        // Latest cumulative `modelUsage` wins.
+        assert_eq!(snap.input_tokens, 17);
+        assert_eq!(snap.output_tokens, 8);
+        assert_eq!(snap.cache_read_tokens, 50);
+        assert_eq!(snap.cache_write_tokens, 2);
+        assert_eq!(snap.total_cost, Some(0.18));
+        assert_eq!(snap.model.as_deref(), Some("claude-opus-4-7"));
+    }
+
+    #[test]
+    fn compute_resume_snapshot_falls_back_to_summed_flat_usage_without_modelusage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        // No `modelUsage` anywhere — only flat per-step `usage`. Must sum
+        // them up to recover the cumulative state.
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"system","subtype":"init","model":"claude-sonnet-4-7"}"#,
+                r#"{"type":"result","session_id":"s","is_error":false,"result":"ok","total_cost_usd":0.02,"usage":{"input_tokens":4,"output_tokens":2,"cache_read_input_tokens":1,"cache_creation_input_tokens":0}}"#,
+                r#"{"type":"result","session_id":"s","is_error":false,"result":"ok","total_cost_usd":0.05,"usage":{"input_tokens":3,"output_tokens":1,"cache_read_input_tokens":2,"cache_creation_input_tokens":1}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(snap.input_tokens, 7);
+        assert_eq!(snap.output_tokens, 3);
+        assert_eq!(snap.cache_read_tokens, 3);
+        assert_eq!(snap.cache_write_tokens, 1);
+        assert_eq!(snap.total_cost, Some(0.05));
+        // No `modelUsage` ever, so the system init model is used as the
+        // fallback signal.
+        assert_eq!(snap.model.as_deref(), Some("claude-sonnet-4-7"));
+    }
+
+    #[test]
+    fn compute_resume_snapshot_returns_zero_for_empty_transcript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        // Transcript with no result/init lines (e.g., a session that
+        // crashed before the first turn). Must not error and must report
+        // a zero baseline so the resume parser starts fresh.
+        write_session(
+            &dir,
+            id,
+            &[r#"{"type":"user","message":{"role":"user","content":"hi"}}"#],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(snap, ResumeSnapshot::default());
+    }
+
+    #[test]
+    fn compute_resume_snapshot_skips_malformed_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        // Mix of malformed and valid lines — the malformed ones must not
+        // poison the running totals.
+        write_session(
+            &dir,
+            id,
+            &[
+                "garbage that is not json",
+                r#"{"type":"result","session_id":"s","is_error":false,"result":"ok","total_cost_usd":0.01,"modelUsage":{"claude-opus-4-7":{"inputTokens":3,"outputTokens":2}}}"#,
+                "{ broken json",
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(snap.input_tokens, 3);
+        assert_eq!(snap.output_tokens, 2);
+        assert_eq!(snap.total_cost, Some(0.01));
+        assert_eq!(snap.model.as_deref(), Some("claude-opus-4-7"));
+    }
+
+    #[test]
+    fn compute_resume_snapshot_rejects_invalid_session_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = compute_resume_snapshot_impl(tmp.path(), "proj", "../escape");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compute_resume_snapshot_returns_error_for_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = compute_resume_snapshot_impl(
+            tmp.path(),
+            "proj",
+            "abcdef01-2345-6789-abcd-ef0123456789",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compute_resume_snapshot_prefers_modelusage_model_over_init() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        // The init line declares one model, but the latest `modelUsage`
+        // shows another (mid-session model switch). The seed must reflect
+        // the most recent model so the next turn's pricing is correct.
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"system","subtype":"init","model":"claude-opus-4-7"}"#,
+                r#"{"type":"result","session_id":"s","is_error":false,"result":"ok","total_cost_usd":0.10,"modelUsage":{"claude-sonnet-4-7":{"inputTokens":1,"outputTokens":1}}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(snap.model.as_deref(), Some("claude-sonnet-4-7"));
     }
 }

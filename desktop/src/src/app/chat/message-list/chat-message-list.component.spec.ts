@@ -175,6 +175,56 @@ describe('ChatMessageListComponent', () => {
     expect(container.scrollTop).toBe(100);
   });
 
+  // ── isPrecedingUserEdited helper ─────────────────────────────────────
+
+  it('isPrecedingUserEdited returns false for index 0', () => {
+    component.messages = [
+      { role: 'user', blocks: [{ type: 'text', content: 'hi' }], timestamp: 1 },
+    ];
+    expect(component.isPrecedingUserEdited(0)).toBe(false);
+  });
+
+  it('isPrecedingUserEdited returns false for user entries', () => {
+    component.messages = [
+      {
+        role: 'user',
+        blocks: [{ type: 'text', content: 'hi' }],
+        timestamp: 1,
+        edited_at: 100,
+      },
+      { role: 'user', blocks: [{ type: 'text', content: 'hey' }], timestamp: 2 },
+    ];
+    expect(component.isPrecedingUserEdited(1)).toBe(false);
+  });
+
+  it('isPrecedingUserEdited returns true when assistant follows an edited user entry', () => {
+    component.messages = [
+      {
+        role: 'user',
+        blocks: [{ type: 'text', content: 'hi' }],
+        timestamp: 1,
+        edited_at: 100,
+      },
+      { role: 'assistant', blocks: [{ type: 'text', content: 'hello' }], timestamp: 2 },
+    ];
+    expect(component.isPrecedingUserEdited(1)).toBe(true);
+  });
+
+  it('isPrecedingUserEdited returns false when preceding user has no edited_at', () => {
+    component.messages = [
+      { role: 'user', blocks: [{ type: 'text', content: 'hi' }], timestamp: 1 },
+      { role: 'assistant', blocks: [{ type: 'text', content: 'hello' }], timestamp: 2 },
+    ];
+    expect(component.isPrecedingUserEdited(1)).toBe(false);
+  });
+
+  it('isPrecedingUserEdited returns false for out-of-bounds index', () => {
+    component.messages = [
+      { role: 'user', blocks: [{ type: 'text', content: 'hi' }], timestamp: 1 },
+    ];
+    expect(component.isPrecedingUserEdited(5)).toBe(false);
+  });
+
   // ── Forwarding the questionAnswered event ────────────────────────────
 
   it('re-emits questionAnswered from child chat-message', () => {
