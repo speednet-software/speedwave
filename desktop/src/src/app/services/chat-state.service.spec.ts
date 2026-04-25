@@ -1417,10 +1417,18 @@ describe('ChatStateService', () => {
             role: 'assistant',
             blocks: [
               { type: 'text', content: 'Hello' },
-              { type: 'tool_use', tool: {
-                tool_id: 't', tool_name: 'Read', input_json: '{}',
-                status: 'done', result: 'ok', result_is_error: false, collapsed: false,
-              } },
+              {
+                type: 'tool_use',
+                tool: {
+                  tool_id: 't',
+                  tool_name: 'Read',
+                  input_json: '{}',
+                  status: 'done',
+                  result: 'ok',
+                  result_is_error: false,
+                  collapsed: false,
+                },
+              },
               { type: 'text', content: 'World' },
             ],
             timestamp: 1,
@@ -1459,9 +1467,7 @@ describe('ChatStateService', () => {
         configurable: true,
       });
       service._setState({
-        messages: [
-          { role: 'assistant', blocks: [{ type: 'text', content: 'x' }], timestamp: 1 },
-        ],
+        messages: [{ role: 'assistant', blocks: [{ type: 'text', content: 'x' }], timestamp: 1 }],
       });
       const ok = await service.copyMessage(0);
       expect(ok).toBe(false);
@@ -1470,9 +1476,7 @@ describe('ChatStateService', () => {
     it('returns false when clipboard.writeText rejects', async () => {
       writeText.mockRejectedValueOnce(new Error('denied'));
       service._setState({
-        messages: [
-          { role: 'assistant', blocks: [{ type: 'text', content: 'x' }], timestamp: 1 },
-        ],
+        messages: [{ role: 'assistant', blocks: [{ type: 'text', content: 'x' }], timestamp: 1 }],
       });
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const ok = await service.copyMessage(0);

@@ -96,6 +96,7 @@ export class MessageActionsComponent implements OnDestroy {
     await this.chat.retryLastAssistant();
   }
 
+  /** Clears any pending "copied" confirmation timer to avoid setting a signal after destroy. */
   ngOnDestroy(): void {
     if (this.copyTimer !== null) {
       clearTimeout(this.copyTimer);
