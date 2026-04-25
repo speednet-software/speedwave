@@ -175,7 +175,31 @@ describe('ChatMessageComponent', () => {
     expect(el.textContent).toContain('Pick a fruit');
   });
 
-  it('emits questionAnswered when ask_user block is answered', () => {
+  it('renders permission_prompt block', () => {
+    component.blocks = [{ type: 'permission_prompt', command: 'rm -rf /tmp' }];
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="permission-prompt"]')).not.toBeNull();
+  });
+
+  it('emits permissionDecided when child emits decided', () => {
+    let emitted:
+      | { blockIndex: number; decision: 'allow_once' | 'allow_always' | 'deny' }
+      | undefined;
+    component.permissionDecided.subscribe(
+      (evt: { blockIndex: number; decision: 'allow_once' | 'allow_always' | 'deny' }) => {
+        emitted = evt;
+      }
+    );
+    component.blocks = [{ type: 'permission_prompt', command: 'rm -rf /tmp' }];
+    fixture.detectChanges();
+    const allowOnce = fixture.nativeElement.querySelector(
+      '[data-testid="permission-allow-once"]'
+    ) as HTMLButtonElement;
+    allowOnce.click();
+    expect(emitted).toEqual({ blockIndex: 0, decision: 'allow_once' });
+  });
+
+  it('emits questionAnswered when ask_user child emits answered', () => {
     const blocks: MessageBlock[] = [
       {
         type: 'ask_user',
@@ -197,12 +221,19 @@ describe('ChatMessageComponent', () => {
     let emitted: { toolId: string; values: string[] } | null = null;
     component.questionAnswered.subscribe((e) => (emitted = e));
 
-    // Simulate the ask-user-block emitting answered
-    const askUserBlock = fixture.nativeElement.querySelector('app-ask-user-block');
-    expect(askUserBlock).not.toBeNull();
+    // Drive the child ask-user-block via its real option + send buttons —
+    // exercises the `(answered)` binding path.
+    const el = fixture.nativeElement as HTMLElement;
+    const optionBtn = el.querySelector(
+      '[data-testid="ask-option-btn"]'
+    ) as HTMLButtonElement | null;
+    const sendBtn = el.querySelector('[data-testid="ask-send-btn"]') as HTMLButtonElement | null;
+    expect(optionBtn).not.toBeNull();
+    expect(sendBtn).not.toBeNull();
+    optionBtn?.click();
+    fixture.detectChanges();
+    sendBtn?.click();
 
-    // Trigger via component method
-    component.onAnswered('toolu_ask1', ['a']);
     expect(emitted).toEqual({ toolId: 'toolu_ask1', values: ['a'] });
   });
 });

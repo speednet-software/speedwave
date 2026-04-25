@@ -5,6 +5,7 @@ import { ThinkingBlockComponent } from '../blocks/thinking-block.component';
 import { ToolBlockComponent } from '../blocks/tool-block.component';
 import { ErrorBlockComponent } from '../blocks/error-block.component';
 import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
+import { PermissionPromptComponent } from '../blocks/permission-prompt.component';
 
 /** Renders a single chat message as a sequence of typed blocks (text, tool, thinking, etc.). */
 @Component({
@@ -16,6 +17,7 @@ import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
     ToolBlockComponent,
     ErrorBlockComponent,
     AskUserBlockComponent,
+    PermissionPromptComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
@@ -49,11 +51,18 @@ import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
           @case ('ask_user') {
             <app-ask-user-block
               [question]="asAskUserBlock(block).question"
-              (answered)="onAnswered(asAskUserBlock(block).question.tool_id, $event)"
+              (answered)="questionAnswered.emit($event)"
             />
           }
           @case ('error') {
-            <app-error-block [content]="block.content" />
+            <app-error-block [content]="block.content" [kind]="block.kind ?? 'generic'" />
+          }
+          @case ('permission_prompt') {
+            <app-permission-prompt
+              [command]="block.command"
+              [description]="block.description ?? ''"
+              (decided)="onPermissionDecided($index, $event)"
+            />
           }
         }
       }
@@ -68,29 +77,33 @@ export class ChatMessageComponent {
   @Input() role: 'user' | 'assistant' = 'assistant';
   @Input() streaming = false;
   @Output() questionAnswered = new EventEmitter<{ toolId: string; values: string[] }>();
+  @Output() permissionDecided = new EventEmitter<{
+    blockIndex: number;
+    decision: 'allow_once' | 'allow_always' | 'deny';
+  }>();
 
   /**
-   * Narrows to tool_use.
-   * @param block - The message block to narrow.
+   * Forwards a permission decision upstream tagged with the block's index.
+   * @param blockIndex - Index of the permission_prompt block in the parent's blocks array.
+   * @param decision - The decision the user pressed (allow_once, allow_always, or deny).
+   */
+  onPermissionDecided(blockIndex: number, decision: 'allow_once' | 'allow_always' | 'deny'): void {
+    this.permissionDecided.emit({ blockIndex, decision });
+  }
+
+  /**
+   * Type guard cast: narrows a MessageBlock to its `tool_use` variant for the template.
+   * @param block - The block to narrow.
    */
   asToolBlock(block: MessageBlock): Extract<MessageBlock, { type: 'tool_use' }> {
     return block as Extract<MessageBlock, { type: 'tool_use' }>;
   }
 
   /**
-   * Narrows to ask_user.
-   * @param block - The message block to narrow.
+   * Type guard cast: narrows a MessageBlock to its `ask_user` variant for the template.
+   * @param block - The block to narrow.
    */
   asAskUserBlock(block: MessageBlock): Extract<MessageBlock, { type: 'ask_user' }> {
     return block as Extract<MessageBlock, { type: 'ask_user' }>;
-  }
-
-  /**
-   * Emits a question-answered event upstream.
-   * @param toolId - The tool ID of the AskUserQuestion block.
-   * @param values - The selected answer values.
-   */
-  onAnswered(toolId: string, values: string[]): void {
-    this.questionAnswered.emit({ toolId, values });
   }
 }
