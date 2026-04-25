@@ -76,17 +76,12 @@
           (questionAnswered)="onQuestionAnswered($event)"
         />
         <app-session-stats [stats]="chat.sessionStats" />
-        <div class="flex gap-2 px-4 py-3 bg-sw-bg-dark border-t border-sw-border">
-          <textarea
-            data-testid="chat-input"
-            class="flex-1 resize-none border border-sw-border rounded-md bg-sw-bg-darkest text-sw-text px-3 py-2.5 text-sm leading-[1.4] min-h-[40px] max-h-[200px] outline-none transition-colors focus:border-sw-accent disabled:opacity-50 disabled:cursor-not-allowed"
-            [(ngModel)]="inputText"
-            (keydown.enter)="onEnter($any($event))"
-            placeholder="Message Claude..."
+        <div class="px-4 py-3 bg-sw-bg-dark border-t border-sw-border flex gap-2">
+          <app-composer
+            class="flex-1"
             [disabled]="chat.isStreaming"
-            rows="1"
-          >
-          </textarea>
+            (submitted)="sendMessage($event)"
+          />
           @if (chat.isStreaming) {
             <button
               data-testid="chat-stop"
@@ -96,15 +91,6 @@
               aria-label="Stop conversation"
             >
               Stop
-            </button>
-          } @else {
-            <button
-              data-testid="chat-send"
-              class="px-5 py-2 border-none rounded-md bg-sw-accent text-white text-sm font-semibold transition-colors hover:enabled:bg-sw-accent-hover disabled:opacity-40 disabled:cursor-not-allowed"
-              (click)="sendMessage()"
-              [disabled]="!inputText.trim()"
-            >
-              Send
             </button>
           }
         </div>

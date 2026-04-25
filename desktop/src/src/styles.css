@@ -78,6 +78,25 @@
   --color-sw-thinking-bg: #1e1e3a;
   --color-sw-event-bg: #1a2840;
 
+  /*
+   * Terminal-minimal design tokens (design-proposals/06-*).
+   * These are short-name aliases used by the composer / session-stats
+   * components and the rest of the terminal-minimal mockup. They map to
+   * existing `sw-*` tokens so the two palettes stay in sync.
+   */
+  --color-bg-1:        var(--color-sw-bg-darkest);
+  --color-line:        var(--color-sw-border);
+  --color-line-strong: var(--color-sw-border-dark);
+  --color-ink:         var(--color-sw-text);
+  --color-ink-mute:    var(--color-sw-text-muted);
+  --color-ink-dim:     var(--color-sw-text-dim);
+  --color-teal:        var(--color-sw-teal);
+  --color-accent:      var(--color-sw-accent);
+  --color-on-accent:   var(--color-sw-bg-darkest);
+  --color-amber:       var(--color-sw-warning);
+  --color-green:       var(--color-sw-success);
+  --color-red:         var(--color-sw-error);
+
   /* Font stack */
   --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', monospace;
 
@@ -96,6 +115,14 @@
 /* ── Terminal-minimal palette tokens (used as plain CSS vars, not Tailwind) ── */
 :root {
   --red: #ef4444;
+}
+
+/* ── Utilities ── */
+@layer utilities {
+  /* Monospaced text — used by terminal-minimal components (composer, session-stats). */
+  .mono {
+    font-family: var(--font-mono);
+  }
 }
 
 /* ── Base styles ── */

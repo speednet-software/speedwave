@@ -9,7 +9,6 @@ import {
   inject,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
@@ -18,6 +17,7 @@ import { UiStateService } from '../services/ui-state.service';
 import type { ChatMessage, ConversationSummary, ConversationTranscript } from '../models/chat';
 import { ChatHeaderComponent } from './header/chat-header.component';
 import { ChatMessageListComponent } from './message-list/chat-message-list.component';
+import { ComposerComponent } from './composer/composer.component';
 import { SessionStatsComponent } from './session-stats/session-stats.component';
 import { TextBlockComponent } from './blocks/text-block.component';
 import { MemoryPanelComponent } from './memory-panel/memory-panel.component';
@@ -29,9 +29,9 @@ import { ConversationsSidebarComponent } from './conversations-sidebar/conversat
   standalone: true,
   imports: [
     CommonModule,
-    FormsModule,
     ChatHeaderComponent,
     ChatMessageListComponent,
+    ComposerComponent,
     SessionStatsComponent,
     TextBlockComponent,
     MemoryPanelComponent,
@@ -41,8 +41,6 @@ import { ConversationsSidebarComponent } from './conversations-sidebar/conversat
   templateUrl: './chat.component.html',
 })
 export class ChatComponent implements OnInit, OnDestroy {
-  inputText = '';
-
   conversations: readonly ConversationSummary[] = [];
   viewingTranscript: ConversationTranscript | null = null;
   historyLoading = false;
@@ -144,25 +142,16 @@ export class ChatComponent implements OnInit, OnDestroy {
     await this.chat.stopConversation();
   }
 
-  /** Submits the current input as a user message; no-ops on empty input or active stream. */
-  async sendMessage(): Promise<void> {
-    const text = this.inputText.trim();
+  /**
+   * Sends a message as the user's next turn. Called by the composer on submit.
+   * Guards against empty input and in-flight streaming.
+   * @param text - The message body emitted by `app-composer`'s `submitted` event.
+   */
+  async sendMessage(text: string): Promise<void> {
+    // ComposerComponent already emits trimmed text
     if (!text || this.chat.isStreaming) return;
-    this.inputText = '';
     this.cdr.markForCheck();
     await this.chat.sendMessage(text);
-  }
-
-  /**
-   * Enter sends; Shift+Enter inserts a newline.
-   * @param event - keyboard event from the input field.
-   */
-  onEnter(event: KeyboardEvent): void {
-    if (event.shiftKey) {
-      return;
-    }
-    event.preventDefault();
-    this.sendMessage();
   }
 
   /**
@@ -284,7 +273,6 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** Clears all chat + drawer state and re-runs the chat session bootstrap. */
   async newConversation(): Promise<void> {
-    this.inputText = '';
     this.viewingTranscript = null;
     this.ui.closeSidebar();
     this.ui.closeMemory();
