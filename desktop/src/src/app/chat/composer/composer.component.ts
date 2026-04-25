@@ -6,24 +6,28 @@ import {
   Input,
   Output,
   ViewChild,
+  inject,
+  signal,
 } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { FormControl, ReactiveFormsModule } from '@angular/forms';
+import { ProjectStateService } from '../../services/project-state.service';
+import { SlashMenuComponent } from '../slash/slash-menu.component';
+import { SlashService, type SlashCommand } from '../slash/slash.service';
 
-/** Regex matching `/` at the very start of input (optionally preceded by whitespace). */
-const SLASH_AT_START = /^\s*\/[^\s/]*$/;
+/** Regex matching `/query` at the very start of input (optionally preceded by whitespace), capturing the query. */
+const SLASH_TRIGGER = /^(\s*)\/([^\s/]*)$/;
 
 /**
- * Stateless composer that wraps a textarea, toolbar slash/mention buttons, and a
+ * Stateless composer that wraps a textarea, slash button, slash-menu popover, and a
  * send button. Input is managed by a reactive `FormControl<string>`; Enter
  * submits while Shift+Enter inserts a newline. Typing `/` at the start of the
- * textarea (or clicking the `/` toolbar button) emits `slashOpened` so a parent
- * component can mount a slash-menu popover (Feature 1).
+ * textarea (or clicking the `/` toolbar button) opens the slash-menu popover.
  */
 @Component({
   selector: 'app-composer',
   standalone: true,
-  imports: [ReactiveFormsModule],
+  imports: [ReactiveFormsModule, SlashMenuComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
@@ -68,6 +72,13 @@ const SLASH_AT_START = /^\s*\/[^\s/]*$/;
           </div>
         </div>
       </div>
+      @if (slashOpen()) {
+        <app-slash-menu
+          [query]="slashQuery()"
+          (selected)="applySelection($event)"
+          (closed)="closeSlash()"
+        />
+      }
     </div>
   `,
 })
@@ -81,11 +92,7 @@ export class ComposerComponent {
   get disabled(): boolean {
     return this._disabled;
   }
-  /**
-   * Setter mirrored to the FormControl so the textarea reflects the disabled
-   * state without firing extra valueChanges events.
-   * @param value - True to disable input and prevent submits, false to enable.
-   */
+  /** True to disable input and prevent submits, false to enable. */
   @Input() set disabled(value: boolean) {
     this._disabled = value;
     if (value) this.text.disable({ emitEvent: false });
@@ -98,42 +105,42 @@ export class ComposerComponent {
   /** Emits the trimmed message text when the user submits via Enter or the send button. */
   @Output() readonly submitted = new EventEmitter<string>();
 
-  /**
-   * Emits when the slash menu should open — either because the user typed `/`
-   * at the start of the textarea, or because they clicked the `/` toolbar button.
-   * The `caretPos` tells the parent where to anchor the popover / apply the insertion.
-   */
-  @Output() readonly slashOpened = new EventEmitter<{ caretPos: number }>();
+  /** Emits when the slash popover transitions open/closed (for parent UI coordination). */
+  @Output() readonly slashOpenChange = new EventEmitter<boolean>();
+
+  readonly slashService = inject(SlashService);
+  private readonly projectState = inject(ProjectStateService);
 
   /** Reactive control holding the current textarea value. */
   readonly text = new FormControl<string>('', { nonNullable: true });
 
-  /**
-   * Platform-aware submit-shortcut label shown in the toolbar.
-   * macOS shows ⌘+↵; Windows / Linux show Ctrl+↵.
-   */
+  /** Whether the slash popover is open. */
+  readonly slashOpen = signal<boolean>(false);
+  /** Active query used to filter the slash menu (text after `/`). */
+  readonly slashQuery = signal<string>('');
+
+  /** Platform-aware submit-shortcut label shown in the toolbar (⌘+↵ on macOS, Ctrl+↵ elsewhere). */
   readonly shortcutLabel = isMacPlatform() ? '⌘+↵' : 'Ctrl+↵';
 
-  /**
-   * Text value as a signal — bridges `FormControl.valueChanges` (RxJS) into
-   * the signal graph so OnPush templates re-render when the textarea changes.
-   * `toSignal` handles teardown automatically when the component is destroyed.
-   */
+  /** Bridges `FormControl.valueChanges` (RxJS) into the signal graph for OnPush. */
   readonly textValue = toSignal(this.text.valueChanges, { initialValue: '' });
+
+  constructor() {
+    this.projectState.onProjectReady(() => {
+      const id = this.projectState.activeProject;
+      if (id) void this.slashService.refresh(id);
+    });
+  }
 
   /** True when there is text to send and the composer is not disabled. */
   canSubmit(): boolean {
     return !this.disabled && this.textValue().trim().length > 0;
   }
 
-  /**
-   * Handles the Enter key. Shift+Enter inserts a newline (default behavior),
-   * Enter alone submits. The template routes this via `(keydown.enter)` which
-   * forwards `$event` typed as `Event`; we narrow to `KeyboardEvent` here.
-   * @param event - Keyboard event from the textarea.
-   */
+  /** Handles Enter — Shift+Enter inserts newline, Enter alone submits. */
   onEnter(event: Event): void {
     if ((event as KeyboardEvent).shiftKey) return;
+    if (this.slashOpen() && this.slashService.commands().length > 0) return;
     event.preventDefault();
     this.submit();
   }
@@ -143,43 +150,93 @@ export class ComposerComponent {
     if (!this.canSubmit()) return;
     this.submitted.emit(this.textValue().trim());
     this.text.reset('');
+    this.closeSlash();
   }
 
-  /**
-   * Fires `slashOpened` when the textarea text matches `^\s*\/...$`.
-   * @param event - Input event from the textarea.
-   */
+  /** Updates slash-menu visibility when the textarea content changes. */
   onInput(event: Event): void {
-    const ta = event.target as HTMLTextAreaElement;
-    const caretPos = ta.selectionStart ?? 0;
-    if (SLASH_AT_START.test(ta.value.slice(0, caretPos))) {
-      this.slashOpened.emit({ caretPos });
-    }
+    this.updateSlashState(event.target as HTMLTextAreaElement);
   }
 
   /**
-   * Inserts a `/` at the current caret position and emits `slashOpened` so the
-   * parent can mount the slash-menu popover.
+   * Inserts a `/` at the current caret position and opens the slash menu.
    */
   onSlashButtonClick(): void {
     if (this.disabled) return;
     const ta = this.textareaRef.nativeElement;
     const start = ta.selectionStart ?? ta.value.length;
     const end = ta.selectionEnd ?? start;
-    this.text.setValue(`${ta.value.slice(0, start)}/${ta.value.slice(end)}`);
-    const newPos = start + 1;
+    const before = ta.value.slice(0, start);
+    const after = ta.value.slice(end);
+    const insert = before.length === 0 || /\s$/.test(before) ? '/' : ' /';
+    this.text.setValue(`${before}${insert}${after}`);
+    const newPos = start + insert.length;
     queueMicrotask(() => {
       ta.focus();
       ta.setSelectionRange(newPos, newPos);
+      this.updateSlashState(ta);
     });
-    this.slashOpened.emit({ caretPos: newPos });
+  }
+
+  /**
+   * Replaces the `/query` token with the selected command name and closes the popover.
+   */
+  applySelection(command: SlashCommand): void {
+    const ta = this.textareaRef.nativeElement;
+    const caret = ta.selectionStart ?? ta.value.length;
+    const prefix = ta.value.slice(0, caret);
+    const suffix = ta.value.slice(caret);
+    const match = SLASH_TRIGGER.exec(prefix);
+    if (!match) {
+      this.closeSlash();
+      return;
+    }
+    const leading = match[1] ?? '';
+    const replacement = `${leading}/${command.name} `;
+    this.text.setValue(`${replacement}${suffix}`);
+    queueMicrotask(() => {
+      const newCaret = replacement.length;
+      ta.focus();
+      ta.setSelectionRange(newCaret, newCaret);
+    });
+    this.closeSlash();
+  }
+
+  /** Closes the popover and returns focus to the textarea. */
+  closeSlash(): void {
+    this.setSlashOpen(false);
+    this.slashQuery.set('');
+  }
+
+  private setSlashOpen(open: boolean): void {
+    if (this.slashOpen() === open) return;
+    this.slashOpen.set(open);
+    this.slashOpenChange.emit(open);
+  }
+
+  private updateSlashState(el: HTMLTextAreaElement): void {
+    const caret = el.selectionStart ?? el.value.length;
+    const prefix = el.value.slice(0, caret);
+    const match = SLASH_TRIGGER.exec(prefix);
+    if (match) {
+      this.slashQuery.set(match[2] ?? '');
+      if (!this.slashOpen()) {
+        this.setSlashOpen(true);
+        const project = this.projectState.activeProject;
+        if (project && this.slashService.commands().length === 0) {
+          void this.slashService.refresh(project);
+        }
+      }
+    } else if (this.slashOpen()) {
+      this.setSlashOpen(false);
+      this.slashQuery.set('');
+    }
   }
 }
 
 /** Detects macOS for platform-aware keyboard hints (browser + jsdom safe). */
 function isMacPlatform(): boolean {
   if (typeof navigator === 'undefined') return false;
-  // navigator.userAgentData.platform is the modern signal; fall back to userAgent.
   type NavigatorWithUA = Navigator & {
     userAgentData?: { platform?: string };
   };

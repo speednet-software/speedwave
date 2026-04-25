@@ -1,6 +1,28 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { signal } from '@angular/core';
 import { ComposerComponent } from './composer.component';
+import { ProjectStateService } from '../../services/project-state.service';
+import { SlashService } from '../slash/slash.service';
+
+class ProjectStateStub {
+  activeProject: string | null = null;
+  onProjectReady(_cb: () => void): () => void {
+    return () => undefined;
+  }
+}
+
+class SlashServiceStub {
+  readonly commands = signal<readonly unknown[]>([]);
+  readonly discovering = signal(false);
+  readonly source = signal<string | null>(null);
+  readonly error = signal<string | null>(null);
+  readonly isLoadingEmpty = signal(false);
+  refresh = vi.fn(async () => undefined);
+  filter(_query: string): readonly unknown[] {
+    return [];
+  }
+}
 
 describe('ComposerComponent', () => {
   let fixture: ComponentFixture<ComposerComponent>;
@@ -10,6 +32,10 @@ describe('ComposerComponent', () => {
   beforeEach(async () => {
     await TestBed.configureTestingModule({
       imports: [ComposerComponent],
+      providers: [
+        { provide: ProjectStateService, useClass: ProjectStateStub },
+        { provide: SlashService, useClass: SlashServiceStub },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(ComposerComponent);
@@ -179,70 +205,59 @@ describe('ComposerComponent', () => {
 
   // ── slash menu trigger ──────────────────────────────────────────────────
   describe('slash menu trigger', () => {
-    it('emits slashOpened when typing `/` at position 0', () => {
-      const events: { caretPos: number }[] = [];
-      component.slashOpened.subscribe((e) => events.push(e));
+    function dispatchInputAt(value: string, caretPos: number): void {
       const ta = textarea();
-      ta.value = '/';
-      ta.setSelectionRange(1, 1);
+      component.text.setValue(value);
+      ta.value = value;
+      ta.setSelectionRange(caretPos, caretPos);
       ta.dispatchEvent(new Event('input'));
+      fixture.detectChanges();
+    }
 
-      expect(events.length).toBe(1);
-      expect(events[0].caretPos).toBe(1);
+    it('opens the slash popover when typing `/` at position 0', () => {
+      const events: boolean[] = [];
+      component.slashOpenChange.subscribe((e) => events.push(e));
+      dispatchInputAt('/', 1);
+      expect(component.slashOpen()).toBe(true);
+      expect(events).toEqual([true]);
     });
 
-    it('emits slashOpened when typing `/` after leading whitespace', () => {
-      const events: { caretPos: number }[] = [];
-      component.slashOpened.subscribe((e) => events.push(e));
-      const ta = textarea();
-      ta.value = '  /';
-      ta.setSelectionRange(3, 3);
-      ta.dispatchEvent(new Event('input'));
-
-      expect(events.length).toBe(1);
+    it('opens the slash popover when typing `/` after leading whitespace', () => {
+      dispatchInputAt('  /', 3);
+      expect(component.slashOpen()).toBe(true);
     });
 
-    it('does NOT emit slashOpened when `/` appears mid-sentence', () => {
-      const events: { caretPos: number }[] = [];
-      component.slashOpened.subscribe((e) => events.push(e));
-      const ta = textarea();
-      ta.value = 'hello /';
-      ta.setSelectionRange(7, 7);
-      ta.dispatchEvent(new Event('input'));
-
-      expect(events.length).toBe(0);
+    it('does NOT open the slash popover when `/` appears mid-sentence', () => {
+      dispatchInputAt('hello /', 7);
+      expect(component.slashOpen()).toBe(false);
     });
 
-    it('emits slashOpened when user types partial command at start', () => {
-      const events: { caretPos: number }[] = [];
-      component.slashOpened.subscribe((e) => events.push(e));
-      const ta = textarea();
-      ta.value = '/rev';
-      ta.setSelectionRange(4, 4);
-      ta.dispatchEvent(new Event('input'));
-
-      expect(events.length).toBe(1);
+    it('updates the slash query when the user types after `/`', () => {
+      dispatchInputAt('/rev', 4);
+      expect(component.slashOpen()).toBe(true);
+      expect(component.slashQuery()).toBe('rev');
     });
 
-    it('emits slashOpened when slash toolbar button is clicked and inserts `/`', () => {
-      const events: { caretPos: number }[] = [];
-      component.slashOpened.subscribe((e) => events.push(e));
-
+    it('opens the slash popover when the slash toolbar button is clicked and inserts `/`', async () => {
+      const events: boolean[] = [];
+      component.slashOpenChange.subscribe((e) => events.push(e));
       slashButton().click();
-
-      expect(events.length).toBe(1);
+      // queueMicrotask defers the caret update; await it for the popover state to settle.
+      await Promise.resolve();
+      fixture.detectChanges();
       expect(component.text.value).toBe('/');
+      expect(component.slashOpen()).toBe(true);
+      expect(events).toContain(true);
     });
 
     it('slash button click does nothing when disabled', () => {
-      const events: { caretPos: number }[] = [];
-      component.slashOpened.subscribe((e) => events.push(e));
+      const events: boolean[] = [];
+      component.slashOpenChange.subscribe((e) => events.push(e));
       fixture.componentRef.setInput('disabled', true);
       fixture.detectChanges();
-
       slashButton().click();
-
-      expect(events.length).toBe(0);
+      expect(component.slashOpen()).toBe(false);
+      expect(events).toEqual([]);
     });
   });
 
