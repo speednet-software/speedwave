@@ -17,28 +17,28 @@ export class UiStateService {
   private readonly sidebarOpenSignal = signal<boolean>(false);
   private readonly memoryOpenSignal = signal<boolean>(false);
 
-  /** Whether the conversations sidebar drawer is open. */
+  /** Read-only signal reflecting the conversations sidebar drawer's open state. */
   readonly sidebarOpen: Signal<boolean> = this.sidebarOpenSignal.asReadonly();
 
-  /** Whether the memory panel drawer is open. */
+  /** Read-only signal reflecting the memory panel drawer's open state. */
   readonly memoryOpen: Signal<boolean> = this.memoryOpenSignal.asReadonly();
 
-  /** Toggles the conversations sidebar drawer. */
+  /** Flips the conversations sidebar drawer between open and closed. */
   toggleSidebar(): void {
     this.sidebarOpenSignal.update((open) => !open);
   }
 
-  /** Toggles the memory panel drawer. */
+  /** Flips the memory panel drawer between open and closed. */
   toggleMemory(): void {
     this.memoryOpenSignal.update((open) => !open);
   }
 
-  /** Closes the conversations sidebar drawer. */
+  /** Forces the conversations sidebar drawer closed. */
   closeSidebar(): void {
     this.sidebarOpenSignal.set(false);
   }
 
-  /** Closes the memory panel drawer. */
+  /** Forces the memory panel drawer closed. */
   closeMemory(): void {
     this.memoryOpenSignal.set(false);
   }

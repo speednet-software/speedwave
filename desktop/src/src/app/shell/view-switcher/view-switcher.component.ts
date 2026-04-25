@@ -3,11 +3,8 @@ import { RouterLink } from '@angular/router';
 
 /** One view entry exposed to the switcher. */
 export interface ViewSwitcherEntry {
-  /** Stable id used to compare against `activeId`. */
   id: string;
-  /** Label rendered on the tab. */
   label: string;
-  /** Angular router link to navigate to. */
   route: string;
 }
 
@@ -73,12 +70,7 @@ export interface ViewSwitcherEntry {
   `,
 })
 export class ViewSwitcherComponent {
-  /** All views exposed by the switcher. */
   @Input({ required: true }) views!: readonly ViewSwitcherEntry[];
-
-  /** Id of the currently-active view — matches one entry in `views`. */
   @Input({ required: true }) activeId!: string;
-
-  /** Emits the selected view id whenever a tab is clicked. */
   @Output() readonly selected = new EventEmitter<string>();
 }

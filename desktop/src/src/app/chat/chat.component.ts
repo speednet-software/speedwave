@@ -45,7 +45,7 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   inputText = '';
 
-  conversations: ConversationSummary[] = [];
+  conversations: readonly ConversationSummary[] = [];
   viewingTranscript: ConversationTranscript | null = null;
   historyLoading = false;
   historyError = '';
@@ -67,16 +67,17 @@ export class ChatComponent implements OnInit, OnDestroy {
   get showHistory(): boolean {
     return this.ui.sidebarOpen();
   }
+  /** Read-only alias — see {@link showHistory}. */
   get showMemory(): boolean {
     return this.ui.memoryOpen();
   }
 
-  /** Session id currently being viewed in the transcript overlay, or null. */
+  /** Session id behind the transcript overlay, or null when no transcript is open. */
   get currentViewSessionId(): string | null {
     return this.viewingTranscript?.session_id ?? null;
   }
 
-  /** Subscribes to state changes from the service. */
+  /** Wires change-detection callbacks and effects that lazy-load data when drawers open. */
   constructor() {
     this.unsubChange = this.chat.onChange(() => {
       this.cdr.markForCheck();
@@ -94,7 +95,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     });
   }
 
-  /** Initializes chat session (idempotent — no-ops if already running). */
+  /** Boots the chat session and subscribes to project lifecycle events (auth + ready). */
   async ngOnInit(): Promise<void> {
     await this.chat.init();
     this.cdr.markForCheck();
@@ -128,9 +129,8 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Handles ESC key to stop the current turn. Ignored when an unanswered
-   * AskUserQuestion block is visible — ESC semantics belong to that block.
-   * @param event - The keyboard event from the document.
+   * ESC stops the current turn — but only when no AskUserQuestion is awaiting an answer.
+   * @param event - keyboard event; consumed (preventDefault) when we handle it.
    */
   @HostListener('document:keydown.escape', ['$event'])
   onEscape(event: Event): void {
@@ -140,12 +140,12 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.chat.stopConversation();
   }
 
-  /** Handles the Stop button click. Stops the current turn unconditionally. */
+  /** Stops the current turn unconditionally (Stop button). */
   async onStopClicked(): Promise<void> {
     await this.chat.stopConversation();
   }
 
-  /** Sends the current input text as a user message and invokes the backend. */
+  /** Submits the current input as a user message; no-ops on empty input or active stream. */
   async sendMessage(): Promise<void> {
     const text = this.inputText.trim();
     if (!text || this.chat.isStreaming) return;
@@ -155,8 +155,8 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Handles Enter key press to send a message, allowing Shift+Enter for newlines.
-   * @param event - The keyboard event from the input field.
+   * Enter sends; Shift+Enter inserts a newline.
+   * @param event - keyboard event from the input field.
    */
   onEnter(event: KeyboardEvent): void {
     if (event.shiftKey) {
@@ -167,22 +167,22 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Handles a user answering an AskUserQuestion prompt.
-   * @param event - Contains the tool ID and selected answer values.
-   * @param event.toolId - The tool ID of the answered question.
-   * @param event.values - The selected or freeform answer values.
+   * Forwards an answered AskUserQuestion to the chat-state service.
+   * @param event - tool id and the selected values from the question block.
+   * @param event.toolId - id of the tool_use that produced the question.
+   * @param event.values - selected values; one per chosen option.
    */
   async onQuestionAnswered(event: { toolId: string; values: string[] }): Promise<void> {
     await this.chat.answerQuestion(event.toolId, event.values);
   }
 
-  /** Toggles the history sidebar; data loads via the constructor effect on open. */
+  /** Flips the sidebar signal; data load is driven by the constructor effect. */
   toggleHistory(): void {
     this.ui.toggleSidebar();
     this.cdr.markForCheck();
   }
 
-  /** Loads conversation list from the backend for the active project. */
+  /** Fetches the active project's past sessions; clears state if no active project. */
   async loadConversations(): Promise<void> {
     this.historyLoading = true;
     this.historyError = '';
@@ -207,8 +207,8 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Loads and displays a past conversation transcript in read-only mode.
-   * @param sessionId - The UUID of the conversation to view.
+   * Loads a past transcript into the read-only overlay.
+   * @param sessionId - session UUID to fetch from the backend.
    */
   async viewConversation(sessionId: string): Promise<void> {
     this.viewError = '';
@@ -228,13 +228,12 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Resumes a past conversation: loads its messages and switches to live chat mode.
-   * @param sessionId - The UUID of the conversation to resume.
+   * Resumes a session in live chat mode, surfacing its transcript locally for instant feedback.
+   * @param sessionId - session UUID to resume; the backend continues streaming once invoked.
    */
   async resumeConversation(sessionId: string): Promise<void> {
     if (this.resumeInProgress) return;
     this.resumeInProgress = true;
-    console.debug('[chat] resumeConversation: sessionId=%s', sessionId);
 
     // If we already viewed this transcript, surface its messages locally
     // for instant feedback. When invoked directly from the sidebar (no
@@ -257,9 +256,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     try {
       const project = this.projectState.activeProject;
       if (project) {
-        console.debug('[chat] resumeConversation: invoking backend');
         await this.tauri.invoke('resume_conversation', { project, sessionId });
-        console.debug('[chat] resumeConversation: backend success');
       }
     } catch (err) {
       console.error('[chat] resumeConversation failed:', err);
@@ -286,7 +283,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Starts a new conversation by clearing all state and re-initialising. */
+  /** Clears all chat + drawer state and re-runs the chat session bootstrap. */
   async newConversation(): Promise<void> {
     this.inputText = '';
     this.viewingTranscript = null;
@@ -297,19 +294,19 @@ export class ChatComponent implements OnInit, OnDestroy {
     await this.chat.init();
   }
 
-  /** Closes the transcript read-only view. */
+  /** Dismisses the read-only transcript overlay without resuming. */
   closeTranscript(): void {
     this.viewingTranscript = null;
     this.cdr.markForCheck();
   }
 
-  /** Toggles the memory panel; data loads via the constructor effect on open. */
+  /** Flips the memory signal; data load is driven by the constructor effect. */
   toggleMemory(): void {
     this.ui.toggleMemory();
     this.cdr.markForCheck();
   }
 
-  /** Loads the project memory (CLAUDE.md contents) from the backend. */
+  /** Fetches the active project's CLAUDE.md; falls back to empty on missing project / error. */
   async loadProjectMemory(): Promise<void> {
     try {
       const project = this.projectState.activeProject;
@@ -335,8 +332,8 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Intercepts clicks on external links and opens them in the system browser.
-   * @param event - The mouse click event to inspect for anchor element targets.
+   * Intercept anchor clicks so http(s) links open in the system browser, not in-app.
+   * @param event - the click event; preventDefault is called when we route to open_url.
    */
   @HostListener('click', ['$event'])
   onLinkClick(event: MouseEvent): void {
@@ -352,7 +349,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Unsubscribes from change notifications and event listeners on component destruction. */
+  /** Tears down change subscriptions registered in the constructor and ngOnInit. */
   ngOnDestroy(): void {
     if (this.unsubChange) {
       this.unsubChange();

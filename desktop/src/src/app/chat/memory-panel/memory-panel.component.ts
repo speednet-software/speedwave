@@ -60,12 +60,7 @@ import { TextBlockComponent } from '../blocks/text-block.component';
   `,
 })
 export class MemoryPanelComponent {
-  /** Whether the memory panel drawer is visible. */
   @Input() open = false;
-
-  /** Raw project CLAUDE.md markdown content. */
   @Input() markdown = '';
-
-  /** Emitted when the user clicks the close button. */
   @Output() readonly closed = new EventEmitter<void>();
 }

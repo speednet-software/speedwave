@@ -580,6 +580,21 @@ describe('ChatComponent', () => {
       expect(component.viewingTranscript).toBeNull();
       expect(component.showHistory).toBe(false);
     });
+
+    it('calls resume_conversation directly when viewingTranscript is null (sidebar shortcut)', async () => {
+      component.viewingTranscript = null;
+      projectState.activeProject = 'test';
+      const invokeCalls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        invokeCalls.push(cmd);
+        return undefined;
+      };
+
+      await component.resumeConversation('s1');
+
+      expect(invokeCalls).toContain('resume_conversation');
+      expect(chatState.messages).toHaveLength(0);
+    });
   });
 
   // ── newConversation ─────────────────────────────────────────────────────────

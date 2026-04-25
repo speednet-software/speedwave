@@ -23,11 +23,8 @@ import {
 /**
  * Main application shell with header navigation and project switcher.
  *
- * Hosts the terminal-minimal top nav via `<app-view-switcher>` and wires the
- * ⌘B / Ctrl+B keyboard shortcut to toggle the conversations sidebar through
- * `UiStateService`. Per the terminal-minimal prompt (Signals architecture),
- * the sidebar's open-state lives in the singleton `UiStateService`, not
- * locally — shell binds the keybinding, chat consumes the signal.
+ * Wires the ⌘B / Ctrl+B keyboard shortcut to `UiStateService.toggleSidebar()` —
+ * the sidebar's open-state is shared via signals, not local component state.
  */
 @Component({
   selector: 'app-shell',
@@ -177,7 +174,7 @@ import {
           </svg>
         </span>
         <nav class="justify-self-center" data-testid="app-nav">
-          <app-view-switcher [views]="visibleViews" [activeId]="activeViewId()" />
+          <app-view-switcher [views]="visibleViews()" [activeId]="activeViewId()" />
         </nav>
         <div class="justify-self-end">
           <app-project-switcher />
@@ -205,22 +202,23 @@ export class ShellComponent implements OnInit, OnDestroy {
   ];
 
   private readonly currentUrlSignal = signal<string>(this.router.url);
+  private readonly statusSignal = signal(this.projectState.status);
 
-  /** Views visible in the top nav — hides `chat` until auth is settled. */
-  get visibleViews(): readonly ViewSwitcherEntry[] {
-    const status = this.projectState.status;
+  /** Top-nav views — hides `chat` until auth is settled. */
+  readonly visibleViews = computed(() => {
+    const status = this.statusSignal();
     const hideChat = status !== 'ready' && status !== 'error';
     return hideChat ? this.viewCatalog.filter((v) => v.id !== 'chat') : this.viewCatalog;
-  }
+  });
 
-  /** The currently-active view id, derived from the router URL. */
+  /** Active view id derived from the current router URL. */
   readonly activeViewId = computed(() => {
     const url = this.currentUrlSignal();
     const match = this.viewCatalog.find((v) => url.startsWith(v.route));
     return match?.id ?? '';
   });
 
-  /** Human-readable status message for the blocking overlay. */
+  /** Human-readable copy for the blocking overlay, keyed off projectState.status. */
   get statusMessage(): string {
     switch (this.projectState.status) {
       case 'loading':
@@ -240,10 +238,11 @@ export class ShellComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Bootstraps ProjectStateService and subscribes to state changes. */
+  /** Bootstraps project state, mirrors status into a signal, and tracks the current URL. */
   ngOnInit(): void {
     this.projectState.init();
     this.unsubscribe = this.projectState.onChange(() => {
+      this.statusSignal.set(this.projectState.status);
       this.cdr.markForCheck();
     });
     this.routerSub = this.router.events
@@ -252,9 +251,8 @@ export class ShellComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Global document keydown handler. Handles:
-   * - ⌘B / Ctrl+B → toggle the conversations sidebar.
-   * @param event - The keyboard event dispatched on the document.
+   * ⌘B / Ctrl+B toggles the conversations sidebar via the shared UI-state signal.
+   * @param event - keyboard event from the document; consumed (preventDefault) on match.
    */
   onKeydown(event: KeyboardEvent): void {
     const isCmdB = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'b';
@@ -263,33 +261,33 @@ export class ShellComponent implements OnInit, OnDestroy {
     this.ui.toggleSidebar();
   }
 
-  /** Retries container lifecycle check. */
+  /** Retries the container lifecycle (used by the error banner). */
   retry(): void {
     this.projectState.ensureContainersRunning();
   }
 
-  /** Retries system check (prereqs + security). */
+  /** Retries the system check (prereqs + security) on check_failed. */
   retryCheck(): void {
     this.projectState.ensureContainersRunning();
   }
 
-  /** Triggers a container restart from the overlay. */
+  /** Triggers a container restart from the restart-required overlay. */
   restartContainers(): void {
     this.projectState.restartContainers();
   }
 
-  /** Dismisses the restart overlay. */
+  /** Dismisses the restart-required overlay without restarting. */
   dismissRestart(): void {
     this.projectState.dismissRestart();
   }
 
-  /** Dismisses the error banner. */
+  /** Clears the active error banner. */
   async dismiss(): Promise<void> {
     await this.projectState.dismissError();
     this.cdr.markForCheck();
   }
 
-  /** Cleans up the project state subscription. */
+  /** Tears down the projectState and router subscriptions. */
   ngOnDestroy(): void {
     if (this.unsubscribe) {
       this.unsubscribe();

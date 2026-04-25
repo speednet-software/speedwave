@@ -98,24 +98,11 @@ import type { ConversationSummary } from '../../models/chat';
   `,
 })
 export class ConversationsSidebarComponent {
-  /** Whether the sidebar drawer is visible. */
   @Input() open = false;
-
-  /** Past conversation summaries for the active project. */
   @Input({ required: true }) conversations!: readonly ConversationSummary[];
-
-  /** Session id of the currently active / viewed conversation, or null for none. */
   @Input() currentSessionId: string | null = null;
-
-  /** Emitted when the user clicks the close button. */
   @Output() readonly closed = new EventEmitter<void>();
-
-  /** Emitted when the user clicks the "+ new" button. */
   @Output() readonly newConversation = new EventEmitter<void>();
-
-  /** Emitted when the user clicks a conversation row to view its transcript. */
   @Output() readonly viewConversation = new EventEmitter<ConversationSummary>();
-
-  /** Emitted when the user clicks the resume action on a conversation row. */
   @Output() readonly resumeConversation = new EventEmitter<ConversationSummary>();
 }
