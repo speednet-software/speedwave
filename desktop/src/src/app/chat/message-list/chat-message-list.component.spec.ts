@@ -72,8 +72,11 @@ describe('ChatMessageListComponent', () => {
     );
     expect(streamingEl).not.toBeNull();
 
-    const cursor = fixture.nativeElement.querySelector('[data-testid="cursor"]');
-    expect(cursor).not.toBeNull();
+    // When the last block is a text block, the per-block streaming caret renders
+    // (data-testid="streaming-caret") and the message-level cursor is suppressed
+    // by lastBlockIsText.
+    const caret = fixture.nativeElement.querySelector('[data-testid="streaming-caret"]');
+    expect(caret).not.toBeNull();
   });
 
   it('does not append a streaming placeholder when currentBlocks is empty', () => {
