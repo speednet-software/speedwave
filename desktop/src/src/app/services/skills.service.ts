@@ -119,12 +119,4 @@ export class SkillsService {
     this._discovered.set(HARDCODED_FALLBACK);
     return HARDCODED_FALLBACK;
   }
-
-  /**
-   * Returns a fresh copy of the hardcoded fallback list. Exposed so tests and
-   * downstream units (slash menu) can assert the baseline.
-   */
-  fallback(): readonly Skill[] {
-    return HARDCODED_FALLBACK;
-  }
 }

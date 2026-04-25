@@ -21,8 +21,8 @@ describe('SkillsService', () => {
     expect(service.discovered()).toEqual(result);
   });
 
-  it('fallback list always contains the core built-ins', () => {
-    const ids = service.fallback().map((s) => s.id);
+  it('fallback list always contains the core built-ins', async () => {
+    const ids = (await service.refresh()).map((s) => s.id);
     expect(ids).toContain('help');
     expect(ids).toContain('clear');
     expect(ids).toContain('compact');
@@ -32,8 +32,8 @@ describe('SkillsService', () => {
     expect(ids).toContain('memory');
   });
 
-  it('every fallback entry is marked source=built-in and kind=builtin', () => {
-    for (const skill of service.fallback()) {
+  it('every fallback entry is marked source=built-in and kind=builtin', async () => {
+    for (const skill of await service.refresh()) {
       expect(skill.source).toBe('built-in');
       expect(skill.kind).toBe('builtin');
       expect(skill.description.length).toBeGreaterThan(0);

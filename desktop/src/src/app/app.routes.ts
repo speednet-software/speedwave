@@ -39,13 +39,11 @@ export const routes: Routes = [
       },
       {
         path: 'projects',
-        canActivate: [setupCompleteGuard],
         loadComponent: () =>
           import('./projects-view/projects-view.component').then((m) => m.ProjectsViewComponent),
       },
       {
         path: 'skills',
-        canActivate: [setupCompleteGuard],
         loadComponent: () =>
           import('./skills-view/skills-view.component').then((m) => m.SkillsViewComponent),
       },

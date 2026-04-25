@@ -35,9 +35,8 @@
           @for (project of projects(); track project.name) {
             <li
               class="rounded ring-1 bg-[var(--bg-1)]"
-              [style.--tw-ring-color]="
-                isActive(project.name) ? 'var(--accent-dim)' : 'var(--line)'
-              "
+              [class.ring-[var(--accent-dim)]]="isActive(project.name)"
+              [class.ring-[var(--line)]]="!isActive(project.name)"
               [attr.data-testid]="'projects-card-' + project.name"
               [attr.data-active]="isActive(project.name) ? 'true' : null"
             >
