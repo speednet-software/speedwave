@@ -42,7 +42,10 @@ const LEVEL_RE = /^(DEBUG|INFO|WARN|WARNING|ERROR|TRACE)\s+(.*)$/i;
 const CONTAINER_PREFIX_RE = /^speedwave_[^_]+_([^_]+)(?:_\d+)?$/;
 const TRAILING_INDEX_RE = /_\d+$/;
 
-/** Parse a single compose-log line into `LogLine`. Tolerant — never throws. */
+/**
+ * Parse a single compose-log line into `LogLine`. Tolerant — never throws.
+ * @param raw - A single log line as emitted by `nerdctl compose logs`.
+ */
 export function parseLogLine(raw: string): LogLine {
   const trimmed = raw.trim();
   if (!trimmed) {
@@ -63,7 +66,10 @@ export function parseLogLine(raw: string): LogLine {
   return { time, source, level, message };
 }
 
-/** Normalise a raw level token to the small enum used by chips. */
+/**
+ * Normalise a raw level token to the small enum used by chips.
+ * @param raw - Raw level token (e.g. `WARNING`, `TRACE`).
+ */
 function normalizeLevel(raw: string): LogLevel {
   const upper = raw.toUpperCase();
   if (upper === 'ERROR') return 'error';
@@ -72,13 +78,22 @@ function normalizeLevel(raw: string): LogLevel {
   return 'info';
 }
 
-/** Strip the `speedwave_<project>_` prefix from a container name. */
+/**
+ * Strip the `speedwave_<project>_` prefix from a container name.
+ * @param container - Container name as it appears in compose-log prefixes.
+ */
 function stripContainerPrefix(container: string): string {
   const match = CONTAINER_PREFIX_RE.exec(container);
   if (match) return match[1];
   return container.replace(TRAILING_INDEX_RE, '');
 }
 
+/**
+ * Logs view — fetches the compose-log tail and renders filtered, parsed lines.
+ *
+ * Owns the level/source filter chips and auto-scrolls to the bottom whenever a
+ * fresh batch is loaded.
+ */
 @Component({
   selector: 'app-logs-view',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -102,7 +117,12 @@ export class LogsViewComponent implements OnInit, AfterViewChecked {
     const distinct = new Set<string>();
     for (const line of this.lines()) distinct.add(line.source);
     // Filter 'all' from observed sources so the hard-coded chip is never duplicated.
-    return ['all', ...Array.from(distinct).filter((s) => s !== 'all').sort()];
+    return [
+      'all',
+      ...Array.from(distinct)
+        .filter((s) => s !== 'all')
+        .sort(),
+    ];
   });
 
   /** Lines after applying the current filters. */
@@ -163,12 +183,18 @@ export class LogsViewComponent implements OnInit, AfterViewChecked {
     }
   }
 
-  /** Select a level chip. */
+  /**
+   * Select a level chip.
+   * @param level - Level to filter on, or `'all'` to disable the filter.
+   */
   protected setLevel(level: LogLevel): void {
     this.filters.update((f) => ({ ...f, level }));
   }
 
-  /** Select a source chip. */
+  /**
+   * Select a source chip.
+   * @param source - Source to filter on, or `'all'` to disable the filter.
+   */
   protected setSource(source: string): void {
     this.filters.update((f) => ({ ...f, source }));
   }
