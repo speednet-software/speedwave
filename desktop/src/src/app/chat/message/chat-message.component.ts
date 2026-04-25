@@ -45,7 +45,7 @@ import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
           @case ('ask_user') {
             <app-ask-user-block
               [question]="asAskUserBlock(block).question"
-              (answered)="onAnswered(asAskUserBlock(block).question.tool_id, $event)"
+              (answered)="questionAnswered.emit($event)"
             />
           }
           @case ('error') {
@@ -79,14 +79,5 @@ export class ChatMessageComponent {
    */
   asAskUserBlock(block: MessageBlock): Extract<MessageBlock, { type: 'ask_user' }> {
     return block as Extract<MessageBlock, { type: 'ask_user' }>;
-  }
-
-  /**
-   * Emits a question-answered event upstream.
-   * @param toolId - The tool ID of the AskUserQuestion block.
-   * @param values - The selected answer values.
-   */
-  onAnswered(toolId: string, values: string[]): void {
-    this.questionAnswered.emit({ toolId, values });
   }
 }

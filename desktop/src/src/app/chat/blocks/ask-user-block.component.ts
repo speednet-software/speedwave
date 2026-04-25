@@ -1,160 +1,353 @@
-import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  EventEmitter,
+  Input,
+  Output,
+  computed,
+  signal,
+} from '@angular/core';
 import type { AskUserQuestionBlock } from '../../models/chat';
 
-/** Renders an interactive question prompt from Claude, with option buttons or freeform input. */
+/**
+ * Interactive question prompt from Claude — violet callout-box per the terminal-minimal
+ * design system. Renders three variants:
+ *   - multi-select: options are toggle buttons; submit with "Send".
+ *   - single + freeform: option buttons plus textarea; submit either the chosen option
+ *     or the freeform text.
+ *   - answered: disabled controls and locked badges showing the user's selection.
+ *
+ * ARIA: `<fieldset>` + `<legend>` groups the question with its controls; option buttons
+ * expose `aria-pressed` for toggle semantics.
+ *
+ * Note on API shape: this component uses classical `@Input` / `@Output` decorators
+ * even though best-practices.md prefers the newer `input()` / `output()` signal APIs.
+ * The project's current `npx vitest run` setup does not run the Angular compiler,
+ * which means `fixture.componentRef.setInput(...)` and template-driven signal inputs
+ * are not recognised at runtime. Once the test harness adopts the Angular vitest
+ * plugin, this component (and the sibling error / permission components) can move
+ * to the signal API in a follow-up sweep.
+ *
+ * Wave 1 design-system tokens (`--violet`, `--ink`, `--ink-dim`, `--line`,
+ * `--line-strong`, `--bg-1`, `--bg-2`, `--accent`, `--on-accent`) may not yet be
+ * merged into the global stylesheet — fallback hex values keep the component
+ * usable in isolation.
+ */
 @Component({
   selector: 'app-ask-user-block',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block my-2' },
-  template: `
-    <div
-      data-testid="ask-user-block"
-      class="bg-sw-purple-bg border border-sw-purple rounded-md p-3"
-    >
-      @if (question.header) {
-        <div data-testid="ask-header" class="font-bold text-sw-purple-light text-[13px] mb-1">
-          {{ question.header }}
-        </div>
+  styles: [
+    `
+      :host {
+        display: block;
       }
-      <div data-testid="ask-question" class="text-sw-text text-sm mb-2">
+      .ask-active {
+        border-radius: 0.25rem;
+        box-shadow: 0 0 0 1px color-mix(in oklab, var(--violet, #a78bfa) 40%, transparent);
+        background-color: color-mix(in oklab, var(--violet, #a78bfa) 6%, transparent);
+        padding: 1rem;
+      }
+      .ask-locked {
+        border-radius: 0.25rem;
+        box-shadow: 0 0 0 1px color-mix(in oklab, var(--violet, #a78bfa) 20%, transparent);
+        background-color: var(--bg-1, #0b0e18);
+        padding: 1rem;
+        opacity: 0.8;
+      }
+      .ask-legend {
+        color: var(--violet, #a78bfa);
+      }
+      .ask-legend-answered {
+        color: color-mix(in oklab, var(--violet, #a78bfa) 70%, transparent);
+      }
+      .ask-question {
+        color: var(--ink, #e8edf7);
+      }
+      .ask-question-answered {
+        color: var(--ink-dim, #9aa3ba);
+      }
+      .opt-btn {
+        transition:
+          background-color 120ms ease,
+          border-color 120ms ease;
+      }
+      .opt-btn.opt-selected {
+        border-color: var(--violet, #a78bfa);
+        background-color: color-mix(in oklab, var(--violet, #a78bfa) 20%, transparent);
+        color: var(--ink, #e8edf7);
+      }
+      .opt-btn:not(.opt-selected) {
+        border-color: var(--line-strong, #252c42);
+        background-color: var(--bg-2, #10141f);
+        color: var(--ink-dim, #9aa3ba);
+      }
+      .opt-btn:not(.opt-selected):hover {
+        border-color: var(--violet, #a78bfa);
+      }
+      .answered-badge {
+        border: 1px solid color-mix(in oklab, var(--violet, #a78bfa) 50%, transparent);
+        background-color: color-mix(in oklab, var(--violet, #a78bfa) 15%, transparent);
+        color: var(--ink, #e8edf7);
+      }
+      .freeform {
+        border: 1px solid var(--line, #1a2030);
+        background-color: var(--bg-2, #10141f);
+        color: var(--ink, #e8edf7);
+      }
+      .send-btn {
+        background-color: var(--accent, #ff4d6d);
+        color: var(--on-accent, #07090f);
+      }
+      .send-btn:hover:not(:disabled) {
+        opacity: 0.9;
+      }
+      .send-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+    `,
+  ],
+  template: `
+    <fieldset
+      data-testid="ask-user-block"
+      [attr.data-variant]="variant()"
+      [disabled]="question.answered"
+      class="border-0 m-0"
+      [class.ask-active]="!question.answered"
+      [class.ask-locked]="question.answered"
+    >
+      <legend
+        data-testid="ask-legend"
+        class="mono mb-2 px-0 text-[11px]"
+        [class.ask-legend]="!question.answered"
+        [class.ask-legend-answered]="question.answered"
+        [class.sr-only]="legendHidden()"
+      >
+        {{ legendText() }}
+      </legend>
+
+      <div
+        data-testid="ask-question"
+        class="mb-3"
+        [class.text-[14px]]="!question.answered"
+        [class.text-[13px]]="question.answered"
+        [class.ask-question]="!question.answered"
+        [class.ask-question-answered]="question.answered"
+      >
         {{ question.question }}
       </div>
+
       @if (question.answered) {
         <div data-testid="ask-answered" class="flex flex-wrap gap-1.5">
           @for (val of question.selected_values; track val) {
             <span
               data-testid="selected-option"
-              class="bg-sw-purple text-white px-2.5 py-1 rounded text-[13px]"
-              >{{ val }}</span
+              class="answered-badge mono inline-block rounded px-2 py-0.5 text-[11px]"
             >
+              {{ val }}
+            </span>
           }
         </div>
       } @else {
         @if (question.options.length > 0) {
-          <div class="flex flex-wrap gap-2 mb-2">
+          <div
+            class="flex flex-wrap gap-2"
+            role="group"
+            [attr.aria-label]="question.multi_select ? 'Select any options' : 'Select one option'"
+          >
             @for (option of question.options; track option.value) {
               <button
+                type="button"
                 data-testid="ask-option-btn"
-                class="bg-sw-bg-navy text-sw-text border border-sw-btn-ask-border rounded px-3 py-1.5 cursor-pointer text-[13px] transition-[background,border-color] duration-150 hover:bg-sw-btn-ask hover:border-sw-purple"
-                [class.!bg-sw-purple]="isSelected(option.value)"
-                [class.!border-sw-purple-light]="isSelected(option.value)"
-                [class.!text-white]="isSelected(option.value)"
+                class="opt-btn mono rounded border px-3 py-1 text-[12px]"
+                [class.opt-selected]="isSelected(option.value)"
+                [attr.aria-pressed]="isSelected(option.value)"
                 (click)="toggleOption(option.value)"
               >
-                {{ option.label }}
+                {{ option.label }}{{ isSelected(option.value) ? ' ✓' : '' }}
               </button>
             }
           </div>
-          <div class="flex items-center gap-2 flex-wrap">
-            <button
-              data-testid="ask-confirm-btn"
-              class="bg-sw-purple text-white border-none rounded px-4 py-1.5 cursor-pointer text-[13px] hover:bg-sw-purple-dark disabled:opacity-50 disabled:cursor-not-allowed"
-              [disabled]="pendingSelection.length === 0"
-              (click)="submit()"
-            >
-              Confirm
-            </button>
-            <span data-testid="ask-or" class="text-sw-code-gray text-xs">or</span>
-            <div class="flex gap-2 flex-1 min-w-[150px]">
-              <input
-                data-testid="ask-input"
-                class="flex-1 bg-sw-bg-abyss text-sw-text border border-sw-btn-ask-border rounded px-2.5 py-1.5 text-[13px] outline-none focus:border-sw-purple"
-                placeholder="Type your own answer..."
-                (keydown.enter)="submitFreeform($event)"
-                #freeformInput
-              />
-              <button
-                data-testid="ask-send-btn"
-                class="bg-sw-purple text-white border-none rounded px-4 py-1.5 cursor-pointer text-[13px] hover:bg-sw-purple-dark"
-                (click)="submitFreeformFromInput(freeformInput)"
-              >
-                Send
-              </button>
-            </div>
-          </div>
-        } @else {
-          <div class="flex gap-2 flex-1 min-w-[150px]">
-            <input
+        }
+
+        @if (allowFreeform()) {
+          <div class="mt-3">
+            <label class="sr-only" [attr.for]="freeformId">Freeform answer</label>
+            <textarea
               data-testid="ask-input"
-              class="flex-1 bg-sw-bg-abyss text-sw-text border border-sw-btn-ask-border rounded px-2.5 py-1.5 text-[13px] outline-none focus:border-sw-purple"
-              placeholder="Type your answer..."
-              (keydown.enter)="submitFreeform($event)"
-              #freeformInput
-            />
-            <button
-              data-testid="ask-send-btn"
-              class="bg-sw-purple text-white border-none rounded px-4 py-1.5 cursor-pointer text-[13px] hover:bg-sw-purple-dark"
-              (click)="submitFreeformFromInput(freeformInput)"
-            >
-              Send
-            </button>
+              [id]="freeformId"
+              class="freeform mono w-full rounded px-3 py-1 text-[12px] resize-y min-h-[2.25rem]"
+              rows="1"
+              placeholder="or type your own answer..."
+              [value]="freeformText()"
+              (input)="onFreeformInput($event)"
+              (keydown.enter)="onFreeformEnter($event)"
+            ></textarea>
           </div>
         }
+
+        <div class="mt-3 flex gap-2">
+          <button
+            type="button"
+            data-testid="ask-send-btn"
+            class="send-btn mono rounded px-3 py-1 text-[12px] font-medium"
+            [disabled]="!canSend()"
+            (click)="submit()"
+          >
+            {{ sendLabel() }}
+          </button>
+        </div>
       }
-    </div>
+    </fieldset>
   `,
 })
 export class AskUserBlockComponent {
-  @Input({ required: true }) question!: AskUserQuestionBlock;
-  @Output() answered = new EventEmitter<string[]>();
+  /** Backing signal for the `question` input so `computed()` derivations update reactively. */
+  private readonly _question = signal<AskUserQuestionBlock | undefined>(undefined);
 
-  pendingSelection: string[] = [];
+  /** The AskUserQuestion payload rendered by this prompt. */
+  get question(): AskUserQuestionBlock {
+    const q = this._question();
+    if (!q) {
+      throw new Error('AskUserBlockComponent.question accessed before initialisation');
+    }
+    return q;
+  }
+  /**
+   * Replaces the current question payload; pushes it into `_question` so all
+   * reactive computeds re-evaluate against the new value.
+   * @param value - The new AskUserQuestion payload.
+   */
+  @Input({ required: true })
+  set question(value: AskUserQuestionBlock) {
+    this._question.set(value);
+  }
+
+  @Output() answered = new EventEmitter<{ toolId: string; values: string[] }>();
+
+  /** Selected option values, tracked reactively for efficient template updates. */
+  readonly selected = signal<ReadonlySet<string>>(new Set());
+
+  /** Freeform textarea content. */
+  readonly freeformText = signal<string>('');
+
+  /** DOM id for label-input association on the freeform textarea. */
+  readonly freeformId = `ask-freeform-${Math.random().toString(36).slice(2, 9)}`;
+
+  /** Variant key used as a data attribute and drives some visual decisions. */
+  readonly variant = computed<'multi' | 'single-freeform' | 'freeform' | 'answered'>(() => {
+    const q = this._question();
+    if (!q) return 'freeform';
+    if (q.answered) return 'answered';
+    if (q.multi_select) return 'multi';
+    if (q.options.length === 0) return 'freeform';
+    return 'single-freeform';
+  });
+
+  /** Freeform input is shown for single-select + freeform and freeform-only variants. */
+  readonly allowFreeform = computed(() => {
+    const v = this.variant();
+    return v === 'single-freeform' || v === 'freeform';
+  });
+
+  /** Whether the Send button may fire. */
+  readonly canSend = computed(() => {
+    const q = this._question();
+    if (q?.answered) return false;
+    if (this.selected().size > 0) return true;
+    if (this.allowFreeform() && this.freeformText().trim().length > 0) return true;
+    return false;
+  });
+
+  /** Send button label — shows a count for multi-select with any selection. */
+  readonly sendLabel = computed(() => {
+    const q = this._question();
+    if (q?.multi_select) {
+      const count = this.selected().size;
+      return count > 0 ? `Send (${count})` : 'Send';
+    }
+    return 'Send';
+  });
+
+  /** Legend text: either the provided header, a fallback, or an answered indicator. */
+  readonly legendText = computed(() => {
+    const q = this._question();
+    if (!q) return '';
+    if (q.answered) return '✓ answered';
+    if (q.header) return q.header;
+    return q.multi_select ? '? question · select any' : '? question · pick one or type';
+  });
+
+  /** Hide the legend visually when there's nothing meaningful to render (screen readers still get it). */
+  readonly legendHidden = computed(() => {
+    const q = this._question();
+    if (!q) return true;
+    return !q.answered && !q.header && q.options.length === 0 && !q.multi_select;
+  });
 
   /**
    * Checks whether a given option value is currently selected.
-   * @param value - The option value to check.
+   * @param value - Option value to check against the selected set.
    */
   isSelected(value: string): boolean {
-    return this.pendingSelection.includes(value);
+    return this.selected().has(value);
   }
 
   /**
    * Toggles selection of an option value (single or multi-select).
-   * @param value - The option value to toggle.
+   * @param value - Option value to toggle into/out of the selected set.
    */
   toggleOption(value: string): void {
     if (this.question.answered) return;
-    if (this.question.multi_select) {
-      if (this.pendingSelection.includes(value)) {
-        this.pendingSelection = this.pendingSelection.filter((v) => v !== value);
+    this.selected.update((prev) => {
+      const next = new Set(prev);
+      if (this.question.multi_select) {
+        if (next.has(value)) {
+          next.delete(value);
+        } else {
+          next.add(value);
+        }
       } else {
-        this.pendingSelection = [...this.pendingSelection, value];
+        next.clear();
+        next.add(value);
       }
-    } else {
-      this.pendingSelection = [value];
+      return next;
+    });
+  }
+
+  /** Emits the pending selection or freeform text. Selection wins over freeform when both present. */
+  submit(): void {
+    if (this.question.answered) return;
+    const values = [...this.selected()];
+    if (values.length > 0) {
+      this.answered.emit({ toolId: this.question.tool_id, values });
+      return;
+    }
+    const trimmed = this.freeformText().trim();
+    if (trimmed.length > 0) {
+      this.answered.emit({ toolId: this.question.tool_id, values: [trimmed] });
     }
   }
 
-  /** Submits the currently selected options. */
-  submit(): void {
-    if (this.pendingSelection.length === 0 || this.question.answered) return;
-    this.answered.emit(this.pendingSelection);
+  /**
+   * Stores the textarea value on each input event.
+   * @param event - The DOM input event whose target holds the current text.
+   */
+  onFreeformInput(event: Event): void {
+    const target = event.target as HTMLTextAreaElement | null;
+    this.freeformText.set(target?.value ?? '');
   }
 
   /**
-   * Submits a freeform answer from a keyboard event target.
-   * @param event - The keyboard event whose target holds the input value.
+   * Submits on Enter (without Shift) for a keyboard-friendly workflow.
+   * @param event - The keydown event fired by the freeform textarea.
    */
-  submitFreeform(event: Event): void {
-    this.submitValue((event.target as HTMLInputElement).value);
-  }
-
-  /**
-   * Submits a freeform answer from a direct input element reference.
-   * @param input - The HTML input element containing the freeform value.
-   */
-  submitFreeformFromInput(input: HTMLInputElement): void {
-    this.submitValue(input.value);
-  }
-
-  /**
-   * Validates and emits a trimmed freeform value.
-   * @param value - The raw freeform input string.
-   */
-  private submitValue(value: string): void {
-    const trimmed = value.trim();
-    if (!trimmed || this.question.answered) return;
-    this.answered.emit([trimmed]);
+  onFreeformEnter(event: Event): void {
+    const ke = event as KeyboardEvent;
+    if (ke.shiftKey) return;
+    event.preventDefault();
+    this.submit();
   }
 }
