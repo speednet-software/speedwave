@@ -7,6 +7,7 @@ import { ErrorBlockComponent } from '../blocks/error-block.component';
 import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
 import { PermissionPromptComponent } from '../blocks/permission-prompt.component';
 import { UserMessageComponent } from './user-message.component';
+import { MessageActionsComponent } from './message-actions.component';
 
 /** Renders a single chat message: user role uses a meta-line layout, assistant role uses a bubble. */
 @Component({
@@ -19,12 +20,13 @@ import { UserMessageComponent } from './user-message.component';
     AskUserBlockComponent,
     PermissionPromptComponent,
     UserMessageComponent,
+    MessageActionsComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
-    class: 'flex w-full',
-    '[class.justify-end]': "role === 'user'",
-    '[class.justify-start]': "role === 'assistant'",
+    class: 'flex flex-col w-full',
+    '[class.items-end]': "role === 'user'",
+    '[class.items-start]': "role === 'assistant'",
   },
   template: `
     @if (role === 'user') {
@@ -73,6 +75,9 @@ import { UserMessageComponent } from './user-message.component';
           >
         }
       </div>
+      @if (role === 'assistant' && !streaming && entryIndex !== null) {
+        <app-message-actions [entryIndex]="entryIndex" [isLast]="isLast" />
+      }
     }
   `,
 })
@@ -82,6 +87,14 @@ export class ChatMessageComponent {
   @Input() streaming = false;
   @Input() editedAt: number | undefined = undefined;
   @Input() timestamp = 0;
+  /**
+   * Index of this message entry in `ChatStateService.messages`. `null`
+   * when rendering live `currentBlocks` (which has no committed index yet)
+   * — the action bar is hidden in that case.
+   */
+  @Input() entryIndex: number | null = null;
+  /** Whether this entry is the last assistant message in the list. */
+  @Input() isLast = false;
   @Output() questionAnswered = new EventEmitter<{ toolId: string; values: string[] }>();
   @Output() permissionDecided = new EventEmitter<{
     blockIndex: number;

@@ -50,6 +50,13 @@ export class ChatComponent implements OnInit, OnDestroy {
   projectMemory = '';
   memoryError = '';
   viewError = '';
+  /**
+   * Cached index of the most recent assistant message in `chat.messages`,
+   * recomputed on every state-change notification. Avoids the O(n) scan in
+   * `isLastAssistant` becoming O(n²) when the template iterates every entry.
+   * `-1` when no assistant message exists.
+   */
+  lastAssistantIndex = -1;
   private resumeInProgress = false;
 
   readonly chat = inject(ChatStateService);
@@ -79,6 +86,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   /** Wires change-detection callbacks and effects that lazy-load data when drawers open. */
   constructor() {
     this.unsubChange = this.chat.onChange(() => {
+      this.recomputeLastAssistantIndex();
       this.cdr.markForCheck();
       // Live-chat scrolling is owned by <app-chat-message-list>; no-op here.
     });
@@ -92,6 +100,18 @@ export class ChatComponent implements OnInit, OnDestroy {
     effect(() => {
       if (this.ui.memoryOpen()) void this.loadProjectMemory();
     });
+  }
+
+  /** Recomputes the cached `lastAssistantIndex` from the current messages. */
+  private recomputeLastAssistantIndex(): void {
+    const msgs = this.chat.messages;
+    for (let i = msgs.length - 1; i >= 0; i -= 1) {
+      if (msgs[i].role === 'assistant') {
+        this.lastAssistantIndex = i;
+        return;
+      }
+    }
+    this.lastAssistantIndex = -1;
   }
 
   /** Boots the chat session and subscribes to project lifecycle events (auth + ready). */
@@ -173,6 +193,17 @@ export class ChatComponent implements OnInit, OnDestroy {
    */
   async onQuestionAnswered(event: { toolId: string; values: string[] }): Promise<void> {
     await this.chat.answerQuestion(event.toolId, event.values);
+  }
+
+  /**
+   * Returns true when the assistant entry at `index` is the most recent
+   * assistant message — used to gate the per-message Retry button. Reads a
+   * precomputed index updated on each state-change notification, so the
+   * per-row template lookup is O(1) instead of O(n).
+   * @param index - Index into `chat.messages` of the entry under test.
+   */
+  isLastAssistant(index: number): boolean {
+    return index === this.lastAssistantIndex;
   }
 
   /** Flips the sidebar signal; data load is driven by the constructor effect. */

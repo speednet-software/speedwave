@@ -1315,4 +1315,328 @@ describe('ChatStateService', () => {
       expect(service.currentBlocks).toEqual([]);
     });
   });
+
+  describe('UserMessageCommit chunk', () => {
+    it('commits the UUID onto the most recent user entry that is missing one', () => {
+      service._setState({
+        messages: [
+          { role: 'user', blocks: [{ type: 'text', content: 'first' }], timestamp: 1, uuid: 'u-1' },
+          { role: 'user', blocks: [{ type: 'text', content: 'second' }], timestamp: 2 },
+        ],
+      });
+      service.handleStreamChunk({
+        chunk_type: 'UserMessageCommit',
+        data: { uuid: 'u-2' },
+      });
+      expect(service.messages[1].uuid).toBe('u-2');
+      expect(service.messages[1].uuid_status).toBe('Committed');
+      // Already-committed entries are untouched.
+      expect(service.messages[0].uuid).toBe('u-1');
+    });
+
+    it('is a no-op when no user entry is missing a UUID', () => {
+      service._setState({
+        messages: [
+          { role: 'user', blocks: [{ type: 'text', content: 'first' }], timestamp: 1, uuid: 'u-1' },
+        ],
+      });
+      const before = service.messages;
+      service.handleStreamChunk({
+        chunk_type: 'UserMessageCommit',
+        data: { uuid: 'u-2' },
+      });
+      // Same object — no mutation, no replacement.
+      expect(service.messages).toBe(before);
+    });
+
+    it('is a no-op when the message list is empty', () => {
+      const before = service.messages;
+      service.handleStreamChunk({
+        chunk_type: 'UserMessageCommit',
+        data: { uuid: 'u-1' },
+      });
+      expect(service.messages).toBe(before);
+    });
+  });
+
+  describe('Result chunk with assistant_uuid', () => {
+    it('stamps the committed UUID onto the finalized assistant entry', () => {
+      service.isStreaming = true;
+      service._setState({ currentBlocks: [{ type: 'text', content: 'reply' }] });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 's-1',
+          total_cost: 0,
+          usage: undefined,
+          result_text: undefined,
+          context_window_size: 200_000,
+          assistant_uuid: 'a-1',
+        },
+      });
+      const last = service.messages[service.messages.length - 1];
+      expect(last.role).toBe('assistant');
+      expect(last.uuid).toBe('a-1');
+      expect(last.uuid_status).toBe('Committed');
+    });
+
+    it('omits uuid_status when assistant_uuid is missing', () => {
+      service.isStreaming = true;
+      service._setState({ currentBlocks: [{ type: 'text', content: 'reply' }] });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 's-1',
+          total_cost: 0,
+          usage: undefined,
+          result_text: undefined,
+          context_window_size: 200_000,
+        },
+      });
+      const last = service.messages[service.messages.length - 1];
+      expect(last.uuid).toBeUndefined();
+      expect(last.uuid_status).toBeUndefined();
+    });
+  });
+
+  describe('copyMessage', () => {
+    let writeText: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, 'clipboard', {
+        value: { writeText },
+        configurable: true,
+      });
+    });
+
+    it('writes flattened text content to the clipboard and returns true', async () => {
+      service._setState({
+        messages: [
+          {
+            role: 'assistant',
+            blocks: [
+              { type: 'text', content: 'Hello' },
+              { type: 'tool_use', tool: {
+                tool_id: 't', tool_name: 'Read', input_json: '{}',
+                status: 'done', result: 'ok', result_is_error: false, collapsed: false,
+              } },
+              { type: 'text', content: 'World' },
+            ],
+            timestamp: 1,
+          },
+        ],
+      });
+      const ok = await service.copyMessage(0);
+      expect(ok).toBe(true);
+      expect(writeText).toHaveBeenCalledWith('Hello\n\nWorld');
+    });
+
+    it('returns false for an out-of-range index', async () => {
+      const ok = await service.copyMessage(99);
+      expect(ok).toBe(false);
+      expect(writeText).not.toHaveBeenCalled();
+    });
+
+    it('returns false when there is no copyable text (only tool_use/thinking)', async () => {
+      service._setState({
+        messages: [
+          {
+            role: 'assistant',
+            blocks: [{ type: 'thinking', content: 'hmm', collapsed: true }],
+            timestamp: 1,
+          },
+        ],
+      });
+      const ok = await service.copyMessage(0);
+      expect(ok).toBe(false);
+      expect(writeText).not.toHaveBeenCalled();
+    });
+
+    it('returns false when navigator.clipboard is missing', async () => {
+      Object.defineProperty(navigator, 'clipboard', {
+        value: undefined,
+        configurable: true,
+      });
+      service._setState({
+        messages: [
+          { role: 'assistant', blocks: [{ type: 'text', content: 'x' }], timestamp: 1 },
+        ],
+      });
+      const ok = await service.copyMessage(0);
+      expect(ok).toBe(false);
+    });
+
+    it('returns false when clipboard.writeText rejects', async () => {
+      writeText.mockRejectedValueOnce(new Error('denied'));
+      service._setState({
+        messages: [
+          { role: 'assistant', blocks: [{ type: 'text', content: 'x' }], timestamp: 1 },
+        ],
+      });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const ok = await service.copyMessage(0);
+      expect(ok).toBe(false);
+      expect(warnSpy).toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+  });
+
+  describe('canRetryLastAssistant / retryLastAssistant', () => {
+    function seedRetryableSession(): void {
+      service._setState({
+        messages: [
+          {
+            role: 'user',
+            blocks: [{ type: 'text', content: 'q' }],
+            timestamp: 1,
+            uuid: 'msg_user_1',
+            uuid_status: 'Committed',
+          },
+          {
+            role: 'assistant',
+            blocks: [{ type: 'text', content: 'a' }],
+            timestamp: 2,
+            uuid: 'msg_assist_1',
+            uuid_status: 'Committed',
+          },
+        ],
+        sessionStats: {
+          session_id: '550e8400-e29b-41d4-a716-446655440000',
+          total_cost: 0,
+          usage: undefined,
+          model: undefined,
+          rate_limit: undefined,
+          context_window_size: 200_000,
+          total_output_tokens: 0,
+        },
+      });
+      service.isStreaming = false;
+    }
+
+    it('canRetryLastAssistant returns true when last assistant is committed and a session id is known', () => {
+      seedRetryableSession();
+      expect(service.canRetryLastAssistant()).toBe(true);
+    });
+
+    it('canRetryLastAssistant returns false while streaming', () => {
+      seedRetryableSession();
+      service.isStreaming = true;
+      expect(service.canRetryLastAssistant()).toBe(false);
+    });
+
+    it('canRetryLastAssistant returns false when no assistant entry exists', () => {
+      service._setState({
+        messages: [
+          {
+            role: 'user',
+            blocks: [{ type: 'text', content: 'q' }],
+            timestamp: 1,
+            uuid: 'msg_user_1',
+            uuid_status: 'Committed',
+          },
+        ],
+        sessionStats: {
+          session_id: '550e8400-e29b-41d4-a716-446655440000',
+          total_cost: 0,
+          usage: undefined,
+          model: undefined,
+          rate_limit: undefined,
+          context_window_size: 200_000,
+          total_output_tokens: 0,
+        },
+      });
+      expect(service.canRetryLastAssistant()).toBe(false);
+    });
+
+    it('canRetryLastAssistant returns false when the user UUID is missing', () => {
+      service._setState({
+        messages: [
+          {
+            role: 'user',
+            blocks: [{ type: 'text', content: 'q' }],
+            timestamp: 1,
+          },
+          {
+            role: 'assistant',
+            blocks: [{ type: 'text', content: 'a' }],
+            timestamp: 2,
+            uuid: 'msg_assist_1',
+            uuid_status: 'Committed',
+          },
+        ],
+        sessionStats: {
+          session_id: '550e8400-e29b-41d4-a716-446655440000',
+          total_cost: 0,
+          usage: undefined,
+          model: undefined,
+          rate_limit: undefined,
+          context_window_size: 200_000,
+          total_output_tokens: 0,
+        },
+      });
+      expect(service.canRetryLastAssistant()).toBe(false);
+    });
+
+    it('canRetryLastAssistant returns false when assistant uuid_status is Pending', () => {
+      seedRetryableSession();
+      service._setState({
+        messages: [
+          ...service.messages.slice(0, -1),
+          { ...service.messages[service.messages.length - 1], uuid_status: 'Pending' },
+        ],
+      });
+      expect(service.canRetryLastAssistant()).toBe(false);
+    });
+
+    it('canRetryLastAssistant returns false without a session id', () => {
+      seedRetryableSession();
+      service._setState({ sessionStats: null });
+      expect(service.canRetryLastAssistant()).toBe(false);
+    });
+
+    it('retryLastAssistant invokes the backend, trims the assistant entry, and starts streaming', async () => {
+      seedRetryableSession();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
+      const before = service.turnId;
+      await service.retryLastAssistant();
+      expect(invokeSpy).toHaveBeenCalledWith('retry_last_turn', {
+        sessionId: '550e8400-e29b-41d4-a716-446655440000',
+        userUuid: 'msg_user_1',
+      });
+      expect(service.messages).toHaveLength(1);
+      expect(service.messages[0].role).toBe('user');
+      expect(service.messages[0].edited_at).toBeDefined();
+      expect(service.isStreaming).toBe(true);
+      expect(service.turnId).toBeGreaterThan(before);
+    });
+
+    it('retryLastAssistant is a no-op when canRetry is false', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      // No setup — empty session, no anchor.
+      await service.retryLastAssistant();
+      expect(invokeSpy).not.toHaveBeenCalled();
+      expect(service.isStreaming).toBe(false);
+    });
+
+    it('retryLastAssistant restores state and surfaces an error block on backend failure', async () => {
+      seedRetryableSession();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'retry_last_turn') throw new Error('resume failed');
+        return undefined;
+      };
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await service.retryLastAssistant();
+      expect(service.isStreaming).toBe(false);
+      // Original two entries restored, plus an error-bearing assistant entry.
+      expect(service.messages).toHaveLength(3);
+      const last = service.messages[2];
+      expect(last.role).toBe('assistant');
+      expect(last.blocks[0].type).toBe('error');
+      expect((last.blocks[0] as { type: 'error'; content: string }).content).toContain(
+        'Retry failed'
+      );
+      errSpy.mockRestore();
+    });
+  });
 });

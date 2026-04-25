@@ -27,6 +27,7 @@ mod oauth_cmd;
 mod plugin_cmd;
 mod reconcile;
 mod redmine_api_cmd;
+mod retry_cmd;
 mod setup_wizard;
 mod tray;
 mod types;
@@ -1360,6 +1361,7 @@ fn main() {
             send_message,
             answer_question,
             stop_chat,
+            retry_cmd::retry_last_turn,
             // Chat history
             list_conversations,
             get_conversation,

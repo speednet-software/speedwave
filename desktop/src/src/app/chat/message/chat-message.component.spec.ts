@@ -115,24 +115,26 @@ describe('ChatMessageComponent', () => {
     expect(time?.textContent?.trim()).toBe('09:30');
   });
 
-  it('host right-aligns user messages via justify-end', () => {
+  it('host right-aligns user messages via items-end', () => {
     component.blocks = [{ type: 'text', content: 'ok' }];
     component.role = 'user';
     fixture.detectChanges();
 
     const host = fixture.nativeElement as HTMLElement;
-    expect(host.classList.contains('justify-end')).toBe(true);
-    expect(host.classList.contains('justify-start')).toBe(false);
+    // The host became a column flex container so the per-message actions
+    // sit below the bubble. Cross-axis alignment uses `items-*` not `justify-*`.
+    expect(host.classList.contains('items-end')).toBe(true);
+    expect(host.classList.contains('items-start')).toBe(false);
   });
 
-  it('host left-aligns assistant messages via justify-start', () => {
+  it('host left-aligns assistant messages via items-start', () => {
     component.blocks = [{ type: 'text', content: 'hello' }];
     component.role = 'assistant';
     fixture.detectChanges();
 
     const host = fixture.nativeElement as HTMLElement;
-    expect(host.classList.contains('justify-start')).toBe(true);
-    expect(host.classList.contains('justify-end')).toBe(false);
+    expect(host.classList.contains('items-start')).toBe(true);
+    expect(host.classList.contains('items-end')).toBe(false);
   });
 
   it('user role dispatches to <app-user-message> (terminal-minimal: no bubble)', () => {
