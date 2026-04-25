@@ -103,7 +103,7 @@ describe('calculateCost', () => {
     expect(calculateCost('claude-opus-4-7', usage)).toBeCloseTo(0.0075, 6);
   });
 
-  it('returns 0 and logs exactly one warning for an unknown model', () => {
+  it('returns null and logs exactly one warning for an unknown model', () => {
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const usage: TurnUsage = {
       input_tokens: 100,
@@ -111,10 +111,10 @@ describe('calculateCost', () => {
       cache_read_tokens: 0,
       cache_write_tokens: 0,
     };
-
-    expect(calculateCost('claude-ghost-9-99', usage)).toBe(0);
+    // null lets the renderer hide the cost segment instead of showing $0.000.
+    expect(calculateCost('claude-ghost-9-99', usage)).toBeNull();
     // Second call with the same unknown id should NOT log again.
-    expect(calculateCost('claude-ghost-9-99', usage)).toBe(0);
+    expect(calculateCost('claude-ghost-9-99', usage)).toBeNull();
 
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy.mock.calls[0][0]).toContain('claude-ghost-9-99');
@@ -122,6 +122,8 @@ describe('calculateCost', () => {
   });
 
   it('logs a fresh warning for a different unknown model', () => {
+    // Reset the dedup cache so prior tests don't suppress the new ids.
+    _resetUnknownModelWarnings();
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const usage: TurnUsage = {
       input_tokens: 0,

@@ -31,7 +31,9 @@ export interface ModelPricing {
  * and 4.5 generations.
  */
 export const PRICING: Record<string, ModelPricing> = {
-  // verified against docs.claude.com on 2026-04-25 — update when prices change
+  // All entries verified against the Anthropic published pricing page on
+  // 2026-04-25 (https://docs.claude.com/en/docs/about-claude/models#model-pricing).
+  // Opus 4.5/4.6/4.7 are all currently shipping models; update when prices change.
   // Opus family — $15 / $75 per 1M
   'claude-opus-4-5': { input: 15, cachedInput: 1.5, cacheWrite: 18.75, output: 75 },
   'claude-opus-4-6': { input: 15, cachedInput: 1.5, cacheWrite: 18.75, output: 75 },
@@ -62,16 +64,18 @@ const warnedUnknownModels = new Set<string>();
  * so unknown models do not spam the console in long sessions.
  * @param model - Canonical Claude model ID (e.g. `"claude-opus-4-7"`).
  * @param usage - Per-turn token usage (from {@link TurnUsage}).
- * @returns Cost in USD as a floating-point number.
+ * @returns Cost in USD; `null` when the model is not in {@link PRICING} so
+ *   the UI can hide the cost segment instead of displaying a misleading
+ *   $0.000 for an unrecognised model id.
  */
-export function calculateCost(model: string, usage: TurnUsage): number {
+export function calculateCost(model: string, usage: TurnUsage): number | null {
   const pricing = PRICING[model];
   if (!pricing) {
     if (!warnedUnknownModels.has(model)) {
       warnedUnknownModels.add(model);
-      console.warn(`[pricing] Unknown model "${model}" — reporting $0 cost for this turn.`);
+      console.warn(`[pricing] Unknown model "${model}" — cost segment will be hidden.`);
     }
-    return 0;
+    return null;
   }
   // input_tokens already excludes cached reads in Anthropic's API output; we
   // still subtract defensively in case a future CLI version emits the raw

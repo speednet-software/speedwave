@@ -225,13 +225,8 @@ impl StreamParser {
         }
     }
 
-    /// Restore the cumulative usage snapshot when resuming a session from
-    /// history. After this call, the next `Result` subtracts against these
-    /// values to compute the first per-turn delta correctly.
-    ///
-    /// Currently used only by unit tests; a future resume-from-history path
-    /// in `ChatSession::start` will call this to seed the snapshot from the
-    /// persisted transcript.
+    /// Test-only: seeds the cumulative usage snapshot so the next `Result`
+    /// subtracts against the supplied baseline.
     #[cfg(test)]
     pub fn restore_session_snapshot(
         &mut self,

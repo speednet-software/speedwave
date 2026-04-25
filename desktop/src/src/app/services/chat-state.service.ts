@@ -856,7 +856,8 @@ function buildEntryMeta(
   if (turn_cost !== undefined) {
     meta.cost = turn_cost;
   } else if (model && turn_usage) {
-    meta.cost = calculateCost(model, turn_usage);
+    const computed = calculateCost(model, turn_usage);
+    if (computed !== null) meta.cost = computed;
   }
   return meta;
 }

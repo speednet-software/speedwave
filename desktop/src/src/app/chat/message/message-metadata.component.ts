@@ -53,9 +53,17 @@ export class MessageMetadataComponent {
    */
   @Input() precedingEdited = false;
 
-  /** Extracts the model label from meta; falls back to an empty string. */
+  /**
+   * Display-friendly model label per the design (`opus-4.7`, not the raw
+   * Anthropic id `claude-opus-4-7`). Strips the `claude-` prefix and
+   * rewrites the version dashes (e.g. `4-7`) back to dots so the label
+   * matches the published model name.
+   */
   modelLabel(): string {
-    return this.entry.meta?.model ?? '';
+    const raw = this.entry.meta?.model;
+    if (!raw) return '';
+    const stripped = raw.replace(/^claude-/, '');
+    return stripped.replace(/-(\d+)-(\d+)$/, '-$1.$2');
   }
 
   /**
