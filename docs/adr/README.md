@@ -48,6 +48,11 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-039](ADR-039-playwright-shared-browser-service.md)                | Playwright Shared Browser Service                       | Accepted              |
 | [ADR-040](ADR-040-remove-litellm-direct-provider-injection.md)         | Remove LiteLLM — Direct Local Provider Injection        | Accepted              |
 | [ADR-041](ADR-041-local-llm-model-discovery.md)                        | Local LLM Model Discovery and SSRF Policy               | Accepted              |
+| [ADR-042](ADR-042-json-patch-stream-protocol.md)                       | JSON Patch (RFC 6902) as the Stream-to-UI Protocol      | Accepted              |
+| [ADR-043](ADR-043-msgstore-history-plus-stream.md)                     | MsgStore — Broadcast Channel Plus Bounded History       | Accepted              |
+| [ADR-044](ADR-044-entry-index-provider.md)                             | EntryIndexProvider — Atomic Counter for Stable Keys     | Accepted              |
+| [ADR-045](ADR-045-one-slot-queued-message.md)                          | One-Slot Queued Message Per Session (Replace, Not FIFO) | Accepted              |
+| [ADR-046](ADR-046-native-session-resume-for-retry.md)                  | Native Session Resume for Assistant-Message Retry       | Accepted              |
 
 ## Creating a New ADR
 
