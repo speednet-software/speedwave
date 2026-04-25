@@ -11,6 +11,7 @@ import type { MessageBlock } from '../../models/chat';
  */
 @Component({
   selector: 'app-user-message',
+  standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `

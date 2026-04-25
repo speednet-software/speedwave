@@ -31,6 +31,7 @@ import { ChatMessageComponent } from '../message/chat-message.component';
  */
 @Component({
   selector: 'app-chat-message-list',
+  standalone: true,
   imports: [ChatMessageComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block flex-1 min-h-0' },

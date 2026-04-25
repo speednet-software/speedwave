@@ -84,7 +84,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   constructor() {
     this.unsubChange = this.chat.onChange(() => {
       this.cdr.markForCheck();
-      this.scrollToBottom();
+      // Live-chat scrolling is owned by <app-chat-message-list>; no-op here.
     });
 
     // Decouple data loading from the toggle source so the keyboard shortcut
@@ -102,7 +102,6 @@ export class ChatComponent implements OnInit, OnDestroy {
   async ngOnInit(): Promise<void> {
     await this.chat.init();
     this.cdr.markForCheck();
-    this.scrollToBottom();
 
     this.unsubAuthWatch = this.projectState.onChange(() => {
       if (this.projectState.status === 'auth_required') {
@@ -326,15 +325,6 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.memoryError = `Failed to load memory: ${err}`;
     }
     this.cdr.markForCheck();
-  }
-
-  private scrollToBottom(): void {
-    setTimeout(() => {
-      if (this.messageList?.nativeElement) {
-        const el = this.messageList.nativeElement;
-        el.scrollTop = el.scrollHeight;
-      }
-    }, 0);
   }
 
   /**

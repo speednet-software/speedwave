@@ -15,6 +15,7 @@ import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from 
  */
 @Component({
   selector: 'app-chat-header',
+  standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
