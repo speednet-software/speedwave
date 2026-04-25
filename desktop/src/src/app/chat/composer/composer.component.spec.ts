@@ -177,41 +177,6 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── queued message badge ────────────────────────────────────────────────
-  describe('queued message', () => {
-    it('renders queued badge with preview text when queuedMessage is non-empty', () => {
-      fixture.componentRef.setInput('queuedMessage', 'pending text');
-      fixture.detectChanges();
-
-      const badge = rootEl.querySelector('[data-testid="composer-queued"]');
-      expect(badge).toBeTruthy();
-      expect(badge?.textContent).toContain('pending text');
-    });
-
-    it('hides queued badge when queuedMessage is empty', () => {
-      fixture.componentRef.setInput('queuedMessage', '');
-      fixture.detectChanges();
-
-      expect(rootEl.querySelector('[data-testid="composer-queued"]')).toBeNull();
-    });
-
-    it('emits cancelQueued when cancel button is clicked', () => {
-      let cancelled = false;
-      component.cancelQueued.subscribe(() => {
-        cancelled = true;
-      });
-      fixture.componentRef.setInput('queuedMessage', 'pending');
-      fixture.detectChanges();
-
-      const cancelBtn = rootEl.querySelector<HTMLButtonElement>(
-        '[data-testid="composer-queued-cancel"]'
-      );
-      cancelBtn?.click();
-
-      expect(cancelled).toBe(true);
-    });
-  });
-
   // ── slash menu trigger ──────────────────────────────────────────────────
   describe('slash menu trigger', () => {
     it('emits slashOpened when typing `/` at position 0', () => {
@@ -289,16 +254,6 @@ describe('ComposerComponent', () => {
 
     it('send button has aria-label "Send"', () => {
       expect(sendButton().getAttribute('aria-label')).toBe('Send');
-    });
-
-    it('queued cancel button has aria-label', () => {
-      fixture.componentRef.setInput('queuedMessage', 'pending');
-      fixture.detectChanges();
-
-      const cancelBtn = rootEl.querySelector<HTMLButtonElement>(
-        '[data-testid="composer-queued-cancel"]'
-      );
-      expect(cancelBtn?.getAttribute('aria-label')).toBe('Cancel queued message');
     });
   });
 

@@ -19,10 +19,6 @@ const SLASH_AT_START = /^\s*\/[^\s/]*$/;
  * submits while Shift+Enter inserts a newline. Typing `/` at the start of the
  * textarea (or clicking the `/` toolbar button) emits `slashOpened` so a parent
  * component can mount a slash-menu popover (Feature 1).
- *
- * The `queuedMessage` input renders a `queued: <preview>` badge above the
- * textarea with a cancel button; when non-empty the caller is expected to have
- * stored the message in the ADR-045 one-slot queue.
  */
 @Component({
   selector: 'app-composer',
@@ -32,25 +28,6 @@ const SLASH_AT_START = /^\s*\/[^\s/]*$/;
   host: { class: 'block' },
   template: `
     <div class="mx-auto max-w-3xl relative">
-      @if (queuedMessage) {
-        <div
-          data-testid="composer-queued"
-          class="mb-2 flex items-center gap-2 rounded border border-line bg-bg-1 px-3 py-1.5 mono text-[11px] text-ink-dim"
-        >
-          <span class="text-accent">queued:</span>
-          <span class="flex-1 truncate text-ink">{{ queuedMessage }}</span>
-          <button
-            type="button"
-            data-testid="composer-queued-cancel"
-            class="text-ink-mute hover:text-ink"
-            aria-label="Cancel queued message"
-            (click)="cancelQueued.emit()"
-          >
-            &times;
-          </button>
-        </div>
-      }
-
       <div class="rounded border border-line bg-bg-1 focus-within:border-accent">
         <textarea
           #textarea
@@ -75,7 +52,9 @@ const SLASH_AT_START = /^\s*\/[^\s/]*$/;
             /<span class="hidden sm:inline"> skill</span>
           </button>
           <div class="ml-auto flex flex-shrink-0 items-center gap-2">
-            <span class="hidden sm:inline" data-testid="composer-shortcut">{{ shortcutLabel }}</span>
+            <span class="hidden sm:inline" data-testid="composer-shortcut">{{
+              shortcutLabel
+            }}</span>
             <button
               type="button"
               data-testid="chat-send"
@@ -102,6 +81,11 @@ export class ComposerComponent {
   get disabled(): boolean {
     return this._disabled;
   }
+  /**
+   * Setter mirrored to the FormControl so the textarea reflects the disabled
+   * state without firing extra valueChanges events.
+   * @param value - True to disable input and prevent submits, false to enable.
+   */
   @Input() set disabled(value: boolean) {
     this._disabled = value;
     if (value) this.text.disable({ emitEvent: false });
@@ -110,12 +94,6 @@ export class ComposerComponent {
 
   /** Placeholder shown in the textarea when it is empty. */
   @Input() placeholder = 'Message Claude...';
-
-  /**
-   * Preview of the message currently sitting in the ADR-045 one-slot queue.
-   * When non-empty, the composer shows a `queued: <preview>` badge with a cancel button.
-   */
-  @Input() queuedMessage = '';
 
   /** Emits the trimmed message text when the user submits via Enter or the send button. */
   @Output() readonly submitted = new EventEmitter<string>();
@@ -126,9 +104,6 @@ export class ComposerComponent {
    * The `caretPos` tells the parent where to anchor the popover / apply the insertion.
    */
   @Output() readonly slashOpened = new EventEmitter<{ caretPos: number }>();
-
-  /** Emits when the user clicks the cancel button on the queued-message badge. */
-  @Output() readonly cancelQueued = new EventEmitter<void>();
 
   /** Reactive control holding the current textarea value. */
   readonly text = new FormControl<string>('', { nonNullable: true });
@@ -203,12 +178,12 @@ export class ComposerComponent {
 
 /** Detects macOS for platform-aware keyboard hints (browser + jsdom safe). */
 function isMacPlatform(): boolean {
-  if (typeof navigator === "undefined") return false;
+  if (typeof navigator === 'undefined') return false;
   // navigator.userAgentData.platform is the modern signal; fall back to userAgent.
   type NavigatorWithUA = Navigator & {
     userAgentData?: { platform?: string };
   };
   const nav = navigator as NavigatorWithUA;
-  const platform = nav.userAgentData?.platform ?? nav.userAgent ?? "";
+  const platform = nav.userAgentData?.platform ?? nav.userAgent ?? '';
   return /Mac|iPhone|iPad|iPod/i.test(platform);
 }

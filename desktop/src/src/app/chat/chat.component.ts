@@ -148,10 +148,10 @@ export class ChatComponent implements OnInit, OnDestroy {
    * @param text - The message body emitted by `app-composer`'s `submitted` event.
    */
   async sendMessage(text: string): Promise<void> {
-    const trimmed = text.trim();
-    if (!trimmed || this.chat.isStreaming) return;
+    // ComposerComponent already emits trimmed text
+    if (!text || this.chat.isStreaming) return;
     this.cdr.markForCheck();
-    await this.chat.sendMessage(trimmed);
+    await this.chat.sendMessage(text);
   }
 
   /**

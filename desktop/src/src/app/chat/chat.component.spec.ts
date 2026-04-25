@@ -201,7 +201,9 @@ describe('ChatComponent', () => {
 
   describe('sendMessage guards', () => {
     it('does not send when input text is empty', async () => {
-      await component.sendMessage('   ');
+      // ComposerComponent contract: emits already-trimmed text, so an empty
+      // payload here represents a whitespace-only or empty composer state.
+      await component.sendMessage('');
 
       expect(chatState.messages).toHaveLength(0);
     });

@@ -13,8 +13,7 @@ const NUMBER_FMT = new Intl.NumberFormat('en-US');
  *    tokens in <n> · cr <n> · cw <n> · out <n> · cost $<x.xxxx>`
  *
  * Bars use 5 inline segments of `h-2 w-2` whose fill color comes from the
- * percentage bucket (green/amber/red) defined in
- * design-proposals/06-terminal-minimal-implementation-prompt.md.
+ * percentage bucket (green/amber/red).
  */
 @Component({
   selector: 'app-session-stats',
@@ -182,8 +181,8 @@ export class SessionStatsComponent {
  * @param pct - Percentage in the range 0–100.
  */
 function barColor(pct: number): string {
-  // Buckets per the design-system spec (Tailwind v4 utilities resolve via
-  // the @theme block in styles.css: --color-amber, --color-green).
+  // Uses Tailwind's built-in `*-500` palette so the bar stays readable in both
+  // light and dark backgrounds. Buckets match the terminal-minimal mockup.
   if (pct >= 77) return 'bg-red-500';
   if (pct >= 50) return 'bg-amber-500';
   return 'bg-green-500';
