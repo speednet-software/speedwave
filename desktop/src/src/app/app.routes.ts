@@ -38,6 +38,16 @@ export const routes: Routes = [
           ),
       },
       {
+        path: 'projects',
+        loadComponent: () =>
+          import('./projects-view/projects-view.component').then((m) => m.ProjectsViewComponent),
+      },
+      {
+        path: 'skills',
+        loadComponent: () =>
+          import('./skills-view/skills-view.component').then((m) => m.SkillsViewComponent),
+      },
+      {
         path: 'settings',
         loadComponent: () =>
           import('./settings/settings.component').then((m) => m.SettingsComponent),

@@ -6,7 +6,6 @@ import {
   OnInit,
   inject,
 } from '@angular/core';
-import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -25,22 +24,19 @@ import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
 @Component({
   selector: 'app-integrations',
   standalone: true,
-  imports: [
-    CommonModule,
-    FormsModule,
-    ServiceCardComponent,
-    RedmineConfigComponent,
-    IdeBridgeComponent,
-  ],
+  imports: [FormsModule, ServiceCardComponent, RedmineConfigComponent, IdeBridgeComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div>
-      <h1 class="text-xl text-sw-accent m-0 mb-6">Integrations</h1>
+    <div class="mx-auto max-w-3xl">
+      <h1 class="mono text-[14px] text-[var(--ink)] m-0 mb-4" data-testid="integrations-title">
+        Service integrations
+      </h1>
 
       @if (error) {
         <div
-          class="mb-4 px-3 py-2 bg-sw-error-bg border border-sw-accent rounded text-sw-accent text-[13px] whitespace-pre-line"
+          class="mb-4 rounded ring-1 ring-red-500/40 bg-red-500/[0.06] px-3 py-2 text-[12px] text-red-300 whitespace-pre-line"
           data-testid="integrations-error"
+          role="alert"
         >
           {{ error }}
         </div>
@@ -49,7 +45,12 @@ import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
       <app-ide-bridge />
 
       <section class="mb-6" data-testid="integrations-services">
-        <h2 class="text-[15px] text-sw-text m-0 mb-3">Services</h2>
+        <h2
+          class="mono mb-3 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+          data-testid="integrations-services-heading"
+        >
+          services
+        </h2>
         @for (svc of services; track svc.service) {
           @if (svc.service === 'redmine') {
             <app-redmine-config
@@ -81,12 +82,14 @@ import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
 
       @if (osIntegrations.length > 0) {
         <section class="mb-6" data-testid="integrations-os">
-          <h2 class="text-[15px] text-sw-text m-0 mb-3">OS Integrations</h2>
+          <h2 class="mono mb-3 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
+            os integrations
+          </h2>
           @for (os of osIntegrations; track os.service) {
-            <div class="bg-sw-bg-dark border border-sw-border rounded-lg mb-3 overflow-hidden">
-              <div class="flex justify-between items-center px-5 py-4 cursor-default">
+            <div class="mb-3 overflow-hidden rounded ring-1 ring-[var(--line)] bg-[var(--bg-1)]">
+              <div class="flex justify-between items-center px-5 py-4">
                 <div class="flex items-center gap-3">
-                  <span class="font-semibold text-base">{{ os.display_name }}</span>
+                  <span class="mono text-[13px] text-[var(--ink)]">{{ os.display_name }}</span>
                 </div>
                 <div class="flex items-center gap-3">
                   <label class="relative inline-block w-[44px] h-[24px]">
@@ -97,19 +100,23 @@ import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
                       (change)="toggleOsService(os, $event)"
                     />
                     <span
-                      class="absolute inset-0 bg-sw-slider rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-sw-accent before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
+                      class="absolute inset-0 bg-[var(--line-strong)] rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-[var(--accent)] before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
                     ></span>
                   </label>
                 </div>
               </div>
-              <p class="px-5 pb-3 text-sw-text-faint text-[13px] m-0">{{ os.description }}</p>
+              <p class="px-5 pb-3 mono text-[12px] text-[var(--ink-dim)] m-0">
+                {{ os.description }}
+              </p>
             </div>
           }
         </section>
       }
     </div>
   `,
-  host: { class: 'block bg-sw-bg-darkest min-h-screen p-6 text-sw-text' },
+  host: {
+    class: 'block min-h-screen bg-[var(--bg)] text-[var(--ink)] p-4 md:p-6',
+  },
 })
 export class IntegrationsComponent implements OnInit, OnDestroy {
   private static readonly HIDDEN_SERVICES = new Set(['slack']);

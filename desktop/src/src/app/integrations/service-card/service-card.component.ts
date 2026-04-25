@@ -1,7 +1,9 @@
 import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
-import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { DeviceCodeInfo, IntegrationStatusEntry } from '../../models/integration';
+
+/** Semantic states the header status dot can reflect. */
+export type ServiceStatusDot = 'connected' | 'configuring' | 'error' | 'disabled';
 
 /** Payload emitted when the user saves credentials for a service. */
 export interface SaveCredentialsEvent {
@@ -14,12 +16,13 @@ export interface SaveCredentialsEvent {
 @Component({
   selector: 'app-service-card',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
-      class="bg-sw-bg-dark border border-sw-border rounded-lg mb-3 overflow-hidden"
+      class="rounded ring-1 ring-[var(--line)] bg-[var(--bg-1)] mb-3 overflow-hidden"
       [attr.data-testid]="'integrations-service-' + svc.service"
+      [attr.data-status-dot]="statusDotKey()"
     >
       <div class="flex justify-between items-center px-5 py-4">
         <button
@@ -28,26 +31,28 @@ export interface SaveCredentialsEvent {
           data-testid="card-header-btn"
           (click)="toggleExpand.emit(svc.service)"
         >
-          <span class="font-semibold text-base" data-testid="service-name">{{
+          <span
+            class="mono inline-block h-2 w-2 flex-shrink-0 rounded-full"
+            [style.background-color]="statusDotColor()"
+            [attr.data-testid]="'status-dot-' + svc.service"
+            aria-hidden="true"
+          ></span>
+          <span class="mono text-[13px] text-[var(--ink)]" data-testid="service-name">{{
             svc.display_name
           }}</span>
           @if (svc.badge) {
             <span
-              class="text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase tracking-wide bg-amber-500/20 text-amber-400 border border-amber-500/30"
+              class="mono text-[10px] px-1.5 py-0.5 rounded font-medium uppercase tracking-wide ring-1 ring-[var(--amber)]/40 text-[var(--amber)]"
               data-testid="service-badge"
             >
               {{ svc.badge }}
             </span>
           }
           <span
-            class="text-[11px] px-2 py-0.5 rounded font-medium"
+            class="mono text-[10px] px-2 py-0.5 rounded font-medium uppercase tracking-widest"
             data-testid="badge"
             [attr.data-status]="svc.configured ? 'configured' : 'not-configured'"
-            [ngClass]="
-              svc.configured
-                ? 'bg-sw-success-dark text-sw-success-text'
-                : 'bg-sw-error-badge text-sw-error-text'
-            "
+            [style.color]="svc.configured ? 'var(--green)' : 'var(--ink-mute)'"
           >
             {{ svc.configured ? 'Configured' : 'Not Configured' }}
           </span>
@@ -62,18 +67,21 @@ export interface SaveCredentialsEvent {
               [attr.data-testid]="'integrations-toggle-' + svc.service"
             />
             <span
-              class="absolute inset-0 bg-sw-slider rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-sw-accent before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
+              class="absolute inset-0 bg-[var(--line-strong)] rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-[var(--accent)] before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
             ></span>
           </label>
         </div>
       </div>
-      <p class="px-5 pb-3 text-sw-text-faint text-[13px] m-0" data-testid="card-description">
+      <p
+        class="px-5 pb-3 mono text-[12px] text-[var(--ink-dim)] m-0"
+        data-testid="card-description"
+      >
         {{ svc.description }}
       </p>
 
       @if (!svc.configured && !expanded && hasConfigurableFields) {
         <p
-          class="px-5 pb-3 text-sw-accent text-[12px] m-0 cursor-pointer"
+          class="px-5 pb-3 mono text-[var(--accent)] text-[11px] m-0 cursor-pointer"
           data-testid="setup-hint"
           role="button"
           tabindex="0"
@@ -86,13 +94,13 @@ export interface SaveCredentialsEvent {
       }
 
       @if (expanded && hasConfigurableFields) {
-        <div class="px-5 pb-5 border-t border-sw-border" data-testid="card-body">
+        <div class="px-5 pb-5 pt-2" data-testid="card-body">
           <form (submit)="onSave($event)">
             @for (field of svc.auth_fields; track field.key) {
               @if (!field.oauth_flow) {
                 <div class="my-4">
                   <label
-                    class="block mb-1.5 text-[13px] text-sw-text-dim"
+                    class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
                     [for]="svc.service + '-' + field.key"
                     >{{ field.label }}{{ field.optional ? ' (optional)' : '' }}</label
                   >
@@ -102,7 +110,7 @@ export interface SaveCredentialsEvent {
                     [placeholder]="field.placeholder"
                     [value]="getFieldValue(field.key)"
                     (input)="onFieldInput(field.key, $event)"
-                    class="w-full px-3 py-2.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-sm font-mono box-border focus:border-sw-accent focus:outline-none"
+                    class="mono w-full rounded ring-1 ring-[var(--line)] bg-[var(--bg-2)] px-2 py-1.5 text-[12px] text-[var(--ink)] focus:outline-none focus:ring-[var(--accent-dim)]"
                     data-testid="auth-field-input"
                     [required]="!field.optional"
                   />
@@ -112,25 +120,28 @@ export interface SaveCredentialsEvent {
 
             @if (hasOAuthFields()) {
               <div
-                class="my-4 p-4 bg-sw-bg-darkest border border-sw-border rounded"
+                class="my-4 rounded ring-1 ring-[var(--line)] bg-[var(--bg-2)] p-4"
                 data-testid="oauth-section"
               >
                 @if (!deviceCodeInfo && oauthStatus !== 'polling' && oauthStatus !== 'starting') {
                   <button
                     type="button"
-                    class="px-5 py-2 bg-transparent text-sw-accent border border-sw-accent rounded text-sm font-mono cursor-pointer transition-all duration-200 hover:bg-sw-accent hover:text-sw-bg-darkest"
+                    class="mono rounded ring-1 ring-[var(--accent-dim)] bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90"
                     (click)="onStartOAuth()"
                   >
                     Sign in with Microsoft
                   </button>
                 }
                 @if (oauthStatus === 'starting') {
-                  <p class="text-sw-text-dim text-[13px] my-2" data-testid="polling-status">
+                  <p
+                    class="mono text-[12px] text-[var(--ink-dim)] my-2"
+                    data-testid="polling-status"
+                  >
                     Connecting to Microsoft...
                   </p>
                   <button
                     type="button"
-                    class="px-4 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer mt-2"
+                    class="mono rounded ring-1 ring-red-500/40 px-3 py-1 text-[11px] text-red-300 hover:bg-red-500/10 mt-2"
                     data-testid="btn-cancel-oauth"
                     (click)="cancelOAuth.emit()"
                   >
@@ -138,9 +149,9 @@ export interface SaveCredentialsEvent {
                   </button>
                 }
                 @if (deviceCodeInfo) {
-                  <p>Enter this code:</p>
+                  <p class="mono text-[12px] text-[var(--ink-dim)]">Enter this code:</p>
                   <div
-                    class="text-[28px] font-mono font-bold tracking-[4px] text-sw-accent my-3 text-center"
+                    class="mono text-[24px] font-bold tracking-[4px] text-[var(--accent)] my-3 text-center"
                     data-testid="user-code"
                   >
                     {{ deviceCodeInfo.user_code }}
@@ -148,26 +159,29 @@ export interface SaveCredentialsEvent {
                   <div class="flex items-center gap-2.5 my-2 flex-wrap">
                     <button
                       type="button"
-                      class="px-4 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer inline-block shrink-0"
+                      class="mono rounded ring-1 ring-[var(--accent-dim)] bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90"
                       data-testid="btn-link"
                       (click)="openVerificationUrl.emit(deviceCodeInfo.verification_uri)"
                     >
                       Open Microsoft Sign-in
                     </button>
                     <span
-                      class="text-xs font-mono text-sw-text-dim select-all break-all"
+                      class="mono text-[11px] text-[var(--ink-dim)] select-all break-all"
                       data-testid="verification-url"
                       >{{ deviceCodeInfo.verification_uri }}</span
                     >
                   </div>
                   @if (oauthStatus === 'polling') {
-                    <p class="text-sw-text-dim text-[13px] my-2" data-testid="polling-status">
+                    <p
+                      class="mono text-[12px] text-[var(--ink-dim)] my-2"
+                      data-testid="polling-status"
+                    >
                       Waiting for sign-in...
                     </p>
                   }
                   <button
                     type="button"
-                    class="px-4 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer mt-2"
+                    class="mono rounded ring-1 ring-red-500/40 px-3 py-1 text-[11px] text-red-300 hover:bg-red-500/10 mt-2"
                     data-testid="btn-cancel-oauth"
                     (click)="cancelOAuth.emit()"
                   >
@@ -175,12 +189,12 @@ export interface SaveCredentialsEvent {
                   </button>
                 }
                 @if (oauthStatus === 'success') {
-                  <p class="text-sw-success-text text-sm" data-testid="oauth-success">
+                  <p class="mono text-[12px] text-[var(--green)]" data-testid="oauth-success">
                     Authentication successful
                   </p>
                 }
                 @if (oauthStatus === 'error' || oauthStatus === 'expired') {
-                  <p class="text-sw-error-text text-sm" data-testid="oauth-error">
+                  <p class="mono text-[12px] text-red-300" data-testid="oauth-error">
                     {{ oauthStatusMessage }}
                   </p>
                 }
@@ -190,14 +204,14 @@ export interface SaveCredentialsEvent {
             <div class="flex gap-3 mt-4">
               <button
                 type="submit"
-                class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-darkest"
+                class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-50"
                 [attr.data-testid]="'integrations-save-' + svc.service"
               >
                 Save
               </button>
               <button
                 type="button"
-                class="px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
+                class="mono rounded ring-1 ring-red-500/40 px-3 py-1 text-[11px] text-red-300 hover:bg-red-500/10"
                 [attr.data-testid]="'integrations-remove-' + svc.service"
                 (click)="deleteCredentials.emit(svc)"
               >
@@ -229,6 +243,34 @@ export class ServiceCardComponent {
   @Output() openVerificationUrl = new EventEmitter<string>();
 
   editedValues: Record<string, string> = {};
+
+  /**
+   * Semantic status dot key — drives both the tinted dot colour and a
+   * `data-status-dot` attribute used by tests and AXE.
+   */
+  statusDotKey(): ServiceStatusDot {
+    if (this.oauthStatus === 'error' || this.oauthStatus === 'expired') return 'error';
+    if (this.svc.enabled && this.svc.configured) return 'connected';
+    if (this.expanded || this.oauthStatus === 'starting' || this.oauthStatus === 'polling') {
+      return 'configuring';
+    }
+    return 'disabled';
+  }
+
+  /** CSS colour token for the dot, tied to `statusDotKey()`. */
+  statusDotColor(): string {
+    switch (this.statusDotKey()) {
+      case 'connected':
+        return 'var(--green)';
+      case 'configuring':
+        return 'var(--amber)';
+      case 'error':
+        return 'var(--red)';
+      case 'disabled':
+      default:
+        return 'var(--ink-mute)';
+    }
+  }
 
   /**
    * Whether this service has anything the user can configure in the card body.

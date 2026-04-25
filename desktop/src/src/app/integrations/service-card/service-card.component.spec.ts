@@ -327,6 +327,72 @@ describe('ServiceCardComponent', () => {
     expect(card).not.toBeNull();
   });
 
+  describe('terminal-minimal restyle', () => {
+    it('wraps the card in ring-1 and does not use border', () => {
+      fixture.detectChanges();
+      const card = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-service-gitlab"]'
+      );
+      expect(card.classList.contains('ring-1')).toBe(true);
+      expect(card.classList.contains('rounded')).toBe(true);
+      // Must not stack a 1px border on a rounded ring-1 wrapper
+      expect(card.classList.contains('border')).toBe(false);
+    });
+
+    it('renders a status dot in the header', () => {
+      fixture.detectChanges();
+      const dot = fixture.nativeElement.querySelector('[data-testid="status-dot-gitlab"]');
+      expect(dot).not.toBeNull();
+      expect(dot.getAttribute('aria-hidden')).toBe('true');
+    });
+
+    it('does not place border-b inside the rounded wrapper when expanded', () => {
+      component.expanded = true;
+      fixture.detectChanges();
+      const body = fixture.nativeElement.querySelector('[data-testid="card-body"]');
+      // The spec bans a border-b inside the rounded ring wrapper
+      expect(body.classList.contains('border-t')).toBe(false);
+      expect(body.classList.contains('border-b')).toBe(false);
+    });
+
+    it('marks dot "connected" for enabled + configured service', () => {
+      fixture.detectChanges();
+      const card = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-service-gitlab"]'
+      );
+      expect(card.getAttribute('data-status-dot')).toBe('connected');
+    });
+
+    it('marks dot "configuring" for an OAuth "starting" state', () => {
+      component.svc = makeSharepointSvc();
+      component.oauthStatus = 'starting';
+      fixture.detectChanges();
+      const card = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-service-sharepoint"]'
+      );
+      expect(card.getAttribute('data-status-dot')).toBe('configuring');
+    });
+
+    it('marks dot "error" when OAuth status is error', () => {
+      component.svc = makeSharepointSvc();
+      component.oauthStatus = 'error';
+      fixture.detectChanges();
+      const card = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-service-sharepoint"]'
+      );
+      expect(card.getAttribute('data-status-dot')).toBe('error');
+    });
+
+    it('marks dot "disabled" when service is idle and unconfigured', () => {
+      component.svc = makeRedmineSvc();
+      fixture.detectChanges();
+      const card = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-service-redmine"]'
+      );
+      expect(card.getAttribute('data-status-dot')).toBe('disabled');
+    });
+  });
+
   // -- OAuth-related tests --
 
   describe('OAuth fields', () => {
