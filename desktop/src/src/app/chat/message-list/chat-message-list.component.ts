@@ -40,6 +40,8 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
             [timestamp]="msg.timestamp"
             [entryIndex]="i"
             [isLast]="i === lastAssistantIndex"
+            [entry]="msg"
+            [precedingEdited]="isPrecedingUserEdited(i)"
             (questionAnswered)="questionAnswered.emit($event)"
           />
         }
@@ -77,6 +79,21 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   /** Whether to render the streaming placeholder as the last entry. */
   get showStreaming(): boolean {
     return this.isStreaming && this.currentBlocks.length > 0;
+  }
+
+  /**
+   * True when the user entry immediately preceding `messages[i]` was retried.
+   * Surfaces as `· edited` in the assistant's metadata row. Returns `false`
+   * for user entries, the first entry, or when the preceding entry has no
+   * `edited_at` timestamp.
+   * @param i - Zero-based index of the assistant entry in `messages`.
+   */
+  isPrecedingUserEdited(i: number): boolean {
+    if (i <= 0) return false;
+    const self = this.messages[i];
+    if (!self || self.role !== 'assistant') return false;
+    const prev = this.messages[i - 1];
+    return prev?.role === 'user' && typeof prev.edited_at === 'number';
   }
 
   /** Marks scroll position for sync on next `ngAfterViewChecked`. */

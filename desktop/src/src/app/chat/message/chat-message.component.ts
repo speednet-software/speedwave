@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
-import type { MessageBlock } from '../../models/chat';
+import type { ChatMessage, MessageBlock } from '../../models/chat';
 import { TextBlockComponent } from '../blocks/text-block.component';
 import { ThinkingBlockComponent } from '../blocks/thinking-block.component';
 import { ToolBlockComponent } from '../blocks/tool-block.component';
@@ -8,6 +8,7 @@ import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
 import { PermissionPromptComponent } from '../blocks/permission-prompt.component';
 import { UserMessageComponent } from './user-message.component';
 import { MessageActionsComponent } from './message-actions.component';
+import { MessageMetadataComponent } from './message-metadata.component';
 
 /** Renders a single chat message: user role uses a meta-line layout, assistant role uses a bubble. */
 @Component({
@@ -21,6 +22,7 @@ import { MessageActionsComponent } from './message-actions.component';
     PermissionPromptComponent,
     UserMessageComponent,
     MessageActionsComponent,
+    MessageMetadataComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
@@ -74,6 +76,9 @@ import { MessageActionsComponent } from './message-actions.component';
             >&#x2588;</span
           >
         }
+        @if (!streaming && entry) {
+          <app-message-metadata [entry]="entry" [precedingEdited]="precedingEdited" />
+        }
       </div>
       @if (role === 'assistant' && !streaming && entryIndex !== null) {
         <app-message-actions [entryIndex]="entryIndex" [isLast]="isLast" />
@@ -95,6 +100,10 @@ export class ChatMessageComponent {
   @Input() entryIndex: number | null = null;
   /** Whether this entry is the last assistant message in the list. */
   @Input() isLast = false;
+  /** Full assistant entry — required for the metadata row. */
+  @Input() entry?: ChatMessage;
+  /** True when the user entry that preceded this assistant was retried. Surfaces as `· edited`. */
+  @Input() precedingEdited = false;
   @Output() questionAnswered = new EventEmitter<{ toolId: string; values: string[] }>();
   @Output() permissionDecided = new EventEmitter<{
     blockIndex: number;
@@ -106,27 +115,17 @@ export class ChatMessageComponent {
     return this.blocks.length > 0 && this.blocks[this.blocks.length - 1].type === 'text';
   }
 
-  /**
-   * Forwards a permission decision upstream tagged with the block's index.
-   * @param blockIndex - Index of the permission_prompt block in the parent's blocks array.
-   * @param decision - The decision the user pressed.
-   */
+  /** Forwards a permission decision upstream tagged with the block's index. */
   onPermissionDecided(blockIndex: number, decision: 'allow_once' | 'allow_always' | 'deny'): void {
     this.permissionDecided.emit({ blockIndex, decision });
   }
 
-  /**
-   * Narrows a MessageBlock to its `tool_use` variant for the template.
-   * @param block - The block to narrow.
-   */
+  /** Narrows a MessageBlock to its `tool_use` variant for the template. */
   asToolBlock(block: MessageBlock): Extract<MessageBlock, { type: 'tool_use' }> {
     return block as Extract<MessageBlock, { type: 'tool_use' }>;
   }
 
-  /**
-   * Narrows a MessageBlock to its `ask_user` variant for the template.
-   * @param block - The block to narrow.
-   */
+  /** Narrows a MessageBlock to its `ask_user` variant for the template. */
   asAskUserBlock(block: MessageBlock): Extract<MessageBlock, { type: 'ask_user' }> {
     return block as Extract<MessageBlock, { type: 'ask_user' }>;
   }

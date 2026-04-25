@@ -2,6 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
 import { TauriService } from './tauri.service';
 import { ProjectStateService } from './project-state.service';
+import { calculateCost } from '../chat/pricing';
 import type {
   ChatMessage,
   MessageBlock,
@@ -11,6 +12,8 @@ import type {
   AskUserQuestionBlock,
   ProjectList,
   RateLimitInfo,
+  EntryMeta,
+  TurnUsage,
 } from '../models/chat';
 
 // Re-export types consumed by components
@@ -22,6 +25,8 @@ export type {
   SessionStats,
   AskUserQuestionBlock,
   RateLimitInfo,
+  EntryMeta,
+  TurnUsage,
 };
 
 /** Maximum time to wait for a chat session to start before surfacing a timeout error. */
@@ -516,16 +521,21 @@ export class ChatStateService {
             ];
           }
         }
+        const resolvedModel = chunk.data.model ?? (this._model || undefined);
+        const meta = buildEntryMeta(chunk.data, resolvedModel);
         if (this._currentBlocks.length > 0) {
           const assistantUuid = chunk.data.assistant_uuid;
-          const assistant: ChatMessage = {
+          const assistantEntry: ChatMessage = {
             role: 'assistant',
             blocks: [...this._currentBlocks],
             timestamp: Date.now(),
             uuid: assistantUuid,
             uuid_status: assistantUuid ? 'Committed' : undefined,
           };
-          this._messages = [...this._messages, assistant];
+          if (meta) {
+            assistantEntry.meta = meta;
+          }
+          this._messages = [...this._messages, assistantEntry];
           this._currentBlocks = [];
         }
         this.isStreaming = false;
@@ -539,7 +549,7 @@ export class ChatStateService {
           session_id: chunk.data.session_id,
           total_cost: chunk.data.total_cost ?? 0,
           usage: chunk.data.usage,
-          model: this._model || undefined,
+          model: resolvedModel,
           rate_limit: this._rateLimit ?? undefined,
           context_window_size: this._contextWindowSize,
           total_output_tokens: this._totalOutputTokens,
@@ -809,6 +819,46 @@ function updateToolInput(blocks: MessageBlock[], toolId: string, delta: string):
     if (b.type !== 'tool_use' || b.tool.tool_id !== toolId) return b;
     return { ...b, tool: { ...b.tool, input_json: b.tool.input_json + delta } };
   });
+}
+
+/**
+ * Builds per-turn metadata for the assistant entry just finalized by a
+ * `Result` chunk. Prefers the backend's authoritative `turn_cost`; falls
+ * back to `calculateCost()` against the per-model pricing table when the
+ * backend didn't provide it. Returns `undefined` when the chunk carries
+ * no usage or model information.
+ * @param data - Relevant fields copied from the `Result` chunk payload.
+ * @param data.turn_usage - Per-turn token usage (required for fallback cost).
+ * @param data.turn_cost - Authoritative per-turn cost from the backend.
+ * @param data.model - Model id attached to the `Result` chunk, if any.
+ * @param resolvedModel - Model id already resolved by the reducer.
+ */
+function buildEntryMeta(
+  data: {
+    turn_usage?: TurnUsage;
+    turn_cost?: number;
+    model?: string;
+  },
+  resolvedModel: string | undefined
+): EntryMeta | undefined {
+  const { turn_usage, turn_cost } = data;
+  const model = data.model ?? resolvedModel;
+  if (!turn_usage && !model && turn_cost === undefined) {
+    return undefined;
+  }
+  const meta: EntryMeta = {};
+  if (model) meta.model = model;
+  if (turn_usage) meta.usage = turn_usage;
+
+  // Cost: prefer backend turn_cost (authoritative); fallback to computed cost
+  // from pricing.ts when usage is available. Leave undefined otherwise so
+  // the renderer hides the segment rather than showing $0.000.
+  if (turn_cost !== undefined) {
+    meta.cost = turn_cost;
+  } else if (model && turn_usage) {
+    meta.cost = calculateCost(model, turn_usage);
+  }
+  return meta;
 }
 
 function completeToolBlock(

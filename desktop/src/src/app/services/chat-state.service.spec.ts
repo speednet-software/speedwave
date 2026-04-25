@@ -1643,4 +1643,153 @@ describe('ChatStateService', () => {
       errSpy.mockRestore();
     });
   });
+
+  describe('per-turn meta on assistant entries', () => {
+    it('attaches meta with model, usage, and cost from Result chunk', () => {
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 'abc',
+          total_cost: 0.05,
+          usage: { input_tokens: 100, output_tokens: 50, cache_read_tokens: 10 },
+          model: 'claude-opus-4-7',
+          turn_usage: {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 10,
+            cache_write_tokens: 0,
+          },
+          turn_cost: 0.018,
+        },
+      });
+
+      expect(service.messages).toHaveLength(1);
+      const meta = service.messages[0].meta;
+      expect(meta).toBeDefined();
+      expect(meta?.model).toBe('claude-opus-4-7');
+      expect(meta?.usage).toEqual({
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_read_tokens: 10,
+        cache_write_tokens: 0,
+      });
+      // Backend turn_cost wins (authoritative)
+      expect(meta?.cost).toBe(0.018);
+    });
+
+    it('falls back to pricing.ts cost calculation when backend omits turn_cost', () => {
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 'abc',
+          total_cost: 0.01,
+          usage: { input_tokens: 1_000_000, output_tokens: 0 },
+          model: 'claude-sonnet-4-6',
+          turn_usage: {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+          },
+          // turn_cost intentionally omitted
+        },
+      });
+
+      const meta = service.messages[0].meta;
+      expect(meta?.cost).toBeCloseTo(3, 6); // 1M input * $3/1M for Sonnet
+    });
+
+    it('uses SystemInit model when the Result chunk omits `model`', () => {
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-haiku-4-5' },
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 'abc',
+          total_cost: 0.001,
+          usage: { input_tokens: 1, output_tokens: 1 },
+          turn_usage: {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+          },
+          turn_cost: 0.0005,
+        },
+      });
+
+      expect(service.messages[0].meta?.model).toBe('claude-haiku-4-5');
+    });
+
+    it('leaves meta undefined when chunk has no usage/model/cost', () => {
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc' },
+      });
+
+      expect(service.messages[0].meta).toBeUndefined();
+    });
+
+    it('simulates patch sequence: Add → Replace meta provisional → Replace meta final', () => {
+      // Mimics the Feature-3 patch stream: text streams in, then a
+      // provisional meta arrives (no turn_cost yet), then a final Result
+      // overrides the provisional values.
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hi.' } });
+
+      // Provisional: usage without turn_cost — the frontend should fall
+      // back to pricing.ts. First finalize (provisional Result).
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 'abc',
+          total_cost: 0.002,
+          usage: { input_tokens: 1_000, output_tokens: 500 },
+          model: 'claude-haiku-4-5',
+          turn_usage: {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+          },
+          // Provisional: backend still computing authoritative cost
+        },
+      });
+
+      // After provisional: meta.cost is the pricing.ts fallback
+      // Haiku: 1000 * 1 / 1M + 500 * 5 / 1M = 0.001 + 0.0025 = 0.0035
+      const provisional = service.messages[0].meta;
+      expect(provisional?.model).toBe('claude-haiku-4-5');
+      expect(provisional?.cost).toBeCloseTo(0.0035, 6);
+
+      // Simulate final Result in a fresh assistant turn — replaces the
+      // previous entry behaviour is per-turn. Test that turn_cost wins.
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Final.' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 'abc',
+          total_cost: 0.005,
+          usage: { input_tokens: 2_000, output_tokens: 1_000 },
+          model: 'claude-haiku-4-5',
+          turn_usage: {
+            input_tokens: 2_000,
+            output_tokens: 1_000,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+          },
+          turn_cost: 0.007, // authoritative — overrides pricing.ts fallback
+        },
+      });
+
+      expect(service.messages).toHaveLength(2);
+      const finalMeta = service.messages[1].meta;
+      expect(finalMeta?.cost).toBe(0.007);
+    });
+  });
 });

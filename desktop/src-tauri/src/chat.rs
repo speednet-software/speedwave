@@ -46,6 +46,21 @@ pub enum StreamChunk {
         /// — the frontend degrades to "no retry target" for those entries.
         #[serde(skip_serializing_if = "Option::is_none")]
         assistant_uuid: Option<String>,
+        /// Per-turn usage delta since the previous turn. When the stream carries
+        /// cumulative `usage`, `turn_usage = current - previous`. When the CLI
+        /// emits per-step `usage` (current behaviour), it equals `usage` with
+        /// cache fields normalized to 0.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_usage: Option<TurnUsage>,
+        /// Per-turn cost in USD. Computed as the delta of `total_cost_usd`
+        /// between this and the previous turn when authoritative; the
+        /// frontend falls back to `calculateCost()` if this is `None`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_cost: Option<f64>,
+        /// Model name for the turn when known. Populated from `modelUsage`
+        /// in the `result` message or from the most recent `SystemInit`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// Interactive question from Claude (AskUserQuestion tool).
     /// The frontend must display the question and send the answer back via `answer_question`.
@@ -90,6 +105,48 @@ pub struct UsageInfo {
     pub cache_read_tokens: Option<u64>,
     /// Number of tokens written to cache.
     pub cache_write_tokens: Option<u64>,
+}
+
+/// Per-turn token usage. All cache fields are required (missing values are
+/// normalized to 0), so the frontend can render without `??` guards.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TurnUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+}
+
+impl TurnUsage {
+    /// Create a `TurnUsage` from a `UsageInfo`, normalizing missing cache
+    /// fields to 0.
+    pub fn from_usage_info(usage: &UsageInfo) -> Self {
+        Self {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_tokens: usage.cache_read_tokens.unwrap_or(0),
+            cache_write_tokens: usage.cache_write_tokens.unwrap_or(0),
+        }
+    }
+
+    /// Per-turn delta between a cumulative snapshot and a previous snapshot.
+    /// Saturating subtraction protects against reset/resume events where the
+    /// current snapshot could momentarily be smaller than the previous one;
+    /// in that case the turn is reported as zero tokens rather than negative.
+    pub fn delta(current: &Self, previous: &Self) -> Self {
+        Self {
+            input_tokens: current.input_tokens.saturating_sub(previous.input_tokens),
+            output_tokens: current
+                .output_tokens
+                .saturating_sub(previous.output_tokens),
+            cache_read_tokens: current
+                .cache_read_tokens
+                .saturating_sub(previous.cache_read_tokens),
+            cache_write_tokens: current
+                .cache_write_tokens
+                .saturating_sub(previous.cache_write_tokens),
+        }
+    }
 }
 
 /// Tool name constant for the AskUserQuestion tool.
@@ -142,6 +199,16 @@ pub struct StreamParser {
     /// same turn (observed on retry/resume paths — the first user message
     /// echoes back). A user prompt's UUID is committed exactly once.
     committed_user_uuids: std::collections::HashSet<String>,
+    /// Snapshot of cumulative session usage taken at the start of the
+    /// current turn. Per-turn usage = current - previous. Kept here so
+    /// that `MessageDelta` (hypothetical cumulative event) and `Result`
+    /// both read the same baseline and compute a consistent delta.
+    previous_session_usage: TurnUsage,
+    /// Cumulative session cost in USD from the previous `Result`. Per-turn
+    /// cost = current total - previous total, when both are authoritative.
+    previous_session_cost: Option<f64>,
+    /// Last model seen (from `SystemInit` or `modelUsage` in a result).
+    last_model: Option<String>,
 }
 
 impl StreamParser {
@@ -152,7 +219,35 @@ impl StreamParser {
             tool_input: HashMap::new(),
             pending_assistant_uuid: None,
             committed_user_uuids: std::collections::HashSet::new(),
+            previous_session_usage: TurnUsage::default(),
+            previous_session_cost: None,
+            last_model: None,
         }
+    }
+
+    /// Restore the cumulative usage snapshot when resuming a session from
+    /// history. After this call, the next `Result` subtracts against these
+    /// values to compute the first per-turn delta correctly.
+    ///
+    /// Currently used only by unit tests; a future resume-from-history path
+    /// in `ChatSession::start` will call this to seed the snapshot from the
+    /// persisted transcript.
+    #[cfg(test)]
+    pub fn restore_session_snapshot(
+        &mut self,
+        usage: TurnUsage,
+        total_cost: Option<f64>,
+        model: Option<String>,
+    ) {
+        self.previous_session_usage = usage;
+        self.previous_session_cost = total_cost;
+        self.last_model = model;
+    }
+
+    /// Current cumulative usage snapshot (test and introspection helper).
+    #[cfg(test)]
+    pub fn previous_session_usage(&self) -> TurnUsage {
+        self.previous_session_usage
     }
 
     /// Parse a pre-parsed JSON value. Mutates internal state for block tracking.
@@ -194,7 +289,9 @@ impl StreamParser {
         }
     }
 
-    /// Reset state (e.g. on new conversation turn).
+    /// Reset per-message block state (e.g. on `message_stop`).
+    /// Does NOT reset the cumulative usage snapshot — that spans the whole
+    /// session and is only reset by `new_session()`.
     pub fn reset(&mut self) {
         self.active_blocks.clear();
         self.tool_input.clear();
@@ -202,6 +299,19 @@ impl StreamParser {
         // committed_user_uuids is NOT reset: it persists across turns for the
         // lifetime of the session so a retry on an already-committed user
         // UUID doesn't re-emit a duplicate commit chunk.
+    }
+
+    /// Reset all state for a fresh session (no snapshot restore). Used
+    /// when starting a brand-new conversation rather than resuming one.
+    ///
+    /// Currently used only by unit tests; a freshly constructed parser is
+    /// already in this state.
+    #[cfg(test)]
+    pub fn new_session(&mut self) {
+        self.reset();
+        self.previous_session_usage = TurnUsage::default();
+        self.previous_session_cost = None;
+        self.last_model = None;
     }
 
     /// Check if a parsed JSON value is a control_request. Returns parsed data if so.
@@ -557,16 +667,24 @@ impl StreamParser {
             .as_f64()
             .or_else(|| parsed["total_cost"].as_f64());
 
-        // contextWindow is constant for a given model — safe to take first entry.
-        // If Claude Code ever switches models mid-session, we'd need to reconcile.
-        let context_window_size = parsed["modelUsage"]
-            .as_object()
+        // modelUsage: cumulative per-model stats from the CLI. Used for
+        // contextWindow (constant per model) and for model identification.
+        let model_usage = parsed["modelUsage"].as_object();
+        let context_window_size = model_usage
             .and_then(|mu| mu.values().next())
             .and_then(|stats| stats["contextWindow"].as_u64());
 
-        // Usage: prefer flat "usage" (per-step, matches statusline's context_window data).
-        // modelUsage is cumulative across the session — NOT suitable for CTX %.
-        // Fall back to modelUsage only when flat usage is absent (shouldn't happen in practice).
+        // Pick the first model key from modelUsage if present; otherwise fall
+        // back to the most recent SystemInit model captured in state.
+        let model = model_usage
+            .and_then(|mu| mu.keys().next().cloned())
+            .or_else(|| self.last_model.clone());
+        // Keep parser state in sync so future turns without modelUsage still
+        // know the model.
+        if let Some(m) = model.as_deref() {
+            self.last_model = Some(m.to_string());
+        }
+
         let usage = if parsed["usage"].is_object() {
             let u = &parsed["usage"];
             Some(UsageInfo {
@@ -582,6 +700,28 @@ impl StreamParser {
         } else {
             None
         };
+
+        // Per-turn usage: see `compute_turn_usage_from_result`.
+        let turn_usage = compute_turn_usage_from_result(
+            parsed,
+            usage.as_ref(),
+            &mut self.previous_session_usage,
+        );
+
+        // Per-turn cost. Use the authoritative delta of `total_cost_usd`
+        // when available (CLI aggregates across the session; our previous
+        // snapshot is the previous turn's cumulative total). For the first
+        // turn in a session without a prior snapshot, `total_cost` itself
+        // IS the first turn's cost.
+        let turn_cost = match (total_cost, self.previous_session_cost) {
+            (Some(current), Some(prev)) if current >= prev => Some(current - prev),
+            (Some(current), None) => Some(current),
+            _ => None,
+        };
+        // Update the cumulative cost snapshot for the next turn.
+        if let Some(t) = total_cost {
+            self.previous_session_cost = Some(t);
+        }
 
         let result_text = parsed["result"]
             .as_str()
@@ -603,6 +743,9 @@ impl StreamParser {
                 result_text,
                 context_window_size,
                 assistant_uuid,
+                turn_usage,
+                turn_cost,
+                model,
             }),
             log_entry,
         )
@@ -653,7 +796,7 @@ impl StreamParser {
     /// Surfaces rate-limit and other actionable system messages as errors
     /// so the frontend can display them.
     fn parse_system_message(
-        &self,
+        &mut self,
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
         // ── Extract model from system init message ──
@@ -662,6 +805,9 @@ impl StreamParser {
         if parsed["subtype"].as_str() == Some("init") {
             if let Some(model) = parsed["model"].as_str() {
                 if !model.is_empty() {
+                    // Cache the model so subsequent result chunks can label
+                    // their meta line even when `modelUsage` is absent.
+                    self.last_model = Some(model.to_string());
                     let log_entry = Some(LogEntry {
                         prefix: "SYSTEM",
                         message: format!("init: model={model}"),
@@ -709,6 +855,76 @@ impl StreamParser {
             // Log but don't surface non-actionable system messages
             (None, log_entry)
         }
+    }
+}
+
+/// Extract per-turn usage from a parsed `result` message, updating the
+/// cumulative snapshot in place.
+///
+/// Two sources are possible:
+///
+///  * Flat `usage` (Claude Code CLI today) — already per-step, so the value
+///    is emitted as the turn and the snapshot accumulates it.
+///  * `modelUsage` only (cumulative per-model, no flat `usage`) — compute
+///    `turn = cumulative - snapshot` and advance the snapshot.
+///
+/// The flat-path snapshot value is kept in sync so that future switches
+/// between the two payload shapes remain consistent. Returns `None` when
+/// the result carries no usage information at all.
+fn compute_turn_usage_from_result(
+    parsed: &serde_json::Value,
+    flat: Option<&UsageInfo>,
+    snapshot: &mut TurnUsage,
+) -> Option<TurnUsage> {
+    if let Some(u) = flat {
+        let delta = TurnUsage::from_usage_info(u);
+        snapshot.input_tokens = snapshot.input_tokens.saturating_add(delta.input_tokens);
+        snapshot.output_tokens = snapshot.output_tokens.saturating_add(delta.output_tokens);
+        snapshot.cache_read_tokens = snapshot
+            .cache_read_tokens
+            .saturating_add(delta.cache_read_tokens);
+        snapshot.cache_write_tokens = snapshot
+            .cache_write_tokens
+            .saturating_add(delta.cache_write_tokens);
+        return Some(delta);
+    }
+    // Fallback path: only `modelUsage` is present. Compute the delta against
+    // the cumulative snapshot. After a resume, callers should restore the
+    // snapshot via `restore_session_snapshot` before the first Result; if
+    // not, the first delta equals the full cumulative total (best-effort).
+    let cumulative = extract_cumulative_usage(parsed)?;
+    let delta = TurnUsage::delta(&cumulative, snapshot);
+    *snapshot = cumulative;
+    Some(delta)
+}
+
+/// Sum `modelUsage` across all models to a single cumulative snapshot.
+/// Returns `None` when the payload has no `modelUsage` object or its
+/// values are missing usage fields.
+fn extract_cumulative_usage(parsed: &serde_json::Value) -> Option<TurnUsage> {
+    let model_usage = parsed["modelUsage"].as_object()?;
+    if model_usage.is_empty() {
+        return None;
+    }
+    let mut total = TurnUsage::default();
+    let mut any_field = false;
+    for stats in model_usage.values() {
+        for (key, target) in [
+            ("inputTokens", &mut total.input_tokens),
+            ("outputTokens", &mut total.output_tokens),
+            ("cacheReadInputTokens", &mut total.cache_read_tokens),
+            ("cacheCreationInputTokens", &mut total.cache_write_tokens),
+        ] {
+            if let Some(n) = stats[key].as_u64() {
+                *target = target.saturating_add(n);
+                any_field = true;
+            }
+        }
+    }
+    if any_field {
+        Some(total)
+    } else {
+        None
     }
 }
 
@@ -1687,6 +1903,9 @@ mod tests {
             result_text: None,
             context_window_size: None,
             assistant_uuid: Some("msg_test".to_string()),
+            turn_usage: None,
+            turn_cost: None,
+            model: None,
         };
         let serialized = serde_json::to_string(&original).unwrap();
         let deserialized: StreamChunk = serde_json::from_str(&serialized).unwrap();
@@ -1940,6 +2159,7 @@ mod tests {
                 result_text,
                 context_window_size,
                 assistant_uuid,
+                ..
             } => {
                 assert_eq!(session_id, "550e8400-e29b-41d4-a716-446655440000");
                 assert_eq!(total_cost, Some(0.015));
@@ -3371,6 +3591,9 @@ mod tests {
             result_text: None,
             context_window_size: None,
             assistant_uuid: None,
+            turn_usage: None,
+            turn_cost: None,
+            model: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(
@@ -3385,6 +3608,9 @@ mod tests {
             !json.contains("assistant_uuid"),
             "assistant_uuid should be absent when None, got: {json}"
         );
+        assert!(!json.contains("turn_usage"));
+        assert!(!json.contains("turn_cost"));
+        assert!(!json.contains("\"model\""));
     }
 
     #[test]
@@ -3396,6 +3622,9 @@ mod tests {
             result_text: None,
             context_window_size: Some(1_000_000),
             assistant_uuid: None,
+            turn_usage: None,
+            turn_cost: None,
+            model: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(
@@ -3547,5 +3776,390 @@ mod tests {
             !log_path.exists(),
             "stop() on fresh session should not create log file"
         );
+    }
+
+    // ── TurnUsage + per-turn meta tests ─────────────────────────────
+
+    #[test]
+    fn turn_usage_from_usage_info_defaults_missing_cache_fields_to_zero() {
+        let info = UsageInfo {
+            input_tokens: 5,
+            output_tokens: 7,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+        };
+        let turn = TurnUsage::from_usage_info(&info);
+        assert_eq!(turn.input_tokens, 5);
+        assert_eq!(turn.output_tokens, 7);
+        assert_eq!(turn.cache_read_tokens, 0);
+        assert_eq!(turn.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn turn_usage_from_usage_info_preserves_present_cache_fields() {
+        let info = UsageInfo {
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: Some(10),
+            cache_write_tokens: Some(20),
+        };
+        let turn = TurnUsage::from_usage_info(&info);
+        assert_eq!(turn.cache_read_tokens, 10);
+        assert_eq!(turn.cache_write_tokens, 20);
+    }
+
+    #[test]
+    fn turn_usage_delta_subtracts_field_by_field() {
+        let prev = TurnUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 200,
+            cache_write_tokens: 10,
+        };
+        let curr = TurnUsage {
+            input_tokens: 150,
+            output_tokens: 75,
+            cache_read_tokens: 500,
+            cache_write_tokens: 12,
+        };
+        let delta = TurnUsage::delta(&curr, &prev);
+        assert_eq!(delta.input_tokens, 50);
+        assert_eq!(delta.output_tokens, 25);
+        assert_eq!(delta.cache_read_tokens, 300);
+        assert_eq!(delta.cache_write_tokens, 2);
+    }
+
+    #[test]
+    fn turn_usage_delta_saturates_on_reset() {
+        // After a resume or reset, `current` may momentarily be less than
+        // `previous`. The helper should report zero, not underflow.
+        let prev = TurnUsage {
+            input_tokens: 500,
+            output_tokens: 500,
+            cache_read_tokens: 500,
+            cache_write_tokens: 500,
+        };
+        let curr = TurnUsage {
+            input_tokens: 100,
+            output_tokens: 100,
+            cache_read_tokens: 100,
+            cache_write_tokens: 100,
+        };
+        let delta = TurnUsage::delta(&curr, &prev);
+        assert_eq!(delta.input_tokens, 0);
+        assert_eq!(delta.output_tokens, 0);
+        assert_eq!(delta.cache_read_tokens, 0);
+        assert_eq!(delta.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn parse_result_emits_turn_usage_from_flat_per_step_usage() {
+        let mut parser = StreamParser::new();
+        // First turn: flat usage with all four fields. With no modelUsage,
+        // the parser treats this as per-step and emits it directly.
+        let line = r#"{"type":"result","session_id":"s1","is_error":false,"result":"","total_cost_usd":0.003,"usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":30,"cache_creation_input_tokens":40}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                turn_usage,
+                turn_cost,
+                ..
+            } => {
+                let t = turn_usage.expect("turn_usage should be populated");
+                assert_eq!(t.input_tokens, 10);
+                assert_eq!(t.output_tokens, 20);
+                assert_eq!(t.cache_read_tokens, 30);
+                assert_eq!(t.cache_write_tokens, 40);
+                assert_eq!(turn_cost, Some(0.003));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_three_turn_cumulative_modelusage_produces_correct_deltas() {
+        let mut parser = StreamParser::new();
+        // Turn 1: cumulative = {in:5, out:3, cR:0, cW:10}. Delta = that.
+        let t1 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.01,"modelUsage":{"claude-opus-4-7":{"inputTokens":5,"outputTokens":3,"cacheReadInputTokens":0,"cacheCreationInputTokens":10}}}"#;
+        let c1 = parse_line_str(&mut parser, t1).unwrap();
+        match c1 {
+            StreamChunk::Result {
+                turn_usage,
+                turn_cost,
+                ..
+            } => {
+                let t = turn_usage.unwrap();
+                assert_eq!(t.input_tokens, 5);
+                assert_eq!(t.output_tokens, 3);
+                assert_eq!(t.cache_read_tokens, 0);
+                assert_eq!(t.cache_write_tokens, 10);
+                assert_eq!(turn_cost, Some(0.01));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+
+        // Turn 2: cumulative = {in:12, out:8, cR:100, cW:10}. Delta = {7,5,100,0}.
+        let t2 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.025,"modelUsage":{"claude-opus-4-7":{"inputTokens":12,"outputTokens":8,"cacheReadInputTokens":100,"cacheCreationInputTokens":10}}}"#;
+        let c2 = parse_line_str(&mut parser, t2).unwrap();
+        match c2 {
+            StreamChunk::Result {
+                turn_usage,
+                turn_cost,
+                ..
+            } => {
+                let t = turn_usage.unwrap();
+                assert_eq!(t.input_tokens, 7);
+                assert_eq!(t.output_tokens, 5);
+                assert_eq!(t.cache_read_tokens, 100);
+                assert_eq!(t.cache_write_tokens, 0);
+                assert!((turn_cost.unwrap() - 0.015).abs() < 1e-9);
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+
+        // Turn 3: cumulative = {in:20, out:13, cR:200, cW:10}. Delta = {8,5,100,0}.
+        let t3 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.040,"modelUsage":{"claude-opus-4-7":{"inputTokens":20,"outputTokens":13,"cacheReadInputTokens":200,"cacheCreationInputTokens":10}}}"#;
+        let c3 = parse_line_str(&mut parser, t3).unwrap();
+        match c3 {
+            StreamChunk::Result {
+                turn_usage,
+                turn_cost,
+                ..
+            } => {
+                let t = turn_usage.unwrap();
+                assert_eq!(t.input_tokens, 8);
+                assert_eq!(t.output_tokens, 5);
+                assert_eq!(t.cache_read_tokens, 100);
+                assert_eq!(t.cache_write_tokens, 0);
+                assert!((turn_cost.unwrap() - 0.015).abs() < 1e-9);
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_resume_session_restores_snapshot_correctly() {
+        // Simulate resuming mid-session: restore the cumulative snapshot
+        // from history, then verify the next Result's delta is computed
+        // against the restored baseline, not against zero.
+        let mut parser = StreamParser::new();
+        parser.restore_session_snapshot(
+            TurnUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_tokens: 200,
+                cache_write_tokens: 30,
+            },
+            Some(0.25),
+            Some("claude-sonnet-4-6".to_string()),
+        );
+
+        // First Result after resume: cumulative = {in:110, out:55, cR:200, cW:30}.
+        // Expected delta: {10, 5, 0, 0}. turn_cost = 0.30 - 0.25 = 0.05.
+        let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.30,"modelUsage":{"claude-sonnet-4-6":{"inputTokens":110,"outputTokens":55,"cacheReadInputTokens":200,"cacheCreationInputTokens":30}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                turn_usage,
+                turn_cost,
+                model,
+                ..
+            } => {
+                let t = turn_usage.unwrap();
+                assert_eq!(t.input_tokens, 10);
+                assert_eq!(t.output_tokens, 5);
+                assert_eq!(t.cache_read_tokens, 0);
+                assert_eq!(t.cache_write_tokens, 0);
+                assert!((turn_cost.unwrap() - 0.05).abs() < 1e-9);
+                assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+
+        // Snapshot advanced to the current cumulative total after the turn.
+        let snap = parser.previous_session_usage();
+        assert_eq!(snap.input_tokens, 110);
+        assert_eq!(snap.output_tokens, 55);
+    }
+
+    #[test]
+    fn parse_result_uses_systeminit_model_when_modelusage_absent() {
+        let mut parser = StreamParser::new();
+        // SystemInit captures the model
+        let init = r#"{"type":"system","subtype":"init","model":"claude-haiku-4-5"}"#;
+        parse_line_str(&mut parser, init);
+
+        // Result without modelUsage should fall back to the captured model
+        let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.001,"usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { model, .. } => {
+                assert_eq!(model.as_deref(), Some("claude-haiku-4-5"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_without_any_usage_emits_no_turn_usage() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","session_id":"s","is_error":false,"result":""}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                turn_usage,
+                turn_cost,
+                model,
+                ..
+            } => {
+                assert!(turn_usage.is_none());
+                assert!(turn_cost.is_none());
+                assert!(model.is_none());
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_treats_missing_cache_fields_as_zero() {
+        // Neither cache_read_input_tokens nor cache_creation_input_tokens —
+        // both must flatten to 0 in the emitted TurnUsage.
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.001,"usage":{"input_tokens":3,"output_tokens":4}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { turn_usage, .. } => {
+                let t = turn_usage.unwrap();
+                assert_eq!(t.input_tokens, 3);
+                assert_eq!(t.output_tokens, 4);
+                assert_eq!(t.cache_read_tokens, 0);
+                assert_eq!(t.cache_write_tokens, 0);
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_first_turn_cost_uses_total_cost_when_no_prior_snapshot() {
+        let mut parser = StreamParser::new();
+        // First Result: no previous cost snapshot — turn_cost == total_cost.
+        let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.123,"usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { turn_cost, .. } => {
+                assert_eq!(turn_cost, Some(0.123));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_turn_cost_is_none_when_total_cost_absent() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { turn_cost, .. } => {
+                assert!(turn_cost.is_none());
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_session_resets_cumulative_snapshot_and_model() {
+        let mut parser = StreamParser::new();
+        parser.restore_session_snapshot(
+            TurnUsage {
+                input_tokens: 10,
+                output_tokens: 10,
+                cache_read_tokens: 10,
+                cache_write_tokens: 10,
+            },
+            Some(0.5),
+            Some("claude-opus-4-7".to_string()),
+        );
+        parser.new_session();
+        assert_eq!(parser.previous_session_usage(), TurnUsage::default());
+        // Next Result with no prior history should emit the turn at face value.
+        let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.001,"usage":{"input_tokens":2,"output_tokens":3}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                turn_usage,
+                turn_cost,
+                ..
+            } => {
+                assert_eq!(turn_usage.unwrap().input_tokens, 2);
+                assert_eq!(turn_cost, Some(0.001));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_with_negative_cost_delta_drops_turn_cost() {
+        // Defensive: if the CLI ever reports a cumulative cost lower than
+        // the previous snapshot (resume edge case), we drop `turn_cost`
+        // rather than report a nonsense negative value.
+        let mut parser = StreamParser::new();
+        let t1 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.50}"#;
+        parse_line_str(&mut parser, t1);
+        let t2 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.30}"#;
+        let chunk = parse_line_str(&mut parser, t2).unwrap();
+        match chunk {
+            StreamChunk::Result { turn_cost, .. } => {
+                assert!(
+                    turn_cost.is_none(),
+                    "negative delta should drop turn_cost, got {turn_cost:?}"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_cumulative_usage_sums_multiple_models() {
+        // Rare but defined case: modelUsage has entries for two models
+        // (e.g., mid-session model switch). The cumulative is the sum.
+        let parsed: serde_json::Value = serde_json::from_str(
+            r#"{
+                "modelUsage": {
+                    "claude-opus-4-7": {"inputTokens":5,"outputTokens":3,"cacheReadInputTokens":0,"cacheCreationInputTokens":0},
+                    "claude-sonnet-4-6": {"inputTokens":2,"outputTokens":1,"cacheReadInputTokens":10,"cacheCreationInputTokens":0}
+                }
+            }"#,
+        )
+        .unwrap();
+        let cumulative = extract_cumulative_usage(&parsed).unwrap();
+        assert_eq!(cumulative.input_tokens, 7);
+        assert_eq!(cumulative.output_tokens, 4);
+        assert_eq!(cumulative.cache_read_tokens, 10);
+        assert_eq!(cumulative.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn extract_cumulative_usage_returns_none_for_absent_model_usage() {
+        let parsed: serde_json::Value = serde_json::from_str(r#"{"modelUsage": {}}"#).unwrap();
+        assert!(extract_cumulative_usage(&parsed).is_none());
+        let parsed2: serde_json::Value = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(extract_cumulative_usage(&parsed2).is_none());
+    }
+
+    #[test]
+    fn turn_usage_serializes_with_required_cache_fields() {
+        // No optional fields: cache_read/write are always present in the
+        // wire format so the TS frontend can render without `??` guards.
+        let t = TurnUsage {
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: 3,
+            cache_write_tokens: 4,
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains("\"input_tokens\":1"));
+        assert!(json.contains("\"output_tokens\":2"));
+        assert!(json.contains("\"cache_read_tokens\":3"));
+        assert!(json.contains("\"cache_write_tokens\":4"));
     }
 }
