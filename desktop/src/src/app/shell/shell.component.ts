@@ -2,26 +2,40 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  computed,
   inject,
   OnDestroy,
   OnInit,
+  signal,
 } from '@angular/core';
-import { RouterOutlet, RouterLink, RouterLinkActive } from '@angular/router';
+import { NavigationEnd, Router, RouterOutlet } from '@angular/router';
+import type { Subscription } from 'rxjs';
+import { filter } from 'rxjs/operators';
 import { ProjectSwitcherComponent } from '../project-switcher/project-switcher.component';
 import { UpdateNotificationComponent } from '../update-notification/update-notification.component';
 import { ProjectStateService } from '../services/project-state.service';
+import { UiStateService } from '../services/ui-state.service';
+import {
+  ViewSwitcherComponent,
+  type ViewSwitcherEntry,
+} from './view-switcher/view-switcher.component';
 
-/** Main application shell with header navigation and project switcher. */
+/**
+ * Main application shell with header navigation and project switcher.
+ *
+ * Wires the ⌘B / Ctrl+B keyboard shortcut to `UiStateService.toggleSidebar()` —
+ * the sidebar's open-state is shared via signals, not local component state.
+ */
 @Component({
   selector: 'app-shell',
   standalone: true,
   imports: [
     RouterOutlet,
-    RouterLink,
-    RouterLinkActive,
     ProjectSwitcherComponent,
     UpdateNotificationComponent,
+    ViewSwitcherComponent,
   ],
+  host: { '(document:keydown)': 'onKeydown($event)' },
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="flex flex-col h-screen bg-sw-bg-darkest text-sw-text">
@@ -159,37 +173,8 @@ import { ProjectStateService } from '../services/project-state.service';
             />
           </svg>
         </span>
-        <nav class="flex gap-4 justify-self-center" data-testid="app-nav">
-          @if (projectState.status === 'ready' || projectState.status === 'error') {
-            <a
-              routerLink="/chat"
-              routerLinkActive="!text-sw-accent font-bold"
-              class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
-              data-testid="nav-chat"
-              >Chat</a
-            >
-          }
-          <a
-            routerLink="/integrations"
-            routerLinkActive="!text-sw-accent font-bold"
-            class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
-            data-testid="nav-integrations"
-            >Integrations</a
-          >
-          <a
-            routerLink="/plugins"
-            routerLinkActive="!text-sw-accent font-bold"
-            class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
-            data-testid="nav-plugins"
-            >Plugins</a
-          >
-          <a
-            routerLink="/settings"
-            routerLinkActive="!text-sw-accent font-bold"
-            class="text-sw-text-muted no-underline text-[13px] font-mono px-2 py-1 rounded transition-colors duration-200 hover:text-sw-text"
-            data-testid="nav-settings"
-            >Settings</a
-          >
+        <nav class="justify-self-center" data-testid="app-nav">
+          <app-view-switcher [views]="visibleViews()" [activeId]="activeViewId()" />
         </nav>
         <div class="justify-self-end">
           <app-project-switcher />
@@ -203,10 +188,37 @@ import { ProjectStateService } from '../services/project-state.service';
 })
 export class ShellComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
+  readonly ui = inject(UiStateService);
   private cdr = inject(ChangeDetectorRef);
+  private router = inject(Router);
   private unsubscribe: (() => void) | null = null;
+  private routerSub: Subscription | null = null;
 
-  /** Human-readable status message for the blocking overlay. */
+  private readonly viewCatalog: readonly ViewSwitcherEntry[] = [
+    { id: 'chat', label: 'Chat', route: '/chat' },
+    { id: 'integrations', label: 'Integrations', route: '/integrations' },
+    { id: 'plugins', label: 'Plugins', route: '/plugins' },
+    { id: 'settings', label: 'Settings', route: '/settings' },
+  ];
+
+  private readonly currentUrlSignal = signal<string>(this.router.url);
+  private readonly statusSignal = signal(this.projectState.status);
+
+  /** Top-nav views — hides `chat` until auth is settled. */
+  readonly visibleViews = computed(() => {
+    const status = this.statusSignal();
+    const hideChat = status !== 'ready' && status !== 'error';
+    return hideChat ? this.viewCatalog.filter((v) => v.id !== 'chat') : this.viewCatalog;
+  });
+
+  /** Active view id derived from the current router URL. */
+  readonly activeViewId = computed(() => {
+    const url = this.currentUrlSignal();
+    const match = this.viewCatalog.find((v) => url.startsWith(v.route));
+    return match?.id ?? '';
+  });
+
+  /** Human-readable copy for the blocking overlay, keyed off projectState.status. */
   get statusMessage(): string {
     switch (this.projectState.status) {
       case 'loading':
@@ -226,45 +238,64 @@ export class ShellComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Bootstraps ProjectStateService and subscribes to state changes. */
+  /** Bootstraps project state, mirrors status into a signal, and tracks the current URL. */
   ngOnInit(): void {
     this.projectState.init();
     this.unsubscribe = this.projectState.onChange(() => {
+      this.statusSignal.set(this.projectState.status);
       this.cdr.markForCheck();
     });
+    this.routerSub = this.router.events
+      .pipe(filter((e): e is NavigationEnd => e instanceof NavigationEnd))
+      .subscribe((e) => this.currentUrlSignal.set(e.urlAfterRedirects));
   }
 
-  /** Retries container lifecycle check. */
+  /**
+   * ⌘B / Ctrl+B toggles the conversations sidebar via the shared UI-state signal.
+   * @param event - keyboard event from the document; consumed (preventDefault) on match.
+   */
+  onKeydown(event: KeyboardEvent): void {
+    const isCmdB = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'b';
+    if (!isCmdB) return;
+    event.preventDefault();
+    this.ui.toggleSidebar();
+  }
+
+  /** Retries the container lifecycle (used by the error banner). */
   retry(): void {
     this.projectState.ensureContainersRunning();
   }
 
-  /** Retries system check (prereqs + security). */
+  /** Retries the system check (prereqs + security) on check_failed. */
   retryCheck(): void {
     this.projectState.ensureContainersRunning();
   }
 
-  /** Triggers a container restart from the overlay. */
+  /** Triggers a container restart from the restart-required overlay. */
   restartContainers(): void {
     this.projectState.restartContainers();
   }
 
-  /** Dismisses the restart overlay. */
+  /** Dismisses the restart-required overlay without restarting. */
   dismissRestart(): void {
     this.projectState.dismissRestart();
   }
 
-  /** Dismisses the error banner. */
+  /** Clears the active error banner. */
   async dismiss(): Promise<void> {
     await this.projectState.dismissError();
     this.cdr.markForCheck();
   }
 
-  /** Cleans up the project state subscription. */
+  /** Tears down the projectState and router subscriptions. */
   ngOnDestroy(): void {
     if (this.unsubscribe) {
       this.unsubscribe();
       this.unsubscribe = null;
+    }
+    if (this.routerSub) {
+      this.routerSub.unsubscribe();
+      this.routerSub = null;
     }
   }
 }

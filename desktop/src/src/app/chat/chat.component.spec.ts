@@ -6,6 +6,7 @@ import { ChatComponent } from './chat.component';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { UiStateService } from '../services/ui-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
 describe('ChatComponent', () => {
@@ -14,6 +15,7 @@ describe('ChatComponent', () => {
   let mockTauri: MockTauriService;
   let chatState: ChatStateService;
   let projectState: ProjectStateService;
+  let uiState: UiStateService;
 
   beforeEach(async () => {
     mockTauri = new MockTauriService();
@@ -52,6 +54,7 @@ describe('ChatComponent', () => {
     component = fixture.componentInstance;
     chatState = TestBed.inject(ChatStateService);
     projectState = TestBed.inject(ProjectStateService);
+    uiState = TestBed.inject(UiStateService);
 
     // Reset service state between tests
     chatState._setState({ messages: [], currentBlocks: [], sessionStats: null });
@@ -569,13 +572,28 @@ describe('ChatComponent', () => {
         session_id: 's1',
         messages: [{ role: 'user', content: 'Hi', timestamp: null }],
       };
-      component.showHistory = true;
+      uiState.toggleSidebar();
       projectState.activeProject = 'test';
 
       await component.resumeConversation('s1');
 
       expect(component.viewingTranscript).toBeNull();
       expect(component.showHistory).toBe(false);
+    });
+
+    it('calls resume_conversation directly when viewingTranscript is null (sidebar shortcut)', async () => {
+      component.viewingTranscript = null;
+      projectState.activeProject = 'test';
+      const invokeCalls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        invokeCalls.push(cmd);
+        return undefined;
+      };
+
+      await component.resumeConversation('s1');
+
+      expect(invokeCalls).toContain('resume_conversation');
+      expect(chatState.messages).toHaveLength(0);
     });
   });
 
@@ -590,8 +608,8 @@ describe('ChatComponent', () => {
       component.inputText = 'partial';
       chatState.isStreaming = true;
       component.viewingTranscript = { session_id: 's1', messages: [] };
-      component.showHistory = true;
-      component.showMemory = true;
+      uiState.toggleSidebar();
+      uiState.toggleMemory();
 
       await component.newConversation();
 
@@ -685,6 +703,53 @@ describe('ChatComponent', () => {
       await component.loadProjectMemory();
 
       expect(component.projectMemory).toBe('');
+    });
+
+    it('surfaces user-facing memoryError on backend failure (parity with historyError)', async () => {
+      projectState.activeProject = 'test';
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_project_memory') throw new Error('disk failure');
+        return undefined;
+      };
+
+      await component.loadProjectMemory();
+
+      expect(component.memoryError).toContain('Failed to load memory');
+      expect(component.memoryError).toContain('disk failure');
+      errorSpy.mockRestore();
+    });
+
+    it('clears memoryError on a subsequent successful load', async () => {
+      projectState.activeProject = 'test';
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let shouldFail = true;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_project_memory') {
+          if (shouldFail) throw new Error('first failure');
+          return '# recovered';
+        }
+        return undefined;
+      };
+
+      await component.loadProjectMemory();
+      expect(component.memoryError).not.toBe('');
+
+      shouldFail = false;
+      await component.loadProjectMemory();
+
+      expect(component.memoryError).toBe('');
+      expect(component.projectMemory).toBe('# recovered');
+      errorSpy.mockRestore();
+    });
+
+    it('does not set memoryError when no active project', async () => {
+      projectState.activeProject = null;
+      component.memoryError = 'stale';
+
+      await component.loadProjectMemory();
+
+      expect(component.memoryError).toBe('');
     });
   });
 
@@ -808,7 +873,7 @@ describe('ChatComponent', () => {
 
       await projectState.init();
       await component.ngOnInit();
-      component.showHistory = true;
+      uiState.toggleSidebar();
       component.conversations = [
         { session_id: 's1', timestamp: '2026-03-06T10:00:00Z', preview: 'old', message_count: 1 },
       ];
