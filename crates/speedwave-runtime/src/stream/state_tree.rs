@@ -410,6 +410,73 @@ mod tests {
         assert!(meta.cost.is_none());
     }
 
+    /// `Debug` for `ConversationState` must redact `session_id` so
+    /// accidental `format!("{state:?}")` (e.g. from `dbg!`, `panic!`, or
+    /// `tracing::debug!`) cannot leak the per-session identifier. Per
+    /// `.claude/rules/logging.md`, structs carrying per-session identifiers
+    /// must redact them in `Debug` output. Other diagnostic fields stay
+    /// visible — only the identifier is hidden.
+    #[test]
+    fn debug_redacts_session_id() {
+        let state = ConversationState {
+            session_id: Some("secret-uuid".into()),
+            entries: vec![ConversationEntry {
+                index: 0,
+                role: EntryRole::User,
+                uuid: None,
+                uuid_status: UuidStatus::Pending,
+                blocks: vec![MessageBlock::Text {
+                    content: "diagnostic-text".into(),
+                }],
+                meta: None,
+                edited_at: None,
+                timestamp: 1,
+            }],
+            model: Some("opus-4.7".into()),
+            is_streaming: true,
+            ..Default::default()
+        };
+        let dbg = format!("{state:?}");
+        assert!(
+            !dbg.contains("secret-uuid"),
+            "session_id leaked through Debug: {dbg}"
+        );
+        assert!(
+            dbg.contains('…'),
+            "expected redaction marker for session_id, got: {dbg}"
+        );
+        // Non-secret diagnostic fields must still be visible.
+        assert!(
+            dbg.contains("diagnostic-text"),
+            "expected entry text in Debug, got: {dbg}"
+        );
+        assert!(
+            dbg.contains("opus-4.7"),
+            "expected model in Debug, got: {dbg}"
+        );
+        assert!(
+            dbg.contains("is_streaming"),
+            "expected struct field name in Debug, got: {dbg}"
+        );
+    }
+
+    /// When `session_id` is `None`, the redaction marker must not appear —
+    /// the redaction maps `Some(_) -> Some("…")` and `None -> None` so
+    /// the absence of an identifier is honestly reported.
+    #[test]
+    fn debug_session_id_none_renders_as_none() {
+        let state = ConversationState::default();
+        let dbg = format!("{state:?}");
+        assert!(
+            dbg.contains("session_id: None"),
+            "expected None for absent session_id, got: {dbg}"
+        );
+        assert!(
+            !dbg.contains('…'),
+            "redaction marker leaked when no session_id present: {dbg}"
+        );
+    }
+
     #[test]
     fn entry_defaults_for_unicode_content() {
         let entry = ConversationEntry {

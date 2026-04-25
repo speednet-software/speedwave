@@ -41,7 +41,9 @@ const BROADCAST_CAPACITY: usize = 1024;
 /// per-session identifiers that have no place in diagnostic logs (per
 /// `.claude/rules/logging.md`). The manual impl redacts `session_id` to
 /// `"…"` so accidental `format!("{msg:?}")` calls in handlers, panic
-/// hooks, or test assertions cannot leak it.
+/// hooks, or test assertions cannot leak it. `Resync` delegates to
+/// `ConversationState`'s own redacting `Debug` impl — keeping the
+/// redaction policy in one place (the type that owns the field).
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum LogMsg {
@@ -62,7 +64,11 @@ impl std::fmt::Debug for LogMsg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::JsonPatch(p) => f.debug_tuple("JsonPatch").field(p).finish(),
-            Self::Resync(_) => f.debug_tuple("Resync").field(&"<state>").finish(),
+            // Delegate to `ConversationState`'s `Debug` impl, which already
+            // redacts `session_id`. Keeping the redaction policy in one place
+            // means a future field added to `ConversationState` is covered
+            // automatically here too.
+            Self::Resync(state) => f.debug_tuple("Resync").field(state).finish(),
             Self::SessionStarted { .. } => f
                 .debug_struct("SessionStarted")
                 .field("session_id", &"…")
@@ -467,6 +473,88 @@ mod tests {
              got {} bytes for a non-empty patch",
             store.history_bytes()
         );
+    }
+
+    /// `Debug` for `LogMsg::SessionStarted` must redact `session_id` so
+    /// accidental `format!("{msg:?}")` (e.g. from a `panic!`, `dbg!`, or
+    /// `tracing::debug!`) cannot leak the per-session identifier. This
+    /// pairs with `.claude/rules/logging.md`: `session_id` values are not
+    /// API-key-grade secrets, but they have no place in diagnostic logs.
+    #[test]
+    fn debug_redacts_session_started_session_id() {
+        let msg = LogMsg::SessionStarted {
+            session_id: "secret-uuid".into(),
+        };
+        let dbg = format!("{msg:?}");
+        assert!(
+            dbg.contains('…'),
+            "expected redaction marker in Debug output, got: {dbg}"
+        );
+        assert!(
+            !dbg.contains("secret-uuid"),
+            "session_id leaked through Debug: {dbg}"
+        );
+    }
+
+    /// `Debug` for `LogMsg::Resync` must redact `session_id` carried inside
+    /// the wrapped `ConversationState`. Delegating to
+    /// `ConversationState::fmt` keeps the redaction policy in one place;
+    /// this test guards against a future change accidentally re-deriving
+    /// `Debug` on `ConversationState` (which would leak the field).
+    #[test]
+    fn debug_resync_propagates_state_redaction() {
+        let state = ConversationState {
+            session_id: Some("secret-uuid".into()),
+            entries: vec![entry(0, "hello")],
+            ..Default::default()
+        };
+        let msg = LogMsg::Resync(Box::new(state));
+        let dbg = format!("{msg:?}");
+        assert!(
+            dbg.starts_with("Resync("),
+            "expected debug_tuple wrapping, got: {dbg}"
+        );
+        assert!(
+            dbg.contains('…'),
+            "expected session_id redaction marker in Resync Debug, got: {dbg}"
+        );
+        assert!(
+            !dbg.contains("secret-uuid"),
+            "session_id leaked through Resync Debug: {dbg}"
+        );
+        // Non-secret state is still observable for diagnostics.
+        assert!(
+            dbg.contains("hello"),
+            "expected non-secret entry text in Resync Debug, got: {dbg}"
+        );
+    }
+
+    /// `Debug` for `LogMsg::JsonPatch` round-trips the inner `Patch`
+    /// verbatim — patches do not carry secrets, so there is nothing to
+    /// redact, and stripping them would hurt diagnostics.
+    #[test]
+    fn debug_json_patch_round_trips_without_redaction() {
+        let patch = ConversationPatch::add_entry(0, entry(0, "diagnostic-text"));
+        let msg = LogMsg::JsonPatch(patch.clone());
+        let dbg = format!("{msg:?}");
+        assert!(
+            dbg.starts_with("JsonPatch("),
+            "expected debug_tuple wrapping, got: {dbg}"
+        );
+        // The full `Patch` Debug must be present — no redaction marker.
+        assert_eq!(dbg, format!("JsonPatch({:?})", patch));
+        assert!(
+            !dbg.contains('…'),
+            "JsonPatch must not be redacted (no secrets to hide): {dbg}"
+        );
+    }
+
+    /// `LogMsg::SessionEnded` carries no payload — `Debug` must render the
+    /// bare variant name, with no parens, fields, or wrapping.
+    #[test]
+    fn debug_session_ended_renders_bare_variant() {
+        let msg = LogMsg::SessionEnded;
+        assert_eq!(format!("{msg:?}"), "SessionEnded");
     }
 
     /// Regression: `history_plus_stream` must not duplicate messages that
