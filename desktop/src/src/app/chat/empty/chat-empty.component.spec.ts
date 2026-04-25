@@ -50,11 +50,12 @@ describe('ChatEmptyComponent', () => {
     expect(header?.className).toContain('text-ink-mute');
   });
 
-  it('applies role="status" on the host for accessibility', () => {
+  it('applies role="region" + aria-label on the host (static placeholder, not a live region)', () => {
     fixture.detectChanges();
 
     const host = fixture.nativeElement as HTMLElement;
-    expect(host.getAttribute('role')).toBe('status');
+    expect(host.getAttribute('role')).toBe('region');
+    expect(host.getAttribute('aria-label')).toBe('Empty conversation');
   });
 
   it('renders an empty-string hint without throwing', () => {

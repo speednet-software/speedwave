@@ -30,15 +30,15 @@ describe('ChatLoadingComponent', () => {
     expect(label?.textContent?.trim()).toBe('Fetching messages…');
   });
 
-  it('renders the spinner svg with the shared .spin animation class', () => {
+  it('renders the border-spinner div with the shared animate-sw-spin class', () => {
     fixture.detectChanges();
 
     const spinner = fixture.nativeElement.querySelector(
       '[data-testid="chat-loading-spinner"]'
-    ) as SVGElement | null;
+    ) as HTMLElement | null;
     expect(spinner).not.toBeNull();
-    expect(spinner?.classList.contains('spin')).toBe(true);
-    expect(spinner?.tagName.toLowerCase()).toBe('svg');
+    expect(spinner?.classList.contains('animate-sw-spin')).toBe(true);
+    expect(spinner?.tagName.toLowerCase()).toBe('div');
     expect(spinner?.getAttribute('aria-hidden')).toBe('true');
   });
 

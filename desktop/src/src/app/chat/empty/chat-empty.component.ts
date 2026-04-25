@@ -17,7 +17,8 @@ import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
     class: 'block my-2',
-    role: 'status',
+    role: 'region',
+    'aria-label': 'Empty conversation',
   },
   template: `<div
     data-testid="chat-empty"

@@ -65,8 +65,6 @@ import { ChangeDetectionStrategy, Component, Input, OnDestroy, signal } from '@a
 export class CodeBlockComponent implements OnDestroy {
   /** Verbatim code content; rendered inside `<pre><code>`. */
   @Input({ required: true }) code!: string;
-  /** Optional language hint — reserved for future syntax highlighting. */
-  @Input() language = '';
   /** File path or name shown in the header row. Empty = no header. */
   @Input() filename = '';
   /** Whether to show the copy button. */
