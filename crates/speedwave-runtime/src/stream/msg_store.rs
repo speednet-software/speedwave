@@ -29,8 +29,14 @@ pub const DEFAULT_HISTORY_BYTES: usize = 100 * 1024 * 1024;
 const BROADCAST_CAPACITY: usize = 1024;
 
 /// One message in the session stream (ADR-042 event protocol).
+///
+/// Uses **adjacently tagged** serde representation (`{"type": "...",
+/// "data": ...}`) because the `JsonPatch` variant wraps `json_patch::Patch`
+/// — a newtype over `Vec<PatchOperation>` that serializes as a JSON array.
+/// Internally tagged enums cannot embed a tag field into an array; the
+/// `JsonPatch` variant would silently fail to serialize otherwise.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum LogMsg {
     /// A JSON-Patch to apply to the current `ConversationState`.
     JsonPatch(Patch),
@@ -47,7 +53,9 @@ pub enum LogMsg {
 
 /// Approximate the serialized byte cost of a message for the history cap.
 fn size_of(msg: &LogMsg) -> usize {
-    serde_json::to_vec(msg).map(|v| v.len()).unwrap_or(0)
+    serde_json::to_vec(msg)
+        .map(|v| v.len())
+        .expect("LogMsg variants are always serde-serializable")
 }
 
 struct Inner {
@@ -109,11 +117,15 @@ impl MsgStore {
     /// Never fails: broadcast returns `Err` only when no subscribers exist,
     /// which is not an error condition — history still holds the message for
     /// future subscribers.
+    ///
+    /// The broadcast `send` happens while the inner lock is held. This
+    /// pairs with `history_plus_stream`, which takes the same lock across
+    /// `subscribe` + snapshot: together, a concurrent push cannot land the
+    /// same message in both a subscriber's receive queue and the snapshot
+    /// (duplicate-delivery race).
     pub fn push(&self, msg: LogMsg) {
-        {
-            let mut inner = self.inner.lock();
-            inner.push(msg.clone());
-        }
+        let mut inner = self.inner.lock();
+        inner.push(msg.clone());
         let _ = self.sender.send(msg);
     }
 
@@ -166,9 +178,18 @@ impl MsgStore {
     /// A lagged subscriber (one that falls behind by more than the broadcast
     /// capacity) receives a single `Resync` message with the current snapshot
     /// and then continues from live — never panics, never silently drops.
+    ///
+    /// Subscribing and snapshotting history happens atomically under the
+    /// inner lock: `push()` also takes the lock before broadcasting, so a
+    /// concurrent push cannot land the same message in both the snapshot
+    /// and the newly created receiver.
     pub fn history_plus_stream(&self) -> BoxStream<'static, LogMsg> {
-        let mut rx = self.sender.subscribe();
-        let history_snapshot = self.history_vec();
+        let (mut rx, history_snapshot) = {
+            let inner = self.inner.lock();
+            let rx = self.sender.subscribe();
+            let snap: Vec<LogMsg> = inner.history.iter().cloned().collect();
+            (rx, snap)
+        };
         let inner = self.inner.clone();
 
         Box::pin(stream! {
@@ -335,7 +356,7 @@ mod tests {
         store2.push(LogMsg::SessionEnded);
         let live = collect_n(stream2, 1).await;
         assert_eq!(live.len(), 1);
-        matches!(live[0], LogMsg::SessionEnded);
+        assert!(matches!(live[0], LogMsg::SessionEnded));
     }
 
     #[test]
@@ -404,5 +425,86 @@ mod tests {
             h.await.unwrap();
         }
         assert_eq!(store.history_len(), 1000);
+    }
+
+    /// Regression: `LogMsg::JsonPatch` must serialize to non-zero bytes so
+    /// that the history cap actually counts patch messages. An internally
+    /// tagged serde representation cannot embed a tag into the array
+    /// produced by `json_patch::Patch` and silently returns zero bytes —
+    /// that made the 100 MB cap inapplicable to the dominant variant.
+    #[test]
+    fn history_bytes_accounts_for_json_patch_messages() {
+        let store = MsgStore::new();
+        store.push(LogMsg::JsonPatch(ConversationPatch::add_entry(
+            0,
+            entry(0, "hello world"),
+        )));
+        assert_eq!(store.history_len(), 1);
+        assert!(
+            store.history_bytes() > 0,
+            "JsonPatch messages must contribute non-zero bytes to the history cap; \
+             got {} bytes for a non-empty patch",
+            store.history_bytes()
+        );
+    }
+
+    /// Regression: `history_plus_stream` must not duplicate messages that
+    /// race against the subscribe/snapshot pair. A push from a parallel
+    /// OS thread while the stream is being constructed would, with the
+    /// pre-fix code, land the message in both the snapshot and the
+    /// subscriber's queue — yielding a duplicate. A multi-threaded runtime
+    /// is required to exercise that interleaving because both
+    /// `subscribe()` and `history_vec()` are synchronous.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn history_plus_stream_no_duplicate_under_concurrent_push() {
+        const N: usize = 200;
+        let store = Arc::new(MsgStore::new());
+        // Pre-seed some history entries so the snapshot branch is exercised.
+        for i in 0..5 {
+            store.push(LogMsg::SessionStarted {
+                session_id: format!("pre-{i}"),
+            });
+        }
+        let initial = store.history_len();
+
+        // Spawn the pusher first so pushes are already in flight by the
+        // time the consumer starts constructing the combined stream.
+        let push_store = store.clone();
+        let pusher = tokio::task::spawn_blocking(move || {
+            for i in 0..N {
+                push_store.push(LogMsg::SessionStarted {
+                    session_id: format!("live-{i}"),
+                });
+            }
+        });
+
+        let stream_store = store.clone();
+        let consumer = tokio::spawn(async move {
+            let stream = stream_store.history_plus_stream();
+            collect_n(stream, initial + N).await
+        });
+
+        pusher.await.unwrap();
+        let collected = consumer.await.unwrap();
+
+        // Every unique session_id must appear exactly once.
+        let mut seen = std::collections::HashSet::new();
+        for msg in &collected {
+            if let LogMsg::SessionStarted { session_id } = msg {
+                assert!(
+                    seen.insert(session_id.clone()),
+                    "duplicate delivery for session_id: {session_id}"
+                );
+            }
+        }
+        // Total must equal initial + N — no duplicates, no drops.
+        assert_eq!(
+            collected.len(),
+            initial + N,
+            "expected {} messages, got {}; duplicates would inflate this count",
+            initial + N,
+            collected.len()
+        );
+        assert_eq!(seen.len(), initial + N);
     }
 }

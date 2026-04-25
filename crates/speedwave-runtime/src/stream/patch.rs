@@ -19,8 +19,10 @@ fn pointer(path: &str) -> PointerBuf {
 }
 
 fn value_of<T: serde::Serialize>(value: &T) -> serde_json::Value {
-    // serde_json::to_value cannot fail for our state types.
-    serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
+    // Panicking is correct here: a silent `Null` fallback would corrupt the
+    // patched state in a way that is hard to debug. Our state types are
+    // always serde-serializable.
+    serde_json::to_value(value).expect("state types are always serde-serializable")
 }
 
 /// Builder for `json_patch::Patch` values that operate on
@@ -30,6 +32,11 @@ pub struct ConversationPatch;
 impl ConversationPatch {
     /// Add a new entry at `/entries/<idx>`. Pass the target vector index —
     /// this maps to RFC 6902 `add` which inserts at that position.
+    ///
+    /// `idx` is the JSON Pointer path segment, i.e. the current vector
+    /// position in `/entries`. It is NOT the logical `ConversationEntry.index`
+    /// allocated by `EntryIndexProvider`. They coincide only when entries are
+    /// appended in order with no removals.
     pub fn add_entry(idx: usize, entry: ConversationEntry) -> Patch {
         Patch(vec![PatchOperation::Add(AddOperation {
             path: pointer(&format!("/entries/{idx}")),
@@ -38,6 +45,11 @@ impl ConversationPatch {
     }
 
     /// Replace the entry at `/entries/<idx>` with a new one.
+    ///
+    /// `idx` is the JSON Pointer path segment, i.e. the current vector
+    /// position in `/entries`. It is NOT the logical `ConversationEntry.index`
+    /// allocated by `EntryIndexProvider`. They coincide only when entries are
+    /// appended in order with no removals.
     pub fn replace_entry(idx: usize, entry: ConversationEntry) -> Patch {
         Patch(vec![PatchOperation::Replace(ReplaceOperation {
             path: pointer(&format!("/entries/{idx}")),
@@ -48,6 +60,11 @@ impl ConversationPatch {
     /// Remove the entry at `/entries/<idx>`. Subsequent entries shift left;
     /// callers that rely on stable indices (ADR-044) should only remove
     /// trailing entries (e.g. during retry per ADR-046).
+    ///
+    /// `idx` is the JSON Pointer path segment, i.e. the current vector
+    /// position in `/entries`. It is NOT the logical `ConversationEntry.index`
+    /// allocated by `EntryIndexProvider`. They coincide only when entries are
+    /// appended in order with no removals.
     pub fn remove_entry(idx: usize) -> Patch {
         Patch(vec![PatchOperation::Remove(RemoveOperation {
             path: pointer(&format!("/entries/{idx}")),
@@ -87,6 +104,18 @@ impl ConversationPatch {
         Patch(vec![PatchOperation::Replace(ReplaceOperation {
             path: pointer("/pending_queue"),
             value: value_of(&queued),
+        })])
+    }
+
+    /// Replace `/session_id` with the given Claude Code session identifier.
+    ///
+    /// The JSON shape matches `ConversationState::session_id`
+    /// (`Option<String>` → `Some(id)`), so the patch round-trips through
+    /// `apply()` without touching other fields.
+    pub fn set_session_id(id: &str) -> Patch {
+        Patch(vec![PatchOperation::Replace(ReplaceOperation {
+            path: pointer("/session_id"),
+            value: value_of(&Some(id.to_string())),
         })])
     }
 }
@@ -233,6 +262,36 @@ mod tests {
         assert_eq!(set.pending_queue.as_ref().unwrap(), &msg);
         let cleared = apply(set, &ConversationPatch::set_pending_queue(None)).unwrap();
         assert!(cleared.pending_queue.is_none());
+    }
+
+    #[test]
+    fn set_session_id_patch_shape() {
+        let p = ConversationPatch::set_session_id("abc-123");
+        let encoded = serde_json::to_value(&p).unwrap();
+        let arr = encoded.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["op"], "replace");
+        assert_eq!(arr[0]["path"], "/session_id");
+        assert_eq!(arr[0]["value"], "abc-123");
+    }
+
+    #[test]
+    fn apply_set_session_id_sets_field() {
+        let state = ConversationState::default();
+        let patch = ConversationPatch::set_session_id("sess-42");
+        let next = apply(state, &patch).unwrap();
+        assert_eq!(next.session_id.as_deref(), Some("sess-42"));
+    }
+
+    #[test]
+    fn apply_set_session_id_overwrites_previous() {
+        let state = ConversationState {
+            session_id: Some("old".into()),
+            ..Default::default()
+        };
+        let patch = ConversationPatch::set_session_id("new");
+        let next = apply(state, &patch).unwrap();
+        assert_eq!(next.session_id.as_deref(), Some("new"));
     }
 
     #[test]

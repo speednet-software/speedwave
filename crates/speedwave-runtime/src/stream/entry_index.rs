@@ -28,13 +28,17 @@ impl EntryIndexProvider {
     }
 
     /// Allocate the next index. Monotonic, never reused.
+    ///
+    /// `Relaxed` ordering is sufficient: the only requirement is that each
+    /// call returns a unique value. We do not use the counter to synchronize
+    /// any other memory, so a full `SeqCst` fence is unnecessary overhead.
     pub fn next(&self) -> usize {
-        self.0.fetch_add(1, Ordering::SeqCst)
+        self.0.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Read the current counter value without consuming an index.
     pub fn current(&self) -> usize {
-        self.0.load(Ordering::SeqCst)
+        self.0.load(Ordering::Relaxed)
     }
 
     /// Recover the next value by scanning an existing `MsgStore`'s history.
