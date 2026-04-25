@@ -998,18 +998,20 @@ describe('ChatComponent', () => {
   });
 
   describe('Stop button and ESC handler', () => {
-    it('shows Stop button when streaming, Send button when idle', () => {
+    it('shows Stop button when streaming, hides it when idle', () => {
+      // After Unit 9 (composer extraction), the Send button lives inside
+      // <app-composer>; chat.component owns only the Stop button alongside.
       projectState.status = 'ready';
       chatState.isStreaming = false;
       fixture.detectChanges();
-      expect(fixture.nativeElement.querySelector('[data-testid="chat-send"]')).toBeTruthy();
       expect(fixture.nativeElement.querySelector('[data-testid="chat-stop"]')).toBeNull();
+      expect(fixture.nativeElement.querySelector('app-composer')).toBeTruthy();
 
       chatState.isStreaming = true;
       chatState['notifyChange']();
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="chat-stop"]')).toBeTruthy();
-      expect(fixture.nativeElement.querySelector('[data-testid="chat-send"]')).toBeNull();
+      expect(fixture.nativeElement.querySelector('app-composer')).toBeTruthy();
     });
 
     it('clicking Stop calls stopConversation', () => {
