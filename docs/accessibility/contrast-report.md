@@ -32,6 +32,7 @@ Base palette (shared across every theme):
 | `--ink-mute`    | `#707a96`                 |
 | `--accent`      | `#ff4d6d` (rose, default) |
 | `--accent-dim`  | `#c9304e`                 |
+| `--on-accent`   | `#07090f`                 |
 | `--teal`        | `#22d3b7`                 |
 | `--amber`       | `#f5b942`                 |
 | `--green`       | `#34d399`                 |
@@ -43,8 +44,8 @@ Accent overrides per theme:
 | -------------- | ---------- | -------------- |
 | default (rose) | `#ff4d6d`  | `#c9304e`      |
 | `mint`         | `#5eead4`  | `#2dd4bf`      |
-| `amber`        | `#f5b942`  | `#d99a24`      |
-| `iris`         | `#a78bfa`  | `#8b5cf6`      |
+| `gold`         | `#f5b942`  | `#d99a24`      |
+| `purple`       | `#a78bfa`  | `#8b5cf6`      |
 | `cyan`         | `#38bdf8`  | `#0ea5e9`      |
 | `sand`         | `#d4a574`  | `#a97f4e`      |
 
@@ -79,9 +80,27 @@ Accent overrides per theme:
 | `--accent`     | `--bg-1`   | TBD   | 4.5:1   | TBD    |
 | `--accent-dim` | `--bg`     | TBD   | 4.5:1   | TBD    |
 
-### Mint, Amber, Iris, Cyan, Sand
+### Mint, Gold, Purple, Cyan, Sand
 
 TBD — Wave 6 fills with measured ratios per theme.
+
+## On-accent text contrast
+
+`--on-accent` (`#07090f`) is the text color that sits on top of a filled
+`--accent` button. This is arguably the highest-stakes contrast pair in the
+UI — button label text must meet the **4.5:1** body-text minimum against the
+filled accent surface of every theme.
+
+<!-- Content to be written: Wave 6 fills with measured ratios per theme. -->
+
+| Foreground    | Background (theme `--accent`) | Ratio | Minimum | Status |
+| ------------- | ----------------------------- | ----- | ------- | ------ |
+| `--on-accent` | `#ff4d6d` (rose, default)     | TBD   | 4.5:1   | TBD    |
+| `--on-accent` | `#5eead4` (mint)              | TBD   | 4.5:1   | TBD    |
+| `--on-accent` | `#f5b942` (gold)              | TBD   | 4.5:1   | TBD    |
+| `--on-accent` | `#a78bfa` (purple)            | TBD   | 4.5:1   | TBD    |
+| `--on-accent` | `#38bdf8` (cyan)              | TBD   | 4.5:1   | TBD    |
+| `--on-accent` | `#d4a574` (sand)              | TBD   | 4.5:1   | TBD    |
 
 ## Semantic colors on backgrounds
 

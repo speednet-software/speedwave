@@ -7,6 +7,10 @@
  * --bg / --ink / --accent / --teal / --amber / --green / --violet / --line
  * (and their variants) — never hex literals, never the legacy --color-sw-*
  * tokens below.
+ *
+ * Tokens are unprefixed — Tauri closed WebView means we control all CSS;
+ * the mockup uses these names verbatim and adopting them preserves 1:1
+ * fidelity with the design source.
  */
 :root {
   color-scheme: dark;
@@ -39,7 +43,7 @@
   --violet: #a78bfa;
 }
 
-/* Accent themes share the neutral crimson backgrounds; only the accent and
+/* Accent themes share the neutral dark backgrounds; only the accent and
  * its derived alphas change. Switched via `data-theme` on the root element.
  */
 
@@ -49,16 +53,16 @@
   --accent-soft: rgba(94, 234, 212, 0.1);
 }
 
-[data-theme='amber'] {
+[data-theme='gold'] {
   --accent: #f5b942;
   --accent-dim: #d99a24;
   --accent-soft: rgba(245, 185, 66, 0.1);
 }
 
-[data-theme='iris'] {
+[data-theme='purple'] {
   --accent: #a78bfa;
   --accent-dim: #8b5cf6;
-  --accent-soft: rgba(167, 139, 250, 0.12);
+  --accent-soft: rgba(167, 139, 250, 0.1);
 }
 
 [data-theme='cyan'] {
@@ -259,6 +263,7 @@
     padding-left: 1rem;
   }
 
+  /* explicit override, same as default `--shape-color: var(--accent)` — kept for readable markup */
   .timeline-event-accent {
     --shape-color: var(--accent);
   }
@@ -281,9 +286,11 @@
     box-shadow: 0 0 0 1px color-mix(in oklab, var(--shape-color) 40%, transparent);
     background-color: color-mix(in oklab, var(--shape-color) 6%, transparent);
     padding: 0.75rem;
+    /* clips corner overflow from rounded ring descendants */
     overflow: hidden;
   }
 
+  /* explicit override, same as default `--shape-color: var(--accent)` — kept for readable markup */
   .callout-box-accent {
     --shape-color: var(--accent);
   }
@@ -299,10 +306,9 @@
   .callout-box-violet {
     --shape-color: var(--violet);
   }
-}
 
-/* ── Prose layer for rendered markdown (innerHTML) ── */
-@layer components {
+  /* ── Prose layer for rendered markdown (innerHTML) ── */
+
   /* Collapse margins at container edges */
   .prose-sw :first-child {
     margin-top: 0;
