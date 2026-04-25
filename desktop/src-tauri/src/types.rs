@@ -35,7 +35,7 @@ pub(crate) struct LlmConfigResponse {
     pub(crate) provider: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) base_url: Option<String>,
-    pub(crate) api_key_env: Option<String>,
+    pub(crate) default_base_url: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -64,6 +64,7 @@ pub(crate) struct IntegrationStatusEntry {
     pub(crate) auth_fields: Vec<AuthField>,
     pub(crate) current_values: std::collections::HashMap<String, String>,
     pub(crate) mappings: Option<std::collections::HashMap<String, serde_json::Value>>,
+    pub(crate) badge: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -300,6 +301,19 @@ mod tests {
     fn toggleable_services_have_auth_fields() {
         for svc in speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES {
             let fields = get_auth_fields(svc.config_key);
+            // Credential-less services (e.g. Playwright) declare `auth_fields: &[]`
+            // in their descriptor; `get_auth_fields` faithfully returns an empty vec.
+            // Only fail if the descriptor says the service has auth fields but the
+            // getter returns nothing — a real bug.
+            if svc.auth_fields.is_empty() {
+                assert!(
+                    fields.is_empty(),
+                    "service '{}' has no descriptor auth_fields but get_auth_fields returned {}",
+                    svc.config_key,
+                    fields.len()
+                );
+                continue;
+            }
             assert!(
                 !fields.is_empty(),
                 "TOGGLEABLE service '{}' has no auth_fields defined",

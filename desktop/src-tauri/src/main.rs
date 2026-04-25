@@ -16,8 +16,10 @@ mod diagnostics;
 mod fs_perms;
 mod health;
 mod history;
+mod http_util;
 mod ide_bridge;
 mod integrations_cmd;
+mod llm_cmd;
 mod log_file;
 mod logging_cmd;
 mod mcp_os_process;
@@ -45,7 +47,7 @@ use std::sync::{Arc, Mutex};
 use tauri::tray::TrayIconBuilder;
 use tauri::Manager;
 
-use reconcile::{SharedAutoCheckHandle, SharedIdeBridge, SharedMcpOs};
+use reconcile::{ExitCleanupContext, SharedAutoCheckHandle, SharedIdeBridge, SharedMcpOs};
 
 /// Joins a cleanup thread handle with a watchdog that force-exits after
 /// `EXIT_CLEANUP_TIMEOUT_SECS`. If the cleanup thread panics, exits with
@@ -69,6 +71,38 @@ pub(crate) fn join_with_exit_watchdog(handle: std::thread::JoinHandle<()>) {
         log::warn!("exit cleanup thread panicked: {e:?}");
     }
     drop(watchdog);
+}
+
+/// Stashes a cleanup `JoinHandle` into the shared slot so `RunEvent::Exit`
+/// can join it before the process exits.
+///
+/// If the slot is already occupied (the other exit path beat us to it, which
+/// the `CLEANUP_ONCE` guard makes effectively impossible) or the mutex is
+/// poisoned, drops the handle — the cleanup thread will run to completion
+/// independently and the process exit path in `RunEvent::Exit` will join
+/// whatever handle arrived first.
+///
+/// **Must not be called on the Tauri event-loop thread with blocking intent** —
+/// both call sites (WindowEvent::Destroyed and RunEvent::ExitRequested) only
+/// stash the handle; the actual join happens in `RunEvent::Exit` on the same
+/// thread after Tauri has finished processing events.
+pub(crate) fn stash_cleanup_handle(
+    slot: &Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    handle: std::thread::JoinHandle<()>,
+) {
+    match slot.lock() {
+        Ok(mut guard) => {
+            if guard.is_none() {
+                *guard = Some(handle);
+            }
+            // else: slot already occupied — CLEANUP_ONCE guarantees the
+            // cleanup body runs once, so this handle is a no-op. Drop it.
+        }
+        Err(e) => {
+            log::warn!("exit cleanup handle slot poisoned, cleanup will not be joined: {e}");
+            // Drop the handle — the cleanup thread runs independently.
+        }
+    }
 }
 
 /// Tracks the latest available update version for the system tray menu.
@@ -207,6 +241,23 @@ async fn answer_question(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn stop_chat_inner(session_arc: SharedChatSession) -> Result<(), String> {
+    let mut session = session_arc
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    session.interrupt().map_err(|e| e.to_string())
+}
+
+/// Tauri command — delegates to [`ChatSession::interrupt`].
+#[tauri::command]
+async fn stop_chat(state: tauri::State<'_, SharedChatSession>) -> Result<(), String> {
+    log::info!("stop_chat: interrupting turn");
+    let session_arc = state.inner().clone();
+    tokio::task::spawn_blocking(move || stop_chat_inner(session_arc))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 // ---------------------------------------------------------------------------
@@ -896,26 +947,28 @@ fn main() {
     let tray_available_setup = tray_available.clone();
     let tray_available_close = tray_available.clone();
 
-    let ide_bridge_exit = ide_bridge.clone();
-    let mcp_os_exit = mcp_os.clone();
-    let auto_check_exit = auto_check_handle.clone();
+    // Bundle the three shared-state Arcs into a single context struct so each
+    // exit path only needs one clone instead of three parallel Arc clones.
+    let cleanup_ctx = ExitCleanupContext {
+        ide_bridge: ide_bridge.clone(),
+        mcp_os: mcp_os.clone(),
+        auto_check_handle: auto_check_handle.clone(),
+    };
+    let cleanup_ctx_window = cleanup_ctx.clone();
+    let cleanup_ctx_runevent = cleanup_ctx.clone();
     let update_version_setup = update_version.clone();
 
     // Register SIGTERM/SIGINT handler so process signals trigger the same
     // cleanup as graceful window close. The CLEANUP_ONCE guard in
     // run_exit_cleanup ensures the body runs at most once even when both
     // the signal handler and WindowEvent::Destroyed fire concurrently.
-    let ide_bridge_signal = ide_bridge.clone();
-    let mcp_os_signal = mcp_os.clone();
-    let auto_check_signal = auto_check_handle.clone();
+    let cleanup_ctx_signal = cleanup_ctx.clone();
     // The ctrlc crate runs handlers on a dedicated thread (not a real signal
     // handler), so blocking with `.join()` here is safe and necessary —
     // `std::process::exit` would otherwise kill the cleanup thread mid-flight
     // and the Lima VM would never stop.
     match ctrlc::set_handler(move || {
-        if let Some(handle) =
-            reconcile::run_exit_cleanup(&ide_bridge_signal, &mcp_os_signal, &auto_check_signal)
-        {
+        if let Some(handle) = reconcile::run_exit_cleanup(&cleanup_ctx_signal) {
             join_with_exit_watchdog(handle);
         }
         // Exit code 1: process was terminated by a signal (SIGTERM/SIGINT).
@@ -929,9 +982,10 @@ fn main() {
     }
 
     // Shared slot for the cleanup `JoinHandle` produced inside
-    // `WindowEvent::Destroyed`. The Tauri `RunEvent::Exit` hook drains and
-    // joins it so the Lima VM stop completes before `Builder::run` returns
-    // (and the process exits).
+    // `WindowEvent::Destroyed` or `RunEvent::ExitRequested` (whichever fires
+    // first for the given exit path). The Tauri `RunEvent::Exit` hook drains
+    // and joins it so the Lima VM stop completes before `Builder::run`
+    // returns (and the process exits).
     let exit_cleanup_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> =
         Arc::new(Mutex::new(None));
     let exit_cleanup_handle_window = exit_cleanup_handle.clone();
@@ -953,9 +1007,11 @@ fn main() {
     #[allow(clippy::expect_used)]
     builder
         .plugin({
-            use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
+            use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
+            // Note: no timezone_strategy() here — the custom `.format(...)`
+            // below takes over and uses `chrono::Local::now()` directly, so
+            // the plugin's TimezoneStrategy would be dead config.
             tauri_plugin_log::Builder::new()
-                .timezone_strategy(TimezoneStrategy::UseLocal)
                 .targets([
                     Target::new(TargetKind::Stdout),
                     Target::new(TargetKind::LogDir {
@@ -972,8 +1028,15 @@ fn main() {
                 .format(move |callback, message, record| {
                     let sanitized =
                         speedwave_runtime::log_sanitizer::sanitize(&format!("{message}"));
+                    // ISO8601 local-time timestamp with millisecond precision.
+                    // Shipped in every log line so post-mortem timing analysis
+                    // (e.g. shutdown-sequence profiling) does not need a
+                    // separate overlay. `%.3f` keeps the millis in the
+                    // fractional-seconds slot; `%z` is the numeric UTC offset
+                    // from chrono::Local::now(), which reads the system timezone.
+                    let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%z");
                     callback.finish(format_args!(
-                        "[{level}][{target}] {sanitized}",
+                        "{ts} [{level}][{target}] {sanitized}",
                         level = record.level(),
                         target = record.target(),
                     ))
@@ -1080,10 +1143,7 @@ fn main() {
             // Build system tray.
             let tray_menu = tray::build_tray_menu(app.handle(), &None)?;
             let update_version_tray = update_version_setup.clone();
-            let tray_icon = app
-                .default_window_icon()
-                .cloned()
-                .ok_or("No default window icon")?;
+            let tray_icon = tray::load_tray_icon()?;
 
             #[cfg_attr(target_os = "linux", allow(unused_mut))]
             let mut tray_builder = TrayIconBuilder::with_id("main-tray")
@@ -1283,7 +1343,9 @@ fn main() {
             // Settings
             containers_cmd::factory_reset,
             containers_cmd::get_llm_config,
+            containers_cmd::get_default_base_url,
             containers_cmd::update_llm_config,
+            llm_cmd::discover_llm_models,
             // Authentication
             auth_commands::save_api_key,
             auth_commands::delete_api_key,
@@ -1297,6 +1359,7 @@ fn main() {
             start_chat,
             send_message,
             answer_question,
+            stop_chat,
             // Chat history
             list_conversations,
             get_conversation,
@@ -1380,17 +1443,8 @@ fn main() {
                     // Tauri main thread would deadlock the event loop. Stash
                     // the handle so `RunEvent::Exit` can join before the
                     // process actually exits.
-                    if let Some(handle) = reconcile::run_exit_cleanup(
-                        &ide_bridge_exit,
-                        &mcp_os_exit,
-                        &auto_check_exit,
-                    ) {
-                        match exit_cleanup_handle_window.lock() {
-                            Ok(mut slot) => *slot = Some(handle),
-                            Err(e) => log::warn!(
-                                "exit cleanup handle slot poisoned, cleanup will not be joined: {e}"
-                            ),
-                        }
+                    if let Some(handle) = reconcile::run_exit_cleanup(&cleanup_ctx_window) {
+                        stash_cleanup_handle(&exit_cleanup_handle_window, handle);
                     }
                 }
                 _ => {}
@@ -1398,11 +1452,60 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("fatal: Tauri application failed to start")
-        .run(move |_app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(move |app_handle, event| match event {
+            // `ExitRequested` covers the paths where `WindowEvent::Destroyed`
+            // does NOT fire on the main window before exit:
+            //   - Tray menu "Quit" (calls `app.exit(0)`)
+            //   - macOS app menu "Quit Speedwave" / Cmd+Q (NSApplication terminate)
+            //   - SIGTERM via the Tauri runtime
+            // In tray mode the main window is hidden (not destroyed), so the
+            // `WindowEvent::Destroyed` branch never runs and the VM would stay
+            // up after the process exits. Spawning cleanup here guarantees it
+            // runs for every exit path. `CLEANUP_ONCE` inside
+            // `run_exit_cleanup` makes this idempotent with respect to the
+            // `WindowEvent::Destroyed` call site.
+            tauri::RunEvent::ExitRequested { .. } => {
+                // Hide the main window immediately so macOS stops waiting for
+                // the window to respond during the cleanup join in
+                // `RunEvent::Exit`. Without this, the user sees a beachball
+                // for ~1s on Cmd+Q because the event loop blocks joining the
+                // limactl stop thread while the window is still visible —
+                // WindowServer then draws the beachball.
+                //
+                // Safe on Linux and Windows too: on those platforms the
+                // window is typically already being destroyed when
+                // ExitRequested fires (tray-less setups), making this a
+                // harmless no-op. Do NOT gate this to macOS — a
+                // `#[cfg(target_os = "macos")]` guard would re-introduce the
+                // beachball if macOS ever reorders event delivery, and
+                // removing it costs nothing elsewhere.
+                hide_main_window(app_handle);
+                if let Some(handle) = reconcile::run_exit_cleanup(&cleanup_ctx_runevent) {
+                    stash_cleanup_handle(&exit_cleanup_handle_runevent, handle);
+                }
+            }
+            tauri::RunEvent::Exit => {
                 // Drain and join the cleanup thread spawned in
-                // WindowEvent::Destroyed so `limactl stop` finishes before
-                // Tauri returns from `.run()` and the process exits.
+                // `WindowEvent::Destroyed` or `RunEvent::ExitRequested` so
+                // `limactl stop` finishes before Tauri returns from `.run()`
+                // and the process exits.
+                //
+                // Fallback: on macOS, Cmd+Q / app-menu-Quit delivers
+                // `applicationWillTerminate`, which tao maps to
+                // `Event::LoopDestroyed`, which tauri-runtime-wry maps
+                // directly to `RunEvent::Exit` — bypassing
+                // `RunEvent::ExitRequested` and (for a hidden tray-mode
+                // window) `WindowEvent::Destroyed` entirely. If neither
+                // earlier arm ran, the slot is empty here and the Lima VM
+                // would be orphaned. Spawn cleanup inline as a last resort.
+                // `CLEANUP_ONCE` inside `run_exit_cleanup` makes this
+                // idempotent with the other entry points.
+                //
+                // NOTE: `exit_arm_runs_cleanup_when_handle_slot_is_empty` in
+                // the tests below asserts that this arm contains the literal
+                // strings `run_exit_cleanup(&cleanup_ctx_runevent)` and
+                // `hide_main_window(app_handle)` — if you rename either
+                // identifier, update the test assertions too.
                 let handle = match exit_cleanup_handle_runevent.lock() {
                     Ok(mut slot) => slot.take(),
                     Err(e) => {
@@ -1410,10 +1513,15 @@ fn main() {
                         None
                     }
                 };
+                let handle = handle.or_else(|| {
+                    hide_main_window(app_handle);
+                    reconcile::run_exit_cleanup(&cleanup_ctx_runevent)
+                });
                 if let Some(handle) = handle {
                     join_with_exit_watchdog(handle);
                 }
             }
+            _ => {}
         });
 }
 
@@ -1797,14 +1905,20 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Structural test: both the ctrlc signal handler and RunEvent::Exit handler
-    /// must use `join_with_exit_watchdog` instead of inline watchdog patterns.
+    /// Structural test: all exit paths must use `join_with_exit_watchdog`
+    /// instead of inline watchdog patterns.
     #[test]
     fn both_exit_paths_use_join_with_exit_watchdog() {
         let source = include_str!("main.rs");
         let occurrences: Vec<_> = source.match_indices("join_with_exit_watchdog").collect();
-        // One definition (the fn) + two call sites + one test reference = at least 4.
-        // We check for at least 3 non-test occurrences (fn def + 2 calls).
+        // Expected non-test occurrences:
+        //   1. fn join_with_exit_watchdog definition
+        //   2. ctrlc signal handler call site (blocks — safe on ctrlc's dedicated thread)
+        //   3. RunEvent::Exit call site (blocks — after Tauri finishes processing events)
+        // The stash_cleanup_handle helper used by WindowEvent::Destroyed and
+        // RunEvent::ExitRequested drops handles rather than joining on the event-loop
+        // thread, so it does NOT add occurrences here.
+        // Total: at least 3 (fn def + 2 call sites) outside the test module.
         let non_test_count = occurrences
             .iter()
             .filter(|(idx, _)| {
@@ -1823,7 +1937,168 @@ mod tests {
         assert!(
             non_test_count >= 3,
             "join_with_exit_watchdog must appear at least 3 times outside tests \
-             (1 definition + 2 call sites), found {non_test_count}"
+             (1 definition + 2 call sites: signal handler and RunEvent::Exit), \
+             found {non_test_count}"
+        );
+    }
+
+    /// Regression guard: the `ExitRequested` arm must hide the main window
+    /// BEFORE spawning cleanup. Without this, the user sees a beachball
+    /// on Cmd+Q because the event loop blocks joining the cleanup thread
+    /// while the main window is still visible — macOS WindowServer then
+    /// draws the beachball. Hiding the window first releases WindowServer
+    /// from expecting paint responses.
+    ///
+    /// The hide is performed via `hide_main_window(app_handle)` — the
+    /// canonical helper in `window.rs` that also sets the macOS activation
+    /// policy to Accessory so the Dock icon disappears immediately.
+    #[test]
+    fn exit_requested_arm_hides_main_window_before_cleanup() {
+        let source = include_str!("main.rs");
+        let arm_start = source
+            .find("tauri::RunEvent::ExitRequested { .. } =>")
+            .expect("ExitRequested arm must exist");
+        let arm_region = &source[arm_start..source.len().min(arm_start + 2_000)];
+        let exit_arm = arm_region
+            .find("tauri::RunEvent::Exit =>")
+            .map_or(arm_region, |end| &arm_region[..end]);
+        let hide_idx = exit_arm.find("hide_main_window(app_handle)").expect(
+            "ExitRequested arm must call hide_main_window(app_handle) \
+                 (the canonical helper) to prevent beachball",
+        );
+        let cleanup_idx = exit_arm
+            .find("run_exit_cleanup")
+            .expect("ExitRequested arm must call run_exit_cleanup");
+        assert!(
+            hide_idx < cleanup_idx,
+            "hide_main_window(app_handle) must appear BEFORE run_exit_cleanup in \
+             the ExitRequested arm — otherwise the window stays visible during \
+             cleanup and macOS shows a beachball"
+        );
+    }
+
+    /// Regression guard: the `ExitRequested` arm must stash its cleanup handle
+    /// into `exit_cleanup_handle_runevent` so that `RunEvent::Exit` can join it
+    /// before the process exits. A future refactor that drops the stash would
+    /// silently break the join and leave the Lima VM running after quit.
+    #[test]
+    fn exit_requested_arm_stashes_handle_for_exit_join() {
+        let source = include_str!("main.rs");
+        let arm_start = source
+            .find("tauri::RunEvent::ExitRequested { .. } =>")
+            .expect("ExitRequested arm must exist");
+        let arm_region = &source[arm_start..source.len().min(arm_start + 2_000)];
+        let exit_arm = arm_region
+            .find("tauri::RunEvent::Exit =>")
+            .map_or(arm_region, |end| &arm_region[..end]);
+        assert!(
+            exit_arm.contains("exit_cleanup_handle_runevent"),
+            "the ExitRequested arm must reference exit_cleanup_handle_runevent \
+             so RunEvent::Exit can join the cleanup thread before the process exits"
+        );
+        assert!(
+            exit_arm.contains("stash_cleanup_handle"),
+            "the ExitRequested arm must call stash_cleanup_handle to \
+             store the JoinHandle — direct slot manipulation would bypass the \
+             write-once safety logic in the helper"
+        );
+    }
+
+    /// Regression guard: the `RunEvent::Exit` arm must have a fallback that
+    /// calls `run_exit_cleanup` when the handle slot is empty. On macOS,
+    /// Cmd+Q / app-menu-Quit delivers `applicationWillTerminate`, which tao
+    /// maps to `Event::LoopDestroyed`, which tauri-runtime-wry maps directly
+    /// to `RunEvent::Exit` — bypassing `RunEvent::ExitRequested` and (for a
+    /// hidden tray-mode window) `WindowEvent::Destroyed`. Without the
+    /// fallback, the slot stays empty, nothing is joined, and the Lima VM
+    /// is orphaned after quit.
+    #[test]
+    fn exit_arm_runs_cleanup_when_handle_slot_is_empty() {
+        let source = include_str!("main.rs");
+        let arm_start = source
+            .find("tauri::RunEvent::Exit =>")
+            .expect("Exit arm must exist");
+        let after_arm = &source[arm_start..];
+        let arm_end = after_arm
+            .find("\n            _ => {}")
+            .unwrap_or(after_arm.len());
+        let exit_arm = &after_arm[..arm_end];
+        assert!(
+            exit_arm.contains("run_exit_cleanup(&cleanup_ctx_runevent)"),
+            "the RunEvent::Exit arm must fall back to \
+             run_exit_cleanup(&cleanup_ctx_runevent) when the handle slot is \
+             empty — otherwise macOS Cmd+Q (which delivers \
+             applicationWillTerminate and bypasses ExitRequested) orphans \
+             the Lima VM"
+        );
+        assert!(
+            exit_arm.contains("hide_main_window(app_handle)"),
+            "the RunEvent::Exit arm must hide the main window before \
+             spawning the fallback cleanup to avoid a beachball during \
+             limactl stop"
+        );
+    }
+
+    /// Behavioral test for `stash_cleanup_handle` happy path: handle is
+    /// stashed into an empty slot. Covers the dominant branch; other
+    /// branches (slot-occupied, poisoned-mutex) are unreachable under
+    /// `CLEANUP_ONCE` or documented-contract-only.
+    #[test]
+    fn stash_cleanup_handle_stores_into_empty_slot() {
+        let slot: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+        let handle = std::thread::spawn(|| {});
+        stash_cleanup_handle(&slot, handle);
+
+        let stashed = slot.lock().unwrap().take();
+        // Regression guard: if the empty-slot branch were ever inverted
+        // (e.g. `if guard.is_some()` instead of `is_none()`), this would be None.
+        assert!(
+            stashed.is_some(),
+            "first handle must be stashed into empty slot"
+        );
+        stashed.unwrap().join().expect("test thread must not panic");
+    }
+
+    // -- stop_chat_inner tests --
+
+    #[test]
+    fn stop_chat_inner_without_active_session_errors() {
+        // interrupt() requires an active stdin (shared_stdin=Some). A freshly
+        // constructed ChatSession has no stdin, so interrupt — and therefore
+        // stop_chat_inner — returns "no active session" instead of panicking.
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("test-project")));
+        let err = stop_chat_inner(session_arc).expect_err("expected error on idle session");
+        assert!(
+            err.contains("no active session"),
+            "expected 'no active session' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn stop_chat_inner_poisoned_mutex_returns_lock_poisoned_error() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("test-project")));
+        let arc_clone = session_arc.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = arc_clone.lock().unwrap();
+            panic!("poison the mutex");
+        })
+        .join();
+        let result = stop_chat_inner(session_arc);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Lock poisoned"),
+            "expected 'Lock poisoned' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn stop_chat_uses_spawn_blocking() {
+        let source = include_str!("main.rs");
+        let body = extract_fn_body(source, "async fn stop_chat(");
+        assert!(
+            body.contains("spawn_blocking"),
+            "stop_chat must use spawn_blocking to avoid blocking the main thread"
         );
     }
 }

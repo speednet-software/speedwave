@@ -202,6 +202,7 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
             auth_fields: auth_fields.clone(),
             current_values,
             mappings,
+            badge: svc_desc.badge.map(|b| b.to_string()),
         });
     }
 
@@ -232,8 +233,10 @@ pub(crate) fn is_service_configured(project: &str, service: &str) -> bool {
         Some(d) => d,
         None => return false,
     };
+    // Services with no auth fields have nothing to configure — they're
+    // always "configured" (e.g. Playwright scrapes public URLs).
     if svc_desc.auth_fields.is_empty() {
-        return false;
+        return true;
     }
     let svc_token_dir = speedwave_runtime::consts::data_dir()
         .join("tokens")
@@ -275,8 +278,10 @@ fn is_service_configured_with_home(home: &std::path::Path, project: &str, servic
         Some(d) => d,
         None => return false,
     };
+    // Services with no auth fields have nothing to configure — they're
+    // always "configured" (e.g. Playwright scrapes public URLs).
     if svc_desc.auth_fields.is_empty() {
-        return false;
+        return true;
     }
     let svc_token_dir = home
         .join(speedwave_runtime::consts::DATA_DIR)
@@ -732,7 +737,7 @@ mod tests {
 
     #[test]
     fn set_service_all_known_keys() {
-        for key in &["slack", "sharepoint", "redmine", "gitlab"] {
+        for key in &["slack", "sharepoint", "redmine", "gitlab", "playwright"] {
             let mut cfg = config::IntegrationsConfig::default();
             let ic = config::IntegrationConfig {
                 enabled: Some(true),
@@ -1109,6 +1114,17 @@ mod tests {
     }
 
     #[test]
+    fn is_service_configured_returns_true_for_credential_less_service() {
+        // Services like Playwright have no auth_fields; they scrape public URLs.
+        // They must be treated as always-configured so the UI toggle is enabled.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            is_service_configured_with_home(tmp.path(), "proj", "playwright"),
+            "credential-less service (playwright) should be always-configured"
+        );
+    }
+
+    #[test]
     fn read_service_config_returns_empty_for_missing_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let nonexistent = tmp.path().join("does-not-exist");
@@ -1354,6 +1370,30 @@ mod tests {
             check_pos < lock_pos,
             "check_os_permission (offset {check_pos}) must appear before with_config_lock (offset {lock_pos})"
         );
+    }
+
+    #[test]
+    fn badge_propagated_for_playwright() {
+        let svc_desc = speedwave_runtime::consts::find_mcp_service("playwright")
+            .expect("playwright must exist");
+        assert_eq!(
+            svc_desc.badge,
+            Some("BETA"),
+            "playwright must have BETA badge"
+        );
+    }
+
+    #[test]
+    fn badge_none_for_credential_services() {
+        for key in &["slack", "sharepoint", "redmine", "gitlab"] {
+            let svc_desc = speedwave_runtime::consts::find_mcp_service(key)
+                .unwrap_or_else(|| panic!("service '{}' must exist", key));
+            assert_eq!(
+                svc_desc.badge, None,
+                "service '{}' should have no badge",
+                key
+            );
+        }
     }
 
     #[test]

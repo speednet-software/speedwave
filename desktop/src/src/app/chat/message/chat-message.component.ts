@@ -20,16 +20,20 @@ import { PermissionPromptComponent } from '../blocks/permission-prompt.component
     PermissionPromptComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  host: { class: 'block' },
+  host: {
+    class: 'flex w-full',
+    '[class.justify-end]': "role === 'user'",
+    '[class.justify-start]': "role === 'assistant'",
+  },
   template: `
     <div
       data-testid="chat-message"
       [attr.data-role]="role"
-      class="max-w-[85%] px-4 py-3 rounded-lg leading-relaxed break-words"
+      class="w-fit max-w-[85%] px-4 py-3 rounded-lg leading-relaxed break-words"
       [class]="
         role === 'user'
-          ? 'self-end bg-sw-bg-navy text-sw-text'
-          : 'self-start bg-sw-bg-dark text-sw-text border border-sw-border'
+          ? 'bg-sw-bg-navy text-sw-text'
+          : 'bg-sw-bg-dark text-sw-text border border-sw-border'
       "
       [class.!border-sw-accent]="streaming"
     >

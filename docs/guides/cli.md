@@ -34,6 +34,7 @@ speedwave plugin list                # list installed plugins with status
 speedwave plugin remove <slug>       # uninstall a plugin
 speedwave plugin enable <slug> --project <name>   # enable plugin for a project
 speedwave plugin disable <slug> --project <name>  # disable plugin for a project
+speedwave --help | -h | help   # print usage and exit (no runtime required)
 ```
 
 - **`speedwave`** (no subcommand) — starts containers via `compose_up`, then exec's into the Claude container for an interactive session
@@ -54,6 +55,7 @@ speedwave plugin disable <slug> --project <name>  # disable plugin for a project
 - **`speedwave plugin remove <slug>`** — removes the plugin directory from `~/.speedwave/plugins/<slug>/`. Note: credential files at `~/.speedwave/tokens/<project>/<slug>/` and config entries are **not** cleaned by the CLI — use the Desktop UI for full cleanup, or remove token directories manually
 - **`speedwave plugin enable <slug> --project <name>`** — enables a plugin for a specific project in user config
 - **`speedwave plugin disable <slug> --project <name>`** — disables a plugin for a specific project in user config
+- **`speedwave --help` / `-h` / `help`** — prints the subcommand list and exits 0. Unlike every other subcommand, `--help` does NOT require Speedwave Desktop to be running — useful for discovering commands during a broken setup or before the runtime is installed.
 
 ## Project Resolution
 

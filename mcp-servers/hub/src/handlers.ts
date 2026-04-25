@@ -26,6 +26,37 @@ interface HandlerConfig {
 const toJsonText = (data: unknown): string =>
   typeof data === 'string' ? data : JSON.stringify(data ?? null);
 
+type McpContentType = 'text' | 'image' | 'audio' | 'resource' | 'resource_link';
+
+interface McpContentItem {
+  type: McpContentType;
+  text?: string;
+  data?: string;
+  mimeType?: string;
+}
+
+const MCP_CONTENT_TYPES: Set<McpContentType> = new Set([
+  'text',
+  'image',
+  'audio',
+  'resource',
+  'resource_link',
+]);
+
+function isMcpContentArray(data: unknown): data is McpContentItem[] {
+  if (!Array.isArray(data) || data.length === 0) return false;
+  return data.every((item) => {
+    if (typeof item !== 'object' || item === null || !('type' in item)) return false;
+    const typed = item as McpContentItem;
+    if (!MCP_CONTENT_TYPES.has(typed.type)) return false;
+    if (typed.type === 'text') return typeof typed.text === 'string';
+    if (typed.type === 'image' || typed.type === 'audio') {
+      return typeof typed.data === 'string' && typeof typed.mimeType === 'string';
+    }
+    return true;
+  });
+}
+
 /**
  * Validate and normalize timeout parameter
  * @param paramValue - The timeout_ms value from request params
@@ -163,6 +194,9 @@ export function createCodeExecutorHandlers(config: HandlerConfig) {
         };
       }
 
+      if (isMcpContentArray(result.data)) {
+        return { content: result.data };
+      }
       return {
         content: [{ type: 'text', text: toJsonText(result.data) }],
       };

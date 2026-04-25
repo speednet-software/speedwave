@@ -84,8 +84,20 @@ export interface JSONRPCResponse {
   id: string | number;
   /** Result object containing MCP response */
   result?: {
-    /** Array of content items */
-    content: Array<{ type: string; text?: string }>;
+    /**
+     * Array of content items. MCP spec 2025-11-25 §Tool Result defines
+     * several `type` values: `"text"`, `"image"` (base64 + mimeType),
+     * `"audio"`, `"resource_link"`, and `"resource"`. Our hub keeps the
+     * shape open so third-party servers (e.g. `@playwright/mcp` returns
+     * a text summary followed by a base64 PNG in the same array) don't
+     * lose structured output.
+     */
+    content: Array<{
+      type: string;
+      text?: string;
+      data?: string;
+      mimeType?: string;
+    }>;
     /** Set by errorResult() when worker returns an error */
     isError?: boolean;
   };
@@ -145,7 +157,14 @@ export async function parseResponse(response: Response): Promise<JSONRPCResponse
         }
       }
     }
-    throw new Error('No JSON-RPC response in SSE stream');
+    // Fail hard with the full body so we can see what the worker actually
+    // sent. This happens in practice when third-party MCP servers emit
+    // progress frames (`event: progress`, `event: ping`, ...) before the
+    // final `data:` line and the stream gets cut off mid-flight.
+    const bodyDump = text.length > 4000 ? text.slice(0, 4000) + '...[truncated]' : text;
+    throw new Error(
+      `No JSON-RPC response in SSE stream (status ${response.status}, ${text.length} bytes). Body:\n${bodyDump}`
+    );
   }
   try {
     return (await response.json()) as JSONRPCResponse;
@@ -199,40 +218,166 @@ function classifyHealthError(error: unknown): string {
 }
 
 /**
+ * Attempt an `initialize` handshake against a worker.
+ *
+ * Strict MCP servers (e.g. `@playwright/mcp`) reject every request with
+ * `Bad Request: Server not initialized` until `initialize` completes AND the
+ * returned `Mcp-Session-Id` header is sent on every subsequent request.
+ * In-house workers are more permissive and answer `ping` without any of
+ * this.
+ *
+ * This helper is called both by `checkWorkerHealth` (startup health path)
+ * and by `ensureWorkerSession` (per-call session management) when
+ * initialization is required.
+ *
+ * Returns the `Mcp-Session-Id` assigned by the worker (or an empty string if
+ * the worker does not use sessions) on success, and `null` on failure.
+ * @param url - Worker base URL (same URL the ping POST is issued against)
+ * @param authToken - Optional bearer token
+ */
+async function performMcpInitialize(url: string, authToken?: string): Promise<string | null> {
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: buildWorkerHeaders(authToken),
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: randomUUID(),
+        method: 'initialize',
+        params: {
+          protocolVersion: LATEST_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: 'speedwave-hub', version: '1.0.0' },
+        },
+      }),
+      signal: AbortSignal.timeout(TIMEOUTS.HEALTH_CHECK_MS),
+      redirect: 'error',
+    });
+    // MCP spec 2025-11-25 §Session Management:
+    //   "A server … MAY assign a session ID at initialization time, by
+    //    including it in an `MCP-Session-Id` header on the HTTP response
+    //    containing the InitializeResult."
+    // HTTP headers are case-insensitive per RFC 7230, so `Mcp-Session-Id`
+    // reads the same header the server wrote, but we keep the canonical
+    // capitalisation when echoing it back on subsequent requests to make
+    // trace logs line up with the spec.
+    const sessionId = response.headers.get('Mcp-Session-Id') ?? '';
+    const result = await parseResponse(response);
+    if (result.error) return null;
+
+    // MCP spec 2025-11-25 §Lifecycle + §Streamable HTTP:
+    //   After InitializeResult the client MUST send
+    //   `notifications/initialized`. Strict servers (e.g. `@playwright/mcp`)
+    //   refuse every subsequent request with 400 "Server not initialized"
+    //   until this notification has been POSTed and ACK'd with 202 Accepted.
+    // Critically, this must complete BEFORE we return — the caller
+    // immediately issues `tools/call` on the session we just built, and any
+    // race with the notification makes the tool call fail.
+    const notifHeaders = buildWorkerHeaders(authToken);
+    if (sessionId) notifHeaders['Mcp-Session-Id'] = sessionId;
+    const notifResponse = await fetch(url, {
+      method: 'POST',
+      headers: notifHeaders,
+      body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+      signal: AbortSignal.timeout(TIMEOUTS.HEALTH_CHECK_MS),
+      redirect: 'error',
+    });
+    // Spec says notifications return 202 Accepted; permissive servers may
+    // return 200. Anything in the 2xx range is fine. Drain the body so the
+    // underlying socket can be reused for the next request.
+    await notifResponse.text().catch(() => undefined);
+    if (!notifResponse.ok) {
+      console.error(
+        `${ts()} [http-bridge] notifications/initialized rejected with ${notifResponse.status} — session is unusable`
+      );
+      return null;
+    }
+
+    return sessionId;
+  } catch (error) {
+    const errorType = classifyHealthError(error);
+    console.warn(
+      `${ts()} [http-bridge] initialize handshake failed for ${url} [${errorType}]: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return null;
+  }
+}
+
+/**
  * Single health-check using MCP `ping` method with `/health` endpoint fallback.
- * First tries a proper MCP JSON-RPC ping request (required per MCP spec).
- * If that fails, falls back to the legacy /health HTTP endpoint for
- * backward compatibility with older workers.
- * Returns true when the worker responds successfully via either method.
+ *
+ * Flow:
+ *   1. Plain MCP `ping` — fast path for our in-house workers that respond to
+ *      `ping` on a fresh connection.
+ *   2. `initialize` handshake followed by `ping` — required by strict MCP
+ *      servers like `@playwright/mcp` that refuse every request with
+ *      `Bad Request: Server not initialized` until the session is
+ *      initialised. This is the spec-compliant flow and the only way to
+ *      talk to most third-party MCP servers.
+ *   3. Legacy `/health` GET — backwards compatibility with any remaining
+ *      worker that predates MCP-over-HTTP.
+ *
+ * Returns `true` when any of the three attempts succeeds.
  * @param service - Service name to check
  */
 async function checkWorkerHealth(service: string): Promise<boolean> {
   const url = getWorkerUrl(service);
   if (!url) return false;
 
-  // Attempt 1: MCP ping via JSON-RPC POST (required per MCP spec)
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: buildWorkerHeaders(),
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: randomUUID(),
-        method: 'ping',
-      }),
-      signal: AbortSignal.timeout(TIMEOUTS.HEALTH_CHECK_MS),
-      redirect: 'error',
-    });
-    const result = await parseResponse(response);
-    if (!result.error) return true;
-  } catch (error) {
-    const errorType = classifyHealthError(error);
-    console.warn(
-      `${ts()} [http-bridge] MCP ping failed for ${service} [${errorType}]: ${error instanceof Error ? error.message : String(error)}`
-    );
+  const authToken = getAuthToken(service);
+
+  const postPing = async (
+    sessionId?: string
+  ): Promise<{ ok: boolean; notInitialised: boolean }> => {
+    try {
+      const headers = buildWorkerHeaders(authToken);
+      if (sessionId) {
+        headers['Mcp-Session-Id'] = sessionId;
+      }
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: randomUUID(),
+          method: 'ping',
+        }),
+        signal: AbortSignal.timeout(TIMEOUTS.HEALTH_CHECK_MS),
+        redirect: 'error',
+      });
+      const result = await parseResponse(response);
+      if (!result.error) return { ok: true, notInitialised: false };
+      return {
+        ok: false,
+        notInitialised: result.error.message.toLowerCase().includes('not initialized'),
+      };
+    } catch (error) {
+      const errorType = classifyHealthError(error);
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `${ts()} [http-bridge] MCP ping failed for ${service} [${errorType}]: ${message}`
+      );
+      return { ok: false, notInitialised: message.toLowerCase().includes('not initialized') };
+    }
+  };
+
+  // Attempt 1: plain ping (fast path for permissive workers).
+  const first = await postPing();
+  if (first.ok) return true;
+
+  // Attempt 2: if the server told us it needed initialisation, do it and
+  // retry the ping on the same session. Strict MCP servers assign a
+  // session ID via the Mcp-Session-Id response header on initialize and
+  // reject subsequent requests that do not echo it back.
+  if (first.notInitialised) {
+    const sessionId = await performMcpInitialize(url, authToken);
+    if (sessionId !== null) {
+      const second = await postPing(sessionId);
+      if (second.ok) return true;
+    }
   }
 
-  // Attempt 2: Legacy /health endpoint (backward compatibility)
+  // Attempt 3: legacy /health endpoint (backwards compatibility).
   try {
     const response = await fetch(`${url}/health`, {
       signal: AbortSignal.timeout(TIMEOUTS.HEALTH_CHECK_MS),
@@ -437,6 +582,65 @@ export function parseServiceError(error: unknown, serviceName: string): string {
 //═══════════════════════════════════════════════════════════════════════════════
 
 /**
+ * Per-service cache of `Mcp-Session-Id` values issued by workers.
+ *
+ * Strict MCP servers (`@playwright/mcp`) reject every JSON-RPC request with
+ * `Bad Request: Server not initialized` unless the caller both completed
+ * `initialize` and echoes back the `Mcp-Session-Id` header the worker set in
+ * the initialize response. We remember that header per service and replay it
+ * on subsequent `tools/call` requests. An empty string means the worker
+ * issued no session header (stateless worker) — we still store it so we
+ * don't re-initialize on every call.
+ *
+ * On a `400 Bad Request` with "not initialized" (worker restarted, session
+ * expired) the entry is invalidated and `ensureWorkerSession` re-runs
+ * `initialize`.
+ */
+const workerSessionCache: Map<string, string> = new Map();
+
+/**
+ * Ensures a worker has been initialised for the current hub process and
+ * returns the `Mcp-Session-Id` to echo on subsequent requests (empty string
+ * if the worker is stateless). Caches per service; subsequent callers hit
+ * the cache.
+ * @param service - Service name
+ * @param url - Worker base URL
+ * @param authToken - Optional bearer token
+ */
+async function ensureWorkerSession(
+  service: string,
+  url: string,
+  authToken?: string
+): Promise<string> {
+  const cached = workerSessionCache.get(service);
+  if (cached !== undefined) return cached;
+
+  const sessionId = await performMcpInitialize(url, authToken);
+  if (sessionId === null) {
+    throw new Error(`Worker ${service}: initialize handshake failed`);
+  }
+  workerSessionCache.set(service, sessionId);
+  return sessionId;
+}
+
+/**
+ * Drop a cached session — used on `not initialized` 400 responses and on
+ * explicit transport errors so the next call re-runs `initialize`.
+ * @param service - Service name whose session to invalidate
+ */
+function invalidateWorkerSession(service: string): void {
+  workerSessionCache.delete(service);
+}
+
+/**
+ * Clear the per-service MCP session cache.
+ * Named with `_` prefix to signal it is a test hook — call only from test files.
+ */
+export function _clearWorkerSessionCacheForTesting(): void {
+  workerSessionCache.clear();
+}
+
+/**
  * Call a worker tool via HTTP bridge
  * @param service Service name (slack, sharepoint, redmine, gitlab)
  * @param toolName Tool name to call
@@ -457,19 +661,23 @@ export async function callWorker<T = unknown>(
     throw new Error(`Unknown service: ${service}`);
   }
 
-  const requestId = randomUUID();
   const timeout = options?.timeoutMs ?? TIMEOUTS.WORKER_REQUEST_MS;
+  const authToken = getAuthToken(service);
 
-  try {
-    const authToken = getAuthToken(service);
+  // Helper: performs the actual tools/call request with an optional cached
+  // session id. Separate so we can retry once after session invalidation
+  // without duplicating the request body / error handling.
+  const attemptCall = async (sessionId: string | undefined): Promise<Response> => {
     const headers = buildWorkerHeaders(authToken);
-
-    const response = await fetch(url, {
+    if (sessionId) {
+      headers['Mcp-Session-Id'] = sessionId;
+    }
+    return fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify({
         jsonrpc: '2.0',
-        id: requestId,
+        id: randomUUID(),
         method: 'tools/call',
         params: {
           name: toolName,
@@ -479,6 +687,43 @@ export async function callWorker<T = unknown>(
       signal: AbortSignal.timeout(timeout),
       redirect: 'error',
     });
+  };
+
+  try {
+    // Fast path: try the call with whatever session is cached (or none, for
+    // permissive workers that never required `initialize`). This keeps the
+    // round-trip count at 1 for the common case — only strict MCP servers
+    // (`@playwright/mcp`) that reject with 400 "not initialized" pay the
+    // cost of an extra initialize handshake.
+    const cachedSid = workerSessionCache.get(service);
+    let response = await attemptCall(cachedSid);
+
+    // Strict MCP servers signal session trouble in two ways:
+    //   * 400 "Server not initialized" — no session on this request at all.
+    //   * 404 Not Found               — the Mcp-Session-Id we just sent has
+    //                                    expired or refers to a worker
+    //                                    instance that has since restarted.
+    // Both cases are recoverable by invalidating the cached session and
+    // running `initialize` (+ `notifications/initialized`) again before
+    // retrying the call exactly once.
+    if (response.status === 400 || response.status === 404) {
+      const body = await response.text();
+      const bodyLower = body.toLowerCase();
+      const looksLikeSessionIssue =
+        bodyLower.includes('not initialized') ||
+        (response.status === 404 &&
+          (bodyLower.includes('session') || bodyLower.includes('not found')));
+      if (looksLikeSessionIssue) {
+        console.warn(
+          `${ts()} [http-bridge] ${service}: ${response.status} on tools/call (${body.slice(0, 200)}) — re-initialising session`
+        );
+        invalidateWorkerSession(service);
+        const sessionId = await ensureWorkerSession(service, url, authToken);
+        response = await attemptCall(sessionId);
+      } else {
+        throw new Error(`Worker ${service} returned ${response.status}: ${body.slice(0, 200)}`);
+      }
+    }
 
     if (!response.ok) {
       throw new Error(`Worker ${service} returned ${response.status}: ${response.statusText}`);
@@ -490,30 +735,45 @@ export async function callWorker<T = unknown>(
       throw new Error(`Worker ${service} error: ${result.error.message}`);
     }
 
-    // Extract text content from MCP response
+    // Extract content from MCP response.
     const content = result.result?.content;
-    if (content && content.length > 0 && content[0].text) {
-      const text = content[0].text;
-
+    if (content && content.length > 0) {
       // Check if worker returned an error (e.g., notConfiguredMessage('Redmine'))
-      // errorResult() sets isError: true and wraps message in "Error: " prefix
+      // errorResult() sets isError: true and wraps message in "Error: " prefix.
       if (result.result?.isError) {
-        throw new Error(text);
+        const firstText = content.find((c) => c.type === 'text')?.text ?? 'Unknown error';
+        throw new Error(firstText);
       }
 
-      // Try to parse as JSON (normal response)
+      // Multi-item responses are spec-compliant (MCP 2025-11-25 §Tool Result:
+      // "can contain multiple content items of different types"). A strict
+      // server like `@playwright/mcp` returns a text summary followed by a
+      // base64 `image` item on `browser_take_screenshot`. Pass the whole
+      // array through so the executor / caller can forward every item — the
+      // image is useless without its sibling text describing the screenshot,
+      // and vice versa.
+      const textItems = content.filter((c) => c.type === 'text' && c.text !== undefined);
+      const hasNonTextItems = content.some((c) => c.type !== 'text');
+      if (hasNonTextItems) {
+        return content as T;
+      }
+
+      // Single text item — legacy shape used by all in-house workers.
+      // MCP spec 2025-11-25 §Tool Result → Text Content defines the content
+      // item as `{ "type": "text", "text": "Tool result text" }` — any
+      // string is valid, no JSON requirement. Our workers happen to wrap
+      // JSON because their bridge API returns structured data. Try JSON
+      // first so existing workers keep their typed shape; fall back to
+      // the raw string when parsing fails. Multiple text items are joined
+      // with newlines before the JSON attempt.
+      const text = textItems.map((c) => c.text).join('\n');
       try {
         return JSON.parse(text) as T;
-      } catch (parseError) {
-        const preview = text.length > 100 ? text.substring(0, 100) + '...' : text;
-        console.error(
-          `${ts()} [http-bridge] Worker ${service} returned invalid JSON:`,
-          `Preview: "${preview}"`,
-          `Parse error: ${parseError instanceof Error ? parseError.message : parseError}`
+      } catch {
+        console.warn(
+          `${ts()} [http-bridge] ${service}.${toolName}: non-JSON text response (${text.length} bytes) — passing through as string`
         );
-        throw new Error(
-          `Worker ${service} returned invalid response format. Expected JSON but received: ${preview}`
-        );
+        return text as T;
       }
     }
 
@@ -525,7 +785,7 @@ export async function callWorker<T = unknown>(
 
     console.error(
       `${ts()} [http-bridge] callWorker(${service}, ${toolName}) failed:`,
-      error instanceof Error ? error.message : error
+      error instanceof Error ? (error.stack ?? error.message) : JSON.stringify(error)
     );
     throw error;
   }

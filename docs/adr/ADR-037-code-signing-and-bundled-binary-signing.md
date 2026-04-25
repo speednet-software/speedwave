@@ -93,19 +93,19 @@ tauri-action's macOS signing logic was designed assuming the Tauri app has no bu
 
 Hardened Runtime disables several platform capabilities by default[^11]. Bundled binaries that use restricted APIs must carry entitlements plists to opt back in. The complete inventory:
 
-| Binary | Entitlements plist | Keys | Reason |
-|---|---|---|---|
-| `nodejs/bin/node` | `node.plist` | `allow-jit`, `allow-unsigned-executable-memory` | V8 JIT engine |
-| `lima/bin/limactl` | `virtualization.plist` | `com.apple.security.virtualization` | Apple Virtualization Framework[^16] |
-| `mail-cli` | `apple-events.plist` | `com.apple.security.automation.apple-events` | Sends Apple Events to Mail.app/Outlook via osascript |
-| `notes-cli` | `apple-events.plist` | `com.apple.security.automation.apple-events` | Sends Apple Events to Notes.app via osascript |
-| `cli/speedwave` | none | — | AOT Rust, no restricted APIs |
-| `calendar-cli` | `calendars.plist` | `com.apple.security.personal-information.calendars` | EventKit read-write access (Hardened Runtime Resource Access)[^17] |
-| `reminders-cli` | `calendars.plist` | `com.apple.security.personal-information.calendars` | EventKit read-write access (Hardened Runtime Resource Access)[^17] |
+| Binary             | Entitlements plist     | Keys                                                | Reason                                                             |
+| ------------------ | ---------------------- | --------------------------------------------------- | ------------------------------------------------------------------ |
+| `nodejs/bin/node`  | `node.plist`           | `allow-jit`, `allow-unsigned-executable-memory`     | V8 JIT engine                                                      |
+| `lima/bin/limactl` | `virtualization.plist` | `com.apple.security.virtualization`                 | Apple Virtualization Framework[^16]                                |
+| `mail-cli`         | `apple-events.plist`   | `com.apple.security.automation.apple-events`        | Sends Apple Events to Mail.app/Outlook via osascript               |
+| `notes-cli`        | `apple-events.plist`   | `com.apple.security.automation.apple-events`        | Sends Apple Events to Notes.app via osascript                      |
+| `cli/speedwave`    | none                   | —                                                   | AOT Rust, no restricted APIs                                       |
+| `calendar-cli`     | `calendars.plist`      | `com.apple.security.personal-information.calendars` | EventKit read-write access (Hardened Runtime Resource Access)[^17] |
+| `reminders-cli`    | `calendars.plist`      | `com.apple.security.personal-information.calendars` | EventKit read-write access (Hardened Runtime Resource Access)[^17] |
 
 If a future bundled binary requires JIT (e.g. a Python runtime with PyPy), virtualization APIs, Apple Events automation, or access to personal information (calendars, contacts, photos), add its entitlements plist under `desktop/src-tauri/entitlements/` and reference it from the `SIGN_TARGETS` table in the script.
 
-**1b. Info.plist TCC usage descriptions.** Entitlements grant *capability* at codesign time; TCC (Transparency, Consent, and Control) still requires a user-facing `NS*UsageDescription` key in `Info.plist` before macOS will display the consent prompt for protected resources. The two surfaces are parallel but distinct — missing either one silently breaks the feature. The required keys track the restricted APIs actually used by bundled binaries:
+**1b. Info.plist TCC usage descriptions.** Entitlements grant _capability_ at codesign time; TCC (Transparency, Consent, and Control) still requires a user-facing `NS*UsageDescription` key in `Info.plist` before macOS will display the consent prompt for protected resources. The two surfaces are parallel but distinct — missing either one silently breaks the feature. The required keys track the restricted APIs actually used by bundled binaries:
 
 - `NSRemindersUsageDescription`, `NSCalendarsUsageDescription` — EventKit, required by `reminders-cli` and `calendar-cli`
 - `NSContactsUsageDescription` — reserved for future Contacts access
@@ -171,7 +171,7 @@ Rejected. Requiring users to right-click → Open → Open Anyway for first laun
 
 [^8]: [Tauri v2 docs — build hooks accept shell commands; cwd is not specified as part of the stable API contract](https://v2.tauri.app/reference/config/#buildconfig)
 
-[^9]: [Apple Developer — "Stapling a ticket to your app" — required so Gatekeeper validates offline](https://developer.apple.com/documentation/security/customizing_the_notarization_workflow)
+[^9]: [Apple Developer — "Stapling a ticket to your app" — required so Gatekeeper validates offline](https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution/customizing_the_notarization_workflow)
 
 [^10]: [tauri-bundler source — `sign_app` signs the main binary and outer bundle; resources under `Contents/Resources/` are copied in unsigned](https://github.com/tauri-apps/tauri/blob/dev/crates/tauri-bundler/src/bundle/macos/sign.rs)
 

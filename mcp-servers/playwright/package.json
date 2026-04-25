@@ -1,0 +1,14 @@
+{
+  "name": "@speedwave/mcp-playwright",
+  "version": "0.1.0",
+  "description": "Speedwave MCP Playwright worker — packages Microsoft's @playwright/mcp as a hardened shared browser-automation service",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "echo 'mcp-playwright has no build step; see Containerfile'",
+    "test": "echo 'mcp-playwright is tested via compose integration tests in speedwave-runtime'"
+  },
+  "dependencies": {
+    "@playwright/mcp": "0.0.70"
+  }
+}

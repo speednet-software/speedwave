@@ -12,6 +12,7 @@
 # be able to resolve it.
 
 WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/desktop-release.yml"
+VERIFY_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/verify-release-assets.sh"
 
 @test "desktop-release.yml exists" {
     [ -f "$WORKFLOW" ]
@@ -95,4 +96,42 @@ WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/desktop-release.yml"
     guard_line=$(awk -v start="$import_line" 'NR>start && /^        if:/ { print NR; exit }' "$WORKFLOW")
     [ -n "$guard_line" ]
     sed -n "${guard_line}p" "$WORKFLOW" | grep -q "matrix.platform == 'macos-latest'"
+}
+
+@test "verify-release-assets.sh enumerates macOS updater assets" {
+    # Anti-removal guard: the release-gate script must enumerate macOS updater
+    # archive names explicitly so a missing asset fails the release before publish.
+    grep -qF "macOS_Apple_Silicon.app.tar.gz" "$VERIFY_SCRIPT"
+}
+
+@test "verify-release-assets.sh enumerates Windows updater assets" {
+    # Anti-removal guard: Windows updater asset names must appear explicitly so
+    # a missing .sig fails the release before publish.
+    grep -qF "x64-setup.nsis.zip" "$VERIFY_SCRIPT"
+    grep -qF "x64_en-US.msi.zip" "$VERIFY_SCRIPT"
+}
+
+@test "verify-release-assets.sh verifies .sig non-emptiness" {
+    # Anti-removal guard: an empty .sig file (size == 0) must cause a release
+    # failure before publish — the error message is the stable semantic marker.
+    grep -qF "signature file empty" "$VERIFY_SCRIPT"
+}
+
+@test "verify-release-assets.sh enforces required latest.json platform keys" {
+    # Anti-removal guard: all 7 required platform keys must appear in the
+    # script so missing keys are caught before the release publishes.
+    grep -qF '"darwin-x86_64"' "$VERIFY_SCRIPT"
+    grep -qF '"darwin-x86_64-app"' "$VERIFY_SCRIPT"
+    grep -qF '"darwin-aarch64"' "$VERIFY_SCRIPT"
+    grep -qF '"darwin-aarch64-app"' "$VERIFY_SCRIPT"
+    grep -qF '"windows-x86_64"' "$VERIFY_SCRIPT"
+    grep -qF '"windows-x86_64-msi"' "$VERIFY_SCRIPT"
+    grep -qF '"windows-x86_64-nsis"' "$VERIFY_SCRIPT"
+}
+
+@test "verify-release-assets.sh documents Linux auto-update exclusion" {
+    # Anti-removal guard: the inline comment explaining why Linux is excluded
+    # from asset verification must remain so future maintainers don't add Linux
+    # assets incorrectly. The semantic intent string is stable across refactors.
+    grep -qF "Linux is excluded: updater.rs disables auto-update" "$VERIFY_SCRIPT"
 }

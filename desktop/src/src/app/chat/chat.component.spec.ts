@@ -932,4 +932,101 @@ describe('ChatComponent', () => {
       navigateSpy.mockRestore();
     });
   });
+
+  describe('Stop button and ESC handler', () => {
+    it('shows Stop button when streaming, Send button when idle', () => {
+      projectState.status = 'ready';
+      chatState.isStreaming = false;
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="chat-send"]')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('[data-testid="chat-stop"]')).toBeNull();
+
+      chatState.isStreaming = true;
+      chatState['notifyChange']();
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="chat-stop"]')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('[data-testid="chat-send"]')).toBeNull();
+    });
+
+    it('clicking Stop calls stopConversation', () => {
+      projectState.status = 'ready';
+      const spy = vi.spyOn(chatState, 'stopConversation').mockResolvedValue();
+      chatState.isStreaming = true;
+      fixture.detectChanges();
+      fixture.nativeElement.querySelector('[data-testid="chat-stop"]').click();
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it('pressing ESC while streaming calls stopConversation', () => {
+      const spy = vi.spyOn(chatState, 'stopConversation').mockResolvedValue();
+      chatState.isStreaming = true;
+      fixture.detectChanges();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it('pressing ESC while idle does nothing', () => {
+      const spy = vi.spyOn(chatState, 'stopConversation').mockResolvedValue();
+      chatState.isStreaming = false;
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('pressing ESC does not stop when an unanswered ask_user block is active', () => {
+      const spy = vi.spyOn(chatState, 'stopConversation').mockResolvedValue();
+      chatState.isStreaming = true;
+      chatState._setState({
+        currentBlocks: [
+          {
+            type: 'ask_user',
+            question: {
+              tool_id: 't1',
+              question: 'q?',
+              options: [],
+              header: '',
+              multi_select: false,
+              answered: false,
+              selected_values: [],
+            },
+          },
+        ],
+      });
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('Stop button still stops when an unanswered ask_user block is active', () => {
+      projectState.status = 'ready';
+      const spy = vi.spyOn(chatState, 'stopConversation').mockResolvedValue();
+      chatState.isStreaming = true;
+      chatState._setState({
+        currentBlocks: [
+          {
+            type: 'ask_user',
+            question: {
+              tool_id: 't1',
+              question: 'q?',
+              options: [],
+              header: '',
+              multi_select: false,
+              answered: false,
+              selected_values: [],
+            },
+          },
+        ],
+      });
+      chatState['notifyChange']();
+      fixture.detectChanges();
+      fixture.nativeElement.querySelector('[data-testid="chat-stop"]').click();
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it('ngOnDestroy removes the ESC listener', () => {
+      const spy = vi.spyOn(chatState, 'stopConversation').mockResolvedValue();
+      fixture.destroy();
+      chatState.isStreaming = true;
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      expect(spy).not.toHaveBeenCalled();
+    });
+  });
 });

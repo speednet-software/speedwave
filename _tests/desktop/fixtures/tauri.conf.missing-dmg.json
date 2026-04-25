@@ -1,0 +1,47 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicedoc/tauri-docs/v2/packages/api/config-schema.json",
+  "productName": "Speedwave",
+  "version": "0.8.0",
+  "identifier": "pl.speedwave.desktop",
+  "build": {
+    "frontendDist": "../src/dist/browser",
+    "devUrl": "http://localhost:4270"
+  },
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"
+    },
+    "windows": [
+      {
+        "title": "Speedwave",
+        "width": 1200,
+        "height": 800
+      }
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/speednet-software/speedwave/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhDREIxN0NDNzUyOUEzMEUKUldRT295bDF6QmZiakFoSGtTeFpSbHNLcUI3ejlUdFgxTlkyYkNEQVZWT0RrU1BBaEs2SlA3MW8K"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "useLocalToolsDir": true,
+    "targets": [
+      "deb",
+      "nsis",
+      "msi",
+      "app"
+    ],
+    "createUpdaterArtifacts": "v1Compatible",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
