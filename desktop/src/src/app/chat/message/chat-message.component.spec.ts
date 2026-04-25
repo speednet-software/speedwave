@@ -87,13 +87,32 @@ describe('ChatMessageComponent', () => {
     expect(el.textContent).toContain('Thinking');
   });
 
-  it('applies user styling for user role', () => {
+  it('dispatches to app-user-message when role is user', () => {
     component.blocks = [{ type: 'text', content: 'hi' }];
     component.role = 'user';
     fixture.detectChanges();
 
     const msg = fixture.nativeElement.querySelector('[data-testid="chat-message"]');
     expect(msg?.getAttribute('data-role')).toBe('user');
+    const userMsg = fixture.nativeElement.querySelector('app-user-message');
+    expect(userMsg).not.toBeNull();
+    expect(fixture.nativeElement.textContent).toContain('hi');
+    // No assistant-style bubble on user messages.
+    expect(fixture.nativeElement.querySelector('.bg-sw-bg-dark')).toBeNull();
+  });
+
+  it('forwards editedAt and timestamp to app-user-message', () => {
+    component.blocks = [{ type: 'text', content: 'hi' }];
+    component.role = 'user';
+    component.editedAt = 1_700_000_000_000;
+    const ts = new Date(2026, 3, 25, 9, 30, 0, 0).getTime();
+    component.timestamp = ts;
+    fixture.detectChanges();
+
+    const edited = fixture.nativeElement.querySelector('[data-testid="user-message-edited"]');
+    expect(edited).not.toBeNull();
+    const time = fixture.nativeElement.querySelector('[data-testid="user-message-time"]');
+    expect(time?.textContent?.trim()).toBe('09:30');
   });
 
   it('host right-aligns user messages via justify-end', () => {
@@ -116,15 +135,26 @@ describe('ChatMessageComponent', () => {
     expect(host.classList.contains('justify-end')).toBe(false);
   });
 
-  it('bubble shrinks to content width (w-fit) with 85% cap', () => {
+  it('user role dispatches to <app-user-message> (terminal-minimal: no bubble)', () => {
+    // After Unit 8 (refactor: extract chat header, list, user-message), user
+    // messages render via <app-user-message> in terminal-minimal style — no
+    // sized "bubble" with w-fit/max-w-[85%]. This replaces the prior bubble
+    // test which assumed both roles shared the same wrapper styling.
     component.blocks = [{ type: 'text', content: 'ok' }];
     component.role = 'user';
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('app-user-message')).not.toBeNull();
+  });
+
+  it('assistant role keeps the bubble (max-w-[85%])', () => {
+    component.blocks = [{ type: 'text', content: 'ok' }];
+    component.role = 'assistant';
     fixture.detectChanges();
 
     const bubble = fixture.nativeElement.querySelector(
       '[data-testid="chat-message"]'
     ) as HTMLElement;
-    expect(bubble.classList.contains('w-fit')).toBe(true);
     expect(bubble.classList.contains('max-w-[85%]')).toBe(true);
   });
 

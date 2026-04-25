@@ -2,11 +2,9 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
-  ElementRef,
   HostListener,
   OnDestroy,
   OnInit,
-  ViewChild,
   effect,
   inject,
 } from '@angular/core';
@@ -18,7 +16,8 @@ import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import type { ChatMessage, ConversationSummary, ConversationTranscript } from '../models/chat';
-import { ChatMessageComponent } from './message/chat-message.component';
+import { ChatHeaderComponent } from './header/chat-header.component';
+import { ChatMessageListComponent } from './message-list/chat-message-list.component';
 import { SessionStatsComponent } from './session-stats/session-stats.component';
 import { TextBlockComponent } from './blocks/text-block.component';
 import { MemoryPanelComponent } from './memory-panel/memory-panel.component';
@@ -31,7 +30,8 @@ import { ConversationsSidebarComponent } from './conversations-sidebar/conversat
   imports: [
     CommonModule,
     FormsModule,
-    ChatMessageComponent,
+    ChatHeaderComponent,
+    ChatMessageListComponent,
     SessionStatsComponent,
     TextBlockComponent,
     MemoryPanelComponent,
@@ -41,8 +41,6 @@ import { ConversationsSidebarComponent } from './conversations-sidebar/conversat
   templateUrl: './chat.component.html',
 })
 export class ChatComponent implements OnInit, OnDestroy {
-  @ViewChild('messageList') messageList!: ElementRef<HTMLDivElement>;
-
   inputText = '';
 
   conversations: readonly ConversationSummary[] = [];
@@ -82,7 +80,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   constructor() {
     this.unsubChange = this.chat.onChange(() => {
       this.cdr.markForCheck();
-      this.scrollToBottom();
+      // Live-chat scrolling is owned by <app-chat-message-list>; no-op here.
     });
 
     // Decouple data loading from the toggle source so the keyboard shortcut
@@ -100,7 +98,6 @@ export class ChatComponent implements OnInit, OnDestroy {
   async ngOnInit(): Promise<void> {
     await this.chat.init();
     this.cdr.markForCheck();
-    this.scrollToBottom();
 
     this.unsubAuthWatch = this.projectState.onChange(() => {
       if (this.projectState.status === 'auth_required') {
@@ -324,15 +321,6 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.memoryError = `Failed to load memory: ${err}`;
     }
     this.cdr.markForCheck();
-  }
-
-  private scrollToBottom(): void {
-    setTimeout(() => {
-      if (this.messageList?.nativeElement) {
-        const el = this.messageList.nativeElement;
-        el.scrollTop = el.scrollHeight;
-      }
-    }, 0);
   }
 
   /**

@@ -11,26 +11,14 @@
     ></app-conversations-sidebar>
 
     <div class="flex flex-col flex-1 min-w-0 relative">
-      <div class="flex gap-1 px-3 py-1.5 bg-sw-bg-dark border-b border-sw-border">
-        <button
-          class="px-3 py-1 border border-transparent rounded text-sw-text-dim text-xs cursor-pointer transition-all hover:text-sw-text hover:bg-sw-bg-darkest"
-          data-testid="chat-history-toggle"
-          [class.!text-sw-accent]="showHistory"
-          [class.!border-sw-accent]="showHistory"
-          (click)="toggleHistory()"
-        >
-          History
-        </button>
-        <button
-          class="px-3 py-1 border border-transparent rounded text-sw-text-dim text-xs cursor-pointer transition-all hover:text-sw-text hover:bg-sw-bg-darkest"
-          data-testid="chat-memory-toggle"
-          [class.!text-sw-accent]="showMemory"
-          [class.!border-sw-accent]="showMemory"
-          (click)="toggleMemory()"
-        >
-          Memory
-        </button>
-      </div>
+      <app-chat-header
+        title="Chat"
+        [projectName]="projectState.activeProject || ''"
+        [memoryOpen]="showMemory"
+        [historyOpen]="showHistory"
+        (toggleMemory)="toggleMemory()"
+        (toggleHistory)="toggleHistory()"
+      />
 
       @if (historyError) {
         <div
@@ -49,11 +37,7 @@
         </div>
       }
       @if (viewingTranscript) {
-        <div
-          class="flex-1 overflow-y-auto p-4 flex flex-col gap-3"
-          data-testid="chat-messages"
-          #messageList
-        >
+        <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-3" data-testid="chat-messages">
           @for (msg of viewingTranscript.messages; track $index) {
             <div
               class="w-fit max-w-[85%] px-4 py-3 rounded-lg leading-normal break-words"
@@ -85,27 +69,12 @@
           </button>
         </div>
       } @else {
-        <div
-          class="flex-1 overflow-y-auto p-4 flex flex-col gap-3"
-          data-testid="chat-messages"
-          #messageList
-        >
-          @for (msg of chat.messages; track msg.timestamp) {
-            <app-chat-message
-              [blocks]="msg.blocks"
-              [role]="msg.role"
-              (questionAnswered)="onQuestionAnswered($event)"
-            />
-          }
-          @if (chat.isStreaming && chat.currentBlocks.length) {
-            <app-chat-message
-              [blocks]="chat.currentBlocks"
-              role="assistant"
-              [streaming]="true"
-              (questionAnswered)="onQuestionAnswered($event)"
-            />
-          }
-        </div>
+        <app-chat-message-list
+          [messages]="chat.messages"
+          [currentBlocks]="chat.currentBlocks"
+          [isStreaming]="chat.isStreaming"
+          (questionAnswered)="onQuestionAnswered($event)"
+        />
         <app-session-stats [stats]="chat.sessionStats" />
         <div class="flex gap-2 px-4 py-3 bg-sw-bg-dark border-t border-sw-border">
           <textarea
