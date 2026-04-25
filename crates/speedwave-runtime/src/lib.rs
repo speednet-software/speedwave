@@ -15,5 +15,6 @@ pub mod project;
 pub mod resources;
 pub mod runtime;
 pub mod signing;
+pub mod stream;
 pub mod update;
 pub mod validation;
