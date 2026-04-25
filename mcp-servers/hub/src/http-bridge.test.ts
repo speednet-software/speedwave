@@ -16,6 +16,7 @@ import {
   STARTUP_RETRY_DELAYS_MS,
   parseResponse,
   buildWorkerHeaders,
+  _clearWorkerSessionCacheForTesting,
 } from './http-bridge.js';
 import { LATEST_PROTOCOL_VERSION } from '@speedwave/mcp-shared';
 import {
@@ -858,10 +859,8 @@ describe('http-bridge', () => {
         }),
       });
 
-      // Now throws error instead of silently returning text as wrong type
-      await expect(callWorker('slack', 'send_channel', {})).rejects.toThrow(
-        'Worker slack returned invalid response format. Expected JSON but received: plain text response'
-      );
+      const result = await callWorker('slack', 'send_channel', {});
+      expect(result).toBe('plain text response');
     });
 
     it('should handle empty content array', async () => {
@@ -894,8 +893,10 @@ describe('http-bridge', () => {
         }),
       });
 
+      // Content item with type 'text' but no text field: textItems filter
+      // excludes it (text === undefined), producing an empty joined string.
       const result = await callWorker('slack', 'test', {});
-      expect(result).toEqual({ content: [{ type: 'text' }] });
+      expect(result).toBe('');
     });
 
     it('should handle unknown service', async () => {
@@ -972,7 +973,7 @@ describe('http-bridge', () => {
       await expect(callWorker('gitlab', 'test', {})).rejects.toThrow('Network failure');
       expect(consoleErrorSpy).toHaveBeenCalledWith(
         expect.stringContaining('[http-bridge]'),
-        'Network failure'
+        expect.stringContaining('Network failure')
       );
 
       consoleErrorSpy.mockRestore();
@@ -1049,6 +1050,299 @@ describe('http-bridge', () => {
     });
   });
 
+  describe('callWorker - MCP session handling', () => {
+    let fetchMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      _clearWorkerSessionCacheForTesting();
+      fetchMock = vi.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+    });
+
+    afterEach(() => {
+      _clearWorkerSessionCacheForTesting();
+      vi.restoreAllMocks();
+    });
+
+    it('re-initialises session on 400 "not initialized" and retries', async () => {
+      let callCount = 0;
+      fetchMock.mockImplementation((_url: string, options: { body: string }) => {
+        callCount++;
+        const body = JSON.parse(options.body ?? '{}');
+
+        // 1st call: tools/call → 400 not initialized
+        if (callCount === 1) {
+          return Promise.resolve({
+            ok: false,
+            status: 400,
+            headers: new Headers({ 'content-type': 'text/plain' }),
+            text: async () => 'Bad Request: Server not initialized',
+          });
+        }
+        // 2nd call: initialize → success with session id
+        if (callCount === 2 && body.method === 'initialize') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            headers: new Headers({
+              'content-type': 'application/json',
+              'Mcp-Session-Id': 'sess-123',
+            }),
+            json: async () => ({
+              jsonrpc: '2.0',
+              id: body.id,
+              result: {
+                protocolVersion: '2025-11-25',
+                capabilities: {},
+                serverInfo: { name: 'test', version: '1' },
+              },
+            }),
+            text: async () =>
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: body.id,
+                result: {
+                  protocolVersion: '2025-11-25',
+                  capabilities: {},
+                  serverInfo: { name: 'test', version: '1' },
+                },
+              }),
+          });
+        }
+        // 3rd call: notifications/initialized → 202
+        if (callCount === 3 && body.method === 'notifications/initialized') {
+          return Promise.resolve({
+            ok: true,
+            status: 202,
+            headers: new Headers(),
+            text: async () => '',
+          });
+        }
+        // 4th call: retry tools/call with session → success
+        if (callCount === 4) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            headers: new Headers({ 'content-type': 'application/json' }),
+            json: async () => ({
+              jsonrpc: '2.0',
+              id: body.id,
+              result: { content: [{ type: 'text', text: '{"navigated":true}' }] },
+            }),
+          });
+        }
+        return Promise.reject(new Error(`Unexpected call #${callCount}`));
+      });
+
+      const result = await callWorker('gitlab', 'browser_navigate', { url: 'https://example.com' });
+      expect(result).toEqual({ navigated: true });
+      expect(callCount).toBe(4);
+
+      // Verify session header was sent on retry
+      const retryHeaders = fetchMock.mock.calls[3][1].headers;
+      expect(retryHeaders['Mcp-Session-Id']).toBe('sess-123');
+    });
+
+    it('uses cached session on subsequent calls', async () => {
+      // Pre-populate session cache by doing a full init flow
+      let callCount = 0;
+      fetchMock.mockImplementation((_url: string, options: { body: string }) => {
+        callCount++;
+        const body = JSON.parse(options.body ?? '{}');
+
+        // 1st call: tools/call → 400
+        if (callCount === 1) {
+          return Promise.resolve({
+            ok: false,
+            status: 400,
+            headers: new Headers(),
+            text: async () => 'Server not initialized',
+          });
+        }
+        // 2nd: initialize
+        if (callCount === 2) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            headers: new Headers({
+              'content-type': 'application/json',
+              'Mcp-Session-Id': 'cached-sess',
+            }),
+            json: async () => ({
+              jsonrpc: '2.0',
+              id: body.id,
+              result: {
+                protocolVersion: '2025-11-25',
+                capabilities: {},
+                serverInfo: { name: 'test', version: '1' },
+              },
+            }),
+            text: async () => '{}',
+          });
+        }
+        // 3rd: notification
+        if (callCount === 3) {
+          return Promise.resolve({
+            ok: true,
+            status: 202,
+            headers: new Headers(),
+            text: async () => '',
+          });
+        }
+        // 4th+: tools/call with cached session — success
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          json: async () => ({
+            jsonrpc: '2.0',
+            id: body.id,
+            result: { content: [{ type: 'text', text: '{"ok":true}' }] },
+          }),
+        });
+      });
+
+      // First call triggers init
+      await callWorker('gitlab', 'test_tool', {});
+      expect(callCount).toBe(4);
+
+      // Second call should use cached session — only 1 fetch (tools/call directly)
+      await callWorker('gitlab', 'test_tool', {});
+      expect(callCount).toBe(5);
+      const secondCallHeaders = fetchMock.mock.calls[4][1].headers;
+      expect(secondCallHeaders['Mcp-Session-Id']).toBe('cached-sess');
+    });
+
+    it('invalidates session on 404 and re-initialises', async () => {
+      let callCount = 0;
+      fetchMock.mockImplementation((_url: string, options: { body: string }) => {
+        callCount++;
+        const body = JSON.parse(options.body ?? '{}');
+
+        // 1st: tools/call → 404 (expired session)
+        if (callCount === 1) {
+          return Promise.resolve({
+            ok: false,
+            status: 404,
+            headers: new Headers(),
+            text: async () => 'Not Found',
+          });
+        }
+        // 2nd: initialize
+        if (callCount === 2) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            headers: new Headers({
+              'content-type': 'application/json',
+              'Mcp-Session-Id': 'new-sess',
+            }),
+            json: async () => ({
+              jsonrpc: '2.0',
+              id: body.id,
+              result: {
+                protocolVersion: '2025-11-25',
+                capabilities: {},
+                serverInfo: { name: 'test', version: '1' },
+              },
+            }),
+            text: async () => '{}',
+          });
+        }
+        // 3rd: notification
+        if (callCount === 3) {
+          return Promise.resolve({
+            ok: true,
+            status: 202,
+            headers: new Headers(),
+            text: async () => '',
+          });
+        }
+        // 4th: retry tools/call
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          json: async () => ({
+            jsonrpc: '2.0',
+            id: body.id,
+            result: { content: [{ type: 'text', text: '{"recovered":true}' }] },
+          }),
+        });
+      });
+
+      const result = await callWorker('gitlab', 'test_tool', {});
+      expect(result).toEqual({ recovered: true });
+    });
+  });
+
+  describe('callWorker - multi-content responses', () => {
+    let fetchMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      fetchMock = vi.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('returns full content array when response includes non-text items', async () => {
+      const multiContent = [
+        { type: 'text', text: 'Screenshot taken' },
+        { type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' },
+      ];
+      fetchMock.mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: '123',
+          result: { content: multiContent },
+        }),
+      });
+
+      const result = await callWorker('gitlab', 'browser_screenshot', {});
+      expect(result).toEqual(multiContent);
+    });
+
+    it('returns parsed JSON for single text-only content', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: '123',
+          result: { content: [{ type: 'text', text: '{"branches":["main"]}' }] },
+        }),
+      });
+
+      const result = await callWorker('gitlab', 'list_branches', {});
+      expect(result).toEqual({ branches: ['main'] });
+    });
+
+    it('joins multiple text items before JSON parsing', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: '123',
+          result: {
+            content: [
+              { type: 'text', text: 'Line 1' },
+              { type: 'text', text: 'Line 2' },
+            ],
+          },
+        }),
+      });
+
+      const result = await callWorker('gitlab', 'test_tool', {});
+      expect(result).toBe('Line 1\nLine 2');
+    });
+  });
+
   describe('SSRF protection', () => {
     let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -1072,7 +1366,7 @@ describe('http-bridge', () => {
     });
 
     it('should reject external hostname in isWorkerAvailable', async () => {
-      process.env.WORKER_SLACK_URL = 'http://evil.com:4001';
+      process.env.WORKER_SLACK_URL = 'http://evil.com:3000';
 
       const result = await isWorkerAvailable('slack');
 
@@ -1081,7 +1375,7 @@ describe('http-bridge', () => {
     });
 
     it('should reject URL with pathname in callWorker', async () => {
-      process.env.WORKER_REDMINE_URL = 'http://mcp-redmine:4001/admin/exec';
+      process.env.WORKER_REDMINE_URL = 'http://mcp-redmine:3000/admin/exec';
 
       await expect(callWorker('redmine', 'list_issues', {})).rejects.toThrow(
         'Unknown service: redmine'
@@ -1646,6 +1940,86 @@ describe('http-bridge', () => {
       const result = await isWorkerAvailable('gitlab');
       expect(result).toBe(true);
       expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('initialises session when ping returns "not initialized" (Attempt 2)', async () => {
+      let callCount = 0;
+      fetchMock.mockImplementation((_url: string, options: { body?: string }) => {
+        callCount++;
+        const body = options.body ? JSON.parse(options.body) : {};
+
+        // 1st call: ping → "not initialized" error
+        if (callCount === 1 && body.method === 'ping') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            headers: new Headers({ 'content-type': 'application/json' }),
+            json: async () => ({
+              jsonrpc: '2.0',
+              id: body.id,
+              error: { code: -32600, message: 'Server not initialized' },
+            }),
+          });
+        }
+        // 2nd call: initialize → success
+        if (callCount === 2 && body.method === 'initialize') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            headers: new Headers({
+              'content-type': 'application/json',
+              'Mcp-Session-Id': 'health-sess',
+            }),
+            json: async () => ({
+              jsonrpc: '2.0',
+              id: body.id,
+              result: {
+                protocolVersion: '2025-11-25',
+                capabilities: {},
+                serverInfo: { name: 'test', version: '1' },
+              },
+            }),
+            text: async () =>
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: body.id,
+                result: {
+                  protocolVersion: '2025-11-25',
+                  capabilities: {},
+                  serverInfo: { name: 'test', version: '1' },
+                },
+              }),
+          });
+        }
+        // 3rd call: notifications/initialized → 202
+        if (callCount === 3 && body.method === 'notifications/initialized') {
+          return Promise.resolve({
+            ok: true,
+            status: 202,
+            headers: new Headers(),
+            text: async () => '',
+          });
+        }
+        // 4th call: ping with session → success
+        if (callCount === 4 && body.method === 'ping') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            headers: new Headers({ 'content-type': 'application/json' }),
+            json: async () => ({
+              jsonrpc: '2.0',
+              id: body.id,
+              result: {},
+            }),
+          });
+        }
+        return Promise.reject(new Error(`Unexpected call #${callCount}: ${body.method}`));
+      });
+
+      clearWorkerCache();
+      const available = await isWorkerAvailable('gitlab');
+      expect(available).toBe(true);
+      expect(callCount).toBe(4);
     });
   });
 });

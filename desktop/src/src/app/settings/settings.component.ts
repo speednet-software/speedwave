@@ -11,6 +11,7 @@ import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { AuthSectionComponent } from './auth-section/auth-section.component';
+import { LlmProviderComponent } from './llm-provider/llm-provider.component';
 import { SystemHealthComponent } from './system-health.component';
 import { AdvancedSectionComponent } from './advanced-section/advanced-section.component';
 import { UpdateSectionComponent } from './update-section/update-section.component';
@@ -22,14 +23,16 @@ import { ProjectList } from '../models/update';
   standalone: true,
   imports: [
     CommonModule,
+    LlmProviderComponent,
     AuthSectionComponent,
     SystemHealthComponent,
     AdvancedSectionComponent,
     UpdateSectionComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block bg-sw-bg-darkest min-h-screen p-6 text-sw-text' },
   template: `
-    <div class="max-w-[700px] mx-auto mt-8 px-6">
+    <div>
       <h1 class="text-xl text-sw-accent m-0 mb-6">Settings</h1>
 
       @if (error) {
@@ -61,6 +64,9 @@ import { ProjectList } from '../models/update';
           </div>
         </div>
       </section>
+
+      <!-- LLM Provider -->
+      <app-llm-provider (providerChange)="llmProvider = $event" (errorOccurred)="error = $event" />
 
       <!-- Authentication -->
       <app-auth-section
@@ -106,7 +112,6 @@ export class SettingsComponent implements OnInit, OnDestroy {
   /** Loads project information on component initialization. */
   ngOnInit(): void {
     this.loadProjectInfo();
-    this.loadLlmProvider();
     this.loadLogLevel();
 
     this.unsubProjectReady = this.projectState.onProjectReady(() => {
@@ -135,16 +140,6 @@ export class SettingsComponent implements OnInit, OnDestroy {
       this.projectDir = entry?.dir ?? '';
     } catch {
       // Not running inside Tauri
-    }
-    this.cdr.markForCheck();
-  }
-
-  private async loadLlmProvider(): Promise<void> {
-    try {
-      const config = await this.tauri.invoke<{ provider: string | null }>('get_llm_config');
-      this.llmProvider = config.provider || 'anthropic';
-    } catch {
-      // Not running inside Tauri or no config yet
     }
     this.cdr.markForCheck();
   }

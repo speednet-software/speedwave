@@ -57,6 +57,19 @@ export class ChatStateService {
   private _totalOutputTokens = 0;
   private _contextWindowSize = 200_000;
 
+  /**
+   * Monotonically increasing turn id. Bumped by both `sendMessage` (new turn
+   * starts) and `stopConversation` (turn cancelled). Used across awaits by
+   * `answerQuestion` to detect whether the turn it was answering has since
+   * been superseded, so late backend errors from the dying turn can be
+   * suppressed.
+   */
+  private _turnId = 0;
+  /** Test-only read access. */
+  get turnId(): number {
+    return this._turnId;
+  }
+
   private unlisten: UnlistenFn | null = null;
   private listenerReady = false;
   private initialized = false;
@@ -170,6 +183,7 @@ export class ChatStateService {
       },
     ];
     this.isStreaming = true;
+    this._turnId += 1;
     this._currentBlocks = [];
     this.notifyChange();
 
@@ -303,6 +317,7 @@ export class ChatStateService {
    */
   async answerQuestion(toolUseId: string, selectedValues: string[]): Promise<void> {
     const answer = selectedValues.join(', ');
+    const capturedTurn = this._turnId;
 
     // Mark the question as answered in currentBlocks
     this._currentBlocks = this._currentBlocks.map((b) =>
@@ -315,8 +330,14 @@ export class ChatStateService {
     try {
       await this.tauri.invoke('answer_question', { toolUseId, answer });
     } catch (err) {
+      // If stopConversation ran while answer_question was in flight, _turnId has
+      // moved on. Suppress the error block: the user deliberately cancelled, a
+      // "Broken pipe" / "no active session" surfacing would be confusing noise.
+      if (capturedTurn !== this._turnId) {
+        console.debug('[chat-state] answerQuestion: suppressing error after stop', err);
+        return;
+      }
       this.isStreaming = false;
-      // Revert the optimistic answered state so the user can retry
       this._currentBlocks = this._currentBlocks.map((b) =>
         b.type === 'ask_user' && b.question.tool_id === toolUseId
           ? { ...b, question: { ...b.question, answered: false, selected_values: [] } }
@@ -325,6 +346,85 @@ export class ChatStateService {
       this._currentBlocks = [
         ...this._currentBlocks,
         { type: 'error', content: `Failed to send answer: ${err}` },
+      ];
+      this.notifyChange();
+    }
+  }
+
+  /**
+   * Stops the current Claude turn. Safe to call when not streaming (no-op).
+   * Synchronously resets UI state so the input is re-enabled immediately,
+   * then fires the backend stop in the background.
+   */
+  async stopConversation(): Promise<void> {
+    if (!this.isStreaming) return;
+
+    // 1. Invalidate any in-flight / buffered stream events from the dying turn.
+    this._turnId += 1;
+
+    // 2. Synchronous UI reset — must precede any await so re-entrant calls see
+    //    isStreaming=false and early-return (prevents double invoke of stop_chat).
+    this.isStreaming = false;
+
+    // 3. Preserve the partial assistant reply but drop ask_user blocks and
+    //    finalize running tool_use blocks. The interrupt aborts the in-flight
+    //    turn; Claude will not answer any rendered question (the matching
+    //    tool_use_id is abandoned), so ask_user is unanswerable. Running tools
+    //    would otherwise render a permanent "running" spinner inside a closed
+    //    message — flip them to status: 'error' with an "Interrupted" marker.
+    const keptBlocks = this._currentBlocks
+      .filter((b) => b.type !== 'ask_user')
+      .map((b) => {
+        if (b.type === 'tool_use' && b.tool.status === 'running') {
+          return {
+            ...b,
+            tool: {
+              type: 'tool_use' as const,
+              tool_id: b.tool.tool_id,
+              tool_name: b.tool.tool_name,
+              input_json: b.tool.input_json,
+              status: 'error' as const,
+              result: 'Interrupted',
+              result_is_error: true as const,
+              collapsed: b.tool.collapsed,
+            },
+          };
+        }
+        return b;
+      });
+    if (keptBlocks.length > 0) {
+      this._messages = [
+        ...this._messages,
+        { role: 'assistant', blocks: keptBlocks, timestamp: Date.now() },
+      ];
+    }
+    this._currentBlocks = [];
+    this.notifyChange();
+
+    // 4. Fire the backend interrupt. "no active session" is benign (idle or
+    //    already exited); any other failure means the turn may still be
+    //    running on the backend, so surface an error block to the user.
+    try {
+      await this.tauri.invoke('stop_chat');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('no active session')) {
+        console.debug('[chat-state] stopConversation: backend already idle', err);
+        return;
+      }
+      console.error('[chat-state] stopConversation: invoke failed', err);
+      this._messages = [
+        ...this._messages,
+        {
+          role: 'assistant',
+          blocks: [
+            {
+              type: 'error',
+              content: `Stop failed — the current turn may still be running. ${msg}`,
+            },
+          ],
+          timestamp: Date.now(),
+        },
       ];
       this.notifyChange();
     }
@@ -512,7 +612,21 @@ export class ChatStateService {
   private async setupStreamListener(): Promise<void> {
     try {
       this.unlisten = await this.tauri.listen<StreamChunk>('chat_stream', (event) => {
-        this.handleStreamChunk(event.payload);
+        const chunk = event.payload;
+        // Metadata-only chunks never mutate _messages / _currentBlocks and
+        // are legitimate between or after turns (e.g. trailing RateLimit).
+        if (chunk.chunk_type === 'SystemInit' || chunk.chunk_type === 'RateLimit') {
+          this.handleStreamChunk(chunk);
+          return;
+        }
+        // Content-bearing chunks belong to a specific turn. If isStreaming is
+        // false (stopConversation already ran, or the turn already finished),
+        // drop the chunk so it cannot write into _messages or flip isStreaming
+        // back on. That single check is sufficient in single-threaded JS:
+        // stopConversation sets isStreaming = false synchronously before any
+        // await, so every subsequent event-loop tick observes the reset.
+        if (!this.isStreaming) return;
+        this.handleStreamChunk(chunk);
       });
     } catch (err) {
       if (this.tauri.isRunningInTauri()) {

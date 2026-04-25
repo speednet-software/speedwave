@@ -309,7 +309,20 @@ Do NOT use AskUserQuestion — it is unavailable."
 VERIFIER_PREAMBLE="You are running in headless mode (claude -p). You are READ-ONLY (except for running make check/test).
 Do NOT use AskUserQuestion — it is unavailable.
 Your output will be captured as structured JSON via --json-schema.
-The gaps_summary field MUST be specific enough for the implementer to fix every gap WITHOUT reading your full analysis."
+The gaps_summary field MUST be specific enough for the implementer to fix every gap WITHOUT reading your full analysis.
+
+HARD RULES FOR RUNNING make check / make test:
+1. Always run with the Bash tool in the FOREGROUND (run_in_background is false). Set the 'timeout' parameter to 900000 (15 minutes). Bash will return the full exit code and output.
+2. Do NOT use Monitor, ScheduleWakeup, sleep-then-read-file loops, or any tailing mechanism to poll results. These are unreliable in this context and have produced false-negative verdicts. Run the command once, wait for it to finish, inspect the captured output, done.
+3. If Bash returns a non-zero exit code after the command ran to completion: the status is FAILED. Paste the last ~100 lines of output into gaps_summary.
+4. If Bash itself timed out (you see no 'test result' / 'Finished' line and the command was killed): the status is UNKNOWN, not FAILED. Explicitly state in gaps_summary that the command did not finish in the allotted time, and which sub-phase it was in when cut.
+5. Never infer PASSED when you did not see the actual success marker. Never infer FAILED from 'I could not tell'. UNKNOWN is a first-class verdict — use it when honest.
+
+HARD RULES FOR THE STRUCTURED RESULT:
+- overall_verdict VERIFIED ⇔ every plan step implemented AND make_check_status=PASSED AND make_test_status=PASSED. No other combination qualifies.
+- If either make_check_status or make_test_status is UNKNOWN: overall_verdict MUST be UNKNOWN. Do NOT promote UNKNOWN to GAPS_FOUND — the orchestrator routes UNKNOWN to retry, while GAPS_FOUND routes to fix-attempt (wrong routing wastes iterations).
+- If either make_check_status or make_test_status is FAILED: overall_verdict MUST be GAPS_FOUND.
+- gaps_summary is required on GAPS_FOUND and on UNKNOWN."
 
 VERIFY_SCHEMA="$(cat "$VERIFY_SCHEMA_FILE")"
 CODE_REVIEW_SCHEMA="$(cat "$CODE_REVIEW_SCHEMA_FILE")"
@@ -321,6 +334,13 @@ CODE_REVIEW_SCHEMA="$(cat "$CODE_REVIEW_SCHEMA_FILE")"
 
 TMPDIR_LOOP=$(mktemp -d)
 RESULT_FILE="$TMPDIR_LOOP/result.json"
+
+# Per-run npm cache — avoids EINTEGRITY/ENOTEMPTY races from concurrent npm ci
+# across parallel plan-loops, regardless of --no-worktree/--impl-only mode.
+# Stored in TMPDIR_LOOP (unique per run via mktemp -d, auto-cleaned on exit).
+# CARGO_TARGET_DIR intentionally not overridden: Makefile hard-codes
+# ./target/debug/ paths in cp rules.
+export NPM_CONFIG_CACHE="$TMPDIR_LOOP/.npm-cache"
 
 WRITER_SESSION_ID=""
 IMPL_SESSION_ID=""
@@ -792,31 +812,46 @@ $IMPL_FEEDBACK" \
     v_verdict=$(jq -r '.structured_output.overall_verdict // "UNKNOWN"' "$RESULT_FILE" 2>/dev/null)
     v_steps=$(jq -r '.structured_output.steps_verified // 0' "$RESULT_FILE" 2>/dev/null)
     v_total=$(jq -r '.structured_output.steps_total // 0' "$RESULT_FILE" 2>/dev/null)
-    v_check=$(jq -r '.structured_output.make_check_passed // false' "$RESULT_FILE" 2>/dev/null)
-    v_test=$(jq -r '.structured_output.make_test_passed // false' "$RESULT_FILE" 2>/dev/null)
+    # New 3-state enum: PASSED / FAILED / UNKNOWN. Legacy boolean fields
+    # (make_check_passed / make_test_passed) are honored as a fallback so an
+    # older verifier that still emits the boolean form does not blow up the
+    # orchestrator — true→PASSED, false→FAILED, missing→UNKNOWN.
+    v_check=$(jq -r '.structured_output.make_check_status // (if .structured_output.make_check_passed == true then "PASSED" elif .structured_output.make_check_passed == false then "FAILED" else "UNKNOWN" end)' "$RESULT_FILE" 2>/dev/null)
+    v_test=$(jq -r '.structured_output.make_test_status // (if .structured_output.make_test_passed == true then "PASSED" elif .structured_output.make_test_passed == false then "FAILED" else "UNKNOWN" end)' "$RESULT_FILE" 2>/dev/null)
     v_gaps=$(jq -r '.structured_output.gaps_summary // ""' "$RESULT_FILE" 2>/dev/null)
 
     printf "  ${GREEN}[verifier] Done${NC} ($((verify_end - verify_start))s)\n"
     echo ""
     printf "  ${BOLD}Verdict:    $v_verdict${NC}\n"
     echo "  Steps:      $v_steps / $v_total"
-    echo "  make check: $( [[ "$v_check" == "true" ]] && echo "PASS" || echo "FAIL" )"
-    echo "  make test:  $( [[ "$v_test" == "true" ]] && echo "PASS" || echo "FAIL" )"
+    echo "  make check: $v_check"
+    echo "  make test:  $v_test"
 
     # Sanity check: demote VERIFIED if model contradicts itself (e.g. reports
     # VERIFIED with missing steps or failing checks). The JSON schema cannot
     # express these correlations, so the orchestrator enforces them.
+    #
+    # Verdict routing:
+    #   VERIFIED  — both check and test PASSED AND all steps done → accept
+    #   UNKNOWN   — verifier could not confirm one or both of check/test
+    #               (e.g., make test timed out). Retry the verifier on the
+    #               next loop iteration instead of treating as failure.
+    #   GAPS_FOUND — verifier confirmed a real failure or missing step
     if [[ "$v_verdict" == "VERIFIED" ]]; then
-        if [[ "$v_check" != "true" || "$v_test" != "true" ]]; then
-            printf "\n  ${RED}[sanity] Verifier returned VERIFIED with failing check/test — demoting to GAPS_FOUND${NC}\n"
-            v_verdict="GAPS_FOUND"
+        if [[ "$v_check" != "PASSED" || "$v_test" != "PASSED" ]]; then
+            printf "\n  ${RED}[sanity] Verifier returned VERIFIED with check=$v_check test=$v_test — demoting${NC}\n"
+            if [[ "$v_check" == "UNKNOWN" || "$v_test" == "UNKNOWN" ]]; then
+                v_verdict="UNKNOWN"
+            else
+                v_verdict="GAPS_FOUND"
+            fi
         elif [[ "$v_total" -gt 0 && "$v_steps" -lt "$v_total" ]]; then
             printf "\n  ${RED}[sanity] Verifier returned VERIFIED with $v_steps/$v_total steps implemented — demoting to GAPS_FOUND${NC}\n"
             v_verdict="GAPS_FOUND"
         fi
     fi
 
-    if [[ "$v_verdict" == "VERIFIED" && "$v_check" == "true" && "$v_test" == "true" ]]; then
+    if [[ "$v_verdict" == "VERIFIED" && "$v_check" == "PASSED" && "$v_test" == "PASSED" ]]; then
         echo ""
         printf "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}\n"
         printf "${GREEN}║  IMPLEMENTATION VERIFIED after $impl_iteration iteration(s)${NC}\n"
@@ -826,19 +861,29 @@ $IMPL_FEEDBACK" \
         break
     fi
 
+    # UNKNOWN → don't ask the implementer to change code. Retry verification
+    # on the next iteration of this loop (same working tree, fresh verifier
+    # context). An implementer fix driven by an inconclusive verdict can
+    # corrupt a perfectly good working tree.
+    if [[ "$v_verdict" == "UNKNOWN" ]]; then
+        printf "\n  ${YELLOW}[verifier] Result inconclusive — will retry without touching the implementation${NC}\n"
+        IMPL_FEEDBACK=""
+        continue
+    fi
+
     IMPL_FEEDBACK="$v_gaps"
     if [[ -z "$IMPL_FEEDBACK" || "$IMPL_FEEDBACK" == "null" ]]; then
-        IMPL_FEEDBACK="Verdict: $v_verdict. Steps verified: $v_steps/$v_total. make check passed: $v_check. make test passed: $v_test. Fix ALL failing checks/tests and any remaining gaps before next verification."
+        IMPL_FEEDBACK="Verdict: $v_verdict. Steps verified: $v_steps/$v_total. make check: $v_check. make test: $v_test. Fix ALL failing checks/tests and any remaining gaps before next verification."
     else
         IMPL_FEEDBACK="$IMPL_FEEDBACK
 
-Additionally: make check passed: $v_check. make test passed: $v_test. Both MUST pass before verification can succeed."
+Additionally: make check: $v_check. make test: $v_test. Both MUST be PASSED before verification can succeed."
     fi
 
     echo ""
 done
 
-if [[ "$v_verdict" != "VERIFIED" || "$v_check" != "true" || "$v_test" != "true" ]]; then
+if [[ "$v_verdict" != "VERIFIED" || "$v_check" != "PASSED" || "$v_test" != "PASSED" ]]; then
     printf "\n${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}\n"
     printf "${YELLOW}║  Phase 2: MAX ITERATIONS ($MAX_IMPL_ITER) — verdict: $v_verdict${NC}\n"
     printf "${YELLOW}║  Steps: $v_steps/$v_total  check: $v_check  test: $v_test${NC}\n"
@@ -992,38 +1037,87 @@ $cr_findings" \
 
     printf "  ${CYAN}[verifier]${NC} Re-verifying after code review fixes...\n"
 
-    rm -f "$RESULT_FILE"
-    rv_start=$(date +%s)
+    # Re-verify with an inner retry for UNKNOWN verdicts. An inconclusive
+    # verifier (e.g., make test hit the 15-min cap mid-run) is NOT a signal
+    # to ask the implementer to touch the code — the implementer just did.
+    # Retry the verifier up to RV_MAX_RETRIES times with a fresh context on
+    # each attempt before escalating to "stop Phase 3".
+    RV_MAX_RETRIES=2
+    rv_attempt=0
+    rv_verdict="UNKNOWN"
+    rv_check="UNKNOWN"
+    rv_test="UNKNOWN"
 
-    run_claude_stream "$RESULT_FILE" \
-        -p "Verify that the implementation plan at $PLAN_PATH was 100% implemented. Check every step, then run make check and make test." \
-        --model opus \
-        --effort max \
-        --no-session-persistence \
-        --allowed-tools "$VERIFIER_TOOLS" \
-        --append-system-prompt "$VERIFIER_SYSTEM_PROMPT" \
-        --json-schema "$VERIFY_SCHEMA" || {
-        printf "  ${RED}[verifier] FAILED${NC}\n" >&2
-        phase3_error=true
-        break
-    }
+    while [[ $rv_attempt -le $RV_MAX_RETRIES ]]; do
+        rv_attempt=$((rv_attempt + 1))
+        if [[ $rv_attempt -gt 1 ]]; then
+            printf "  ${YELLOW}[verifier] retry $((rv_attempt - 1))/$RV_MAX_RETRIES after inconclusive result${NC}\n"
+        fi
 
-    rv_end=$(date +%s)
+        rm -f "$RESULT_FILE"
+        rv_start=$(date +%s)
 
-    rv_verdict=$(jq -r '.structured_output.overall_verdict // "UNKNOWN"' "$RESULT_FILE" 2>/dev/null)
-    rv_check=$(jq -r '.structured_output.make_check_passed // false' "$RESULT_FILE" 2>/dev/null)
-    rv_test=$(jq -r '.structured_output.make_test_passed // false' "$RESULT_FILE" 2>/dev/null)
+        if ! run_claude_stream "$RESULT_FILE" \
+            -p "Verify that the implementation plan at $PLAN_PATH was 100% implemented. Check every step, then run make check and make test." \
+            --model opus \
+            --effort max \
+            --no-session-persistence \
+            --allowed-tools "$VERIFIER_TOOLS" \
+            --append-system-prompt "$VERIFIER_SYSTEM_PROMPT" \
+            --json-schema "$VERIFY_SCHEMA"; then
+            printf "  ${RED}[verifier] FAILED${NC}\n" >&2
+            phase3_error=true
+            break 2  # break out of both the retry loop and the code-review loop
+        fi
 
-    printf "  ${GREEN}[verifier] Done${NC} ($((rv_end - rv_start))s)\n"
-    echo "  Verdict: $rv_verdict  check: $( [[ "$rv_check" == "true" ]] && echo "PASS" || echo "FAIL" )  test: $( [[ "$rv_test" == "true" ]] && echo "PASS" || echo "FAIL" )"
+        rv_end=$(date +%s)
 
-    if [[ "$rv_verdict" != "VERIFIED" || "$rv_check" != "true" || "$rv_test" != "true" ]]; then
-        printf "\n  ${RED}Re-verification failed after code review fixes — stopping Phase 3${NC}\n"
-        phase3_error=true
+        rv_verdict=$(jq -r '.structured_output.overall_verdict // "UNKNOWN"' "$RESULT_FILE" 2>/dev/null)
+        # Accept both new 3-state enum and legacy boolean fields (see Phase 2).
+        rv_check=$(jq -r '.structured_output.make_check_status // (if .structured_output.make_check_passed == true then "PASSED" elif .structured_output.make_check_passed == false then "FAILED" else "UNKNOWN" end)' "$RESULT_FILE" 2>/dev/null)
+        rv_test=$(jq -r '.structured_output.make_test_status // (if .structured_output.make_test_passed == true then "PASSED" elif .structured_output.make_test_passed == false then "FAILED" else "UNKNOWN" end)' "$RESULT_FILE" 2>/dev/null)
+
+        # Demote a contradictory VERIFIED the same way Phase 2 does.
+        if [[ "$rv_verdict" == "VERIFIED" ]]; then
+            if [[ "$rv_check" != "PASSED" || "$rv_test" != "PASSED" ]]; then
+                if [[ "$rv_check" == "UNKNOWN" || "$rv_test" == "UNKNOWN" ]]; then
+                    rv_verdict="UNKNOWN"
+                else
+                    rv_verdict="GAPS_FOUND"
+                fi
+            fi
+        fi
+
+        printf "  ${GREEN}[verifier] Done${NC} ($((rv_end - rv_start))s)\n"
+        echo "  Verdict: $rv_verdict  check: $rv_check  test: $rv_test"
+
+        # Conclusive result (VERIFIED or GAPS_FOUND): exit the retry loop and
+        # let the surrounding code-review-loop logic decide what to do next.
+        if [[ "$rv_verdict" != "UNKNOWN" ]]; then
+            break
+        fi
+
+        printf "  ${YELLOW}Re-verification inconclusive (check=$rv_check test=$rv_test) — will retry verifier${NC}\n"
+    done
+
+    if [[ "$rv_verdict" == "VERIFIED" && "$rv_check" == "PASSED" && "$rv_test" == "PASSED" ]]; then
+        # Re-verify succeeded; fall through to top of the review loop.
+        echo ""
+        continue
+    fi
+
+    if [[ "$rv_verdict" == "UNKNOWN" ]]; then
+        # All RV retries returned UNKNOWN. Treat as a warning, not a hard
+        # failure — the user can run make check/test themselves. Don't block
+        # them from seeing the diff.
+        printf "\n  ${YELLOW}Re-verification remained inconclusive after $RV_MAX_RETRIES retries. Treating as warning — user must run 'make check' and 'make test' manually to confirm.${NC}\n"
         break
     fi
 
-    echo ""
+    # Real failure (GAPS_FOUND) — stop Phase 3.
+    printf "\n  ${RED}Re-verification failed after code review fixes — stopping Phase 3${NC}\n"
+    phase3_error=true
+    break
 done
 
 if [[ "$phase3_error" == "true" ]]; then
@@ -1033,6 +1127,17 @@ if [[ "$phase3_error" == "true" ]]; then
     printf "${RED}╚══════════════════════════════════════════════════════════════╝${NC}\n"
     rm -rf "$TMPDIR_LOOP"
     exit 1
+fi
+
+# Warning banner if we broke out of the review loop with an UNKNOWN verdict.
+# Implementation is NOT broken — the verifier just could not confirm (e.g.
+# make test timed out). The user needs to run check/test themselves.
+if [[ "${rv_verdict:-VERIFIED}" == "UNKNOWN" ]]; then
+    printf "\n${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}\n"
+    printf "${YELLOW}║  Phase 3: INCONCLUSIVE — verifier could not confirm${NC}\n"
+    printf "${YELLOW}║  Code is likely fine; run 'make check' and 'make test'${NC}\n"
+    printf "${YELLOW}║  yourself to be sure before committing.${NC}\n"
+    printf "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}\n"
 fi
 
 if [[ "$cr_verdict" != "CLEAN" && "$review_iteration" -ge "$MAX_REVIEW_ITER" ]]; then

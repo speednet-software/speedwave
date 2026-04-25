@@ -1,5 +1,8 @@
 # ADR-018: LLM Provider Switching — Proxy as Container
 
+> **Status:** Superseded by [ADR-040](ADR-040-remove-litellm-direct-provider-injection.md) — as of 2026-04-19.
+> LiteLLM proxy removed; only local models supported via direct ANTHROPIC_BASE_URL injection.
+
 ## Decision
 
 When the LLM provider is not Anthropic, Speedwave adds an `llm-proxy` container (LiteLLM) that translates the Anthropic Messages API to the target provider's API. For Ollama, no proxy is needed — Claude Code connects directly.

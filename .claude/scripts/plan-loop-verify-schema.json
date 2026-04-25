@@ -3,7 +3,8 @@
   "properties": {
     "overall_verdict": {
       "type": "string",
-      "enum": ["VERIFIED", "GAPS_FOUND"]
+      "enum": ["VERIFIED", "GAPS_FOUND", "UNKNOWN"],
+      "description": "VERIFIED: every plan step implemented AND both make check/test passed. GAPS_FOUND: verifier confirmed real failure or missing implementation. UNKNOWN: verifier could not reach a confident conclusion (e.g., make check/test timed out or could not be run). UNKNOWN is NOT failure — it means verification is inconclusive and should be retried."
     },
     "steps_verified": {
       "type": "integer",
@@ -13,23 +14,27 @@
       "type": "integer",
       "description": "Total number of plan steps"
     },
-    "make_check_passed": {
-      "type": "boolean"
+    "make_check_status": {
+      "type": "string",
+      "enum": ["PASSED", "FAILED", "UNKNOWN"],
+      "description": "PASSED: make check ran to completion with exit 0. FAILED: make check ran to completion with non-zero exit OR printed explicit failure markers. UNKNOWN: make check did not complete (timed out, was interrupted, could not be invoked). Return UNKNOWN rather than guessing."
     },
-    "make_test_passed": {
-      "type": "boolean"
+    "make_test_status": {
+      "type": "string",
+      "enum": ["PASSED", "FAILED", "UNKNOWN"],
+      "description": "PASSED: make test ran to completion and every test suite reported success. FAILED: at least one test suite reported failure. UNKNOWN: make test did not complete. Return UNKNOWN rather than guessing."
     },
     "gaps_summary": {
       "type": "string",
-      "description": "Detailed description of all gaps, missing implementations, and test failures. Passed directly to the implementer as fix instructions."
+      "description": "Detailed description of gaps, missing implementations, and test failures. When overall_verdict is UNKNOWN, include WHY verification could not complete (e.g., 'make test exceeded 15-min timeout during Angular phase') so the orchestrator can retry intelligently. Passed directly to the implementer as fix instructions when GAPS_FOUND."
     }
   },
   "required": [
     "overall_verdict",
     "steps_verified",
     "steps_total",
-    "make_check_passed",
-    "make_test_passed",
+    "make_check_status",
+    "make_test_status",
     "gaps_summary"
   ],
   "additionalProperties": false

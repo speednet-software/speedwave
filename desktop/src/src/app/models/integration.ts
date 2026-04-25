@@ -18,6 +18,7 @@ export interface IntegrationStatusEntry {
   auth_fields: AuthField[];
   current_values: Record<string, string>;
   mappings?: Record<string, unknown>;
+  badge?: string;
 }
 
 /** Status and configuration details for a native OS integration. */

@@ -926,6 +926,104 @@ describe('createCodeExecutorHandlers', () => {
     });
   });
 
+  describe('MCP content array passthrough', () => {
+    it('should pass through multi-item content array (text + image)', async () => {
+      const mcpContent = [
+        { type: 'text', text: 'Screenshot taken' },
+        { type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' },
+      ];
+
+      vi.mocked(executorModule.executeCode).mockResolvedValue(createMockExecuteResult(mcpContent));
+
+      const handlers = createCodeExecutorHandlers(mockConfig);
+      const result = await handlers.handleExecuteCode({ code: 'return screenshot' });
+
+      expect(result.content).toEqual(mcpContent);
+      expect(result.content).toHaveLength(2);
+      expect(result.content[0].type).toBe('text');
+      expect(result.content[1].type).toBe('image');
+    });
+
+    it('should pass through single image content item', async () => {
+      const mcpContent = [{ type: 'image', data: 'base64data', mimeType: 'image/jpeg' }];
+
+      vi.mocked(executorModule.executeCode).mockResolvedValue(createMockExecuteResult(mcpContent));
+
+      const handlers = createCodeExecutorHandlers(mockConfig);
+      const result = await handlers.handleExecuteCode({ code: 'return img' });
+
+      expect(result.content).toEqual(mcpContent);
+    });
+
+    it('should pass through resource content items', async () => {
+      const mcpContent = [{ type: 'resource', text: 'resource data' }];
+
+      vi.mocked(executorModule.executeCode).mockResolvedValue(createMockExecuteResult(mcpContent));
+
+      const handlers = createCodeExecutorHandlers(mockConfig);
+      const result = await handlers.handleExecuteCode({ code: 'return res' });
+
+      expect(result.content).toEqual(mcpContent);
+    });
+
+    it('should NOT pass through arrays of non-MCP objects', async () => {
+      const regularArray = [
+        { id: 1, name: 'issue' },
+        { id: 2, name: 'bug' },
+      ];
+
+      vi.mocked(executorModule.executeCode).mockResolvedValue(
+        createMockExecuteResult(regularArray)
+      );
+
+      const handlers = createCodeExecutorHandlers(mockConfig);
+      const result = await handlers.handleExecuteCode({ code: 'return issues' });
+
+      expect(result.content).toHaveLength(1);
+      expect(result.content[0].type).toBe('text');
+      expect(result.content[0].text).toBe(JSON.stringify(regularArray));
+    });
+
+    it('should NOT pass through empty arrays', async () => {
+      vi.mocked(executorModule.executeCode).mockResolvedValue(createMockExecuteResult([]));
+
+      const handlers = createCodeExecutorHandlers(mockConfig);
+      const result = await handlers.handleExecuteCode({ code: 'return []' });
+
+      expect(result.content).toHaveLength(1);
+      expect(result.content[0].type).toBe('text');
+      expect(result.content[0].text).toBe('[]');
+    });
+
+    it('should NOT pass through arrays with unknown type values', async () => {
+      const unknownTypes = [{ type: 'custom', data: 'something' }];
+
+      vi.mocked(executorModule.executeCode).mockResolvedValue(
+        createMockExecuteResult(unknownTypes)
+      );
+
+      const handlers = createCodeExecutorHandlers(mockConfig);
+      const result = await handlers.handleExecuteCode({ code: 'return data' });
+
+      expect(result.content).toHaveLength(1);
+      expect(result.content[0].type).toBe('text');
+      expect(result.content[0].text).toBe(JSON.stringify(unknownTypes));
+    });
+
+    it('should pass through text-only content arrays unchanged', async () => {
+      const textOnlyContent = [{ type: 'text', text: 'just text' }];
+
+      vi.mocked(executorModule.executeCode).mockResolvedValue(
+        createMockExecuteResult(textOnlyContent)
+      );
+
+      const handlers = createCodeExecutorHandlers(mockConfig);
+      const result = await handlers.handleExecuteCode({ code: 'return data' });
+
+      expect(result.content).toEqual(textOnlyContent);
+    });
+  });
+
   describe('timeout validation edge cases', () => {
     it.each([NaN, Infinity, -Infinity])(
       'should reject %s timeout with error',

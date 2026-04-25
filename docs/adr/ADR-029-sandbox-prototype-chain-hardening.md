@@ -93,11 +93,11 @@ If a mature, actively maintained V8 isolate library emerges with Node 24+ suppor
 
 [^1]: [MDN: Reflect](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Reflect) — `Reflect.construct()` can invoke any constructor including `Function`
 
-[^2]: [OWASP Prototype Pollution](https://owasp.org/www-community/attacks/Prototype_Pollution) — documents `.constructor` as the standard chain escape mechanism
+[^2]: [PortSwigger — Prototype Pollution](https://portswigger.net/web-security/prototype-pollution) — documents `.constructor` as the standard chain escape mechanism
 
 [^3]: [isolated-vm GitHub](https://github.com/laverdet/isolated-vm) — repository shows maintenance-mode status and Node.js ABI compatibility issues
 
-[^4]: [quickjs-emscripten GitHub](https://github.com/nicolo-ribaudo/quickjs-emscripten) — async execution limitations documented in README
+[^4]: [quickjs-emscripten GitHub](https://github.com/justjake/quickjs-emscripten) — async execution limitations documented in README
 
 [^5]: [Node.js vm module documentation](https://nodejs.org/api/vm.html#vm-executing-javascript) — "The node:vm module is not a security mechanism. Do not use it to run untrusted code."
 

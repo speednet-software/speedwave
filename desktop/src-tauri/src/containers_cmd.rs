@@ -577,12 +577,40 @@ pub fn get_llm_config() -> Result<LlmConfigResponse, String> {
         .active_project_entry()
         .and_then(|p| p.claude.as_ref())
         .and_then(|c| c.llm.as_ref());
+    let provider = llm.and_then(|l| l.provider.clone());
+    let default_url = provider
+        .as_deref()
+        .and_then(speedwave_runtime::compose::default_base_url);
+    let base_url = llm.and_then(|l| l.base_url.clone());
+
+    // Non-destructive migration: if a previously-stored base_url no longer
+    // satisfies the current SSRF policy (e.g. someone saved `http://169.254.169.254`
+    // before the policy was introduced), log a warning. The value is still
+    // returned so the UI can show it in the input; the Save path will reject
+    // it on the user's next edit. See ADR-041.
+    if let Some(ref url) = base_url {
+        let normalized = speedwave_runtime::compose::strip_trailing_v1(url);
+        if let Err(e) = crate::llm_cmd::validate_llm_base_url(&normalized) {
+            log::warn!("get_llm_config: stored base_url '{url}' fails current SSRF policy: {e}");
+        }
+    }
+
     Ok(LlmConfigResponse {
-        provider: llm.and_then(|l| l.provider.clone()),
+        provider,
         model: llm.and_then(|l| l.model.clone()),
-        base_url: llm.and_then(|l| l.base_url.clone()),
-        api_key_env: llm.and_then(|l| l.api_key_env.clone()),
+        base_url,
+        default_base_url: default_url,
     })
+}
+
+/// Returns the backend-authoritative default base URL for a given provider.
+///
+/// Delegates to `speedwave_runtime::compose::default_base_url` so the frontend
+/// never needs to duplicate URL strings. Returns `None` for unknown providers
+/// (e.g. `"anthropic"` has no local server URL).
+#[tauri::command]
+pub fn get_default_base_url(provider: String) -> Result<Option<String>, String> {
+    Ok(speedwave_runtime::compose::default_base_url(&provider))
 }
 
 /// Applies LLM config to the active project in-memory. Extracted for testability.
@@ -591,7 +619,6 @@ fn apply_llm_config(
     provider: Option<String>,
     model: Option<String>,
     base_url: Option<String>,
-    api_key_env: Option<String>,
 ) -> anyhow::Result<()> {
     let active = user_config
         .active_project
@@ -605,7 +632,6 @@ fn apply_llm_config(
         provider,
         model,
         base_url,
-        api_key_env,
     };
     match &mut project.claude {
         Some(c) => c.llm = Some(llm),
@@ -625,11 +651,47 @@ pub fn update_llm_config(
     provider: Option<String>,
     model: Option<String>,
     base_url: Option<String>,
-    api_key_env: Option<String>,
 ) -> Result<(), String> {
+    // Local providers (ollama, lmstudio, llamacpp) cannot start a session
+    // without a model — `compose::apply_llm_config` rejects the compose
+    // render, which only surfaces when the user tries to run Claude.
+    // Enforce the same requirement at save time so the config never reaches
+    // that failure mode. The frontend performs the same check, but a
+    // malformed Tauri call (or future callers bypassing the UI) could still
+    // persist `provider=<local>, model=null` without this guard.
+    if config::is_local_provider(provider.as_deref()) && model.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(format!(
+            "Provider '{}' requires a model name. \
+             Configure it in Settings → LLM Provider → Model.",
+            provider.as_deref().unwrap_or("")
+        ));
+    }
+    if let Some(ref m) = model {
+        // A model name starting with `--` (or `-`) would be interpreted as
+        // a flag by Claude Code's argument parser when rendered as
+        // `--model <name>`. Reject at save time so the free-text input can't
+        // smuggle flags into the CLI invocation.
+        if m.starts_with("--") || m.starts_with('-') {
+            return Err("Model name must not start with '-' (CLI flag collision)".to_string());
+        }
+    }
+    if let Some(ref url) = base_url {
+        // Normalize the same way apply_llm_config does, so a value accepted at
+        // render time is also accepted at save time (Ollama docs commonly use
+        // `http://…/v1` suffixes; we strip that before validating).
+        let normalized = speedwave_runtime::compose::strip_trailing_v1(url);
+        // SSRF guard — same policy as LLM discovery probe. Blocks link-local,
+        // metadata, IPv6-mapped bypasses, embedded credentials, query/fragment.
+        // See ADR-041.
+        crate::llm_cmd::validate_llm_base_url(&normalized).map_err(|e| e.to_string())?;
+        // validate_base_url also rejects path components (http://host/path),
+        // which validate_llm_base_url does not check.
+        speedwave_runtime::compose::validate_base_url(&normalized).map_err(|e| e.to_string())?;
+    }
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
-        apply_llm_config(&mut user_config, provider, model, base_url, api_key_env)?;
+        apply_llm_config(&mut user_config, provider, model, base_url)?;
         config::save_user_config(&user_config)
     })
     .map_err(|e| e.to_string())
@@ -665,7 +727,6 @@ mod tests {
                             provider: Some("anthropic".to_string()),
                             model: Some("claude-sonnet-4-6".to_string()),
                             base_url: None,
-                            api_key_env: None,
                         }),
                     }),
                     integrations: None,
@@ -688,19 +749,17 @@ mod tests {
 
         let result = apply_llm_config(
             &mut cfg,
-            Some("openai".to_string()),
-            Some("gpt-4o".to_string()),
-            Some("http://localhost:8080".to_string()),
-            Some("OPENAI_KEY".to_string()),
+            Some("ollama".to_string()),
+            Some("llama3.3".to_string()),
+            Some("http://localhost:11434".to_string()),
         );
         assert!(result.is_ok());
 
         let project = cfg.find_project("alpha").unwrap();
         let llm = project.claude.as_ref().unwrap().llm.as_ref().unwrap();
-        assert_eq!(llm.provider.as_deref(), Some("openai"));
-        assert_eq!(llm.model.as_deref(), Some("gpt-4o"));
-        assert_eq!(llm.base_url.as_deref(), Some("http://localhost:8080"));
-        assert_eq!(llm.api_key_env.as_deref(), Some("OPENAI_KEY"));
+        assert_eq!(llm.provider.as_deref(), Some("ollama"));
+        assert_eq!(llm.model.as_deref(), Some("llama3.3"));
+        assert_eq!(llm.base_url.as_deref(), Some("http://localhost:11434"));
     }
 
     #[test]
@@ -714,7 +773,6 @@ mod tests {
             Some("ollama".to_string()),
             Some("llama3.3".to_string()),
             None,
-            None,
         );
         assert!(result.is_ok());
 
@@ -723,7 +781,6 @@ mod tests {
         assert_eq!(llm.provider.as_deref(), Some("ollama"));
         assert_eq!(llm.model.as_deref(), Some("llama3.3"));
         assert_eq!(llm.base_url, None);
-        assert_eq!(llm.api_key_env, None);
     }
 
     #[test]
@@ -731,7 +788,7 @@ mod tests {
         let mut cfg = make_config_with_active_project();
         cfg.active_project = Some("beta".to_string());
 
-        let result = apply_llm_config(&mut cfg, None, None, None, None);
+        let result = apply_llm_config(&mut cfg, None, None, None);
         assert!(result.is_ok());
 
         let project = cfg.find_project("beta").unwrap();
@@ -739,7 +796,6 @@ mod tests {
         assert!(llm.provider.is_none());
         assert!(llm.model.is_none());
         assert!(llm.base_url.is_none());
-        assert!(llm.api_key_env.is_none());
     }
 
     #[test]
@@ -757,7 +813,7 @@ mod tests {
             log_level: None,
         };
 
-        let result = apply_llm_config(&mut cfg, Some("openai".to_string()), None, None, None);
+        let result = apply_llm_config(&mut cfg, Some("ollama".to_string()), None, None);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -781,7 +837,7 @@ mod tests {
             log_level: None,
         };
 
-        let result = apply_llm_config(&mut cfg, Some("openai".to_string()), None, None, None);
+        let result = apply_llm_config(&mut cfg, Some("ollama".to_string()), None, None);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -812,7 +868,7 @@ mod tests {
             log_level: None,
         };
 
-        apply_llm_config(&mut cfg, Some("openai".to_string()), None, None, None).unwrap();
+        apply_llm_config(&mut cfg, Some("ollama".to_string()), None, None).unwrap();
 
         let project = cfg.find_project("proj").unwrap();
         let claude = project.claude.as_ref().unwrap();
@@ -824,7 +880,7 @@ mod tests {
         assert!(claude.settings.is_some(), "settings should be preserved");
         assert_eq!(
             claude.llm.as_ref().unwrap().provider.as_deref(),
-            Some("openai")
+            Some("ollama")
         );
     }
 
@@ -833,13 +889,294 @@ mod tests {
         let mut cfg = make_config_with_active_project();
         // active_project is "alpha"
 
-        apply_llm_config(&mut cfg, Some("openai".to_string()), None, None, None).unwrap();
+        apply_llm_config(&mut cfg, Some("ollama".to_string()), None, None).unwrap();
 
         // beta should be unchanged
         let beta = cfg.find_project("beta").unwrap();
         let beta_llm = beta.claude.as_ref().unwrap().llm.as_ref().unwrap();
         assert_eq!(beta_llm.provider.as_deref(), Some("anthropic"));
         assert_eq!(beta_llm.model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn update_llm_config_rejects_local_provider_without_model() {
+        // Local providers can't start a session without a model —
+        // `compose::apply_llm_config` would reject the compose render.
+        // Catching it at save time prevents the config from persisting a
+        // state that only fails when the user tries to run.
+        //
+        // Enumerate every local provider via the SSOT const so a future
+        // addition (a fourth local backend) is automatically covered.
+        assert!(
+            !config::LOCAL_PROVIDERS.is_empty(),
+            "LOCAL_PROVIDERS must list at least one provider — this test \
+             iterates it"
+        );
+        for provider in config::LOCAL_PROVIDERS {
+            // Empty string also counts as "no model" — matches the frontend
+            // guard in llm-provider.component.ts.
+            for model in [None, Some(String::new())] {
+                let result = update_llm_config(
+                    Some((*provider).to_string()),
+                    model.clone(),
+                    Some("http://localhost:11434".to_string()),
+                );
+                let err = result.expect_err(&format!(
+                    "provider={provider}, model={model:?} must be rejected \
+                     but save succeeded"
+                ));
+                assert!(
+                    err.contains("requires a model name"),
+                    "provider={provider}, model={model:?} must fail with \
+                     model-required error, got: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn update_llm_config_accepts_anthropic_without_model() {
+        // Anthropic is not a local provider — the model-required guard must
+        // not fire. The Anthropic path has its own default model handling.
+        let result = update_llm_config(Some("anthropic".to_string()), None, None);
+        // Either succeeds or fails for project-config reasons in the test env
+        // (no active project) — what we require is that the error is NOT the
+        // model-required one.
+        if let Err(err) = result {
+            assert!(
+                !err.contains("requires a model name"),
+                "Anthropic with no model must not trigger the local-provider \
+                 model-required guard, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_llm_config_rejects_model_with_flag_prefix() {
+        // Regression: a model name starting with `--` would be rendered as
+        // `--model --dangerously-skip-permissions` in the Claude Code
+        // invocation; argument parsers may treat the value as another flag.
+        let result = update_llm_config(
+            Some("ollama".to_string()),
+            Some("--dangerously-skip-permissions".to_string()),
+            Some("http://localhost:11434".to_string()),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_lowercase().contains("flag"),
+            "Error must reference the flag collision, got: {err}"
+        );
+    }
+
+    #[test]
+    fn update_llm_config_rejects_model_with_single_dash_prefix() {
+        let result = update_llm_config(
+            Some("ollama".to_string()),
+            Some("-h".to_string()),
+            Some("http://localhost:11434".to_string()),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_llm_config_accepts_model_with_dash_in_middle() {
+        // Common model names contain dashes (e.g. `llama-3.3`, `qwen-coder`).
+        // The guard only rejects leading dashes.
+        let result = update_llm_config(
+            Some("ollama".to_string()),
+            Some("llama-3.3".to_string()),
+            Some("http://localhost:11434".to_string()),
+        );
+        // The save itself may fail for project-config reasons in the test env,
+        // but the model-name check must not be the reason.
+        if let Err(e) = result {
+            assert!(
+                !e.to_lowercase().contains("flag collision"),
+                "Middle-dash model must not trigger flag-collision guard, got: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_llm_config_rejects_invalid_base_url() {
+        // Non-empty model so the model-required guard doesn't short-circuit
+        // before URL validation runs — this test exercises URL scheme
+        // rejection, not model handling.
+        let result = update_llm_config(
+            Some("ollama".to_string()),
+            Some("placeholder-model".to_string()),
+            Some("javascript:alert(1)".to_string()),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // Either the new SSRF guard (scheme denylist) or the runtime syntactic
+        // validator rejects this; both mention the allowed schemes.
+        assert!(
+            err.to_lowercase().contains("http"),
+            "Error must reference the allowed http(s) scheme, got: {err}"
+        );
+    }
+
+    #[test]
+    fn update_llm_config_accepts_v1_suffix() {
+        // Regression: a `…/v1` URL (common in Ollama/LiteLLM docs) must be accepted
+        // at save time because compose rendering strips the suffix before validating.
+        // Previously this produced a false "base_url must not contain a path" error.
+        // We only check the URL-validation path here — a config-save error is fine,
+        // what we require is that the error (if any) is NOT the path rejection.
+        let result = update_llm_config(
+            Some("ollama".to_string()),
+            Some("llama3.3".to_string()),
+            Some("http://localhost:11434/v1".to_string()),
+        );
+        if let Err(err) = result {
+            assert!(
+                !err.contains("must not contain a path"),
+                "`/v1` suffix must be stripped before validation, got: {err}"
+            );
+        }
+    }
+
+    // ── Save-path SSRF coverage (ADR-041) ────────────────────────────────
+    //
+    // Before these tests, `update_llm_config` ran only compose::validate_base_url,
+    // which accepts `http://169.254.169.254` and friends. The new
+    // `llm_cmd::validate_llm_base_url` guard closes that hole — these tests
+    // exercise it at the command boundary. Validation fails before the config
+    // file is touched, so no fixture/lock setup is required.
+
+    /// Helper for SSRF URL-validation tests. Passes a placeholder model so the
+    /// model-required guard doesn't short-circuit before the URL is validated
+    /// — these tests exercise URL validation specifically, not model handling.
+    fn url_rejection_err(url: &str) -> String {
+        update_llm_config(
+            Some("ollama".to_string()),
+            Some("placeholder-model".to_string()),
+            Some(url.to_string()),
+        )
+        .unwrap_err()
+    }
+
+    #[test]
+    fn update_llm_config_rejects_metadata_ip() {
+        let err = url_rejection_err("http://169.254.169.254:8080");
+        assert!(
+            err.to_lowercase().contains("private") || err.to_lowercase().contains("reserved"),
+            "metadata IP must be rejected with a private/reserved error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn update_llm_config_rejects_link_local_ipv6() {
+        let err = url_rejection_err("http://[fe80::1]");
+        assert!(
+            err.to_lowercase().contains("private") || err.to_lowercase().contains("reserved"),
+            "IPv6 link-local must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn update_llm_config_rejects_credentials() {
+        let err = url_rejection_err("http://user:pass@localhost:11434");
+        assert!(
+            err.to_lowercase().contains("credentials"),
+            "embedded credentials must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn update_llm_config_rejects_query_string() {
+        let err = url_rejection_err("http://localhost:11434?foo=bar");
+        assert!(
+            err.to_lowercase().contains("query"),
+            "query string must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn update_llm_config_accepts_loopback_via_validation() {
+        // `update_llm_config` may fail later (no active project) — we just need
+        // the error (if any) NOT to be a URL rejection.
+        let result = update_llm_config(
+            Some("ollama".to_string()),
+            Some("llama3.3".to_string()),
+            Some("http://127.0.0.1:11434".to_string()),
+        );
+        if let Err(err) = result {
+            assert!(
+                !err.to_lowercase().contains("private")
+                    && !err.to_lowercase().contains("blocked")
+                    && !err.to_lowercase().contains("credentials"),
+                "loopback must NOT be rejected by URL validation, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_llm_config_accepts_rfc1918_via_validation() {
+        let result = update_llm_config(
+            Some("ollama".to_string()),
+            Some("llama3.3".to_string()),
+            Some("http://192.168.1.50:11434".to_string()),
+        );
+        if let Err(err) = result {
+            assert!(
+                !err.to_lowercase().contains("private") && !err.to_lowercase().contains("blocked"),
+                "RFC1918 must NOT be rejected by URL validation, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_llm_config_accepts_public_domain_via_validation() {
+        // Per ADR-041: user-written URL == user's threat model (align with Redmine).
+        let result = update_llm_config(
+            Some("ollama".to_string()),
+            Some("x".to_string()),
+            Some("http://my-ollama.company.com".to_string()),
+        );
+        if let Err(err) = result {
+            assert!(
+                !err.to_lowercase().contains("blocked"),
+                "public domain must NOT be rejected by URL validation, got: {err}"
+            );
+        }
+    }
+
+    // -- get_default_base_url tests --
+
+    #[test]
+    fn get_default_base_url_returns_ollama_url() {
+        let result = get_default_base_url("ollama".to_string()).unwrap();
+        assert_eq!(
+            result,
+            Some("http://host.docker.internal:11434".to_string())
+        );
+    }
+
+    #[test]
+    fn get_default_base_url_returns_lmstudio_url() {
+        let result = get_default_base_url("lmstudio".to_string()).unwrap();
+        assert_eq!(result, Some("http://host.docker.internal:1234".to_string()));
+    }
+
+    #[test]
+    fn get_default_base_url_returns_llamacpp_url() {
+        let result = get_default_base_url("llamacpp".to_string()).unwrap();
+        assert_eq!(result, Some("http://host.docker.internal:8080".to_string()));
+    }
+
+    #[test]
+    fn get_default_base_url_returns_none_for_anthropic() {
+        let result = get_default_base_url("anthropic".to_string()).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn get_default_base_url_returns_none_for_unknown_provider() {
+        let result = get_default_base_url("openai".to_string()).unwrap();
+        assert_eq!(result, None);
     }
 
     // -- MockRuntime for switch/teardown tests --

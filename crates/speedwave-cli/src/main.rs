@@ -25,6 +25,7 @@ enum CliAction {
     SelfUpdate,
     Update,
     Run, // default: compose_up + exec
+    Help,
 }
 
 /// Extracts `--project <value>` from plugin enable/disable args.
@@ -40,6 +41,7 @@ fn parse_project_flag(args: &[String], subcommand: &str) -> Result<String, Strin
 
 fn parse_action(args: &[String]) -> Result<CliAction, String> {
     match args.get(1).map(|s| s.as_str()) {
+        Some("--help" | "-h" | "help") => Ok(CliAction::Help),
         Some("plugin") => match args.get(2).map(|s| s.as_str()) {
             Some("install") => {
                 let path = args
@@ -271,6 +273,33 @@ fn validate_project_name(name: &str) -> Result<(), String> {
     validation::validate_project_name(name).map_err(|e| e.to_string())
 }
 
+/// Printed by `speedwave --help` / `-h` / `help`. Must not require the
+/// runtime or any I/O so users can discover commands before Desktop is
+/// running (or while troubleshooting a broken setup).
+fn print_help() {
+    println!(
+        "\
+speedwave — run Claude Code in a hardened container per project
+
+USAGE:
+    speedwave                         Start Claude Code for the current project
+    speedwave check                   Run security + OS prerequisite checks
+    speedwave init [name]             Register the current directory as a project
+    speedwave update                  Rebuild container images for the current bundle
+    speedwave self-update             Download the latest speedwave CLI binary
+
+    speedwave plugin install <zip>    Install a plugin from a signed ZIP
+    speedwave plugin list             List installed plugins
+    speedwave plugin remove <slug>    Uninstall a plugin
+    speedwave plugin enable  <id> --project <project>   Enable a plugin per-project
+    speedwave plugin disable <id> --project <project>   Disable a plugin per-project
+
+    speedwave --help | -h | help      Show this help and exit
+
+Most commands require Speedwave Desktop to be running. See docs/guides/cli.md.",
+    );
+}
+
 fn runtime_not_available() -> ! {
     eprintln!("Speedwave runtime is not running.");
     eprintln!("CLI requires Speedwave Desktop to be running with a completed setup.");
@@ -301,9 +330,13 @@ fn main() -> anyhow::Result<()> {
             use std::io::Write;
             let sanitized =
                 speedwave_runtime::log_sanitizer::sanitize(&format!("{}", record.args()));
+            // ISO8601 local-time timestamp with millis — kept in sync with
+            // the desktop logger format so merged log views (e.g. user
+            // pasting CLI + desktop logs side-by-side) stay comparable.
+            let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%z");
             writeln!(
                 buf,
-                "[{level}][{target}] {sanitized}",
+                "{ts} [{level}][{target}] {sanitized}",
                 level = record.level(),
                 target = record.target(),
             )
@@ -331,6 +364,19 @@ fn main() -> anyhow::Result<()> {
         eprintln!("{}", msg);
         std::process::exit(1);
     });
+
+    // `--help` / `-h` / `help` must print usage without touching the runtime
+    // so users can discover commands when Desktop isn't running (or while
+    // troubleshooting a broken setup).
+    //
+    // NOTE: `main_handles_help_before_runtime_check` in the tests below
+    // asserts that the literal string `if action == CliAction::Help` appears
+    // before any `runtime_not_available()` call site inside `fn main()`. If
+    // you rename either identifier, update the test assertion too.
+    if action == CliAction::Help {
+        print_help();
+        std::process::exit(0);
+    }
 
     // Handle `speedwave self-update` before anything else
     if action == CliAction::SelfUpdate {
@@ -632,7 +678,7 @@ fn main() -> anyhow::Result<()> {
 
     // exec -it -> interactive Claude terminal inside container
     let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
-    exec_cmd.extend_from_slice(&resolved.flags);
+    exec_cmd.extend(resolved.flags.iter().map(String::as_str));
     let status = runtime
         .container_exec(&container_name, &exec_cmd)
         .status()?;
@@ -734,6 +780,49 @@ mod tests {
     fn parse_action_no_args_returns_run() {
         let args = vec!["speedwave".to_string()];
         assert_eq!(parse_action(&args).unwrap(), CliAction::Run);
+    }
+
+    #[test]
+    fn parse_action_help_long_flag() {
+        let args = vec!["speedwave".to_string(), "--help".to_string()];
+        assert_eq!(parse_action(&args).unwrap(), CliAction::Help);
+    }
+
+    #[test]
+    fn parse_action_help_short_flag() {
+        let args = vec!["speedwave".to_string(), "-h".to_string()];
+        assert_eq!(parse_action(&args).unwrap(), CliAction::Help);
+    }
+
+    #[test]
+    fn parse_action_help_subcommand() {
+        let args = vec!["speedwave".to_string(), "help".to_string()];
+        assert_eq!(parse_action(&args).unwrap(), CliAction::Help);
+    }
+
+    /// Regression guard: the Help action must be reachable without touching
+    /// the runtime. If the main() ordering ever changes so that runtime
+    /// detection runs before Help is handled, users lose `--help` whenever
+    /// Desktop isn't running — defeating the purpose of the flag.
+    #[test]
+    fn main_handles_help_before_runtime_check() {
+        let source = include_str!("main.rs");
+        let main_start = source
+            .find("\nfn main() -> anyhow::Result<()>")
+            .expect("main.rs must define fn main()");
+        let main_body = &source[main_start..];
+        let help_idx = main_body
+            .find("if action == CliAction::Help")
+            .expect("main() must handle CliAction::Help");
+        let runtime_idx = main_body
+            .find("runtime_not_available()")
+            .expect("main() must have at least one runtime_not_available call site");
+        assert!(
+            help_idx < runtime_idx,
+            "CliAction::Help must be handled BEFORE any runtime_not_available \
+             call site inside main() — otherwise `speedwave --help` fails \
+             when Desktop is not running"
+        );
     }
 
     #[test]

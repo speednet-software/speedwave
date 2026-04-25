@@ -5,9 +5,22 @@ pub const LIMA_SUBDIR: &str = "lima";
 pub const DATA_DIR: &str = ".speedwave";
 pub const CLI_BINARY: &str = "speedwave";
 pub const COMPOSE_PREFIX: &str = "speedwave";
+/// Port on which `mcp-hub` listens inside the compose network.
+///
+/// This is the single external contract: the `claude` container reaches the
+/// hub at `http://mcp-hub:4000`. See ADR-038.
 pub const PORT_BASE: u16 = 4000;
-/// Port reserved for the optional LLM proxy container (PORT_BASE + 9).
-pub const PORT_LLM_PROXY: u16 = PORT_BASE + 9;
+
+/// Port on which every MCP worker listens inside its own container.
+///
+/// All workers — built-in services (slack, sharepoint, redmine, gitlab)
+/// and plugin workers — share this port. Each container has its own
+/// network namespace, so port reuse is safe; the compose network
+/// disambiguates by DNS service name
+/// (`http://mcp-slack:3000`, `http://mcp-gitlab:3000`, etc.).
+///
+/// See ADR-038 for the rationale behind the single-internal-port model.
+pub const PORT_WORKER: u16 = 3000;
 pub const MCP_OS_AUTH_TOKEN_FILE: &str = "mcp-os-auth-token";
 pub const MCP_OS_PORT_FILE: &str = "mcp-os-port";
 pub const MCP_OS_PID_FILE: &str = "mcp-os-pid";
@@ -25,6 +38,17 @@ pub const LIMA_HOST: &str = "host.lima.internal";
 pub const NERDCTL_LINUX_HOST: &str = "host.docker.internal";
 /// Hostname reachable from inside WSL2/nerdctl containers pointing to the Windows host.
 pub const WSL_HOST: &str = "host.speedwave.internal";
+/// Podman-compatibility alias injected via `extra_hosts` in compose.template.yml.
+/// Containers use this when built for environments that expect the Podman convention.
+pub const CONTAINERS_HOST: &str = "host.containers.internal";
+
+/// All hostnames resolved inside containers to the host gateway via `extra_hosts`
+/// in `compose.template.yml`. Used by host-side code (Desktop settings) that needs
+/// to probe the same endpoint a container would hit: each alias is rewritten to
+/// `127.0.0.1` before a local HTTP probe because the aliases are not present in
+/// the host's resolver (Lima/WSL2/rootless nerdctl inject them only inside the VM).
+pub const CONTAINER_HOST_ALIASES: &[&str] =
+    &[LIMA_HOST, NERDCTL_LINUX_HOST, WSL_HOST, CONTAINERS_HOST];
 
 /// IP of the macOS host as seen from inside nerdctl containers in the Lima vzNAT network.
 /// Lima vzNAT always assigns 192.168.5.2 to the host — this is static, not DHCP.
@@ -116,6 +140,12 @@ pub const NESTED_VIRT_WARNING_MSG: &str = "\
     - Increase VM memory to at least 8 GB\n\
     - Enable nested virtualization in VM settings (VT-x/EPT or AMD-V/RVI)\n\
     - Close other memory-intensive applications";
+
+/// Path inside the container to the system prompt file used when running a
+/// local LLM (Ollama, LM Studio, llama.cpp). The slim prompt replaces
+/// Claude Code's built-in ~16k-token prompt which exceeds local model context
+/// windows. See ADR-040.
+pub const LOCAL_LLM_SYSTEM_PROMPT_PATH: &str = "/speedwave/resources/system-prompts/local-llm.md";
 
 /// Error prefix used by backend when SecurityCheck or OS prereqs fail.
 /// Frontend matches on this string to distinguish blocking (check_failed)
@@ -223,6 +253,8 @@ pub struct McpServiceDescriptor {
     /// Credential file names allowed for this service (superset of auth field keys,
     /// may include extra files like "config.json").
     pub credential_files: &'static [&'static str],
+    /// Optional UI badge label (e.g. "BETA", "NEW"). `None` = no badge.
+    pub badge: Option<&'static str>,
 }
 
 /// Toggleable MCP services — Single Source of Truth for service metadata.
@@ -257,6 +289,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             },
         ],
         credential_files: &["bot_token", "user_token"],
+        badge: None,
     },
     McpServiceDescriptor {
         config_key: "sharepoint",
@@ -334,6 +367,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             "site_id",
             "base_path",
         ],
+        badge: None,
     },
     McpServiceDescriptor {
         config_key: "redmine",
@@ -380,6 +414,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             "project_id",
             "project_name",
         ],
+        badge: None,
     },
     McpServiceDescriptor {
         config_key: "gitlab",
@@ -410,6 +445,18 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             },
         ],
         credential_files: &["token", "host_url"],
+        badge: None,
+    },
+    McpServiceDescriptor {
+        config_key: "playwright",
+        compose_name: "mcp-playwright",
+        worker_env: "WORKER_PLAYWRIGHT_URL",
+        display_name: "Playwright",
+        description: "Headless browser automation (Chromium via Playwright)",
+        // Playwright has no credentials — it scrapes public URLs only.
+        auth_fields: &[],
+        credential_files: &[],
+        badge: Some("BETA"),
     },
 ];
 
@@ -481,11 +528,19 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
     "mcp-sharepoint",
     "mcp-redmine",
     "mcp-gitlab",
+    "mcp-playwright",
 ];
 
 /// Built-in service IDs (logical names, not compose names).
 /// Used by plugin install to prevent slug collisions.
-pub const BUILT_IN_SERVICE_IDS: &[&str] = &["slack", "sharepoint", "redmine", "gitlab", "os"];
+pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
+    "slack",
+    "sharepoint",
+    "redmine",
+    "gitlab",
+    "playwright",
+    "os",
+];
 
 /// Pure, testable function for resolving the data directory.
 /// `env_val` = None or empty string → `home.join(DATA_DIR)` (empty string treated as unset)
@@ -674,12 +729,13 @@ mod tests {
         let resolved = crate::config::ResolvedIntegrationsConfig::default();
         // Explicit field enumeration — update this when adding/removing MCP fields.
         // Using a const to force a compile-time reminder when struct changes.
-        const EXPECTED_MCP_FIELDS: usize = 4; // slack, sharepoint, redmine, gitlab
+        const EXPECTED_MCP_FIELDS: usize = 5; // slack, sharepoint, redmine, gitlab, playwright
         let _ = (
             resolved.slack,
             resolved.sharepoint,
             resolved.redmine,
             resolved.gitlab,
+            resolved.playwright,
         );
         assert_eq!(
             TOGGLEABLE_MCP_SERVICES.len(),
@@ -748,6 +804,7 @@ mod tests {
             ("sharepoint", 6),
             ("redmine", 3),
             ("gitlab", 2),
+            ("playwright", 0),
         ];
         for &(key, count) in expected {
             let svc =
@@ -763,9 +820,24 @@ mod tests {
         }
     }
 
+    /// Services that intentionally have no credentials — they access only
+    /// public resources (e.g. Playwright scrapes public URLs). Kept as a
+    /// small explicit allowlist so forgetting to declare auth for a new
+    /// service that actually needs it still fails this test.
+    const CREDENTIAL_LESS_SERVICES: &[&str] = &["playwright"];
+
     #[test]
     fn test_every_service_has_auth_fields() {
         for svc in TOGGLEABLE_MCP_SERVICES {
+            if CREDENTIAL_LESS_SERVICES.contains(&svc.config_key) {
+                assert!(
+                    svc.auth_fields.is_empty(),
+                    "service '{}' is in CREDENTIAL_LESS_SERVICES but declares auth fields — \
+                     move it out of the allowlist or remove the fields",
+                    svc.config_key
+                );
+                continue;
+            }
             assert!(
                 !svc.auth_fields.is_empty(),
                 "service '{}' must have at least one auth field",
@@ -777,6 +849,14 @@ mod tests {
     #[test]
     fn test_every_service_has_credential_files() {
         for svc in TOGGLEABLE_MCP_SERVICES {
+            if CREDENTIAL_LESS_SERVICES.contains(&svc.config_key) {
+                assert!(
+                    svc.credential_files.is_empty(),
+                    "service '{}' is in CREDENTIAL_LESS_SERVICES but declares credential files",
+                    svc.config_key
+                );
+                continue;
+            }
             assert!(
                 !svc.credential_files.is_empty(),
                 "service '{}' must have at least one credential file",
@@ -1228,6 +1308,43 @@ mod tests {
         assert!(
             LIMA_VM_STOP_TIMEOUT_SECS > 0,
             "LIMA_VM_STOP_TIMEOUT_SECS must be positive"
+        );
+    }
+
+    #[test]
+    fn test_playwright_has_beta_badge() {
+        let svc = find_mcp_service("playwright").expect("playwright service must exist");
+        assert_eq!(svc.badge, Some("BETA"));
+    }
+
+    #[test]
+    fn test_credential_services_have_no_badge() {
+        for svc in TOGGLEABLE_MCP_SERVICES {
+            if !svc.auth_fields.is_empty() {
+                assert_eq!(
+                    svc.badge, None,
+                    "service '{}' with credentials should not have a badge",
+                    svc.config_key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_container_host_aliases_contains_all_named_hosts() {
+        // Alignment guard: CONTAINER_HOST_ALIASES is composed from the per-platform
+        // host constants. If someone adds a new alias to `extra_hosts` in
+        // compose.template.yml and forgets to name it here, this test doesn't catch
+        // that (separate template test does). This test catches the inverse:
+        // renaming one of the named hosts without updating the composition.
+        assert!(CONTAINER_HOST_ALIASES.contains(&LIMA_HOST));
+        assert!(CONTAINER_HOST_ALIASES.contains(&NERDCTL_LINUX_HOST));
+        assert!(CONTAINER_HOST_ALIASES.contains(&WSL_HOST));
+        assert!(CONTAINER_HOST_ALIASES.contains(&CONTAINERS_HOST));
+        assert_eq!(
+            CONTAINER_HOST_ALIASES.len(),
+            4,
+            "expected exactly 4 container host aliases; update this test if you added a new platform alias to compose.template.yml"
         );
     }
 }

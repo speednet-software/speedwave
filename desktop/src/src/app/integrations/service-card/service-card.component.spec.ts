@@ -161,6 +161,22 @@ describe('ServiceCardComponent', () => {
     );
   });
 
+  describe('service-badge', () => {
+    it('renders badge span with text when badge is set', () => {
+      component.svc = { ...makeGitlabSvc(), badge: 'BETA' };
+      fixture.detectChanges();
+      const badgeEl = fixture.nativeElement.querySelector('[data-testid="service-badge"]');
+      expect(badgeEl).not.toBeNull();
+      expect(badgeEl.textContent.trim()).toBe('BETA');
+    });
+
+    it('does not render badge span when badge is absent', () => {
+      component.svc = { ...makeGitlabSvc(), badge: undefined };
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="service-badge"]')).toBeNull();
+    });
+  });
+
   it('should show configured badge when configured', () => {
     fixture.detectChanges();
     const badge = fixture.nativeElement.querySelector('[data-testid="badge"]');

@@ -10,7 +10,7 @@ import { createMCPServer, ts, notConfiguredMessage, retryAsync } from '@speedwav
 import { initializeRedmineClient } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 
-const PORT = parseInt(process.env.PORT || '3003', 10);
+const PORT = parseInt(process.env.PORT || '3000', 10);
 const SERVER_NAME = 'mcp-redmine';
 const AUTH_TOKEN = process.env.MCP_REDMINE_AUTH_TOKEN;
 

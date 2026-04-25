@@ -85,7 +85,7 @@
         >
           @for (msg of viewingTranscript.messages; track $index) {
             <div
-              class="max-w-[85%] px-4 py-3 rounded-lg leading-normal break-words"
+              class="w-fit max-w-[85%] px-4 py-3 rounded-lg leading-normal break-words"
               [class.self-end]="msg.role === 'user'"
               [class.bg-sw-bg-navy]="msg.role === 'user'"
               [class.self-start]="msg.role === 'assistant'"
@@ -93,7 +93,7 @@
               [class.border]="msg.role === 'assistant'"
               [class.border-sw-border]="msg.role === 'assistant'"
             >
-              <div class="prose-sw text-sw-text" [innerHTML]="renderMarkdown(msg.content)"></div>
+              <app-text-block [content]="msg.content" />
             </div>
           }
         </div>
@@ -147,14 +147,26 @@
             rows="1"
           >
           </textarea>
-          <button
-            data-testid="chat-send"
-            class="px-5 py-2 border-none rounded-md bg-sw-accent text-white text-sm font-semibold transition-colors hover:enabled:bg-sw-accent-hover disabled:opacity-40 disabled:cursor-not-allowed"
-            (click)="sendMessage()"
-            [disabled]="!inputText.trim() || chat.isStreaming"
-          >
-            Send
-          </button>
+          @if (chat.isStreaming) {
+            <button
+              data-testid="chat-stop"
+              class="px-5 py-2 border-none rounded-md bg-sw-destructive text-white text-sm font-semibold transition-colors hover:enabled:bg-sw-destructive-hover cursor-pointer"
+              (click)="onStopClicked()"
+              title="Stop (Esc)"
+              aria-label="Stop conversation"
+            >
+              Stop
+            </button>
+          } @else {
+            <button
+              data-testid="chat-send"
+              class="px-5 py-2 border-none rounded-md bg-sw-accent text-white text-sm font-semibold transition-colors hover:enabled:bg-sw-accent-hover disabled:opacity-40 disabled:cursor-not-allowed"
+              (click)="sendMessage()"
+              [disabled]="!inputText.trim()"
+            >
+              Send
+            </button>
+          }
         </div>
       }
 
@@ -174,10 +186,9 @@
               X
             </button>
           </div>
-          <div
-            class="prose-sw flex-1 overflow-y-auto p-4 text-sw-text text-[13px] leading-relaxed"
-            [innerHTML]="renderMarkdown(projectMemory)"
-          ></div>
+          <div class="flex-1 overflow-y-auto p-4 text-sw-text text-[13px] leading-relaxed">
+            <app-text-block [content]="projectMemory" />
+          </div>
         </div>
       }
     </div>
