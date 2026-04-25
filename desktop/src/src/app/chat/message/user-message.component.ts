@@ -1,14 +1,7 @@
 import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
 import type { MessageBlock } from '../../models/chat';
 
-/**
- * Renders a user message in the terminal-minimal style.
- *
- * Per mockup convention, user messages are LEFT-aligned with a mono metadata
- * header (`user · HH:MM`). An `· edited` chip appears when the message has
- * been retried (`editedAt` defined). User messages only ever contain `text`
- * blocks — any other block types are filtered out at render time.
- */
+/** User messages contain only text blocks; non-text blocks are filtered out at render time. */
 @Component({
   selector: 'app-user-message',
   standalone: true,

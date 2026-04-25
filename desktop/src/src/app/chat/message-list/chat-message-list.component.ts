@@ -13,17 +13,6 @@ import type { ChatMessage, MessageBlock } from '../../models/chat';
 import { ChatMessageComponent } from '../message/chat-message.component';
 
 /**
- * Scrolling list of chat messages.
- *
- * Each completed message is rendered via `<app-chat-message>`. When
- * `isStreaming` is true and `currentBlocks` has content, an additional
- * streaming `<app-chat-message role="assistant" streaming=true />` is
- * appended as the last entry.
- *
- * Auto-scroll-to-bottom: when the user is at (or near) the bottom of the
- * container we keep pinning new output to the bottom; if the user scrolls
- * up we stop auto-scrolling until they scroll back down.
- *
  * NOTE on `track`: we use `msg.timestamp` until the state-tree lands
  * (ADR-044) because `ChatMessage` has no stable `index` yet. Timestamps
  * are assigned at message creation and are unique enough for the current

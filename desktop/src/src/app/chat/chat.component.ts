@@ -2,11 +2,9 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
-  ElementRef,
   HostListener,
   OnDestroy,
   OnInit,
-  ViewChild,
   effect,
   inject,
 } from '@angular/core';
@@ -43,8 +41,6 @@ import { ConversationsSidebarComponent } from './conversations-sidebar/conversat
   templateUrl: './chat.component.html',
 })
 export class ChatComponent implements OnInit, OnDestroy {
-  @ViewChild('messageList') messageList!: ElementRef<HTMLDivElement>;
-
   inputText = '';
 
   conversations: readonly ConversationSummary[] = [];

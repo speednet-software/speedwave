@@ -1,18 +1,6 @@
 import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
 
-/**
- * Minimal terminal-style chat header bar.
- *
- * Renders the conversation title, an optional project pill, and toggle buttons
- * for the memory and history panels. Purely presentational — all state lives in
- * the parent component and is wired through the inputs/outputs.
- *
- * NOTE: uses decorator-based `@Input`/`@Output` to match the current codebase
- * convention (tests run via raw vitest without the Angular compiler plugin,
- * which is required to wire up signal-based `input()`/`output()`). A future
- * codebase-wide migration to signals will flip this over — the public API
- * (template binding names) stays identical.
- */
+/** Uses decorator-based @Input/@Output: signal inputs require the Angular compiler plugin, unavailable in vitest setup. */
 @Component({
   selector: 'app-chat-header',
   standalone: true,

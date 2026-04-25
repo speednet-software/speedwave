@@ -37,11 +37,7 @@
         </div>
       }
       @if (viewingTranscript) {
-        <div
-          class="flex-1 overflow-y-auto p-4 flex flex-col gap-3"
-          data-testid="chat-messages"
-          #messageList
-        >
+        <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-3" data-testid="chat-messages">
           @for (msg of viewingTranscript.messages; track $index) {
             <div
               class="w-fit max-w-[85%] px-4 py-3 rounded-lg leading-normal break-words"
