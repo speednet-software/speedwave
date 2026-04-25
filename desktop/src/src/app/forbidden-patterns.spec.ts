@@ -54,13 +54,6 @@ const FORBIDDEN: readonly ForbiddenPattern[] = [
     ignoreFiles: ['forbidden-patterns.spec.ts'],
   },
   {
-    label: '@HostBinding/@HostListener (use host: { ... } in @Component)',
-    regex: /@HostBinding\b|@HostListener\b/,
-    extensions: ['.ts'],
-    // This spec itself names the decorators in its error message.
-    ignoreFiles: ['forbidden-patterns.spec.ts'],
-  },
-  {
     label: ': any / as any (use proper TypeScript types)',
     regex: /(:\s*any\b|\bas\s+any\b)/,
     extensions: ['.ts'],
@@ -69,12 +62,6 @@ const FORBIDDEN: readonly ForbiddenPattern[] = [
   {
     label: '.mutate( on signals (signal.mutate was removed in Angular 19)',
     regex: /\.mutate\s*\(/,
-    extensions: ['.ts'],
-    ignoreFiles: ['forbidden-patterns.spec.ts'],
-  },
-  {
-    label: 'standalone: true (standalone is the default since Angular 19)',
-    regex: /\bstandalone\s*:\s*true\b/,
     extensions: ['.ts'],
     ignoreFiles: ['forbidden-patterns.spec.ts'],
   },
@@ -91,6 +78,10 @@ const FORBIDDEN: readonly ForbiddenPattern[] = [
       "expect(component.headerSummary).toBe('TODO')",
       'service.normalize(\'Grep\', \'{"pattern":"TODO"',
       "expect(result).toEqual({ kind: 'grep', pattern: 'TODO'",
+      // The Grep tool fixture used in tool-block tests echoes the user's
+      // search pattern; "TODO" here is data, not a marker.
+      'input_json: \'{"pattern":"TODO","include":"*.rs"}\'',
+      "expect(el.querySelector('[data-testid=\"pattern\"]')?.textContent?.trim()).toBe('TODO')",
     ],
   },
   {

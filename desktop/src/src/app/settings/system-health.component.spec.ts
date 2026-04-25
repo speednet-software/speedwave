@@ -282,6 +282,33 @@ describe('SystemHealthComponent', () => {
       expect(component.showAllLogs).toBe(false);
       expect(component.logLoading).toBe(true);
     });
+
+    it('selects container via Enter key on row', () => {
+      component.report = makeHealthReport();
+      fixture.detectChanges();
+
+      const row = fixture.nativeElement.querySelector(
+        '[data-testid="container-row"]'
+      ) as HTMLElement;
+      const spy = vi.spyOn(component, 'selectContainer');
+      row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }));
+
+      expect(spy).toHaveBeenCalled();
+    });
+
+    it('selects container via Space and prevents default', () => {
+      component.report = makeHealthReport();
+      fixture.detectChanges();
+
+      const row = fixture.nativeElement.querySelector(
+        '[data-testid="container-row"]'
+      ) as HTMLElement;
+      const ev = new KeyboardEvent('keydown', { key: ' ', cancelable: true });
+      row.dispatchEvent(ev);
+      fixture.detectChanges();
+
+      expect(ev.defaultPrevented).toBe(true);
+    });
   });
 
   describe('selectAllLogs()', () => {

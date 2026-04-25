@@ -451,6 +451,24 @@ describe('ToolBlockComponent', () => {
       const header = fixture.nativeElement.querySelector('[aria-expanded]') as HTMLElement | null;
       expect(header?.tagName).toBe('BUTTON');
     });
+
+    it('toggles when the header button is activated (Enter/Space dispatch click)', () => {
+      // Native <button> elements receive a synthesised `click` from Enter/Space.
+      // We assert the click pathway here; browser-level key→click translation is
+      // covered by Angular's own DOM tests, not ours.
+      component.tool = makeTool({ status: 'done' });
+      fixture.detectChanges();
+
+      const header = fixture.nativeElement.querySelector(
+        '[aria-expanded]'
+      ) as HTMLButtonElement | null;
+      expect(header?.tagName).toBe('BUTTON');
+      const before = component.isCollapsed();
+      header?.click();
+      fixture.detectChanges();
+
+      expect(component.isCollapsed()).not.toBe(before);
+    });
   });
 
   describe('status transitions', () => {

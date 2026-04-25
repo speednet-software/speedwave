@@ -107,10 +107,23 @@ Additionally:
 ### `sw-text-faint` / `sw-text-muted` on `sw-bg-navy`
 
 - On `sw-bg-navy` (#0f3460) the ratios drop to 3.57 – 4.39 (UI tier).
-- These combinations are only used for secondary meta text inside expanded
-  navy card surfaces that live on the broader dark page. For primary body
-  text on navy, components use `sw-text` (9.47 : 1) or `sw-text-dim`
-  (5.38 : 1). No regression.
+- This combination is **anticipated in forthcoming Wave 2-5 sibling PRs and
+  is not yet live in the current branch** — no component on `main` or in this
+  PR renders `sw-text-faint` or `sw-text-muted` against `sw-bg-navy` today.
+- **Font-size context:** these tokens are used at 13 px body-text size,
+  so the **4.5 : 1 AA threshold applies** (not the 3 : 1 large-text
+  threshold, which only kicks in at ≥ 18 px regular / ≥ 14 px bold).
+  The 4.39 : 1 ratio for `sw-text-faint` on `bg-navy` is therefore
+  **below AA** for the intended usage, and 3.57 : 1 for `sw-text-muted`
+  is even further below.
+- **Deferred-validation note (Wave 2-5):** when the Wave 2-5 PRs introduce
+  these combinations, the next round must either bump the foreground
+  contrast (e.g. by promoting `sw-text-faint` to `sw-text-dim` at 5.38 : 1
+  on `bg-navy`) or restrict the combination to ≥ 18 px regular / ≥ 14 px
+  bold contexts where the 3 : 1 large-text threshold applies. This
+  document will be updated alongside that change; for primary body text
+  on navy, components today use `sw-text` (9.47 : 1) or `sw-text-dim`
+  (5.38 : 1), so there is no regression in the current branch.
 
 ## How these numbers are verified
 
@@ -119,8 +132,8 @@ Additionally:
    `wcag21a`, and `wcag21aa` rulesets against every routed view — including
    the `color-contrast` rule, which uses the same formula.
 3. `desktop/src/src/app/forbidden-patterns.spec.ts` asserts that no
-   legacy pattern (`*ngIf`, `[ngClass]`, `@HostListener`, `: any`,
-   `standalone: true`, etc.) reappears in `desktop/src/`.
+   legacy pattern (`*ngIf`, `[ngClass]`, `: any`, `.mutate(`, `TODO`
+   marker comments, `@deprecated`, etc.) reappears in `desktop/src/`.
 
 Re-run the suite with `make test-angular` after any token change.
 
