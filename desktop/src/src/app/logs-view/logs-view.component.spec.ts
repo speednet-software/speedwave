@@ -107,7 +107,7 @@ describe('LogsViewComponent', () => {
     expect(chipAll?.getAttribute('aria-pressed')).toBe('true');
     expect(chipError?.getAttribute('aria-pressed')).toBe('false');
 
-    component.setLevel('error');
+    component['setLevel']('error');
     fixture.detectChanges();
 
     expect(
@@ -140,7 +140,7 @@ describe('LogsViewComponent', () => {
     await component.ngOnInit();
     fixture.detectChanges();
 
-    component.setSource('lima-does-not-exist');
+    component['setSource']('lima-does-not-exist');
     fixture.detectChanges();
 
     const empty = fixture.nativeElement.querySelector('[data-testid="logs-empty"]');
@@ -211,8 +211,8 @@ describe('LogsViewComponent', () => {
     await component.ngOnInit();
     fixture.detectChanges();
 
-    component.setLevel('info');
-    component.setSource('mcp-hub');
+    component['setLevel']('info');
+    component['setSource']('mcp-hub');
     fixture.detectChanges();
 
     const rows = fixture.nativeElement.querySelectorAll('[data-testid="logs-line"]');
@@ -224,7 +224,7 @@ describe('LogsViewComponent', () => {
     await component.ngOnInit();
     fixture.detectChanges();
 
-    component.setSource('redmine');
+    component['setSource']('redmine');
     fixture.detectChanges();
 
     const rows = fixture.nativeElement.querySelectorAll('[data-testid="logs-line"]');

@@ -236,9 +236,9 @@ describe('SystemViewComponent', () => {
     await component.ngOnInit();
     const baseline = calls.length;
 
-    await component.refresh();
+    await component['refresh']();
     expect(calls.length).toBe(baseline + 1);
-    await component.refresh();
+    await component['refresh']();
     expect(calls.length).toBe(baseline + 2);
   });
 
@@ -256,7 +256,7 @@ describe('SystemViewComponent', () => {
     const btn = fixture.nativeElement.querySelector(
       '[data-testid="system-restart"]'
     ) as HTMLButtonElement;
-    await component.restart('speedwave_test_claude');
+    await component['restart']('speedwave_test_claude');
     fixture.detectChanges();
 
     expect(calls).toContain('recreate_project_containers');
@@ -279,7 +279,7 @@ describe('SystemViewComponent', () => {
     await component.ngOnInit();
     fixture.detectChanges();
 
-    const restartPromise = component.restart('speedwave_test_claude');
+    const restartPromise = component['restart']('speedwave_test_claude');
     fixture.detectChanges();
 
     expect(component.restarting.has('speedwave_test_claude')).toBe(true);

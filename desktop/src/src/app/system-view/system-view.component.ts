@@ -13,14 +13,6 @@ import type { HealthReport } from '../models/health';
 /** How often the system view polls the backend for a fresh health report. */
 export const SYSTEM_REFRESH_INTERVAL_MS = 5000;
 
-/**
- * Terminal-minimal system health view.
- *
- * Polls `get_health` for the active project every 5 s and renders each
- * container as a row in a terminal-style table with a status dot, name,
- * state, healthy flag, and action buttons. Auto-refresh runs only while
- * the component is mounted — `ngOnDestroy` clears the interval.
- */
 @Component({
   selector: 'app-system-view',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -59,7 +51,7 @@ export class SystemViewComponent implements OnInit, OnDestroy {
   }
 
   /** Fetches a fresh health report and updates view state. */
-  async refresh(): Promise<void> {
+  protected async refresh(): Promise<void> {
     const project = this.projectState.activeProject;
     if (!project) {
       this.loading = false;
@@ -79,18 +71,13 @@ export class SystemViewComponent implements OnInit, OnDestroy {
     }
   }
 
-  /**
-   * Recreates all project containers via the existing Tauri command.
-   * The runtime does not expose a per-container restart, so "restart"
-   * here means recreate-all. Runs once and re-fetches health.
-   * @param name - The container name triggered from the row button.
-   */
-  async restart(name: string): Promise<void> {
+  protected async restart(name: string): Promise<void> {
     const project = this.projectState.activeProject;
     if (!project || this.restarting.has(name)) return;
     this.restarting.add(name);
     this.cdr.markForCheck();
     try {
+      // recreate_project_containers restarts all — per-container restart not exposed by runtime
       await this.tauri.invoke('recreate_project_containers', { project });
       await this.refresh();
     } catch (e: unknown) {

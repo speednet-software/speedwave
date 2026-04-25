@@ -42,14 +42,7 @@ const LEVEL_RE = /^(DEBUG|INFO|WARN|WARNING|ERROR|TRACE)\s+(.*)$/i;
 const CONTAINER_PREFIX_RE = /^speedwave_[^_]+_([^_]+)(?:_\d+)?$/;
 const TRAILING_INDEX_RE = /_\d+$/;
 
-/**
- * Parse a single compose-log line into `LogLine`.
- *
- * Compose logs look like: `service_1  | [HH:MM:SS.sss] LEVEL  message`.
- * This helper is tolerant — unparsed parts default to `source='log'`,
- * `level='info'`, current wall-clock time. It never throws.
- * @param raw - Raw log line text from the backend.
- */
+/** Parse a single compose-log line into `LogLine`. Tolerant — never throws. */
 export function parseLogLine(raw: string): LogLine {
   const trimmed = raw.trim();
   if (!trimmed) {
@@ -70,10 +63,7 @@ export function parseLogLine(raw: string): LogLine {
   return { time, source, level, message };
 }
 
-/**
- * Normalise a raw level token to the small enum used by chips.
- * @param raw - Level token from a log line, e.g. `INFO`, `WARN`, `ERROR`.
- */
+/** Normalise a raw level token to the small enum used by chips. */
 function normalizeLevel(raw: string): LogLevel {
   const upper = raw.toUpperCase();
   if (upper === 'ERROR') return 'error';
@@ -82,29 +72,13 @@ function normalizeLevel(raw: string): LogLevel {
   return 'info';
 }
 
-/**
- * Strip the `speedwave_<project>_` prefix from a container name so chips
- * and row labels stay short ("redmine" vs "speedwave_test_redmine_1").
- * @param container - Container name as emitted by the runtime.
- */
+/** Strip the `speedwave_<project>_` prefix from a container name. */
 function stripContainerPrefix(container: string): string {
   const match = CONTAINER_PREFIX_RE.exec(container);
   if (match) return match[1];
   return container.replace(TRAILING_INDEX_RE, '');
 }
 
-/**
- * Terminal-minimal logs view.
- *
- * Reads compose logs for the active project, parses each line into
- * timestamp / source / level / message, and renders them with filter
- * chips at the top. Filters combine — selecting `level=error` and
- * `source=redmine` shows only errors from redmine.
- *
- * The list auto-scrolls to bottom whenever new lines arrive and no
- * user filter has been touched this frame (so mid-scroll reading is
- * not interrupted).
- */
 @Component({
   selector: 'app-logs-view',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -161,11 +135,8 @@ export class LogsViewComponent implements OnInit, AfterViewChecked {
     }
   }
 
-  /**
-   * Re-fetch the tail of compose logs and re-parse into typed lines.
-   * Called from the `↻` toolbar button.
-   */
-  async refresh(): Promise<void> {
+  /** Re-fetch the tail of compose logs and re-parse into typed lines. */
+  protected async refresh(): Promise<void> {
     const project = this.projectState.activeProject;
     if (!project) {
       this.loading.set(false);
@@ -192,21 +163,13 @@ export class LogsViewComponent implements OnInit, AfterViewChecked {
     }
   }
 
-  /**
-   * Select a level chip, toggling off back to `'all'` when the active
-   * chip is clicked again.
-   * @param level - The new level filter value.
-   */
-  setLevel(level: LogLevel): void {
+  /** Select a level chip. */
+  protected setLevel(level: LogLevel): void {
     this.filters.update((f) => ({ ...f, level }));
   }
 
-  /**
-   * Select a source chip, toggling off back to `'all'` when the active
-   * chip is clicked again.
-   * @param source - The new source filter value.
-   */
-  setSource(source: string): void {
+  /** Select a source chip. */
+  protected setSource(source: string): void {
     this.filters.update((f) => ({ ...f, source }));
   }
 }

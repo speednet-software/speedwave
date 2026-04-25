@@ -33,6 +33,8 @@ describe('ShellComponent', () => {
         RouterModule.forRoot([
           { path: 'chat', component: ShellComponent },
           { path: 'settings', component: ShellComponent },
+          { path: 'system', component: ShellComponent },
+          { path: 'logs', component: ShellComponent },
         ]),
       ],
       providers: [{ provide: TauriService, useValue: mockTauri }],
