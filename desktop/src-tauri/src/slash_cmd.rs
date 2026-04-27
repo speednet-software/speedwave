@@ -18,7 +18,9 @@ use std::path::PathBuf;
 /// running or discovery times out — callers should treat the
 /// `source` field as the source-of-truth indicator.
 #[tauri::command]
-pub(crate) async fn list_slash_commands(project_id: String) -> Result<slash::SlashDiscovery, String> {
+pub(crate) async fn list_slash_commands(
+    project_id: String,
+) -> Result<slash::SlashDiscovery, String> {
     check_project(&project_id)?;
 
     let discovery = tauri::async_runtime::spawn_blocking(move || {
@@ -26,7 +28,8 @@ pub(crate) async fn list_slash_commands(project_id: String) -> Result<slash::Sla
         let project_entry = user_config
             .require_project(&project_id)
             .map_err(|e| e.to_string())?;
-        let handle = slash::ProjectHandle::new(&project_entry.name, PathBuf::from(&project_entry.dir));
+        let handle =
+            slash::ProjectHandle::new(&project_entry.name, PathBuf::from(&project_entry.dir));
         let rt = runtime::detect_runtime();
         slash::discover_slash_commands(&*rt, &handle).map_err(|e| e.to_string())
     })
