@@ -13,6 +13,7 @@ import { FormsModule } from '@angular/forms';
 import { IntegrationStatusEntry } from '../../models/integration';
 import { SaveCredentialsEvent } from '../service-card/service-card.component';
 import { TauriService } from '../../services/tauri.service';
+import { SpinIconComponent } from '../../shared/spin-icon.component';
 
 /** A single Redmine enumeration entry (project, status, tracker, etc.). */
 export interface RedmineEnumEntry {
@@ -127,7 +128,7 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
 /** Wizard-based configuration component for the Redmine integration. */
 @Component({
   selector: 'app-redmine-config',
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, SpinIconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -238,10 +239,7 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
                 (click)="onValidate()"
               >
                 @if (validating) {
-                  <span
-                    class="inline-block w-3 h-3 border-2 border-sw-accent/30 border-t-sw-accent rounded-full animate-sw-spin"
-                    data-testid="redmine-validate-spinner"
-                  ></span>
+                  <app-spin-icon class="text-sw-accent" testId="redmine-validate-spinner" />
                   Validating...
                 } @else {
                   Validate
@@ -255,10 +253,7 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
             <div data-testid="redmine-state-mappings">
               @if (loadingEnumerations) {
                 <div class="flex items-center gap-2 my-4 text-sw-text-dim text-[13px]">
-                  <span
-                    class="inline-block w-4 h-4 border-2 border-sw-accent/30 border-t-sw-accent rounded-full animate-sw-spin"
-                    data-testid="redmine-enum-spinner"
-                  ></span>
+                  <app-spin-icon class="h-4 w-4 text-sw-accent" testId="redmine-enum-spinner" />
                   Loading Redmine configuration...
                 </div>
               } @else {

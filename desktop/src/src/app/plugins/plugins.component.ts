@@ -12,6 +12,7 @@ import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { PluginStatusEntry, PluginsResponse } from '../models/plugin';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
+import { SpinIconComponent } from '../shared/spin-icon.component';
 import { open } from '@tauri-apps/plugin-dialog';
 
 /** Per-row plugin dot colour cycle. */
@@ -34,7 +35,7 @@ function dotColourFor(index: number): string {
 /** Manages installed plugins: list, install, remove, enable/disable, credentials. */
 @Component({
   selector: 'app-plugins',
-  imports: [CommonModule, ProjectPillComponent],
+  imports: [CommonModule, ProjectPillComponent, SpinIconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (installing) {
@@ -45,9 +46,7 @@ function dotColourFor(index: number): string {
         aria-label="Installing plugin"
         data-testid="plugins-install-overlay"
       >
-        <div
-          class="h-8 w-8 animate-spin rounded-full border-[3px] border-[var(--line)] border-t-[var(--accent)]"
-        ></div>
+        <app-spin-icon class="block h-8 w-8 text-[var(--accent)]" />
         <p class="mono mt-4 text-[12px] text-[var(--ink)]">Installing plugin…</p>
       </div>
     }

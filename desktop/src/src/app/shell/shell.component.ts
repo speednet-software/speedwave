@@ -19,6 +19,7 @@ import { UiStateService } from '../services/ui-state.service';
 import { CommandPaletteComponent } from './command-palette/command-palette.component';
 import { ModalOverlayComponent } from './modal-overlay/modal-overlay.component';
 import { NavRailComponent, type NavRailEntry } from './nav-rail/nav-rail.component';
+import { SpinIconComponent } from '../shared/spin-icon.component';
 
 /** SVG `d` paths for the rail icons (kept short — single-path glyphs). */
 const ICON_CHAT =
@@ -47,6 +48,7 @@ const ICON_LOGS =
     NavRailComponent,
     ModalOverlayComponent,
     CommandPaletteComponent,
+    SpinIconComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '(document:keydown)': 'onKeydown($event)' },
@@ -104,9 +106,7 @@ const ICON_LOGS =
             [attr.aria-label]="statusMessage"
             data-testid="blocking-overlay"
           >
-            <div
-              class="spin h-8 w-8 rounded-full border-[3px] border-[var(--line-strong)] border-t-[var(--accent)]"
-            ></div>
+            <app-spin-icon class="block h-8 w-8 text-[var(--accent)]" />
             <p class="mono mt-4 text-sm text-[var(--ink)]">{{ statusMessage }}</p>
           </div>
         }
@@ -124,9 +124,7 @@ const ICON_LOGS =
               class="w-[min(24rem,calc(100vw-2rem))] rounded border border-[var(--line-strong)] bg-[var(--bg-1)] p-5"
             >
               <div class="flex flex-col items-center">
-                <div
-                  class="spin h-8 w-8 rounded-full border-[3px] border-[var(--line-strong)] border-t-[var(--accent)]"
-                ></div>
+                <app-spin-icon class="block h-8 w-8 text-[var(--accent)]" />
                 <p class="mono mt-4 text-sm text-[var(--ink)]">Restarting containers...</p>
                 <p class="mono mt-2 text-[11px] text-[var(--ink-mute)]">This may take a while</p>
               </div>

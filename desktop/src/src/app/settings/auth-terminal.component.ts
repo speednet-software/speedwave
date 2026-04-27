@@ -9,6 +9,7 @@ import {
   output,
 } from '@angular/core';
 import { TauriService } from '../services/tauri.service';
+import { SpinIconComponent } from '../shared/spin-icon.component';
 
 /**
  * OAuth login instructions card.
@@ -18,6 +19,7 @@ import { TauriService } from '../services/tauri.service';
 @Component({
   selector: 'app-auth-terminal',
   changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [SpinIconComponent],
   template: `
     <div class="mt-3 rounded border border-[var(--line)] bg-[var(--bg-1)] p-4">
       <p class="text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
@@ -60,9 +62,7 @@ import { TauriService } from '../services/tauri.service';
         This page updates automatically when authentication completes.
       </p>
       <div class="mono mt-3 flex items-center gap-2 text-[11px] text-[var(--ink-dim)]">
-        <span
-          class="h-3.5 w-3.5 shrink-0 animate-sw-spin rounded-full border-2 border-[var(--line)] border-t-[var(--accent)]"
-        ></span>
+        <app-spin-icon class="shrink-0 text-[var(--accent)]" />
         <span>Waiting for authentication...</span>
       </div>
     </div>

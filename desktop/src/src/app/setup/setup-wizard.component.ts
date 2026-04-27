@@ -6,10 +6,9 @@ import {
   inject,
   input,
   NgZone,
-  output,
   signal,
 } from '@angular/core';
-import { CommonModule, NgOptimizedImage } from '@angular/common';
+import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
@@ -38,7 +37,7 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
 /** Guides the user through initial environment setup and project creation. */
 @Component({
   selector: 'app-setup-wizard',
-  imports: [CommonModule, FormsModule, NgOptimizedImage, SpinIconComponent],
+  imports: [CommonModule, FormsModule, SpinIconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -50,12 +49,11 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
         <div class="mx-auto flex min-h-full w-full max-w-xl flex-col justify-center px-6 py-10">
           <div class="mb-6 flex items-center gap-3">
             <img
-              ngSrc="assets/speedwave-mark-white@2x.png"
+              src="assets/speedwave-mark-white@2x.png"
               alt="Speedwave"
               class="h-9 w-9"
               width="36"
               height="36"
-              priority
             />
             <div>
               <div class="view-title text-[22px] text-[var(--ink)]" data-testid="setup-headline">
@@ -229,32 +227,11 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
               </div>
             }
 
-            <div
-              class="mono mt-4 flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--ink-mute)]"
-              data-testid="setup-footer"
-            >
+            <div class="mono mt-4 text-[11px] text-[var(--ink-mute)]" data-testid="setup-footer">
               <span data-testid="setup-progress-summary">
                 step {{ currentStepNumber() }} of {{ totalSteps() }} · ~{{ etaSeconds() }}s
                 remaining
               </span>
-              <div class="flex gap-4">
-                <button
-                  type="button"
-                  class="hover:text-[var(--ink)]"
-                  data-testid="setup-view-logs"
-                  (click)="onViewLogs()"
-                >
-                  view logs →
-                </button>
-                <button
-                  type="button"
-                  class="hover:text-[var(--ink)]"
-                  data-testid="setup-exit"
-                  (click)="onExitSetup()"
-                >
-                  exit setup
-                </button>
-              </div>
             </div>
           } @else if (phase === 'complete') {
             <div
@@ -274,10 +251,6 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
 export class SetupWizardComponent {
   /** When false, the overlay hides itself (used by parent host integrations). */
   readonly visible = input<boolean>(true);
-  /** Emitted when the user clicks "view logs". */
-  readonly viewLogs = output<void>();
-  /** Emitted when the user clicks "exit setup". */
-  readonly exitSetup = output<void>();
 
   phase: 'welcome' | 'progress' | 'project' | 'complete' = 'welcome';
   busy = false;
@@ -482,16 +455,6 @@ export class SetupWizardComponent {
     if (step.status === 'active') return 'var(--accent)';
     if (step.status === 'error') return '#f87171';
     return 'var(--ink-mute)';
-  }
-
-  /** Emit `viewLogs` for parents that wrap the wizard. */
-  protected onViewLogs(): void {
-    this.viewLogs.emit();
-  }
-
-  /** Emit `exitSetup` for parents that wrap the wizard. */
-  protected onExitSetup(): void {
-    this.exitSetup.emit();
   }
 
   // ---- Private helpers ----

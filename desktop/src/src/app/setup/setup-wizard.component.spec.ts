@@ -335,33 +335,5 @@ describe('SetupWizardComponent', () => {
       const after = component.etaSeconds();
       expect(after).toBeLessThanOrEqual(before);
     });
-
-    it('emits viewLogs output when "view logs" is clicked', async () => {
-      await component.startSetup();
-      await fixture.whenStable();
-      fixture.detectChanges();
-      const emitted: number[] = [];
-      const sub = component.viewLogs.subscribe(() => emitted.push(1));
-      const btn = fixture.nativeElement.querySelector(
-        '[data-testid="setup-view-logs"]'
-      ) as HTMLButtonElement;
-      btn.click();
-      sub.unsubscribe();
-      expect(emitted.length).toBe(1);
-    });
-
-    it('emits exitSetup output when "exit setup" is clicked', async () => {
-      await component.startSetup();
-      await fixture.whenStable();
-      fixture.detectChanges();
-      const emitted: number[] = [];
-      const sub = component.exitSetup.subscribe(() => emitted.push(1));
-      const btn = fixture.nativeElement.querySelector(
-        '[data-testid="setup-exit"]'
-      ) as HTMLButtonElement;
-      btn.click();
-      sub.unsubscribe();
-      expect(emitted.length).toBe(1);
-    });
   });
 });

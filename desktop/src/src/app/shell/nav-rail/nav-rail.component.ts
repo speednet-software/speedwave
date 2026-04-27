@@ -1,5 +1,4 @@
 import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
-import { NgOptimizedImage } from '@angular/common';
 import { RouterLink } from '@angular/router';
 
 /** One entry in the left navigation rail. */
@@ -27,7 +26,7 @@ export interface NavRailEntry {
  */
 @Component({
   selector: 'app-nav-rail',
-  imports: [RouterLink, NgOptimizedImage],
+  imports: [RouterLink],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
     role: 'navigation',
@@ -38,12 +37,11 @@ export interface NavRailEntry {
     <!-- Logo band aligned with chat header (44px). -->
     <div class="flex h-11 w-14 items-center justify-center border-b border-[var(--line)]">
       <img
-        ngSrc="assets/speedwave-mark-white@2x.png"
+        src="assets/speedwave-mark-white@2x.png"
         alt="Speedwave"
         width="28"
         height="28"
         class="h-7 w-7"
-        priority
       />
     </div>
 

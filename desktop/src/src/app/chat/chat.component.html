@@ -72,29 +72,23 @@
       (closed)="ui.closeMemory()"
     />
   </section>
-} @else {
-  <!-- Inline placeholder for non-ready statuses (auth_required, switching,
-       starting, …). The shell still renders the chat icon in the rail so
-       the user can see where they are; this block tells them what to do. -->
+} @else if (projectState.status === 'auth_required') {
+  <!-- Auth-required is the only non-ready status that shell.component does
+       NOT cover with its own blocking overlay (the user can still navigate
+       freely to /settings to configure auth). All other transient statuses
+       — loading / starting / switching / error / check_failed — are owned
+       by the shell, so chat must stay silent for them to avoid stacking
+       two overlays on the same screen. -->
   <section
     class="flex h-full flex-col items-center justify-center bg-[var(--bg)] p-8"
     data-testid="chat-view-blocked"
   >
     <div class="mono max-w-md text-center text-[12.5px] text-[var(--ink-dim)]">
-      @if (projectState.status === 'auth_required') {
-        <p class="text-[var(--amber)]">⚠ auth required</p>
-        <p class="mt-2">Sign in to Anthropic or configure an API key to start chatting.</p>
-        <a
-          routerLink="/settings"
-          class="mono mt-4 inline-block text-[var(--accent)] hover:underline"
-          >open settings →</a
-        >
-      } @else {
-        <p>Project is not ready yet.</p>
-        <p class="mt-2 text-[var(--ink-mute)]">
-          status: <span class="text-[var(--ink)]">{{ projectState.status }}</span>
-        </p>
-      }
+      <p class="text-[var(--amber)]">⚠ auth required</p>
+      <p class="mt-2">Sign in to Anthropic or configure an API key to start chatting.</p>
+      <a routerLink="/settings" class="mono mt-4 inline-block text-[var(--accent)] hover:underline"
+        >open settings →</a
+      >
     </div>
   </section>
 }
