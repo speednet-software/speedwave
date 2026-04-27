@@ -28,17 +28,19 @@ describe('ChatLoadingComponent', () => {
     expect(label?.textContent?.trim()).toBe('Fetching messages…');
   });
 
-  it('renders an SVG circle spinner with the shared `spin` animation class', () => {
+  it('renders an SVG circle spinner with the two-layer Material animation classes', () => {
     fixture.detectChanges();
 
     const spinner = fixture.nativeElement.querySelector(
       '[data-testid="chat-loading-spinner"]'
     ) as SVGElement | null;
     expect(spinner).not.toBeNull();
-    expect(spinner?.classList.contains('spin')).toBe(true);
+    expect(spinner?.classList.contains('spin-svg')).toBe(true);
     // Inline SVG with a stroked circle — true geometry, never hints oval.
     expect(spinner?.tagName.toLowerCase()).toBe('svg');
-    expect(spinner?.querySelector('circle')).not.toBeNull();
+    const circle = spinner?.querySelector('circle');
+    expect(circle).not.toBeNull();
+    expect(circle?.classList.contains('spin-circle')).toBe(true);
     expect(spinner?.getAttribute('aria-hidden')).toBe('true');
   });
 

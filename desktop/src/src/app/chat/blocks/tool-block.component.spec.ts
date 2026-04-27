@@ -81,13 +81,14 @@ describe('ToolBlockComponent', () => {
       fixture.detectChanges();
 
       const status = fixture.nativeElement.querySelector('[data-testid="tool-status"]');
-      // Production renders a centred SVG circle with a stroke-dasharray to
-      // expose ~75% of the circumference; SVG keeps the geometry perfectly
-      // round at any rendered size (CSS border + rounded-full hinted oval
-      // at fractional pixel sizes).
+      // Production renders a centred two-layer Material spinner (root SVG
+      // rotates at one period, the inner circle's stroke-dasharray grows
+      // and shrinks at a coprime period) so the loop seam is invisible.
       expect(status?.tagName.toLowerCase()).toBe('svg');
-      expect(status?.classList.contains('spin')).toBe(true);
-      expect(status?.querySelector('circle')).not.toBeNull();
+      expect(status?.classList.contains('spin-svg')).toBe(true);
+      const circle = status?.querySelector('circle');
+      expect(circle).not.toBeNull();
+      expect(circle?.classList.contains('spin-circle')).toBe(true);
     });
 
     it('renders the error glyph for failed tools', () => {

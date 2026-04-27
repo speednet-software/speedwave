@@ -248,6 +248,19 @@
   @keyframes sw-spin { to { transform: rotate(360deg); } }
   @keyframes spin    { to { transform: rotate(360deg); } }
   @keyframes blink   { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
+
+  /* Material-style two-layer spinner. The svg rotates at one period and
+     the circle's dash grows/shrinks at a coprime period; the seam where
+     either layer wraps never lines up, so the eye sees continuous motion
+     instead of the once-per-loop "jump" of a single-rotation spinner.
+     `pathLength="100"` on the circle lets the dasharray be a clean
+     percentage of the circumference regardless of `r`. */
+  @keyframes spin-svg { to { transform: rotate(360deg); } }
+  @keyframes spin-circle {
+    0%       { stroke-dasharray: 1 99;  stroke-dashoffset: 0;   }
+    50%      { stroke-dasharray: 70 30; stroke-dashoffset: -25; }
+    100%     { stroke-dasharray: 1 99;  stroke-dashoffset: -100;}
+  }
 }
 
 /* ── Utility helpers from the mockup ── */
@@ -267,6 +280,18 @@
     animation: spin 0.8s linear infinite;
     /* SVG roots default to `transform-origin: 0 0` in some engines — force
        the centre so the rotation doesn't translate the shape every frame. */
+    transform-origin: 50% 50%;
+    transform-box: fill-box;
+  }
+
+  /* Two-layer Material spinner (see `@keyframes spin-svg` / `spin-circle`). */
+  .spin-svg {
+    animation: spin-svg 2s linear infinite;
+    transform-origin: 50% 50%;
+    transform-box: fill-box;
+  }
+  .spin-circle {
+    animation: spin-circle 1.4s ease-in-out infinite both;
     transform-origin: 50% 50%;
     transform-box: fill-box;
   }
