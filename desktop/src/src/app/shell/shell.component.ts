@@ -128,7 +128,7 @@ const ICON_LOGS =
                   class="spin h-8 w-8 rounded-full border-[3px] border-[var(--line-strong)] border-t-[var(--accent)]"
                 ></div>
                 <p class="mono mt-4 text-sm text-[var(--ink)]">Restarting containers...</p>
-                <p class="mono mt-2 text-[11px] text-[var(--ink-mute)]">This may take a minute</p>
+                <p class="mono mt-2 text-[11px] text-[var(--ink-mute)]">This may take a while</p>
               </div>
             </div>
           </div>

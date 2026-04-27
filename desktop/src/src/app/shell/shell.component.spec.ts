@@ -389,7 +389,7 @@ describe('ShellComponent', () => {
       const overlay = fixture.nativeElement.querySelector('[data-testid="restart-overlay"]');
       expect(overlay).not.toBeNull();
       expect(overlay.textContent).toContain('Restarting containers...');
-      expect(overlay.textContent).toContain('This may take a minute');
+      expect(overlay.textContent).toContain('This may take a while');
       expect(overlay.textContent).not.toContain('restart required');
       expect(fixture.nativeElement.querySelector('[data-testid="restart-now-btn"]')).toBeNull();
       expect(fixture.nativeElement.querySelector('[data-testid="restart-later-btn"]')).toBeNull();
