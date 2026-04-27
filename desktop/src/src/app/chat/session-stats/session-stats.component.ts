@@ -1,4 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
+import { NgTemplateOutlet } from '@angular/common';
 import type { SessionStats } from '../../models/chat';
 
 /** Shared bar segment indices — module-level constant to avoid per-instance allocation. */
@@ -20,6 +21,7 @@ const NUMBER_FMT = new Intl.NumberFormat('en-US');
 @Component({
   selector: 'app-session-stats',
   changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [NgTemplateOutlet],
   host: { class: 'block' },
   template: `
     @if (stats(); as s) {
@@ -76,30 +78,8 @@ const NUMBER_FMT = new Intl.NumberFormat('en-US');
           </span>
         }
 
-        <!-- Branch chip (right-aligned, sm+) — mockup line 1172. -->
-        @if (branch(); as br) {
-          <span
-            class="ml-auto hidden items-center gap-1.5 whitespace-nowrap sm:inline-flex"
-            data-testid="session-stats-branch"
-          >
-            <svg
-              class="h-3 w-3"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-              stroke-width="1.75"
-              aria-hidden="true"
-            >
-              <circle cx="6" cy="6" r="2" />
-              <circle cx="6" cy="18" r="2" />
-              <circle cx="18" cy="8" r="2" />
-              <path stroke-linecap="round" d="M6 8v8m0-8a6 6 0 0 0 6 6h4" />
-            </svg>
-            <span class="text-[var(--ink-dim)]">{{ br }}</span>
-          </span>
-        }
+        <ng-container *ngTemplateOutlet="branchChip" />
 
-        <!-- Cost (right-aligned, sm+) -->
         @if (s.total_cost > 0) {
           <span class="hidden whitespace-nowrap sm:inline" [class.ml-auto]="!branch()">
             session:
@@ -135,32 +115,36 @@ const NUMBER_FMT = new Intl.NumberFormat('en-US');
           </span>
           <span class="text-[var(--ink-dim)]">0%</span>
         </span>
-        @if (branch(); as br) {
-          <span
-            class="ml-auto hidden items-center gap-1.5 whitespace-nowrap sm:inline-flex"
-            data-testid="session-stats-branch"
-          >
-            <svg
-              class="h-3 w-3"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-              stroke-width="1.75"
-              aria-hidden="true"
-            >
-              <circle cx="6" cy="6" r="2" />
-              <circle cx="6" cy="18" r="2" />
-              <circle cx="18" cy="8" r="2" />
-              <path stroke-linecap="round" d="M6 8v8m0-8a6 6 0 0 0 6 6h4" />
-            </svg>
-            <span class="text-[var(--ink-dim)]">{{ br }}</span>
-          </span>
-        }
+        <ng-container *ngTemplateOutlet="branchChip" />
         <span class="hidden whitespace-nowrap sm:inline" [class.ml-auto]="!branch()">
           session: <span class="text-[var(--ink-dim)]">$0.0000</span>
         </span>
       </div>
     }
+
+    <ng-template #branchChip>
+      @if (branch(); as br) {
+        <span
+          class="ml-auto hidden items-center gap-1.5 whitespace-nowrap sm:inline-flex"
+          data-testid="session-stats-branch"
+        >
+          <svg
+            class="h-3 w-3"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+            stroke-width="1.75"
+            aria-hidden="true"
+          >
+            <circle cx="6" cy="6" r="2" />
+            <circle cx="6" cy="18" r="2" />
+            <circle cx="18" cy="8" r="2" />
+            <path stroke-linecap="round" d="M6 8v8m0-8a6 6 0 0 0 6 6h4" />
+          </svg>
+          <span class="text-[var(--ink-dim)]">{{ br }}</span>
+        </span>
+      }
+    </ng-template>
   `,
 })
 export class SessionStatsComponent {
@@ -173,7 +157,7 @@ export class SessionStatsComponent {
   /**
    * Current git branch of the active project's working tree, or `null` when
    * the project isn't a git repo. Renders as the branch-icon chip on the
-   * right side of the strip — mockup lines 1172–1175.
+   * right side of the strip.
    */
   readonly branch = input<string | null>(null);
 

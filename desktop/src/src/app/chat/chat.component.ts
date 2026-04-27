@@ -58,8 +58,8 @@ export class ChatComponent implements OnInit, OnDestroy {
   memoryError = '';
   /**
    * Current git branch of the active project's working tree, or `null` when
-   * the project is not a git repo. Refreshed on project-ready and on each
-   * turn finish (assistant might have switched branches via shell tool).
+   * the project is not a git repo. Re-read after each turn finishes because
+   * the assistant may have switched branches via a shell tool.
    */
   gitBranch: string | null = null;
   /**
@@ -154,8 +154,9 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** Boots the chat session and subscribes to project lifecycle events (auth + ready). */
   async ngOnInit(): Promise<void> {
-    await this.chat.init();
-    await this.refreshGitBranch();
+    // Independent — running in parallel saves one git-fork's latency on
+    // cold start.
+    await Promise.all([this.chat.init(), this.refreshGitBranch()]);
     this.cdr.markForCheck();
 
     this.unsubAuthWatch = this.projectState.onChange(() => {

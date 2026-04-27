@@ -135,25 +135,8 @@ export class ChatStateService {
    */
   readonly retryEnabled: Signal<boolean> = computed(() => {
     const tree = this._state();
-    if (tree.is_streaming) return false;
-    if (!tree.session_id) return false;
-    const entries = tree.entries;
-    let lastAssistantIdx = -1;
-    for (let i = entries.length - 1; i >= 0; i -= 1) {
-      if (entries[i].role === 'assistant') {
-        lastAssistantIdx = i;
-        break;
-      }
-    }
-    if (lastAssistantIdx < 0) return false;
-    const assistant = entries[lastAssistantIdx];
-    if (assistant.uuid_status !== 'committed') return false;
-    for (let i = lastAssistantIdx - 1; i >= 0; i -= 1) {
-      const m = entries[i];
-      if (m.role !== 'user') continue;
-      return Boolean(m.uuid) && m.uuid_status === 'committed';
-    }
-    return false;
+    if (tree.is_streaming || !tree.session_id) return false;
+    return hasRetryAnchor(tree.entries, 'committed');
   });
 
   /**
@@ -794,13 +777,11 @@ export class ChatStateService {
     if (!sessionId) return;
     if (this._sessionStats?.session_id === sessionId) return;
     this._sessionStats = {
+      total_cost: 0,
+      context_window_size: 200_000,
+      total_output_tokens: 0,
+      ...this._sessionStats,
       session_id: sessionId,
-      total_cost: this._sessionStats?.total_cost ?? 0,
-      context_window_size: this._sessionStats?.context_window_size ?? 200_000,
-      total_output_tokens: this._sessionStats?.total_output_tokens ?? 0,
-      ...(this._sessionStats?.usage ? { usage: this._sessionStats.usage } : {}),
-      ...(this._sessionStats?.model ? { model: this._sessionStats.model } : {}),
-      ...(this._sessionStats?.rate_limit ? { rate_limit: this._sessionStats.rate_limit } : {}),
     };
     this.notifyChange();
   }
@@ -1145,6 +1126,40 @@ function updateToolInput(blocks: MessageBlock[], toolId: string, delta: string):
  * @param data.model - Model id attached to the `Result` chunk, if any.
  * @param resolvedModel - Model id already resolved by the reducer.
  */
+/**
+ * True when `entries` ends with a committed assistant turn whose
+ * preceding user entry also has a committed uuid — the precondition for
+ * `retry_last_turn` (ADR-046). Generic over the casing of `committedTag`
+ * because the legacy ChatMessage shape uses 'Committed' while the
+ * state-tree shape uses 'committed'.
+ * @param entries - Conversation entries in order, oldest first.
+ * @param committedTag - The literal value that means "uuid is durable".
+ */
+function hasRetryAnchor(
+  entries: readonly {
+    role: 'user' | 'assistant';
+    uuid?: string | null;
+    uuid_status?: string;
+  }[],
+  committedTag: string
+): boolean {
+  let lastAssistantIdx = -1;
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    if (entries[i].role === 'assistant') {
+      lastAssistantIdx = i;
+      break;
+    }
+  }
+  if (lastAssistantIdx < 0) return false;
+  if (entries[lastAssistantIdx].uuid_status !== committedTag) return false;
+  for (let i = lastAssistantIdx - 1; i >= 0; i -= 1) {
+    const m = entries[i];
+    if (m.role !== 'user') continue;
+    return Boolean(m.uuid) && m.uuid_status === committedTag;
+  }
+  return false;
+}
+
 function buildEntryMeta(
   data: {
     turn_usage?: TurnUsage;
