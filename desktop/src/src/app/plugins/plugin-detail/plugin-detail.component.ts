@@ -13,6 +13,7 @@ import { ProjectStateService } from '../../services/project-state.service';
 import { PluginStatusEntry, PluginsResponse } from '../../models/plugin';
 import { IntegrationsResponse } from '../../models/integration';
 import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-settings-form.component';
+import { ProjectPillComponent } from '../../project-switcher/project-pill.component';
 
 /** Tabs available in the plugin-detail view. */
 export type PluginDetailTab = 'dashboard' | 'settings' | 'tools' | 'logs';
@@ -27,7 +28,7 @@ interface ExposedTool {
 /** Detail page for a single plugin with Dashboard / Settings / Tools / Logs tabs. */
 @Component({
   selector: 'app-plugin-detail',
-  imports: [CommonModule, PluginSettingsFormComponent],
+  imports: [CommonModule, PluginSettingsFormComponent, ProjectPillComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -78,17 +79,7 @@ interface ExposedTool {
           ></button>
           <span class="hidden text-[var(--line-strong)] md:inline">·</span>
         }
-        <span
-          class="mono flex items-center gap-1.5 text-[11px] text-[var(--ink)]"
-          data-testid="detail-project-pill"
-        >
-          <span
-            class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-[var(--violet)] text-[8px] font-bold text-[#07090f]"
-          >
-            {{ projectMonogram }}
-          </span>
-          <span>{{ activeProjectName || 'no project' }}</span>
-        </span>
+        <app-project-pill />
       </div>
     </div>
 
@@ -394,17 +385,6 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   get missingIntegrations(): string[] {
     if (!this.plugin) return [];
     return this.plugin.requires_integrations.filter((i) => !this.integrationStatuses.get(i));
-  }
-
-  /** Used by the header pill. */
-  get activeProjectName(): string | null {
-    return this.activeProject;
-  }
-
-  /** First two letters of the active project for the violet monogram. */
-  get projectMonogram(): string {
-    if (!this.activeProject) return '··';
-    return this.activeProject.slice(0, 2).toLowerCase();
   }
 
   /** Loads plugin data, settings, and integration status from the backend. */

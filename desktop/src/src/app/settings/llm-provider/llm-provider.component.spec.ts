@@ -222,28 +222,54 @@ describe('LlmProviderComponent', () => {
     expect(invokedArgs['apiKeyEnv']).toBeUndefined();
   });
 
-  it('renders provider select', async () => {
+  it('renders four provider cards in a radiogroup', async () => {
     component.ngOnInit();
     await fixture.whenStable();
     fixture.detectChanges();
 
-    const select = fixture.nativeElement.querySelector('[data-testid="settings-llm-provider"]');
-    expect(select).not.toBeNull();
-    expect(select.tagName).toBe('SELECT');
+    const cards = fixture.nativeElement.querySelectorAll('[data-testid^="settings-llm-provider-"]');
+    expect(cards.length).toBe(4);
+    const ids = Array.from(cards).map((c) =>
+      (c as HTMLElement).getAttribute('data-testid')?.replace('settings-llm-provider-', '')
+    );
+    expect(ids).toEqual(['anthropic', 'ollama', 'lmstudio', 'llamacpp']);
   });
 
-  it('hides model and base URL fields for anthropic provider', async () => {
+  it('marks the active provider card with aria-checked=true', async () => {
     component.provider = 'anthropic';
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
 
-    const modelInput = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
-    expect(modelInput).toBeNull();
+    const anthropicCard = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-provider-anthropic"]'
+    );
+    const ollamaCard = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-provider-ollama"]'
+    );
+    expect(anthropicCard.getAttribute('aria-checked')).toBe('true');
+    expect(ollamaCard.getAttribute('aria-checked')).toBe('false');
+  });
 
+  it('shows base URL and a hard-coded model dropdown for anthropic', async () => {
+    component.provider = 'anthropic';
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
+
+    // Mockup keeps both fields visible for anthropic — base_url is read-only
+    // and model is a dropdown of the three current Claude families.
     const baseUrlInput = fixture.nativeElement.querySelector(
       '[data-testid="settings-llm-base-url"]'
     );
-    expect(baseUrlInput).toBeNull();
+    expect(baseUrlInput).not.toBeNull();
+    expect(baseUrlInput.readOnly).toBe(true);
+
+    const modelEl = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
+    expect(modelEl).not.toBeNull();
+    expect(modelEl.tagName).toBe('SELECT');
+    const options = Array.from(modelEl.querySelectorAll('option')).map(
+      (o) => (o as HTMLOptionElement).value
+    );
+    expect(options).toEqual(['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5']);
   });
 
   it('shows model and base URL fields for ollama provider', async () => {

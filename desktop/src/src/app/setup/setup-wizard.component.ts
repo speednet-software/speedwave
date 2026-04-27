@@ -13,6 +13,7 @@ import { CommonModule, NgOptimizedImage } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
+import { SpinIconComponent } from '../shared/spin-icon.component';
 
 /** Lifecycle status of a single setup step. */
 export type StepState = 'pending' | 'active' | 'done' | 'error';
@@ -37,7 +38,7 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
 /** Guides the user through initial environment setup and project creation. */
 @Component({
   selector: 'app-setup-wizard',
-  imports: [CommonModule, FormsModule, NgOptimizedImage],
+  imports: [CommonModule, FormsModule, NgOptimizedImage, SpinIconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -107,20 +108,7 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
                         <span aria-hidden="true">✓</span>
                       }
                       @case ('active') {
-                        <svg
-                          class="spin h-3 w-3"
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                          stroke-width="2"
-                          aria-hidden="true"
-                        >
-                          <path
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 0 0 4.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 0 1-15.357-2m15.357 2H15"
-                          />
-                        </svg>
+                        <app-spin-icon />
                       }
                       @case ('error') {
                         <span aria-hidden="true">!</span>

@@ -62,19 +62,14 @@ describe('NavRailComponent', () => {
     expect(inactive.getAttribute('aria-current')).toBeNull();
   });
 
-  it('renders the keyboard shortcut hint when provided', () => {
-    const tip = fixture.nativeElement
-      .querySelector('[data-testid="nav-chat"] .tooltip')
-      ?.textContent?.trim();
-    expect(tip).toContain('Chat');
-    expect(tip).toContain('⌘1');
-  });
-
-  it('omits the kbd hint for entries without a shortcut', () => {
-    const tip = fixture.nativeElement.querySelector(
-      '[data-testid="nav-integrations"] .tooltip .kbd'
-    );
+  it('does not render hover tooltips on rail entries', () => {
+    // The hover tooltip with the shortcut hint was removed — the rail
+    // surface is intentionally minimal (mockup-aligned) and the keyboard
+    // shortcuts live in the command palette.
+    const tip = fixture.nativeElement.querySelector('[data-testid="nav-chat"] .tooltip');
     expect(tip).toBeNull();
+    const tipKbd = fixture.nativeElement.querySelector('[data-testid="nav-integrations"] .tooltip');
+    expect(tipKbd).toBeNull();
   });
 
   // Edge cases

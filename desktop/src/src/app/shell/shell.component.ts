@@ -128,9 +128,7 @@ const ICON_LOGS =
                   class="spin h-8 w-8 rounded-full border-[3px] border-[var(--line-strong)] border-t-[var(--accent)]"
                 ></div>
                 <p class="mono mt-4 text-sm text-[var(--ink)]">Restarting containers...</p>
-                <p class="mono mt-2 text-[11px] text-[var(--ink-mute)]">
-                  This may take a minute while containers are recreated
-                </p>
+                <p class="mono mt-2 text-[11px] text-[var(--ink-mute)]">This may take a minute</p>
               </div>
             </div>
           </div>
@@ -141,7 +139,6 @@ const ICON_LOGS =
             kickerColor="amber"
             title="Container config changed"
             body="Enabling/disabling services needs a container restart. Running conversations will pause briefly."
-            note="estimated: ~8s · lima keeps running"
             [inlineError]="projectState.restartError"
             primaryLabel="restart now"
             secondaryLabel="later"
@@ -164,7 +161,7 @@ const ICON_LOGS =
           (paletteOpened)="ui.togglePalette()"
         />
         <div class="flex flex-1 flex-col overflow-hidden">
-          <main class="flex-1 overflow-hidden">
+          <main class="flex min-h-0 flex-1 flex-col overflow-hidden">
             <router-outlet />
           </main>
         </div>
@@ -217,12 +214,13 @@ export class ShellComponent implements OnInit, OnDestroy {
   private readonly currentUrlSignal = signal<string>(this.router.url);
   private readonly statusSignal = signal(this.projectState.status);
 
-  /** Catalog filtered for the current project status — hides chat when not ready. */
-  readonly visibleEntries = computed(() => {
-    const status = this.statusSignal();
-    const hideChat = status !== 'ready' && status !== 'error';
-    return hideChat ? this.entryCatalog.filter((e) => e.id !== 'chat') : this.entryCatalog;
-  });
+  /**
+   * Catalog of nav entries to render. The chat icon stays visible regardless
+   * of project status — when the user lands on `/chat` while authentication
+   * is missing, the view itself surfaces the `auth required` block + a link
+   * back to Settings instead of silently disappearing from the rail.
+   */
+  readonly visibleEntries = computed(() => this.entryCatalog);
 
   /** Active entry id derived from the current router URL — used by the rail. */
   readonly activeViewId = computed(() => {

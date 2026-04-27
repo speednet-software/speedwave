@@ -39,6 +39,14 @@ const SWATCH_TOKENS = ['var(--violet)', 'var(--teal)', 'var(--amber)', 'var(--ac
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (ui.projectSwitcherOpen()) {
+      <!-- Click-outside backdrop — closes the dropdown when clicking anywhere
+           outside it (mockup behaviour). Sits below the dropdown z-index. -->
+      <div
+        class="fixed inset-0 z-[1000]"
+        data-testid="project-switcher-backdrop"
+        aria-hidden="true"
+        (click)="ui.closeProjectSwitcher()"
+      ></div>
       <div
         class="fixed right-2 top-12 z-[1001] w-[calc(100vw-1rem)] max-w-xs sm:right-4 sm:top-14 sm:w-72"
         data-testid="project-switcher-dropdown"

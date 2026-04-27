@@ -1,5 +1,87 @@
 @import "tailwindcss";
 
+/* ── Bundled fonts (woff2 via /public/fonts) ──
+   Tauri's strict CSP blocks Google Fonts at runtime, so we self-host the
+   subset the mockup pulls from googleapis.com. Files live in
+   /public/fonts/*.woff2 and are copied to /fonts/ at build via angular.json. */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/inter-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/inter-500.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/inter-600.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/fonts/inter-700.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-500.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-600.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-sans-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-sans-500.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-sans-600.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-sans-700.woff2') format('woff2');
+}
+
 /* ── Speedwave terminal-minimal palette ──
    Source of truth: design-proposals/06-terminal-minimal.html (lines 13–69).
    Defined as plain CSS custom properties on :root so Tailwind arbitrary-value
@@ -281,10 +363,18 @@
   }
   .rail-btn:hover  { color: var(--ink); background: var(--bg-2); }
   .rail-btn.active { color: var(--ink); }
+  /* Active accent bar — placed against the rail's left edge exactly like
+     the mockup. The negative offset only works when no ancestor clips on
+     the X axis, so the rail (`<app-nav-rail>` host) keeps `overflow-visible`
+     and the indicator falls inside the rail viewport at x=0..2px. */
   .rail-btn.active::before {
     content: '';
     position: absolute;
-    left: -10px;
+    /* Measured live: rail-btn sits at x=6 inside the rail (items-center
+       leaves 6px gutters, not 10 the mockup assumed). At -10px the bar
+       would land at x=-4 — outside the viewport. -5px lands at x=1,
+       a 2px stripe pinned to the rail's left edge. */
+    left: -5px;
     top: 6px;
     bottom: 6px;
     width: 2px;
@@ -374,6 +464,7 @@ body.memory-open::before {
 @layer base {
   html, body {
     height: 100%;
+    overflow: hidden;
     font-family: var(--font-sans);
     font-size: 14px;
     background: var(--bg);
@@ -440,12 +531,15 @@ body.memory-open::before {
   .prose-sw :first-child { margin-top: 0; }
   .prose-sw :last-child  { margin-bottom: 0; }
 
-  .prose-sw h1 { font-size: 1.75em; font-weight: 700; color: var(--ink);     margin: 24px 0 12px; }
-  .prose-sw h2 { font-size: 1.5em;  font-weight: 700; color: var(--ink);     margin: 20px 0 10px; }
-  .prose-sw h3 { font-size: 1.25em; font-weight: 600; color: var(--ink);     margin: 16px 0 8px; }
-  .prose-sw h4 { font-size: 1.1em;  font-weight: 600; color: var(--ink);     margin: 14px 0 6px; }
-  .prose-sw h5 { font-size: 1em;    font-weight: 600; color: var(--ink);     margin: 12px 0 4px; }
-  .prose-sw h6 { font-size: 0.9em;  font-weight: 600; color: var(--ink-dim); margin: 12px 0 4px; }
+  /* Tight heading scale for in-chat markdown — the terminal-minimal layout
+     keeps body text at 14px, so headings step up by tiny increments instead
+     of the chunky web-prose 1.75em / 1.5em ladder that drowns out the body. */
+  .prose-sw h1 { font-size: 1.15em; font-weight: 600; color: var(--ink);     margin: 16px 0 8px; }
+  .prose-sw h2 { font-size: 1.05em; font-weight: 600; color: var(--ink);     margin: 14px 0 6px; }
+  .prose-sw h3 { font-size: 1em;    font-weight: 600; color: var(--ink);     margin: 12px 0 4px; }
+  .prose-sw h4 { font-size: 1em;    font-weight: 600; color: var(--ink-dim); margin: 12px 0 4px; }
+  .prose-sw h5 { font-size: 0.95em; font-weight: 600; color: var(--ink-dim); margin: 10px 0 4px; }
+  .prose-sw h6 { font-size: 0.9em;  font-weight: 600; color: var(--ink-mute); margin: 10px 0 4px; }
 
   .prose-sw p  { color: var(--ink); line-height: 1.7; margin: 8px 0; }
 

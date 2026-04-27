@@ -1,4 +1,5 @@
 import {
+  AfterViewInit,
   ChangeDetectionStrategy,
   Component,
   ElementRef,
@@ -19,6 +20,14 @@ import { SlashService, type SlashCommand } from '../slash/slash.service';
 const SLASH_TRIGGER = /^(\s*)\/([^\s/]*)$/;
 
 /**
+ * Inline directive prepended to a user message when plan mode is active.
+ * Stream-json has no first-class plan toggle, so we encode the intent in the
+ * prompt itself. The wording mirrors Claude Code's CLI plan mode banner.
+ */
+const PLAN_MODE_PREFIX =
+  '[Plan mode] Produce a plan only — do NOT modify files, do NOT run tools that mutate state. Then ask me to confirm before acting.\n\n';
+
+/**
  * Stateless composer that wraps a textarea, slash button, slash-menu popover, and a
  * send button. Input is managed by a reactive `FormControl<string>`; Enter
  * submits while Shift+Enter inserts a newline. Typing `/` at the start of the
@@ -33,7 +42,7 @@ const SLASH_TRIGGER = /^(\s*)\/([^\s/]*)$/;
   selector: 'app-composer',
   imports: [ReactiveFormsModule, SlashMenuComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  host: { class: 'relative block' },
+  host: { class: 'relative block min-w-0' },
   template: `
     @if (queuedText()) {
       <div
@@ -70,6 +79,30 @@ const SLASH_TRIGGER = /^(\s*)\/([^\s/]*)$/;
       <div
         class="mono flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--line)] px-3 py-1.5 text-[11px] text-[var(--ink-mute)]"
       >
+        <!-- Plan / Act mode toggle — first control in the toolbar so the
+             active mode is the most visible piece of the row. Plan mode
+             prepends a planning directive to the backend payload (Claude
+             produces a plan and asks before acting); the local bubble
+             keeps the user's raw text. -->
+        <button
+          type="button"
+          data-testid="composer-plan-toggle"
+          class="rounded border px-2 py-0.5 text-[10px] uppercase tracking-widest transition-colors"
+          [class]="
+            planMode()
+              ? 'border-[var(--amber)] text-[var(--amber)] bg-[var(--amber)]/10'
+              : 'border-[var(--line)] text-[var(--ink-mute)] hover:text-[var(--ink)]'
+          "
+          [attr.aria-pressed]="planMode()"
+          [title]="
+            planMode()
+              ? 'Plan mode on — Claude will plan, not act'
+              : 'Plan mode off — Claude will execute changes'
+          "
+          (click)="togglePlanMode()"
+        >
+          {{ planMode() ? 'plan' : 'act' }}
+        </button>
         <button
           type="button"
           data-testid="composer-mention"
@@ -108,22 +141,35 @@ const SLASH_TRIGGER = /^(\s*)\/([^\s/]*)$/;
           }}</span>
         }
         <div class="ml-auto flex flex-shrink-0 items-center gap-2">
-          <span class="hidden sm:inline" data-testid="composer-shortcut">{{ shortcutLabel }}</span>
-          <button
-            type="button"
-            data-testid="chat-send"
-            aria-label="Send"
-            class="rounded bg-[var(--accent)] px-2.5 py-0.5 font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-            [disabled]="!canSubmit()"
-            (click)="submit()"
-          >
-            send &rarr;
-          </button>
+          @if (streaming()) {
+            <button
+              type="button"
+              data-testid="chat-stop"
+              aria-label="Stop"
+              title="Stop (Esc)"
+              class="rounded border border-red-500/50 bg-red-500/10 px-2.5 py-0.5 font-medium text-red-300 hover:bg-red-500/20"
+              (click)="stopRequested.emit()"
+            >
+              stop
+            </button>
+          } @else {
+            <button
+              type="button"
+              data-testid="chat-send"
+              aria-label="Send"
+              class="rounded bg-[var(--accent)] px-2.5 py-0.5 font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+              [disabled]="!canSubmit()"
+              (click)="submit()"
+            >
+              send &rarr;
+            </button>
+          }
         </div>
       </div>
     </div>
     @if (slashOpen()) {
       <app-slash-menu
+        [open]="true"
         [query]="slashQuery()"
         (selected)="applySelection($event)"
         (closed)="closeSlash()"
@@ -131,7 +177,7 @@ const SLASH_TRIGGER = /^(\s*)\/([^\s/]*)$/;
     }
   `,
 })
-export class ComposerComponent {
+export class ComposerComponent implements AfterViewInit {
   /** Textarea DOM node used to read the caret position and insert text at the cursor. */
   @ViewChild('textarea', { static: true })
   private textareaRef!: ElementRef<HTMLTextAreaElement>;
@@ -159,7 +205,7 @@ export class ComposerComponent {
   readonly contextLabel = input('');
 
   /** Emits the trimmed message text when the user submits via Enter or the send button. */
-  readonly submitted = output<string>();
+  readonly submitted = output<{ payload: string; displayText: string }>();
 
   /**
    * ADR-045 — emits when the user submits while a turn is streaming.
@@ -169,6 +215,9 @@ export class ComposerComponent {
 
   /** ADR-045 — emits when the user clicks the X on the queued preview. */
   readonly queueCancelled = output<void>();
+
+  /** Emits when the user clicks the inline Stop button while streaming. */
+  readonly stopRequested = output<void>();
 
   /** Emits when the slash popover transitions open/closed (for parent UI coordination). */
   readonly slashOpenChange = output<boolean>();
@@ -184,8 +233,12 @@ export class ComposerComponent {
   /** Active query used to filter the slash menu (text after `/`). */
   readonly slashQuery = signal<string>('');
 
-  /** Platform-aware submit-shortcut label shown in the toolbar (⌘+↵ on macOS, Ctrl+↵ elsewhere). */
-  readonly shortcutLabel = isMacPlatform() ? '⌘+↵' : 'Ctrl+↵';
+  /**
+   * Plan mode state. When true, the next submitted message is prefixed with
+   * the planning directive (`PLAN_MODE_PREFIX`). Persists across messages
+   * until the user toggles it off — mirrors the CLI's plan mode behaviour.
+   */
+  readonly planMode = signal<boolean>(false);
 
   /** Bridges `FormControl.valueChanges` (RxJS) into the signal graph for OnPush. */
   readonly textValue = toSignal(this.text.valueChanges, { initialValue: '' });
@@ -206,6 +259,19 @@ export class ComposerComponent {
       if (value) this.text.disable({ emitEvent: false });
       else this.text.enable({ emitEvent: false });
     });
+  }
+
+  /** Auto-focus the textarea on mount so the user can start typing immediately. */
+  ngAfterViewInit(): void {
+    this.focusInput();
+  }
+
+  /**
+   * Focus the textarea. Public so the parent can re-focus after high-level
+   * actions like "new conversation" that reset state and may steal focus.
+   */
+  focusInput(): void {
+    queueMicrotask(() => this.textareaRef?.nativeElement?.focus());
   }
 
   /**
@@ -246,17 +312,27 @@ export class ComposerComponent {
   /**
    * Submits the current textarea value and resets the form. Routes to
    * `queueRequested` while streaming (ADR-045); `submitted` otherwise.
+   *
+   * When plan mode is active, the prefix is added to the backend payload
+   * so Claude produces a plan instead of acting — but the local bubble
+   * still shows the user's raw text, not the directive boilerplate.
    */
   submit(): void {
     if (!this.canSubmit()) return;
     const text = this.textValue().trim();
+    const payload = this.planMode() ? `${PLAN_MODE_PREFIX}${text}` : text;
     if (this.streaming()) {
-      this.queueRequested.emit(text);
+      this.queueRequested.emit(payload);
     } else {
-      this.submitted.emit(text);
+      this.submitted.emit({ payload, displayText: text });
     }
     this.text.reset('');
     this.closeSlash();
+  }
+
+  /** Toggles plan mode on/off. Persists across messages until toggled again. */
+  togglePlanMode(): void {
+    this.planMode.update((v) => !v);
   }
 
   /**
@@ -342,15 +418,4 @@ export class ComposerComponent {
       this.slashQuery.set('');
     }
   }
-}
-
-/** Detects macOS for platform-aware keyboard hints (browser + jsdom safe). */
-function isMacPlatform(): boolean {
-  if (typeof navigator === 'undefined') return false;
-  type NavigatorWithUA = Navigator & {
-    userAgentData?: { platform?: string };
-  };
-  const nav = navigator as NavigatorWithUA;
-  const platform = nav.userAgentData?.platform ?? nav.userAgent ?? '';
-  return /Mac|iPhone|iPad|iPod/i.test(platform);
 }

@@ -22,29 +22,8 @@ describe('AdvancedSectionComponent — logging settings', () => {
     component = fixture.componentInstance;
   });
 
-  describe('setLogLevel()', () => {
-    it('calls set_log_level with the selected level', async () => {
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      await component.setLogLevel('debug');
-      expect(invokeSpy).toHaveBeenCalledWith('set_log_level', { level: 'debug' });
-    });
-
-    it('updates logLevel property', async () => {
-      await component.setLogLevel('trace');
-      expect(component.logLevel()).toBe('trace');
-    });
-
-    it('emits errorOccurred on failure', async () => {
-      const errorSpy = vi.fn();
-      component.errorOccurred.subscribe(errorSpy);
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'set_log_level') throw new Error('invalid level');
-        return undefined;
-      };
-      await component.setLogLevel('bad');
-      expect(errorSpy).toHaveBeenCalledWith('invalid level');
-    });
-  });
+  // setLogLevel was removed: log level is forced to `trace` on init.
+  // The forced-init behaviour is covered by advanced-section.component.spec.
 
   describe('exportDiagnostics()', () => {
     it('calls export_diagnostics with active project', async () => {

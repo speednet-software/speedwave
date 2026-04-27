@@ -46,43 +46,51 @@ describe('UpdateSectionComponent', () => {
     expect(component.currentVersion).toBe('1.0.0');
   });
 
-  describe('toggleAutoCheck()', () => {
-    it('flips updateAutoCheck from true to false', async () => {
-      component.updateAutoCheck = true;
-      await component.toggleAutoCheck();
-      expect(component.updateAutoCheck).toBe(false);
-    });
-
-    it('flips updateAutoCheck from false to true', async () => {
-      component.updateAutoCheck = false;
-      await component.toggleAutoCheck();
-      expect(component.updateAutoCheck).toBe(true);
-    });
-
-    it('awaits saveUpdateSettings (invokes set_update_settings)', async () => {
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      component.updateAutoCheck = true;
-      await component.toggleAutoCheck();
-      expect(invokeSpy).toHaveBeenCalledWith('set_update_settings', {
-        settings: { auto_check: false, check_interval_hours: component.updateIntervalHours },
-      });
-    });
-  });
-
-  describe('setCheckInterval()', () => {
-    it('updates updateIntervalHours to the given value', async () => {
-      component.updateIntervalHours = 24;
-      await component.setCheckInterval(168);
-      expect(component.updateIntervalHours).toBe(168);
-    });
-
-    it('awaits saveUpdateSettings (invokes set_update_settings)', async () => {
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      component.updateAutoCheck = true;
-      await component.setCheckInterval(12);
-      expect(invokeSpy).toHaveBeenCalledWith('set_update_settings', {
+  describe('auto-check defaults (no UI)', () => {
+    // The toggle + frequency dropdown were removed — auto-check is always on
+    // with a fixed 12 h interval. The component rewrites persisted settings
+    // on init when they drift from those defaults.
+    it('rewrites backend settings when persisted state has auto_check=false', async () => {
+      const calls: { cmd: string; args?: Record<string, unknown> }[] = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        calls.push({ cmd, args });
+        if (cmd === 'get_update_settings') return { auto_check: false, check_interval_hours: 24 };
+        return undefined;
+      };
+      await component.ngOnInit();
+      await new Promise<void>((r) => setTimeout(r, 0));
+      const setCall = calls.find((c) => c.cmd === 'set_update_settings');
+      expect(setCall?.args).toEqual({
         settings: { auto_check: true, check_interval_hours: 12 },
       });
+    });
+
+    it('rewrites backend settings when interval drifts from 12 h', async () => {
+      const calls: { cmd: string; args?: Record<string, unknown> }[] = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        calls.push({ cmd, args });
+        if (cmd === 'get_update_settings') return { auto_check: true, check_interval_hours: 168 };
+        return undefined;
+      };
+      await component.ngOnInit();
+      await new Promise<void>((r) => setTimeout(r, 0));
+      const setCall = calls.find((c) => c.cmd === 'set_update_settings');
+      expect(setCall?.args).toEqual({
+        settings: { auto_check: true, check_interval_hours: 12 },
+      });
+    });
+
+    it('does not rewrite when persisted state already matches the defaults', async () => {
+      const calls: { cmd: string; args?: Record<string, unknown> }[] = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        calls.push({ cmd, args });
+        if (cmd === 'get_update_settings') return { auto_check: true, check_interval_hours: 12 };
+        return undefined;
+      };
+      await component.ngOnInit();
+      await new Promise<void>((r) => setTimeout(r, 0));
+      const setCall = calls.find((c) => c.cmd === 'set_update_settings');
+      expect(setCall).toBeUndefined();
     });
   });
 

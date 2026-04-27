@@ -19,6 +19,7 @@ import {
 import { ServiceCardComponent, SaveCredentialsEvent } from './service-card/service-card.component';
 import { RedmineConfigComponent } from './redmine-config/redmine-config.component';
 import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
+import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 
 /** Per-service dot colour cycle used in the table. */
 const SERVICE_DOT_COLOURS: readonly string[] = [
@@ -43,7 +44,13 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
 /** Manages MCP service integrations and native OS integration toggles. */
 @Component({
   selector: 'app-integrations',
-  imports: [FormsModule, ServiceCardComponent, RedmineConfigComponent, IdeBridgeComponent],
+  imports: [
+    FormsModule,
+    ServiceCardComponent,
+    RedmineConfigComponent,
+    IdeBridgeComponent,
+    ProjectPillComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -57,24 +64,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
         Service integrations
       </h1>
       <div class="ml-auto flex flex-shrink-0 items-center gap-3">
-        <span
-          class="mono hidden text-[11px] text-[var(--ink-mute)] md:inline"
-          data-testid="integrations-count"
-        >
-          {{ services.length }} services · {{ runningCount }} running
-        </span>
-        <span class="hidden text-[var(--line-strong)] md:inline">·</span>
-        <span
-          class="mono flex items-center gap-1.5 text-[11px] text-[var(--ink)]"
-          data-testid="integrations-project-pill"
-        >
-          <span
-            class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-[var(--violet)] text-[8px] font-bold text-[#07090f]"
-          >
-            {{ projectMonogram }}
-          </span>
-          <span>{{ activeProject || 'no project' }}</span>
-        </span>
+        <app-project-pill />
       </div>
     </div>
 
@@ -311,17 +301,6 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private unsubProjectReady: (() => void) | null = null;
-
-  /** First two letters of the active project, used by the header pill. */
-  get projectMonogram(): string {
-    if (!this.activeProject) return '··';
-    return this.activeProject.slice(0, 2).toLowerCase();
-  }
-
-  /** Number of services currently running (enabled + configured). */
-  get runningCount(): number {
-    return this.services.filter((s) => s.enabled && s.configured).length;
-  }
 
   /** Loads the active project and integrations on init. */
   async ngOnInit(): Promise<void> {

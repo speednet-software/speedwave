@@ -28,7 +28,7 @@ describe('ChatLoadingComponent', () => {
     expect(label?.textContent?.trim()).toBe('Fetching messages…');
   });
 
-  it('renders an inline SVG spinner with the shared `spin` animation class', () => {
+  it('renders an SVG circle spinner with the shared `spin` animation class', () => {
     fixture.detectChanges();
 
     const spinner = fixture.nativeElement.querySelector(
@@ -36,7 +36,9 @@ describe('ChatLoadingComponent', () => {
     ) as SVGElement | null;
     expect(spinner).not.toBeNull();
     expect(spinner?.classList.contains('spin')).toBe(true);
+    // Inline SVG with a stroked circle — true geometry, never hints oval.
     expect(spinner?.tagName.toLowerCase()).toBe('svg');
+    expect(spinner?.querySelector('circle')).not.toBeNull();
     expect(spinner?.getAttribute('aria-hidden')).toBe('true');
   });
 

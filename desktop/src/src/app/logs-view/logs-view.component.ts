@@ -12,6 +12,7 @@ import {
 } from '@angular/core';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import type { HealthReport } from '../models/health';
 
 /** Log severity levels recognised by the logs-view filter chips. */
@@ -99,6 +100,7 @@ function stripContainerPrefix(container: string): string {
  */
 @Component({
   selector: 'app-logs-view',
+  imports: [ProjectPillComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -116,17 +118,7 @@ function stripContainerPrefix(container: string): string {
           auto-refresh 5s
         </span>
         <span class="hidden text-[var(--line-strong)] md:inline">·</span>
-        <span
-          class="mono flex items-center gap-1.5 text-[11px] text-[var(--ink)]"
-          data-testid="logs-project-pill"
-        >
-          <span
-            class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-[var(--violet)] text-[8px] font-bold text-[#07090f]"
-          >
-            {{ projectMonogram() }}
-          </span>
-          <span>{{ activeProjectName() || 'no project' }}</span>
-        </span>
+        <app-project-pill />
       </div>
     </div>
 
@@ -314,7 +306,11 @@ function stripContainerPrefix(container: string): string {
       aria-live="polite"
       aria-label="Application logs"
     >
-      <div class="mono mx-auto max-w-3xl" data-testid="logs-list">
+      <!-- Full-width log surface with a small horizontal pad so long lines
+           breathe but still don't run edge-to-edge with the rail. The
+           dashboard cards above keep their narrower max-w-3xl frame; only
+           the log stream needs the extra width. -->
+      <div class="mono w-full px-2 md:px-4" data-testid="logs-list">
         @if (loading() && lines().length === 0) {
           <p
             class="mono text-[12px] text-[var(--ink-mute)] py-8 text-center"
@@ -335,17 +331,26 @@ function stripContainerPrefix(container: string): string {
           </p>
         } @else {
           @for (line of visibleLines(); track $index) {
+            <!-- Row layout: fixed-width time + source + level columns
+                 truncate their content (min-w-0 + truncate) so a long
+                 source name like dev_speedwave_mcp_hub cannot bleed into
+                 the level/message columns. The message column owns the
+                 rest of the row and wraps with break-words on long lines. -->
             <div
-              class="flex gap-3 py-1 hover:bg-[var(--bg-1)]"
+              class="flex items-start gap-3 py-1 hover:bg-[var(--bg-1)]"
               data-testid="logs-line"
               [style.background]="line.level === 'error' ? 'rgba(239, 68, 68, 0.05)' : null"
             >
-              <span class="w-24 flex-shrink-0 text-[var(--ink-mute)]" data-testid="logs-time">
+              <span
+                class="w-[72px] flex-shrink-0 text-[var(--ink-mute)] tabular-nums"
+                data-testid="logs-time"
+              >
                 {{ line.time }}
               </span>
               <span
-                class="hidden w-16 flex-shrink-0 md:inline-block"
+                class="hidden w-56 flex-shrink-0 truncate md:inline-block"
                 [style.color]="sourceColour(line)"
+                [title]="line.source"
                 data-testid="logs-source"
               >
                 {{ line.source }}
@@ -358,7 +363,7 @@ function stripContainerPrefix(container: string): string {
                 {{ line.level }}
               </span>
               <span
-                class="min-w-0 break-words"
+                class="min-w-0 flex-1 break-words"
                 [style.color]="line.level === 'error' ? '#fca5a5' : 'var(--ink-dim)'"
                 data-testid="logs-message"
               >
@@ -393,8 +398,6 @@ export class LogsViewComponent implements OnInit, OnDestroy, AfterViewChecked {
   readonly error = signal<string>('');
   /** Latest health report shown above the logs (null until first fetch). */
   readonly health = signal<HealthReport | null>(null);
-  /** Active project name, exposed for the project pill. */
-  readonly activeProjectName = signal<string | null>(null);
 
   /** Distinct source names found in the current log set plus `'all'`. */
   readonly sources = computed<string[]>(() => {
@@ -420,13 +423,6 @@ export class LogsViewComponent implements OnInit, OnDestroy, AfterViewChecked {
   });
 
   readonly levelChips = LEVEL_CHIPS;
-
-  /** First two letters of the active project (for the violet monogram). */
-  readonly projectMonogram = computed<string>(() => {
-    const name = this.activeProjectName();
-    if (!name) return '··';
-    return name.slice(0, 2).toLowerCase();
-  });
 
   /** Whether the overall system is healthy. */
   readonly overallHealthy = computed<boolean>(() => this.health()?.overall_healthy ?? false);
@@ -511,7 +507,6 @@ export class LogsViewComponent implements OnInit, OnDestroy, AfterViewChecked {
 
   /** Kicks off the initial log fetch + health refresh + polling. */
   async ngOnInit(): Promise<void> {
-    this.activeProjectName.set(this.projectState.activeProject);
     await this.refresh();
     await this.refreshHealth();
     this.healthRefreshTimer = setInterval(() => {
@@ -539,7 +534,6 @@ export class LogsViewComponent implements OnInit, OnDestroy, AfterViewChecked {
   /** Re-fetch the tail of compose logs and re-parse into typed lines. */
   protected async refresh(): Promise<void> {
     const project = this.projectState.activeProject;
-    this.activeProjectName.set(project);
     if (!project) {
       this.loading.set(false);
       this.error.set('No active project');

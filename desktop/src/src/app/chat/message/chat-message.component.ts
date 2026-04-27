@@ -41,18 +41,11 @@ import { MessageMetadataComponent } from './message-metadata.component';
       </article>
     } @else {
       <article data-testid="chat-message" [attr.data-role]="role()">
-        <div class="mono mb-1 flex items-center gap-2 text-[11px]">
-          <span class="text-[var(--accent)]">speedwave</span>
-          @if (formattedTime()) {
-            <span class="text-[var(--ink-mute)]">·</span>
-            <span class="text-[var(--ink-mute)]" data-testid="meta-time">{{
-              streaming() ? 'streaming...' : formattedTime()
-            }}</span>
-          } @else if (streaming()) {
-            <span class="text-[var(--ink-mute)]">· streaming...</span>
-          }
-        </div>
-
+        <!-- Author + timestamp meta line removed: identity is conveyed by
+             alignment (assistant on the left, user-bubble on the right) and
+             the per-message metadata row at the bottom already shows model
+             + tokens + cost; an explicit "speedwave · HH:MM" header was
+             redundant. Streaming state is signalled by the trailing caret. -->
         <div class="text-[14px] leading-[1.7] text-[var(--ink)]">
           @for (block of blocks(); track $index) {
             @switch (block.type) {

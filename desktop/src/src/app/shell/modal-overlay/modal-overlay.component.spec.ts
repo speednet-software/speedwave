@@ -112,11 +112,11 @@ describe('ModalOverlayComponent', () => {
     });
 
     it('renders the optional note bar when supplied', () => {
-      host.note.set('estimated: ~8s · lima keeps running');
+      host.note.set('keep this short');
       fixture.detectChanges();
       const note = fixture.nativeElement.querySelector('[data-testid="modal-note"]');
       expect(note).not.toBeNull();
-      expect(note.textContent).toContain('lima keeps running');
+      expect(note.textContent).toContain('keep this short');
     });
   });
 

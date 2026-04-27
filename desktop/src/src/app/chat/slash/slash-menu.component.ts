@@ -48,12 +48,6 @@ import { SlashService, type SlashCommand } from './slash.service';
           aria-label="Filter slash commands"
           [value]="query()"
         />
-        <span
-          class="mono hidden text-[10px] text-[var(--ink-mute)] sm:inline"
-          data-testid="slash-menu-count"
-        >
-          {{ filtered().length }} matches
-        </span>
         <button
           type="button"
           class="text-[var(--ink-mute)] hover:text-[var(--ink)]"
@@ -145,9 +139,6 @@ import { SlashService, type SlashCommand } from './slash.service';
                     </div>
                   }
                 </div>
-                @if (entry.flatIndex === highlighted()) {
-                  <span class="kbd flex-shrink-0">↵</span>
-                }
               </button>
             }
           }
@@ -185,10 +176,18 @@ export class SlashMenuComponent {
   readonly service = inject(SlashService);
   readonly highlighted = signal(0);
 
-  /** Commands filtered by the current query, with startsWith ranked above substring. */
+  /**
+   * Commands filtered by the current query, with startsWith ranked above
+   * substring matches.
+   *
+   * Subagents (`kind === 'Agent'`) are dropped here: Claude Code does not
+   * expose them as slash commands — they can only be invoked from inside an
+   * Agent tool call. Surfacing them in the slash menu lets the user pick a
+   * "/Plan" entry that the model then rejects with `Unknown skill: Plan`.
+   */
   readonly filtered = computed<readonly SlashCommand[]>(() => {
     const q = this.query().trim().toLowerCase();
-    const all = this.service.commands();
+    const all = this.service.commands().filter((c) => c.kind !== 'Agent');
     if (!q) {
       return [...all];
     }

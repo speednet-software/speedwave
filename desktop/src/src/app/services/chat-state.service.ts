@@ -270,9 +270,14 @@ export class ChatStateService {
 
   /**
    * Sends a user message to Claude via the backend.
-   * @param text - The message text to send.
+   * @param text - The message text to send. May be the user's raw input or
+   *   a prefixed payload (e.g. plan-mode prefix); when `displayText` is
+   *   provided it is used for the local bubble while `text` is what the
+   *   backend receives.
+   * @param displayText - Optional surface-level text rendered in the chat
+   *   list. Falls back to `text` when omitted.
    */
-  async sendMessage(text: string): Promise<void> {
+  async sendMessage(text: string, displayText?: string): Promise<void> {
     if (!text || this.isStreaming) return;
     console.debug('[chat-state] sendMessage: isStreaming=%s', this.isStreaming);
 
@@ -280,7 +285,7 @@ export class ChatStateService {
       ...this._messages,
       {
         role: 'user',
-        blocks: [{ type: 'text', content: text }],
+        blocks: [{ type: 'text', content: displayText ?? text }],
         timestamp: Date.now(),
       },
     ];

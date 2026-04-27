@@ -149,7 +149,11 @@ describe('ChatMessageListComponent', () => {
     expect(container.scrollTop).toBe(1400);
   });
 
-  it('stops auto-scrolling when the user scrolls up', () => {
+  it('re-arms auto-scroll on a new message even after the user scrolled up', () => {
+    // Product decision: a new turn (length grew) snaps the view back to the
+    // bottom unconditionally. Streaming deltas that arrive on the *same*
+    // turn still respect a manual scroll-up, but the next user-visible
+    // message wins so the freshly-arrived content is always in sight.
     fixture.componentRef.setInput('messages', [
       { role: 'user', blocks: [{ type: 'text', content: 'first' }], timestamp: 1 },
     ]);
@@ -172,7 +176,7 @@ describe('ChatMessageListComponent', () => {
     Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 1400 });
     fixture.detectChanges();
 
-    expect(container.scrollTop).toBe(100);
+    expect(container.scrollTop).toBe(1400);
   });
 
   // ── isPrecedingUserEdited helper ─────────────────────────────────────

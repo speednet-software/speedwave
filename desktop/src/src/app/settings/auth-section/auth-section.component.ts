@@ -18,49 +18,60 @@ import { AuthTerminalComponent } from '../auth-terminal.component';
   selector: 'app-auth-section',
   imports: [CommonModule, FormsModule, AuthTerminalComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block' },
   template: `
     @if (llmProvider() === 'anthropic') {
       <section id="section-authentication" class="border-t border-[var(--line)] pt-6">
         <h2 class="view-title text-[16px] text-[var(--ink)]">Authentication</h2>
 
-        <div class="mt-3 flex items-center justify-between">
-          <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-            >status</span
-          >
-          <span
-            class="mono text-[11px]"
-            data-testid="auth-status-value"
-            [class]="
-              apiKeyConfigured || oauthAuthenticated
-                ? 'text-[var(--green)]'
-                : 'text-[var(--ink-dim)]'
-            "
-          >
-            {{
-              apiKeyConfigured
-                ? 'API Key configured'
-                : oauthAuthenticated
-                  ? 'OAuth authenticated'
-                  : 'Not authenticated'
-            }}
-          </span>
+        <!-- Pill replaces the "status" label entirely (mockup-aligned with the
+             integrations table convention): green for authenticated states,
+             amber when action is needed. -->
+        <div class="mt-3 flex items-center">
+          @if (apiKeyConfigured) {
+            <span class="pill green" data-testid="auth-status-value">api key</span>
+          } @else if (oauthAuthenticated) {
+            <span class="pill green" data-testid="auth-status-value">oauth</span>
+          } @else {
+            <span class="pill amber" data-testid="auth-status-value">not configured</span>
+          }
         </div>
 
-        <div class="mt-3">
-          <label
-            class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-            for="auth-method"
-            >method</label
+        <div
+          class="mt-3 flex overflow-hidden rounded border border-[var(--line)]"
+          role="radiogroup"
+          aria-label="Authentication method"
+        >
+          <button
+            type="button"
+            role="radio"
+            [attr.aria-checked]="authMethod === 'api_key'"
+            class="mono flex-1 border-r border-[var(--line)] px-3 py-2 text-[11px] transition-colors"
+            [class]="
+              authMethod === 'api_key'
+                ? 'bg-[var(--bg-2)] text-[var(--ink)]'
+                : 'text-[var(--ink-mute)] hover:text-[var(--ink)]'
+            "
+            data-testid="settings-auth-method-api-key"
+            (click)="authMethod = 'api_key'"
           >
-          <select
-            id="auth-method"
-            [(ngModel)]="authMethod"
-            class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-            data-testid="settings-auth-method"
+            api key
+          </button>
+          <button
+            type="button"
+            role="radio"
+            [attr.aria-checked]="authMethod === 'oauth'"
+            class="mono flex-1 px-3 py-2 text-[11px] transition-colors"
+            [class]="
+              authMethod === 'oauth'
+                ? 'bg-[var(--bg-2)] text-[var(--ink)]'
+                : 'text-[var(--ink-mute)] hover:text-[var(--ink)]'
+            "
+            data-testid="settings-auth-method-oauth"
+            (click)="authMethod = 'oauth'"
           >
-            <option value="api_key">api key</option>
-            <option value="oauth">oauth (claude.ai)</option>
-          </select>
+            oauth (claude.ai)
+          </button>
         </div>
 
         @if (authMethod === 'api_key') {
@@ -78,9 +89,6 @@ import { AuthTerminalComponent } from '../auth-terminal.component';
               class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
               data-testid="settings-api-key"
             />
-            <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]">
-              stored in keychain &middot; never logged
-            </p>
           </div>
           <div class="mt-3 flex flex-wrap items-center gap-2">
             <button
@@ -105,9 +113,6 @@ import { AuthTerminalComponent } from '../auth-terminal.component';
               <span class="mono text-[11px] text-[var(--green)]">saved!</span>
             }
           </div>
-          <p class="mono mt-2 text-[10px] text-[var(--ink-mute)]" data-testid="auth-note">
-            Restart containers after saving for changes to take effect.
-          </p>
         }
         @if (authMethod === 'oauth' && activeProject(); as project) {
           <app-auth-terminal [project]="project" (done)="onOAuthDone($event)" />

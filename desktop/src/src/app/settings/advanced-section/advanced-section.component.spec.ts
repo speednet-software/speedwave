@@ -26,35 +26,36 @@ describe('AdvancedSectionComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  it('renders Logging and Danger Zone sections', () => {
+  it('renders Diagnostics and Danger Zone sections', () => {
     fixture.detectChanges();
     const headings = fixture.nativeElement.querySelectorAll('h2') as NodeListOf<Element>;
     const texts = Array.from(headings).map((h) => h.textContent?.trim());
-    expect(texts).toContain('Logging');
+    expect(texts).toContain('Diagnostics');
     expect(texts).toContain('Danger Zone');
   });
 
-  describe('setLogLevel()', () => {
-    it('calls set_log_level with the selected level', async () => {
+  describe('forced log level on init', () => {
+    // The user-facing log-level dropdown was removed — every install now
+    // logs at `trace` so exported diagnostics always carry full context.
+    it('invokes set_log_level("trace") when the component initialises', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      await component.setLogLevel('debug');
-      expect(invokeSpy).toHaveBeenCalledWith('set_log_level', { level: 'debug' });
+      component.ngOnInit();
+      await new Promise<void>((r) => setTimeout(r, 0));
+      expect(invokeSpy).toHaveBeenCalledWith('set_log_level', { level: 'trace' });
     });
 
-    it('updates logLevel property', async () => {
-      await component.setLogLevel('trace');
-      expect(component.logLevel()).toBe('trace');
-    });
-
-    it('emits errorOccurred on failure', async () => {
+    it('does not surface backend failures to the user', async () => {
       const errorSpy = vi.fn();
       component.errorOccurred.subscribe(errorSpy);
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'set_log_level') throw new Error('invalid level');
+        if (cmd === 'set_log_level') throw new Error('not in tauri');
         return undefined;
       };
-      await component.setLogLevel('bad');
-      expect(errorSpy).toHaveBeenCalledWith('invalid level');
+      component.ngOnInit();
+      await new Promise<void>((r) => setTimeout(r, 0));
+      // Forced log-level write is fire-and-forget — failures stay silent
+      // so a missing backend doesn't block the rest of the settings page.
+      expect(errorSpy).not.toHaveBeenCalled();
     });
   });
 

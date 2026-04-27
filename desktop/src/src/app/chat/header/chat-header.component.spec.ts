@@ -35,29 +35,14 @@ describe('ChatHeaderComponent', () => {
   });
 
   // ── Project pill ──────────────────────────────────────────────────────
+  // The project pill was extracted to <app-project-pill> (single SSOT used
+  // across every view header). Behaviour is covered by project-pill.spec.ts;
+  // here we just verify the chat header still renders the host element.
 
-  it('renders project pill when projectName is set', () => {
-    fixture.componentRef.setInput('projectName', 'speedwave');
+  it('renders the shared project pill component', () => {
     fixture.detectChanges();
-
-    const pill = fixture.nativeElement.querySelector(
-      '[data-testid="chat-header-project"]'
-    ) as HTMLElement;
+    const pill = fixture.nativeElement.querySelector('app-project-pill');
     expect(pill).not.toBeNull();
-    expect(pill.textContent).toContain('speedwave');
-  });
-
-  it('renders the violet monogram square with the project initials', () => {
-    fixture.componentRef.setInput('projectName', 'speedwave');
-    fixture.detectChanges();
-    const pill = fixture.nativeElement.querySelector('[data-testid="chat-header-project"]');
-    expect(pill.querySelector('span')?.textContent?.trim()).toBe('sp');
-  });
-
-  it('hides project pill when projectName is empty', () => {
-    fixture.detectChanges();
-    const pill = fixture.nativeElement.querySelector('[data-testid="chat-header-project"]');
-    expect(pill).toBeNull();
   });
 
   // ── Toggle buttons — emission ────────────────────────────────────────
@@ -100,18 +85,7 @@ describe('ChatHeaderComponent', () => {
     expect(emitted).toBe(1);
   });
 
-  it('emits openProjectSwitcher when the project pill is clicked', () => {
-    fixture.componentRef.setInput('projectName', 'speedwave');
-    fixture.detectChanges();
-    let emitted = 0;
-    fixture.componentInstance.openProjectSwitcher.subscribe(() => emitted++);
-
-    const btn = fixture.nativeElement.querySelector(
-      '[data-testid="chat-header-project"]'
-    ) as HTMLButtonElement;
-    btn.click();
-    expect(emitted).toBe(1);
-  });
+  // openProjectSwitcher emit is now the shared pill's responsibility.
 
   // ── ARIA aria-pressed reflects toggle state ──────────────────────────
 

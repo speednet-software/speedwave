@@ -66,7 +66,7 @@ describe('ComposerComponent', () => {
   describe('happy path — submit', () => {
     it('emits submitted(value) and resets form when Enter is pressed without Shift', () => {
       const emitted: string[] = [];
-      component.submitted.subscribe((v) => emitted.push(v));
+      component.submitted.subscribe((v) => emitted.push(v.payload));
       component.text.setValue('hello claude');
       fixture.detectChanges();
 
@@ -81,7 +81,7 @@ describe('ComposerComponent', () => {
 
     it('emits submitted(value) when send button is clicked', () => {
       const emitted: string[] = [];
-      component.submitted.subscribe((v) => emitted.push(v));
+      component.submitted.subscribe((v) => emitted.push(v.payload));
       component.text.setValue('ping');
       fixture.detectChanges();
 
@@ -92,7 +92,7 @@ describe('ComposerComponent', () => {
 
     it('trims whitespace before emitting', () => {
       const emitted: string[] = [];
-      component.submitted.subscribe((v) => emitted.push(v));
+      component.submitted.subscribe((v) => emitted.push(v.payload));
       component.text.setValue('  hello  ');
       fixture.detectChanges();
 
@@ -106,7 +106,7 @@ describe('ComposerComponent', () => {
   describe('Shift+Enter', () => {
     it('does NOT submit when Shift+Enter is pressed', () => {
       const emitted: string[] = [];
-      component.submitted.subscribe((v) => emitted.push(v));
+      component.submitted.subscribe((v) => emitted.push(v.payload));
       component.text.setValue('line one');
       fixture.detectChanges();
 
@@ -124,7 +124,7 @@ describe('ComposerComponent', () => {
   describe('edge cases', () => {
     it('does not emit when submitting empty text', () => {
       const emitted: string[] = [];
-      component.submitted.subscribe((v) => emitted.push(v));
+      component.submitted.subscribe((v) => emitted.push(v.payload));
       component.text.setValue('');
       fixture.detectChanges();
 
@@ -135,7 +135,7 @@ describe('ComposerComponent', () => {
 
     it('does not emit when submitting whitespace-only text', () => {
       const emitted: string[] = [];
-      component.submitted.subscribe((v) => emitted.push(v));
+      component.submitted.subscribe((v) => emitted.push(v.payload));
       component.text.setValue('   \n  ');
       fixture.detectChanges();
 
@@ -146,7 +146,7 @@ describe('ComposerComponent', () => {
 
     it('handles very long text', () => {
       const emitted: string[] = [];
-      component.submitted.subscribe((v) => emitted.push(v));
+      component.submitted.subscribe((v) => emitted.push(v.payload));
       const longText = 'x'.repeat(10_000);
       component.text.setValue(longText);
       fixture.detectChanges();
@@ -161,7 +161,7 @@ describe('ComposerComponent', () => {
   describe('disabled state', () => {
     it('prevents submission via Enter when disabled', () => {
       const emitted: string[] = [];
-      component.submitted.subscribe((v) => emitted.push(v));
+      component.submitted.subscribe((v) => emitted.push(v.payload));
       fixture.componentRef.setInput('disabled', true);
       component.text.setValue('blocked');
       fixture.detectChanges();
@@ -345,11 +345,13 @@ describe('ComposerComponent', () => {
       fixture.detectChanges();
       const submitted: string[] = [];
       const queued: string[] = [];
-      component.submitted.subscribe((v) => submitted.push(v));
+      component.submitted.subscribe((v) => submitted.push(v.payload));
       component.queueRequested.subscribe((v) => queued.push(v));
       component.text.setValue('next turn');
       fixture.detectChanges();
-      sendButton().click();
+      // While streaming the send button is replaced by a stop button —
+      // submission goes through the textarea Enter handler instead.
+      component.submit();
       expect(submitted).toEqual([]);
       expect(queued).toEqual(['next turn']);
       expect(component.text.value).toBe('');
@@ -358,7 +360,7 @@ describe('ComposerComponent', () => {
     it('emits submitted (not queueRequested) when not streaming', () => {
       const submitted: string[] = [];
       const queued: string[] = [];
-      component.submitted.subscribe((v) => submitted.push(v));
+      component.submitted.subscribe((v) => submitted.push(v.payload));
       component.queueRequested.subscribe((v) => queued.push(v));
       component.text.setValue('regular send');
       fixture.detectChanges();
@@ -373,7 +375,7 @@ describe('ComposerComponent', () => {
       fixture.detectChanges();
       const submitted: string[] = [];
       const queued: string[] = [];
-      component.submitted.subscribe((v) => submitted.push(v));
+      component.submitted.subscribe((v) => submitted.push(v.payload));
       component.queueRequested.subscribe((v) => queued.push(v));
       // Cannot setValue when control is disabled — guard with try.
       component.text.enable({ emitEvent: false });
@@ -382,10 +384,61 @@ describe('ComposerComponent', () => {
       fixture.detectChanges();
       // canSubmit returns false because disabled() is true.
       expect(component.canSubmit()).toBe(false);
-      // Send button reflects the disabled state.
-      expect(sendButton().disabled).toBe(true);
+      // submit() called directly is also a no-op when canSubmit() is false.
+      component.submit();
       expect(submitted).toEqual([]);
       expect(queued).toEqual([]);
+    });
+  });
+
+  describe('plan mode toggle', () => {
+    it('starts in act mode (planMode is false)', () => {
+      expect(component.planMode()).toBe(false);
+    });
+
+    it('togglePlanMode flips the signal', () => {
+      component.togglePlanMode();
+      expect(component.planMode()).toBe(true);
+      component.togglePlanMode();
+      expect(component.planMode()).toBe(false);
+    });
+
+    it('emits the raw text in act mode', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      component.text.setValue('refactor this');
+      fixture.detectChanges();
+      component.submit();
+      expect(emitted).toEqual(['refactor this']);
+    });
+
+    it('prefixes the message with the plan-mode directive when active', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      component.togglePlanMode();
+      component.text.setValue('refactor this');
+      fixture.detectChanges();
+      component.submit();
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0]).toContain('Plan mode');
+      expect(emitted[0]).toContain('refactor this');
+      expect(emitted[0].endsWith('refactor this')).toBe(true);
+    });
+
+    it('plan mode survives across submissions until toggled off', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      component.togglePlanMode();
+      component.text.setValue('first');
+      fixture.detectChanges();
+      component.submit();
+      component.text.setValue('second');
+      fixture.detectChanges();
+      component.submit();
+      expect(emitted[0]).toContain('Plan mode');
+      expect(emitted[1]).toContain('Plan mode');
+      expect(emitted[0]).toContain('first');
+      expect(emitted[1]).toContain('second');
     });
   });
 });

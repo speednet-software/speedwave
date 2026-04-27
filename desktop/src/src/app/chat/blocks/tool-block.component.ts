@@ -9,6 +9,7 @@ import {
 import type { NormalizedToolInput, ToolUseBlock } from '../../models/chat';
 import { ToolNormalizerService } from '../../services/tool-normalizer.service';
 import { DiffViewComponent } from './diff-view.component';
+import { SpinIconComponent } from '../../shared/spin-icon.component';
 
 /**
  * Semantic status → timeline border color class.
@@ -38,13 +39,13 @@ const STATUS_INK: Readonly<Record<ToolUseBlock['status'], string>> = Object.free
  * grep, web_search, web_fetch, agent, or a generic JSON fallback. Edit and
  * Write delegate their diff pane to `<app-diff-view>`.
  *
- * Default collapsed state: `running` tools are expanded (the user wants to
- * see the live output); every other status collapses by default and is
- * toggled manually.
+ * Default collapsed state: every tool block starts collapsed regardless of
+ * status. The user expands a block by clicking the header — explicit choices
+ * override the default and survive status transitions (running → done).
  */
 @Component({
   selector: 'app-tool-block',
-  imports: [DiffViewComponent],
+  imports: [DiffViewComponent, SpinIconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block my-2' },
   template: `
@@ -65,21 +66,7 @@ const STATUS_INK: Readonly<Record<ToolUseBlock['status'], string>> = Object.free
       >
         <span [class]="statusInkClass()" class="inline-flex items-center gap-1.5">
           @if (tool().status === 'running' && !isStopped()) {
-            <svg
-              data-testid="tool-status"
-              class="spin h-3 w-3"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-              stroke-width="2"
-              aria-hidden="true"
-            >
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                d="M4 4v5h.582m15.356 2A8.001 8.001 0 0 0 4.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 0 1-15.357-2m15.357 2H15"
-              />
-            </svg>
+            <app-spin-icon testId="tool-status" />
           } @else {
             <span data-testid="tool-status" aria-hidden="true">{{ statusGlyph() }}</span>
           }
@@ -272,7 +259,9 @@ export class ToolBlockComponent {
     if (override !== undefined) {
       return override;
     }
-    return t.status !== 'running';
+    // All tool blocks default to collapsed regardless of status — the user
+    // expands them on demand by clicking the header.
+    return true;
   }
 
   /** Toggles this tool's collapsed state; the override survives status changes. */

@@ -8,15 +8,15 @@ import {
   output,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { TauriService } from '../../services/tauri.service';
 import { UpdateInfo, UpdateSettings } from '../../models/update';
 
 /** Displays app update controls, container update/rollback, and auto-check settings. */
 @Component({
   selector: 'app-update-section',
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block' },
   template: `
     <section id="section-updates" class="border-t border-[var(--line)] pt-6">
       <h2 class="view-title text-[16px] text-[var(--ink)]">Updates</h2>
@@ -74,40 +74,9 @@ import { UpdateInfo, UpdateSettings } from '../../models/update';
         </p>
       }
 
-      <label
-        class="mono mt-3 flex cursor-pointer items-center gap-2 text-[12px] text-[var(--ink-dim)]"
-        for="update-auto-check"
-      >
-        <input
-          id="update-auto-check"
-          type="checkbox"
-          [checked]="updateAutoCheck"
-          (change)="toggleAutoCheck()"
-          class="sr-only"
-        />
-        <span class="toggle" [class.on]="updateAutoCheck" aria-hidden="true"></span>
-        <span>auto-check</span>
-      </label>
-
-      @if (updateAutoCheck) {
-        <div class="mt-3">
-          <label
-            class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-            for="check-frequency"
-            >frequency</label
-          >
-          <select
-            id="check-frequency"
-            [ngModel]="updateIntervalHours"
-            (ngModelChange)="setCheckInterval($event)"
-            class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-          >
-            <option [ngValue]="12">every 12 hours</option>
-            <option [ngValue]="24">every 24 hours</option>
-            <option [ngValue]="168">weekly</option>
-          </select>
-        </div>
-      }
+      <!-- Auto-check is always on with a fixed 12h interval — there is no
+           user-facing control. The values are persisted on init by the
+           component so the backend stays in sync. -->
     </section>
   `,
 })
@@ -116,9 +85,19 @@ export class UpdateSectionComponent implements OnInit {
 
   readonly errorOccurred = output<string>();
 
+  /**
+   * Hard-coded auto-check interval in hours — every user is opted in to a
+   *  12 h check, the UI no longer exposes a toggle or frequency dropdown.
+   */
+  private static readonly DEFAULT_INTERVAL_HOURS = 12;
+
   currentVersion = '';
+  /**
+   * Always true — auto-check is non-negotiable, kept as a field so the
+   *  existing backend-sync helper (`saveUpdateSettings`) compiles unchanged.
+   */
   updateAutoCheck = true;
-  updateIntervalHours = 24;
+  updateIntervalHours = UpdateSectionComponent.DEFAULT_INTERVAL_HOURS;
   updateChecking = false;
   updateResult: 'none' | 'up-to-date' | 'available' = 'none';
   updateAvailableVersion = '';
@@ -171,11 +150,22 @@ export class UpdateSectionComponent implements OnInit {
     this.cdr.markForCheck();
   }
 
+  /**
+   * Backend-sync on init. Auto-check + 12 h interval are non-negotiable in
+   * the UI, so on first read we *force* the persisted settings to those
+   * defaults if they drift (e.g. from an older version that exposed the
+   * dropdown). The frontend never reads `settings.check_interval_hours` for
+   * display — it just keeps the backend in sync.
+   */
   private async loadUpdateSettings(): Promise<void> {
     try {
       const settings = await this.tauri.invoke<UpdateSettings>('get_update_settings');
-      this.updateAutoCheck = settings.auto_check;
-      this.updateIntervalHours = settings.check_interval_hours;
+      const needsRewrite =
+        !settings.auto_check ||
+        settings.check_interval_hours !== UpdateSectionComponent.DEFAULT_INTERVAL_HOURS;
+      if (needsRewrite) {
+        await this.saveUpdateSettings();
+      }
     } catch {
       // Not running inside Tauri
     }
@@ -195,21 +185,6 @@ export class UpdateSectionComponent implements OnInit {
       this.errorOccurred.emit(this.error);
       this.cdr.markForCheck();
     }
-  }
-
-  /** Toggles the auto-check setting and persists it. */
-  async toggleAutoCheck(): Promise<void> {
-    this.updateAutoCheck = !this.updateAutoCheck;
-    await this.saveUpdateSettings();
-  }
-
-  /**
-   * Updates the check interval and persists it.
-   * @param hours - The interval in hours between automatic update checks.
-   */
-  async setCheckInterval(hours: number): Promise<void> {
-    this.updateIntervalHours = hours;
-    await this.saveUpdateSettings();
   }
 
   /** Manually checks for available updates. */

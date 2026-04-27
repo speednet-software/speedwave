@@ -1,7 +1,6 @@
 import { Routes } from '@angular/router';
 import { setupCompleteGuard } from './guards/setup-complete.guard';
 import { setupNotCompleteGuard } from './guards/setup-not-complete.guard';
-import { authRequiredGuard } from './guards/auth-required.guard';
 
 export const routes: Routes = [
   {
@@ -18,7 +17,9 @@ export const routes: Routes = [
       { path: '', redirectTo: 'chat', pathMatch: 'full' },
       {
         path: 'chat',
-        canActivate: [authRequiredGuard],
+        // No authRequiredGuard — the chat view itself surfaces an inline
+        // "auth required" block (mockup-aligned) so the user can still see
+        // where they are and one-click jump to Settings.
         loadComponent: () => import('./chat/chat.component').then((m) => m.ChatComponent),
       },
       {
@@ -36,16 +37,6 @@ export const routes: Routes = [
           import('./plugins/plugin-detail/plugin-detail.component').then(
             (m) => m.PluginDetailComponent
           ),
-      },
-      {
-        path: 'projects',
-        loadComponent: () =>
-          import('./projects-view/projects-view.component').then((m) => m.ProjectsViewComponent),
-      },
-      {
-        path: 'skills',
-        loadComponent: () =>
-          import('./skills-view/skills-view.component').then((m) => m.SkillsViewComponent),
       },
       {
         path: 'settings',

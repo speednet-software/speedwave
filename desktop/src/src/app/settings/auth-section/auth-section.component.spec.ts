@@ -55,10 +55,28 @@ describe('AuthSectionComponent', () => {
     fixture.detectChanges();
     const heading = fixture.nativeElement.querySelector('h2');
     expect(heading?.textContent).toContain('Authentication');
-    const methodSelect = fixture.nativeElement.querySelector(
-      '[data-testid="settings-auth-method"]'
+    // Method picker is now two segmented buttons (mockup-aligned), not a <select>.
+    const apiKeyTab = fixture.nativeElement.querySelector(
+      '[data-testid="settings-auth-method-api-key"]'
     );
-    expect(methodSelect).not.toBeNull();
+    const oauthTab = fixture.nativeElement.querySelector(
+      '[data-testid="settings-auth-method-oauth"]'
+    );
+    expect(apiKeyTab).not.toBeNull();
+    expect(oauthTab).not.toBeNull();
+    expect(apiKeyTab.getAttribute('aria-checked')).toBe('true');
+    expect(oauthTab.getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('clicking the oauth tab switches authMethod', () => {
+    fixture.componentRef.setInput('llmProvider', 'anthropic');
+    fixture.detectChanges();
+    const oauthTab = fixture.nativeElement.querySelector(
+      '[data-testid="settings-auth-method-oauth"]'
+    ) as HTMLButtonElement;
+    oauthTab.click();
+    fixture.detectChanges();
+    expect(component.authMethod).toBe('oauth');
   });
 
   it('shows local provider note when llmProvider is ollama', () => {
@@ -290,21 +308,36 @@ describe('AuthSectionComponent', () => {
     expect(authEl).not.toBeNull();
   });
 
-  it('displays API Key configured status when key is set', () => {
+  it('renders a green api-key pill when the key is set', () => {
     fixture.componentRef.setInput('llmProvider', 'anthropic');
     component.apiKeyConfigured = true;
     fixture.detectChanges();
     const statusEl = fixture.nativeElement.querySelector('[data-testid="auth-status-value"]');
-    expect(statusEl?.textContent).toContain('API Key configured');
+    expect(statusEl?.textContent?.trim()).toBe('api key');
+    expect(statusEl?.classList.contains('pill')).toBe(true);
+    expect(statusEl?.classList.contains('green')).toBe(true);
   });
 
-  it('displays Not authenticated status when no auth configured', () => {
+  it('renders a green oauth pill when oauth is authenticated', () => {
+    fixture.componentRef.setInput('llmProvider', 'anthropic');
+    component.apiKeyConfigured = false;
+    component.oauthAuthenticated = true;
+    fixture.detectChanges();
+    const statusEl = fixture.nativeElement.querySelector('[data-testid="auth-status-value"]');
+    expect(statusEl?.textContent?.trim()).toBe('oauth');
+    expect(statusEl?.classList.contains('pill')).toBe(true);
+    expect(statusEl?.classList.contains('green')).toBe(true);
+  });
+
+  it('renders an amber not-configured pill when no auth is set', () => {
     fixture.componentRef.setInput('llmProvider', 'anthropic');
     component.apiKeyConfigured = false;
     component.oauthAuthenticated = false;
     fixture.detectChanges();
     const valueEl = fixture.nativeElement.querySelector('[data-testid="auth-status-value"]');
-    expect(valueEl?.textContent?.trim()).toContain('Not authenticated');
+    expect(valueEl?.textContent?.trim()).toBe('not configured');
+    expect(valueEl?.classList.contains('pill')).toBe(true);
+    expect(valueEl?.classList.contains('amber')).toBe(true);
   });
 
   it('calls applyAuthStatus after saving API key', async () => {

@@ -5,6 +5,7 @@ import {
   ElementRef,
   OnChanges,
   ViewChild,
+  effect,
   input,
   output,
 } from '@angular/core';
@@ -19,7 +20,7 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
   selector: 'app-chat-message-list',
   imports: [ChatMessageComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  host: { class: 'block flex-1 min-h-0' },
+  host: { class: 'flex min-h-0 flex-1 flex-col' },
   template: `
     <div
       #scrollContainer
@@ -73,6 +74,34 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
 
   private shouldAutoScroll = true;
   private pendingScrollSync = false;
+  /** Tracks message-count to detect new turns (vs. mere streaming deltas). */
+  private lastMessageCount = 0;
+
+  /**
+   * Wires the streaming-aware scroll sync — re-runs on every signal input
+   *  change so streaming deltas (which mutate `currentBlocks` in place) and
+   *  new turns alike trigger a scroll-to-bottom.
+   */
+  constructor() {
+    // Re-run on every signal-input change. `messages`, `currentBlocks` and
+    // `isStreaming` all need to drive a scroll sync — relying on
+    // `ngOnChanges` alone misses streaming deltas where the array reference
+    // stays stable but its contents grow.
+    effect(() => {
+      const count = this.messages().length;
+      // Reading these signals subscribes the effect to streaming chunks too.
+      this.currentBlocks();
+      this.isStreaming();
+      // A genuinely new turn (length grew) re-arms auto-scroll even if the
+      // user had previously scrolled up — they almost always want to see
+      // the freshly-sent message + the assistant's reply.
+      if (count > this.lastMessageCount) {
+        this.shouldAutoScroll = true;
+      }
+      this.lastMessageCount = count;
+      this.pendingScrollSync = true;
+    });
+  }
 
   /** Whether to render the streaming placeholder as the last entry. */
   showStreaming(): boolean {

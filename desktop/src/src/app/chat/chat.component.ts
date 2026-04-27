@@ -4,16 +4,22 @@ import {
   Component,
   OnDestroy,
   OnInit,
+  ViewChild,
   effect,
   inject,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { Router } from '@angular/router';
+import { Router, RouterLink } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
-import type { ChatMessage, ConversationSummary, ConversationTranscript } from '../models/chat';
+import type {
+  ChatMessage,
+  ConversationSummary,
+  ConversationTranscript,
+  MessageBlock,
+} from '../models/chat';
 import { ChatHeaderComponent } from './header/chat-header.component';
 import { ChatMessageListComponent } from './message-list/chat-message-list.component';
 import { ComposerComponent } from './composer/composer.component';
@@ -27,6 +33,7 @@ import { ConversationsSidebarComponent } from './conversations-sidebar/conversat
   selector: 'app-chat',
   imports: [
     CommonModule,
+    RouterLink,
     ChatHeaderComponent,
     ChatMessageListComponent,
     ComposerComponent,
@@ -38,18 +45,17 @@ import { ConversationsSidebarComponent } from './conversations-sidebar/conversat
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './chat.component.html',
   host: {
+    class: 'flex min-h-0 flex-1 flex-col overflow-hidden',
     '(click)': 'onLinkClick($event)',
     '(document:keydown.escape)': 'onEscape($event)',
   },
 })
 export class ChatComponent implements OnInit, OnDestroy {
   conversations: readonly ConversationSummary[] = [];
-  viewingTranscript: ConversationTranscript | null = null;
   historyLoading = false;
   historyError = '';
   projectMemory = '';
   memoryError = '';
-  viewError = '';
   /**
    * Cached index of the most recent assistant message in `chat.messages`,
    * recomputed on every state-change notification. Avoids the O(n) scan in
@@ -58,6 +64,13 @@ export class ChatComponent implements OnInit, OnDestroy {
    */
   lastAssistantIndex = -1;
   private resumeInProgress = false;
+
+  /**
+   * Composer reference used to refocus the textarea after parent-driven
+   *  state resets (new conversation, etc.) — autofocus on mount happens
+   *  inside the composer's own `ngAfterViewInit`.
+   */
+  @ViewChild('composer') private composer?: { focusInput: () => void };
 
   readonly chat = inject(ChatStateService);
   readonly projectState = inject(ProjectStateService);
@@ -78,9 +91,20 @@ export class ChatComponent implements OnInit, OnDestroy {
     return this.ui.memoryOpen();
   }
 
-  /** Session id behind the transcript overlay, or null when no transcript is open. */
+  /**
+   * Optimistic session id stamped the moment the user clicks a row in the
+   * conversations drawer. The backend may take a turn or two to surface the
+   * resumed session id in `chat.sessionStats`, so we keep this local override
+   * to drive the drawer's accent indicator without flickering.
+   */
+  private optimisticSessionId: string | null = null;
+
+  /**
+   * Active live-chat session id — backend value when present, otherwise the
+   *  optimistic stamp set on resume.
+   */
   get currentViewSessionId(): string | null {
-    return this.viewingTranscript?.session_id ?? null;
+    return this.chat.sessionStats?.session_id ?? this.optimisticSessionId;
   }
 
   /** Wires change-detection callbacks and effects that lazy-load data when drawers open. */
@@ -126,7 +150,6 @@ export class ChatComponent implements OnInit, OnDestroy {
     });
 
     this.unsubProjectReady = this.projectState.onProjectReady(async () => {
-      this.viewingTranscript = null;
       const wasHistoryOpen = this.showHistory;
       const wasMemoryOpen = this.showMemory;
       this.conversations = [];
@@ -169,13 +192,14 @@ export class ChatComponent implements OnInit, OnDestroy {
   /**
    * Sends a message as the user's next turn. Called by the composer on submit.
    * Guards against empty input and in-flight streaming.
-   * @param text - The message body emitted by `app-composer`'s `submitted` event.
+   * @param event - Composer payload object.
+   * @param event.payload - Backend message body (may include plan-mode prefix).
+   * @param event.displayText - Surface text rendered in the local user bubble.
    */
-  async sendMessage(text: string): Promise<void> {
-    // ComposerComponent already emits trimmed text
-    if (!text || this.chat.isStreaming) return;
+  async sendMessage(event: { payload: string; displayText: string }): Promise<void> {
+    if (!event?.payload || this.chat.isStreaming) return;
     this.cdr.markForCheck();
-    await this.chat.sendMessage(text);
+    await this.chat.sendMessage(event.payload, event.displayText);
   }
 
   /**
@@ -246,56 +270,46 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Loads a past transcript into the read-only overlay.
-   * @param sessionId - session UUID to fetch from the backend.
-   */
-  async viewConversation(sessionId: string): Promise<void> {
-    this.viewError = '';
-    try {
-      const project = this.projectState.activeProject;
-      if (!project) return;
-      this.viewingTranscript = await this.tauri.invoke<ConversationTranscript>('get_conversation', {
-        project,
-        sessionId,
-      });
-    } catch (err) {
-      console.error('viewConversation failed:', err);
-      this.viewError = `Failed to load conversation: ${err}`;
-      this.viewingTranscript = null;
-    }
-    this.cdr.markForCheck();
-  }
-
-  /**
-   * Resumes a session in live chat mode, surfacing its transcript locally for instant feedback.
-   * @param sessionId - session UUID to resume; the backend continues streaming once invoked.
+   * Resumes a session in live chat mode. The drawer click is the primary
+   * action — there is no longer a "view transcript" intermediate step.
+   *
+   * Flow: clear local state -> fetch the persisted transcript and surface its
+   * messages immediately (Claude Code's `--resume` reuses the session but
+   * does not replay history on the stream-json channel) -> invoke
+   * `resume_conversation` so subsequent user turns continue the same session.
+   * @param sessionId - session UUID to resume.
    */
   async resumeConversation(sessionId: string): Promise<void> {
     if (this.resumeInProgress) return;
     this.resumeInProgress = true;
 
-    // If we already viewed this transcript, surface its messages locally
-    // for instant feedback. When invoked directly from the sidebar (no
-    // prior view), skip — the backend will stream the full history once
-    // resume_conversation completes.
-    if (this.viewingTranscript && this.viewingTranscript.session_id === sessionId) {
-      const messages: ChatMessage[] = this.viewingTranscript.messages.map((msg) => ({
-        role: msg.role as 'user' | 'assistant',
-        blocks: normalizeHistoryBlocks(
-          msg.blocks ?? [{ type: 'text' as const, content: msg.content }]
-        ),
-        timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
-      }));
-      this.chat.loadMessages(messages);
-    }
-    this.viewingTranscript = null;
+    this.chat.resetForNewConversation();
+    // Stamp the active session id immediately so the drawer's accent
+    // indicator follows the user's click without waiting for the backend
+    // to surface session_id on the next stream chunk.
+    this.optimisticSessionId = sessionId;
     this.ui.closeSidebar();
     this.cdr.markForCheck();
 
     try {
       const project = this.projectState.activeProject;
-      if (project) {
-        await this.tauri.invoke('resume_conversation', { project, sessionId });
+      if (!project) return;
+
+      // Run transcript fetch and the live-session relaunch in parallel —
+      // the two backend calls are independent (resume_conversation does
+      // not need the transcript). When both resolve we load the messages
+      // even if `resume_conversation` finished first.
+      const transcriptPromise = this.tauri
+        .invoke<ConversationTranscript>('get_conversation', { project, sessionId })
+        .catch((err) => {
+          console.error('[chat] get_conversation failed:', err);
+          return null;
+        });
+      const resumePromise = this.tauri.invoke('resume_conversation', { project, sessionId });
+
+      const [transcript] = await Promise.all([transcriptPromise, resumePromise]);
+      if (transcript) {
+        this.chat.loadMessages(toChatMessages(transcript));
       }
     } catch (err) {
       console.error('[chat] resumeConversation failed:', err);
@@ -319,23 +333,21 @@ export class ChatComponent implements OnInit, OnDestroy {
       }
     } finally {
       this.resumeInProgress = false;
+      this.cdr.markForCheck();
     }
   }
 
   /** Clears all chat + drawer state and re-runs the chat session bootstrap. */
   async newConversation(): Promise<void> {
-    this.viewingTranscript = null;
     this.ui.closeSidebar();
     this.ui.closeMemory();
+    this.optimisticSessionId = null;
     this.chat.resetForNewConversation();
     this.cdr.markForCheck();
     await this.chat.init();
-  }
-
-  /** Dismisses the read-only transcript overlay without resuming. */
-  closeTranscript(): void {
-    this.viewingTranscript = null;
-    this.cdr.markForCheck();
+    // Re-focus the composer so the user can start typing right after
+    // hitting "+ new conversation" without an extra click.
+    this.composer?.focusInput();
   }
 
   /** Flips the memory signal; data load is driven by the constructor effect. */
@@ -404,7 +416,7 @@ interface HistoryToolUseBlock {
   input_json: string;
 }
 
-/** Raw tool_result block from Rust history.rs. */
+/** Raw tool_result block from Rust history.rs (consumed during normalization). */
 interface HistoryToolResultBlock {
   type: 'tool_result';
   content: string;
@@ -412,22 +424,44 @@ interface HistoryToolResultBlock {
 }
 
 /**
- * Converts blocks from Rust history format to the Angular live-chat format.
+ * Maps a backend `ConversationTranscript` into the live-chat `ChatMessage[]`
+ * shape used by `ChatStateService.loadMessages`.
+ *
+ * Each transcript entry carries either pre-built `blocks` or a flat `content`
+ * string. We prefer `blocks` so tool calls / thinking sections survive the
+ * round-trip; otherwise we fall back to a single text block.
+ * @param transcript - Backend conversation transcript to convert.
+ */
+function toChatMessages(transcript: ConversationTranscript): ChatMessage[] {
+  return transcript.messages.map((msg) => {
+    const role: 'user' | 'assistant' = msg.role === 'user' ? 'user' : 'assistant';
+    const rawBlocks =
+      msg.blocks && msg.blocks.length > 0
+        ? (msg.blocks as unknown as (MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock)[])
+        : ([{ type: 'text' as const, content: msg.content }] as MessageBlock[]);
+    const blocks = normalizeHistoryBlocks(rawBlocks);
+    const timestamp = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now();
+    return { role, blocks, timestamp };
+  });
+}
+
+/**
+ * Converts blocks from the backend history format to the live-chat format.
+ *
  * History `tool_use` blocks are flat (`{ type, tool_name, input_json }`),
- * while live-chat blocks nest inside `{ type: 'tool_use', tool: ToolUseBlock }`.
- * History `tool_result` blocks are merged into the preceding `tool_use` block.
- * @param blocks - Raw blocks from Rust history (may be flat tool_use or already normalized).
- *   `tool_result` blocks are consumed and merged into the preceding `tool_use`;
- *   they do not appear standalone in the returned array.
+ * while live-chat blocks nest the tool data inside
+ * `{ type: 'tool_use', tool: ToolUseBlock }`. History `tool_result` blocks
+ * are consumed and merged into the preceding `tool_use` block — they never
+ * appear standalone in the returned array.
+ * @param blocks - Raw blocks from the backend history payload.
  */
 function normalizeHistoryBlocks(
-  blocks: (import('../models/chat').MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock)[]
-): import('../models/chat').MessageBlock[] {
-  const result: import('../models/chat').MessageBlock[] = [];
+  blocks: (MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock)[]
+): MessageBlock[] {
+  const result: MessageBlock[] = [];
 
   for (const block of blocks) {
     if (block.type === 'tool_use' && !('tool' in block)) {
-      // History format: flat tool_use → wrap into nested ToolUseBlock
       const hist = block as HistoryToolUseBlock;
       result.push({
         type: 'tool_use',
@@ -442,8 +476,6 @@ function normalizeHistoryBlocks(
         },
       });
     } else if (block.type === 'tool_result') {
-      // History format: merge result into the preceding tool_use block.
-      // tool_result blocks are consumed here and do not appear standalone.
       const hist = block as HistoryToolResultBlock;
       const prev = result[result.length - 1];
       if (prev?.type === 'tool_use') {
@@ -451,12 +483,9 @@ function normalizeHistoryBlocks(
         prev.tool = hist.is_error
           ? { ...base, status: 'error' as const, result_is_error: true as const }
           : { ...base, status: 'done' as const, result_is_error: false as const };
-      } else {
-        console.warn('[normalizeHistoryBlocks] orphaned tool_result (no preceding tool_use)');
       }
     } else {
-      // text, thinking, error, or already-normalized tool_use — pass through
-      result.push(block as import('../models/chat').MessageBlock);
+      result.push(block as MessageBlock);
     }
   }
 

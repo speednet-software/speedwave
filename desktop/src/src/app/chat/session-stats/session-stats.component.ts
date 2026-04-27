@@ -84,6 +84,38 @@ const NUMBER_FMT = new Intl.NumberFormat('en-US');
           </span>
         }
       </div>
+    } @else {
+      <!-- Zero-state: same row, just with all counters at 0. Always visible
+           so the user sees the metric set even before the first turn — it
+           also preserves vertical rhythm so the composer never reflows. -->
+      <div
+        data-testid="session-stats-placeholder"
+        class="mono flex flex-wrap items-center gap-x-3 gap-y-1 px-1 py-3 text-[10px] text-[var(--ink-mute)]"
+      >
+        <span class="whitespace-nowrap"> in: <span class="text-[var(--teal)]">0</span> </span>
+        <span class="whitespace-nowrap"> out: <span class="text-[var(--accent)]">0</span> </span>
+        <span class="hidden items-center gap-1.5 whitespace-nowrap sm:inline-flex">
+          ctx
+          <span class="flex gap-px" aria-label="Context: 0% used">
+            @for (i of barIndices; track i) {
+              <span class="inline-block h-1.5 w-1.5 bg-[var(--line-strong)]"></span>
+            }
+          </span>
+          <span class="text-[var(--ink-dim)]">0%</span>
+        </span>
+        <span class="hidden items-center gap-1.5 whitespace-nowrap md:inline-flex">
+          limit
+          <span class="flex gap-px" aria-label="Rate limit: 0% used">
+            @for (i of barIndices; track i) {
+              <span class="inline-block h-1.5 w-1.5 bg-[var(--line-strong)]"></span>
+            }
+          </span>
+          <span class="text-[var(--ink-dim)]">0%</span>
+        </span>
+        <span class="ml-auto hidden whitespace-nowrap sm:inline">
+          session: <span class="text-[var(--ink-dim)]">$0.0000</span>
+        </span>
+      </div>
     }
   `,
 })

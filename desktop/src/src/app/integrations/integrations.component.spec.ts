@@ -666,18 +666,19 @@ describe('IntegrationsComponent', () => {
       expect(title.classList.contains('view-title')).toBe(true);
     });
 
-    it('header surfaces the running-services count + project pill', async () => {
+    it('header right slot only surfaces the project pill (count was removed)', async () => {
       await component.ngOnInit();
       fixture.changeDetectorRef.markForCheck();
       fixture.detectChanges();
+      // The "X services · Y running" counter was dropped — the integrations
+      // table itself already conveys per-row status, so the header counter
+      // was redundant noise.
       const count = fixture.nativeElement.querySelector('[data-testid="integrations-count"]');
-      expect(count).not.toBeNull();
-      expect(count.textContent).toContain('services');
-      expect(count.textContent).toContain('running');
+      expect(count).toBeNull();
 
-      const pill = fixture.nativeElement.querySelector('[data-testid="integrations-project-pill"]');
+      // Project pill is the shared <app-project-pill> component.
+      const pill = fixture.nativeElement.querySelector('app-project-pill');
       expect(pill).not.toBeNull();
-      expect(pill.textContent).toContain('test-project');
     });
 
     it('renders the integrations table with a header row and one row per service', async () => {
@@ -688,7 +689,10 @@ describe('IntegrationsComponent', () => {
         '[data-testid="integrations-table-wrapper"]'
       );
       expect(wrapper).not.toBeNull();
-      const rows = fixture.nativeElement.querySelectorAll('tbody tr');
+      // Scope the row count to the integrations table — `<app-ide-bridge>`
+      // now also renders a tbody, so a global `tbody tr` selector picks up
+      // unrelated rows.
+      const rows = wrapper.querySelectorAll('tbody tr');
       expect(rows.length).toBe(component.services.length);
     });
 

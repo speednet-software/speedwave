@@ -76,15 +76,18 @@ describe('ToolBlockComponent', () => {
       ).toBe('✓');
     });
 
-    it('renders an inline spinner SVG (not a glyph) for in-flight tools', () => {
+    it('renders an inline SVG circle spinner for in-flight tools', () => {
       setTool(makeTool({ status: 'running' }));
       fixture.detectChanges();
 
       const status = fixture.nativeElement.querySelector('[data-testid="tool-status"]');
-      // Production renders a spin SVG while running; the statusGlyph branch is
-      // skipped so there is no textual glyph in the header.
+      // Production renders a centred SVG circle with a stroke-dasharray to
+      // expose ~75% of the circumference; SVG keeps the geometry perfectly
+      // round at any rendered size (CSS border + rounded-full hinted oval
+      // at fractional pixel sizes).
       expect(status?.tagName.toLowerCase()).toBe('svg');
       expect(status?.classList.contains('spin')).toBe(true);
+      expect(status?.querySelector('circle')).not.toBeNull();
     });
 
     it('renders the error glyph for failed tools', () => {
@@ -154,12 +157,15 @@ describe('ToolBlockComponent', () => {
   });
 
   describe('collapse default', () => {
-    it('expands running tools by default', () => {
+    // Every tool block now starts collapsed regardless of status — the user
+    // expands by clicking the header. This avoids surprise expansion of long
+    // outputs in fresh chats.
+    it('collapses running tools by default', () => {
       setTool(makeTool({ status: 'running' }));
       fixture.detectChanges();
       expect(
         (fixture.nativeElement as HTMLElement).querySelector('[data-testid="tool-body"]')
-      ).not.toBeNull();
+      ).toBeNull();
     });
 
     it('collapses done tools by default', () => {
@@ -411,6 +417,10 @@ describe('ToolBlockComponent', () => {
   describe('ARIA and keyboard', () => {
     it('wires role=region and aria-labelledby/aria-controls/aria-expanded', () => {
       setTool(makeTool({ status: 'running' }));
+      fixture.detectChanges();
+      // Tool blocks default to collapsed — expand first so the body region
+      // (the [role="region"] container) is rendered for the ARIA assertions.
+      component.toggleCollapsed();
       fixture.detectChanges();
 
       const region = fixture.nativeElement.querySelector('[role="region"]') as HTMLElement | null;

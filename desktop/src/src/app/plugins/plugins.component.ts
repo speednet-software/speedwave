@@ -11,6 +11,7 @@ import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { PluginStatusEntry, PluginsResponse } from '../models/plugin';
+import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import { open } from '@tauri-apps/plugin-dialog';
 
 /** Per-row plugin dot colour cycle. */
@@ -33,7 +34,7 @@ function dotColourFor(index: number): string {
 /** Manages installed plugins: list, install, remove, enable/disable, credentials. */
 @Component({
   selector: 'app-plugins',
-  imports: [CommonModule],
+  imports: [CommonModule, ProjectPillComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (installing) {
@@ -69,17 +70,7 @@ function dotColourFor(index: number): string {
           $ install plugin
         </button>
         <span class="hidden text-[var(--line-strong)] md:inline">·</span>
-        <span
-          class="mono flex items-center gap-1.5 text-[11px] text-[var(--ink)]"
-          data-testid="plugins-project-pill"
-        >
-          <span
-            class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-[var(--violet)] text-[8px] font-bold text-[#07090f]"
-          >
-            {{ projectMonogram }}
-          </span>
-          <span>{{ activeProject || 'no project' }}</span>
-        </span>
+        <app-project-pill />
       </div>
     </div>
 
@@ -224,12 +215,6 @@ export class PluginsComponent implements OnInit, OnDestroy {
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private unsubProjectReady: (() => void) | null = null;
-
-  /** First two letters of the active project, used by the header pill. */
-  get projectMonogram(): string {
-    if (!this.activeProject) return '··';
-    return this.activeProject.slice(0, 2).toLowerCase();
-  }
 
   /** Loads the active project and plugins on init. */
   async ngOnInit(): Promise<void> {

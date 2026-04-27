@@ -1,4 +1,5 @@
-import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
+import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
+import { ProjectPillComponent } from '../../project-switcher/project-pill.component';
 
 /**
  * Chat header strip — terminal-minimal layout.
@@ -12,6 +13,7 @@ import { ChangeDetectionStrategy, Component, computed, input, output } from '@an
  */
 @Component({
   selector: 'app-chat-header',
+  imports: [ProjectPillComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block flex-shrink-0' },
   template: `
@@ -89,25 +91,8 @@ import { ChangeDetectionStrategy, Component, computed, input, output } from '@an
             />
           </svg>
         </button>
-        @if (projectName()) {
-          <span class="text-[var(--line-strong)]" aria-hidden="true">·</span>
-          <button
-            type="button"
-            data-testid="chat-header-project"
-            class="mono flex items-center gap-1.5 text-[11px] text-[var(--ink)] hover:text-[var(--accent)]"
-            title="Switch project"
-            aria-label="Switch project"
-            (click)="openProjectSwitcher.emit()"
-          >
-            <span
-              class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-[var(--violet)] text-[8px] font-bold text-[#07090f]"
-              aria-hidden="true"
-            >
-              {{ monogram() }}
-            </span>
-            <span>{{ projectName() }}</span>
-          </button>
-        }
+        <span class="text-[var(--line-strong)]" aria-hidden="true">·</span>
+        <app-project-pill />
       </div>
     </div>
   `,
@@ -115,8 +100,6 @@ import { ChangeDetectionStrategy, Component, computed, input, output } from '@an
 export class ChatHeaderComponent {
   /** Conversation title (or default "Chat" when none set yet). */
   readonly title = input<string>('Chat');
-  /** Active project name — when empty, the project pill is hidden. */
-  readonly projectName = input<string>('');
   /** Whether the memory panel is currently open (drives aria-pressed). */
   readonly memoryOpen = input<boolean>(false);
   /** Whether the conversations drawer is currently open (drives aria-pressed). */
@@ -128,13 +111,4 @@ export class ChatHeaderComponent {
   readonly toggleHistory = output<void>();
   /** Start a new conversation (plus button → ⌘N). */
   readonly newConversation = output<void>();
-  /** Open the project switcher dropdown (project pill click). */
-  readonly openProjectSwitcher = output<void>();
-
-  /** First two letters of the project name for the violet monogram square. */
-  protected readonly monogram = computed(() => {
-    const name = this.projectName().trim();
-    if (!name) return '';
-    return name.slice(0, 2).toLowerCase();
-  });
 }

@@ -334,9 +334,11 @@ describe('LogsViewComponent — terminal-minimal layout', () => {
     expect(title.textContent).toContain('System health');
     const hint = fixture.nativeElement.querySelector('[data-testid="logs-refresh-hint"]');
     expect(hint).not.toBeNull();
-    const pill = fixture.nativeElement.querySelector('[data-testid="logs-project-pill"]');
+    // Project pill is the shared <app-project-pill> component now —
+    // verify the host is rendered. Pill content/behaviour is covered by
+    // project-pill.spec.ts.
+    const pill = fixture.nativeElement.querySelector('app-project-pill');
     expect(pill).not.toBeNull();
-    expect(pill.textContent).toContain('demo');
   });
 
   it('renders a 4-card health grid (overall / vm / containers / ide_bridge)', async () => {

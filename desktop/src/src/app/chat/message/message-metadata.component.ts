@@ -20,7 +20,7 @@ const TOKEN_FORMATTER = new Intl.NumberFormat('en-US');
     @let label = modelLabel();
     <div
       data-testid="message-metadata"
-      class="mono mt-1 flex flex-wrap items-center gap-x-2 text-[11px] leading-none text-[var(--ink-mute)]"
+      class="mono mt-1 flex flex-wrap items-center gap-x-2 text-[10px] leading-none text-[var(--ink-mute)] opacity-60"
     >
       @if (label) {
         <span data-testid="meta-model">{{ label }}</span>

@@ -33,11 +33,26 @@ type DiscoveryState =
   | { kind: 'ready'; url: string; models: string[] }
   | { kind: 'failed'; url: string; reason: 'offline' | 'unsupported' | 'other' };
 
+/** Static catalog of provider cards rendered at the top of the section. */
+interface ProviderCard {
+  readonly id: 'anthropic' | 'ollama' | 'lmstudio' | 'llamacpp';
+  readonly label: string;
+  readonly tag: string;
+}
+
+const PROVIDER_CARDS: readonly ProviderCard[] = [
+  { id: 'anthropic', label: 'anthropic', tag: 'cloud · default' },
+  { id: 'ollama', label: 'ollama', tag: 'local' },
+  { id: 'lmstudio', label: 'lm studio', tag: 'local' },
+  { id: 'llamacpp', label: 'llama.cpp', tag: 'local' },
+] as const;
+
 /** Manages LLM provider selection and configuration. */
 @Component({
   selector: 'app-llm-provider',
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block' },
   template: `
     <section id="section-llm-provider">
       <h2 class="view-title text-[16px] text-[var(--ink)]">LLM provider</h2>
@@ -45,91 +60,114 @@ type DiscoveryState =
         Where Claude Code routes model requests. Local providers keep everything on-device.
       </p>
 
+      <!-- Provider cards (4-col grid on lg) -->
+      <div
+        class="mt-4 grid grid-cols-2 gap-2 lg:grid-cols-4"
+        role="radiogroup"
+        aria-label="LLM provider"
+      >
+        @for (p of providerCards; track p.id) {
+          <button
+            type="button"
+            role="radio"
+            [attr.aria-checked]="provider === p.id"
+            [attr.data-testid]="'settings-llm-provider-' + p.id"
+            class="rounded border px-3 py-2 text-left transition-colors"
+            [class]="
+              provider === p.id
+                ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
+                : 'border-[var(--line)] bg-[var(--bg-1)] hover:border-[var(--line-strong)]'
+            "
+            (click)="selectProvider(p.id)"
+          >
+            <div
+              class="mono text-[11px] font-medium"
+              [class]="provider === p.id ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'"
+            >
+              {{ p.label }}
+            </div>
+            <div class="mono mt-0.5 text-[10px] text-[var(--ink-mute)]">{{ p.tag }}</div>
+          </button>
+        }
+      </div>
+
+      <!-- BASE_URL + DEFAULT_MODEL row -->
       <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
         <div>
           <label
             class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-            for="llm-provider"
-            >provider</label
+            for="llm-base-url"
+            >base_url</label
           >
-          <select
-            id="llm-provider"
-            [(ngModel)]="provider"
-            (ngModelChange)="onProviderChange()"
+          <input
+            id="llm-base-url"
+            type="text"
+            [(ngModel)]="baseUrl"
+            [placeholder]="defaultBaseUrl || anthropicBaseUrlHint()"
+            [readOnly]="provider === 'anthropic'"
+            (blur)="discoverModels(false)"
             class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-            data-testid="settings-llm-provider"
-          >
-            <option value="anthropic">anthropic</option>
-            <option value="ollama">ollama</option>
-            <option value="lmstudio">lm studio</option>
-            <option value="llamacpp">llama.cpp</option>
-          </select>
+            data-testid="settings-llm-base-url"
+          />
         </div>
-        @if (provider !== 'anthropic') {
-          <div>
-            <label
-              class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-              for="llm-base-url"
-              >base_url</label
-            >
-            <input
-              id="llm-base-url"
-              type="text"
-              [(ngModel)]="baseUrl"
-              [placeholder]="defaultBaseUrl || baseUrlPlaceholder()"
-              (blur)="discoverModels(false)"
+        <div>
+          <label
+            class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+            for="llm-model"
+            >default_model</label
+          >
+          @if (provider !== 'anthropic' && discoveryState.kind === 'ready') {
+            <select
+              id="llm-model"
+              [(ngModel)]="model"
               class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-              data-testid="settings-llm-base-url"
-            />
-          </div>
-          <div class="md:col-span-2">
-            <label
-              class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-              for="llm-model"
-              >default_model</label
+              data-testid="settings-llm-model"
             >
-            @if (discoveryState.kind === 'ready') {
-              <select
-                id="llm-model"
-                [(ngModel)]="model"
-                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                data-testid="settings-llm-model"
-              >
-                @if (model && !discoveryState.models.includes(model)) {
-                  <option [value]="model">{{ model }}</option>
-                }
-                @for (m of discoveryState.models; track m) {
-                  <option [value]="m">{{ m }}</option>
-                }
-              </select>
-            } @else {
-              <input
-                id="llm-model"
-                type="text"
-                [(ngModel)]="model"
-                [placeholder]="modelPlaceholder()"
-                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                data-testid="settings-llm-model"
-              />
-            }
-            @if (discoveryState.kind === 'failed') {
-              <p
-                class="mono mt-1 text-[11px] text-[var(--amber)]"
-                data-testid="settings-llm-discovery-error"
-              >
-                {{ discoveryFailureMessage() }}
-              </p>
-            }
-            @if (discoveryState.kind === 'in-flight') {
-              <p
-                class="mono mt-1 text-[11px] text-[var(--ink-mute)]"
-                data-testid="settings-llm-discovering"
-              >
-                Probing {{ discoveryState.url }}...
-              </p>
-            }
-          </div>
-        }
+              @if (model && !discoveryState.models.includes(model)) {
+                <option [value]="model">{{ model }}</option>
+              }
+              @for (m of discoveryState.models; track m) {
+                <option [value]="m">{{ m }}</option>
+              }
+            </select>
+          } @else if (provider === 'anthropic') {
+            <select
+              id="llm-model"
+              [(ngModel)]="model"
+              class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+              data-testid="settings-llm-model"
+            >
+              <option value="claude-opus-4-7">claude-opus-4-7</option>
+              <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+              <option value="claude-haiku-4-5">claude-haiku-4-5</option>
+            </select>
+          } @else {
+            <input
+              id="llm-model"
+              type="text"
+              [(ngModel)]="model"
+              [placeholder]="modelPlaceholder()"
+              class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+              data-testid="settings-llm-model"
+            />
+          }
+          @if (discoveryState.kind === 'failed') {
+            <p
+              class="mono mt-1 text-[11px] text-[var(--amber)]"
+              data-testid="settings-llm-discovery-error"
+            >
+              {{ discoveryFailureMessage() }}
+            </p>
+          }
+          @if (discoveryState.kind === 'in-flight') {
+            <p
+              class="mono mt-1 text-[11px] text-[var(--ink-mute)]"
+              data-testid="settings-llm-discovering"
+            >
+              Probing {{ discoveryState.url }}...
+            </p>
+          }
+        </div>
       </div>
 
       @if (provider !== 'anthropic') {
@@ -176,6 +214,9 @@ export class LlmProviderComponent implements OnInit {
   saving = false;
   saved = false;
 
+  /** Cards rendered at the top of the section (mockup-aligned). */
+  readonly providerCards: readonly ProviderCard[] = PROVIDER_CARDS;
+
   /** Current state of the model discovery probe. See `DiscoveryState` docstring. */
   discoveryState: DiscoveryState = { kind: 'idle' };
 
@@ -220,6 +261,23 @@ export class LlmProviderComponent implements OnInit {
   /** Loads the LLM configuration from the backend on init. */
   ngOnInit(): void {
     this.loadConfig();
+  }
+
+  /**
+   * Click handler for provider cards. Routes through the existing
+   * `onProviderChange` so URL caching, default fetching, and discovery probe
+   * gating all stay intact — the cards are just a different control surface.
+   * @param id - Provider identifier matching a `ProviderCard.id`.
+   */
+  async selectProvider(id: ProviderCard['id']): Promise<void> {
+    if (this.provider === id) return;
+    this.provider = id;
+    await this.onProviderChange();
+  }
+
+  /** Placeholder shown for the read-only Anthropic base URL field. */
+  anthropicBaseUrlHint(): string {
+    return this.provider === 'anthropic' ? 'https://api.anthropic.com' : '';
   }
 
   /** Returns a placeholder model name based on the selected LLM provider. */

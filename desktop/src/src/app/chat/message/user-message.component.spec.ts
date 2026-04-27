@@ -80,28 +80,10 @@ describe('UserMessageComponent', () => {
   });
 
   // ── Timestamp formatting ─────────────────────────────────────────────
-
-  it('renders the formatted timestamp when non-zero', () => {
-    const date = new Date(2026, 3, 25, 14, 5, 0, 0);
-    fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'hi' }]);
-    fixture.componentRef.setInput('timestamp', date.getTime());
-    fixture.detectChanges();
-
-    const timeEl = fixture.nativeElement.querySelector(
-      '[data-testid="user-message-time"]'
-    ) as HTMLElement | null;
-    expect(timeEl).not.toBeNull();
-    expect(timeEl?.textContent?.trim()).toBe('14:05');
-  });
-
-  it('omits the time segment when timestamp is 0 (sentinel for unknown)', () => {
-    fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'hi' }]);
-    fixture.componentRef.setInput('timestamp', 0);
-    fixture.detectChanges();
-
-    const timeEl = fixture.nativeElement.querySelector('[data-testid="user-message-time"]');
-    expect(timeEl).toBeNull();
-  });
+  // The "user · HH:MM" header was removed from the bubble — identity comes
+  // from right-alignment + bubble background, and the timestamp would have
+  // duplicated info already present in the assistant's metadata row. So
+  // there is no `user-message-time` element to assert against any more.
 
   // ── Edge case — empty blocks ─────────────────────────────────────────
 

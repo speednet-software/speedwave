@@ -230,7 +230,10 @@ describe('ShellComponent', () => {
     ).toBeNull();
   });
 
-  it('hides Chat nav link when status is auth_required', async () => {
+  it('keeps the Chat nav link visible when status is auth_required', async () => {
+    // Mockup-aligned behaviour: the chat icon is always present in the rail.
+    // When auth is missing the chat view itself surfaces an inline
+    // "auth required" block with a link to Settings instead of disappearing.
     await component.ngOnInit();
     projectState.status = 'auth_required';
     component['cdr'].markForCheck();
@@ -239,8 +242,13 @@ describe('ShellComponent', () => {
     const nav = fixture.nativeElement.querySelector('[data-testid="nav-rail"]');
     const links = Array.from(nav.querySelectorAll('a[data-testid^="nav-"]')) as HTMLAnchorElement[];
     const ids = links.map((a) => a.getAttribute('data-testid'));
-    expect(ids).toEqual(['nav-integrations', 'nav-plugins', 'nav-settings', 'nav-logs']);
-    expect(ids).not.toContain('nav-chat');
+    expect(ids).toEqual([
+      'nav-chat',
+      'nav-integrations',
+      'nav-plugins',
+      'nav-settings',
+      'nav-logs',
+    ]);
   });
 
   it('shows Chat nav link when status is ready', async () => {

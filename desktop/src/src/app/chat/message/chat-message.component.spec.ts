@@ -110,7 +110,7 @@ describe('ChatMessageComponent', () => {
     expect(fixture.nativeElement.querySelector('.max-w-\\[85\\%\\]')).toBeNull();
   });
 
-  it('forwards editedAt and timestamp to app-user-message', () => {
+  it('forwards editedAt to app-user-message (timestamp header was removed)', () => {
     fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'hi' }]);
     fixture.componentRef.setInput('role', 'user');
     fixture.componentRef.setInput('editedAt', 1_700_000_000_000);
@@ -120,8 +120,10 @@ describe('ChatMessageComponent', () => {
 
     const edited = fixture.nativeElement.querySelector('[data-testid="user-message-edited"]');
     expect(edited).not.toBeNull();
+    // The "user · HH:MM" header was removed — there is no `user-message-time`
+    // element to assert against any more.
     const time = fixture.nativeElement.querySelector('[data-testid="user-message-time"]');
-    expect(time?.textContent?.trim()).toBe('09:30');
+    expect(time).toBeNull();
   });
 
   it('host stretches messages full-width (terminal-minimal: no role-based alignment)', () => {

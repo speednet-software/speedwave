@@ -53,6 +53,8 @@ export interface NavRailEntry {
           [routerLink]="entry.route"
           [attr.data-testid]="'nav-' + entry.id"
           [attr.aria-current]="entry.id === activeId() ? 'page' : null"
+          [attr.aria-label]="entry.label"
+          [attr.title]="entry.label"
           [class.active]="entry.id === activeId()"
           class="rail-btn"
         >
@@ -66,12 +68,6 @@ export interface NavRailEntry {
           >
             <path stroke-linecap="round" stroke-linejoin="round" [attr.d]="entry.iconPath" />
           </svg>
-          <span class="tooltip">
-            {{ entry.label }}
-            @if (entry.shortcut) {
-              <span class="kbd ml-1">{{ entry.shortcut }}</span>
-            }
-          </span>
         </a>
       }
     </nav>
@@ -96,7 +92,6 @@ export interface NavRailEntry {
         >
           <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h7" />
         </svg>
-        <span class="tooltip">Command palette <span class="kbd ml-1">⌘K</span></span>
       </button>
     </div>
   `,

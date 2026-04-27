@@ -111,7 +111,7 @@ export class ModalOverlayComponent {
   readonly body = input<string>('');
   /** Optional pre-formatted block (e.g. stderr trace) inside a red callout. */
   readonly code = input<string>('');
-  /** Optional mono inset bar (e.g. "estimated: ~8s · lima keeps running"). */
+  /** Optional mono inset bar for a short auxiliary note (estimates, hints). */
   readonly note = input<string>('');
   /** Optional inline error message rendered above the action buttons in red. */
   readonly inlineError = input<string>('');

@@ -548,9 +548,9 @@ describe('PluginsComponent', () => {
       expect(title).not.toBeNull();
       expect(title.textContent).toContain('Installed plugins');
       expect(title.classList.contains('view-title')).toBe(true);
-      const pill = fixture.nativeElement.querySelector('[data-testid="plugins-project-pill"]');
+      // Project pill is the shared <app-project-pill> component.
+      const pill = fixture.nativeElement.querySelector('app-project-pill');
       expect(pill).not.toBeNull();
-      expect(pill.textContent).toContain('test-project');
     });
 
     it('renders one table row per plugin with name, type pill, version, and signed pill', async () => {

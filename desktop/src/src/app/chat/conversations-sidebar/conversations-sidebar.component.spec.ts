@@ -15,7 +15,6 @@ import type { ConversationSummary } from '../../models/chat';
       [currentSessionId]="currentSessionId"
       (closed)="onClosed()"
       (newConversation)="onNew()"
-      (viewConversation)="onView($event)"
       (resumeConversation)="onResume($event)"
     />
   `,
@@ -26,7 +25,6 @@ class HostComponent {
   currentSessionId: string | null = null;
   closedCount = 0;
   newCount = 0;
-  viewedPayload: ConversationSummary | null = null;
   resumedPayload: ConversationSummary | null = null;
 
   onClosed(): void {
@@ -34,9 +32,6 @@ class HostComponent {
   }
   onNew(): void {
     this.newCount += 1;
-  }
-  onView(payload: ConversationSummary): void {
-    this.viewedPayload = payload;
   }
   onResume(payload: ConversationSummary): void {
     this.resumedPayload = payload;
@@ -147,10 +142,12 @@ describe('ConversationsSidebarComponent', () => {
       expect(fixture.nativeElement.textContent).toContain('untitled');
     });
 
-    it('falls back to "unknown" when timestamp is null', () => {
+    it('falls back to a dash when timestamp is null', () => {
+      // The drawer now formats timestamps as short relative labels
+      // (e.g. "2m", "1h", "3d") and uses "—" for missing values.
       host.conversations = sample;
       fixture.detectChanges();
-      expect(fixture.nativeElement.textContent).toContain('0 · unknown');
+      expect(fixture.nativeElement.textContent).toContain('0 · —');
     });
   });
 
@@ -159,7 +156,9 @@ describe('ConversationsSidebarComponent', () => {
       host.conversations = sample;
       host.currentSessionId = 's2';
       fixture.detectChanges();
-      const active = fixture.nativeElement.querySelector('[data-testid="conversation-view-s2"]');
+      // Row click resumes directly (single primary action), so the test-id is
+      // `conversation-resume-<sid>` rather than the legacy `view-<sid>`.
+      const active = fixture.nativeElement.querySelector('[data-testid="conversation-resume-s2"]');
       expect(active.getAttribute('aria-current')).toBe('true');
     });
 
@@ -195,26 +194,15 @@ describe('ConversationsSidebarComponent', () => {
       expect(host.newCount).toBe(1);
     });
 
-    it('emits viewConversation with the clicked row payload', () => {
+    it('emits resumeConversation when any row is clicked (primary action)', () => {
       host.conversations = sample;
       fixture.detectChanges();
       (
         fixture.nativeElement.querySelector(
-          '[data-testid="conversation-view-s1"]'
+          '[data-testid="conversation-resume-s1"]'
         ) as HTMLButtonElement
       ).click();
-      expect(host.viewedPayload?.session_id).toBe('s1');
-    });
-
-    it('emits resumeConversation with the clicked row payload', () => {
-      host.conversations = sample;
-      fixture.detectChanges();
-      (
-        fixture.nativeElement.querySelector(
-          '[data-testid="conversation-resume-s2"]'
-        ) as HTMLButtonElement
-      ).click();
-      expect(host.resumedPayload?.session_id).toBe('s2');
+      expect(host.resumedPayload?.session_id).toBe('s1');
     });
   });
 });

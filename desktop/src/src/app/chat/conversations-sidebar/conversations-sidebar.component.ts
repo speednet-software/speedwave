@@ -1,8 +1,10 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  DestroyRef,
   computed,
   effect,
+  inject,
   input,
   output,
   signal,
@@ -28,11 +30,22 @@ function bucketForTimestamp(ts: string | null | undefined, now: number = Date.no
   return 'older';
 }
 
-/** A bucket with the matching conversations, in display order. */
+/**
+ * One conversation row prepared for rendering — preview/timestamp passed
+ * through the cleanup helpers once when the buckets are computed, so the
+ * template never re-runs the regexes per CD tick.
+ */
+interface ConversationRow {
+  readonly conv: ConversationSummary;
+  readonly preview: string;
+  readonly timestamp: string;
+}
+
+/** A bucket with the matching prepared rows, in display order. */
 interface ConversationGroup {
   key: string;
   label: string;
-  rows: readonly ConversationSummary[];
+  rows: readonly ConversationRow[];
 }
 
 /** Display order — drives both grouping and rendering. */
@@ -149,8 +162,8 @@ const BUCKET_ORDER: readonly { key: string; label: string }[] = [
           >
             {{ group.label }}
           </div>
-          @for (conv of group.rows; track conv.session_id) {
-            @let active = conv.session_id === currentSessionId();
+          @for (row of group.rows; track row.conv.session_id) {
+            @let active = row.conv.session_id === currentSessionId();
             <div
               class="flex items-stretch border-l-2"
               [class]="
@@ -158,31 +171,24 @@ const BUCKET_ORDER: readonly { key: string; label: string }[] = [
               "
               data-testid="conversations-sidebar-row"
             >
+              <!-- Row click resumes directly — no "view → resume" two-step. -->
               <button
                 type="button"
                 class="min-w-0 flex-1 px-3 py-2 text-left"
-                [attr.data-testid]="'conversation-view-' + conv.session_id"
+                [attr.data-testid]="'conversation-resume-' + row.conv.session_id"
                 [attr.aria-current]="active ? 'true' : null"
-                (click)="viewConversation.emit(conv)"
+                aria-label="Resume conversation"
+                (click)="resumeConversation.emit(row.conv)"
               >
                 <div
                   class="truncate text-[13px]"
                   [class]="active ? 'text-[var(--ink)]' : 'text-[var(--ink-dim)]'"
                 >
-                  {{ conv.preview || 'untitled' }}
+                  {{ row.preview }}
                 </div>
                 <div class="mono mt-0.5 text-[10px] text-[var(--ink-mute)]">
-                  {{ conv.message_count }} · {{ conv.timestamp ?? 'unknown' }}
+                  {{ row.conv.message_count }} · {{ row.timestamp }}
                 </div>
-              </button>
-              <button
-                type="button"
-                class="mono px-2 text-[10px] text-[var(--ink-mute)] hover:text-[var(--accent)]"
-                [attr.data-testid]="'conversation-resume-' + conv.session_id"
-                aria-label="Resume conversation"
-                (click)="resumeConversation.emit(conv)"
-              >
-                resume
               </button>
             </div>
           }
@@ -203,26 +209,34 @@ export class ConversationsSidebarComponent {
   readonly closed = output<void>();
   /** New conversation requested. */
   readonly newConversation = output<void>();
-  /** Read-only transcript view of `conv` requested. */
-  readonly viewConversation = output<ConversationSummary>();
-  /** Resume `conv` as the live session requested. */
+  /** Resume `conv` as the live session — emitted on row click (primary action). */
   readonly resumeConversation = output<ConversationSummary>();
 
   /** Free-text filter applied to the buckets — narrows preview matches case-insensitively. */
   protected readonly query = signal('');
 
-  /** Buckets the filtered list into today / yesterday / older with stable order. */
+  /**
+   * Buckets the filtered list into today / yesterday / older. Preview /
+   * timestamp formatting happens once here (not in the template) so a row
+   * with 100+ conversations doesn't re-run the regex / date math on every
+   * change-detection tick.
+   */
   protected readonly groups = computed<readonly ConversationGroup[]>(() => {
     const q = this.query().trim().toLowerCase();
     const list = this.conversations();
     const filtered =
       q === '' ? list : list.filter((c) => (c.preview ?? '').toLowerCase().includes(q));
-    const buckets = new Map<string, ConversationSummary[]>();
+    const buckets = new Map<string, ConversationRow[]>();
     for (const conv of filtered) {
       const bucket = bucketForTimestamp(conv.timestamp);
+      const row: ConversationRow = {
+        conv,
+        preview: cleanConversationPreview(conv.preview),
+        timestamp: formatRelativeTime(conv.timestamp),
+      };
       const existing = buckets.get(bucket);
-      if (existing) existing.push(conv);
-      else buckets.set(bucket, [conv]);
+      if (existing) existing.push(row);
+      else buckets.set(bucket, [row]);
     }
     return BUCKET_ORDER.flatMap((b) => {
       const rows = buckets.get(b.key);
@@ -231,18 +245,20 @@ export class ConversationsSidebarComponent {
   });
 
   /**
-   * Mirrors the `open` input onto a body class so the drawer animates in.
+   * Mirrors the `open` input onto the global body class so the drawer
+   *  animates in (and the backdrop dims), and clears the class on destroy
+   *  so a route swap with the drawer open doesn't leak the dimmed state.
    */
   constructor() {
-    // Toggle the global body class so the stylesheet animates in the drawer
-    // and dims the backdrop. We intentionally do NOT remove the class on
-    // destroy — the parent owns the open/closed lifecycle.
+    const cls = 'sidebar-drawer-open';
     effect(() => {
-      const open = this.open();
-      const cls = 'sidebar-drawer-open';
-      if (open) document.body.classList.add(cls);
+      if (this.open()) document.body.classList.add(cls);
       else document.body.classList.remove(cls);
     });
+    // Always clear the body class on destroy so a route swap with the
+    // drawer left open doesn't leak the dimmed-backdrop state into the
+    // next view.
+    inject(DestroyRef).onDestroy(() => document.body.classList.remove(cls));
   }
 
   /**
@@ -253,4 +269,52 @@ export class ConversationsSidebarComponent {
     const target = event.target as HTMLInputElement | null;
     this.query.set(target?.value ?? '');
   }
+}
+
+const PREVIEW_TAG_RE =
+  /<\/?(command-(?:name|message|args|stdout|stderr)|local-command-[^>]+|user-prompt-submit-hook[^>]*)>/gi;
+const PREVIEW_OTHER_TAG_RE = /<[^>]+>/g;
+const PREVIEW_PLAN_PREFIX_RE = /^\[Plan mode\][^\n]*\n+/i;
+
+/**
+ * Cleans up a backend preview so the drawer never shows internal markers
+ * like `<command-message>` or `<local-command-caveat>` blocks. Falls back
+ * to "untitled" when nothing usable remains.
+ * @param raw - Raw preview text from `list_conversations`.
+ */
+function cleanConversationPreview(raw: string): string {
+  if (!raw) return 'untitled';
+  const stripped = raw
+    .replace(PREVIEW_TAG_RE, '')
+    .replace(PREVIEW_OTHER_TAG_RE, ' ')
+    .replace(PREVIEW_PLAN_PREFIX_RE, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return stripped || 'untitled';
+}
+
+/**
+ * Formats a backend timestamp as a short relative label (`2m`, `1h`, `3d`).
+ * Returns the raw value unchanged when it isn't parseable as a date so the
+ * backend can keep delivering pre-formatted strings without breaking the UI.
+ * @param value - ISO timestamp string (or pre-formatted display label).
+ */
+function formatRelativeTime(value: string | null | undefined): string {
+  if (!value) return '—';
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) return value;
+  const diffMs = Date.now() - parsed;
+  if (diffMs < 0) return 'now';
+  const seconds = Math.floor(diffMs / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo`;
+  const years = Math.floor(days / 365);
+  return `${years}y`;
 }

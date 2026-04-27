@@ -2,49 +2,31 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  OnInit,
   inject,
   input,
-  model,
   output,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { TauriService } from '../../services/tauri.service';
 
-/** Displays logging controls, diagnostics export, and factory reset (danger zone). */
+/**
+ * Hard-coded log level — diagnostics value the backend should always run at.
+ *  No user-facing control: every install logs at the most verbose level so
+ *  exported diagnostics never depend on the user's current setting.
+ */
+const FORCED_LOG_LEVEL = 'trace';
+
+/** Displays diagnostics export and factory reset (danger zone). */
 @Component({
   selector: 'app-advanced-section',
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block' },
   template: `
-    <!-- Logging -->
-    <section id="section-logging" class="border-t border-[var(--line)] pt-6">
-      <h2 class="view-title text-[16px] text-[var(--ink)]">Logging</h2>
-
-      <div class="mt-3">
-        <label
-          class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-          for="log-level"
-          >log level</label
-        >
-        <select
-          id="log-level"
-          [ngModel]="logLevel()"
-          (ngModelChange)="setLogLevel($event)"
-          class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-          data-testid="settings-log-level"
-        >
-          <option value="error">error</option>
-          <option value="warn">warn</option>
-          <option value="info">info (default)</option>
-          <option value="debug">debug</option>
-          <option value="trace">trace</option>
-        </select>
-        <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]">
-          Higher levels (debug, trace) produce more output. Verbose library logs (hyper, reqwest)
-          are always clamped to warn.
-        </p>
-      </div>
+    <!-- Diagnostics — log level is always max (trace) on init, no UI control. -->
+    <section id="section-diagnostics" class="border-t border-[var(--line)] pt-6">
+      <h2 class="view-title text-[16px] text-[var(--ink)]">Diagnostics</h2>
 
       <div class="mt-3 flex flex-wrap items-center gap-2">
         <button
@@ -66,8 +48,9 @@ import { TauriService } from '../../services/tauri.service';
       </p>
     </section>
 
-    <!-- Danger zone -->
-    <section id="section-danger" class="border-t border-red-500/20 pt-6">
+    <!-- Danger zone — extra top margin adds breathing room between the
+         diagnostics block above and the red separator. -->
+    <section id="section-danger" class="mt-8 border-t border-red-500/20 pt-6">
       <h2 class="view-title text-[16px] text-red-300">Danger Zone</h2>
       <div class="mt-3 rounded border border-red-500/30 bg-red-500/5 p-4">
         <div class="mono text-[12px] text-red-200">factory reset</div>
@@ -113,9 +96,8 @@ import { TauriService } from '../../services/tauri.service';
     </section>
   `,
 })
-export class AdvancedSectionComponent {
+export class AdvancedSectionComponent implements OnInit {
   readonly activeProject = input<string | null>(null);
-  readonly logLevel = model('info');
   readonly errorOccurred = output<string>();
   readonly resetCompleted = output<void>();
 
@@ -128,17 +110,20 @@ export class AdvancedSectionComponent {
   private tauri = inject(TauriService);
 
   /**
-   * Changes the runtime log level and persists it to config.
-   * @param level - The desired log level (error, warn, info, debug, trace).
+   * Forces the backend log level to the most verbose value (trace) on init.
+   * The user no longer has a knob — diagnostics should always capture
+   * maximum detail so exported ZIPs are useful by default.
    */
-  async setLogLevel(level: string): Promise<void> {
-    this.logLevel.set(level);
+  ngOnInit(): void {
+    void this.forceMaxLogLevel();
+  }
+
+  private async forceMaxLogLevel(): Promise<void> {
     try {
-      await this.tauri.invoke('set_log_level', { level });
-    } catch (e: unknown) {
-      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+      await this.tauri.invoke('set_log_level', { level: FORCED_LOG_LEVEL });
+    } catch {
+      // Not in Tauri (browser dev mode) or backend unavailable — silent.
     }
-    this.cdr.markForCheck();
   }
 
   /** Exports diagnostic data as a sanitized ZIP archive. */
