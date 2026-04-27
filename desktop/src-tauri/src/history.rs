@@ -57,6 +57,11 @@ pub struct ConversationMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<MessageBlock>>,
     pub timestamp: Option<String>,
+    /// Stable UUID written into the JSONL by Claude Code; needed by the
+    /// retry-last-turn flow (ADR-046) to anchor the rewind point. `None`
+    /// when the line lacks a `uuid` field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
 }
 
 /// Full transcript of a conversation.
@@ -195,6 +200,7 @@ fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage>
     let message = &parsed["message"];
     let content = &message["content"];
     let timestamp = parsed["timestamp"].as_str().map(String::from);
+    let uuid = parsed["uuid"].as_str().map(String::from);
 
     // content can be a plain string
     if let Some(text) = content.as_str() {
@@ -208,6 +214,7 @@ fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage>
                 content: text.to_string(),
             }]),
             timestamp,
+            uuid,
         });
     }
 
@@ -244,6 +251,7 @@ fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage>
             content: text_parts.join("\n"),
             blocks: Some(rich_blocks),
             timestamp,
+            uuid,
         });
     }
 
@@ -254,6 +262,7 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
     let message = &parsed["message"];
     let content = &message["content"];
     let timestamp = parsed["timestamp"].as_str().map(String::from);
+    let uuid = parsed["uuid"].as_str().map(String::from);
 
     let raw_blocks = content.as_array()?;
 
@@ -308,6 +317,7 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
         content: flat_content,
         blocks: Some(rich_blocks),
         timestamp,
+        uuid,
     })
 }
 
@@ -320,6 +330,9 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
     }
 
     let timestamp = parsed["timestamp"].as_str().map(String::from);
+    // Result lines don't carry a stable per-turn uuid in the JSONL — they're
+    // synthetic summary entries. Leave `None` so the retry path skips them.
+    let uuid = None;
 
     if is_error {
         return Some(ConversationMessage {
@@ -329,6 +342,7 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
                 content: result_text.to_string(),
             }]),
             timestamp,
+            uuid: uuid.clone(),
         });
     }
 
@@ -339,6 +353,7 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
             content: result_text.to_string(),
         }]),
         timestamp,
+        uuid,
     })
 }
 
@@ -953,6 +968,52 @@ mod tests {
         let msg = parse_jsonl_message(line).unwrap();
         assert_eq!(msg.role, "assistant");
         assert_eq!(msg.content, "done");
+    }
+
+    #[test]
+    fn parse_user_message_extracts_uuid_from_jsonl() {
+        let line = r#"{"type":"user","uuid":"11111111-2222-3333-4444-555555555555","message":{"role":"user","content":"hi"}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert_eq!(
+            msg.uuid.as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+    }
+
+    #[test]
+    fn parse_user_message_uuid_is_none_when_absent() {
+        let line = r#"{"type":"user","message":{"role":"user","content":"hi"}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert!(msg.uuid.is_none());
+    }
+
+    #[test]
+    fn parse_assistant_message_extracts_uuid_from_jsonl() {
+        let line = r#"{"type":"assistant","uuid":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert_eq!(
+            msg.uuid.as_deref(),
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        );
+    }
+
+    #[test]
+    fn parse_user_message_array_content_propagates_uuid() {
+        let line = r#"{"type":"user","uuid":"deadbeef-1111-2222-3333-444444444444","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert_eq!(
+            msg.uuid.as_deref(),
+            Some("deadbeef-1111-2222-3333-444444444444")
+        );
+    }
+
+    #[test]
+    fn parse_result_message_uuid_is_always_none() {
+        // Result lines are synthesized turn summaries — they're not valid
+        // retry anchors, so the parser should never expose a uuid for them.
+        let line = r#"{"type":"result","is_error":false,"result":"summary"}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert!(msg.uuid.is_none());
     }
 
     #[test]

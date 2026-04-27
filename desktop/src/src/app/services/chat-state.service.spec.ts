@@ -2110,4 +2110,38 @@ describe('ChatStateService', () => {
       expect(subscribeCalls).toHaveLength(1);
     });
   });
+
+  describe('seedResumedSession', () => {
+    it('stamps the session id when none is set so retry/queue work pre-Result', () => {
+      service._setState({ messages: [], currentBlocks: [], sessionStats: null });
+      service.seedResumedSession('resumed-sess-1');
+      expect(service.sessionStats?.session_id).toBe('resumed-sess-1');
+      expect(service.sessionStats?.total_cost).toBe(0);
+      expect(service.sessionStats?.total_output_tokens).toBe(0);
+    });
+
+    it('is a no-op when the session id already matches', () => {
+      service._setState({
+        messages: [],
+        currentBlocks: [],
+        sessionStats: {
+          session_id: 'sess-x',
+          total_cost: 0.123,
+          context_window_size: 200_000,
+          total_output_tokens: 42,
+        },
+      });
+      const before = service.sessionStats;
+      service.seedResumedSession('sess-x');
+      // Same reference — nothing replaced.
+      expect(service.sessionStats).toBe(before);
+      expect(service.sessionStats?.total_cost).toBe(0.123);
+    });
+
+    it('refuses an empty session id', () => {
+      service._setState({ messages: [], currentBlocks: [], sessionStats: null });
+      service.seedResumedSession('');
+      expect(service.sessionStats).toBeNull();
+    });
+  });
 });

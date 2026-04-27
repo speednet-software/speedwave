@@ -345,6 +345,9 @@ export class ChatComponent implements OnInit, OnDestroy {
       const [transcript] = await Promise.all([transcriptPromise, resumePromise]);
       if (transcript) {
         this.chat.loadMessages(toChatMessages(transcript));
+        // Seed the session id immediately so retry / queue work without
+        // waiting for the next live `Result` event to land.
+        this.chat.seedResumedSession(sessionId);
       }
     } catch (err) {
       console.error('[chat] resumeConversation failed:', err);
@@ -483,7 +486,15 @@ function toChatMessages(transcript: ConversationTranscript): ChatMessage[] {
         : ([{ type: 'text' as const, content: msg.content }] as MessageBlock[]);
     const blocks = normalizeHistoryBlocks(rawBlocks);
     const timestamp = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now();
-    return { role, blocks, timestamp };
+    // History entries are by definition durable — propagate the JSONL uuid
+    // (when present) and mark it `Committed` so `canRetryLastAssistant`
+    // accepts the resumed conversation as a valid retry anchor (ADR-046).
+    const base: ChatMessage = { role, blocks, timestamp };
+    if (msg.uuid) {
+      base.uuid = msg.uuid;
+      base.uuid_status = 'Committed';
+    }
+    return base;
   });
 }
 

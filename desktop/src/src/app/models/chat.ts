@@ -257,4 +257,10 @@ export interface ConversationMessage {
   content: string;
   timestamp: string | null;
   blocks?: MessageBlock[];
+  /**
+   * Stable JSONL uuid that anchors the retry-last-turn flow (ADR-046).
+   * `undefined` for synthesized entries (e.g. `result` lines) — those never
+   * become a retry target.
+   */
+  uuid?: string;
 }

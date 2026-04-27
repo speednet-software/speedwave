@@ -755,6 +755,28 @@ export class ChatStateService {
   }
 
   /**
+   * Seeds the session id immediately after a resume so retry / queue can run
+   * without waiting for the first `Result` event. Stamps a minimal stats
+   * object — token counters / cost stay zero until the next live turn fills
+   * them in.
+   * @param sessionId - Resumed JSONL session uuid.
+   */
+  seedResumedSession(sessionId: string): void {
+    if (!sessionId) return;
+    if (this._sessionStats?.session_id === sessionId) return;
+    this._sessionStats = {
+      session_id: sessionId,
+      total_cost: this._sessionStats?.total_cost ?? 0,
+      context_window_size: this._sessionStats?.context_window_size ?? 200_000,
+      total_output_tokens: this._sessionStats?.total_output_tokens ?? 0,
+      ...(this._sessionStats?.usage ? { usage: this._sessionStats.usage } : {}),
+      ...(this._sessionStats?.model ? { model: this._sessionStats.model } : {}),
+      ...(this._sessionStats?.rate_limit ? { rate_limit: this._sessionStats.rate_limit } : {}),
+    };
+    this.notifyChange();
+  }
+
+  /**
    * Queue a message to be sent as the next turn (ADR-045). Replace
    * semantics — calling this while a slot is already occupied displaces the
    * previous queued message and returns its preview text. Returns `null`
