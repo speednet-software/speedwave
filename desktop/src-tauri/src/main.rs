@@ -14,6 +14,7 @@ mod container_logs_cmd;
 mod containers_cmd;
 mod diagnostics;
 mod fs_perms;
+mod git_cmd;
 mod health;
 mod history;
 mod http_util;
@@ -1441,6 +1442,8 @@ fn main() {
             // Slash menu discovery
             slash_cmd::list_slash_commands,
             slash_cmd::invalidate_slash_cache,
+            // Git introspection (chat status strip)
+            git_cmd::get_git_branch,
         ])
         .on_window_event(move |window, event| {
             match event {

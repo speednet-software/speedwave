@@ -57,6 +57,12 @@ export class ChatComponent implements OnInit, OnDestroy {
   projectMemory = '';
   memoryError = '';
   /**
+   * Current git branch of the active project's working tree, or `null` when
+   * the project is not a git repo. Refreshed on project-ready and on each
+   * turn finish (assistant might have switched branches via shell tool).
+   */
+  gitBranch: string | null = null;
+  /**
    * Cached index of the most recent assistant message in `chat.messages`,
    * recomputed on every state-change notification. Avoids the O(n) scan in
    * `isLastAssistant` becoming O(n²) when the template iterates every entry.
@@ -109,8 +115,16 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** Wires change-detection callbacks and effects that lazy-load data when drawers open. */
   constructor() {
+    let wasStreaming = false;
     this.unsubChange = this.chat.onChange(() => {
       this.recomputeLastAssistantIndex();
+      // Refresh the branch chip on every streaming -> idle transition so a
+      // turn that ran `git checkout` updates the status strip without a
+      // full page reload.
+      if (wasStreaming && !this.chat.isStreaming) {
+        void this.refreshGitBranch();
+      }
+      wasStreaming = this.chat.isStreaming;
       this.cdr.markForCheck();
       // Live-chat scrolling is owned by <app-chat-message-list>; no-op here.
     });
@@ -141,6 +155,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   /** Boots the chat session and subscribes to project lifecycle events (auth + ready). */
   async ngOnInit(): Promise<void> {
     await this.chat.init();
+    await this.refreshGitBranch();
     this.cdr.markForCheck();
 
     this.unsubAuthWatch = this.projectState.onChange(() => {
@@ -156,6 +171,7 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.projectMemory = '';
       this.memoryError = '';
       this.cdr.markForCheck();
+      await this.refreshGitBranch();
       if (wasHistoryOpen) {
         await this.loadConversations();
       }
@@ -163,6 +179,25 @@ export class ChatComponent implements OnInit, OnDestroy {
         await this.loadProjectMemory();
       }
     });
+  }
+
+  /**
+   * Pulls the current git branch from the backend for the active project.
+   * Silent on errors — the chip just hides when the read fails so a missing
+   * git binary or non-repo project doesn't surface a noisy error.
+   */
+  private async refreshGitBranch(): Promise<void> {
+    const project = this.projectState.activeProject;
+    if (!project) {
+      this.gitBranch = null;
+      return;
+    }
+    try {
+      this.gitBranch = await this.tauri.invoke<string | null>('get_git_branch', { project });
+    } catch {
+      this.gitBranch = null;
+    }
+    this.cdr.markForCheck();
   }
 
   /** True if the current turn is paused on an unanswered AskUserQuestion. */

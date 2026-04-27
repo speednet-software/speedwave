@@ -79,17 +79,21 @@ describe('ChatMessageListComponent', () => {
     expect(caret).not.toBeNull();
   });
 
-  it('does not append a streaming placeholder when currentBlocks is empty', () => {
+  it('renders the awaiting caret while streaming has started but no block has arrived', () => {
     fixture.componentRef.setInput('messages', []);
     fixture.componentRef.setInput('currentBlocks', []);
     fixture.componentRef.setInput('isStreaming', true);
     fakeOnChanges();
     fixture.detectChanges();
 
-    const streamingEl = fixture.nativeElement.querySelector(
-      '[data-testid="chat-message-list-streaming"]'
-    );
-    expect(streamingEl).toBeNull();
+    // The full streaming bubble is suppressed (no blocks yet)…
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="chat-message-list-streaming"]')
+    ).toBeNull();
+    // …but a standalone blinking caret tells the user the assistant started.
+    const caret = fixture.nativeElement.querySelector('[data-testid="chat-message-list-awaiting"]');
+    expect(caret).not.toBeNull();
+    expect(caret!.querySelector('.caret')).not.toBeNull();
   });
 
   it('does not append a streaming placeholder when isStreaming is false', () => {
@@ -103,6 +107,27 @@ describe('ChatMessageListComponent', () => {
       '[data-testid="chat-message-list-streaming"]'
     );
     expect(streamingEl).toBeNull();
+    // And no awaiting caret either when the turn isn't running.
+    const awaiting = fixture.nativeElement.querySelector(
+      '[data-testid="chat-message-list-awaiting"]'
+    );
+    expect(awaiting).toBeNull();
+  });
+
+  it('hides the awaiting caret as soon as the first block arrives', () => {
+    fixture.componentRef.setInput('messages', []);
+    fixture.componentRef.setInput('currentBlocks', [{ type: 'text', content: 'hi' }]);
+    fixture.componentRef.setInput('isStreaming', true);
+    fakeOnChanges();
+    fixture.detectChanges();
+
+    const awaiting = fixture.nativeElement.querySelector(
+      '[data-testid="chat-message-list-awaiting"]'
+    );
+    expect(awaiting).toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="chat-message-list-streaming"]')
+    ).not.toBeNull();
   });
 
   // ── ARIA — log role + polite live region ──────────────────────────────

@@ -76,9 +76,32 @@ const NUMBER_FMT = new Intl.NumberFormat('en-US');
           </span>
         }
 
+        <!-- Branch chip (right-aligned, sm+) — mockup line 1172. -->
+        @if (branch(); as br) {
+          <span
+            class="ml-auto hidden items-center gap-1.5 whitespace-nowrap sm:inline-flex"
+            data-testid="session-stats-branch"
+          >
+            <svg
+              class="h-3 w-3"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+              stroke-width="1.75"
+              aria-hidden="true"
+            >
+              <circle cx="6" cy="6" r="2" />
+              <circle cx="6" cy="18" r="2" />
+              <circle cx="18" cy="8" r="2" />
+              <path stroke-linecap="round" d="M6 8v8m0-8a6 6 0 0 0 6 6h4" />
+            </svg>
+            <span class="text-[var(--ink-dim)]">{{ br }}</span>
+          </span>
+        }
+
         <!-- Cost (right-aligned, sm+) -->
         @if (s.total_cost > 0) {
-          <span class="ml-auto hidden whitespace-nowrap sm:inline">
+          <span class="hidden whitespace-nowrap sm:inline" [class.ml-auto]="!branch()">
             session:
             <span class="text-[var(--ink-dim)]">\${{ s.total_cost.toFixed(4) }}</span>
           </span>
@@ -112,7 +135,28 @@ const NUMBER_FMT = new Intl.NumberFormat('en-US');
           </span>
           <span class="text-[var(--ink-dim)]">0%</span>
         </span>
-        <span class="ml-auto hidden whitespace-nowrap sm:inline">
+        @if (branch(); as br) {
+          <span
+            class="ml-auto hidden items-center gap-1.5 whitespace-nowrap sm:inline-flex"
+            data-testid="session-stats-branch"
+          >
+            <svg
+              class="h-3 w-3"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+              stroke-width="1.75"
+              aria-hidden="true"
+            >
+              <circle cx="6" cy="6" r="2" />
+              <circle cx="6" cy="18" r="2" />
+              <circle cx="18" cy="8" r="2" />
+              <path stroke-linecap="round" d="M6 8v8m0-8a6 6 0 0 0 6 6h4" />
+            </svg>
+            <span class="text-[var(--ink-dim)]">{{ br }}</span>
+          </span>
+        }
+        <span class="hidden whitespace-nowrap sm:inline" [class.ml-auto]="!branch()">
           session: <span class="text-[var(--ink-dim)]">$0.0000</span>
         </span>
       </div>
@@ -125,6 +169,13 @@ export class SessionStatsComponent {
 
   /** Stats input (signal). */
   readonly stats = input<SessionStats | null>(null);
+
+  /**
+   * Current git branch of the active project's working tree, or `null` when
+   * the project isn't a git repo. Renders as the branch-icon chip on the
+   * right side of the strip — mockup lines 1172–1175.
+   */
+  readonly branch = input<string | null>(null);
 
   /**
    * Total input tokens consumed from the context window (sum of `input`,

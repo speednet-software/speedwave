@@ -388,4 +388,50 @@ describe('SessionStatsComponent', () => {
       expect(rootText()).toContain('500');
     });
   });
+
+  // ── git branch chip ────────────────────────────────────────────────────
+  describe('git branch chip', () => {
+    it('hides the chip when branch input is null', () => {
+      fixture.componentRef.setInput('stats', {
+        session_id: 'abc',
+        total_cost: 0.01,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        context_window_size: 200000,
+        total_output_tokens: 1,
+      });
+      fixture.componentRef.setInput('branch', null);
+      fixture.detectChanges();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="session-stats-branch"]')
+      ).toBeNull();
+    });
+
+    it('renders the branch name when branch input is set', () => {
+      fixture.componentRef.setInput('stats', {
+        session_id: 'abc',
+        total_cost: 0.01,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        context_window_size: 200000,
+        total_output_tokens: 1,
+      });
+      fixture.componentRef.setInput('branch', 'feat/terminal-minimal');
+      fixture.detectChanges();
+      const chip = fixture.nativeElement.querySelector(
+        '[data-testid="session-stats-branch"]'
+      ) as HTMLElement | null;
+      expect(chip).not.toBeNull();
+      expect(chip!.textContent).toContain('feat/terminal-minimal');
+    });
+
+    it('renders the branch chip in the placeholder (null stats) row', () => {
+      fixture.componentRef.setInput('stats', null);
+      fixture.componentRef.setInput('branch', 'main');
+      fixture.detectChanges();
+      const chip = fixture.nativeElement.querySelector(
+        '[data-testid="session-stats-branch"]'
+      ) as HTMLElement | null;
+      expect(chip).not.toBeNull();
+      expect(chip!.textContent).toContain('main');
+    });
+  });
 });

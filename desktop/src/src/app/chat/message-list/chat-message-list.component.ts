@@ -52,6 +52,14 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
             [streaming]="true"
             (questionAnswered)="questionAnswered.emit($event)"
           />
+        } @else if (showAwaitingCaret()) {
+          <!-- Streaming has started but no block has arrived yet. Show a
+               blinking caret so the user has visual confirmation that
+               the assistant is working — same caret used inline during
+               text streaming, just rendered as a standalone placeholder. -->
+          <div data-testid="chat-message-list-awaiting" class="px-1">
+            <span class="caret" aria-label="Assistant is responding"></span>
+          </div>
         }
       </div>
     </div>
@@ -106,6 +114,15 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   /** Whether to render the streaming placeholder as the last entry. */
   showStreaming(): boolean {
     return this.isStreaming() && this.currentBlocks().length > 0;
+  }
+
+  /**
+   * Whether to render the standalone blinking caret. True only in the gap
+   * between sending a message and the first streamed block — once any block
+   * arrives the regular streaming bubble takes over.
+   */
+  showAwaitingCaret(): boolean {
+    return this.isStreaming() && this.currentBlocks().length === 0;
   }
 
   /**
