@@ -4,7 +4,6 @@ import { ChatHeaderComponent } from './chat-header.component';
 
 describe('ChatHeaderComponent', () => {
   let fixture: ComponentFixture<ChatHeaderComponent>;
-  let component: ChatHeaderComponent;
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
@@ -12,13 +11,12 @@ describe('ChatHeaderComponent', () => {
     }).compileComponents();
 
     fixture = TestBed.createComponent(ChatHeaderComponent);
-    component = fixture.componentInstance;
   });
 
   // ── Happy path — title rendering ──────────────────────────────────────
 
   it('renders the title', () => {
-    component.title = 'Refactoring container runtime';
+    fixture.componentRef.setInput('title', 'Refactoring container runtime');
     fixture.detectChanges();
 
     const titleEl = fixture.nativeElement.querySelector(
@@ -39,20 +37,25 @@ describe('ChatHeaderComponent', () => {
   // ── Project pill ──────────────────────────────────────────────────────
 
   it('renders project pill when projectName is set', () => {
-    component.projectName = 'speedwave';
+    fixture.componentRef.setInput('projectName', 'speedwave');
     fixture.detectChanges();
 
     const pill = fixture.nativeElement.querySelector(
       '[data-testid="chat-header-project"]'
     ) as HTMLElement;
     expect(pill).not.toBeNull();
-    expect(pill.textContent?.trim()).toBe('speedwave');
+    expect(pill.textContent).toContain('speedwave');
+  });
+
+  it('renders the violet monogram square with the project initials', () => {
+    fixture.componentRef.setInput('projectName', 'speedwave');
+    fixture.detectChanges();
+    const pill = fixture.nativeElement.querySelector('[data-testid="chat-header-project"]');
+    expect(pill.querySelector('span')?.textContent?.trim()).toBe('sp');
   });
 
   it('hides project pill when projectName is empty', () => {
-    component.projectName = '';
     fixture.detectChanges();
-
     const pill = fixture.nativeElement.querySelector('[data-testid="chat-header-project"]');
     expect(pill).toBeNull();
   });
@@ -62,7 +65,7 @@ describe('ChatHeaderComponent', () => {
   it('emits toggleMemory when memory button is clicked', () => {
     fixture.detectChanges();
     let emitted = 0;
-    component.toggleMemory.subscribe(() => emitted++);
+    fixture.componentInstance.toggleMemory.subscribe(() => emitted++);
 
     const btn = fixture.nativeElement.querySelector(
       '[data-testid="chat-header-memory"]'
@@ -72,10 +75,10 @@ describe('ChatHeaderComponent', () => {
     expect(emitted).toBe(1);
   });
 
-  it('emits toggleHistory when history button is clicked', () => {
+  it('emits toggleHistory when hamburger button is clicked', () => {
     fixture.detectChanges();
     let emitted = 0;
-    component.toggleHistory.subscribe(() => emitted++);
+    fixture.componentInstance.toggleHistory.subscribe(() => emitted++);
 
     const btn = fixture.nativeElement.querySelector(
       '[data-testid="chat-header-history"]'
@@ -85,10 +88,35 @@ describe('ChatHeaderComponent', () => {
     expect(emitted).toBe(1);
   });
 
+  it('emits newConversation when plus button is clicked', () => {
+    fixture.detectChanges();
+    let emitted = 0;
+    fixture.componentInstance.newConversation.subscribe(() => emitted++);
+
+    const btn = fixture.nativeElement.querySelector(
+      '[data-testid="chat-header-new"]'
+    ) as HTMLButtonElement;
+    btn.click();
+    expect(emitted).toBe(1);
+  });
+
+  it('emits openProjectSwitcher when the project pill is clicked', () => {
+    fixture.componentRef.setInput('projectName', 'speedwave');
+    fixture.detectChanges();
+    let emitted = 0;
+    fixture.componentInstance.openProjectSwitcher.subscribe(() => emitted++);
+
+    const btn = fixture.nativeElement.querySelector(
+      '[data-testid="chat-header-project"]'
+    ) as HTMLButtonElement;
+    btn.click();
+    expect(emitted).toBe(1);
+  });
+
   // ── ARIA aria-pressed reflects toggle state ──────────────────────────
 
   it('sets aria-pressed=true on memory button when memoryOpen is true', () => {
-    component.memoryOpen = true;
+    fixture.componentRef.setInput('memoryOpen', true);
     fixture.detectChanges();
     const btn = fixture.nativeElement.querySelector(
       '[data-testid="chat-header-memory"]'
@@ -105,7 +133,7 @@ describe('ChatHeaderComponent', () => {
   });
 
   it('sets aria-pressed=true on history button when historyOpen is true', () => {
-    component.historyOpen = true;
+    fixture.componentRef.setInput('historyOpen', true);
     fixture.detectChanges();
     const btn = fixture.nativeElement.querySelector(
       '[data-testid="chat-header-history"]'
@@ -124,7 +152,7 @@ describe('ChatHeaderComponent', () => {
   // ── Edge case — Unicode and long titles render unchanged ────────────
 
   it('renders Unicode characters in title verbatim', () => {
-    component.title = 'Σφαῖρα — тест 漢字';
+    fixture.componentRef.setInput('title', 'Σφαῖρα — тест 漢字');
     fixture.detectChanges();
     const titleEl = fixture.nativeElement.querySelector(
       '[data-testid="chat-header-title"]'

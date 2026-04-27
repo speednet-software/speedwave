@@ -2,7 +2,6 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
-  HostListener,
   OnDestroy,
   OnInit,
   effect,
@@ -26,7 +25,6 @@ import { ConversationsSidebarComponent } from './conversations-sidebar/conversat
 /** Chat component that handles message rendering, user input, and streaming responses from Claude. */
 @Component({
   selector: 'app-chat',
-  standalone: true,
   imports: [
     CommonModule,
     ChatHeaderComponent,
@@ -39,7 +37,10 @@ import { ConversationsSidebarComponent } from './conversations-sidebar/conversat
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './chat.component.html',
-  host: { '(click)': 'onLinkClick($event)' },
+  host: {
+    '(click)': 'onLinkClick($event)',
+    '(document:keydown.escape)': 'onEscape($event)',
+  },
 })
 export class ChatComponent implements OnInit, OnDestroy {
   conversations: readonly ConversationSummary[] = [];
@@ -148,9 +149,11 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /**
    * ESC stops the current turn — but only when no AskUserQuestion is awaiting an answer.
+   *
+   * Wired via `host: { '(document:keydown.escape)': … }` because the project's
+   * best-practices forbid `@HostListener` (use the `host` decorator metadata).
    * @param event - keyboard event; consumed (preventDefault) when we handle it.
    */
-  @HostListener('document:keydown.escape', ['$event'])
   onEscape(event: Event): void {
     if (!this.chat.isStreaming) return;
     if (this.hasUnansweredQuestion()) return; // let the block own ESC semantics
@@ -173,6 +176,22 @@ export class ChatComponent implements OnInit, OnDestroy {
     if (!text || this.chat.isStreaming) return;
     this.cdr.markForCheck();
     await this.chat.sendMessage(text);
+  }
+
+  /**
+   * ADR-045 — composer signalled a queue request (user sent while streaming).
+   * @param text Trimmed payload to queue.
+   */
+  async onQueueRequested(text: string): Promise<void> {
+    if (!text) return;
+    await this.chat.queueMessage(text);
+    this.cdr.markForCheck();
+  }
+
+  /** ADR-045 — composer signalled queue cancellation (X button). */
+  async onQueueCancelled(): Promise<void> {
+    await this.chat.cancelQueuedMessage();
+    this.cdr.markForCheck();
   }
 
   /**

@@ -31,7 +31,7 @@ describe('AdvancedSectionComponent — logging settings', () => {
 
     it('updates logLevel property', async () => {
       await component.setLogLevel('trace');
-      expect(component.logLevel).toBe('trace');
+      expect(component.logLevel()).toBe('trace');
     });
 
     it('emits errorOccurred on failure', async () => {
@@ -49,7 +49,7 @@ describe('AdvancedSectionComponent — logging settings', () => {
   describe('exportDiagnostics()', () => {
     it('calls export_diagnostics with active project', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      component.activeProject = 'test';
+      fixture.componentRef.setInput('activeProject', 'test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'export_diagnostics') return '/Users/user/Downloads/speedwave-diagnostics.zip';
         return undefined;
@@ -60,7 +60,7 @@ describe('AdvancedSectionComponent — logging settings', () => {
     });
 
     it('sets diagnosticsExporting during export', async () => {
-      component.activeProject = 'test';
+      fixture.componentRef.setInput('activeProject', 'test');
       let resolveFn!: (v: string) => void;
       mockTauri.invokeHandler = (cmd: string) =>
         new Promise<string>((resolve) => {
@@ -76,7 +76,7 @@ describe('AdvancedSectionComponent — logging settings', () => {
 
     it('does nothing without activeProject', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      component.activeProject = null;
+      fixture.componentRef.setInput('activeProject', null);
       await component.exportDiagnostics();
       expect(invokeSpy).not.toHaveBeenCalledWith('export_diagnostics', expect.anything());
     });
@@ -84,7 +84,7 @@ describe('AdvancedSectionComponent — logging settings', () => {
     it('emits errorOccurred on failure', async () => {
       const errorSpy = vi.fn();
       component.errorOccurred.subscribe(errorSpy);
-      component.activeProject = 'test';
+      fixture.componentRef.setInput('activeProject', 'test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'export_diagnostics') throw new Error('zip failed');
         return undefined;

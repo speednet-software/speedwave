@@ -656,38 +656,90 @@ describe('IntegrationsComponent', () => {
   });
 
   describe('terminal-minimal restyle', () => {
-    it('renders the header with mono 14px title per mockup', async () => {
+    it('renders the header with the view-title page heading', async () => {
       await component.ngOnInit();
       fixture.changeDetectorRef.markForCheck();
       fixture.detectChanges();
       const title = fixture.nativeElement.querySelector('[data-testid="integrations-title"]');
       expect(title).not.toBeNull();
       expect(title.textContent).toContain('Service integrations');
-      expect(title.classList.contains('mono')).toBe(true);
+      expect(title.classList.contains('view-title')).toBe(true);
     });
 
-    it('section headings use uppercase tracking-widest mono labels', async () => {
+    it('header surfaces the running-services count + project pill', async () => {
       await component.ngOnInit();
       fixture.changeDetectorRef.markForCheck();
       fixture.detectChanges();
-      const heading = fixture.nativeElement.querySelector(
-        '[data-testid="integrations-services-heading"]'
-      );
-      expect(heading).not.toBeNull();
-      expect(heading.classList.contains('uppercase')).toBe(true);
-      expect(heading.classList.contains('tracking-widest')).toBe(true);
+      const count = fixture.nativeElement.querySelector('[data-testid="integrations-count"]');
+      expect(count).not.toBeNull();
+      expect(count.textContent).toContain('services');
+      expect(count.textContent).toContain('running');
+
+      const pill = fixture.nativeElement.querySelector('[data-testid="integrations-project-pill"]');
+      expect(pill).not.toBeNull();
+      expect(pill.textContent).toContain('test-project');
     });
 
-    it('service cards use ring-1 wrapper (no border) per Borders & rings rule', async () => {
+    it('renders the integrations table with a header row and one row per service', async () => {
       await component.ngOnInit();
       fixture.changeDetectorRef.markForCheck();
       fixture.detectChanges();
-      const card = fixture.nativeElement.querySelector(
-        '[data-testid="integrations-service-gitlab"]'
+      const wrapper = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-table-wrapper"]'
       );
-      expect(card).not.toBeNull();
-      expect(card.classList.contains('ring-1')).toBe(true);
-      expect(card.classList.contains('border')).toBe(false);
+      expect(wrapper).not.toBeNull();
+      const rows = fixture.nativeElement.querySelectorAll('tbody tr');
+      expect(rows.length).toBe(component.services.length);
+    });
+
+    it('row exposes a service name, status pill, mount cell, and toggle', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const row = fixture.nativeElement.querySelector('[data-testid="integrations-row-gitlab"]');
+      expect(row).not.toBeNull();
+      const status = row.querySelector('[data-testid="integrations-row-status"]');
+      expect(status).not.toBeNull();
+      const toggle = row.querySelector('[data-testid="integrations-row-toggle-gitlab"]');
+      expect(toggle).not.toBeNull();
+    });
+
+    it('clicking a row toggle flips the enabled state without expanding', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const before = component.services[0].enabled;
+      const svc = component.services[0];
+      // Use the parent click handler directly — the JSDOM click() does not
+      // bubble through stopPropagation reliably across the @if scope.
+      await component.onRowToggle(svc, new MouseEvent('click'));
+      expect(svc.enabled).toBe(!before);
+      // Row click must NOT expand because onRowToggle calls stopPropagation.
+      expect(component.expandedService).toBeNull();
+    });
+
+    it('expanding a row reveals the inline configuration block', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      component.toggleExpand('gitlab');
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const expanded = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-expanded-gitlab"]'
+      );
+      expect(expanded).not.toBeNull();
+    });
+
+    it('mounts the IDE bridge child component below the table', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const slot = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-ide-bridge-slot"]'
+      );
+      expect(slot).not.toBeNull();
+      expect(slot.querySelector('app-ide-bridge')).not.toBeNull();
     });
   });
 
@@ -1173,15 +1225,14 @@ describe('IntegrationsComponent', () => {
   });
 
   describe('cancel button visibility in starting state', () => {
-    it('shows cancel button during starting state', async () => {
+    it('expanding sharepoint while oauthStatus is starting renders the service-card child', async () => {
       await component.ngOnInit();
       component.oauthStatus = 'starting';
+      component.toggleExpand('sharepoint');
       fixture.changeDetectorRef.markForCheck();
       fixture.detectChanges();
 
       const serviceCards = fixture.nativeElement.querySelectorAll('app-service-card');
-      // Find the sharepoint card — it should get oauthStatus='starting'
-      // We verify that the parent passes the starting state correctly
       expect(component.oauthStatus).toBe('starting');
       expect(serviceCards.length).toBeGreaterThan(0);
     });

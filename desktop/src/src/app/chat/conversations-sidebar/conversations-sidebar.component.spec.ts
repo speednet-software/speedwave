@@ -65,21 +65,41 @@ describe('ConversationsSidebarComponent', () => {
   });
 
   describe('visibility', () => {
-    it('renders nothing when open=false', () => {
+    it('marks the drawer aria-hidden + inert when open=false', () => {
       host.open = false;
       host.conversations = sample;
       fixture.detectChanges();
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="conversations-sidebar"]')
-      ).toBeNull();
+      const drawer = fixture.nativeElement.querySelector('[data-testid="conversations-sidebar"]');
+      expect(drawer).not.toBeNull();
+      expect(drawer.getAttribute('aria-hidden')).toBe('true');
+      expect(drawer.hasAttribute('inert')).toBe(true);
     });
 
-    it('renders drawer when open=true', () => {
+    it('renders drawer with no aria-hidden / inert when open=true', () => {
       host.conversations = sample;
       fixture.detectChanges();
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="conversations-sidebar"]')
-      ).not.toBeNull();
+      const drawer = fixture.nativeElement.querySelector('[data-testid="conversations-sidebar"]');
+      expect(drawer).not.toBeNull();
+      expect(drawer.getAttribute('aria-hidden')).toBeNull();
+      expect(drawer.hasAttribute('inert')).toBe(false);
+    });
+
+    it('toggles body.sidebar-drawer-open with the open input', () => {
+      // Drive the child input directly to bypass OnPush propagation issues
+      // when mutating the host wrapper's plain fields. The effect registered
+      // in the child's constructor is what we're verifying — it must
+      // synchronize the global body class with the open signal.
+      const childFixture = TestBed.createComponent(ConversationsSidebarComponent);
+      childFixture.componentRef.setInput('conversations', sample);
+      childFixture.componentRef.setInput('open', true);
+      childFixture.detectChanges();
+      TestBed.tick();
+      expect(document.body.classList.contains('sidebar-drawer-open')).toBe(true);
+
+      childFixture.componentRef.setInput('open', false);
+      childFixture.detectChanges();
+      TestBed.tick();
+      expect(document.body.classList.contains('sidebar-drawer-open')).toBe(false);
     });
   });
 

@@ -538,4 +538,76 @@ describe('PluginsComponent', () => {
       expect(emptyState.textContent).toContain('No plugins installed');
     });
   });
+
+  describe('terminal-minimal table layout', () => {
+    it('renders the view-title page heading and project pill in the header', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const title = fixture.nativeElement.querySelector('[data-testid="plugins-title"]');
+      expect(title).not.toBeNull();
+      expect(title.textContent).toContain('Installed plugins');
+      expect(title.classList.contains('view-title')).toBe(true);
+      const pill = fixture.nativeElement.querySelector('[data-testid="plugins-project-pill"]');
+      expect(pill).not.toBeNull();
+      expect(pill.textContent).toContain('test-project');
+    });
+
+    it('renders one table row per plugin with name, type pill, version, and signed pill', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const rows = fixture.nativeElement.querySelectorAll('tbody tr');
+      expect(rows.length).toBe(component.plugins.length);
+
+      const presaleRow = fixture.nativeElement.querySelector('[data-testid="plugins-row-presale"]');
+      expect(presaleRow).not.toBeNull();
+      const type = presaleRow.querySelector('[data-testid="plugins-row-type"]');
+      expect(type).not.toBeNull();
+      expect(type.textContent.trim()).toBe('mcp');
+      const ver = presaleRow.querySelector('[data-testid="plugins-row-ver"]');
+      expect(ver).not.toBeNull();
+      expect(ver.textContent.trim()).toContain('v1.2.0');
+      const signed = presaleRow.querySelector('[data-testid="plugins-row-signed"]');
+      expect(signed).not.toBeNull();
+      expect(signed.textContent).toContain('ed25519');
+    });
+
+    it('resource plugins (no service_id) render the neutral resource pill', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const row = fixture.nativeElement.querySelector('[data-testid="plugins-row-my-commands"]');
+      expect(row).not.toBeNull();
+      const type = row.querySelector('[data-testid="plugins-row-type"]');
+      expect(type.textContent.trim()).toBe('resource');
+    });
+
+    it('clicking a row navigates to /plugins/<slug>', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const router = TestBed.inject(Router);
+      const spy = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+      const row = fixture.nativeElement.querySelector('[data-testid="plugins-row-presale"]');
+      row.click();
+      expect(spy).toHaveBeenCalledWith(['/plugins', 'presale']);
+    });
+
+    it('row toggle flips enabled state and stops propagation (no navigation)', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const router = TestBed.inject(Router);
+      const navSpy = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+      const target = component.plugins[0];
+      const before = target.enabled;
+      await component.onRowToggle(target, new MouseEvent('click'));
+      // Hold a direct reference because ngOnInit's project-ready listener
+      // can re-fetch and replace the plugins array between the await and
+      // the assertion in some Angular zone flushes.
+      expect(target.enabled).toBe(!before);
+      expect(navSpy).not.toHaveBeenCalled();
+    });
+  });
 });

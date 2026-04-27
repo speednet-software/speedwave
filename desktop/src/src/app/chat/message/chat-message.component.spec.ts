@@ -20,8 +20,8 @@ describe('ChatMessageComponent', () => {
 
   it('renders text block', () => {
     const blocks: MessageBlock[] = [{ type: 'text', content: 'Hello world' }];
-    component.blocks = blocks;
-    component.role = 'assistant';
+    fixture.componentRef.setInput('blocks', blocks);
+    fixture.componentRef.setInput('role', 'assistant');
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
@@ -30,8 +30,8 @@ describe('ChatMessageComponent', () => {
 
   it('renders error block', () => {
     const blocks: MessageBlock[] = [{ type: 'error', content: 'Something failed' }];
-    component.blocks = blocks;
-    component.role = 'assistant';
+    fixture.componentRef.setInput('blocks', blocks);
+    fixture.componentRef.setInput('role', 'assistant');
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
@@ -41,13 +41,18 @@ describe('ChatMessageComponent', () => {
 
   it('renders thinking block collapsed', () => {
     const blocks: MessageBlock[] = [{ type: 'thinking', content: 'hmm', collapsed: true }];
-    component.blocks = blocks;
-    component.role = 'assistant';
+    fixture.componentRef.setInput('blocks', blocks);
+    fixture.componentRef.setInput('role', 'assistant');
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('[data-testid="thinking-content"]')).toBeNull();
-    expect(el.textContent).toContain('Thinking');
+    // The collapsed thinking block uses native <details> without the `open`
+    // attribute — the content stays in the DOM but is visually hidden.
+    const details = el.querySelector('details');
+    expect(details).not.toBeNull();
+    expect(details?.hasAttribute('open')).toBe(false);
+    // The summary toggle is always rendered with the lowercase "thinking" label.
+    expect(el.textContent).toContain('thinking');
   });
 
   it('renders tool_use block', () => {
@@ -55,16 +60,18 @@ describe('ChatMessageComponent', () => {
       {
         type: 'tool_use',
         tool: {
+          type: 'tool_use',
           tool_id: 't1',
           tool_name: 'Read',
           input_json: '{"file_path":"/a.ts"}',
           status: 'done',
-          collapsed: false,
+          result: '',
+          result_is_error: false,
         },
       },
     ];
-    component.blocks = blocks;
-    component.role = 'assistant';
+    fixture.componentRef.setInput('blocks', blocks);
+    fixture.componentRef.setInput('role', 'assistant');
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
@@ -74,22 +81,23 @@ describe('ChatMessageComponent', () => {
   it('renders multiple blocks in order', () => {
     const blocks: MessageBlock[] = [
       { type: 'text', content: 'First' },
-      { type: 'thinking', content: 'thinking...', collapsed: true },
+      { type: 'thinking', content: 'reasoning step', collapsed: true },
       { type: 'text', content: 'Second' },
     ];
-    component.blocks = blocks;
-    component.role = 'assistant';
+    fixture.componentRef.setInput('blocks', blocks);
+    fixture.componentRef.setInput('role', 'assistant');
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
     expect(el.textContent).toContain('First');
     expect(el.textContent).toContain('Second');
-    expect(el.textContent).toContain('Thinking');
+    // The thinking block contributes its lowercase "thinking" summary label.
+    expect(el.textContent).toContain('thinking');
   });
 
   it('dispatches to app-user-message when role is user', () => {
-    component.blocks = [{ type: 'text', content: 'hi' }];
-    component.role = 'user';
+    fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'hi' }]);
+    fixture.componentRef.setInput('role', 'user');
     fixture.detectChanges();
 
     const msg = fixture.nativeElement.querySelector('[data-testid="chat-message"]');
@@ -97,16 +105,17 @@ describe('ChatMessageComponent', () => {
     const userMsg = fixture.nativeElement.querySelector('app-user-message');
     expect(userMsg).not.toBeNull();
     expect(fixture.nativeElement.textContent).toContain('hi');
-    // No assistant-style bubble on user messages.
+    // No assistant-style bubble on user messages — no max-width or border background.
     expect(fixture.nativeElement.querySelector('.bg-sw-bg-dark')).toBeNull();
+    expect(fixture.nativeElement.querySelector('.max-w-\\[85\\%\\]')).toBeNull();
   });
 
   it('forwards editedAt and timestamp to app-user-message', () => {
-    component.blocks = [{ type: 'text', content: 'hi' }];
-    component.role = 'user';
-    component.editedAt = 1_700_000_000_000;
+    fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'hi' }]);
+    fixture.componentRef.setInput('role', 'user');
+    fixture.componentRef.setInput('editedAt', 1_700_000_000_000);
     const ts = new Date(2026, 3, 25, 9, 30, 0, 0).getTime();
-    component.timestamp = ts;
+    fixture.componentRef.setInput('timestamp', ts);
     fixture.detectChanges();
 
     const edited = fixture.nativeElement.querySelector('[data-testid="user-message-edited"]');
@@ -115,26 +124,29 @@ describe('ChatMessageComponent', () => {
     expect(time?.textContent?.trim()).toBe('09:30');
   });
 
-  it('host right-aligns user messages via items-end', () => {
-    component.blocks = [{ type: 'text', content: 'ok' }];
-    component.role = 'user';
+  it('host stretches messages full-width (terminal-minimal: no role-based alignment)', () => {
+    // The terminal-minimal layout removes role-based horizontal alignment —
+    // both user and assistant messages stretch to the column width with the
+    // mono meta line as the visual differentiator instead of a bubble.
+    fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'ok' }]);
+    fixture.componentRef.setInput('role', 'user');
     fixture.detectChanges();
 
     const host = fixture.nativeElement as HTMLElement;
-    // The host became a column flex container so the per-message actions
-    // sit below the bubble. Cross-axis alignment uses `items-*` not `justify-*`.
-    expect(host.classList.contains('items-end')).toBe(true);
+    expect(host.classList.contains('items-stretch')).toBe(true);
+    expect(host.classList.contains('items-end')).toBe(false);
     expect(host.classList.contains('items-start')).toBe(false);
   });
 
-  it('host left-aligns assistant messages via items-start', () => {
-    component.blocks = [{ type: 'text', content: 'hello' }];
-    component.role = 'assistant';
+  it('assistant host also stretches messages full-width', () => {
+    fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'hello' }]);
+    fixture.componentRef.setInput('role', 'assistant');
     fixture.detectChanges();
 
     const host = fixture.nativeElement as HTMLElement;
-    expect(host.classList.contains('items-start')).toBe(true);
+    expect(host.classList.contains('items-stretch')).toBe(true);
     expect(host.classList.contains('items-end')).toBe(false);
+    expect(host.classList.contains('items-start')).toBe(false);
   });
 
   it('user role dispatches to <app-user-message> (terminal-minimal: no bubble)', () => {
@@ -142,29 +154,35 @@ describe('ChatMessageComponent', () => {
     // messages render via <app-user-message> in terminal-minimal style — no
     // sized "bubble" with w-fit/max-w-[85%]. This replaces the prior bubble
     // test which assumed both roles shared the same wrapper styling.
-    component.blocks = [{ type: 'text', content: 'ok' }];
-    component.role = 'user';
+    fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'ok' }]);
+    fixture.componentRef.setInput('role', 'user');
     fixture.detectChanges();
 
     expect(fixture.nativeElement.querySelector('app-user-message')).not.toBeNull();
   });
 
-  it('assistant role keeps the bubble (max-w-[85%])', () => {
-    component.blocks = [{ type: 'text', content: 'ok' }];
-    component.role = 'assistant';
+  it('assistant role renders without a bubble (terminal-minimal: plain article)', () => {
+    // After the terminal-minimal redesign, assistant messages are plain
+    // articles — no max-width, no border, no rounded background. The mono
+    // `speedwave · model · time` meta line is the only visual delimiter.
+    fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'ok' }]);
+    fixture.componentRef.setInput('role', 'assistant');
     fixture.detectChanges();
 
-    const bubble = fixture.nativeElement.querySelector(
+    const article = fixture.nativeElement.querySelector(
       '[data-testid="chat-message"]'
     ) as HTMLElement;
-    expect(bubble.classList.contains('max-w-[85%]')).toBe(true);
+    expect(article).not.toBeNull();
+    expect(article.classList.contains('max-w-[85%]')).toBe(false);
+    expect(article.classList.contains('rounded-lg')).toBe(false);
+    expect(article.classList.contains('bg-sw-bg-dark')).toBe(false);
   });
 
   it('shows the block-level cursor when streaming and last block is NOT text', () => {
     // The per-text-block streaming caret renders inside <app-text-block>;
     // the parent block-level cursor is suppressed when the last block is a
     // text block to avoid a double-cursor visual bug.
-    component.blocks = [
+    fixture.componentRef.setInput('blocks', [
       {
         type: 'tool_use',
         tool: {
@@ -173,12 +191,11 @@ describe('ChatMessageComponent', () => {
           tool_name: 'Read',
           input_json: '{}',
           status: 'running',
-          collapsed: true,
         },
       },
-    ];
-    component.role = 'assistant';
-    component.streaming = true;
+    ]);
+    fixture.componentRef.setInput('role', 'assistant');
+    fixture.componentRef.setInput('streaming', true);
     fixture.detectChanges();
 
     const cursor = fixture.nativeElement.querySelector('[data-testid="cursor"]');
@@ -186,9 +203,9 @@ describe('ChatMessageComponent', () => {
   });
 
   it('hides the block-level cursor when streaming and last block IS text (per-block caret takes over)', () => {
-    component.blocks = [{ type: 'text', content: 'partial...' }];
-    component.role = 'assistant';
-    component.streaming = true;
+    fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'partial...' }]);
+    fixture.componentRef.setInput('role', 'assistant');
+    fixture.componentRef.setInput('streaming', true);
     fixture.detectChanges();
 
     expect(fixture.nativeElement.querySelector('[data-testid="cursor"]')).toBeNull();
@@ -197,9 +214,9 @@ describe('ChatMessageComponent', () => {
   });
 
   it('does not show cursor when not streaming', () => {
-    component.blocks = [{ type: 'text', content: 'done' }];
-    component.role = 'assistant';
-    component.streaming = false;
+    fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'done' }]);
+    fixture.componentRef.setInput('role', 'assistant');
+    fixture.componentRef.setInput('streaming', false);
     fixture.detectChanges();
 
     const cursor = fixture.nativeElement.querySelector('[data-testid="cursor"]');
@@ -224,8 +241,8 @@ describe('ChatMessageComponent', () => {
         },
       },
     ];
-    component.blocks = blocks;
-    component.role = 'assistant';
+    fixture.componentRef.setInput('blocks', blocks);
+    fixture.componentRef.setInput('role', 'assistant');
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
@@ -234,7 +251,9 @@ describe('ChatMessageComponent', () => {
   });
 
   it('renders permission_prompt block', () => {
-    component.blocks = [{ type: 'permission_prompt', command: 'rm -rf /tmp' }];
+    fixture.componentRef.setInput('blocks', [
+      { type: 'permission_prompt', command: 'rm -rf /tmp' },
+    ]);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="permission-prompt"]')).not.toBeNull();
   });
@@ -248,7 +267,9 @@ describe('ChatMessageComponent', () => {
         emitted = evt;
       }
     );
-    component.blocks = [{ type: 'permission_prompt', command: 'rm -rf /tmp' }];
+    fixture.componentRef.setInput('blocks', [
+      { type: 'permission_prompt', command: 'rm -rf /tmp' },
+    ]);
     fixture.detectChanges();
     const allowOnce = fixture.nativeElement.querySelector(
       '[data-testid="permission-allow-once"]'
@@ -272,8 +293,8 @@ describe('ChatMessageComponent', () => {
         },
       },
     ];
-    component.blocks = blocks;
-    component.role = 'assistant';
+    fixture.componentRef.setInput('blocks', blocks);
+    fixture.componentRef.setInput('role', 'assistant');
     fixture.detectChanges();
 
     let emitted: { toolId: string; values: string[] } | null = null;

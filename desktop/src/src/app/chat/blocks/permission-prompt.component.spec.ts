@@ -15,8 +15,8 @@ describe('PermissionPromptComponent', () => {
   });
 
   function setInputs(command: string, description = ''): void {
-    component.command = command;
-    component.description = description;
+    fixture.componentRef.setInput('command', command);
+    fixture.componentRef.setInput('description', description);
     fixture.detectChanges();
   }
 
@@ -40,10 +40,14 @@ describe('PermissionPromptComponent', () => {
 
   it('happy: each button emits the expected decision (separate components per click)', () => {
     // After the self-protect guard lands (single emission per component), each
-    // button-decision pair needs its own component instance.
+    // button-decision pair needs its own component instance. Seed the outer
+    // fixture's required input first so the global change-detection pass
+    // triggered by the inner `f.detectChanges()` does not raise NG0950 on the
+    // sibling component still attached to the test bed.
+    fixture.componentRef.setInput('command', 'ls');
     for (const expected of ['allow_once', 'allow_always', 'deny'] as const) {
       const f = TestBed.createComponent(PermissionPromptComponent);
-      f.componentInstance.command = 'ls';
+      f.componentRef.setInput('command', 'ls');
       f.detectChanges();
       const events: PermissionDecision[] = [];
       f.componentInstance.decided.subscribe((d) => events.push(d));

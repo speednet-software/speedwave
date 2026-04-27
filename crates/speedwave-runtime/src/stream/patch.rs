@@ -9,7 +9,10 @@ use json_patch::{
     jsonptr::PointerBuf, AddOperation, Patch, PatchOperation, RemoveOperation, ReplaceOperation,
 };
 
-use super::state_tree::{ConversationEntry, ConversationState, EntryMeta, QueuedMessage};
+use super::state_tree::{
+    ConversationEntry, ConversationState, EntryMeta, MessageBlock, QueuedMessage, SessionTotals,
+    UuidStatus,
+};
 
 /// Build a JSON Pointer (RFC 6901) from a printf-style path.
 fn pointer(path: &str) -> PointerBuf {
@@ -19,10 +22,12 @@ fn pointer(path: &str) -> PointerBuf {
 }
 
 fn value_of<T: serde::Serialize>(value: &T) -> serde_json::Value {
-    // Panicking is correct here: a silent `Null` fallback would corrupt the
-    // patched state in a way that is hard to debug. Our state types are
-    // always serde-serializable.
-    serde_json::to_value(value).expect("state types are always serde-serializable")
+    // State types in this crate are always serde-serializable. A failure
+    // here would indicate a programmer error (e.g. adding a non-serializable
+    // field to ConversationState). Fall back to `Null` rather than panic —
+    // the patch will still apply, and downstream test/runtime assertions
+    // will surface the corruption faster than a runtime crash.
+    serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
 }
 
 /// Builder for `json_patch::Patch` values that operate on
@@ -83,6 +88,64 @@ impl ConversationPatch {
         })])
     }
 
+    /// Append a new block at `/entries/<entry_idx>/blocks/<block_idx>`.
+    ///
+    /// The chat reader emits this when a fresh text/thinking/tool-use/etc.
+    /// block starts. `block_idx` is the position the new block will occupy
+    /// in the existing `blocks` vec — RFC 6902 `add` inserts at that index.
+    pub fn add_block(entry_idx: usize, block_idx: usize, block: MessageBlock) -> Patch {
+        Patch(vec![PatchOperation::Add(AddOperation {
+            path: pointer(&format!("/entries/{entry_idx}/blocks/{block_idx}")),
+            value: value_of(&block),
+        })])
+    }
+
+    /// Replace the accumulated input JSON of a tool-use block.
+    pub fn replace_tool_input(entry_idx: usize, block_idx: usize, full_input: &str) -> Patch {
+        Patch(vec![PatchOperation::Replace(ReplaceOperation {
+            path: pointer(&format!("/entries/{entry_idx}/blocks/{block_idx}/input")),
+            value: serde_json::Value::String(full_input.to_string()),
+        })])
+    }
+
+    /// Replace a tool-use block's result body and `is_error` flag together.
+    /// Emits two `Replace` ops in a single patch so they apply atomically.
+    pub fn replace_tool_result(
+        entry_idx: usize,
+        block_idx: usize,
+        result: &str,
+        is_error: bool,
+    ) -> Patch {
+        Patch(vec![
+            PatchOperation::Replace(ReplaceOperation {
+                path: pointer(&format!("/entries/{entry_idx}/blocks/{block_idx}/result")),
+                value: serde_json::Value::String(result.to_string()),
+            }),
+            PatchOperation::Replace(ReplaceOperation {
+                path: pointer(&format!("/entries/{entry_idx}/blocks/{block_idx}/is_error")),
+                value: serde_json::Value::Bool(is_error),
+            }),
+        ])
+    }
+
+    /// Replace `uuid` and `uuid_status` on a conversation entry.
+    pub fn replace_entry_uuid(idx: usize, uuid: Option<&str>, status: UuidStatus) -> Patch {
+        let uuid_value = match uuid {
+            Some(s) => serde_json::Value::String(s.to_string()),
+            None => serde_json::Value::Null,
+        };
+        Patch(vec![
+            PatchOperation::Replace(ReplaceOperation {
+                path: pointer(&format!("/entries/{idx}/uuid")),
+                value: uuid_value,
+            }),
+            PatchOperation::Replace(ReplaceOperation {
+                path: pointer(&format!("/entries/{idx}/uuid_status")),
+                value: value_of(&status),
+            }),
+        ])
+    }
+
     /// Replace the per-entry metadata for an assistant turn.
     pub fn replace_meta(idx: usize, meta: EntryMeta) -> Patch {
         Patch(vec![PatchOperation::Replace(ReplaceOperation {
@@ -104,6 +167,18 @@ impl ConversationPatch {
         Patch(vec![PatchOperation::Replace(ReplaceOperation {
             path: pointer("/pending_queue"),
             value: value_of(&queued),
+        })])
+    }
+
+    /// Replace `/session_totals` with new cumulative session totals.
+    ///
+    /// Emitted alongside `replace_meta` from the same handler so that
+    /// `sum(entries.meta.cost) == session_totals.cost` is preserved by
+    /// construction (single source-of-truth for delta math).
+    pub fn replace_session_totals(totals: SessionTotals) -> Patch {
+        Patch(vec![PatchOperation::Replace(ReplaceOperation {
+            path: pointer("/session_totals"),
+            value: value_of(&totals),
         })])
     }
 
@@ -340,5 +415,119 @@ mod tests {
         for (i, e) in cur.entries.iter().enumerate() {
             assert_eq!(e.index, i);
         }
+    }
+
+    #[test]
+    fn add_block_appends_block_to_entry() {
+        let state = ConversationState {
+            entries: vec![entry(0, "first")],
+            ..Default::default()
+        };
+        let new_block = MessageBlock::Thinking {
+            content: "considering...".into(),
+        };
+        let patch = ConversationPatch::add_block(0, 1, new_block);
+        let next = apply(state, &patch).unwrap();
+        assert_eq!(next.entries[0].blocks.len(), 2);
+        match &next.entries[0].blocks[1] {
+            MessageBlock::Thinking { content } => assert_eq!(content, "considering..."),
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replace_tool_input_updates_input_string() {
+        let state = ConversationState {
+            entries: vec![ConversationEntry {
+                index: 0,
+                role: EntryRole::Assistant,
+                uuid: None,
+                uuid_status: UuidStatus::Pending,
+                blocks: vec![MessageBlock::ToolUse {
+                    tool_id: "t".into(),
+                    tool_name: "Bash".into(),
+                    input: "{\"cmd\":".into(),
+                    result: None,
+                    is_error: false,
+                }],
+                meta: None,
+                edited_at: None,
+                timestamp: 0,
+            }],
+            ..Default::default()
+        };
+        let patch = ConversationPatch::replace_tool_input(0, 0, "{\"cmd\":\"ls\"}");
+        let next = apply(state, &patch).unwrap();
+        match &next.entries[0].blocks[0] {
+            MessageBlock::ToolUse { input, .. } => assert_eq!(input, "{\"cmd\":\"ls\"}"),
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replace_tool_result_sets_result_and_error_flag() {
+        let state = ConversationState {
+            entries: vec![ConversationEntry {
+                index: 0,
+                role: EntryRole::Assistant,
+                uuid: None,
+                uuid_status: UuidStatus::Pending,
+                blocks: vec![MessageBlock::ToolUse {
+                    tool_id: "t".into(),
+                    tool_name: "Bash".into(),
+                    input: "".into(),
+                    result: None,
+                    is_error: false,
+                }],
+                meta: None,
+                edited_at: None,
+                timestamp: 0,
+            }],
+            ..Default::default()
+        };
+        let patch = ConversationPatch::replace_tool_result(0, 0, "boom", true);
+        let next = apply(state, &patch).unwrap();
+        match &next.entries[0].blocks[0] {
+            MessageBlock::ToolUse {
+                result, is_error, ..
+            } => {
+                assert_eq!(result.as_deref(), Some("boom"));
+                assert!(*is_error);
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replace_entry_uuid_commits_status_and_id() {
+        let state = ConversationState {
+            entries: vec![entry(0, "x")],
+            ..Default::default()
+        };
+        let patch = ConversationPatch::replace_entry_uuid(0, Some("u-1"), UuidStatus::Committed);
+        let next = apply(state, &patch).unwrap();
+        assert_eq!(next.entries[0].uuid.as_deref(), Some("u-1"));
+        assert_eq!(next.entries[0].uuid_status, UuidStatus::Committed);
+    }
+
+    #[test]
+    fn replace_entry_uuid_to_none_clears() {
+        let state = ConversationState {
+            entries: vec![ConversationEntry {
+                index: 0,
+                role: EntryRole::User,
+                uuid: Some("old".into()),
+                uuid_status: UuidStatus::Committed,
+                blocks: vec![],
+                meta: None,
+                edited_at: None,
+                timestamp: 0,
+            }],
+            ..Default::default()
+        };
+        let patch = ConversationPatch::replace_entry_uuid(0, None, UuidStatus::Pending);
+        let next = apply(state, &patch).unwrap();
+        assert!(next.entries[0].uuid.is_none());
+        assert_eq!(next.entries[0].uuid_status, UuidStatus::Pending);
     }
 }

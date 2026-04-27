@@ -6,7 +6,7 @@ use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Events emitted to the Angular frontend via Tauri's event system.
 /// The frontend listens for `"chat_stream"` events with this payload.
@@ -85,6 +85,10 @@ pub enum StreamChunk {
     /// the parser first sees `{"type":"user","message":{"id":"...",...}}` with
     /// a text-bearing user prompt (not a tool_result wrapper).
     UserMessageCommit { uuid: String },
+    /// One-slot queued message (ADR-045) was drained server-side when the
+    /// previous turn ended. Frontend clears `state.pending_queue` on receipt
+    /// — the message is already in flight via stdin.
+    QueueDrained { session_id: String, text: String },
 }
 
 /// A single option in an AskUserQuestion prompt.
@@ -1276,6 +1280,12 @@ impl ChatSession {
         // Background thread: parse Claude's stream-json and emit Tauri events
         let h = std::thread::spawn(move || {
             let mut parser = StreamParser::new();
+            // ADR-042/043/044 — mirror every emitted chunk into the
+            // per-session JSON-Patch stream so the frontend's state-tree
+            // signal stays in lockstep with the legacy `chat_stream`
+            // bindings. The emitter buffers patches until the first
+            // `Result` event reveals the session_id, then flushes.
+            let mut patch_emitter = crate::patch_emitter::PatchEmitter::new();
             if let Some(seed) = resume_seed {
                 parser.restore_session_snapshot(
                     TurnUsage {
@@ -1412,6 +1422,14 @@ impl ChatSession {
                 let is_terminal = chunks
                     .iter()
                     .any(|c| matches!(c, StreamChunk::Result { .. } | StreamChunk::Error { .. }));
+                // Capture the session_id from a Result chunk before the
+                // chunks vector is consumed by the emit loop. ADR-045 drain
+                // happens here: when a turn ends, take any queued message
+                // for this session and write it to stdin as the next turn.
+                let result_session_id = chunks.iter().find_map(|c| match c {
+                    StreamChunk::Result { session_id, .. } => Some(session_id.clone()),
+                    _ => None,
+                });
                 if is_terminal || msg_type == "system" {
                     got_result = true;
                     // Clear StreamParser per-turn state. message_stop also
@@ -1421,10 +1439,24 @@ impl ChatSession {
                     // ToolInputDelta events in the next turn.
                     parser.reset();
                 }
+                let registry = app_handle.state::<crate::subscribe_cmd::MsgStoreRegistry>();
                 for chunk in chunks {
+                    patch_emitter.handle_chunk(&chunk, &registry);
                     if let Err(e) = app_handle.emit("chat_stream", chunk) {
                         log::warn!("failed to emit chat_stream event: {e}");
                     }
+                }
+                // ADR-042/043 lifecycle patches are emitted automatically
+                // by `patch_emitter.handle_chunk` when it sees `Result` —
+                // no separate hook needed.
+                // ADR-045 drain: after Result chunks have been emitted (so
+                // the frontend already saw `is_streaming=false`), take any
+                // queued message for this session and write it back to
+                // Claude's stdin as the next turn. The composer ALSO clears
+                // its local `state.pending_queue` via the `QueueDrained`
+                // event below — both sides converge on the same state.
+                if let Some(session_id) = result_session_id {
+                    drain_queued_message(&app_handle, &session_id, &stdin_for_reader);
                 }
             }
 
@@ -1432,14 +1464,14 @@ impl ChatSession {
             // emit an error so the frontend doesn't hang with isStreaming=true.
             if !got_result {
                 log::warn!("stdout reader: stream ended without result");
-                let _ = app_handle.emit(
-                    "chat_stream",
-                    StreamChunk::Error {
-                        content:
-                            "Claude session ended unexpectedly. Check the session log for details."
-                                .to_string(),
-                    },
-                );
+                let chunk = StreamChunk::Error {
+                    content:
+                        "Claude session ended unexpectedly. Check the session log for details."
+                            .to_string(),
+                };
+                let registry = app_handle.state::<crate::subscribe_cmd::MsgStoreRegistry>();
+                patch_emitter.handle_chunk(&chunk, &registry);
+                let _ = app_handle.emit("chat_stream", chunk);
             }
         });
         self.drain_handles.push(h);
@@ -1668,6 +1700,61 @@ impl Drop for ChatSession {
 
 /// Thread-safe wrapper for ChatSession, to be used from Tauri commands.
 pub type SharedChatSession = Arc<Mutex<ChatSession>>;
+
+/// Drain any queued message for `session_id` (ADR-045) and write it to
+/// `stdin` as the next turn. Called from the stream reader thread when a
+/// `Result` chunk is observed — i.e. the turn just ended and a new one
+/// can start. Best-effort: failures are logged, never fatal.
+fn drain_queued_message(
+    app_handle: &AppHandle,
+    session_id: &str,
+    stdin: &Arc<Mutex<std::process::ChildStdin>>,
+) {
+    let queue = app_handle.state::<speedwave_runtime::session::QueuedMessageService>();
+    let drained = match queue.take(session_id) {
+        Some(m) => m,
+        None => return,
+    };
+    let payload = build_user_message(&drained.text);
+    match stdin.lock() {
+        Ok(mut handle) => {
+            if let Err(e) = writeln!(handle, "{}", payload) {
+                log::warn!("queued-message write failed: {e}");
+                return;
+            }
+            if let Err(e) = handle.flush() {
+                log::warn!("queued-message flush failed: {e}");
+                return;
+            }
+        }
+        Err(e) => {
+            log::warn!("queued-message stdin lock poisoned: {e}");
+            return;
+        }
+    }
+    let drained_text = drained.text.clone();
+    if let Err(e) = app_handle.emit(
+        "chat_stream",
+        StreamChunk::QueueDrained {
+            session_id: session_id.to_string(),
+            text: drained.text,
+        },
+    ) {
+        log::warn!("failed to emit QueueDrained event: {e}");
+    }
+    // ADR-042/045 mirror: clear the state-tree's pending_queue slot.
+    use speedwave_runtime::stream::msg_store::LogMsg;
+    use speedwave_runtime::stream::ConversationPatch;
+    let registry = app_handle.state::<crate::subscribe_cmd::MsgStoreRegistry>();
+    let store = registry.store_for(session_id);
+    store.push(LogMsg::JsonPatch(ConversationPatch::set_pending_queue(
+        None,
+    )));
+    // The drained message is already in flight; record it as a state-tree
+    // event so subscribers can observe the queue lifecycle without listening
+    // to the legacy `chat_stream` channel.
+    log::debug!("queue drained: {} bytes for session", drained_text.len());
+}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

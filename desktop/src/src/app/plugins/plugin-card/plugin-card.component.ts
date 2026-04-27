@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
+import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { PluginStatusEntry } from '../../models/plugin';
 
@@ -16,30 +16,32 @@ export interface SavePluginCredentialsEvent {
   template: `
     <div
       class="bg-sw-bg-navy border border-sw-border rounded-lg mb-3 overflow-hidden"
-      [attr.data-testid]="'plugin-card-' + plugin.slug"
+      [attr.data-testid]="'plugin-card-' + plugin().slug"
     >
       <div class="flex justify-between items-center px-5 py-4">
         <button
           class="flex items-center gap-3 flex-1 cursor-pointer bg-transparent border-none text-inherit font-inherit text-left p-0"
           type="button"
           data-testid="card-header-btn"
-          (click)="toggleExpand.emit(plugin.slug)"
+          (click)="toggleExpand.emit(plugin().slug)"
         >
-          <span class="font-semibold text-base" data-testid="service-name">{{ plugin.name }}</span>
+          <span class="font-semibold text-base" data-testid="service-name">{{
+            plugin().name
+          }}</span>
           <span class="text-[11px] text-sw-text-dim font-mono" data-testid="version-badge"
-            >v{{ plugin.version }}</span
+            >v{{ plugin().version }}</span
           >
-          @if (plugin.auth_fields.length > 0) {
+          @if (plugin().auth_fields.length > 0) {
             <span
               class="text-[11px] px-2 py-0.5 rounded font-medium"
               data-testid="badge"
-              [attr.data-status]="plugin.configured ? 'configured' : 'not-configured'"
-              [class.bg-sw-success-dark]="plugin.configured"
-              [class.text-sw-success-text]="plugin.configured"
-              [class.bg-sw-error-badge]="!plugin.configured"
-              [class.text-sw-error-text]="!plugin.configured"
+              [attr.data-status]="plugin().configured ? 'configured' : 'not-configured'"
+              [class.bg-sw-success-dark]="plugin().configured"
+              [class.text-sw-success-text]="plugin().configured"
+              [class.bg-sw-error-badge]="!plugin().configured"
+              [class.text-sw-error-text]="!plugin().configured"
             >
-              {{ plugin.configured ? 'Configured' : 'Not Configured' }}
+              {{ plugin().configured ? 'Configured' : 'Not Configured' }}
             </span>
           }
         </button>
@@ -47,8 +49,8 @@ export interface SavePluginCredentialsEvent {
           <button
             type="button"
             class="px-3 py-1 bg-transparent text-sw-accent border border-sw-accent rounded text-xs font-mono cursor-pointer transition-all duration-200 hover:bg-sw-accent hover:text-sw-bg-darkest"
-            [attr.data-testid]="'plugin-open-' + plugin.slug"
-            (click)="openPlugin.emit(plugin.slug); $event.stopPropagation()"
+            [attr.data-testid]="'plugin-open-' + plugin().slug"
+            (click)="openPlugin.emit(plugin().slug); $event.stopPropagation()"
           >
             Open
           </button>
@@ -56,9 +58,9 @@ export interface SavePluginCredentialsEvent {
             <input
               type="checkbox"
               class="peer sr-only"
-              [checked]="plugin.enabled"
+              [checked]="plugin().enabled"
               (change)="onToggle($event)"
-              [attr.data-testid]="'plugin-toggle-' + plugin.slug"
+              [attr.data-testid]="'plugin-toggle-' + plugin().slug"
             />
             <span
               class="absolute inset-0 bg-sw-slider rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-sw-accent before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
@@ -67,36 +69,36 @@ export interface SavePluginCredentialsEvent {
         </div>
       </div>
       <p class="px-5 pb-3 text-sw-text-muted text-[13px] m-0" data-testid="card-description">
-        {{ plugin.description }}
+        {{ plugin().description }}
       </p>
 
-      @if (plugin.auth_fields.length > 0 && !plugin.configured && !expanded) {
+      @if (plugin().auth_fields.length > 0 && !plugin().configured && !expanded()) {
         <p
           class="px-5 pb-3 text-sw-accent text-[12px] m-0 cursor-pointer"
           data-testid="setup-hint"
           role="button"
           tabindex="0"
-          (click)="toggleExpand.emit(plugin.slug)"
-          (keydown.enter)="toggleExpand.emit(plugin.slug)"
-          (keydown.space)="$event.preventDefault(); toggleExpand.emit(plugin.slug)"
+          (click)="toggleExpand.emit(plugin().slug)"
+          (keydown.enter)="toggleExpand.emit(plugin().slug)"
+          (keydown.space)="$event.preventDefault(); toggleExpand.emit(plugin().slug)"
         >
           Click to set up credentials
         </p>
       }
 
-      @if (expanded) {
+      @if (expanded()) {
         <div class="px-5 pb-5 border-t border-sw-border" data-testid="card-body">
-          @if (plugin.auth_fields.length > 0) {
+          @if (plugin().auth_fields.length > 0) {
             <form (submit)="onSave($event)">
-              @for (field of plugin.auth_fields; track field.key) {
+              @for (field of plugin().auth_fields; track field.key) {
                 <div class="my-4">
                   <label
                     class="block mb-1.5 text-[13px] text-sw-text-muted"
-                    [for]="plugin.slug + '-' + field.key"
+                    [for]="plugin().slug + '-' + field.key"
                     >{{ field.label }}</label
                   >
                   <input
-                    [id]="plugin.slug + '-' + field.key"
+                    [id]="plugin().slug + '-' + field.key"
                     [type]="field.field_type === 'password' ? 'password' : 'text'"
                     [placeholder]="field.placeholder"
                     [value]="getFieldValue(field.key)"
@@ -111,15 +113,15 @@ export interface SavePluginCredentialsEvent {
                 <button
                   type="submit"
                   class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-darkest"
-                  [attr.data-testid]="'plugin-save-' + plugin.slug"
+                  [attr.data-testid]="'plugin-save-' + plugin().slug"
                 >
                   Save
                 </button>
                 <button
                   type="button"
                   class="px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
-                  [attr.data-testid]="'plugin-delete-creds-' + plugin.slug"
-                  (click)="deleteCredentials.emit(plugin)"
+                  [attr.data-testid]="'plugin-delete-creds-' + plugin().slug"
+                  (click)="deleteCredentials.emit(plugin())"
                 >
                   Remove Credentials
                 </button>
@@ -127,9 +129,9 @@ export interface SavePluginCredentialsEvent {
             </form>
           }
 
-          @if (plugin.token_mount.startsWith('rw')) {
+          @if (plugin().token_mount.startsWith('rw')) {
             <p class="text-[11px] text-sw-text-dim mt-2 font-mono">
-              Token mount: {{ plugin.token_mount }}
+              Token mount: {{ plugin().token_mount }}
             </p>
           }
 
@@ -143,7 +145,7 @@ export interface SavePluginCredentialsEvent {
               <button
                 type="button"
                 class="px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
-                [attr.data-testid]="'plugin-remove-confirm-' + plugin.slug"
+                [attr.data-testid]="'plugin-remove-confirm-' + plugin().slug"
                 (click)="onConfirmRemove()"
               >
                 Yes, uninstall
@@ -151,7 +153,7 @@ export interface SavePluginCredentialsEvent {
               <button
                 type="button"
                 class="px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
-                [attr.data-testid]="'plugin-remove-cancel-' + plugin.slug"
+                [attr.data-testid]="'plugin-remove-cancel-' + plugin().slug"
                 (click)="confirmingRemove = false"
               >
                 Cancel
@@ -160,7 +162,7 @@ export interface SavePluginCredentialsEvent {
               <button
                 type="button"
                 class="px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
-                [attr.data-testid]="'plugin-remove-' + plugin.slug"
+                [attr.data-testid]="'plugin-remove-' + plugin().slug"
                 (click)="confirmingRemove = true"
               >
                 Uninstall Plugin
@@ -173,15 +175,15 @@ export interface SavePluginCredentialsEvent {
   `,
 })
 export class PluginCardComponent {
-  @Input({ required: true }) plugin!: PluginStatusEntry;
-  @Input() expanded = false;
+  readonly plugin = input.required<PluginStatusEntry>();
+  readonly expanded = input(false);
 
-  @Output() toggleExpand = new EventEmitter<string>();
-  @Output() openPlugin = new EventEmitter<string>();
-  @Output() togglePlugin = new EventEmitter<{ plugin: PluginStatusEntry; event: Event }>();
-  @Output() saveCredentials = new EventEmitter<SavePluginCredentialsEvent>();
-  @Output() deleteCredentials = new EventEmitter<PluginStatusEntry>();
-  @Output() removePlugin = new EventEmitter<PluginStatusEntry>();
+  readonly toggleExpand = output<string>();
+  readonly openPlugin = output<string>();
+  readonly togglePlugin = output<{ plugin: PluginStatusEntry; event: Event }>();
+  readonly saveCredentials = output<SavePluginCredentialsEvent>();
+  readonly deleteCredentials = output<PluginStatusEntry>();
+  readonly removePlugin = output<PluginStatusEntry>();
 
   editedValues: Record<string, string> = {};
   confirmingRemove = false;
@@ -191,7 +193,7 @@ export class PluginCardComponent {
    * @param key - the field key to look up
    */
   getFieldValue(key: string): string {
-    return this.editedValues[key] ?? this.plugin.current_values[key] ?? '';
+    return this.editedValues[key] ?? this.plugin().current_values[key] ?? '';
   }
 
   /**
@@ -209,12 +211,13 @@ export class PluginCardComponent {
    * @param event - the checkbox change event
    */
   onToggle(event: Event): void {
-    if (!this.plugin.configured) {
+    const plugin = this.plugin();
+    if (!plugin.configured) {
       (event.target as HTMLInputElement).checked = false;
-      this.toggleExpand.emit(this.plugin.slug);
+      this.toggleExpand.emit(plugin.slug);
       return;
     }
-    this.togglePlugin.emit({ plugin: this.plugin, event });
+    this.togglePlugin.emit({ plugin, event });
   }
 
   /**
@@ -222,7 +225,7 @@ export class PluginCardComponent {
    */
   onConfirmRemove(): void {
     this.confirmingRemove = false;
-    this.removePlugin.emit(this.plugin);
+    this.removePlugin.emit(this.plugin());
   }
 
   /**
@@ -231,9 +234,10 @@ export class PluginCardComponent {
    */
   onSave(event: Event): void {
     event.preventDefault();
+    const plugin = this.plugin();
     const credentials: Record<string, string> = {};
 
-    for (const field of this.plugin.auth_fields) {
+    for (const field of plugin.auth_fields) {
       const value = this.editedValues[field.key];
       if (value !== undefined && value !== '') {
         credentials[field.key] = value;
@@ -243,7 +247,7 @@ export class PluginCardComponent {
     if (Object.keys(credentials).length === 0) return;
 
     this.saveCredentials.emit({
-      plugin: this.plugin,
+      plugin,
       credentials,
     });
 

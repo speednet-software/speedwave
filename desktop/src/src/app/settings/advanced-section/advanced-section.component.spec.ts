@@ -28,8 +28,8 @@ describe('AdvancedSectionComponent', () => {
 
   it('renders Logging and Danger Zone sections', () => {
     fixture.detectChanges();
-    const headings = fixture.nativeElement.querySelectorAll('h2');
-    const texts = Array.from(headings).map((h: Element) => h.textContent?.trim());
+    const headings = fixture.nativeElement.querySelectorAll('h2') as NodeListOf<Element>;
+    const texts = Array.from(headings).map((h) => h.textContent?.trim());
     expect(texts).toContain('Logging');
     expect(texts).toContain('Danger Zone');
   });
@@ -43,7 +43,7 @@ describe('AdvancedSectionComponent', () => {
 
     it('updates logLevel property', async () => {
       await component.setLogLevel('trace');
-      expect(component.logLevel).toBe('trace');
+      expect(component.logLevel()).toBe('trace');
     });
 
     it('emits errorOccurred on failure', async () => {
@@ -61,7 +61,7 @@ describe('AdvancedSectionComponent', () => {
   describe('exportDiagnostics()', () => {
     it('calls export_diagnostics with active project', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      component.activeProject = 'test';
+      fixture.componentRef.setInput('activeProject', 'test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'export_diagnostics') return '/tmp/diag.zip';
         return undefined;
@@ -72,7 +72,7 @@ describe('AdvancedSectionComponent', () => {
     });
 
     it('sets diagnosticsExporting during export', async () => {
-      component.activeProject = 'test';
+      fixture.componentRef.setInput('activeProject', 'test');
       let resolveFn!: (v: string) => void;
       mockTauri.invokeHandler = (cmd: string) =>
         new Promise<string>((resolve) => {
@@ -88,7 +88,7 @@ describe('AdvancedSectionComponent', () => {
 
     it('does nothing without activeProject', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      component.activeProject = null;
+      fixture.componentRef.setInput('activeProject', null);
       await component.exportDiagnostics();
       expect(invokeSpy).not.toHaveBeenCalledWith('export_diagnostics', expect.anything());
     });
@@ -96,7 +96,7 @@ describe('AdvancedSectionComponent', () => {
     it('emits errorOccurred on failure', async () => {
       const errorSpy = vi.fn();
       component.errorOccurred.subscribe(errorSpy);
-      component.activeProject = 'test';
+      fixture.componentRef.setInput('activeProject', 'test');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'export_diagnostics') throw new Error('zip failed');
         return undefined;
@@ -174,7 +174,7 @@ describe('AdvancedSectionComponent', () => {
     });
 
     it('disables Export Diagnostics when no activeProject', () => {
-      component.activeProject = null;
+      fixture.componentRef.setInput('activeProject', null);
       fixture.detectChanges();
       const btn: HTMLButtonElement = fixture.nativeElement.querySelector(
         '[data-testid="settings-export-diagnostics"]'
@@ -183,7 +183,7 @@ describe('AdvancedSectionComponent', () => {
     });
 
     it('enables Export Diagnostics when activeProject is set', () => {
-      component.activeProject = 'test';
+      fixture.componentRef.setInput('activeProject', 'test');
       fixture.detectChanges();
       const btn: HTMLButtonElement = fixture.nativeElement.querySelector(
         '[data-testid="settings-export-diagnostics"]'

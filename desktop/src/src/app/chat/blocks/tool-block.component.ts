@@ -2,8 +2,9 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
-  Input,
+  computed,
   inject,
+  input,
 } from '@angular/core';
 import type { NormalizedToolInput, ToolUseBlock } from '../../models/chat';
 import { ToolNormalizerService } from '../../services/tool-normalizer.service';
@@ -16,15 +17,15 @@ import { DiffViewComponent } from './diff-view.component';
  * running, green on success, red-500 on error.
  */
 const STATUS_BORDER: Readonly<Record<ToolUseBlock['status'], string>> = Object.freeze({
-  running: 'border-amber/50',
-  done: 'border-green/50',
+  running: 'border-[var(--amber)]/50',
+  done: 'border-[var(--green)]/50',
   error: 'border-red-500/50',
 });
 
-/** Status → text color for the tool-name glyph in the header. */
+/** Status → text color for the tool-name label in the header. */
 const STATUS_INK: Readonly<Record<ToolUseBlock['status'], string>> = Object.freeze({
-  running: 'text-amber',
-  done: 'text-green',
+  running: 'text-[var(--amber)]',
+  done: 'text-[var(--green)]',
   error: 'text-red-400',
 });
 
@@ -43,7 +44,6 @@ const STATUS_INK: Readonly<Record<ToolUseBlock['status'], string>> = Object.free
  */
 @Component({
   selector: 'app-tool-block',
-  standalone: true,
   imports: [DiffViewComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block my-2' },
@@ -52,80 +52,101 @@ const STATUS_INK: Readonly<Record<ToolUseBlock['status'], string>> = Object.free
       role="region"
       [attr.aria-labelledby]="headerId"
       class="border-l-2 pl-4"
-      [class]="borderClass"
-      [class.opacity-70]="isStopped"
+      [class]="borderClass()"
+      [class.opacity-70]="isStopped()"
     >
       <button
         type="button"
         [id]="headerId"
         [attr.aria-controls]="bodyId"
         [attr.aria-expanded]="!isCollapsed()"
-        class="mono flex w-full items-center gap-2 text-[11px] text-left"
+        class="mono flex w-full items-center gap-2 text-left text-[11px]"
         (click)="toggleCollapsed()"
       >
-        <span [class]="statusInkClass" class="inline-flex items-center gap-1.5">
-          <span data-testid="tool-status" aria-hidden="true">{{ statusGlyph }}</span>
-          <span data-testid="tool-name">{{ tool.tool_name }}</span>
+        <span [class]="statusInkClass()" class="inline-flex items-center gap-1.5">
+          @if (tool().status === 'running' && !isStopped()) {
+            <svg
+              data-testid="tool-status"
+              class="spin h-3 w-3"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+              stroke-width="2"
+              aria-hidden="true"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 0 0 4.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 0 1-15.357-2m15.357 2H15"
+              />
+            </svg>
+          } @else {
+            <span data-testid="tool-status" aria-hidden="true">{{ statusGlyph() }}</span>
+          }
+          <span data-testid="tool-name">{{ tool().tool_name }}</span>
         </span>
-        @if (headerSummary) {
-          <span data-testid="tool-summary" class="truncate text-ink-dim">
-            {{ headerSummary }}
+        @if (headerSummary()) {
+          <span data-testid="tool-summary" class="truncate text-[var(--ink-dim)]">
+            {{ headerSummary() }}
           </span>
         }
-        @if (headerMeta) {
-          <span data-testid="tool-meta" class="ml-auto text-ink-mute">{{ headerMeta }}</span>
+        @if (headerMeta()) {
+          <span data-testid="tool-meta" class="ml-auto text-[var(--ink-mute)]">{{
+            headerMeta()
+          }}</span>
         }
       </button>
 
       @if (!isCollapsed()) {
         <div [id]="bodyId" data-testid="tool-body" class="mt-2">
-          @switch (normalized.kind) {
+          @switch (normalized().kind) {
             @case ('bash') {
               <pre
                 data-testid="terminal-output"
-                class="mono overflow-x-auto overflow-hidden rounded ring-1 ring-line bg-bg-1 p-3 text-[11.5px] leading-[1.6] text-ink"
+                class="mono overflow-x-auto rounded border border-[var(--line)] bg-[var(--bg-1)] p-3 text-[11.5px] leading-[1.6] text-[var(--ink-dim)]"
               >
-$ {{ asBash(normalized).command }}</pre
+$ {{ asBash(normalized()).command }}</pre
               >
             }
             @case ('read') {
-              <div data-testid="file-path" class="mono text-[11.5px] text-teal">
-                {{ asRead(normalized).file_path }}
+              <div data-testid="file-path" class="mono text-[11.5px] text-[var(--teal)]">
+                {{ asRead(normalized()).file_path }}
               </div>
               @if (
-                asRead(normalized).offset !== undefined || asRead(normalized).limit !== undefined
+                asRead(normalized()).offset !== undefined ||
+                asRead(normalized()).limit !== undefined
               ) {
-                <div class="mono mt-1 text-[11px] text-ink-mute">
-                  @if (asRead(normalized).offset !== undefined) {
-                    offset {{ asRead(normalized).offset }}
+                <div class="mono mt-1 text-[11px] text-[var(--ink-mute)]">
+                  @if (asRead(normalized()).offset !== undefined) {
+                    offset {{ asRead(normalized()).offset }}
                   }
-                  @if (asRead(normalized).limit !== undefined) {
-                    &nbsp;&middot; limit {{ asRead(normalized).limit }}
+                  @if (asRead(normalized()).limit !== undefined) {
+                    &nbsp;&middot; limit {{ asRead(normalized()).limit }}
                   }
                 </div>
               }
             }
             @case ('edit') {
-              <div data-testid="file-path" class="mono mb-2 text-[11.5px] text-teal">
-                {{ asEdit(normalized).file_path }}
+              <div data-testid="file-path" class="mono mb-2 text-[11.5px] text-[var(--teal)]">
+                {{ asEdit(normalized()).file_path }}
               </div>
               <app-diff-view
-                [oldString]="asEdit(normalized).old_string"
-                [newString]="asEdit(normalized).new_string"
+                [oldString]="asEdit(normalized()).old_string"
+                [newString]="asEdit(normalized()).new_string"
               />
             }
             @case ('write') {
-              <div data-testid="file-path" class="mono mb-2 text-[11.5px] text-teal">
-                {{ asWrite(normalized).file_path }}
+              <div data-testid="file-path" class="mono mb-2 text-[11.5px] text-[var(--teal)]">
+                {{ asWrite(normalized()).file_path }}
               </div>
-              <app-diff-view [oldString]="''" [newString]="asWrite(normalized).content" />
+              <app-diff-view [oldString]="''" [newString]="asWrite(normalized()).content" />
             }
             @case ('todo_write') {
               <ul
                 data-testid="todo-list"
-                class="mono space-y-0.5 overflow-hidden rounded ring-1 ring-line bg-bg-1 p-3 text-[12px] list-none"
+                class="mono list-none space-y-0.5 rounded border border-[var(--line)] bg-[var(--bg-1)] p-3 text-[12px]"
               >
-                @for (todo of asTodoWrite(normalized).todos; track todo.id) {
+                @for (todo of asTodoWrite(normalized()).todos; track todo.id) {
                   <li [class]="todoColor(todo.status)">
                     {{ todoGlyph(todo.status) }} {{ todo.title }}
                   </li>
@@ -134,78 +155,80 @@ $ {{ asBash(normalized).command }}</pre
             }
             @case ('glob') {
               <div class="mono flex flex-wrap items-center gap-2 text-[11.5px]">
-                <span class="text-ink-mute">pattern:</span>
-                <span data-testid="pattern" class="text-teal">{{
-                  asGlob(normalized).pattern
+                <span class="text-[var(--ink-mute)]">pattern:</span>
+                <span data-testid="pattern" class="text-[var(--teal)]">{{
+                  asGlob(normalized()).pattern
                 }}</span>
-                @if (asGlob(normalized).path) {
-                  <span class="text-ink-mute">&middot; in</span>
-                  <span class="text-teal">{{ asGlob(normalized).path }}</span>
+                @if (asGlob(normalized()).path) {
+                  <span class="text-[var(--ink-mute)]">&middot; in</span>
+                  <span class="text-[var(--teal)]">{{ asGlob(normalized()).path }}</span>
                 }
               </div>
             }
             @case ('grep') {
               <div class="mono flex flex-wrap items-center gap-2 text-[11.5px]">
-                <span class="text-ink-mute">pattern:</span>
-                <span data-testid="pattern" class="text-teal">{{
-                  asGrep(normalized).pattern
+                <span class="text-[var(--ink-mute)]">pattern:</span>
+                <span data-testid="pattern" class="text-[var(--teal)]">{{
+                  asGrep(normalized()).pattern
                 }}</span>
-                @if (asGrep(normalized).path) {
-                  <span class="text-ink-mute">&middot; in</span>
-                  <span class="text-teal">{{ asGrep(normalized).path }}</span>
+                @if (asGrep(normalized()).path) {
+                  <span class="text-[var(--ink-mute)]">&middot; in</span>
+                  <span class="text-[var(--teal)]">{{ asGrep(normalized()).path }}</span>
                 }
-                @if (asGrep(normalized).include) {
-                  <span class="text-ink-mute">&middot; include</span>
-                  <span class="text-teal">{{ asGrep(normalized).include }}</span>
+                @if (asGrep(normalized()).include) {
+                  <span class="text-[var(--ink-mute)]">&middot; include</span>
+                  <span class="text-[var(--teal)]">{{ asGrep(normalized()).include }}</span>
                 }
               </div>
             }
             @case ('web_search') {
               <div class="mono flex flex-wrap items-center gap-2 text-[11.5px]">
-                <span class="text-ink-mute">query:</span>
-                <span data-testid="query" class="text-teal">{{
-                  asWebSearch(normalized).query
+                <span class="text-[var(--ink-mute)]">query:</span>
+                <span data-testid="query" class="text-[var(--teal)]">{{
+                  asWebSearch(normalized()).query
                 }}</span>
               </div>
             }
             @case ('web_fetch') {
               <div class="mono flex flex-wrap items-center gap-2 text-[11.5px]">
-                <span class="text-ink-mute">url:</span>
-                <span data-testid="url" class="text-teal">{{ asWebFetch(normalized).url }}</span>
+                <span class="text-[var(--ink-mute)]">url:</span>
+                <span data-testid="url" class="text-[var(--teal)]">{{
+                  asWebFetch(normalized()).url
+                }}</span>
               </div>
             }
             @case ('agent') {
-              <div data-testid="agent-description" class="mono text-[11.5px] text-ink-dim">
-                {{ asAgent(normalized).description }}
+              <div data-testid="agent-description" class="mono text-[11.5px] text-[var(--ink-dim)]">
+                {{ asAgent(normalized()).description }}
               </div>
             }
             @default {
               <pre
                 data-testid="code-block"
-                class="mono overflow-x-auto overflow-hidden rounded ring-1 ring-line bg-bg-1 p-3 text-[11.5px] leading-[1.5] text-ink-dim"
-                >{{ asGeneric(normalized).raw_json }}</pre
+                class="mono overflow-x-auto rounded border border-[var(--line)] bg-[var(--bg-1)] p-3 text-[11.5px] leading-[1.5] text-[var(--ink-dim)]"
+                >{{ asGeneric(normalized()).raw_json }}</pre
               >
             }
           }
-          @if (hasResult) {
+          @if (hasResult()) {
             <div
               data-testid="tool-result"
               class="mt-2"
-              [attr.data-error]="resultIsError ? 'true' : null"
+              [attr.data-error]="resultIsError() ? 'true' : null"
             >
               <div
                 data-testid="result-label"
                 class="mono mb-1 text-[10px] uppercase tracking-widest"
-                [class.text-red-400]="resultIsError"
-                [class.text-ink-mute]="!resultIsError"
+                [class.text-red-400]="resultIsError()"
+                [class.text-[var(--ink-mute)]]="!resultIsError()"
               >
-                {{ resultIsError ? 'Error' : 'Result' }}
+                {{ resultIsError() ? 'Error' : 'Result' }}
               </div>
               <pre
                 data-testid="result-content"
-                class="mono max-h-[300px] overflow-x-auto overflow-y-auto overflow-hidden rounded ring-1 p-3 text-[11.5px] leading-[1.6]"
-                [class]="resultPaneClass"
-                >{{ resultText }}</pre
+                class="mono max-h-[300px] overflow-x-auto overflow-y-auto rounded border p-3 text-[11.5px] leading-[1.6]"
+                [class]="resultPaneClass()"
+                >{{ resultText() }}</pre
               >
             </div>
           }
@@ -215,7 +238,7 @@ $ {{ asBash(normalized).command }}</pre
   `,
 })
 export class ToolBlockComponent {
-  @Input({ required: true }) tool!: ToolUseBlock;
+  readonly tool = input.required<ToolUseBlock>();
 
   private readonly normalizer = inject(ToolNormalizerService);
   private readonly cdr = inject(ChangeDetectorRef);
@@ -225,10 +248,6 @@ export class ToolBlockComponent {
   private readonly instanceId = ++ToolBlockComponent.nextInstance;
   readonly headerId = `tool-block-header-${this.instanceId}`;
   readonly bodyId = `tool-block-body-${this.instanceId}`;
-
-  /** Cached normalized result plus the input_json it was computed from. */
-  private cachedInputJson = '';
-  private cachedNormalized: NormalizedToolInput | null = null;
 
   /**
    * User-toggle state, keyed by tool_id.
@@ -241,73 +260,76 @@ export class ToolBlockComponent {
    */
   private readonly overrides: Record<string, boolean> = {};
 
-  /** Returns the normalized tool input, caching the result until input_json changes. */
-  get normalized(): NormalizedToolInput {
-    if (this.cachedInputJson !== this.tool.input_json || !this.cachedNormalized) {
-      this.cachedInputJson = this.tool.input_json;
-      this.cachedNormalized = this.normalizer.normalize(this.tool.tool_name, this.tool.input_json);
-    }
-    return this.cachedNormalized;
-  }
+  /** Returns the normalized tool input — recomputes only when input_json changes. */
+  readonly normalized = computed<NormalizedToolInput>(() =>
+    this.normalizer.normalize(this.tool().tool_name, this.tool().input_json)
+  );
 
   /** Whether this tool's body is currently hidden. */
   isCollapsed(): boolean {
-    const override = this.overrides[this.tool.tool_id];
+    const t = this.tool();
+    const override = this.overrides[t.tool_id];
     if (override !== undefined) {
       return override;
     }
-    return this.tool.status !== 'running';
+    return t.status !== 'running';
   }
 
   /** Toggles this tool's collapsed state; the override survives status changes. */
   toggleCollapsed(): void {
     const next = !this.isCollapsed();
-    this.overrides[this.tool.tool_id] = next;
+    this.overrides[this.tool().tool_id] = next;
     this.cdr.markForCheck();
   }
 
   /** Tailwind border-color class for the timeline left rail, keyed by tool status. */
-  get borderClass(): string {
-    // Stopped tools surface as status="error" but visually use a neutral gray
-    // rail (matches the "stopped gray" rule in the design-system spec). The
-    // host element already carries `border-l-2 pl-4`, so only the color
-    // class is returned here.
-    if (this.isStopped) return 'border-line-strong/50';
-    return STATUS_BORDER[this.tool.status];
-  }
+  readonly borderClass = computed<string>(() => {
+    // Stopped tools surface as status="error" but visually use a muted gray rail
+    // (matches the "stopped gray" rule in the design-system spec). The host
+    // element already carries `border-l-2 pl-4`, so only the color class is
+    // returned here.
+    if (this.isStopped()) return 'border-[var(--ink-mute)]/50';
+    return STATUS_BORDER[this.tool().status];
+  });
 
   /** Tailwind text-color class for the status glyph + tool name in the header. */
-  get statusInkClass(): string {
-    return STATUS_INK[this.tool.status];
-  }
+  readonly statusInkClass = computed<string>(() => {
+    if (this.isStopped()) return 'text-[var(--ink-mute)]';
+    return STATUS_INK[this.tool().status];
+  });
 
   /** A tool is "stopped" when its error result mentions a user cancel (opacity cue). */
-  get isStopped(): boolean {
-    if (this.tool.status !== 'error') {
+  readonly isStopped = computed<boolean>(() => {
+    const t = this.tool();
+    if (t.status !== 'error') {
       return false;
     }
-    const marker = this.tool.result.toLowerCase();
+    const marker = t.result.toLowerCase();
     return marker.includes('stopped') || marker.includes('interrupted');
-  }
+  });
 
-  /** Header glyph: stopped tools beat the status switch; running/done/error fall through. */
-  get statusGlyph(): string {
-    if (this.isStopped) {
+  /**
+   * Header glyph for non-running statuses. The running variant is rendered as
+   * an inline spin SVG directly in the template (matches the mockup) so this
+   * computed never returns a placeholder for it.
+   */
+  readonly statusGlyph = computed<string>(() => {
+    if (this.isStopped()) {
       return '⊘';
     }
-    switch (this.tool.status) {
+    switch (this.tool().status) {
       case 'running':
-        return '○';
+        return '';
       case 'done':
         return '✓';
       case 'error':
         return '✗';
     }
-  }
+  });
 
   /** Returns a one-line human summary shown inline after the tool name. */
-  get headerSummary(): string {
-    const n = this.normalized;
+  readonly headerSummary = computed<string>(() => {
+    const n = this.normalized();
     switch (n.kind) {
       case 'bash':
         return `$ ${n.command}`;
@@ -329,40 +351,43 @@ export class ToolBlockComponent {
       case 'generic':
         return '';
     }
-  }
+  });
 
   /** Returns right-aligned metadata shown on the header (running, stopped). */
-  get headerMeta(): string {
-    if (this.tool.status === 'running') {
+  readonly headerMeta = computed<string>(() => {
+    if (this.tool().status === 'running') {
       return 'running';
     }
-    if (this.isStopped) {
+    if (this.isStopped()) {
       return 'stopped';
     }
     return '';
-  }
+  });
 
   /** True when the tool has finished AND emitted a non-empty result string. */
-  get hasResult(): boolean {
-    return this.tool.status !== 'running' && this.tool.result.length > 0;
-  }
+  readonly hasResult = computed<boolean>(() => {
+    const t = this.tool();
+    return t.status !== 'running' && t.result.length > 0;
+  });
 
   /** True when the tool ended in error and the runtime flagged the result as an error payload. */
-  get resultIsError(): boolean {
-    return this.tool.status === 'error' && this.tool.result_is_error === true;
-  }
+  readonly resultIsError = computed<boolean>(() => {
+    const t = this.tool();
+    return t.status === 'error' && t.result_is_error === true;
+  });
 
   /** Text shown in the result pane — blank while running so we don't echo a stale value. */
-  get resultText(): string {
-    return this.tool.status === 'running' ? '' : this.tool.result;
-  }
+  readonly resultText = computed<string>(() => {
+    const t = this.tool();
+    return t.status === 'running' ? '' : t.result;
+  });
 
-  /** Tailwind classes for the result pane — swap ring/bg/text on error without slash-class bindings. */
-  get resultPaneClass(): string {
-    return this.resultIsError
-      ? 'ring-red-500/20 bg-red-500/5 text-red-300'
-      : 'ring-line bg-bg-1 text-ink-dim';
-  }
+  /** Tailwind classes for the result pane — swap border/bg/text on error without slash-class bindings. */
+  readonly resultPaneClass = computed<string>(() =>
+    this.resultIsError()
+      ? 'border-red-500/20 bg-red-500/5 text-red-300'
+      : 'border-[var(--line)] bg-[var(--bg-1)] text-[var(--ink-dim)]'
+  );
 
   /**
    * Glyph for a TodoWrite item's status cell.
@@ -388,13 +413,13 @@ export class ToolBlockComponent {
   todoColor(status: string): string {
     switch (status) {
       case 'completed':
-        return 'text-green';
+        return 'text-[var(--green)]';
       case 'in_progress':
-        return 'text-accent';
+        return 'text-[var(--accent)]';
       case 'cancelled':
-        return 'text-ink-mute line-through';
+        return 'text-[var(--ink-mute)] line-through';
       default:
-        return 'text-ink-mute';
+        return 'text-[var(--ink-mute)]';
     }
   }
 

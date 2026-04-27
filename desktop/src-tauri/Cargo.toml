@@ -35,6 +35,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 ctrlc = { version = "3", features = ["termination"] }
+dashmap = "6"
+futures-core = "0.3"
+json-patch = "4"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

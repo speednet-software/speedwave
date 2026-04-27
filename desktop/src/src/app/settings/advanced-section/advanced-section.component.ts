@@ -2,10 +2,10 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
-  EventEmitter,
-  Input,
-  Output,
   inject,
+  input,
+  model,
+  output,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
@@ -18,91 +18,93 @@ import { TauriService } from '../../services/tauri.service';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <!-- Logging -->
-    <section class="mb-6">
-      <h2 class="text-[15px] text-sw-text m-0 mb-3">Logging</h2>
-      <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-4">
-        <div class="flex justify-between items-center py-2">
-          <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="log-level"
-            >Log level</label
-          >
-          <select
-            id="log-level"
-            [ngModel]="logLevel"
-            (ngModelChange)="setLogLevel($event)"
-            class="flex-1 max-w-[340px] px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
-            data-testid="settings-log-level"
-          >
-            <option value="error">Error</option>
-            <option value="warn">Warn</option>
-            <option value="info">Info (default)</option>
-            <option value="debug">Debug</option>
-            <option value="trace">Trace</option>
-          </select>
-        </div>
-        <p class="text-[11px] text-sw-text-faint mt-2 mb-0">
-          Higher levels (Debug, Trace) produce more output. Verbose library logs (hyper, reqwest)
-          are always clamped to Warn.
-        </p>
-        <div class="flex items-center gap-3 pt-3 pb-1">
-          <button
-            class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-abyss disabled:opacity-40 disabled:cursor-not-allowed"
-            data-testid="settings-export-diagnostics"
-            (click)="exportDiagnostics()"
-            [disabled]="diagnosticsExporting || !activeProject"
-          >
-            {{ diagnosticsExporting ? 'Exporting...' : 'Export Diagnostics' }}
-          </button>
-          @if (diagnosticsPath) {
-            <span class="text-sw-success text-[13px]">{{ diagnosticsPath }}</span>
-          }
-        </div>
-        <p class="text-[11px] text-sw-text-faint mt-2 mb-0">
-          Collects app logs, container logs, and system info into a sanitized ZIP (no tokens or
-          secrets).
+    <section id="section-logging" class="border-t border-[var(--line)] pt-6">
+      <h2 class="view-title text-[16px] text-[var(--ink)]">Logging</h2>
+
+      <div class="mt-3">
+        <label
+          class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+          for="log-level"
+          >log level</label
+        >
+        <select
+          id="log-level"
+          [ngModel]="logLevel()"
+          (ngModelChange)="setLogLevel($event)"
+          class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+          data-testid="settings-log-level"
+        >
+          <option value="error">error</option>
+          <option value="warn">warn</option>
+          <option value="info">info (default)</option>
+          <option value="debug">debug</option>
+          <option value="trace">trace</option>
+        </select>
+        <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]">
+          Higher levels (debug, trace) produce more output. Verbose library logs (hyper, reqwest)
+          are always clamped to warn.
         </p>
       </div>
+
+      <div class="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
+          data-testid="settings-export-diagnostics"
+          (click)="exportDiagnostics()"
+          [disabled]="diagnosticsExporting || !activeProject()"
+        >
+          {{ diagnosticsExporting ? 'exporting...' : 'export diagnostics' }}
+        </button>
+        @if (diagnosticsPath) {
+          <span class="mono text-[11px] text-[var(--green)]">{{ diagnosticsPath }}</span>
+        }
+      </div>
+      <p class="mono mt-2 text-[10px] text-[var(--ink-mute)]">
+        Collects app logs, container logs, and system info into a sanitized ZIP (no tokens or
+        secrets).
+      </p>
     </section>
 
     <!-- Danger zone -->
-    <section class="mb-6">
-      <h2 class="text-[15px] text-sw-error m-0 mb-3">Danger Zone</h2>
-      <div
-        class="bg-sw-bg-dark border border-sw-error rounded-lg p-4 flex justify-between items-center gap-4"
-      >
-        <div class="flex-1">
-          <h3 class="text-sm text-sw-text m-0 mb-1">Factory Reset</h3>
-          <p class="text-xs text-sw-text-muted m-0 leading-relaxed">
-            Stops all containers, destroys the VM (macOS), and removes all Speedwave data including
-            tokens and plugins. The application will restart and the Setup Wizard will run again.
-          </p>
-        </div>
-        <div class="shrink-0">
+    <section id="section-danger" class="border-t border-red-500/20 pt-6">
+      <h2 class="view-title text-[16px] text-red-300">Danger Zone</h2>
+      <div class="mt-3 rounded border border-red-500/30 bg-red-500/5 p-4">
+        <div class="mono text-[12px] text-red-200">factory reset</div>
+        <p class="mt-1 text-[12px] leading-relaxed text-[var(--ink-dim)]">
+          Stops all containers, destroys the VM (macOS), and removes all Speedwave data including
+          tokens and plugins. The application will restart and the Setup Wizard will run again.
+        </p>
+        <div class="mt-3">
           @if (!confirmReset) {
             <button
-              class="px-4 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 whitespace-nowrap hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-abyss disabled:opacity-40 disabled:cursor-not-allowed"
+              type="button"
+              class="mono rounded border border-red-500/50 bg-red-500/10 px-3 py-1 text-[11px] text-red-300 hover:bg-red-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
               data-testid="settings-reset-btn"
               (click)="confirmReset = true"
               [disabled]="resetting"
             >
-              Reset
+              reset everything &rarr;
             </button>
           } @else {
-            <div class="flex gap-2">
+            <div class="flex flex-wrap gap-2">
               <button
-                class="px-4 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 whitespace-nowrap hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-abyss disabled:opacity-40 disabled:cursor-not-allowed"
+                type="button"
+                class="mono rounded border border-red-500/50 bg-red-500/10 px-3 py-1 text-[11px] text-red-300 hover:bg-red-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
                 data-testid="settings-confirm-reset"
                 (click)="resetEnvironment()"
                 [disabled]="resetting"
               >
-                {{ resetting ? 'Resetting...' : 'Confirm Reset' }}
+                {{ resetting ? 'resetting...' : 'confirm reset' }}
               </button>
               <button
-                class="px-4 py-1.5 bg-transparent text-sw-text-muted border border-sw-text-faint rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:text-sw-text hover:enabled:border-sw-text-muted disabled:opacity-40 disabled:cursor-not-allowed"
+                type="button"
+                class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
                 data-testid="settings-cancel-reset"
                 (click)="confirmReset = false"
                 [disabled]="resetting"
               >
-                Cancel
+                cancel
               </button>
             </div>
           }
@@ -112,10 +114,10 @@ import { TauriService } from '../../services/tauri.service';
   `,
 })
 export class AdvancedSectionComponent {
-  @Input() activeProject: string | null = null;
-  @Input() logLevel = 'info';
-  @Output() errorOccurred = new EventEmitter<string>();
-  @Output() resetCompleted = new EventEmitter<void>();
+  readonly activeProject = input<string | null>(null);
+  readonly logLevel = model('info');
+  readonly errorOccurred = output<string>();
+  readonly resetCompleted = output<void>();
 
   confirmReset = false;
   resetting = false;
@@ -130,7 +132,7 @@ export class AdvancedSectionComponent {
    * @param level - The desired log level (error, warn, info, debug, trace).
    */
   async setLogLevel(level: string): Promise<void> {
-    this.logLevel = level;
+    this.logLevel.set(level);
     try {
       await this.tauri.invoke('set_log_level', { level });
     } catch (e: unknown) {
@@ -141,13 +143,14 @@ export class AdvancedSectionComponent {
 
   /** Exports diagnostic data as a sanitized ZIP archive. */
   async exportDiagnostics(): Promise<void> {
-    if (!this.activeProject) return;
+    const project = this.activeProject();
+    if (!project) return;
     this.diagnosticsExporting = true;
     this.diagnosticsPath = '';
     this.cdr.markForCheck();
     try {
       const path = await this.tauri.invoke<string>('export_diagnostics', {
-        project: this.activeProject,
+        project,
       });
       this.diagnosticsPath = path;
     } catch (e: unknown) {

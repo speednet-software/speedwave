@@ -144,7 +144,7 @@ describe('ServiceCardComponent', () => {
 
     fixture = TestBed.createComponent(ServiceCardComponent);
     component = fixture.componentInstance;
-    component.svc = makeGitlabSvc();
+    fixture.componentRef.setInput('svc', makeGitlabSvc());
   });
 
   it('should create', () => {
@@ -163,7 +163,7 @@ describe('ServiceCardComponent', () => {
 
   describe('service-badge', () => {
     it('renders badge span with text when badge is set', () => {
-      component.svc = { ...makeGitlabSvc(), badge: 'BETA' };
+      fixture.componentRef.setInput('svc', { ...makeGitlabSvc(), badge: 'BETA' });
       fixture.detectChanges();
       const badgeEl = fixture.nativeElement.querySelector('[data-testid="service-badge"]');
       expect(badgeEl).not.toBeNull();
@@ -171,7 +171,7 @@ describe('ServiceCardComponent', () => {
     });
 
     it('does not render badge span when badge is absent', () => {
-      component.svc = { ...makeGitlabSvc(), badge: undefined };
+      fixture.componentRef.setInput('svc', { ...makeGitlabSvc(), badge: undefined });
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="service-badge"]')).toBeNull();
     });
@@ -185,7 +185,7 @@ describe('ServiceCardComponent', () => {
   });
 
   it('should show not-configured badge when not configured', () => {
-    component.svc = makeRedmineSvc();
+    fixture.componentRef.setInput('svc', makeRedmineSvc());
     fixture.detectChanges();
     const badge = fixture.nativeElement.querySelector('[data-testid="badge"]');
     expect(badge.textContent.trim()).toBe('Not Configured');
@@ -193,7 +193,7 @@ describe('ServiceCardComponent', () => {
   });
 
   it('should NOT disable toggle when service is not configured', () => {
-    component.svc = makeRedmineSvc();
+    fixture.componentRef.setInput('svc', makeRedmineSvc());
     fixture.detectChanges();
     const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
     const toggle = fixture.nativeElement.querySelector('[data-testid="toggle"]');
@@ -210,7 +210,7 @@ describe('ServiceCardComponent', () => {
   });
 
   it('should emit toggleExpand (not toggleService) when toggle clicked on unconfigured service', () => {
-    component.svc = makeRedmineSvc();
+    fixture.componentRef.setInput('svc', makeRedmineSvc());
     fixture.detectChanges();
     const expandSpy = vi.spyOn(component.toggleExpand, 'emit');
     const toggleSpy = vi.spyOn(component.toggleService, 'emit');
@@ -221,7 +221,7 @@ describe('ServiceCardComponent', () => {
   });
 
   it('should reset checkbox to false when toggle clicked on unconfigured service', () => {
-    component.svc = makeRedmineSvc();
+    fixture.componentRef.setInput('svc', makeRedmineSvc());
     fixture.detectChanges();
     const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
     checkbox.checked = true;
@@ -230,13 +230,13 @@ describe('ServiceCardComponent', () => {
   });
 
   it('should not show card-body when not expanded', () => {
-    component.expanded = false;
+    fixture.componentRef.setInput('expanded', false);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="card-body"]')).toBeNull();
   });
 
   it('should show card-body when expanded', () => {
-    component.expanded = true;
+    fixture.componentRef.setInput('expanded', true);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="card-body"]')).not.toBeNull();
   });
@@ -254,7 +254,10 @@ describe('ServiceCardComponent', () => {
     const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
     checkbox.dispatchEvent(new Event('change'));
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy.mock.calls[0][0].svc).toBe(component.svc);
+    const payload = spy.mock.calls[0][0];
+    expect(payload).toBeDefined();
+    if (!payload) throw new Error('expected payload');
+    expect(payload.svc).toBe(component.svc());
   });
 
   describe('getFieldValue()', () => {
@@ -268,7 +271,7 @@ describe('ServiceCardComponent', () => {
     });
 
     it('returns empty string when no value anywhere', () => {
-      component.svc = { ...makeGitlabSvc(), current_values: {} };
+      fixture.componentRef.setInput('svc', { ...makeGitlabSvc(), current_values: {} });
       expect(component.getFieldValue('token')).toBe('');
     });
   });
@@ -289,7 +292,7 @@ describe('ServiceCardComponent', () => {
       component.onSave(event);
       expect(event.preventDefault).toHaveBeenCalled();
       expect(spy).toHaveBeenCalledWith({
-        svc: component.svc,
+        svc: component.svc(),
         credentials: { token: 'glpat-new' },
         mappings: null,
       });
@@ -311,14 +314,14 @@ describe('ServiceCardComponent', () => {
   });
 
   it('should emit deleteCredentials when remove button is clicked', () => {
-    component.expanded = true;
+    fixture.componentRef.setInput('expanded', true);
     fixture.detectChanges();
     const spy = vi.spyOn(component.deleteCredentials, 'emit');
     const removeBtn = fixture.nativeElement.querySelector(
       '[data-testid="integrations-remove-gitlab"]'
     );
     removeBtn.click();
-    expect(spy).toHaveBeenCalledWith(component.svc);
+    expect(spy).toHaveBeenCalledWith(component.svc());
   });
 
   it('should set correct data-testid attribute', () => {
@@ -347,7 +350,7 @@ describe('ServiceCardComponent', () => {
     });
 
     it('does not place border-b inside the rounded wrapper when expanded', () => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       const body = fixture.nativeElement.querySelector('[data-testid="card-body"]');
       // The spec bans a border-b inside the rounded ring wrapper
@@ -364,8 +367,8 @@ describe('ServiceCardComponent', () => {
     });
 
     it('marks dot "configuring" for an OAuth "starting" state', () => {
-      component.svc = makeSharepointSvc();
-      component.oauthStatus = 'starting';
+      fixture.componentRef.setInput('svc', makeSharepointSvc());
+      fixture.componentRef.setInput('oauthStatus', 'starting');
       fixture.detectChanges();
       const card = fixture.nativeElement.querySelector(
         '[data-testid="integrations-service-sharepoint"]'
@@ -374,8 +377,8 @@ describe('ServiceCardComponent', () => {
     });
 
     it('marks dot "error" when OAuth status is error', () => {
-      component.svc = makeSharepointSvc();
-      component.oauthStatus = 'error';
+      fixture.componentRef.setInput('svc', makeSharepointSvc());
+      fixture.componentRef.setInput('oauthStatus', 'error');
       fixture.detectChanges();
       const card = fixture.nativeElement.querySelector(
         '[data-testid="integrations-service-sharepoint"]'
@@ -384,7 +387,7 @@ describe('ServiceCardComponent', () => {
     });
 
     it('marks dot "disabled" when service is idle and unconfigured', () => {
-      component.svc = makeRedmineSvc();
+      fixture.componentRef.setInput('svc', makeRedmineSvc());
       fixture.detectChanges();
       const card = fixture.nativeElement.querySelector(
         '[data-testid="integrations-service-redmine"]'
@@ -397,8 +400,8 @@ describe('ServiceCardComponent', () => {
 
   describe('OAuth fields', () => {
     it('does not render inputs for oauth_flow fields', () => {
-      component.svc = makeSharepointSvc();
-      component.expanded = true;
+      fixture.componentRef.setInput('svc', makeSharepointSvc());
+      fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       const el = fixture.nativeElement;
       expect(el.querySelector('#sharepoint-access_token')).toBeNull();
@@ -406,8 +409,8 @@ describe('ServiceCardComponent', () => {
     });
 
     it('renders non-oauth fields for sharepoint', () => {
-      component.svc = makeSharepointSvc();
-      component.expanded = true;
+      fixture.componentRef.setInput('svc', makeSharepointSvc());
+      fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       const el = fixture.nativeElement;
       expect(el.querySelector('#sharepoint-client_id')).not.toBeNull();
@@ -417,8 +420,8 @@ describe('ServiceCardComponent', () => {
     });
 
     it('marks all visible SharePoint inputs as required', () => {
-      component.svc = makeSharepointSvc();
-      component.expanded = true;
+      fixture.componentRef.setInput('svc', makeSharepointSvc());
+      fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       const inputs = fixture.nativeElement.querySelectorAll('[data-testid="auth-field-input"]');
       expect(inputs.length).toBe(4); // client_id, tenant_id, site_id, base_path
@@ -428,22 +431,22 @@ describe('ServiceCardComponent', () => {
     });
 
     it('shows oauth section for sharepoint when expanded', () => {
-      component.svc = makeSharepointSvc();
-      component.expanded = true;
+      fixture.componentRef.setInput('svc', makeSharepointSvc());
+      fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="oauth-section"]')).not.toBeNull();
     });
 
     it('does not show oauth section for non-oauth services', () => {
-      component.svc = makeGitlabSvc();
-      component.expanded = true;
+      fixture.componentRef.setInput('svc', makeGitlabSvc());
+      fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="oauth-section"]')).toBeNull();
     });
 
     it('does not show oauth section for redmine', () => {
-      component.svc = makeRedmineSvc();
-      component.expanded = true;
+      fixture.componentRef.setInput('svc', makeRedmineSvc());
+      fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="oauth-section"]')).toBeNull();
     });
@@ -451,7 +454,7 @@ describe('ServiceCardComponent', () => {
 
   describe('onStartOAuth()', () => {
     it('emits startOAuth with fresh form values (non-oauth only)', () => {
-      component.svc = makeSharepointSvc();
+      fixture.componentRef.setInput('svc', makeSharepointSvc());
       component.editedValues = {
         client_id: 'my-client',
         tenant_id: 'my-tenant',
@@ -461,6 +464,8 @@ describe('ServiceCardComponent', () => {
       component.onStartOAuth();
       expect(spy).toHaveBeenCalledTimes(1);
       const payload = spy.mock.calls[0][0];
+      expect(payload).toBeDefined();
+      if (!payload) throw new Error('expected payload');
       expect(payload.credentials).toEqual({
         client_id: 'my-client',
         tenant_id: 'my-tenant',
@@ -472,14 +477,16 @@ describe('ServiceCardComponent', () => {
     });
 
     it('emits startOAuth with current_values merged', () => {
-      component.svc = {
+      fixture.componentRef.setInput('svc', {
         ...makeSharepointSvc(),
         current_values: { client_id: 'saved-client', tenant_id: 'saved-tenant' },
-      };
+      });
       component.editedValues = { site_id: 'new-site' };
       const spy = vi.spyOn(component.startOAuth, 'emit');
       component.onStartOAuth();
       const payload = spy.mock.calls[0][0];
+      expect(payload).toBeDefined();
+      if (!payload) throw new Error('expected payload');
       expect(payload.credentials['client_id']).toBe('saved-client');
       expect(payload.credentials['tenant_id']).toBe('saved-tenant');
       expect(payload.credentials['site_id']).toBe('new-site');
@@ -488,9 +495,9 @@ describe('ServiceCardComponent', () => {
 
   describe('cancelOAuth', () => {
     it('emits cancelOAuth on cancel click', () => {
-      component.svc = makeSharepointSvc();
-      component.expanded = true;
-      component.oauthStatus = 'starting';
+      fixture.componentRef.setInput('svc', makeSharepointSvc());
+      fixture.componentRef.setInput('expanded', true);
+      fixture.componentRef.setInput('oauthStatus', 'starting');
       fixture.detectChanges();
       const spy = vi.spyOn(component.cancelOAuth, 'emit');
       const cancelBtn = fixture.nativeElement.querySelector('[data-testid="btn-cancel-oauth"]');
@@ -501,15 +508,15 @@ describe('ServiceCardComponent', () => {
 
   describe('openVerificationUrl', () => {
     it('emits on open link click', () => {
-      component.svc = makeSharepointSvc();
-      component.expanded = true;
-      component.deviceCodeInfo = {
+      fixture.componentRef.setInput('svc', makeSharepointSvc());
+      fixture.componentRef.setInput('expanded', true);
+      fixture.componentRef.setInput('deviceCodeInfo', {
         user_code: 'ABCD1234',
         verification_uri: 'https://microsoft.com/devicelogin',
         expires_in: 900,
         request_id: 'test-rid',
-      };
-      component.oauthStatus = 'polling';
+      });
+      fixture.componentRef.setInput('oauthStatus', 'polling');
       fixture.detectChanges();
       const spy = vi.spyOn(component.openVerificationUrl, 'emit');
       const link = fixture.nativeElement.querySelector('[data-testid="btn-link"]');
@@ -520,15 +527,15 @@ describe('ServiceCardComponent', () => {
 
   describe('verification URL display', () => {
     it('shows copyable verification URL next to open button', () => {
-      component.svc = makeSharepointSvc();
-      component.expanded = true;
-      component.deviceCodeInfo = {
+      fixture.componentRef.setInput('svc', makeSharepointSvc());
+      fixture.componentRef.setInput('expanded', true);
+      fixture.componentRef.setInput('deviceCodeInfo', {
         user_code: 'CODE123',
         verification_uri: 'https://microsoft.com/devicelogin',
         expires_in: 900,
         request_id: 'rid',
-      };
-      component.oauthStatus = 'polling';
+      });
+      fixture.componentRef.setInput('oauthStatus', 'polling');
       fixture.detectChanges();
       const urlEl = fixture.nativeElement.querySelector('[data-testid="verification-url"]');
       expect(urlEl).not.toBeNull();
@@ -538,15 +545,15 @@ describe('ServiceCardComponent', () => {
 
   describe('device code display', () => {
     it('displays user code when deviceCodeInfo is provided', () => {
-      component.svc = makeSharepointSvc();
-      component.expanded = true;
-      component.deviceCodeInfo = {
+      fixture.componentRef.setInput('svc', makeSharepointSvc());
+      fixture.componentRef.setInput('expanded', true);
+      fixture.componentRef.setInput('deviceCodeInfo', {
         user_code: 'XYZW9876',
         verification_uri: 'https://microsoft.com/devicelogin',
         expires_in: 900,
         request_id: 'test-rid',
-      };
-      component.oauthStatus = 'polling';
+      });
+      fixture.componentRef.setInput('oauthStatus', 'polling');
       fixture.detectChanges();
       const codeEl = fixture.nativeElement.querySelector('[data-testid="user-code"]');
       expect(codeEl).not.toBeNull();
@@ -554,15 +561,15 @@ describe('ServiceCardComponent', () => {
     });
 
     it('shows polling status when polling', () => {
-      component.svc = makeSharepointSvc();
-      component.expanded = true;
-      component.deviceCodeInfo = {
+      fixture.componentRef.setInput('svc', makeSharepointSvc());
+      fixture.componentRef.setInput('expanded', true);
+      fixture.componentRef.setInput('deviceCodeInfo', {
         user_code: 'CODE',
         verification_uri: 'https://example.com',
         expires_in: 900,
         request_id: 'rid',
-      };
-      component.oauthStatus = 'polling';
+      });
+      fixture.componentRef.setInput('oauthStatus', 'polling');
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="polling-status"]')).not.toBeNull();
     });
@@ -570,8 +577,8 @@ describe('ServiceCardComponent', () => {
 
   describe('optional fields', () => {
     it('appends (optional) to label for optional fields', () => {
-      component.svc = makeRedmineSvc();
-      component.expanded = true;
+      fixture.componentRef.setInput('svc', makeRedmineSvc());
+      fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       const el = fixture.nativeElement;
       // Query labels by their `for` attribute — immune to field reordering
@@ -587,8 +594,8 @@ describe('ServiceCardComponent', () => {
     });
 
     it('does not mark optional fields as required', () => {
-      component.svc = makeRedmineSvc();
-      component.expanded = true;
+      fixture.componentRef.setInput('svc', makeRedmineSvc());
+      fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       const el = fixture.nativeElement;
       // Query inputs by their ID — immune to field reordering
@@ -598,22 +605,26 @@ describe('ServiceCardComponent', () => {
     });
 
     it('onSave sends empty string for cleared optional fields', () => {
-      component.svc = makeRedmineSvc();
+      fixture.componentRef.setInput('svc', makeRedmineSvc());
       component.editedValues = { project_id: '' };
       const spy = vi.spyOn(component.saveCredentials, 'emit');
       component.onSave(new Event('submit'));
       expect(spy).toHaveBeenCalledTimes(1);
       const payload = spy.mock.calls[0][0];
+      expect(payload).toBeDefined();
+      if (!payload) throw new Error('expected payload');
       expect(payload.credentials['project_id']).toBe('');
     });
 
     it('onSave does not send empty string for cleared required fields', () => {
-      component.svc = makeRedmineSvc();
+      fixture.componentRef.setInput('svc', makeRedmineSvc());
       component.editedValues = { api_key: '', host_url: 'https://example.com' };
       const spy = vi.spyOn(component.saveCredentials, 'emit');
       component.onSave(new Event('submit'));
       expect(spy).toHaveBeenCalledTimes(1);
       const payload = spy.mock.calls[0][0];
+      expect(payload).toBeDefined();
+      if (!payload) throw new Error('expected payload');
       expect(payload.credentials['api_key']).toBeUndefined();
       expect(payload.credentials['host_url']).toBe('https://example.com');
     });
@@ -621,8 +632,8 @@ describe('ServiceCardComponent', () => {
 
   describe('setup-hint', () => {
     it('shows setup-hint when not configured and not expanded', () => {
-      component.svc = makeRedmineSvc();
-      component.expanded = false;
+      fixture.componentRef.setInput('svc', makeRedmineSvc());
+      fixture.componentRef.setInput('expanded', false);
       fixture.detectChanges();
       const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
       expect(hint).not.toBeNull();
@@ -635,15 +646,15 @@ describe('ServiceCardComponent', () => {
     });
 
     it('hides setup-hint when expanded (even if not configured)', () => {
-      component.svc = makeRedmineSvc();
-      component.expanded = true;
+      fixture.componentRef.setInput('svc', makeRedmineSvc());
+      fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="setup-hint"]')).toBeNull();
     });
 
     it('emits toggleExpand with service name when setup-hint is clicked', () => {
-      component.svc = makeRedmineSvc();
-      component.expanded = false;
+      fixture.componentRef.setInput('svc', makeRedmineSvc());
+      fixture.componentRef.setInput('expanded', false);
       fixture.detectChanges();
       const spy = vi.spyOn(component.toggleExpand, 'emit');
       const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
@@ -652,8 +663,8 @@ describe('ServiceCardComponent', () => {
     });
 
     it('emits toggleExpand on Enter key', () => {
-      component.svc = makeRedmineSvc();
-      component.expanded = false;
+      fixture.componentRef.setInput('svc', makeRedmineSvc());
+      fixture.componentRef.setInput('expanded', false);
       fixture.detectChanges();
       const spy = vi.spyOn(component.toggleExpand, 'emit');
       const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
@@ -662,8 +673,8 @@ describe('ServiceCardComponent', () => {
     });
 
     it('emits toggleExpand on Space key and prevents default', () => {
-      component.svc = makeRedmineSvc();
-      component.expanded = false;
+      fixture.componentRef.setInput('svc', makeRedmineSvc());
+      fixture.componentRef.setInput('expanded', false);
       fixture.detectChanges();
       const spy = vi.spyOn(component.toggleExpand, 'emit');
       const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
@@ -676,9 +687,9 @@ describe('ServiceCardComponent', () => {
 
   describe('success/error messages', () => {
     it('shows success message', () => {
-      component.svc = makeSharepointSvc();
-      component.expanded = true;
-      component.oauthStatus = 'success';
+      fixture.componentRef.setInput('svc', makeSharepointSvc());
+      fixture.componentRef.setInput('expanded', true);
+      fixture.componentRef.setInput('oauthStatus', 'success');
       fixture.detectChanges();
       const el = fixture.nativeElement.querySelector('[data-testid="oauth-success"]');
       expect(el).not.toBeNull();
@@ -686,10 +697,10 @@ describe('ServiceCardComponent', () => {
     });
 
     it('shows error message', () => {
-      component.svc = makeSharepointSvc();
-      component.expanded = true;
-      component.oauthStatus = 'error';
-      component.oauthStatusMessage = 'Something went wrong';
+      fixture.componentRef.setInput('svc', makeSharepointSvc());
+      fixture.componentRef.setInput('expanded', true);
+      fixture.componentRef.setInput('oauthStatus', 'error');
+      fixture.componentRef.setInput('oauthStatusMessage', 'Something went wrong');
       fixture.detectChanges();
       const el = fixture.nativeElement.querySelector('[data-testid="oauth-error"]');
       expect(el).not.toBeNull();
@@ -697,10 +708,10 @@ describe('ServiceCardComponent', () => {
     });
 
     it('shows expired message', () => {
-      component.svc = makeSharepointSvc();
-      component.expanded = true;
-      component.oauthStatus = 'expired';
-      component.oauthStatusMessage = 'Code expired';
+      fixture.componentRef.setInput('svc', makeSharepointSvc());
+      fixture.componentRef.setInput('expanded', true);
+      fixture.componentRef.setInput('oauthStatus', 'expired');
+      fixture.componentRef.setInput('oauthStatusMessage', 'Code expired');
       fixture.detectChanges();
       const el = fixture.nativeElement.querySelector('[data-testid="oauth-error"]');
       expect(el).not.toBeNull();

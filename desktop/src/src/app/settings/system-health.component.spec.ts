@@ -53,16 +53,20 @@ describe('SystemHealthComponent', () => {
 
     mockUnlistenReconciled.mockReset();
 
-    mockTauri.listen = async (_event: string, handler: unknown) => {
+    mockTauri.listen = async (_event: string, handler: unknown): Promise<() => void> => {
       if (_event === 'ide_bridge_event') {
         listenCallback = handler as (event: { payload: { kind: string; detail: string } }) => void;
-        return mockUnlisten;
+        return () => {
+          mockUnlisten();
+        };
       }
       if (_event === 'containers_reconciled') {
         reconciledCallback = handler as () => void;
-        return mockUnlistenReconciled;
+        return () => {
+          mockUnlistenReconciled();
+        };
       }
-      return vi.fn();
+      return () => undefined;
     };
 
     await TestBed.configureTestingModule({
@@ -80,7 +84,7 @@ describe('SystemHealthComponent', () => {
       expect(component.loading).toBe(false);
       expect(component.error).toBeNull();
       expect(component.lastUpdated).toBeNull();
-      expect(component.project).toBeNull();
+      expect(component.project()).toBeNull();
       expect(component.selectedContainer).toBeNull();
       expect(component.bridgeStatus).toBeNull();
       expect(component.selectedIde).toBeNull();
@@ -201,7 +205,7 @@ describe('SystemHealthComponent', () => {
     });
 
     it('passes project input to get_health', async () => {
-      component.project = 'my-project';
+      fixture.componentRef.setInput('project', 'my-project');
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
       await component.refresh();
@@ -370,7 +374,7 @@ describe('SystemHealthComponent', () => {
     it('invokes get_compose_logs when showAllLogs is true', async () => {
       component.selectedContainer = 'all';
       component.showAllLogs = true;
-      component.project = 'my-project';
+      fixture.componentRef.setInput('project', 'my-project');
       component.tailLines = 500;
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       mockTauri.invokeHandler = async () => 'compose log output';
@@ -531,7 +535,7 @@ describe('SystemHealthComponent', () => {
 
   describe('recreateContainers()', () => {
     it('invokes recreate_project_containers and refreshes', async () => {
-      component.project = 'my-project';
+      fixture.componentRef.setInput('project', 'my-project');
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'recreate_project_containers') return undefined;
@@ -550,7 +554,7 @@ describe('SystemHealthComponent', () => {
     });
 
     it('sets error on failure', async () => {
-      component.project = 'my-project';
+      fixture.componentRef.setInput('project', 'my-project');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'recreate_project_containers') throw new Error('recreate failed');
         if (cmd === 'get_health') return makeHealthReport();
@@ -565,7 +569,7 @@ describe('SystemHealthComponent', () => {
     });
 
     it('does nothing when project is null', async () => {
-      component.project = null;
+      fixture.componentRef.setInput('project', null);
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
       await component.recreateContainers();
@@ -668,8 +672,8 @@ describe('SystemHealthComponent', () => {
     it('calls unlisten on destroy', async () => {
       vi.spyOn(component, 'refresh').mockResolvedValue();
       component.ngOnInit();
-      await new Promise((r) => queueMicrotask(r));
-      await new Promise((r) => queueMicrotask(r));
+      await new Promise<void>((r) => queueMicrotask(() => r()));
+      await new Promise<void>((r) => queueMicrotask(() => r()));
 
       component.ngOnDestroy();
 
@@ -680,8 +684,8 @@ describe('SystemHealthComponent', () => {
     it('calls unlistenReconciled on destroy', async () => {
       vi.spyOn(component, 'refresh').mockResolvedValue();
       component.ngOnInit();
-      await new Promise((r) => queueMicrotask(r));
-      await new Promise((r) => queueMicrotask(r));
+      await new Promise<void>((r) => queueMicrotask(() => r()));
+      await new Promise<void>((r) => queueMicrotask(() => r()));
 
       component.ngOnDestroy();
 
@@ -692,8 +696,8 @@ describe('SystemHealthComponent', () => {
     it('cleans up project ready listener on destroy', async () => {
       vi.spyOn(component, 'refresh').mockResolvedValue();
       component.ngOnInit();
-      await new Promise((r) => queueMicrotask(r));
-      await new Promise((r) => queueMicrotask(r));
+      await new Promise<void>((r) => queueMicrotask(() => r()));
+      await new Promise<void>((r) => queueMicrotask(() => r()));
 
       component.ngOnDestroy();
 
@@ -852,8 +856,8 @@ describe('SystemHealthComponent', () => {
     it('triggers refresh when containers_reconciled event fires', async () => {
       const refreshSpy = vi.spyOn(component, 'refresh').mockResolvedValue();
       component.ngOnInit();
-      await new Promise((r) => queueMicrotask(r));
-      await new Promise((r) => queueMicrotask(r));
+      await new Promise<void>((r) => queueMicrotask(() => r()));
+      await new Promise<void>((r) => queueMicrotask(() => r()));
 
       refreshSpy.mockClear();
       reconciledCallback();
@@ -864,8 +868,8 @@ describe('SystemHealthComponent', () => {
     it('does not call refresh after ngOnDestroy', async () => {
       const refreshSpy = vi.spyOn(component, 'refresh').mockResolvedValue();
       component.ngOnInit();
-      await new Promise((r) => queueMicrotask(r));
-      await new Promise((r) => queueMicrotask(r));
+      await new Promise<void>((r) => queueMicrotask(() => r()));
+      await new Promise<void>((r) => queueMicrotask(() => r()));
 
       component.ngOnDestroy();
       refreshSpy.mockClear();
@@ -875,22 +879,24 @@ describe('SystemHealthComponent', () => {
     });
 
     it('handles listen rejection gracefully', async () => {
-      mockTauri.listen = async (_event: string, handler: unknown) => {
+      mockTauri.listen = async (_event: string, handler: unknown): Promise<() => void> => {
         if (_event === 'ide_bridge_event') {
           listenCallback = handler as (event: {
             payload: { kind: string; detail: string };
           }) => void;
-          return mockUnlisten;
+          return () => {
+            mockUnlisten();
+          };
         }
         if (_event === 'containers_reconciled') {
           throw new Error('listen failed');
         }
-        return vi.fn();
+        return () => undefined;
       };
 
       expect(() => component.ngOnInit()).not.toThrow();
-      await new Promise((r) => queueMicrotask(r));
-      await new Promise((r) => queueMicrotask(r));
+      await new Promise<void>((r) => queueMicrotask(() => r()));
+      await new Promise<void>((r) => queueMicrotask(() => r()));
 
       expect((component as never as Private)['unlistenReconciled']).toBeNull();
       expect(() => component.ngOnDestroy()).not.toThrow();
@@ -901,8 +907,8 @@ describe('SystemHealthComponent', () => {
         .spyOn(component, 'refresh')
         .mockRejectedValueOnce(new Error('refresh failed'));
       component.ngOnInit();
-      await new Promise((r) => queueMicrotask(r));
-      await new Promise((r) => queueMicrotask(r));
+      await new Promise<void>((r) => queueMicrotask(() => r()));
+      await new Promise<void>((r) => queueMicrotask(() => r()));
 
       refreshSpy.mockClear();
       refreshSpy.mockRejectedValueOnce(new Error('refresh failed'));

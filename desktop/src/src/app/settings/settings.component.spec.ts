@@ -4,6 +4,7 @@ import { RouterModule } from '@angular/router';
 import { SettingsComponent } from './settings.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { ThemeService, THEME_IDS } from '../services/theme.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
 function setupMockTauri(mockTauri: MockTauriService): void {
@@ -187,6 +188,78 @@ describe('SettingsComponent', () => {
       // Rows are separated via divide-y — not via border-b inside the wrapper
       const divider = wrapper.querySelector('.divide-y');
       expect(divider).not.toBeNull();
+    });
+  });
+
+  describe('Appearance section', () => {
+    beforeEach(() => {
+      // Reset accent before each test so active-state assertions start clean.
+      const theme = TestBed.inject(ThemeService);
+      theme.setTheme('crimson');
+    });
+
+    it('renders one .theme-card button per registered ThemeService theme', () => {
+      fixture.detectChanges();
+      const section = fixture.nativeElement.querySelector(
+        '[data-testid="settings-section-appearance"]'
+      );
+      expect(section).not.toBeNull();
+      const cards = section.querySelectorAll('button[data-theme-btn]');
+      expect(cards.length).toBe(THEME_IDS.length);
+      const ids = Array.from(cards).map((b) => (b as HTMLElement).getAttribute('data-theme-btn'));
+      expect(ids).toEqual([...THEME_IDS]);
+    });
+
+    it('marks the card whose id matches ThemeService.theme() as active', () => {
+      const theme = TestBed.inject(ThemeService);
+      theme.setTheme('iris');
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const active = fixture.nativeElement.querySelector(
+        'button[data-theme-btn="iris"]'
+      ) as HTMLButtonElement;
+      const inactive = fixture.nativeElement.querySelector(
+        'button[data-theme-btn="mint"]'
+      ) as HTMLButtonElement;
+      expect(active.classList.contains('active')).toBe(true);
+      expect(inactive.classList.contains('active')).toBe(false);
+      expect(active.getAttribute('aria-pressed')).toBe('true');
+      expect(inactive.getAttribute('aria-pressed')).toBe('false');
+    });
+
+    it('clicking a card calls ThemeService.setTheme(id)', () => {
+      const theme = TestBed.inject(ThemeService);
+      fixture.detectChanges();
+      const cyanBtn = fixture.nativeElement.querySelector(
+        'button[data-theme-btn="cyan"]'
+      ) as HTMLButtonElement;
+      cyanBtn.click();
+      expect(theme.theme()).toBe('cyan');
+    });
+
+    it('renders the heading, accent-color label, and ⌘T shortcut hint', () => {
+      fixture.detectChanges();
+      const section = fixture.nativeElement.querySelector(
+        '[data-testid="settings-section-appearance"]'
+      );
+      expect(section.textContent).toContain('Appearance');
+      expect(section.textContent).toContain('accent color');
+      // Mockup shortcut copy: "shortcut: ⌘T cycles themes"
+      expect(section.textContent).toContain('cycles themes');
+      const kbd = section.querySelector('.kbd');
+      expect(kbd).not.toBeNull();
+      expect(kbd.textContent).toContain('⌘T');
+    });
+
+    it('does not toggle theme when the same card is clicked twice (no-op)', () => {
+      const theme = TestBed.inject(ThemeService);
+      theme.setTheme('amber');
+      fixture.detectChanges();
+      const amberBtn = fixture.nativeElement.querySelector(
+        'button[data-theme-btn="amber"]'
+      ) as HTMLButtonElement;
+      amberBtn.click();
+      expect(theme.theme()).toBe('amber');
     });
   });
 });

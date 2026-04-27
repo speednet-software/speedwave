@@ -265,12 +265,12 @@ describe('SystemViewComponent', () => {
   });
 
   it('disables the restart button while the restart is in flight', async () => {
-    let resolveRestart: (() => void) | null = null;
+    const restartResolver: { current: (() => void) | null } = { current: null };
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_health') return MOCK_HEALTHY_REPORT;
       if (cmd === 'recreate_project_containers') {
         return new Promise<void>((resolve) => {
-          resolveRestart = resolve;
+          restartResolver.current = resolve;
         });
       }
       return undefined;
@@ -284,7 +284,7 @@ describe('SystemViewComponent', () => {
 
     expect(component.restarting.has('speedwave_test_claude')).toBe(true);
 
-    resolveRestart?.();
+    restartResolver.current?.();
     await restartPromise;
     fixture.detectChanges();
 

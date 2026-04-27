@@ -4,7 +4,6 @@ import { SkillsService, type Skill } from '../services/skills.service';
 /** Catalog view for slash commands, skills, and agents wired to `SkillsService`. */
 @Component({
   selector: 'app-skills-view',
-  standalone: true,
   imports: [],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './skills-view.component.html',

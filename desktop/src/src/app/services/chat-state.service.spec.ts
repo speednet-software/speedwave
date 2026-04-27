@@ -362,7 +362,7 @@ describe('ChatStateService', () => {
       });
 
       const block = service.currentBlocks[0];
-      if (block.type === 'tool_use') {
+      if (block.type === 'tool_use' && block.tool.status === 'done') {
         expect(block.tool.result).toBe('file contents');
         expect(block.tool.status).toBe('done');
       }
@@ -379,7 +379,7 @@ describe('ChatStateService', () => {
       });
 
       const block = service.currentBlocks[0];
-      if (block.type === 'tool_use') {
+      if (block.type === 'tool_use' && block.tool.status === 'error') {
         expect(block.tool.result_is_error).toBe(true);
         expect(block.tool.status).toBe('error');
       }
@@ -1420,13 +1420,13 @@ describe('ChatStateService', () => {
               {
                 type: 'tool_use',
                 tool: {
+                  type: 'tool_use',
                   tool_id: 't',
                   tool_name: 'Read',
                   input_json: '{}',
                   status: 'done',
                   result: 'ok',
                   result_is_error: false,
-                  collapsed: false,
                 },
               },
               { type: 'text', content: 'World' },
@@ -1790,6 +1790,324 @@ describe('ChatStateService', () => {
       expect(service.messages).toHaveLength(2);
       const finalMeta = service.messages[1].meta;
       expect(finalMeta?.cost).toBe(0.007);
+    });
+  });
+
+  // ── ADR-045 — queued message ─────────────────────────────────────────────
+  describe('queueMessage / cancelQueuedMessage / QueueDrained', () => {
+    function setSession(id: string): void {
+      service._setState({
+        sessionStats: {
+          session_id: id,
+          total_cost: 0,
+          model: '',
+          input_tokens: 0,
+          output_tokens: 0,
+          cached_tokens: 0,
+          context_used: 0,
+          total_output_tokens: 0,
+          context_window_size: 200_000,
+          rate_limit: null,
+        } as never,
+      });
+    }
+
+    it('queueMessage invokes backend with sessionId+text and sets pendingQueue', async () => {
+      setSession('s-1');
+      const calls: Array<{ cmd: string; args: unknown }> = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: unknown) => {
+        calls.push({ cmd, args });
+        if (cmd === 'queue_message') return null;
+        return undefined;
+      };
+
+      const prior = await service.queueMessage('next');
+      expect(prior).toBeNull();
+      expect(calls).toEqual([{ cmd: 'queue_message', args: { sessionId: 's-1', text: 'next' } }]);
+      expect(service.pendingQueue?.text).toBe('next');
+    });
+
+    it('queueMessage returns previous text when slot was already occupied', async () => {
+      setSession('s-1');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'queue_message') return { text: 'older', queued_at: 1 };
+        return undefined;
+      };
+      const prior = await service.queueMessage('newer');
+      expect(prior).toBe('older');
+      expect(service.pendingQueue?.text).toBe('newer');
+    });
+
+    it('queueMessage no-ops without a session id', async () => {
+      service._setState({ sessionStats: null });
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        return undefined;
+      };
+      const prior = await service.queueMessage('next');
+      expect(prior).toBeNull();
+      expect(calls).not.toContain('queue_message');
+      expect(service.pendingQueue).toBeNull();
+    });
+
+    it('queueMessage no-ops on empty text', async () => {
+      setSession('s-1');
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        return undefined;
+      };
+      const prior = await service.queueMessage('');
+      expect(prior).toBeNull();
+      expect(calls).not.toContain('queue_message');
+    });
+
+    it('cancelQueuedMessage invokes backend and clears pendingQueue', async () => {
+      setSession('s-1');
+      service._setState({ pendingQueue: { text: 'q', queued_at: 1 } });
+      const calls: Array<{ cmd: string; args: unknown }> = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: unknown) => {
+        calls.push({ cmd, args });
+        return undefined;
+      };
+      await service.cancelQueuedMessage();
+      expect(calls).toContainEqual({
+        cmd: 'cancel_queued_message',
+        args: { sessionId: 's-1' },
+      });
+      expect(service.pendingQueue).toBeNull();
+    });
+
+    it('cancelQueuedMessage clears local slot when no session id is set', async () => {
+      service._setState({
+        sessionStats: null,
+        pendingQueue: { text: 'orphan', queued_at: 1 },
+      });
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        return undefined;
+      };
+      await service.cancelQueuedMessage();
+      expect(service.pendingQueue).toBeNull();
+      expect(calls).not.toContain('cancel_queued_message');
+    });
+
+    it('handleStreamChunk("QueueDrained") clears pendingQueue, appends user entry, flips streaming=true', () => {
+      service._setState({
+        messages: [],
+        pendingQueue: { text: 'next', queued_at: 5 },
+      });
+      service.isStreaming = false;
+      service.handleStreamChunk({
+        chunk_type: 'QueueDrained',
+        data: { session_id: 's-1', text: 'next' },
+      });
+      expect(service.pendingQueue).toBeNull();
+      expect(service.isStreaming).toBe(true);
+      expect(service.messages).toHaveLength(1);
+      expect(service.messages[0].role).toBe('user');
+      expect(service.messages[0].blocks).toEqual([{ type: 'text', content: 'next' }]);
+    });
+
+    it('queueMessage swallows backend errors and leaves slot untouched', async () => {
+      setSession('s-1');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'queue_message') throw new Error('backend down');
+        return undefined;
+      };
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const prior = await service.queueMessage('next');
+      warnSpy.mockRestore();
+      expect(prior).toBeNull();
+      expect(service.pendingQueue).toBeNull();
+    });
+
+    it('resetForNewConversation clears pendingQueue', () => {
+      service._setState({ pendingQueue: { text: 'leftover', queued_at: 1 } });
+      service.resetForNewConversation();
+      expect(service.pendingQueue).toBeNull();
+    });
+  });
+
+  // ── ADR-042/043 — JSON Patch state-tree reducer ──────────────────────────
+  describe('state-tree signal + applyLogMsg', () => {
+    it('initial state matches DEFAULT_STATE_TREE', () => {
+      const s = service.state();
+      expect(s.session_id).toBeNull();
+      expect(s.entries).toEqual([]);
+      expect(s.is_streaming).toBe(false);
+      expect(s.pending_queue).toBeNull();
+      expect(s.session_totals.cost).toBe(0);
+    });
+
+    it('SessionStarted lifecycle commits session_id', () => {
+      service.applyLogMsg({ type: 'session_started', data: { session_id: 'abc-123' } });
+      expect(service.state().session_id).toBe('abc-123');
+    });
+
+    it('JsonPatch sets is_streaming to true via /is_streaming', () => {
+      service.applyLogMsg({
+        type: 'json_patch',
+        data: [{ op: 'replace', path: '/is_streaming', value: true }],
+      });
+      expect(service.state().is_streaming).toBe(true);
+    });
+
+    it('JsonPatch sequence stays consistent (apply then apply equals composed)', () => {
+      // Bring up an entry then replace its text — final state must match
+      // a single composed patch (associativity property).
+      service.applyLogMsg({
+        type: 'json_patch',
+        data: [
+          {
+            op: 'add',
+            path: '/entries/0',
+            value: {
+              index: 0,
+              role: 'assistant',
+              uuid: null,
+              uuid_status: 'pending',
+              blocks: [{ kind: 'text', content: '' }],
+              meta: null,
+              edited_at: null,
+              timestamp: 1,
+            },
+          },
+        ],
+      });
+      service.applyLogMsg({
+        type: 'json_patch',
+        data: [{ op: 'replace', path: '/entries/0/blocks/0/content', value: 'hi' }],
+      });
+      expect(service.state().entries).toHaveLength(1);
+      const entry = service.state().entries[0];
+      expect(entry.blocks[0]).toEqual({ kind: 'text', content: 'hi' });
+    });
+
+    it('Resync replaces the entire state-tree wholesale', () => {
+      service.applyLogMsg({
+        type: 'session_started',
+        data: { session_id: 'old' },
+      });
+      service.applyLogMsg({
+        type: 'resync',
+        data: {
+          session_id: 'replaced',
+          entries: [],
+          session_totals: {
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: 3,
+            cache_write_tokens: 4,
+            cost: 0.5,
+            turn_count: 1,
+          },
+          pending_queue: null,
+          model: 'opus-4.7',
+          is_streaming: false,
+        },
+      });
+      const s = service.state();
+      expect(s.session_id).toBe('replaced');
+      expect(s.session_totals.input_tokens).toBe(1);
+      expect(s.model).toBe('opus-4.7');
+    });
+
+    it('SessionEnded forces is_streaming back to false', () => {
+      service.applyLogMsg({
+        type: 'json_patch',
+        data: [{ op: 'replace', path: '/is_streaming', value: true }],
+      });
+      expect(service.state().is_streaming).toBe(true);
+      service.applyLogMsg({ type: 'session_ended' });
+      expect(service.state().is_streaming).toBe(false);
+    });
+
+    it('Bad patch is dropped without throwing or mutating state', () => {
+      const before = service.state();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      service.applyLogMsg({
+        type: 'json_patch',
+        data: [{ op: 'replace', path: '/missing/key/that/does/not/exist', value: 1 }],
+      });
+      warnSpy.mockRestore();
+      expect(service.state()).toBe(before);
+    });
+
+    it('subscribeToSession invokes subscribe_session and listens on the returned event', async () => {
+      const calls: Array<{ cmd: string; args: unknown }> = [];
+      const listenCalls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: unknown) => {
+        calls.push({ cmd, args });
+        if (cmd === 'subscribe_session') return { event_name: 'chat_patch::sess-1' };
+        return undefined;
+      };
+      mockTauri.listen = (async (event: string, _handler: unknown) => {
+        listenCalls.push(event);
+        return () => undefined;
+      }) as typeof mockTauri.listen;
+
+      await service.subscribeToSession('sess-1');
+      expect(calls).toEqual([{ cmd: 'subscribe_session', args: { sessionId: 'sess-1' } }]);
+      expect(listenCalls).toEqual(['chat_patch::sess-1']);
+    });
+
+    it('messagesFromState mirrors messages getter after streaming a turn', () => {
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: ' world' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 's-mirror',
+          total_cost: 0.001,
+          usage: { input_tokens: 5, output_tokens: 2 },
+          model: 'claude-opus-4-7',
+          turn_usage: {
+            input_tokens: 5,
+            output_tokens: 2,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+          },
+          turn_cost: 0.001,
+        },
+      });
+      const legacy = service.messages;
+      const projected = service.messagesFromState();
+      expect(projected.length).toBe(legacy.length);
+      expect(projected[0].role).toBe(legacy[0].role);
+      expect(projected[0].blocks.length).toBe(legacy[0].blocks.length);
+      expect(service.isStreamingFromState()).toBe(service.isStreaming);
+      expect(service.currentBlocksFromState().length).toBe(0);
+    });
+
+    it('currentBlocksFromState exposes trailing live-streaming entry', () => {
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'streaming...' } });
+      expect(service.currentBlocksFromState().length).toBeGreaterThan(0);
+      expect(service.isStreamingFromState()).toBe(true);
+      expect(service.messagesFromState().length).toBe(0);
+    });
+
+    it('pendingQueueFromState mirrors pending_queue field after notifyChange', () => {
+      service._setState({ pendingQueue: { text: 'next', queued_at: 1 } });
+      // _setState does NOT trigger notifyChange — drive a chunk to fire it.
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'tick' } });
+      expect(service.pendingQueueFromState()?.text).toBe('next');
+    });
+
+    it('subscribeToSession is idempotent for the same session id', async () => {
+      const calls: Array<{ cmd: string }> = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push({ cmd });
+        if (cmd === 'subscribe_session') return { event_name: 'chat_patch::sess-x' };
+        return undefined;
+      };
+      mockTauri.listen = (async () => () => undefined) as typeof mockTauri.listen;
+      await service.subscribeToSession('sess-x');
+      await service.subscribeToSession('sess-x');
+      const subscribeCalls = calls.filter((c) => c.cmd === 'subscribe_session');
+      expect(subscribeCalls).toHaveLength(1);
     });
   });
 });

@@ -275,13 +275,117 @@ describe('ComposerComponent', () => {
   // ── placeholder input ───────────────────────────────────────────────────
   describe('placeholder', () => {
     it('uses default placeholder when none provided', () => {
-      expect(textarea().getAttribute('placeholder')).toBe('Message Claude...');
+      expect(textarea().getAttribute('placeholder')).toBe('message speedwave...');
     });
 
     it('honors custom placeholder input', () => {
       fixture.componentRef.setInput('placeholder', 'say something');
       fixture.detectChanges();
       expect(textarea().getAttribute('placeholder')).toBe('say something');
+    });
+
+    it('swaps to "queue next message..." when streaming', () => {
+      fixture.componentRef.setInput('streaming', true);
+      fixture.detectChanges();
+      expect(textarea().getAttribute('placeholder')).toBe('queue next message...');
+    });
+  });
+
+  // ── ADR-045 — queued message UX ─────────────────────────────────────────
+  describe('queued message (ADR-045)', () => {
+    function queuedRow(): HTMLElement | null {
+      return rootEl.querySelector<HTMLElement>('[data-testid="composer-queued"]');
+    }
+
+    function queuedText(): HTMLElement | null {
+      return rootEl.querySelector<HTMLElement>('[data-testid="composer-queued-text"]');
+    }
+
+    function queuedCancel(): HTMLButtonElement | null {
+      return rootEl.querySelector<HTMLButtonElement>('[data-testid="composer-queued-cancel"]');
+    }
+
+    it('does not render queued row when queuedText is empty', () => {
+      expect(queuedRow()).toBeNull();
+    });
+
+    it('renders queued preview with truncation past 80 chars', () => {
+      const long = 'a'.repeat(120);
+      fixture.componentRef.setInput('queuedText', long);
+      fixture.detectChanges();
+      expect(queuedRow()).not.toBeNull();
+      const txt = queuedText()?.textContent ?? '';
+      expect(txt.length).toBeLessThanOrEqual(80);
+      expect(txt.endsWith('…')).toBe(true);
+    });
+
+    it('renders short queued text verbatim', () => {
+      fixture.componentRef.setInput('queuedText', 'pick up where we left off');
+      fixture.detectChanges();
+      expect(queuedText()?.textContent?.trim()).toBe('pick up where we left off');
+    });
+
+    it('cancel button has aria-label "Cancel queued message"', () => {
+      fixture.componentRef.setInput('queuedText', 'next');
+      fixture.detectChanges();
+      expect(queuedCancel()?.getAttribute('aria-label')).toBe('Cancel queued message');
+    });
+
+    it('clicking cancel emits queueCancelled', () => {
+      fixture.componentRef.setInput('queuedText', 'next');
+      fixture.detectChanges();
+      const events: number[] = [];
+      component.queueCancelled.subscribe(() => events.push(1));
+      queuedCancel()!.click();
+      expect(events).toEqual([1]);
+    });
+
+    it('emits queueRequested(text) instead of submitted when streaming', () => {
+      fixture.componentRef.setInput('streaming', true);
+      fixture.detectChanges();
+      const submitted: string[] = [];
+      const queued: string[] = [];
+      component.submitted.subscribe((v) => submitted.push(v));
+      component.queueRequested.subscribe((v) => queued.push(v));
+      component.text.setValue('next turn');
+      fixture.detectChanges();
+      sendButton().click();
+      expect(submitted).toEqual([]);
+      expect(queued).toEqual(['next turn']);
+      expect(component.text.value).toBe('');
+    });
+
+    it('emits submitted (not queueRequested) when not streaming', () => {
+      const submitted: string[] = [];
+      const queued: string[] = [];
+      component.submitted.subscribe((v) => submitted.push(v));
+      component.queueRequested.subscribe((v) => queued.push(v));
+      component.text.setValue('regular send');
+      fixture.detectChanges();
+      sendButton().click();
+      expect(submitted).toEqual(['regular send']);
+      expect(queued).toEqual([]);
+    });
+
+    it('disabled input still blocks both routes', () => {
+      fixture.componentRef.setInput('disabled', true);
+      fixture.componentRef.setInput('streaming', true);
+      fixture.detectChanges();
+      const submitted: string[] = [];
+      const queued: string[] = [];
+      component.submitted.subscribe((v) => submitted.push(v));
+      component.queueRequested.subscribe((v) => queued.push(v));
+      // Cannot setValue when control is disabled — guard with try.
+      component.text.enable({ emitEvent: false });
+      component.text.setValue('blocked');
+      component.text.disable({ emitEvent: false });
+      fixture.detectChanges();
+      // canSubmit returns false because disabled() is true.
+      expect(component.canSubmit()).toBe(false);
+      // Send button reflects the disabled state.
+      expect(sendButton().disabled).toBe(true);
+      expect(submitted).toEqual([]);
+      expect(queued).toEqual([]);
     });
   });
 });

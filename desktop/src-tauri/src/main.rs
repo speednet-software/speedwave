@@ -24,12 +24,15 @@ mod log_file;
 mod logging_cmd;
 mod mcp_os_process;
 mod oauth_cmd;
+mod patch_emitter;
 mod plugin_cmd;
+mod queue_cmd;
 mod reconcile;
 mod redmine_api_cmd;
 mod retry_cmd;
 mod setup_wizard;
 mod slash_cmd;
+mod subscribe_cmd;
 mod tray;
 mod types;
 mod update_commands;
@@ -937,6 +940,8 @@ fn main() {
 
     let initial_session: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("default")));
     let compose_lock: ComposeLock = Arc::new(Mutex::new(()));
+    let queue_service = speedwave_runtime::session::QueuedMessageService::new();
+    let msg_store_registry = subscribe_cmd::MsgStoreRegistry::new();
 
     // Shared state for IDE Bridge, mcp-os process, auto-check handle, and tray update version
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
@@ -1060,6 +1065,8 @@ fn main() {
         .manage(compose_lock.clone())
         .manage(ide_bridge.clone())
         .manage(mcp_os.clone())
+        .manage(queue_service.clone())
+        .manage(msg_store_registry.clone())
         .setup(move |app| {
             // Restore persisted log level (default: Info)
             let initial_level = config::load_user_config()
@@ -1363,6 +1370,12 @@ fn main() {
             answer_question,
             stop_chat,
             retry_cmd::retry_last_turn,
+            // Queued messages (ADR-045)
+            queue_cmd::queue_message,
+            queue_cmd::cancel_queued_message,
+            queue_cmd::peek_queued_message,
+            // JSON-Patch stream protocol (ADR-042/043)
+            subscribe_cmd::subscribe_session,
             // Chat history
             list_conversations,
             get_conversation,

@@ -31,6 +31,7 @@ tokio = { version = "1", default-features = false, features = ["sync"] }
 futures-core = "0.3"
 async-stream = "0.3"
 parking_lot = "0.12"
+dashmap = "6"
 
 [dev-dependencies]
 tempfile = "3"

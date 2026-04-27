@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
+import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { JsonSchema } from '../../models/plugin';
@@ -9,24 +9,20 @@ import { JsonSchema } from '../../models/plugin';
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    @if (!schema) {
-      <p class="text-sw-text-dim text-[13px]" data-testid="no-settings">
-        No configurable settings for this plugin.
-      </p>
-    } @else {
+    @if (schema(); as s) {
       <form (submit)="onSubmit($event)">
         @for (key of propertyKeys(); track key) {
           <div class="my-4">
             <label class="block mb-1.5 text-[13px] text-sw-text-muted" [for]="'setting-' + key">{{
               key
             }}</label>
-            @if (schema.properties[key].description) {
+            @if (s.properties[key].description) {
               <span class="block text-[11px] text-sw-text-ghost mb-1.5" data-testid="field-hint">{{
-                schema.properties[key].description
+                s.properties[key].description
               }}</span>
             }
 
-            @if (schema.properties[key].enum) {
+            @if (s.properties[key].enum) {
               <select
                 [id]="'setting-' + key"
                 class="w-full px-3 py-2.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-sm font-mono box-border focus:border-sw-accent focus:outline-none"
@@ -34,11 +30,11 @@ import { JsonSchema } from '../../models/plugin';
                 (change)="onFieldChange(key, $event)"
                 [attr.data-testid]="'setting-' + key"
               >
-                @for (opt of schema.properties[key].enum; track opt) {
+                @for (opt of s.properties[key].enum; track opt) {
                   <option [value]="opt" [selected]="opt === getValue(key)">{{ opt }}</option>
                 }
               </select>
-            } @else if (schema.properties[key].type === 'boolean') {
+            } @else if (s.properties[key].type === 'boolean') {
               <label class="flex items-center gap-2 text-[13px] text-sw-text cursor-pointer">
                 <input
                   type="checkbox"
@@ -51,7 +47,7 @@ import { JsonSchema } from '../../models/plugin';
                 Enabled
               </label>
             } @else if (
-              schema.properties[key].type === 'number' || schema.properties[key].type === 'integer'
+              s.properties[key].type === 'number' || s.properties[key].type === 'integer'
             ) {
               <input
                 type="number"
@@ -84,21 +80,26 @@ import { JsonSchema } from '../../models/plugin';
           </button>
         </div>
       </form>
+    } @else {
+      <p class="text-sw-text-dim text-[13px]" data-testid="no-settings">
+        No configurable settings for this plugin.
+      </p>
     }
   `,
 })
 export class PluginSettingsFormComponent {
-  @Input() schema: JsonSchema | null = null;
-  @Input() values: Record<string, unknown> = {};
+  readonly schema = input<JsonSchema | null>(null);
+  readonly values = input<Record<string, unknown>>({});
 
-  @Output() save = new EventEmitter<Record<string, unknown>>();
+  readonly save = output<Record<string, unknown>>();
 
   editedValues: Record<string, unknown> = {};
 
   /** Returns sorted property keys from the schema. */
   propertyKeys(): string[] {
-    if (!this.schema) return [];
-    return Object.keys(this.schema.properties).sort();
+    const schema = this.schema();
+    if (!schema) return [];
+    return Object.keys(schema.properties).sort();
   }
 
   /**
@@ -107,8 +108,9 @@ export class PluginSettingsFormComponent {
    */
   getValue(key: string): unknown {
     if (key in this.editedValues) return this.editedValues[key];
-    if (key in this.values) return this.values[key];
-    return this.schema?.properties[key]?.default ?? '';
+    const values = this.values();
+    if (key in values) return values[key];
+    return this.schema()?.properties[key]?.default ?? '';
   }
 
   /**
@@ -118,7 +120,7 @@ export class PluginSettingsFormComponent {
    */
   onFieldChange(key: string, event: Event): void {
     const target = event.target as HTMLInputElement | HTMLSelectElement;
-    const prop = this.schema?.properties[key];
+    const prop = this.schema()?.properties[key];
     if (prop && (prop.type === 'number' || prop.type === 'integer')) {
       this.editedValues[key] = Number(target.value);
     } else {

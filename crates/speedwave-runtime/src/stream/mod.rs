@@ -20,6 +20,9 @@ pub mod msg_store;
 pub mod patch;
 pub mod state_tree;
 
+#[cfg(test)]
+mod session_stress_test;
+
 pub use entry_index::EntryIndexProvider;
 pub use msg_store::{LogMsg, MsgStore, DEFAULT_HISTORY_BYTES};
 pub use patch::{apply, ConversationPatch};

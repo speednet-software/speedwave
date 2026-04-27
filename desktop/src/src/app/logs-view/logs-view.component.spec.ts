@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { LogsViewComponent, parseLogLine } from './logs-view.component';
 import { TauriService } from '../services/tauri.service';
@@ -276,5 +276,107 @@ describe('parseLogLine', () => {
     expect(line.time).toBe('2024-01-15T14:34:02.814Z');
     expect(line.level).toBe('info');
     expect(line.message).toBe('started');
+  });
+});
+
+describe('LogsViewComponent — terminal-minimal layout', () => {
+  let component: LogsViewComponent;
+  let fixture: ComponentFixture<LogsViewComponent>;
+  let mockTauri: MockTauriService;
+  let projectState: ProjectStateService;
+
+  const MOCK_HEALTH = {
+    containers: [
+      { name: 'speedwave_demo_hub', status: 'running', healthy: true },
+      { name: 'speedwave_demo_redmine', status: 'running', healthy: true },
+      { name: 'speedwave_demo_sharepoint', status: 'starting', healthy: false },
+    ],
+    vm: { running: true, vm_type: 'lima' },
+    mcp_os: { running: true },
+    ide_bridge: {
+      running: true,
+      port: 4001,
+      ws_url: 'ws://127.0.0.1:4001',
+      detected_ides: [{ ide_name: 'cursor', port: 49820, ws_url: null }],
+    },
+    overall_healthy: false,
+  };
+
+  beforeEach(async () => {
+    mockTauri = new MockTauriService();
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_compose_logs') return '';
+      if (cmd === 'get_health') return MOCK_HEALTH;
+      return undefined;
+    };
+
+    await TestBed.configureTestingModule({
+      imports: [LogsViewComponent],
+      providers: [{ provide: TauriService, useValue: mockTauri }],
+    }).compileComponents();
+
+    projectState = TestBed.inject(ProjectStateService);
+    projectState.activeProject = 'demo';
+
+    fixture = TestBed.createComponent(LogsViewComponent);
+    component = fixture.componentInstance;
+  });
+
+  afterEach(() => {
+    fixture.destroy();
+  });
+
+  it('renders the System health header with project pill and refresh hint', async () => {
+    await component.ngOnInit();
+    fixture.detectChanges();
+    const title = fixture.nativeElement.querySelector('[data-testid="logs-title"]');
+    expect(title).not.toBeNull();
+    expect(title.textContent).toContain('System health');
+    const hint = fixture.nativeElement.querySelector('[data-testid="logs-refresh-hint"]');
+    expect(hint).not.toBeNull();
+    const pill = fixture.nativeElement.querySelector('[data-testid="logs-project-pill"]');
+    expect(pill).not.toBeNull();
+    expect(pill.textContent).toContain('demo');
+  });
+
+  it('renders a 4-card health grid (overall / vm / containers / ide_bridge)', async () => {
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="health-overall"]')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="health-vm"]')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="health-containers"]')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="health-bridge"]')).not.toBeNull();
+  });
+
+  it('computed signals reflect the current health snapshot', async () => {
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(component.vmRunning()).toBe(true);
+    expect(component.bridgeRunning()).toBe(true);
+    expect(component.anyContainerUnhealthy()).toBe(true);
+    expect(component.containersLabel()).toContain('2 of 3');
+    expect(component.containersDetail()).toContain('sharepoint');
+  });
+
+  it('renders the export-diagnostics button beside the refresh control', async () => {
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="logs-refresh"]')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="logs-export"]')).not.toBeNull();
+  });
+
+  it('export-diagnostics triggers the matching tauri invoke', async () => {
+    await component.ngOnInit();
+    fixture.detectChanges();
+    const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+    const btn = fixture.nativeElement.querySelector(
+      '[data-testid="logs-export"]'
+    ) as HTMLButtonElement;
+    btn.click();
+    await fixture.whenStable();
+    expect(invokeSpy).toHaveBeenCalledWith(
+      'export_diagnostics',
+      expect.objectContaining({ project: 'demo' })
+    );
   });
 });

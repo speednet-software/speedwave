@@ -5,6 +5,16 @@
  * initial render, and asserts zero WCAG 2.1 AA violations. Any new
  * view must be added to VIEWS so the sweep remains comprehensive.
  *
+ * Themes: the terminal-minimal design ships SIX accent variants on a
+ * single dark base (`crimson`, `mint`, `amber`, `iris`, `cyan`, `sand`
+ * — see `desktop/src/src/app/services/theme.service.ts`). There is no
+ * separate light theme; backgrounds stay dark and only the accent
+ * family rotates. Per the implementation prompt's acceptance criterion
+ * #3 (AXE clean "in both light and dark modes if both exist"), the
+ * sweep iterates every accent variant the app actually ships so the
+ * coverage matches the production surface, not a hypothetical light
+ * mode that does not exist.
+ *
  * Waivers (with justification) go in docs/accessibility/contrast-report.md.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -30,6 +40,7 @@ import { ToolBlockComponent } from './chat/blocks/tool-block.component';
 
 import { TauriService } from './services/tauri.service';
 import { MockTauriService } from './testing/mock-tauri.service';
+import { THEME_IDS, type ThemeId } from './services/theme.service';
 
 interface ViewUnderTest {
   readonly name: string;
@@ -88,6 +99,19 @@ function buildMockTauri(): MockTauriService {
 }
 
 /**
+ * Sets `data-theme` to the given accent variant; no-op for the default `crimson`.
+ * @param id - Accent theme to activate via the `data-theme` attribute.
+ */
+function activateTheme(id: ThemeId): void {
+  const html = document.documentElement;
+  if (id === 'crimson') {
+    html.removeAttribute('data-theme');
+  } else {
+    html.setAttribute('data-theme', id);
+  }
+}
+
+/**
  * Renders a component in a detached fixture for axe inspection.
  *
  * Runs the full change-detection loop so dynamic content (e.g. conditional
@@ -123,28 +147,28 @@ const VIEWS: readonly ViewUnderTest[] = [
     name: 'ErrorBlockComponent',
     component: ErrorBlockComponent,
     prepare: (fixture) => {
-      (fixture.componentInstance as { content: string }).content = 'Something failed';
+      fixture.componentRef.setInput('content', 'Something failed');
     },
   },
   {
     name: 'ThinkingBlockComponent',
     component: ThinkingBlockComponent,
     prepare: (fixture) => {
-      (fixture.componentInstance as { content: string }).content = 'reasoning';
+      fixture.componentRef.setInput('content', 'reasoning');
     },
   },
   {
     name: 'TextBlockComponent',
     component: TextBlockComponent,
     prepare: (fixture) => {
-      (fixture.componentInstance as { content: string }).content = 'Hello **world**.';
+      fixture.componentRef.setInput('content', 'Hello **world**.');
     },
   },
   {
     name: 'AskUserBlockComponent',
     component: AskUserBlockComponent,
     prepare: (fixture) => {
-      (fixture.componentInstance as { question: unknown }).question = {
+      fixture.componentRef.setInput('question', {
         tool_id: 'ask-1',
         question: 'Choose one',
         options: [
@@ -155,20 +179,20 @@ const VIEWS: readonly ViewUnderTest[] = [
         multi_select: false,
         answered: false,
         selected_values: [],
-      };
+      });
     },
   },
   {
     name: 'ToolBlockComponent',
     component: ToolBlockComponent,
     prepare: (fixture) => {
-      (fixture.componentInstance as { tool: unknown }).tool = {
+      fixture.componentRef.setInput('tool', {
         type: 'tool_use',
         tool_id: 'tool-1',
         tool_name: 'Read',
         input_json: '{}',
         status: 'running',
-      };
+      });
     },
   },
 ];
@@ -202,22 +226,33 @@ describe('A11y sweep — axe-core on every reachable view', () => {
 
   afterEach(() => {
     TestBed.resetTestingModule();
+    activateTheme('crimson');
   });
 
-  for (const view of VIEWS) {
-    it(`${view.name} has zero serious axe violations`, async () => {
-      const root = await render(view, mockTauri);
-      const results = await axe.run(root, {
-        runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'] },
+  for (const themeId of THEME_IDS) {
+    describe(`theme=${themeId}`, () => {
+      beforeEach(() => {
+        activateTheme(themeId);
       });
-      const blocking = seriousViolations(results);
-      if (blocking.length) {
-        const summary = blocking
-          .map((v) => `  - [${v.impact}] ${v.id}: ${v.help} (${v.nodes.length} nodes)`)
-          .join('\n');
-        throw new Error(`axe found ${blocking.length} violations in ${view.name}:\n${summary}`);
+
+      for (const view of VIEWS) {
+        it(`${view.name} has zero serious axe violations`, async () => {
+          const root = await render(view, mockTauri);
+          const results = await axe.run(root, {
+            runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'] },
+          });
+          const blocking = seriousViolations(results);
+          if (blocking.length) {
+            const summary = blocking
+              .map((v) => `  - [${v.impact}] ${v.id}: ${v.help} (${v.nodes.length} nodes)`)
+              .join('\n');
+            throw new Error(
+              `axe found ${blocking.length} violations in ${view.name} (theme=${themeId}):\n${summary}`
+            );
+          }
+          expect(blocking).toEqual([]);
+        });
       }
-      expect(blocking).toEqual([]);
     });
   }
 });

@@ -60,7 +60,6 @@ describe('computeLineDiff', () => {
 });
 
 describe('DiffViewComponent', () => {
-  let component: DiffViewComponent;
   let fixture: ComponentFixture<DiffViewComponent>;
 
   beforeEach(async () => {
@@ -69,14 +68,20 @@ describe('DiffViewComponent', () => {
     }).compileComponents();
 
     fixture = TestBed.createComponent(DiffViewComponent);
-    component = fixture.componentInstance;
   });
+
+  function setInputs(oldString: string, newString: string, truncateLines?: number): void {
+    fixture.componentRef.setInput('oldString', oldString);
+    fixture.componentRef.setInput('newString', newString);
+    if (truncateLines !== undefined) {
+      fixture.componentRef.setInput('truncateLines', truncateLines);
+    }
+    fixture.detectChanges();
+  }
 
   it('renders 3 added, 2 removed, 5 context lines with correct test-ids', () => {
     const ctx = ['same-1', 'same-2', 'same-3', 'same-4', 'same-5'].join('\n');
-    component.oldString = `${ctx}\nold-1\nold-2`;
-    component.newString = `${ctx}\nnew-1\nnew-2\nnew-3`;
-    fixture.detectChanges();
+    setInputs(`${ctx}\nold-1\nold-2`, `${ctx}\nnew-1\nnew-2\nnew-3`);
 
     const el = fixture.nativeElement as HTMLElement;
     expect(el.querySelectorAll('[data-testid="diff-ctx"]').length).toBe(5);
@@ -85,9 +90,7 @@ describe('DiffViewComponent', () => {
   });
 
   it('renders only the container when both inputs are empty', () => {
-    component.oldString = '';
-    component.newString = '';
-    fixture.detectChanges();
+    setInputs('', '');
 
     const el = fixture.nativeElement as HTMLElement;
     expect(el.querySelector('[data-testid="diff-container"]')).not.toBeNull();
@@ -97,9 +100,7 @@ describe('DiffViewComponent', () => {
   });
 
   it('renders only context rows when inputs are identical', () => {
-    component.oldString = 'a\nb\nc';
-    component.newString = 'a\nb\nc';
-    fixture.detectChanges();
+    setInputs('a\nb\nc', 'a\nb\nc');
 
     const el = fixture.nativeElement as HTMLElement;
     expect(el.querySelectorAll('[data-testid="diff-ctx"]').length).toBe(3);
@@ -108,9 +109,7 @@ describe('DiffViewComponent', () => {
   });
 
   it('renders only additions when oldString is empty', () => {
-    component.oldString = '';
-    component.newString = 'x\ny\nz';
-    fixture.detectChanges();
+    setInputs('', 'x\ny\nz');
 
     const el = fixture.nativeElement as HTMLElement;
     expect(el.querySelectorAll('[data-testid="diff-add"]').length).toBe(3);
@@ -119,9 +118,7 @@ describe('DiffViewComponent', () => {
   });
 
   it('renders only removals when newString is empty', () => {
-    component.oldString = 'x\ny\nz';
-    component.newString = '';
-    fixture.detectChanges();
+    setInputs('x\ny\nz', '');
 
     const el = fixture.nativeElement as HTMLElement;
     expect(el.querySelectorAll('[data-testid="diff-remove"]').length).toBe(3);
@@ -130,10 +127,11 @@ describe('DiffViewComponent', () => {
   });
 
   it('truncates diffs longer than truncateLines and shows omitted marker', () => {
-    component.oldString = Array.from({ length: 50 }, (_, i) => `old-${i}`).join('\n');
-    component.newString = Array.from({ length: 50 }, (_, i) => `new-${i}`).join('\n');
-    component.truncateLines = 10;
-    fixture.detectChanges();
+    setInputs(
+      Array.from({ length: 50 }, (_, i) => `old-${i}`).join('\n'),
+      Array.from({ length: 50 }, (_, i) => `new-${i}`).join('\n'),
+      10
+    );
 
     const el = fixture.nativeElement as HTMLElement;
     const omitted = el.querySelector('[data-testid="diff-omitted"]');
@@ -145,10 +143,7 @@ describe('DiffViewComponent', () => {
   });
 
   it('does not show omitted marker or expand button for short diffs', () => {
-    component.oldString = 'a\nb';
-    component.newString = 'x\ny';
-    component.truncateLines = 20;
-    fixture.detectChanges();
+    setInputs('a\nb', 'x\ny', 20);
 
     const el = fixture.nativeElement as HTMLElement;
     expect(el.querySelector('[data-testid="diff-omitted"]')).toBeNull();
@@ -156,10 +151,11 @@ describe('DiffViewComponent', () => {
   });
 
   it('expand button reveals full diff and hides the omitted marker', () => {
-    component.oldString = Array.from({ length: 30 }, (_, i) => `old-${i}`).join('\n');
-    component.newString = Array.from({ length: 30 }, (_, i) => `new-${i}`).join('\n');
-    component.truncateLines = 10;
-    fixture.detectChanges();
+    setInputs(
+      Array.from({ length: 30 }, (_, i) => `old-${i}`).join('\n'),
+      Array.from({ length: 30 }, (_, i) => `new-${i}`).join('\n'),
+      10
+    );
 
     const el = fixture.nativeElement as HTMLElement;
     const expandBtn = el.querySelector('[data-testid="diff-expand"]') as HTMLButtonElement | null;
@@ -178,9 +174,7 @@ describe('DiffViewComponent', () => {
   });
 
   it('applies whitespace-pre on each line, not the container', () => {
-    component.oldString = 'a b c';
-    component.newString = 'x y z';
-    fixture.detectChanges();
+    setInputs('a b c', 'x y z');
 
     const el = fixture.nativeElement as HTMLElement;
     const container = el.querySelector('[data-testid="diff-container"]');
@@ -194,10 +188,7 @@ describe('DiffViewComponent', () => {
 
   it('does NOT truncate when diff line count equals truncateLines exactly', () => {
     // 6 total diff lines (3 removals + 3 additions). truncateLines = 6 — must NOT truncate.
-    component.oldString = 'a\nb\nc';
-    component.newString = 'x\ny\nz';
-    component.truncateLines = 6;
-    fixture.detectChanges();
+    setInputs('a\nb\nc', 'x\ny\nz', 6);
 
     const el = fixture.nativeElement as HTMLElement;
     expect(el.querySelector('[data-testid="diff-omitted"]')).toBeNull();
@@ -205,12 +196,33 @@ describe('DiffViewComponent', () => {
 
   it('truncates when diff line count exceeds truncateLines', () => {
     // 8 total diff lines (4 removals + 4 additions) > truncateLines 6 — must truncate.
-    component.oldString = 'a\nb\nc\nd';
-    component.newString = 'w\nx\ny\nz';
-    component.truncateLines = 6;
-    fixture.detectChanges();
+    setInputs('a\nb\nc\nd', 'w\nx\ny\nz', 6);
 
     const el = fixture.nativeElement as HTMLElement;
     expect(el.querySelector('[data-testid="diff-omitted"]')).not.toBeNull();
+  });
+
+  it('resets the user expand toggle when oldString or newString changes', () => {
+    // Truncate with a long diff, click expand to reveal full, then swap inputs:
+    // the new diff must start collapsed again per the OnChanges contract preserved
+    // by the effect.
+    setInputs(
+      Array.from({ length: 30 }, (_, i) => `old-${i}`).join('\n'),
+      Array.from({ length: 30 }, (_, i) => `new-${i}`).join('\n'),
+      10
+    );
+    const el = fixture.nativeElement as HTMLElement;
+    (el.querySelector('[data-testid="diff-expand"]') as HTMLButtonElement | null)?.click();
+    fixture.detectChanges();
+    expect(el.querySelector('[data-testid="diff-omitted"]')).toBeNull();
+
+    // Swap to a fresh diff that is again above the threshold.
+    setInputs(
+      Array.from({ length: 30 }, (_, i) => `old2-${i}`).join('\n'),
+      Array.from({ length: 30 }, (_, i) => `new2-${i}`).join('\n'),
+      10
+    );
+    expect(el.querySelector('[data-testid="diff-omitted"]')).not.toBeNull();
+    expect(el.querySelector('[data-testid="diff-expand"]')).not.toBeNull();
   });
 });

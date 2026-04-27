@@ -43,6 +43,15 @@ export type StreamChunk =
       /** Commits a retry-anchor UUID onto the most recent user entry (ADR-046). */
       chunk_type: 'UserMessageCommit';
       data: { uuid: string };
+    }
+  | {
+      /**
+       * One-slot queued message (ADR-045) was drained server-side after the
+       * previous turn ended. Frontend clears `pendingQueue` on receipt — the
+       * queued payload is already in flight via stdin.
+       */
+      chunk_type: 'QueueDrained';
+      data: { session_id: string; text: string };
     };
 
 /** A single selectable option in an AskUserQuestion prompt. */
@@ -94,6 +103,17 @@ export interface EntryMeta {
   model?: string;
   usage?: TurnUsage;
   cost?: number;
+}
+
+/**
+ * One-slot queued message (ADR-045). Mirrors the Rust `QueuedMessage` type;
+ * the composer surfaces `text` as the "queued: …" preview and exposes a
+ * cancel button that drops the slot via the `cancel_queued_message`
+ * Tauri command.
+ */
+export interface QueuedMessage {
+  text: string;
+  queued_at: number;
 }
 
 /** A block within a chat message */

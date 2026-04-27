@@ -315,7 +315,7 @@ describe('LlmProviderComponent', () => {
     fixture.detectChanges();
     const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
     expect(btn).not.toBeNull();
-    expect(btn.textContent.trim()).toContain('Save');
+    expect(btn.textContent.trim().toLowerCase()).toContain('save');
   });
 
   // ── Model discovery (ADR-041) ────────────────────────────────────────
@@ -376,7 +376,7 @@ describe('LlmProviderComponent', () => {
     const select = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
     expect(select).not.toBeNull();
     expect(select.tagName).toBe('SELECT');
-    const opts = Array.from(select.querySelectorAll('option')).map((o: Element) =>
+    const opts = Array.from(select.querySelectorAll('option') as NodeListOf<Element>).map((o) =>
       (o.textContent || '').trim()
     );
     expect(opts).toContain('llama3.3');
@@ -558,7 +558,7 @@ describe('LlmProviderComponent', () => {
     const select = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
     expect(select).not.toBeNull();
     expect(select.tagName).toBe('SELECT');
-    const opts = Array.from(select.querySelectorAll('option')).map((o: Element) =>
+    const opts = Array.from(select.querySelectorAll('option') as NodeListOf<Element>).map((o) =>
       (o.getAttribute('value') || '').toString()
     );
     expect(opts).toContain('legacy');

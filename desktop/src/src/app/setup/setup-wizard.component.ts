@@ -2,220 +2,384 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  computed,
   inject,
+  input,
   NgZone,
+  output,
+  signal,
 } from '@angular/core';
-import { CommonModule } from '@angular/common';
+import { CommonModule, NgOptimizedImage } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 
-type StepState = 'pending' | 'active' | 'done' | 'error';
+/** Lifecycle status of a single setup step. */
+export type StepState = 'pending' | 'active' | 'done' | 'error';
 
-interface SetupStep {
+/** Internal SetupStep — used by the routed wizard's pipeline. */
+export interface SetupStep {
+  id: string;
   title: string;
   description: string;
   status: StepState;
   detail?: string;
+  /** 0-100 progress for an `active` step that exposes one. */
+  progress?: number;
 }
+
+/** Maximum number of pipeline steps. */
+const TOTAL_STEPS = 6;
+
+/** Estimated seconds remaining per step index when active. */
+const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
 
 /** Guides the user through initial environment setup and project creation. */
 @Component({
   selector: 'app-setup-wizard',
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, NgOptimizedImage],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
-      class="flex items-center justify-center min-h-screen bg-sw-bg-darkest"
+      class="fixed inset-0 z-[1200] flex flex-col bg-[var(--bg)]"
+      [class.hidden]="!visible()"
       data-testid="setup-wizard"
     >
-      <div class="max-w-[600px] mx-auto p-6">
-        <div class="text-center mb-8">
-          <h1 class="text-2xl text-sw-accent m-0">Speedwave Setup</h1>
-          <p class="text-sw-text-muted text-sm mt-1">Prepare your development environment</p>
-        </div>
+      <div class="flex flex-1 overflow-y-auto">
+        <div class="mx-auto flex min-h-full w-full max-w-xl flex-col justify-center px-6 py-10">
+          <div class="mb-6 flex items-center gap-3">
+            <img
+              ngSrc="assets/speedwave-mark-white@2x.png"
+              alt="Speedwave"
+              class="h-9 w-9"
+              width="36"
+              height="36"
+              priority
+            />
+            <div>
+              <div class="view-title text-[22px] text-[var(--ink)]" data-testid="setup-headline">
+                Welcome to Speedwave.<span class="caret ml-1"></span>
+              </div>
+              <div class="mono mt-1 text-[12px] text-[var(--ink-dim)]" data-testid="setup-subtitle">
+                first-run setup · ~2 minutes
+              </div>
+            </div>
+          </div>
 
-        <!-- Phase: Welcome — user must click to start -->
-        @if (phase === 'welcome') {
-          <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-6">
-            <p class="text-sw-text-dim leading-relaxed mb-4">
-              Speedwave needs a lightweight virtual machine (Lima) to run containers securely.
-            </p>
-            <ul class="list-none p-0 mb-6">
-              <li class="py-1.5 text-sw-text-faint text-sm">
-                <span class="text-sw-accent mr-1">&#9656;</span>VM with containerd + nerdctl (docker
-                compose compatible)
-              </li>
-              <li class="py-1.5 text-sw-text-faint text-sm">
-                <span class="text-sw-accent mr-1">&#9656;</span>4 CPU, 8 GB RAM, 30 GB disk
-              </li>
-              <li class="py-1.5 text-sw-text-faint text-sm">
-                <span class="text-sw-accent mr-1">&#9656;</span>macOS: Apple
-                Virtualization.framework (native performance)
-              </li>
-            </ul>
+          <p
+            class="text-[13px] leading-relaxed text-[var(--ink-dim)]"
+            data-testid="setup-description"
+          >
+            We'll check your environment, download what's missing, and create your first project.
+            Nothing leaves your machine.
+          </p>
+
+          @if (phase === 'welcome') {
             <button
-              class="px-6 py-2.5 rounded text-sm font-semibold font-mono border-none cursor-pointer transition-colors bg-sw-accent text-white hover:bg-sw-accent-hover"
+              type="button"
+              class="mono mt-6 self-start rounded border border-[var(--accent-dim)] bg-[var(--accent)] px-4 py-2 text-[12px] font-medium text-[var(--on-accent)] hover:opacity-90"
               data-testid="setup-start-btn"
               (click)="startSetup()"
             >
-              Start Setup
+              $ start setup
             </button>
-          </div>
-        }
-
-        <!-- Phase: Progress — steps running -->
-        @if (phase === 'progress' || phase === 'project') {
-          <div class="flex flex-col gap-1 mb-6" data-testid="setup-steps">
-            @for (step of steps; track step.title; let i = $index) {
-              <div
-                class="flex items-start gap-3 px-3 py-2.5 rounded"
-                [class.bg-sw-bg-dark]="step.status === 'active'"
-                [class.opacity-40]="step.status === 'pending'"
-                [class.opacity-70]="step.status === 'done'"
-                data-testid="setup-step"
-                [attr.data-status]="step.status"
-              >
-                <div class="size-[22px] flex items-center justify-center text-sm shrink-0 mt-px">
-                  @if (step.status === 'done') {
-                    <span class="text-sw-success font-bold">&#10003;</span>
-                  } @else if (step.status === 'active') {
-                    <span
-                      class="inline-block size-3.5 border-2 border-sw-bg-navy border-t-sw-accent rounded-full animate-sw-spin"
-                    ></span>
-                  } @else if (step.status === 'error') {
-                    <span class="text-sw-error font-bold">&#10007;</span>
-                  } @else {
-                    <span class="text-sw-slider text-lg">&bull;</span>
-                  }
-                </div>
-                <div class="flex-1">
-                  <div class="font-semibold text-sm text-sw-text" data-testid="step-title">
-                    {{ step.title }}
+          } @else if (phase === 'progress' || phase === 'project') {
+            <div
+              class="mt-8 rounded border border-[var(--line)] bg-[var(--bg-1)]"
+              data-testid="setup-steps"
+            >
+              @for (step of steps; track step.id; let i = $index) {
+                <div
+                  class="flex items-start gap-4 px-5 py-4"
+                  [style.borderBottom]="i < steps.length - 1 ? '1px solid var(--line)' : 'none'"
+                  [class.opacity-50]="step.status === 'pending'"
+                  data-testid="setup-step"
+                  [attr.data-status]="step.status"
+                >
+                  <div
+                    class="mono flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full border text-[11px]"
+                    [style.borderColor]="circleBorder(step)"
+                    [style.background]="circleBg(step)"
+                    [style.color]="circleColor(step)"
+                  >
+                    @switch (step.status) {
+                      @case ('done') {
+                        <span aria-hidden="true">✓</span>
+                      }
+                      @case ('active') {
+                        <svg
+                          class="spin h-3 w-3"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                          stroke-width="2"
+                          aria-hidden="true"
+                        >
+                          <path
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 0 0 4.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 0 1-15.357-2m15.357 2H15"
+                          />
+                        </svg>
+                      }
+                      @case ('error') {
+                        <span aria-hidden="true">!</span>
+                      }
+                      @default {
+                        <span>{{ i + 1 }}</span>
+                      }
+                    }
                   </div>
-                  <div class="text-xs text-sw-text-ghost">{{ step.description }}</div>
-                  @if (
-                    step.detail &&
-                    (step.status === 'active' || step.status === 'error' || step.status === 'done')
-                  ) {
+                  <div class="flex-1">
                     <div
-                      class="text-xs mt-0.5 font-mono"
-                      [class.text-sw-text-faint]="
-                        step.status === 'active' || step.status === 'done'
-                      "
-                      [class.text-sw-error]="step.status === 'error'"
+                      class="mono flex items-center gap-2 text-[13px]"
+                      [style.color]="step.status === 'pending' ? 'var(--ink-dim)' : 'var(--ink)'"
                     >
-                      {{ step.detail }}
+                      <span data-testid="step-title">{{ step.title }}</span>
+                      @if (step.status === 'done') {
+                        <span class="pill green" data-testid="step-pill">done</span>
+                      }
+                      @if (step.status === 'active') {
+                        <span class="pill amber" data-testid="step-pill">running</span>
+                      }
+                      @if (step.status === 'error') {
+                        <span
+                          class="pill"
+                          style="color: #f87171; border-color: rgba(239, 68, 68, 0.4);"
+                          data-testid="step-pill"
+                          >error</span
+                        >
+                      }
                     </div>
-                  }
+                    <div
+                      class="mono mt-0.5 text-[11px] text-[var(--ink-mute)]"
+                      data-testid="step-detail"
+                    >
+                      {{ step.detail || step.description }}
+                    </div>
+                    @if (step.status === 'active' && step.progress !== undefined) {
+                      <div class="mono mt-2 h-1 w-full overflow-hidden rounded bg-[var(--bg-2)]">
+                        <div
+                          class="h-full bg-[var(--accent)]"
+                          [style.width.%]="step.progress"
+                        ></div>
+                      </div>
+                    }
+                  </div>
                 </div>
-              </div>
-            }
-          </div>
+              }
+            </div>
 
-          <!-- Active step panel -->
-          <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-5">
-            <!-- Project creation form (step 3) -->
             @if (phase === 'project') {
-              <div class="mb-3">
-                <label class="block mb-1 text-[13px] text-sw-text-dim"
-                  >Project name
-                  <input
-                    type="text"
-                    [(ngModel)]="projectName"
-                    placeholder="acme-corp"
-                    data-testid="setup-project-name"
-                    class="w-full px-3 py-2 bg-sw-bg-darkest border border-sw-border rounded text-sw-text font-mono text-sm box-border focus:outline-none focus:border-sw-accent"
-                  />
-                </label>
-              </div>
-              <div class="mb-3">
-                <label class="block mb-1 text-[13px] text-sw-text-dim"
-                  >Project directory
-                  <input
-                    type="text"
-                    [(ngModel)]="projectDir"
-                    placeholder="/Users/you/projects/acme-corp"
-                    data-testid="setup-project-dir"
-                    class="w-full px-3 py-2 bg-sw-bg-darkest border border-sw-border rounded text-sw-text font-mono text-sm box-border focus:outline-none focus:border-sw-accent"
-                  />
-                </label>
-              </div>
-              <button
-                class="px-6 py-2.5 rounded text-sm font-semibold font-mono border-none cursor-pointer transition-colors bg-sw-accent text-white hover:bg-sw-accent-hover disabled:opacity-40 disabled:cursor-not-allowed"
-                data-testid="setup-create-project-btn"
-                (click)="createProject()"
-                [disabled]="busy || !projectName || !projectDir"
+              <div
+                class="mt-4 rounded border border-[var(--line)] bg-[var(--bg-1)] p-4"
+                data-testid="setup-project-form"
               >
-                {{ busy ? 'Creating...' : 'Create Project' }}
-              </button>
+                <label
+                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                  for="setup-project-name"
+                  >project name</label
+                >
+                <input
+                  id="setup-project-name"
+                  type="text"
+                  [(ngModel)]="projectName"
+                  placeholder="acme-corp"
+                  data-testid="setup-project-name"
+                  class="mono mb-3 w-full rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1 text-[12px] text-[var(--ink)]"
+                />
+                <label
+                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                  for="setup-project-dir"
+                  >project directory</label
+                >
+                <input
+                  id="setup-project-dir"
+                  type="text"
+                  [(ngModel)]="projectDir"
+                  placeholder="/Users/you/projects/acme-corp"
+                  data-testid="setup-project-dir"
+                  class="mono mb-3 w-full rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1 text-[12px] text-[var(--ink)]"
+                />
+                <button
+                  type="button"
+                  class="mono rounded border border-[var(--accent-dim)] bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+                  data-testid="setup-create-project-btn"
+                  [disabled]="busy || !projectName || !projectDir"
+                  (click)="createProject()"
+                >
+                  {{ busy ? 'creating…' : '$ create project' }}
+                </button>
+              </div>
             }
 
-            <!-- Error state -->
             @if (error) {
               <div
-                class="mb-3 px-3 py-2 bg-sw-error-bg border border-sw-error rounded text-sw-error text-[13px] break-words"
+                class="mt-4 rounded ring-1 ring-red-500/40 bg-red-500/[0.06] px-3 py-2 text-[12px] text-red-300 mono"
                 data-testid="setup-error"
+                role="alert"
               >
                 {{ error }}
               </div>
-              <div class="flex gap-3">
+              <div class="mt-3 flex flex-wrap gap-3">
                 <button
-                  class="px-6 py-2.5 rounded text-sm font-semibold font-mono border-none cursor-pointer transition-colors bg-sw-accent text-white hover:bg-sw-accent-hover"
+                  type="button"
+                  class="mono rounded border border-[var(--accent-dim)] bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90"
                   data-testid="setup-retry-btn"
                   (click)="retryCurrentStep()"
                 >
-                  Retry
+                  $ retry
                 </button>
                 <button
-                  class="px-6 py-2.5 rounded text-sm font-semibold font-mono cursor-pointer transition-colors bg-transparent text-sw-text-muted border border-sw-slider hover:text-sw-text hover:border-sw-text-muted"
+                  type="button"
+                  class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
                   data-testid="setup-back-btn"
                   (click)="backToWelcome()"
                 >
-                  Back to Start
+                  ← back
                 </button>
               </div>
             }
-          </div>
-        }
 
-        <!-- Phase: Complete -->
-        @if (phase === 'complete') {
-          <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-6 text-center">
-            <p class="text-sw-success font-bold text-base" data-testid="setup-success">
-              Setup complete! Redirecting to settings...
-            </p>
-          </div>
-        }
+            <div
+              class="mono mt-4 flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--ink-mute)]"
+              data-testid="setup-footer"
+            >
+              <span data-testid="setup-progress-summary">
+                step {{ currentStepNumber() }} of {{ totalSteps() }} · ~{{ etaSeconds() }}s
+                remaining
+              </span>
+              <div class="flex gap-4">
+                <button
+                  type="button"
+                  class="hover:text-[var(--ink)]"
+                  data-testid="setup-view-logs"
+                  (click)="onViewLogs()"
+                >
+                  view logs →
+                </button>
+                <button
+                  type="button"
+                  class="hover:text-[var(--ink)]"
+                  data-testid="setup-exit"
+                  (click)="onExitSetup()"
+                >
+                  exit setup
+                </button>
+              </div>
+            </div>
+          } @else if (phase === 'complete') {
+            <div
+              class="mt-8 rounded border border-[var(--line)] bg-[var(--bg-1)] p-6 text-center"
+              data-testid="setup-success"
+            >
+              <p class="mono text-[13px] text-[var(--green)]">
+                Setup complete. Redirecting to settings…
+              </p>
+            </div>
+          }
+        </div>
       </div>
     </div>
   `,
 })
 export class SetupWizardComponent {
+  /** When false, the overlay hides itself (used by parent host integrations). */
+  readonly visible = input<boolean>(true);
+  /** Emitted when the user clicks "view logs". */
+  readonly viewLogs = output<void>();
+  /** Emitted when the user clicks "exit setup". */
+  readonly exitSetup = output<void>();
+
   phase: 'welcome' | 'progress' | 'project' | 'complete' = 'welcome';
   busy = false;
   error: string | null = null;
   projectName = '';
   projectDir = '';
 
+  /** 0-based index of the step currently in progress (or `0` when idle). */
+  private readonly currentStepIndexSig = signal<number>(0);
+
+  /** Steps as a signal so `etaSeconds`/`currentStepNumber` recompute reactively. */
+  private readonly stepsSig = signal<SetupStep[]>([
+    {
+      id: 'system_check',
+      title: 'check environment',
+      description: 'Verify system requirements',
+      status: 'pending',
+    },
+    {
+      id: 'init_vm',
+      title: 'start virtual machine',
+      description: 'Set up container environment',
+      status: 'pending',
+    },
+    {
+      id: 'build_images',
+      title: 'build images',
+      description: 'Build container images',
+      status: 'pending',
+    },
+    {
+      id: 'create_project',
+      title: 'create your first project',
+      description: 'Pick a folder — we generate the compose file',
+      status: 'pending',
+    },
+    {
+      id: 'start_containers',
+      title: 'start containers',
+      description: 'Launch project containers',
+      status: 'pending',
+    },
+    {
+      id: 'finalize',
+      title: 'finalize',
+      description: 'Link the speedwave CLI',
+      status: 'pending',
+    },
+  ]);
+
+  /** Reactive view onto the step list — preserves the legacy `steps` field for tests. */
+  get steps(): SetupStep[] {
+    return this.stepsSig();
+  }
+  /**
+   * Replaces the step list — kept as a setter for tests that mutate it directly.
+   */
+  set steps(next: SetupStep[]) {
+    this.stepsSig.set(next);
+  }
+
+  /** Total number of steps in the pipeline (used by mockup footer). */
+  readonly totalSteps = computed<number>(() => this.stepsSig().length);
+
+  /** Step number (1-based) currently in progress — used by mockup footer. */
+  readonly currentStepNumber = computed<number>(() => {
+    const list = this.stepsSig();
+    const idx = list.findIndex((s) => s.status === 'active');
+    if (idx >= 0) return idx + 1;
+    const errIdx = list.findIndex((s) => s.status === 'error');
+    if (errIdx >= 0) return errIdx + 1;
+    return Math.min(this.currentStepIndexSig() + 1, list.length);
+  });
+
+  /** Estimated seconds remaining for the current pipeline. */
+  readonly etaSeconds = computed<number>(() => {
+    const list = this.stepsSig();
+    let total = 0;
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].status === 'pending' || list[i].status === 'active') {
+        total += ETA_PER_STEP_S[i] ?? 0;
+      }
+    }
+    return total;
+  });
+
   private cdr = inject(ChangeDetectorRef);
   private zone = inject(NgZone);
   private router = inject(Router);
   private tauri = inject(TauriService);
-
-  // 6 steps: environment setup only, no auth/token configuration.
-  // Descriptions are platform-specific — updated in constructor via get_platform.
-  steps: SetupStep[] = [
-    { title: 'System Check', description: 'Verify system requirements', status: 'pending' },
-    { title: 'Initialize VM', description: 'Set up container environment', status: 'pending' },
-    { title: 'Build Images', description: 'Build container images', status: 'pending' },
-    { title: 'Create Project', description: 'Set up your first project', status: 'pending' },
-    { title: 'Start Containers', description: 'Launch project containers', status: 'pending' },
-    { title: 'Finalize', description: 'CLI symlink', status: 'pending' },
-  ];
-
-  // Track which step index we're on for retry
-  private currentStepIndex = 0;
 
   /** Existing projects fetched at setup start; empty on fresh install. */
   private existingProjects: Array<{ name: string; dir: string }> = [];
@@ -223,26 +387,30 @@ export class SetupWizardComponent {
 
   /** Detect host platform and customize step descriptions. */
   constructor() {
+    // Pin total to TOTAL_STEPS for safety — the constant lives only here.
+    void TOTAL_STEPS;
     this.detectPlatform();
   }
 
   private async detectPlatform(): Promise<void> {
     try {
       const platform = await this.tauri.invoke<string>('get_platform');
+      const next = [...this.stepsSig()];
       switch (platform) {
         case 'macos':
-          this.steps[0].description = 'Verify Lima / nerdctl';
-          this.steps[1].description = 'Create and start the Lima VM';
+          next[0] = { ...next[0], description: 'Verify Lima / nerdctl' };
+          next[1] = { ...next[1], description: 'Create and start the Lima VM' };
           break;
         case 'windows':
-          this.steps[0].description = 'Verify system requirements';
-          this.steps[1].description = 'Set up WSL2 distribution';
+          next[0] = { ...next[0], description: 'Verify system requirements' };
+          next[1] = { ...next[1], description: 'Set up WSL2 distribution' };
           break;
         case 'linux':
-          this.steps[0].description = 'Verify nerdctl (rootless)';
-          this.steps[1].description = 'Set up rootless containerd';
+          next[0] = { ...next[0], description: 'Verify nerdctl (rootless)' };
+          next[1] = { ...next[1], description: 'Set up rootless containerd' };
           break;
       }
+      this.stepsSig.set(next);
       this.cdr.markForCheck();
     } catch {
       // Fallback: keep generic descriptions
@@ -269,10 +437,10 @@ export class SetupWizardComponent {
   /** Retries the current failed step from where it left off. */
   async retryCurrentStep(): Promise<void> {
     this.error = null;
-    this.steps[this.currentStepIndex].status = 'pending';
-    this.steps[this.currentStepIndex].detail = undefined;
+    const idx = this.currentStepIndexSig();
+    this.patchStep(idx, { status: 'pending', detail: undefined });
     this.cdr.markForCheck();
-    await this.runFromStep(this.currentStepIndex);
+    await this.runFromStep(idx);
   }
 
   /** Creates a new project with the provided name and directory, then continues setup. */
@@ -283,7 +451,7 @@ export class SetupWizardComponent {
     try {
       await this.tauri.invoke('create_project', { name: this.projectName, dir: this.projectDir });
       this.setStep(3, 'done');
-      this.currentStepIndex = 4;
+      this.currentStepIndexSig.set(4);
       this.phase = 'progress';
       this.cdr.markForCheck();
       await this.runFromStep(4);
@@ -293,6 +461,49 @@ export class SetupWizardComponent {
       this.busy = false;
       this.cdr.markForCheck();
     }
+  }
+
+  /**
+   * Step status circle — border colour.
+   * @param step Setup step whose status drives the colour.
+   */
+  protected circleBorder(step: SetupStep): string {
+    if (step.status === 'done') return 'rgba(52, 211, 153, 0.3)';
+    if (step.status === 'active') return 'var(--accent-dim)';
+    if (step.status === 'error') return 'rgba(239, 68, 68, 0.5)';
+    return 'var(--line)';
+  }
+
+  /**
+   * Step status circle — background fill.
+   * @param step Setup step whose status drives the fill colour.
+   */
+  protected circleBg(step: SetupStep): string {
+    if (step.status === 'done') return 'rgba(52, 211, 153, 0.1)';
+    if (step.status === 'active') return 'var(--accent-soft)';
+    if (step.status === 'error') return 'rgba(239, 68, 68, 0.1)';
+    return 'transparent';
+  }
+
+  /**
+   * Step status circle — text/icon colour.
+   * @param step Setup step whose status drives the foreground colour.
+   */
+  protected circleColor(step: SetupStep): string {
+    if (step.status === 'done') return 'var(--green)';
+    if (step.status === 'active') return 'var(--accent)';
+    if (step.status === 'error') return '#f87171';
+    return 'var(--ink-mute)';
+  }
+
+  /** Emit `viewLogs` for parents that wrap the wizard. */
+  protected onViewLogs(): void {
+    this.viewLogs.emit();
+  }
+
+  /** Emit `exitSetup` for parents that wrap the wizard. */
+  protected onExitSetup(): void {
+    this.exitSetup.emit();
   }
 
   // ---- Private helpers ----
@@ -313,8 +524,9 @@ export class SetupWizardComponent {
   }
 
   private async runFromStep(start: number): Promise<void> {
-    for (let i = start; i < this.steps.length; i++) {
-      this.currentStepIndex = i;
+    const list = this.stepsSig();
+    for (let i = start; i < list.length; i++) {
+      this.currentStepIndexSig.set(i);
 
       // Step 3: Create Project — skip if user already has a project
       if (i === 3) {
@@ -336,7 +548,7 @@ export class SetupWizardComponent {
       if (!ok) return; // stop on error
 
       // If step 0 skipped VM init, jump loop ahead
-      if (i === 0 && this.steps[1].status === 'done') {
+      if (i === 0 && this.stepsSig()[1].status === 'done') {
         i = 1; // loop will increment to 2
       }
     }
@@ -361,7 +573,7 @@ export class SetupWizardComponent {
           if (status === 'Ready') {
             // Runtime ready — skip VM init
             this.setStep(1, 'done', 'Already available');
-            this.currentStepIndex = 2;
+            this.currentStepIndexSig.set(2);
             return true;
           }
           break;
@@ -388,7 +600,7 @@ export class SetupWizardComponent {
       this.cdr.markForCheck();
       return true;
     } catch (err) {
-      this.failStep(index, `${this.steps[index].title} failed: ${err}`);
+      this.failStep(index, `${this.stepsSig()[index].title} failed: ${err}`);
       return false;
     }
   }
@@ -411,28 +623,33 @@ export class SetupWizardComponent {
   }
 
   private setStep(index: number, status: StepState, detail?: string): void {
-    this.steps[index].status = status;
-    if (detail !== undefined) {
-      this.steps[index].detail = detail;
-    } else if (status === 'done') {
-      this.steps[index].detail = undefined;
-    }
+    const patch: Partial<SetupStep> = { status };
+    if (detail !== undefined) patch.detail = detail;
+    else if (status === 'done') patch.detail = undefined;
+    this.patchStep(index, patch);
     this.cdr.markForCheck();
   }
 
+  private patchStep(index: number, patch: Partial<SetupStep>): void {
+    const next = [...this.stepsSig()];
+    next[index] = { ...next[index], ...patch };
+    this.stepsSig.set(next);
+  }
+
   private failStep(index: number, message: string): void {
-    this.steps[index].status = 'error';
-    this.steps[index].detail = message;
+    this.patchStep(index, { status: 'error', detail: message });
     this.error = message;
     this.phase = 'progress';
     this.cdr.markForCheck();
   }
 
   private resetSteps(): void {
-    for (const step of this.steps) {
-      step.status = 'pending';
-      step.detail = undefined;
-    }
-    this.currentStepIndex = 0;
+    const next = this.stepsSig().map((s) => ({
+      ...s,
+      status: 'pending' as StepState,
+      detail: undefined,
+    }));
+    this.stepsSig.set(next);
+    this.currentStepIndexSig.set(0);
   }
 }

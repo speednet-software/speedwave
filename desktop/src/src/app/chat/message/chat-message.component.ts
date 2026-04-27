@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
 import type { ChatMessage, MessageBlock } from '../../models/chat';
 import { TextBlockComponent } from '../blocks/text-block.component';
 import { ThinkingBlockComponent } from '../blocks/thinking-block.component';
@@ -10,7 +10,15 @@ import { UserMessageComponent } from './user-message.component';
 import { MessageActionsComponent } from './message-actions.component';
 import { MessageMetadataComponent } from './message-metadata.component';
 
-/** Renders a single chat message: user role uses a meta-line layout, assistant role uses a bubble. */
+/**
+ * Renders a single chat message in the terminal-minimal layout.
+ *
+ * - User messages → delegate to `<app-user-message>` (mono "user · time" meta
+ *   line + plain content, no bubble).
+ * - Assistant messages → mono "speedwave · time" meta line, then body blocks,
+ *   then `<app-message-metadata>` (model · edited · tokens · cache · cost),
+ *   then `<app-message-actions>` (copy / retry).
+ */
 @Component({
   selector: 'app-chat-message',
   imports: [
@@ -25,107 +33,126 @@ import { MessageMetadataComponent } from './message-metadata.component';
     MessageMetadataComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  host: {
-    class: 'flex flex-col w-full',
-    '[class.items-end]': "role === 'user'",
-    '[class.items-start]': "role === 'assistant'",
-  },
+  host: { class: 'flex w-full flex-col items-stretch' },
   template: `
-    @if (role === 'user') {
-      <div data-testid="chat-message" [attr.data-role]="role">
-        <app-user-message [blocks]="blocks" [editedAt]="editedAt" [timestamp]="timestamp" />
-      </div>
+    @if (role() === 'user') {
+      <article data-testid="chat-message" [attr.data-role]="role()">
+        <app-user-message [blocks]="blocks()" [editedAt]="editedAt()" [timestamp]="timestamp()" />
+      </article>
     } @else {
-      <div
-        data-testid="chat-message"
-        [attr.data-role]="role"
-        class="max-w-[85%] px-4 py-3 rounded-lg leading-relaxed break-words self-start bg-sw-bg-dark text-sw-text border border-sw-border"
-        [class.!border-sw-accent]="streaming"
-      >
-        @for (block of blocks; track $index) {
-          @switch (block.type) {
-            @case ('text') {
-              <app-text-block [content]="block.content" [streaming]="streaming && $last" />
-            }
-            @case ('thinking') {
-              <app-thinking-block [content]="block.content" [collapsedDefault]="block.collapsed" />
-            }
-            @case ('tool_use') {
-              <app-tool-block [tool]="asToolBlock(block).tool" />
-            }
-            @case ('ask_user') {
-              <app-ask-user-block
-                [question]="asAskUserBlock(block).question"
-                (answered)="questionAnswered.emit($event)"
-              />
-            }
-            @case ('error') {
-              <app-error-block [content]="block.content" [kind]="block.kind ?? 'generic'" />
-            }
-            @case ('permission_prompt') {
-              <app-permission-prompt
-                [command]="block.command"
-                [description]="block.description ?? ''"
-                (decided)="onPermissionDecided($index, $event)"
-              />
+      <article data-testid="chat-message" [attr.data-role]="role()">
+        <div class="mono mb-1 flex items-center gap-2 text-[11px]">
+          <span class="text-[var(--accent)]">speedwave</span>
+          @if (formattedTime()) {
+            <span class="text-[var(--ink-mute)]">·</span>
+            <span class="text-[var(--ink-mute)]" data-testid="meta-time">{{
+              streaming() ? 'streaming...' : formattedTime()
+            }}</span>
+          } @else if (streaming()) {
+            <span class="text-[var(--ink-mute)]">· streaming...</span>
+          }
+        </div>
+
+        <div class="text-[14px] leading-[1.7] text-[var(--ink)]">
+          @for (block of blocks(); track $index) {
+            @switch (block.type) {
+              @case ('text') {
+                <app-text-block [content]="block.content" [streaming]="streaming() && $last" />
+              }
+              @case ('thinking') {
+                <app-thinking-block
+                  [content]="block.content"
+                  [collapsedDefault]="block.collapsed"
+                />
+              }
+              @case ('tool_use') {
+                <app-tool-block [tool]="asToolBlock(block).tool" />
+              }
+              @case ('ask_user') {
+                <app-ask-user-block
+                  [question]="asAskUserBlock(block).question"
+                  (answered)="questionAnswered.emit($event)"
+                />
+              }
+              @case ('error') {
+                <app-error-block [content]="block.content" [kind]="block.kind ?? 'generic'" />
+              }
+              @case ('permission_prompt') {
+                <app-permission-prompt
+                  [command]="block.command"
+                  [description]="block.description ?? ''"
+                  (decided)="onPermissionDecided($index, $event)"
+                />
+              }
             }
           }
+          @if (streaming() && !lastBlockIsText()) {
+            <span data-testid="cursor" class="caret ml-0.5" aria-hidden="true"></span>
+          }
+        </div>
+
+        @if (!streaming() && entry()) {
+          <app-message-metadata [entry]="entry()!" [precedingEdited]="precedingEdited()" />
         }
-        @if (streaming && !lastBlockIsText) {
-          <span data-testid="cursor" class="inline-block animate-blink text-sw-accent"
-            >&#x2588;</span
-          >
+
+        @if (!streaming() && entry() && entryIndex() !== null) {
+          <app-message-actions [entryIndex]="entryIndex()!" [isLast]="isLast()" />
         }
-        @if (!streaming && entry) {
-          <app-message-metadata [entry]="entry" [precedingEdited]="precedingEdited" />
-        }
-      </div>
-      @if (role === 'assistant' && !streaming && entryIndex !== null) {
-        <app-message-actions [entryIndex]="entryIndex" [isLast]="isLast" />
-      }
+      </article>
     }
   `,
 })
 export class ChatMessageComponent {
-  @Input({ required: true }) blocks!: readonly MessageBlock[];
-  @Input() role: 'user' | 'assistant' = 'assistant';
-  @Input() streaming = false;
-  @Input() editedAt: number | undefined = undefined;
-  @Input() timestamp = 0;
-  /**
-   * Index of this message entry in `ChatStateService.messages`. `null`
-   * when rendering live `currentBlocks` (which has no committed index yet)
-   * — the action bar is hidden in that case.
-   */
-  @Input() entryIndex: number | null = null;
-  /** Whether this entry is the last assistant message in the list. */
-  @Input() isLast = false;
-  /** Full assistant entry — required for the metadata row. */
-  @Input() entry?: ChatMessage;
-  /** True when the user entry that preceded this assistant was retried. Surfaces as `· edited`. */
-  @Input() precedingEdited = false;
-  @Output() questionAnswered = new EventEmitter<{ toolId: string; values: string[] }>();
-  @Output() permissionDecided = new EventEmitter<{
+  readonly blocks = input.required<readonly MessageBlock[]>();
+  readonly role = input<'user' | 'assistant'>('assistant');
+  readonly streaming = input(false);
+  readonly editedAt = input<number | undefined>(undefined);
+  readonly timestamp = input(0);
+  readonly entryIndex = input<number | null>(null);
+  readonly isLast = input(false);
+  readonly entry = input<ChatMessage | undefined>(undefined);
+  readonly precedingEdited = input(false);
+  readonly questionAnswered = output<{ toolId: string; values: string[] }>();
+  readonly permissionDecided = output<{
     blockIndex: number;
     decision: 'allow_once' | 'allow_always' | 'deny';
   }>();
 
-  /** Suppresses the block-level cursor when the last block renders its own streaming caret. */
-  get lastBlockIsText(): boolean {
-    return this.blocks.length > 0 && this.blocks[this.blocks.length - 1].type === 'text';
-  }
+  readonly lastBlockIsText = computed<boolean>(() => {
+    const b = this.blocks();
+    return b.length > 0 && b[b.length - 1].type === 'text';
+  });
 
-  /** Forwards a permission decision upstream tagged with the block's index. */
+  readonly formattedTime = computed<string>(() => {
+    const ts = this.timestamp();
+    if (!ts) return '';
+    const date = new Date(ts);
+    const hh = String(date.getHours()).padStart(2, '0');
+    const mm = String(date.getMinutes()).padStart(2, '0');
+    return `${hh}:${mm}`;
+  });
+
+  /**
+   * Forwards a permission decision upstream tagged with the block's index.
+   * @param blockIndex - Index of the permission_prompt block within this message.
+   * @param decision - User's choice on the prompt.
+   */
   onPermissionDecided(blockIndex: number, decision: 'allow_once' | 'allow_always' | 'deny'): void {
     this.permissionDecided.emit({ blockIndex, decision });
   }
 
-  /** Narrows a MessageBlock to its `tool_use` variant for the template. */
+  /**
+   * Narrows a MessageBlock to its `tool_use` variant for the template.
+   * @param block - Block to narrow.
+   */
   asToolBlock(block: MessageBlock): Extract<MessageBlock, { type: 'tool_use' }> {
     return block as Extract<MessageBlock, { type: 'tool_use' }>;
   }
 
-  /** Narrows a MessageBlock to its `ask_user` variant for the template. */
+  /**
+   * Narrows a MessageBlock to its `ask_user` variant for the template.
+   * @param block - Block to narrow.
+   */
   asAskUserBlock(block: MessageBlock): Extract<MessageBlock, { type: 'ask_user' }> {
     return block as Extract<MessageBlock, { type: 'ask_user' }>;
   }

@@ -1,5 +1,7 @@
 @if (projectState.status === 'ready') {
-  <div class="flex flex-row h-full bg-sw-bg-darkest relative">
+  <section class="relative flex h-full overflow-hidden bg-[var(--bg)]" data-testid="chat-view">
+    <!-- Left overlay drawer: conversations history. Always present in the DOM
+         so the slide-in transition runs cleanly. -->
     <app-conversations-sidebar
       [open]="ui.sidebarOpen()"
       [conversations]="conversations"
@@ -8,9 +10,10 @@
       (newConversation)="newConversation()"
       (viewConversation)="viewConversation($event.session_id)"
       (resumeConversation)="resumeConversation($event.session_id)"
-    ></app-conversations-sidebar>
+    />
 
-    <div class="flex flex-col flex-1 min-w-0 relative">
+    <!-- Main column: header + body (messages or transcript) + composer. -->
+    <div class="relative flex min-w-0 flex-1 flex-col overflow-hidden">
       <app-chat-header
         title="Chat"
         [projectName]="projectState.activeProject || ''"
@@ -18,91 +21,118 @@
         [historyOpen]="showHistory"
         (toggleMemory)="toggleMemory()"
         (toggleHistory)="toggleHistory()"
+        (newConversation)="newConversation()"
+        (openProjectSwitcher)="ui.toggleProjectSwitcher()"
       />
 
       @if (historyError) {
         <div
-          class="px-3 py-2 mx-3 my-2 bg-sw-error-bg border border-sw-error rounded text-sw-error text-xs"
+          class="mono mx-4 my-2 rounded border border-red-500/40 bg-red-500/5 px-3 py-2 text-[12px] text-red-300"
           data-testid="chat-history-error"
+          role="alert"
         >
           {{ historyError }}
         </div>
       }
       @if (viewError) {
         <div
-          class="px-3 py-2 mx-3 my-2 bg-sw-error-bg border border-sw-error rounded text-sw-error text-xs"
+          class="mono mx-4 my-2 rounded border border-red-500/40 bg-red-500/5 px-3 py-2 text-[12px] text-red-300"
           data-testid="chat-view-error"
+          role="alert"
         >
           {{ viewError }}
         </div>
       }
+
       @if (viewingTranscript) {
-        <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-3" data-testid="chat-messages">
-          @for (msg of viewingTranscript.messages; track $index) {
-            <div
-              class="w-fit max-w-[85%] px-4 py-3 rounded-lg leading-normal break-words"
-              [class.self-end]="msg.role === 'user'"
-              [class.bg-sw-bg-navy]="msg.role === 'user'"
-              [class.self-start]="msg.role === 'assistant'"
-              [class.bg-sw-bg-dark]="msg.role === 'assistant'"
-              [class.border]="msg.role === 'assistant'"
-              [class.border-sw-border]="msg.role === 'assistant'"
-            >
-              <app-text-block [content]="msg.content" />
-            </div>
-          }
+        <div class="flex-1 overflow-y-auto p-4 md:p-6" data-testid="chat-messages">
+          <div class="mx-auto max-w-3xl space-y-8">
+            @for (msg of viewingTranscript.messages; track $index) {
+              <article>
+                <div class="mono mb-1 flex items-center gap-2 text-[11px]">
+                  @if (msg.role === 'user') {
+                    <span class="text-[var(--ink-mute)]">user</span>
+                  } @else {
+                    <span class="text-[var(--accent)]">speedwave</span>
+                  }
+                  @if (msg.timestamp) {
+                    <span class="text-[var(--ink-mute)]">·</span>
+                    <span class="text-[var(--ink-mute)]">{{ msg.timestamp }}</span>
+                  }
+                </div>
+                <div class="text-[14px] leading-[1.7] text-[var(--ink)]">
+                  <app-text-block [content]="msg.content" />
+                </div>
+              </article>
+            }
+          </div>
         </div>
-        <div class="flex gap-2 px-4 py-3 bg-sw-bg-dark border-t border-sw-border justify-end">
+        <div
+          class="flex justify-end gap-2 border-t border-[var(--line)] bg-[var(--bg-1)] px-4 py-3"
+        >
           <button
-            class="px-5 py-2 border-none rounded-md text-sm font-semibold cursor-pointer transition-colors bg-sw-bg-navy text-sw-text hover:bg-[#1a1a4e]"
+            type="button"
+            class="mono cursor-pointer rounded border border-[var(--line)] px-3 py-1 text-[12px] text-[var(--ink-dim)] hover:text-[var(--ink)]"
             data-testid="chat-transcript-back"
             (click)="closeTranscript()"
           >
-            Back
+            back
           </button>
           <button
-            class="px-5 py-2 border-none rounded-md text-sm font-semibold cursor-pointer transition-colors bg-sw-accent text-white hover:bg-sw-accent-hover"
+            type="button"
+            class="mono cursor-pointer rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-[var(--on-accent)] hover:opacity-90"
             data-testid="chat-transcript-resume"
             (click)="resumeConversation(viewingTranscript.session_id)"
           >
-            Resume
+            resume
           </button>
         </div>
       } @else {
         <app-chat-message-list
+          class="flex-1 overflow-hidden"
           [messages]="chat.messages"
           [currentBlocks]="chat.currentBlocks"
           [isStreaming]="chat.isStreaming"
           [lastAssistantIndex]="lastAssistantIndex"
           (questionAnswered)="onQuestionAnswered($event)"
         />
-        <app-session-stats [stats]="chat.sessionStats" />
-        <div class="px-4 py-3 bg-sw-bg-dark border-t border-sw-border flex gap-2">
-          <app-composer
-            class="flex-1"
-            [disabled]="chat.isStreaming"
-            (submitted)="sendMessage($event)"
-          />
-          @if (chat.isStreaming) {
-            <button
-              data-testid="chat-stop"
-              class="px-5 py-2 border-none rounded-md bg-sw-destructive text-white text-sm font-semibold transition-colors hover:enabled:bg-sw-destructive-hover cursor-pointer"
-              (click)="onStopClicked()"
-              title="Stop (Esc)"
-              aria-label="Stop conversation"
-            >
-              Stop
-            </button>
-          }
+        <div class="border-t border-[var(--line)] bg-[var(--bg-2)] px-4 pt-3 md:px-6">
+          <div class="relative mx-auto max-w-3xl">
+            <div class="flex items-stretch gap-2">
+              <app-composer
+                class="flex-1"
+                [streaming]="chat.isStreaming"
+                [queuedText]="chat.pendingQueue?.text ?? ''"
+                (submitted)="sendMessage($event)"
+                (queueRequested)="onQueueRequested($event)"
+                (queueCancelled)="onQueueCancelled()"
+              />
+              @if (chat.isStreaming) {
+                <button
+                  type="button"
+                  data-testid="chat-stop"
+                  class="mono cursor-pointer rounded border border-red-500/50 bg-red-500/10 px-3 py-1 text-[12px] text-red-300 hover:bg-red-500/20"
+                  (click)="onStopClicked()"
+                  title="Stop (Esc)"
+                  aria-label="Stop conversation"
+                >
+                  stop
+                </button>
+              }
+            </div>
+            <app-session-stats [stats]="chat.sessionStats" />
+          </div>
         </div>
       }
-
-      <app-memory-panel
-        [open]="ui.memoryOpen()"
-        [markdown]="projectMemory"
-        [error]="memoryError"
-        (closed)="ui.closeMemory()"
-      ></app-memory-panel>
     </div>
-  </div>
+
+    <!-- Right overlay drawer: project memory. Sibling of the main column so
+         the absolute drawer overlays everything but the rail. -->
+    <app-memory-panel
+      [open]="ui.memoryOpen()"
+      [markdown]="projectMemory"
+      [error]="memoryError"
+      (closed)="ui.closeMemory()"
+    />
+  </section>
 }

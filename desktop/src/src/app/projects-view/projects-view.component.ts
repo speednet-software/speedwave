@@ -14,7 +14,6 @@ import type { ProjectEntry, ProjectList } from '../models/update';
 /** Terminal-minimal project list view with switch action via `ProjectStateService`. */
 @Component({
   selector: 'app-projects-view',
-  standalone: true,
   imports: [],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './projects-view.component.html',

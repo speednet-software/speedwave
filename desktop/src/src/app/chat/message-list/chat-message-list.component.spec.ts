@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { SimpleChange, DebugElement } from '@angular/core';
+import { DebugElement } from '@angular/core';
 import { ChatMessageListComponent } from './chat-message-list.component';
 import { ChatMessageComponent } from '../message/chat-message.component';
 import { ToolNormalizerService } from '../../services/tool-normalizer.service';
@@ -18,26 +18,26 @@ describe('ChatMessageListComponent', () => {
 
     fixture = TestBed.createComponent(ChatMessageListComponent);
     component = fixture.componentInstance;
+    // `messages` is required; seed with empty so `setInput` can mutate later.
+    fixture.componentRef.setInput('messages', []);
   });
 
   /**
    * Replays `ngOnChanges` after a manual property set — mirrors what Angular
-   * does when a template binding changes. Needed because our tests mutate the
-   * component's inputs directly.
+   * does when a template binding changes. Signal `input()` does NOT trigger
+   * lifecycle `ngOnChanges`, so tests must invoke it explicitly.
    */
   function fakeOnChanges(): void {
-    component.ngOnChanges({
-      messages: new SimpleChange(null, component.messages, false),
-    });
+    component.ngOnChanges();
   }
 
   // ── Happy path — per-message rendering ────────────────────────────────
 
   it('renders one chat-message per entry in messages', () => {
-    component.messages = [
+    fixture.componentRef.setInput('messages', [
       { role: 'user', blocks: [{ type: 'text', content: 'hi' }], timestamp: 1 },
       { role: 'assistant', blocks: [{ type: 'text', content: 'hello' }], timestamp: 2 },
-    ];
+    ]);
     fakeOnChanges();
     fixture.detectChanges();
 
@@ -46,7 +46,7 @@ describe('ChatMessageListComponent', () => {
   });
 
   it('renders nothing extra when messages is empty and not streaming', () => {
-    component.messages = [];
+    fixture.componentRef.setInput('messages', []);
     fakeOnChanges();
     fixture.detectChanges();
 
@@ -61,9 +61,9 @@ describe('ChatMessageListComponent', () => {
       { role: 'user', blocks: [{ type: 'text', content: 'hi' }], timestamp: 1 },
     ];
     const currentBlocks: MessageBlock[] = [{ type: 'text', content: 'partial...' }];
-    component.messages = messages;
-    component.currentBlocks = currentBlocks;
-    component.isStreaming = true;
+    fixture.componentRef.setInput('messages', messages);
+    fixture.componentRef.setInput('currentBlocks', currentBlocks);
+    fixture.componentRef.setInput('isStreaming', true);
     fakeOnChanges();
     fixture.detectChanges();
 
@@ -80,9 +80,9 @@ describe('ChatMessageListComponent', () => {
   });
 
   it('does not append a streaming placeholder when currentBlocks is empty', () => {
-    component.messages = [];
-    component.currentBlocks = [];
-    component.isStreaming = true;
+    fixture.componentRef.setInput('messages', []);
+    fixture.componentRef.setInput('currentBlocks', []);
+    fixture.componentRef.setInput('isStreaming', true);
     fakeOnChanges();
     fixture.detectChanges();
 
@@ -93,9 +93,9 @@ describe('ChatMessageListComponent', () => {
   });
 
   it('does not append a streaming placeholder when isStreaming is false', () => {
-    component.messages = [];
-    component.currentBlocks = [{ type: 'text', content: 'orphan' }];
-    component.isStreaming = false;
+    fixture.componentRef.setInput('messages', []);
+    fixture.componentRef.setInput('currentBlocks', [{ type: 'text', content: 'orphan' }]);
+    fixture.componentRef.setInput('isStreaming', false);
     fakeOnChanges();
     fixture.detectChanges();
 
@@ -108,7 +108,7 @@ describe('ChatMessageListComponent', () => {
   // ── ARIA — log role + polite live region ──────────────────────────────
 
   it('exposes a polite log live region for screen readers', () => {
-    component.messages = [];
+    fixture.componentRef.setInput('messages', []);
     fakeOnChanges();
     fixture.detectChanges();
 
@@ -125,7 +125,7 @@ describe('ChatMessageListComponent', () => {
     const messages: ChatMessage[] = [
       { role: 'user', blocks: [{ type: 'text', content: 'first' }], timestamp: 1 },
     ];
-    component.messages = messages;
+    fixture.componentRef.setInput('messages', messages);
     fakeOnChanges();
     fixture.detectChanges();
 
@@ -137,10 +137,10 @@ describe('ChatMessageListComponent', () => {
     container.scrollTop = 600; // at bottom
     container.dispatchEvent(new Event('scroll'));
 
-    component.messages = [
+    fixture.componentRef.setInput('messages', [
       ...messages,
       { role: 'assistant', blocks: [{ type: 'text', content: 'second' }], timestamp: 2 },
-    ];
+    ]);
     fakeOnChanges();
     // Grow content height before Angular runs ngAfterViewChecked.
     Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 1400 });
@@ -150,9 +150,9 @@ describe('ChatMessageListComponent', () => {
   });
 
   it('stops auto-scrolling when the user scrolls up', () => {
-    component.messages = [
+    fixture.componentRef.setInput('messages', [
       { role: 'user', blocks: [{ type: 'text', content: 'first' }], timestamp: 1 },
-    ];
+    ]);
     fakeOnChanges();
     fixture.detectChanges();
 
@@ -164,10 +164,10 @@ describe('ChatMessageListComponent', () => {
     container.scrollTop = 100; // user scrolled up
     container.dispatchEvent(new Event('scroll'));
 
-    component.messages = [
-      ...component.messages,
+    fixture.componentRef.setInput('messages', [
+      ...component.messages(),
       { role: 'assistant', blocks: [{ type: 'text', content: 'second' }], timestamp: 2 },
-    ];
+    ]);
     fakeOnChanges();
     Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 1400 });
     fixture.detectChanges();
@@ -178,14 +178,14 @@ describe('ChatMessageListComponent', () => {
   // ── isPrecedingUserEdited helper ─────────────────────────────────────
 
   it('isPrecedingUserEdited returns false for index 0', () => {
-    component.messages = [
+    fixture.componentRef.setInput('messages', [
       { role: 'user', blocks: [{ type: 'text', content: 'hi' }], timestamp: 1 },
-    ];
+    ]);
     expect(component.isPrecedingUserEdited(0)).toBe(false);
   });
 
   it('isPrecedingUserEdited returns false for user entries', () => {
-    component.messages = [
+    fixture.componentRef.setInput('messages', [
       {
         role: 'user',
         blocks: [{ type: 'text', content: 'hi' }],
@@ -193,12 +193,12 @@ describe('ChatMessageListComponent', () => {
         edited_at: 100,
       },
       { role: 'user', blocks: [{ type: 'text', content: 'hey' }], timestamp: 2 },
-    ];
+    ]);
     expect(component.isPrecedingUserEdited(1)).toBe(false);
   });
 
   it('isPrecedingUserEdited returns true when assistant follows an edited user entry', () => {
-    component.messages = [
+    fixture.componentRef.setInput('messages', [
       {
         role: 'user',
         blocks: [{ type: 'text', content: 'hi' }],
@@ -206,31 +206,31 @@ describe('ChatMessageListComponent', () => {
         edited_at: 100,
       },
       { role: 'assistant', blocks: [{ type: 'text', content: 'hello' }], timestamp: 2 },
-    ];
+    ]);
     expect(component.isPrecedingUserEdited(1)).toBe(true);
   });
 
   it('isPrecedingUserEdited returns false when preceding user has no edited_at', () => {
-    component.messages = [
+    fixture.componentRef.setInput('messages', [
       { role: 'user', blocks: [{ type: 'text', content: 'hi' }], timestamp: 1 },
       { role: 'assistant', blocks: [{ type: 'text', content: 'hello' }], timestamp: 2 },
-    ];
+    ]);
     expect(component.isPrecedingUserEdited(1)).toBe(false);
   });
 
   it('isPrecedingUserEdited returns false for out-of-bounds index', () => {
-    component.messages = [
+    fixture.componentRef.setInput('messages', [
       { role: 'user', blocks: [{ type: 'text', content: 'hi' }], timestamp: 1 },
-    ];
+    ]);
     expect(component.isPrecedingUserEdited(5)).toBe(false);
   });
 
   // ── Forwarding the questionAnswered event ────────────────────────────
 
   it('re-emits questionAnswered from child chat-message', () => {
-    component.messages = [
+    fixture.componentRef.setInput('messages', [
       { role: 'assistant', blocks: [{ type: 'text', content: 'hi' }], timestamp: 1 },
-    ];
+    ]);
     fakeOnChanges();
     fixture.detectChanges();
 

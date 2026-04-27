@@ -29,15 +29,17 @@ describe('MessageActionsComponent', () => {
     ) as HTMLButtonElement | null;
   }
 
-  /**
-   * Re-runs CD on the OnPush component. Direct mutation of `chat` state does
-   * not mark the view dirty — toggling an input via `setInput` is the cheapest
-   * way to dirty the OnPush input cache and re-evaluate `[disabled]` bindings.
-   */
+  function copiedIndicator(): HTMLElement | null {
+    return fixture.nativeElement.querySelector(
+      '[data-testid="message-copied"]'
+    ) as HTMLElement | null;
+  }
+
   function refresh(): void {
-    fixture.componentRef.setInput('entryIndex', component.entryIndex + 1);
+    const current = component.entryIndex();
+    fixture.componentRef.setInput('entryIndex', current + 1);
     fixture.detectChanges();
-    fixture.componentRef.setInput('entryIndex', component.entryIndex - 1);
+    fixture.componentRef.setInput('entryIndex', current);
     fixture.detectChanges();
   }
 
@@ -60,14 +62,14 @@ describe('MessageActionsComponent', () => {
     vi.useRealTimers();
   });
 
-  // ── Happy path ──────────────────────────────────────────────────
-
   it('renders copy and retry buttons with ARIA labels by default', () => {
     const copy = copyButton();
     const retry = retryButton();
     expect(copy.getAttribute('aria-label')).toBe('Copy message');
+    expect(copy.textContent?.trim()).toBe('copy');
     expect(retry).not.toBeNull();
     expect(retry?.getAttribute('aria-label')).toBe('Retry last response');
+    expect(retry?.textContent?.trim()).toBe('retry');
   });
 
   it('copy button is enabled and retry button is enabled when canRetry is true and not streaming', () => {
@@ -87,24 +89,22 @@ describe('MessageActionsComponent', () => {
     expect(chat.retryLastAssistant).toHaveBeenCalledTimes(1);
   });
 
-  // ── Copy confirmation timing ────────────────────────────────────
-
-  it('shows "✓ copied" for 1.5s after a successful copy, then reverts', async () => {
+  it('shows "✓ copied" indicator alongside copy button for 1.5s after a successful copy, then reverts', async () => {
     copyButton().click();
-    // Drain the pending copy promise.
     await Promise.resolve();
     await Promise.resolve();
     fixture.detectChanges();
-    expect(copyButton().textContent?.trim()).toBe('✓ copied');
+    expect(copiedIndicator()).not.toBeNull();
+    expect(copiedIndicator()?.textContent?.trim()).toBe('✓ copied');
+    expect(copyButton().textContent?.trim()).toBe('copy');
     expect(copyButton().getAttribute('aria-label')).toBe('Copied to clipboard');
-    // 1499ms before — still showing
     vi.advanceTimersByTime(1_499);
     fixture.detectChanges();
-    expect(copyButton().textContent?.trim()).toBe('✓ copied');
-    // After 1500ms total — reverted
+    expect(copiedIndicator()).not.toBeNull();
     vi.advanceTimersByTime(1);
     fixture.detectChanges();
-    expect(copyButton().textContent?.trim()).toBe('Copy');
+    expect(copiedIndicator()).toBeNull();
+    expect(copyButton().textContent?.trim()).toBe('copy');
     expect(copyButton().getAttribute('aria-label')).toBe('Copy message');
   });
 
@@ -114,10 +114,9 @@ describe('MessageActionsComponent', () => {
     await Promise.resolve();
     await Promise.resolve();
     fixture.detectChanges();
-    expect(copyButton().textContent?.trim()).toBe('Copy');
+    expect(copiedIndicator()).toBeNull();
+    expect(copyButton().textContent?.trim()).toBe('copy');
   });
-
-  // ── Disabled / hidden states ────────────────────────────────────
 
   it('hides retry button when isLast is false', () => {
     fixture.componentRef.setInput('isLast', false);
@@ -126,9 +125,6 @@ describe('MessageActionsComponent', () => {
   });
 
   it('disables retry button when chat.isStreaming is true', () => {
-    // The real ChatStateService.canRetryLastAssistant() returns false while
-    // streaming (it walks through findRetryAnchor() which has the guard).
-    // Mirror that contract in the stub.
     chat.isStreaming = true;
     chat.canRetryLastAssistant = vi.fn().mockReturnValue(false);
     refresh();
@@ -144,8 +140,6 @@ describe('MessageActionsComponent', () => {
   it('does not invoke retryLastAssistant when retry is disabled', async () => {
     chat.canRetryLastAssistant = vi.fn().mockReturnValue(false);
     fixture.detectChanges();
-    // Calling onRetry directly mimics the keyboard shortcut path; the button
-    // itself is disabled at the DOM level so a real click would be no-op.
     await component.onRetry();
     expect(chat.retryLastAssistant).not.toHaveBeenCalled();
   });
@@ -165,21 +159,24 @@ describe('MessageActionsComponent', () => {
     await Promise.resolve();
     await Promise.resolve();
     fixture.detectChanges();
-    // After resolution, busy clears even though "copied" is still showing.
     expect(copyButton().disabled).toBe(false);
   });
-
-  // ── Cleanup ─────────────────────────────────────────────────────
 
   it('clears the pending copy timer on destroy', async () => {
     copyButton().click();
     await Promise.resolve();
     await Promise.resolve();
     fixture.detectChanges();
-    expect(copyButton().textContent?.trim()).toBe('✓ copied');
+    expect(copiedIndicator()).not.toBeNull();
     fixture.destroy();
-    // Advancing past the feedback window must not throw or schedule callbacks
-    // on a destroyed component (which would crash with "ChangeDetector destroyed").
     vi.advanceTimersByTime(2_000);
+  });
+
+  it('does not render any metadata segments (delegated to app-message-metadata)', () => {
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.querySelector('[data-testid="message-meta"]')).toBeNull();
+    expect(el.querySelector('[data-testid="meta-tokens"]')).toBeNull();
+    expect(el.querySelector('[data-testid="meta-cache"]')).toBeNull();
+    expect(el.querySelector('[data-testid="meta-cost"]')).toBeNull();
   });
 });

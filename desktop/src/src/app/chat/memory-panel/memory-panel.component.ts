@@ -1,74 +1,160 @@
-import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, effect, input, output } from '@angular/core';
 import { TextBlockComponent } from '../blocks/text-block.component';
 
 /**
- * Right-drawer memory panel showing the active project's CLAUDE.md contents.
+ * Right overlay drawer that surfaces the active project's CLAUDE.md.
  *
- * Matches the terminal-minimal mockup: a 320px absolute drawer anchored to the
- * right edge, with a mono `memory` header, close button, and a markdown body
- * rendered via `TextBlockComponent` (reused to keep the marked pipeline DRY).
- *
- * Per the implementation prompt spec: the panel does NOT over-parse CLAUDE.md
- * into category buckets — the markdown source already has a clean section
- * structure (headings for User Preferences / Feedback / Project / Reference),
- * so the prose renderer shines through.
- *
- * Uses `@Input`/`@Output` decorators rather than signal input()/output() to stay
- * compatible with the project's Vitest runner, which does not apply Angular's
- * AOT compiler pass and therefore cannot register signal-based inputs. The
- * rest of the codebase follows the same convention.
+ * Layout matches the terminal-minimal mockup (lines 302–319 + 944–970):
+ * - Always present in the DOM as a `.memory-drawer` so the
+ *   `transform: translateX(...)` transition runs in/out smoothly.
+ * - The parent toggles `body.memory-open` via `UiStateService` — the global
+ *   stylesheet animates the drawer in and dims the backdrop via
+ *   `body.memory-open::before`.
+ * - Header: mono "memory" + neutral pill with section count + close ×.
+ * - Body: when the source markdown contains the canonical section markers
+ *   (## User Preferences / ## Feedback / ## Project / ## Reference) we render
+ *   each as a mono kicker + dimmed text block — matching the mockup. Otherwise
+ *   we fall back to the existing markdown pipeline via `<app-text-block>` so
+ *   no project memory is ever silently dropped.
  */
 @Component({
   selector: 'app-memory-panel',
-  standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [TextBlockComponent],
+  host: {
+    role: 'complementary',
+    'aria-label': 'Project memory',
+    class:
+      'memory-drawer w-72 flex-shrink-0 flex-col border-l border-[var(--line)] bg-[var(--bg-1)]',
+    '[attr.data-testid]': '"memory-panel"',
+    '[attr.aria-hidden]': '!open() ? "true" : null',
+    '[attr.inert]': '!open() ? "" : null',
+  },
   template: `
-    @if (open) {
-      <aside
-        class="absolute right-0 top-0 h-full w-[320px] bg-bg-1 ring-1 ring-line flex flex-col z-10"
-        role="complementary"
-        aria-label="Project memory"
-        data-testid="memory-panel"
+    <div class="flex h-11 items-center gap-2 border-b border-[var(--line)] px-3">
+      <span class="mono text-[11px] text-[var(--ink-mute)]">memory</span>
+      @if (sectionCount() > 0) {
+        <span class="pill" data-testid="memory-panel-count">{{ sectionLabel() }}</span>
+      }
+      <button
+        type="button"
+        class="ml-auto text-[var(--ink-mute)] hover:text-[var(--ink)]"
+        data-testid="memory-panel-close"
+        aria-label="Close memory panel"
+        (click)="closed.emit()"
       >
-        <div class="flex h-11 items-center gap-2 border-b border-line px-3">
-          <span class="font-mono text-[11px] text-ink-mute">memory</span>
-          <button
-            type="button"
-            class="ml-auto text-ink-mute hover:text-ink text-sm px-1"
-            data-testid="memory-panel-close"
-            aria-label="Close memory panel"
-            (click)="closed.emit()"
-          >
-            ×
-          </button>
-        </div>
-        <div
-          class="flex-1 overflow-y-auto p-3 text-[13px] leading-relaxed text-ink"
-          data-testid="memory-panel-body"
+        <svg
+          class="h-4 w-4"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+          stroke-width="1.75"
+          aria-hidden="true"
         >
-          @if (error) {
-            <p
-              class="font-mono text-[11.5px] text-sw-accent border border-sw-accent rounded px-2 py-1.5"
-              data-testid="memory-panel-error"
-            >
-              {{ error }}
-            </p>
-          } @else if (markdown) {
-            <app-text-block [content]="markdown" />
-          } @else {
-            <p class="font-mono text-[11.5px] text-ink-mute" data-testid="memory-panel-empty">
-              no memory yet
-            </p>
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
+    </div>
+
+    <div
+      class="flex-1 overflow-y-auto p-3 text-[13px] leading-relaxed text-[var(--ink)]"
+      data-testid="memory-panel-body"
+    >
+      @if (error()) {
+        <p
+          class="mono rounded border border-red-500/40 bg-red-500/5 px-2 py-1.5 text-[11.5px] text-red-300"
+          data-testid="memory-panel-error"
+          role="alert"
+        >
+          {{ error() }}
+        </p>
+      } @else if (sections().length > 0) {
+        <div class="mono space-y-3 text-[11.5px]">
+          @for (section of sections(); track section.id) {
+            <section [attr.data-testid]="'memory-section-' + section.id">
+              <div class="text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
+                {{ section.label }}
+              </div>
+              <div class="mt-1 whitespace-pre-wrap text-[var(--ink-dim)]">{{ section.body }}</div>
+            </section>
           }
         </div>
-      </aside>
-    }
+      } @else if (markdown()) {
+        <app-text-block [content]="markdown()" />
+      } @else {
+        <p class="mono text-[11.5px] text-[var(--ink-mute)]" data-testid="memory-panel-empty">
+          no memory yet
+        </p>
+      }
+    </div>
   `,
 })
 export class MemoryPanelComponent {
-  @Input() open = false;
-  @Input() markdown = '';
-  @Input() error = '';
-  @Output() readonly closed = new EventEmitter<void>();
+  /** Whether the drawer is open. Drives the body class + a11y attrs. */
+  readonly open = input<boolean>(false);
+  /** Raw markdown source (CLAUDE.md). */
+  readonly markdown = input<string>('');
+  /** Optional error string — when set, replaces the body content. */
+  readonly error = input<string>('');
+  /** Drawer requested to close (close button or backdrop). */
+  readonly closed = output<void>();
+
+  /** Parsed sections (kicker + body) when markdown follows the canonical layout. */
+  protected readonly sections = computed(() => parseSections(this.markdown()));
+  protected readonly sectionCount = computed(() => this.sections().length);
+  protected readonly sectionLabel = computed(() => {
+    const n = this.sectionCount();
+    return n === 1 ? '1 entry' : `${n} entries`;
+  });
+
+  /**
+   * Mirrors the `open` input onto a body class so the panel can animate in.
+   */
+  constructor() {
+    effect(() => {
+      const open = this.open();
+      const cls = 'memory-open';
+      if (open) document.body.classList.add(cls);
+      else document.body.classList.remove(cls);
+    });
+  }
+}
+
+/** Section marker config: matches `## <Heading>` lines from CLAUDE.md. */
+const SECTION_MARKERS: readonly { id: string; label: string; pattern: RegExp }[] = [
+  { id: 'user', label: 'user', pattern: /^##\s+user\b/im },
+  { id: 'project', label: 'project', pattern: /^##\s+project\b/im },
+  { id: 'feedback', label: 'feedback', pattern: /^##\s+feedback\b/im },
+  { id: 'reference', label: 'reference', pattern: /^##\s+reference\b/im },
+];
+
+/**
+ * Splits a CLAUDE.md-style memory document into mockup-shaped sections.
+ *
+ * Returns an empty array when none of the canonical headers are present so the
+ * caller can fall back to the standard markdown renderer.
+ * @param markdown - Raw markdown source.
+ */
+export function parseSections(
+  markdown: string
+): readonly { id: string; label: string; body: string }[] {
+  if (!markdown) return [];
+  const matches = SECTION_MARKERS.flatMap((m) => {
+    const match = m.pattern.exec(markdown);
+    return match ? [{ id: m.id, label: m.label, start: match.index }] : [];
+  }).sort((a, b) => a.start - b.start);
+  if (matches.length === 0) return [];
+
+  const sections: { id: string; label: string; body: string }[] = [];
+  for (let i = 0; i < matches.length; i += 1) {
+    const start = matches[i].start;
+    const end = i + 1 < matches.length ? matches[i + 1].start : markdown.length;
+    const block = markdown.slice(start, end);
+    // Drop the heading line; trim trailing whitespace.
+    const body = block.replace(/^##\s+\S.*\r?\n?/, '').trim();
+    if (body) {
+      sections.push({ id: matches[i].id, label: matches[i].label, body });
+    }
+  }
+  return sections;
 }

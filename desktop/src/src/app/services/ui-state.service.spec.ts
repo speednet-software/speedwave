@@ -18,6 +18,14 @@ describe('UiStateService', () => {
     it('memoryOpen defaults to false', () => {
       expect(service.memoryOpen()).toBe(false);
     });
+
+    it('paletteOpen defaults to false', () => {
+      expect(service.paletteOpen()).toBe(false);
+    });
+
+    it('projectSwitcherOpen defaults to false', () => {
+      expect(service.projectSwitcherOpen()).toBe(false);
+    });
   });
 
   describe('toggleSidebar', () => {
@@ -79,6 +87,58 @@ describe('UiStateService', () => {
     it('leaves memoryOpen false when already closed', () => {
       service.closeMemory();
       expect(service.memoryOpen()).toBe(false);
+    });
+  });
+
+  describe('togglePalette', () => {
+    it('flips paletteOpen from false to true', () => {
+      service.togglePalette();
+      expect(service.paletteOpen()).toBe(true);
+    });
+
+    it('flips paletteOpen from true back to false', () => {
+      service.togglePalette();
+      service.togglePalette();
+      expect(service.paletteOpen()).toBe(false);
+    });
+  });
+
+  describe('toggleProjectSwitcher', () => {
+    it('flips projectSwitcherOpen from false to true', () => {
+      service.toggleProjectSwitcher();
+      expect(service.projectSwitcherOpen()).toBe(true);
+    });
+
+    it('flips projectSwitcherOpen from true back to false', () => {
+      service.toggleProjectSwitcher();
+      service.toggleProjectSwitcher();
+      expect(service.projectSwitcherOpen()).toBe(false);
+    });
+  });
+
+  describe('closePalette', () => {
+    it('sets paletteOpen to false when open', () => {
+      service.togglePalette();
+      service.closePalette();
+      expect(service.paletteOpen()).toBe(false);
+    });
+
+    it('leaves paletteOpen false when already closed', () => {
+      service.closePalette();
+      expect(service.paletteOpen()).toBe(false);
+    });
+  });
+
+  describe('closeProjectSwitcher', () => {
+    it('sets projectSwitcherOpen to false when open', () => {
+      service.toggleProjectSwitcher();
+      service.closeProjectSwitcher();
+      expect(service.projectSwitcherOpen()).toBe(false);
+    });
+
+    it('leaves projectSwitcherOpen false when already closed', () => {
+      service.closeProjectSwitcher();
+      expect(service.projectSwitcherOpen()).toBe(false);
     });
   });
 

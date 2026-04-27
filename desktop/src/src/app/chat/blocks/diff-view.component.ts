@@ -1,11 +1,4 @@
-import {
-  ChangeDetectionStrategy,
-  Component,
-  Input,
-  OnChanges,
-  signal,
-  type SimpleChanges,
-} from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, effect, input, signal } from '@angular/core';
 import { diffLines } from 'diff';
 
 /** A single line in the rendered diff, tagged by semantic role. */
@@ -57,41 +50,37 @@ export function computeLineDiff(oldStr: string, newStr: string): DiffLine[] {
  */
 @Component({
   selector: 'app-diff-view',
-  standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
     <div
       data-testid="diff-container"
-      class="mono overflow-x-auto overflow-hidden rounded ring-1 ring-line bg-bg-1 py-1.5 text-[11.5px] leading-[1.5]"
+      class="mono mt-2 overflow-x-auto overflow-hidden rounded bg-[var(--bg-1)] py-1.5 text-[11.5px] leading-[1.5] ring-1 ring-[var(--line)]"
     >
-      @for (seg of segments; track $index) {
+      @for (seg of segments(); track $index) {
         @switch (segKind(seg)) {
           @case ('add') {
             <div
               data-testid="diff-add"
-              class="whitespace-pre bg-green-500/[0.15] text-green-300 px-3"
+              class="whitespace-pre bg-[var(--green)]/15 px-3 text-[var(--green)]"
             >
               + {{ asLine(seg).text }}
             </div>
           }
           @case ('remove') {
-            <div
-              data-testid="diff-remove"
-              class="whitespace-pre bg-red-500/[0.15] text-red-300 px-3"
-            >
+            <div data-testid="diff-remove" class="whitespace-pre bg-red-500/15 px-3 text-red-300">
               - {{ asLine(seg).text }}
             </div>
           }
           @case ('ctx') {
-            <div data-testid="diff-ctx" class="whitespace-pre text-ink-dim px-3">
+            <div data-testid="diff-ctx" class="whitespace-pre px-3 text-[var(--ink-dim)]">
               {{ asLine(seg).text }}
             </div>
           }
           @case ('omitted') {
             <div
               data-testid="diff-omitted"
-              class="whitespace-pre bg-bg-2 text-ink-mute px-3 py-1 text-center"
+              class="whitespace-pre border-t border-[var(--line)] bg-[var(--bg-2)] px-3 py-1 text-center text-[var(--ink-mute)]"
             >
               &middot;&middot;&middot; {{ asOmitted(seg).count }} lines omitted
               &middot;&middot;&middot;
@@ -100,11 +89,11 @@ export function computeLineDiff(oldStr: string, newStr: string): DiffLine[] {
         }
       }
     </div>
-    @if (isTruncated) {
+    @if (isTruncated()) {
       <button
         type="button"
         data-testid="diff-expand"
-        class="mono mt-1 text-[11px] text-accent hover:underline"
+        class="mono mt-1 text-[11px] text-[var(--accent)] hover:underline"
         (click)="expand()"
       >
         expand full diff &rarr;
@@ -112,56 +101,51 @@ export function computeLineDiff(oldStr: string, newStr: string): DiffLine[] {
     }
   `,
 })
-export class DiffViewComponent implements OnChanges {
-  @Input() oldString = '';
-  @Input() newString = '';
-  @Input() truncateLines = 20;
+export class DiffViewComponent {
+  readonly oldString = input('');
+  readonly newString = input('');
+  readonly truncateLines = input(20);
 
   /** Toggle set by the "expand full diff" button. */
   private readonly expanded = signal<boolean>(false);
 
   /**
-   * Reset the user's expand-toggle when either input string changes — otherwise
-   * an instance reused for a different file (live tool block streaming an
-   * edit, recycled for a later edit) keeps the previous expand state.
-   * @param changes - Angular's per-input change record.
+   * Resets the expand-toggle whenever the diff input strings change.
    */
-  ngOnChanges(changes: SimpleChanges): void {
-    if (changes['oldString'] || changes['newString']) {
+  constructor() {
+    // Reset the user's expand-toggle when either input string changes —
+    // otherwise an instance reused for a different file (live tool block
+    // streaming an edit, recycled for a later edit) keeps the previous expand
+    // state.
+    effect(() => {
+      // Touch both inputs so the effect re-runs on either change.
+      this.oldString();
+      this.newString();
       this.expanded.set(false);
-    }
+    });
   }
 
   /** Memoized diff — recomputes only when either input string reference changes. */
-  private memoOld: string | null = null;
-  private memoNew: string | null = null;
-  private memoLines: DiffLine[] = [];
-
-  /** Returns all diff lines for the current inputs (memoized by input identity). */
-  get allLines(): DiffLine[] {
-    if (this.memoOld !== this.oldString || this.memoNew !== this.newString) {
-      this.memoOld = this.oldString;
-      this.memoNew = this.newString;
-      this.memoLines = computeLineDiff(this.oldString, this.newString);
-    }
-    return this.memoLines;
-  }
+  readonly allLines = computed<DiffLine[]>(() =>
+    computeLineDiff(this.oldString(), this.newString())
+  );
 
   /** True when the diff exceeds `truncateLines` AND the user has not expanded. */
-  get isTruncated(): boolean {
-    return !this.expanded() && this.allLines.length > this.truncateLines;
-  }
+  readonly isTruncated = computed<boolean>(
+    () => !this.expanded() && this.allLines().length > this.truncateLines()
+  );
 
   /** Row list emitted to the template: head lines + optional omitted marker + tail lines. */
-  get segments(): DiffSegment[] {
-    const lines = this.allLines;
-    if (!this.isTruncated) {
+  readonly segments = computed<DiffSegment[]>(() => {
+    const lines = this.allLines();
+    if (!this.isTruncated()) {
       return lines.map((line) => ({ type: 'line', line }));
     }
     // For odd truncateLines, give the extra line to head so the visible total
     // matches the advertised count (e.g. 21 → head 11 + tail 10 = 21).
-    const headCount = Math.ceil(this.truncateLines / 2);
-    const tailCount = Math.floor(this.truncateLines / 2);
+    const truncate = this.truncateLines();
+    const headCount = Math.ceil(truncate / 2);
+    const tailCount = Math.floor(truncate / 2);
     const head = lines.slice(0, headCount);
     const tail = lines.slice(lines.length - tailCount);
     const omitted = lines.length - headCount - tailCount;
@@ -170,7 +154,7 @@ export class DiffViewComponent implements OnChanges {
       { type: 'omitted', count: omitted },
       ...tail.map<DiffSegment>((line) => ({ type: 'line', line })),
     ];
-  }
+  });
 
   /**
    * Returns the template-switch key for a segment: diff-line kind or 'omitted'.

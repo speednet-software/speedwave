@@ -1,103 +1,68 @@
-import {
-  ChangeDetectionStrategy,
-  Component,
-  EventEmitter,
-  Input,
-  Output,
-  signal,
-} from '@angular/core';
+import { ChangeDetectionStrategy, Component, input, output, signal } from '@angular/core';
 
 /** Decision emitted by the permission prompt. */
 export type PermissionDecision = 'allow_once' | 'allow_always' | 'deny';
 
-/** Amber callout asking the user to authorise a tool invocation; emits `decided` with allow_once / allow_always / deny. */
+/**
+ * Amber callout asking the user to authorise a tool invocation.
+ *
+ * Matches the terminal-minimal mockup (lines 796–808): rounded amber-bordered
+ * box with a 4% amber wash, mono header (warning glyph + label + tool name),
+ * monospaced command preview, and three action buttons (allow-once primary
+ * accent, allow-always neutral bordered, deny red bordered).
+ */
 @Component({
   selector: 'app-permission-prompt',
-  standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block my-2' },
-  styles: [
-    `
-      :host {
-        display: block;
-      }
-      .pp-wrapper {
-        border-radius: 0.25rem;
-        box-shadow: 0 0 0 1px color-mix(in oklab, var(--amber, #f5b942) 40%, transparent);
-        background-color: color-mix(in oklab, var(--amber, #f5b942) 6%, transparent);
-        padding: 0.75rem;
-      }
-      .pp-header {
-        color: var(--amber, #f5b942);
-      }
-      .pp-description {
-        color: var(--ink-dim, #9aa3ba);
-      }
-      .pp-code {
-        border: 1px solid var(--line, #1a2030);
-        background-color: var(--bg-1, #0b0e18);
-        color: var(--ink-dim, #9aa3ba);
-      }
-      .pp-primary {
-        background-color: var(--accent, #ff4d6d);
-        color: var(--on-accent, #07090f);
-      }
-      .pp-primary:hover {
-        opacity: 0.9;
-      }
-      .pp-secondary {
-        border: 1px solid var(--line-strong, #252c42);
-        background-color: var(--bg-2, #10141f);
-        color: var(--ink, #e8edf7);
-      }
-      .pp-secondary:hover {
-        background-color: var(--bg-3, #161b2a);
-      }
-      .pp-deny {
-        border: 1px solid color-mix(in oklab, #ef4444 40%, transparent);
-        background-color: color-mix(in oklab, #ef4444 5%, transparent);
-        color: #fca5a5;
-      }
-      .pp-deny:hover {
-        background-color: color-mix(in oklab, #ef4444 10%, transparent);
-      }
-    `,
-  ],
   template: `
     <div
       data-testid="permission-prompt"
-      class="pp-wrapper"
       role="alertdialog"
       [attr.aria-labelledby]="headerId"
       [attr.aria-describedby]="commandId"
+      class="rounded border border-[var(--amber)]/40 bg-[var(--amber)]/[0.04] p-3"
     >
       <div
         [id]="headerId"
         data-testid="permission-header"
-        class="pp-header mono mb-2 flex items-center gap-2 text-[11px]"
+        class="mono mb-2 flex items-center gap-2 text-[11px] text-[var(--amber)]"
       >
-        <span aria-hidden="true">&#9888;</span>
+        <svg
+          class="h-3 w-3"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+          stroke-width="2"
+          aria-hidden="true"
+        >
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+          />
+        </svg>
         <span>permission required</span>
       </div>
 
-      @if (description) {
-        <div data-testid="permission-description" class="pp-description mb-2 text-[12.5px]">
-          {{ description }}
+      @if (description()) {
+        <div data-testid="permission-description" class="mb-2 text-[12.5px] text-[var(--ink-dim)]">
+          {{ description() }}
         </div>
       }
 
       <pre
         [id]="commandId"
         data-testid="permission-command"
-        class="pp-code mono mb-3 overflow-x-auto rounded p-2 text-[11.5px]"
-        >{{ command }}</pre
+        class="mono mb-3 overflow-x-auto rounded border border-[var(--line)] bg-[var(--bg-1)] p-2 text-[11.5px] text-[var(--ink-dim)]"
+        >{{ command() }}</pre
       >
 
       <div class="flex flex-wrap gap-2" role="group" aria-label="Permission decision">
         <button
           type="button"
           data-testid="permission-allow-once"
-          class="pp-primary mono rounded px-3 py-1 text-[12px] font-medium disabled:opacity-50"
+          class="mono rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-50"
           [disabled]="hasDecided()"
           (click)="decide('allow_once')"
         >
@@ -106,7 +71,7 @@ export type PermissionDecision = 'allow_once' | 'allow_always' | 'deny';
         <button
           type="button"
           data-testid="permission-allow-always"
-          class="pp-secondary mono rounded px-3 py-1 text-[12px] disabled:opacity-50"
+          class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[12px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-50"
           [disabled]="hasDecided()"
           (click)="decide('allow_always')"
         >
@@ -115,7 +80,7 @@ export type PermissionDecision = 'allow_once' | 'allow_always' | 'deny';
         <button
           type="button"
           data-testid="permission-deny"
-          class="pp-deny mono rounded px-3 py-1 text-[12px] disabled:opacity-50"
+          class="mono rounded border border-red-500/40 bg-red-500/5 px-3 py-1 text-[12px] text-red-300 hover:bg-red-500/10 disabled:opacity-50"
           [disabled]="hasDecided()"
           (click)="decide('deny')"
         >
@@ -127,18 +92,24 @@ export type PermissionDecision = 'allow_once' | 'allow_always' | 'deny';
 })
 export class PermissionPromptComponent {
   /** The command/operation the user is being asked to authorise. */
-  @Input({ required: true }) command!: string;
+  readonly command = input.required<string>();
 
   /** Optional human-readable description shown above the command block. */
-  @Input() description = '';
+  readonly description = input('');
 
   /** Parent receives the user's typed decision. */
-  @Output() decided = new EventEmitter<PermissionDecision>();
+  readonly decided = output<PermissionDecision>();
 
-  /** Stable DOM id for `aria-labelledby` on the dialog wrapper. */
-  readonly headerId = `permission-header-${Math.random().toString(36).slice(2, 9)}`;
-  /** Stable DOM id for `aria-describedby` pointing at the command pre. */
-  readonly commandId = `permission-command-${Math.random().toString(36).slice(2, 9)}`;
+  /**
+   * Stable DOM id for `aria-labelledby` on the dialog wrapper. Generated once
+   * at construction so re-renders don't break the ARIA pairing — uses an
+   * incrementing counter rather than `Math.random` so test fixtures get
+   * deterministic ids.
+   */
+  private static instanceCounter = 0;
+  private readonly instanceId = ++PermissionPromptComponent.instanceCounter;
+  readonly headerId = `permission-header-${this.instanceId}`;
+  readonly commandId = `permission-command-${this.instanceId}`;
 
   /** Self-protection: once a decision is emitted, all buttons go disabled to absorb double-clicks. */
   readonly hasDecided = signal(false);

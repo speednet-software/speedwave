@@ -32,8 +32,9 @@ describe('ShellComponent', () => {
         ShellComponent,
         RouterModule.forRoot([
           { path: 'chat', component: ShellComponent },
+          { path: 'integrations', component: ShellComponent },
+          { path: 'plugins', component: ShellComponent },
           { path: 'settings', component: ShellComponent },
-          { path: 'system', component: ShellComponent },
           { path: 'logs', component: ShellComponent },
         ]),
       ],
@@ -235,11 +236,11 @@ describe('ShellComponent', () => {
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
-    const nav = fixture.nativeElement.querySelector('[data-testid="app-nav"]');
-    const links = Array.from(nav.querySelectorAll('a')) as HTMLAnchorElement[];
-    const labels = links.map((a) => a.textContent?.trim());
-    expect(labels).toEqual(['Integrations', 'Plugins', 'System', 'Logs', 'Settings']);
-    expect(labels).not.toContain('Chat');
+    const nav = fixture.nativeElement.querySelector('[data-testid="nav-rail"]');
+    const links = Array.from(nav.querySelectorAll('a[data-testid^="nav-"]')) as HTMLAnchorElement[];
+    const ids = links.map((a) => a.getAttribute('data-testid'));
+    expect(ids).toEqual(['nav-integrations', 'nav-plugins', 'nav-settings', 'nav-logs']);
+    expect(ids).not.toContain('nav-chat');
   });
 
   it('shows Chat nav link when status is ready', async () => {
@@ -249,10 +250,16 @@ describe('ShellComponent', () => {
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
-    const nav = fixture.nativeElement.querySelector('[data-testid="app-nav"]');
-    const links = Array.from(nav.querySelectorAll('a')) as HTMLAnchorElement[];
-    const labels = links.map((a) => a.textContent?.trim());
-    expect(labels).toEqual(['Chat', 'Integrations', 'Plugins', 'System', 'Logs', 'Settings']);
+    const nav = fixture.nativeElement.querySelector('[data-testid="nav-rail"]');
+    const links = Array.from(nav.querySelectorAll('a[data-testid^="nav-"]')) as HTMLAnchorElement[];
+    const ids = links.map((a) => a.getAttribute('data-testid'));
+    expect(ids).toEqual([
+      'nav-chat',
+      'nav-integrations',
+      'nav-plugins',
+      'nav-settings',
+      'nav-logs',
+    ]);
   });
 
   it('shows Chat nav link when status is error', async () => {
@@ -282,8 +289,9 @@ describe('ShellComponent', () => {
 
       const overlay = fixture.nativeElement.querySelector('[data-testid="restart-overlay"]');
       expect(overlay).not.toBeNull();
-      expect(overlay.textContent).toContain('Restart Required');
-      expect(overlay.textContent).toContain('Changes require container restart');
+      // Terminal-minimal restart overlay copy.
+      expect(overlay.textContent).toContain('restart required');
+      expect(overlay.textContent).toContain('Container config changed');
     });
 
     it('hides overlay when needsRestart is false', () => {
@@ -374,7 +382,7 @@ describe('ShellComponent', () => {
       expect(overlay).not.toBeNull();
       expect(overlay.textContent).toContain('Restarting containers...');
       expect(overlay.textContent).toContain('This may take a minute');
-      expect(overlay.textContent).not.toContain('Restart Required');
+      expect(overlay.textContent).not.toContain('restart required');
       expect(fixture.nativeElement.querySelector('[data-testid="restart-now-btn"]')).toBeNull();
       expect(fixture.nativeElement.querySelector('[data-testid="restart-later-btn"]')).toBeNull();
     });

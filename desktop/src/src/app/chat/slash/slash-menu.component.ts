@@ -1,12 +1,10 @@
 import {
   ChangeDetectionStrategy,
   Component,
-  EventEmitter,
-  Input,
-  OnChanges,
-  Output,
   computed,
   inject,
+  input,
+  output,
   signal,
 } from '@angular/core';
 import { SlashService, type SlashCommand } from './slash.service';
@@ -16,20 +14,13 @@ import { SlashService, type SlashCommand } from './slash.service';
  * session. Filters the list by the `query` input using a "startsWith
  * above substring" ranking, and exposes keyboard navigation via host
  * bindings.
- *
- * Uses legacy `\@Input` / `\@Output` decorators to stay compatible with the
- * project's current vitest-based test harness, which does not run the
- * Angular compiler and therefore cannot resolve `input()`/`output()`
- * signal metadata at test time. Migrate to signal inputs once the
- * harness adds an Angular-compiler vitest plugin.
  */
 @Component({
   selector: 'app-slash-menu',
-  standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
     class: 'block',
-    '[class.hidden]': '!open',
+    '[class.hidden]': '!open()',
     '(document:keydown.arrowdown)': 'handleArrowDown($event)',
     '(document:keydown.arrowup)': 'handleArrowUp($event)',
     '(document:keydown.home)': 'handleHome($event)',
@@ -43,96 +34,160 @@ import { SlashService, type SlashCommand } from './slash.service';
       role="listbox"
       aria-label="Slash commands"
       [attr.aria-activedescendant]="activeDescendantId()"
-      class="absolute bottom-full left-0 mb-2 w-[360px] max-h-[280px] overflow-y-auto ring-1 rounded shadow-lg z-20"
-      [style.background]="'var(--bg-1, #1a1a1a)'"
-      [style.--tw-ring-color]="'var(--line-strong, #2a2a2a)'"
+      class="absolute bottom-full left-0 right-0 z-40 mb-2 overflow-hidden rounded border border-[var(--line-strong)] bg-[var(--bg-1)] shadow-[0_16px_40px_rgba(0,0,0,0.5)]"
     >
-      @if (service.isLoadingEmpty()) {
-        <div
-          data-testid="slash-menu-loading"
-          class="px-3 py-2 text-[11px] mono"
-          [style.color]="'var(--ink-mute, #888)'"
-          role="status"
-          aria-live="polite"
+      <!-- Header: leading slash, query input, match count, close. -->
+      <div class="flex items-center gap-2 border-b border-[var(--line)] px-3 py-2">
+        <span class="mono text-[12px] text-[var(--accent)]" aria-hidden="true">/</span>
+        <input
+          type="search"
+          name="slash-query"
+          data-testid="slash-menu-query"
+          class="mono w-full bg-transparent text-[12px] text-[var(--ink)] placeholder-[var(--ink-mute)] focus:outline-none"
+          placeholder="search skills &amp; commands..."
+          aria-label="Filter slash commands"
+          [value]="query()"
+        />
+        <span
+          class="mono hidden text-[10px] text-[var(--ink-mute)] sm:inline"
+          data-testid="slash-menu-count"
         >
-          discovering…
-        </div>
-      } @else if (filtered().length === 0) {
-        <div
-          data-testid="slash-menu-empty"
-          class="px-3 py-2 text-[11px] mono"
-          [style.color]="'var(--ink-mute, #888)'"
+          {{ filtered().length }} matches
+        </span>
+        <button
+          type="button"
+          class="text-[var(--ink-mute)] hover:text-[var(--ink)]"
+          data-testid="slash-menu-close"
+          aria-label="Close slash menu"
+          title="Close (esc)"
+          (click)="closed.emit()"
         >
-          no matches
-        </div>
-      } @else {
-        <ul>
-          @for (cmd of filtered(); let i = $index; track cmd.name) {
-            <li
-              [id]="optionId(i)"
-              role="option"
-              tabindex="-1"
-              [attr.aria-selected]="i === highlighted()"
-              data-testid="slash-menu-item"
-              class="px-3 py-2 cursor-pointer flex items-center gap-2 mono text-[12px]"
-              [style.background]="i === highlighted() ? 'var(--bg-2, #222)' : 'transparent'"
-              (mouseenter)="highlighted.set(i)"
-              (click)="select(cmd)"
-              (keydown.enter)="select(cmd)"
-              (keydown.space)="select(cmd)"
+          ×
+        </button>
+      </div>
+
+      <!-- Body: grouped list, status states. -->
+      <div class="max-h-72 overflow-y-auto py-1">
+        @if (service.isLoadingEmpty()) {
+          <div
+            data-testid="slash-menu-loading"
+            class="mono px-3 py-2 text-[11px] text-[var(--ink-mute)]"
+            role="status"
+            aria-live="polite"
+          >
+            discovering…
+          </div>
+        } @else if (filtered().length === 0) {
+          <div
+            data-testid="slash-menu-empty"
+            class="mono px-3 py-2 text-[11px] text-[var(--ink-mute)]"
+          >
+            no matches
+          </div>
+        } @else {
+          @for (group of groups(); track group.key) {
+            <div
+              class="mono px-3 py-1 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+              [attr.data-testid]="'slash-menu-group-' + group.key"
             >
-              <span class="font-medium" [style.color]="'var(--accent, #e11d48)'"
-                >/{{ cmd.name }}</span
+              {{ group.label }} · {{ group.items.length }}
+            </div>
+            @for (entry of group.items; track entry.cmd.name) {
+              <button
+                type="button"
+                role="option"
+                tabindex="-1"
+                [id]="optionId(entry.flatIndex)"
+                [attr.aria-selected]="entry.flatIndex === highlighted()"
+                data-testid="slash-menu-item"
+                class="flex w-full items-start gap-3 border-l-2 px-3 py-1.5 text-left"
+                [class]="
+                  entry.flatIndex === highlighted()
+                    ? 'border-[var(--accent)] bg-[var(--bg-2)]'
+                    : 'border-transparent hover-bg'
+                "
+                (mouseenter)="highlighted.set(entry.flatIndex)"
+                (click)="select(entry.cmd)"
               >
-              @if (cmd.argument_hint) {
-                <span class="text-[11px]" [style.color]="'var(--ink-mute, #888)'">{{
-                  cmd.argument_hint
-                }}</span>
-              }
-              <span class="flex-1 truncate text-[11px]" [style.color]="'var(--ink-dim, #aaa)'">{{
-                cmd.description || ''
-              }}</span>
-              <span
-                data-testid="slash-menu-badge"
-                class="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-widest"
-                [style.background]="badgeBackground(cmd)"
-                [style.color]="badgeForeground(cmd)"
-                >{{ badgeText(cmd) }}</span
-              >
-            </li>
+                <span
+                  class="mono text-[11px]"
+                  [class]="
+                    entry.flatIndex === highlighted()
+                      ? 'text-[var(--accent)]'
+                      : 'text-[var(--ink-mute)]'
+                  "
+                  aria-hidden="true"
+                  >/</span
+                >
+                <div class="min-w-0 flex-1">
+                  <div class="mono flex items-center gap-2 text-[12px] text-[var(--ink)]">
+                    @if (entry.cmd.plugin) {
+                      <span class="text-[var(--violet)]">{{ entry.cmd.plugin }}:</span>
+                    }
+                    {{ entry.cmd.name }}
+                    <span
+                      data-testid="slash-menu-badge"
+                      class="pill"
+                      [class.teal]="entry.cmd.kind === 'Skill'"
+                      [class.violet]="entry.cmd.kind === 'Plugin'"
+                      [class.amber]="entry.cmd.kind === 'Agent'"
+                      >{{ badgeText(entry.cmd) }}</span
+                    >
+                    @if (entry.cmd.argument_hint) {
+                      <span class="mono text-[10px] text-[var(--ink-mute)]">{{
+                        entry.cmd.argument_hint
+                      }}</span>
+                    }
+                  </div>
+                  @if (entry.cmd.description) {
+                    <div class="mt-0.5 text-[11.5px] text-[var(--ink-dim)]">
+                      {{ entry.cmd.description }}
+                    </div>
+                  }
+                </div>
+                @if (entry.flatIndex === highlighted()) {
+                  <span class="kbd flex-shrink-0">↵</span>
+                }
+              </button>
+            }
           }
-        </ul>
-      }
-      @if (service.source() === 'Fallback') {
-        <div
-          data-testid="slash-menu-fallback"
-          class="px-3 py-1.5 text-[10px] border-t mono"
-          [style.color]="'var(--ink-mute, #888)'"
-          [style.border-color]="'var(--line, #2a2a2a)'"
-        >
-          offline · showing built-in commands
-        </div>
-      }
+        }
+      </div>
+
+      <!-- Footer: keybind hints + offline-fallback indicator. -->
+      <div
+        class="mono flex items-center gap-4 border-t border-[var(--line)] px-3 py-1.5 text-[10px] text-[var(--ink-mute)]"
+      >
+        <span><span class="kbd">↑↓</span> navigate</span>
+        <span><span class="kbd">↵</span> select</span>
+        <span><span class="kbd">tab</span> complete</span>
+        @if (service.source() === 'Fallback') {
+          <span class="text-[var(--amber)]" data-testid="slash-menu-fallback"
+            >offline · built-in commands</span
+          >
+        }
+        <span class="ml-auto"><span class="kbd">esc</span> close</span>
+      </div>
     </div>
   `,
 })
-export class SlashMenuComponent implements OnChanges {
+export class SlashMenuComponent {
   /** Current filter query (the text after `/` in the composer). */
-  @Input() query = '';
+  readonly query = input('');
   /** Whether the popover is visible. Host binding hides the element when false. */
-  @Input() open = false;
+  readonly open = input(false);
 
   /** Fires when the user picks a command (Enter or click). */
-  @Output() readonly selected = new EventEmitter<SlashCommand>();
+  readonly selected = output<SlashCommand>();
   /** Fires when the user dismisses the popover (Escape). */
-  @Output() readonly closed = new EventEmitter<void>();
+  readonly closed = output<void>();
 
   readonly service = inject(SlashService);
   readonly highlighted = signal(0);
 
   /** Commands filtered by the current query, with startsWith ranked above substring. */
   readonly filtered = computed<readonly SlashCommand[]>(() => {
-    const q = this.queryForCompute().trim().toLowerCase();
+    const q = this.query().trim().toLowerCase();
     const all = this.service.commands();
     if (!q) {
       return [...all];
@@ -152,19 +207,36 @@ export class SlashMenuComponent implements OnChanges {
     return [...starts, ...contains];
   });
 
-  /** Writable copy so `computed` can track query changes when parent calls setInput. */
-  private readonly queryForCompute = signal<string>('');
-
-  /** Sync the signal when the @Input is set from outside. */
-  ngOnChanges(): void {
-    this.queryForCompute.set(this.query);
-  }
-
   readonly activeDescendantId = computed(() => {
     const list = this.filtered();
     if (list.length === 0) return null;
     const idx = Math.min(this.highlighted(), list.length - 1);
     return this.optionId(idx);
+  });
+
+  /**
+   * Buckets the filtered list into the mockup's three groups: skills, slash
+   * commands, and plugin commands. The flat-index is preserved on every
+   * entry so keyboard navigation (which addresses items by their position in
+   * `filtered()`) and group rendering stay in sync.
+   */
+  readonly groups = computed<readonly SlashGroup[]>(() => {
+    const list = this.filtered();
+    const skills: GroupEntry[] = [];
+    const commands: GroupEntry[] = [];
+    const plugins: GroupEntry[] = [];
+    list.forEach((cmd, i) => {
+      const entry: GroupEntry = { cmd, flatIndex: i };
+      if (cmd.plugin) plugins.push(entry);
+      else if (cmd.kind === 'Skill') skills.push(entry);
+      else commands.push(entry);
+    });
+    const out: SlashGroup[] = [];
+    if (skills.length > 0) out.push({ key: 'skills', label: 'skills', items: skills });
+    if (commands.length > 0)
+      out.push({ key: 'commands', label: 'slash commands', items: commands });
+    if (plugins.length > 0) out.push({ key: 'plugins', label: 'from plugins', items: plugins });
+    return out;
   });
 
   /**
@@ -239,10 +311,11 @@ export class SlashMenuComponent implements OnChanges {
 
   /**
    * Arrow-down handler — advances the highlighted index with wrap-around.
-   * @param event - The key event to consume.
+   * @param event - The DOM event to consume; Angular's `host` metadata types
+   *   the listener as `Event`, so we accept the wider type and consume it.
    */
-  handleArrowDown(event: KeyboardEvent): void {
-    if (!this.open) return;
+  handleArrowDown(event: Event): void {
+    if (!this.open()) return;
     event.preventDefault();
     const len = this.filtered().length;
     if (len === 0) return;
@@ -251,10 +324,10 @@ export class SlashMenuComponent implements OnChanges {
 
   /**
    * Arrow-up handler — moves the highlight up with wrap-around.
-   * @param event - The key event to consume.
+   * @param event - DOM event from the document keydown.
    */
-  handleArrowUp(event: KeyboardEvent): void {
-    if (!this.open) return;
+  handleArrowUp(event: Event): void {
+    if (!this.open()) return;
     event.preventDefault();
     const len = this.filtered().length;
     if (len === 0) return;
@@ -263,20 +336,20 @@ export class SlashMenuComponent implements OnChanges {
 
   /**
    * Home-key handler — jumps to the first item.
-   * @param event - The key event to consume.
+   * @param event - DOM event from the document keydown.
    */
-  handleHome(event: KeyboardEvent): void {
-    if (!this.open) return;
+  handleHome(event: Event): void {
+    if (!this.open()) return;
     event.preventDefault();
     this.highlighted.set(0);
   }
 
   /**
    * End-key handler — jumps to the last item.
-   * @param event - The key event to consume.
+   * @param event - DOM event from the document keydown.
    */
-  handleEnd(event: KeyboardEvent): void {
-    if (!this.open) return;
+  handleEnd(event: Event): void {
+    if (!this.open()) return;
     event.preventDefault();
     const len = this.filtered().length;
     if (len === 0) return;
@@ -285,10 +358,10 @@ export class SlashMenuComponent implements OnChanges {
 
   /**
    * Enter-key handler — emits `selected` with the highlighted command.
-   * @param event - The key event to consume.
+   * @param event - DOM event from the document keydown.
    */
-  handleEnter(event: KeyboardEvent): void {
-    if (!this.open) return;
+  handleEnter(event: Event): void {
+    if (!this.open()) return;
     if (this.filtered().length === 0) return;
     event.preventDefault();
     this.selectHighlighted();
@@ -296,11 +369,24 @@ export class SlashMenuComponent implements OnChanges {
 
   /**
    * Escape-key handler — emits `closed` so the parent can hide us.
-   * @param event - The key event to consume.
+   * @param event - DOM event from the document keydown.
    */
-  handleEscape(event: KeyboardEvent): void {
-    if (!this.open) return;
+  handleEscape(event: Event): void {
+    if (!this.open()) return;
     event.preventDefault();
     this.closed.emit();
   }
+}
+
+/** One entry inside a slash-menu group, carrying the position in `filtered()`. */
+interface GroupEntry {
+  cmd: SlashCommand;
+  flatIndex: number;
+}
+
+/** A rendered group: kebab key, mono uppercase label, and member entries. */
+interface SlashGroup {
+  key: string;
+  label: string;
+  items: readonly GroupEntry[];
 }

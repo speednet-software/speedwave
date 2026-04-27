@@ -301,7 +301,7 @@ endif
 # ── Angular tests ───────────────────────────────────────────────────────────
 
 test-angular:
-	cd desktop/src && npx vitest run
+	cd desktop/src && npx ng test --no-watch
 	@echo "✅ Angular tests passed"
 
 # ── MCP server tests ────────────────────────────────────────────────────────
@@ -329,14 +329,14 @@ coverage-mcp: build-mcp
 	@echo "✅ MCP coverage passed"
 
 coverage-angular:
-	cd desktop/src && npx vitest run --coverage
-	@echo "✅ Angular coverage passed (thresholds enforced by vitest.config.ts)"
+	cd desktop/src && npx ng test --no-watch --coverage
+	@echo "✅ Angular coverage passed"
 
 coverage-html: build-mcp
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "❌ cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
 	cargo llvm-cov -p speedwave-runtime -p speedwave-cli --html --output-dir target/coverage/rust
 	cd mcp-servers && npm run test:coverage
-	cd desktop/src && npx vitest run --coverage
+	cd desktop/src && npx ng test --no-watch --coverage
 	@echo "\n✅ Coverage reports generated:"
 	@echo "  Rust:    target/coverage/rust/html/index.html"
 	@echo "  MCP:     mcp-servers/coverage/index.html"

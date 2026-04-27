@@ -102,7 +102,7 @@ describe('RedmineConfigComponent', () => {
 
     fixture = TestBed.createComponent(RedmineConfigComponent);
     component = fixture.componentInstance;
-    component.svc = makeRedmineSvc();
+    fixture.componentRef.setInput('svc', makeRedmineSvc());
   });
 
   it('should create', () => {
@@ -127,7 +127,7 @@ describe('RedmineConfigComponent', () => {
   });
 
   it('should show configured badge when configured', () => {
-    component.svc = makeRedmineSvc({ configured: true });
+    fixture.componentRef.setInput('svc', makeRedmineSvc({ configured: true }));
     fixture.detectChanges();
     const badge = fixture.nativeElement.querySelector('[data-testid="badge"]');
     expect(badge.textContent.trim()).toBe('Configured');
@@ -142,20 +142,20 @@ describe('RedmineConfigComponent', () => {
   });
 
   it('should not show card-body when not expanded', () => {
-    component.expanded = false;
+    fixture.componentRef.setInput('expanded', false);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="card-body"]')).toBeNull();
   });
 
   it('should show card-body when expanded', () => {
-    component.expanded = true;
+    fixture.componentRef.setInput('expanded', true);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="card-body"]')).not.toBeNull();
   });
 
   describe('State transitions', () => {
     it('starts in credentials state', () => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       expect(component.wizardState).toBe('credentials');
       expect(
@@ -164,17 +164,20 @@ describe('RedmineConfigComponent', () => {
     });
 
     it('transitions to configured state on init when svc is configured', () => {
-      component.svc = makeRedmineSvc({
-        configured: true,
-        current_values: { host_url: 'https://redmine.test', api_key: 'key123' },
-      });
-      component.ngOnChanges();
+      fixture.componentRef.setInput(
+        'svc',
+        makeRedmineSvc({
+          configured: true,
+          current_values: { host_url: 'https://redmine.test', api_key: 'key123' },
+        })
+      );
+      fixture.detectChanges();
       fixture.detectChanges();
       expect(component.wizardState).toBe('configured');
     });
 
     it('transitions from credentials to mappings on successful validation', async () => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       component.hostUrl = 'https://redmine.test';
       component.apiKey = 'valid-key';
       fixture.detectChanges();
@@ -199,7 +202,7 @@ describe('RedmineConfigComponent', () => {
     });
 
     it('transitions from mappings to configured on save', async () => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       component.hostUrl = 'https://redmine.test';
       component.apiKey = 'valid-key';
       component.wizardState = 'mappings';
@@ -215,7 +218,7 @@ describe('RedmineConfigComponent', () => {
     });
 
     it('transitions from configured to credentials on edit', () => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       component.wizardState = 'configured';
       fixture.detectChanges();
 
@@ -229,7 +232,7 @@ describe('RedmineConfigComponent', () => {
     });
 
     it('transitions from edit back to mappings on re-validate', async () => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       component.wizardState = 'configured';
       component.hostUrl = 'https://redmine.test';
       component.apiKey = 'valid-key';
@@ -254,7 +257,7 @@ describe('RedmineConfigComponent', () => {
 
   describe('Validation errors', () => {
     beforeEach(() => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       component.hostUrl = 'https://redmine.test';
       component.apiKey = 'bad-key';
       fixture.detectChanges();
@@ -310,7 +313,7 @@ describe('RedmineConfigComponent', () => {
 
   describe('Concurrency', () => {
     it('double-click validate is no-op while validating', async () => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       component.hostUrl = 'https://redmine.test';
       component.apiKey = 'key';
       fixture.detectChanges();
@@ -335,7 +338,7 @@ describe('RedmineConfigComponent', () => {
     });
 
     it('component destroyed during validation produces no errors', async () => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       component.hostUrl = 'https://redmine.test';
       component.apiKey = 'key';
       fixture.detectChanges();
@@ -358,7 +361,7 @@ describe('RedmineConfigComponent', () => {
     });
 
     it('component destroyed during enumeration fetch produces no errors', async () => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       component.hostUrl = 'https://redmine.test';
       component.apiKey = 'key';
       fixture.detectChanges();
@@ -400,7 +403,7 @@ describe('RedmineConfigComponent', () => {
     });
 
     it('rapid transitions: stale enumeration fetch does not overwrite newer result', async () => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       component.hostUrl = 'https://redmine.test';
       component.apiKey = 'key';
       fixture.detectChanges();
@@ -470,7 +473,7 @@ describe('RedmineConfigComponent', () => {
 
   describe('Dropdowns', () => {
     beforeEach(() => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       component.wizardState = 'mappings';
       component.enumerations = makeEnumerations();
       component.loadingEnumerations = false;
@@ -565,6 +568,8 @@ describe('RedmineConfigComponent', () => {
 
       expect(spy).toHaveBeenCalledTimes(1);
       const payload = spy.mock.calls[0][0];
+      expect(payload).toBeDefined();
+      if (!payload) throw new Error('expected payload');
       expect(payload.credentials['host_url']).toBe('https://redmine.test');
       expect(payload.credentials['api_key']).toBe('key123');
       expect(payload.credentials['project_id']).toBe('1');
@@ -581,6 +586,8 @@ describe('RedmineConfigComponent', () => {
       component.onSaveMappings();
 
       const payload = spy.mock.calls[0][0];
+      expect(payload).toBeDefined();
+      if (!payload) throw new Error('expected payload');
       expect(payload.mappings).toEqual({ status_new: 1 });
     });
 
@@ -592,7 +599,10 @@ describe('RedmineConfigComponent', () => {
       const spy = vi.spyOn(component.saveCredentials, 'emit');
       component.onSaveMappings();
 
-      expect(spy.mock.calls[0][0].mappings).toBeNull();
+      const payload = spy.mock.calls[0][0];
+      expect(payload).toBeDefined();
+      if (!payload) throw new Error('expected payload');
+      expect(payload.mappings).toBeNull();
     });
 
     it('does not include project_id when All projects selected', () => {
@@ -603,18 +613,24 @@ describe('RedmineConfigComponent', () => {
       const spy = vi.spyOn(component.saveCredentials, 'emit');
       component.onSaveMappings();
 
-      expect(spy.mock.calls[0][0].credentials['project_id']).toBeUndefined();
+      const payload = spy.mock.calls[0][0];
+      expect(payload).toBeDefined();
+      if (!payload) throw new Error('expected payload');
+      expect(payload.credentials['project_id']).toBeUndefined();
     });
   });
 
   describe('Configured state', () => {
     beforeEach(() => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       component.wizardState = 'configured';
-      component.svc = makeRedmineSvc({
-        configured: true,
-        current_values: { host_url: 'https://redmine.test', api_key: 'key' },
-      });
+      fixture.componentRef.setInput(
+        'svc',
+        makeRedmineSvc({
+          configured: true,
+          current_values: { host_url: 'https://redmine.test', api_key: 'key' },
+        })
+      );
     });
 
     it('shows configured state elements', () => {
@@ -638,10 +654,10 @@ describe('RedmineConfigComponent', () => {
 
     it('shows project_id fallback when enumerations not loaded', () => {
       component.enumerations = null;
-      component.svc = {
-        ...component.svc,
-        current_values: { ...component.svc.current_values, project_id: 'my-project' },
-      };
+      fixture.componentRef.setInput('svc', {
+        ...component.svc(),
+        current_values: { ...component.svc().current_values, project_id: 'my-project' },
+      });
       fixture.detectChanges();
       const project = fixture.nativeElement.querySelector(
         '[data-testid="redmine-configured-project"]'
@@ -663,7 +679,7 @@ describe('RedmineConfigComponent', () => {
       fixture.detectChanges();
       const spy = vi.spyOn(component.deleteCredentials, 'emit');
       fixture.nativeElement.querySelector('[data-testid="integrations-remove-redmine"]').click();
-      expect(spy).toHaveBeenCalledWith(component.svc);
+      expect(spy).toHaveBeenCalledWith(component.svc());
     });
 
     it('edit button transitions to credentials state', () => {
@@ -676,27 +692,36 @@ describe('RedmineConfigComponent', () => {
 
   describe('Pre-population', () => {
     it('pre-populates host_url and api_key from current_values', () => {
-      component.svc = makeRedmineSvc({
-        current_values: { host_url: 'https://existing.test', api_key: 'existing-key' },
-      });
-      component.ngOnChanges();
+      fixture.componentRef.setInput(
+        'svc',
+        makeRedmineSvc({
+          current_values: { host_url: 'https://existing.test', api_key: 'existing-key' },
+        })
+      );
+      fixture.detectChanges();
       expect(component.hostUrl).toBe('https://existing.test');
       expect(component.apiKey).toBe('existing-key');
     });
 
     it('pre-populates project_id from current_values', () => {
-      component.svc = makeRedmineSvc({
-        current_values: { host_url: 'h', api_key: 'k', project_id: '42' },
-      });
-      component.ngOnChanges();
+      fixture.componentRef.setInput(
+        'svc',
+        makeRedmineSvc({
+          current_values: { host_url: 'h', api_key: 'k', project_id: '42' },
+        })
+      );
+      fixture.detectChanges();
       expect(component.selectedProjectId).toBe(42);
     });
 
     it('restores mappings from svc.mappings', () => {
-      component.svc = makeRedmineSvc({
-        mappings: { status_new: 1, tracker_bug: 3 },
-      });
-      component.ngOnChanges();
+      fixture.componentRef.setInput(
+        'svc',
+        makeRedmineSvc({
+          mappings: { status_new: 1, tracker_bug: 3 },
+        })
+      );
+      fixture.detectChanges();
       expect(component.editedMappings['status_new']).toBe(1);
       expect(component.editedMappings['tracker_bug']).toBe(3);
     });
@@ -704,13 +729,16 @@ describe('RedmineConfigComponent', () => {
 
   describe('Toggle', () => {
     it('emits toggleService on checkbox change', () => {
-      component.svc = makeRedmineSvc({ configured: true, enabled: true });
+      fixture.componentRef.setInput('svc', makeRedmineSvc({ configured: true, enabled: true }));
       fixture.detectChanges();
       const spy = vi.spyOn(component.toggleService, 'emit');
       const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
       checkbox.dispatchEvent(new Event('change'));
       expect(spy).toHaveBeenCalledTimes(1);
-      expect(spy.mock.calls[0][0].svc).toBe(component.svc);
+      const payload = spy.mock.calls[0][0];
+      expect(payload).toBeDefined();
+      if (!payload) throw new Error('expected payload');
+      expect(payload.svc).toBe(component.svc());
     });
 
     it('disables toggle when not configured', () => {
@@ -722,7 +750,7 @@ describe('RedmineConfigComponent', () => {
 
   describe('Enumeration loading spinner', () => {
     it('shows spinner while loading enumerations', () => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       component.wizardState = 'mappings';
       component.loadingEnumerations = true;
       fixture.detectChanges();
@@ -732,7 +760,7 @@ describe('RedmineConfigComponent', () => {
     });
 
     it('hides spinner when enumerations loaded', () => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       component.wizardState = 'mappings';
       component.loadingEnumerations = false;
       component.enumerations = makeEnumerations();
@@ -745,7 +773,7 @@ describe('RedmineConfigComponent', () => {
 
   describe('Validation button', () => {
     it('shows spinner during validation', () => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       component.validating = true;
       fixture.detectChanges();
       expect(
@@ -756,7 +784,7 @@ describe('RedmineConfigComponent', () => {
     });
 
     it('is enabled when not validating', () => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       const btn = fixture.nativeElement.querySelector('[data-testid="redmine-validate-btn"]');
       expect(btn.disabled).toBe(false);
@@ -785,7 +813,7 @@ describe('RedmineConfigComponent', () => {
 
     it('falls back to svc.mappings count when editedMappings are all null', () => {
       component.editedMappings = {};
-      component.svc = makeRedmineSvc({ mappings: { x: 1, y: 2, z: 3 } });
+      fixture.componentRef.setInput('svc', makeRedmineSvc({ mappings: { x: 1, y: 2, z: 3 } }));
       expect(component.getConfiguredMappingCount()).toBe(3);
     });
 

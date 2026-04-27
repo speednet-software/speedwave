@@ -4,7 +4,6 @@ import { UserMessageComponent } from './user-message.component';
 
 describe('UserMessageComponent', () => {
   let fixture: ComponentFixture<UserMessageComponent>;
-  let component: UserMessageComponent;
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
@@ -12,13 +11,12 @@ describe('UserMessageComponent', () => {
     }).compileComponents();
 
     fixture = TestBed.createComponent(UserMessageComponent);
-    component = fixture.componentInstance;
   });
 
   // ── Happy path — text rendering ─────────────────────────────────────
 
   it('renders plain text content', () => {
-    component.blocks = [{ type: 'text', content: 'Hello from the user' }];
+    fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'Hello from the user' }]);
     fixture.detectChanges();
 
     const body = fixture.nativeElement.querySelector(
@@ -28,10 +26,10 @@ describe('UserMessageComponent', () => {
   });
 
   it('renders multiple text blocks in order', () => {
-    component.blocks = [
+    fixture.componentRef.setInput('blocks', [
       { type: 'text', content: 'First line' },
       { type: 'text', content: 'Second line' },
-    ];
+    ]);
     fixture.detectChanges();
 
     const body = fixture.nativeElement.querySelector(
@@ -46,10 +44,10 @@ describe('UserMessageComponent', () => {
   // ── Edge case — non-text blocks are filtered out ────────────────────
 
   it('ignores non-text blocks (user messages only carry text)', () => {
-    component.blocks = [
+    fixture.componentRef.setInput('blocks', [
       { type: 'text', content: 'visible' },
       { type: 'thinking', content: 'should be hidden', collapsed: true },
-    ];
+    ]);
     fixture.detectChanges();
 
     const body = fixture.nativeElement.querySelector(
@@ -62,8 +60,8 @@ describe('UserMessageComponent', () => {
   // ── Edited badge ────────────────────────────────────────────────────
 
   it('shows the edited badge when editedAt is set', () => {
-    component.blocks = [{ type: 'text', content: 'hi' }];
-    component.editedAt = 1_700_000_000_000;
+    fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'hi' }]);
+    fixture.componentRef.setInput('editedAt', 1_700_000_000_000);
     fixture.detectChanges();
 
     const badge = fixture.nativeElement.querySelector(
@@ -74,7 +72,7 @@ describe('UserMessageComponent', () => {
   });
 
   it('hides the edited badge when editedAt is undefined', () => {
-    component.blocks = [{ type: 'text', content: 'hi' }];
+    fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'hi' }]);
     fixture.detectChanges();
 
     const badge = fixture.nativeElement.querySelector('[data-testid="user-message-edited"]');
@@ -85,8 +83,8 @@ describe('UserMessageComponent', () => {
 
   it('renders the formatted timestamp when non-zero', () => {
     const date = new Date(2026, 3, 25, 14, 5, 0, 0);
-    component.blocks = [{ type: 'text', content: 'hi' }];
-    component.timestamp = date.getTime();
+    fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'hi' }]);
+    fixture.componentRef.setInput('timestamp', date.getTime());
     fixture.detectChanges();
 
     const timeEl = fixture.nativeElement.querySelector(
@@ -97,8 +95,8 @@ describe('UserMessageComponent', () => {
   });
 
   it('omits the time segment when timestamp is 0 (sentinel for unknown)', () => {
-    component.blocks = [{ type: 'text', content: 'hi' }];
-    component.timestamp = 0;
+    fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'hi' }]);
+    fixture.componentRef.setInput('timestamp', 0);
     fixture.detectChanges();
 
     const timeEl = fixture.nativeElement.querySelector('[data-testid="user-message-time"]');
@@ -108,7 +106,7 @@ describe('UserMessageComponent', () => {
   // ── Edge case — empty blocks ─────────────────────────────────────────
 
   it('renders with an empty body when no blocks are provided', () => {
-    component.blocks = [];
+    fixture.componentRef.setInput('blocks', []);
     fixture.detectChanges();
 
     const body = fixture.nativeElement.querySelector(

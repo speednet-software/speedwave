@@ -3,7 +3,6 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ChatEmptyComponent } from './chat-empty.component';
 
 describe('ChatEmptyComponent', () => {
-  let component: ChatEmptyComponent;
   let fixture: ComponentFixture<ChatEmptyComponent>;
 
   beforeEach(async () => {
@@ -12,18 +11,17 @@ describe('ChatEmptyComponent', () => {
     }).compileComponents();
 
     fixture = TestBed.createComponent(ChatEmptyComponent);
-    component = fixture.componentInstance;
   });
 
   it('renders the default hint when no input is provided', () => {
     fixture.detectChanges();
 
     const hint = fixture.nativeElement.querySelector('[data-testid="chat-empty-hint"]');
-    expect(hint?.textContent?.trim()).toBe('Type a message to start');
+    expect(hint?.textContent?.trim()).toBe('No messages yet — ask speedwave anything.');
   });
 
   it('renders the custom hint when supplied', () => {
-    component.hint = 'No messages yet — ask speedwave anything.';
+    fixture.componentRef.setInput('hint', 'No messages yet — ask speedwave anything.');
     fixture.detectChanges();
 
     const hint = fixture.nativeElement.querySelector('[data-testid="chat-empty-hint"]');
@@ -35,19 +33,19 @@ describe('ChatEmptyComponent', () => {
 
     const card = fixture.nativeElement.querySelector('[data-testid="chat-empty"]') as HTMLElement;
     expect(card.className).toContain('border-dashed');
-    expect(card.className).toContain('border-line-strong');
+    expect(card.className).toContain('border-[var(--line)]');
     expect(card.className).toContain('text-center');
   });
 
-  it('renders the `// empty` header in mono / uppercase / muted ink', () => {
+  it('renders the `empty` header in mono / uppercase / muted ink', () => {
     fixture.detectChanges();
 
     const card = fixture.nativeElement.querySelector('[data-testid="chat-empty"]') as HTMLElement;
     const header = card.querySelector('div');
-    expect(header?.textContent?.trim()).toBe('// empty');
+    expect(header?.textContent?.trim()).toBe('empty');
     expect(header?.className).toContain('mono');
     expect(header?.className).toContain('uppercase');
-    expect(header?.className).toContain('text-ink-mute');
+    expect(header?.className).toContain('text-[var(--ink-mute)]');
   });
 
   it('applies role="region" + aria-label on the host (static placeholder, not a live region)', () => {
@@ -59,7 +57,7 @@ describe('ChatEmptyComponent', () => {
   });
 
   it('renders an empty-string hint without throwing', () => {
-    component.hint = '';
+    fixture.componentRef.setInput('hint', '');
     fixture.detectChanges();
 
     const hint = fixture.nativeElement.querySelector('[data-testid="chat-empty-hint"]');

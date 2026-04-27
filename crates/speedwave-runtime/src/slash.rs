@@ -1126,7 +1126,8 @@ mod tests {
             path: Some(plugin_dir.clone()),
         }];
 
-        let (fm, origin) = lookup_frontmatter("tool", Some("plugin-x"), &project_dir, None, &plugins);
+        let (fm, origin) =
+            lookup_frontmatter("tool", Some("plugin-x"), &project_dir, None, &plugins);
         assert_eq!(fm.description.as_deref(), Some("from plugin"));
         assert_eq!(origin, Some(FrontmatterOrigin::Skill));
     }

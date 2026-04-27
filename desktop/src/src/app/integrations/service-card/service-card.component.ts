@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
+import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { DeviceCodeInfo, IntegrationStatusEntry } from '../../models/integration';
 
@@ -15,13 +15,12 @@ export interface SaveCredentialsEvent {
 /** Reusable card for a single MCP integration service. */
 @Component({
   selector: 'app-service-card',
-  standalone: true,
   imports: [FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
       class="rounded ring-1 ring-[var(--line)] bg-[var(--bg-1)] mb-3 overflow-hidden"
-      [attr.data-testid]="'integrations-service-' + svc.service"
+      [attr.data-testid]="'integrations-service-' + svc().service"
       [attr.data-status-dot]="statusDotKey()"
     >
       <div class="flex justify-between items-center px-5 py-4">
@@ -29,32 +28,32 @@ export interface SaveCredentialsEvent {
           class="flex items-center gap-3 flex-1 cursor-pointer bg-transparent border-none text-inherit font-inherit text-left p-0"
           type="button"
           data-testid="card-header-btn"
-          (click)="toggleExpand.emit(svc.service)"
+          (click)="toggleExpand.emit(svc().service)"
         >
           <span
             class="mono inline-block h-2 w-2 flex-shrink-0 rounded-full"
             [style.background-color]="statusDotColor()"
-            [attr.data-testid]="'status-dot-' + svc.service"
+            [attr.data-testid]="'status-dot-' + svc().service"
             aria-hidden="true"
           ></span>
           <span class="mono text-[13px] text-[var(--ink)]" data-testid="service-name">{{
-            svc.display_name
+            svc().display_name
           }}</span>
-          @if (svc.badge) {
+          @if (svc().badge) {
             <span
               class="mono text-[10px] px-1.5 py-0.5 rounded font-medium uppercase tracking-wide ring-1 ring-[var(--amber)]/40 text-[var(--amber)]"
               data-testid="service-badge"
             >
-              {{ svc.badge }}
+              {{ svc().badge }}
             </span>
           }
           <span
             class="mono text-[10px] px-2 py-0.5 rounded font-medium uppercase tracking-widest"
             data-testid="badge"
-            [attr.data-status]="svc.configured ? 'configured' : 'not-configured'"
-            [style.color]="svc.configured ? 'var(--green)' : 'var(--ink-mute)'"
+            [attr.data-status]="svc().configured ? 'configured' : 'not-configured'"
+            [style.color]="svc().configured ? 'var(--green)' : 'var(--ink-mute)'"
           >
-            {{ svc.configured ? 'Configured' : 'Not Configured' }}
+            {{ svc().configured ? 'Configured' : 'Not Configured' }}
           </span>
         </button>
         <div class="flex items-center gap-3">
@@ -62,9 +61,9 @@ export interface SaveCredentialsEvent {
             <input
               type="checkbox"
               class="peer sr-only"
-              [checked]="svc.enabled"
+              [checked]="svc().enabled"
               (change)="onToggle($event)"
-              [attr.data-testid]="'integrations-toggle-' + svc.service"
+              [attr.data-testid]="'integrations-toggle-' + svc().service"
             />
             <span
               class="absolute inset-0 bg-[var(--line-strong)] rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-[var(--accent)] before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
@@ -76,36 +75,36 @@ export interface SaveCredentialsEvent {
         class="px-5 pb-3 mono text-[12px] text-[var(--ink-dim)] m-0"
         data-testid="card-description"
       >
-        {{ svc.description }}
+        {{ svc().description }}
       </p>
 
-      @if (!svc.configured && !expanded && hasConfigurableFields) {
+      @if (!svc().configured && !expanded() && hasConfigurableFields) {
         <p
           class="px-5 pb-3 mono text-[var(--accent)] text-[11px] m-0 cursor-pointer"
           data-testid="setup-hint"
           role="button"
           tabindex="0"
-          (click)="toggleExpand.emit(svc.service)"
-          (keydown.enter)="toggleExpand.emit(svc.service)"
-          (keydown.space)="$event.preventDefault(); toggleExpand.emit(svc.service)"
+          (click)="toggleExpand.emit(svc().service)"
+          (keydown.enter)="toggleExpand.emit(svc().service)"
+          (keydown.space)="$event.preventDefault(); toggleExpand.emit(svc().service)"
         >
           Click to set up credentials
         </p>
       }
 
-      @if (expanded && hasConfigurableFields) {
+      @if (expanded() && hasConfigurableFields) {
         <div class="px-5 pb-5 pt-2" data-testid="card-body">
           <form (submit)="onSave($event)">
-            @for (field of svc.auth_fields; track field.key) {
+            @for (field of svc().auth_fields; track field.key) {
               @if (!field.oauth_flow) {
                 <div class="my-4">
                   <label
                     class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                    [for]="svc.service + '-' + field.key"
+                    [for]="svc().service + '-' + field.key"
                     >{{ field.label }}{{ field.optional ? ' (optional)' : '' }}</label
                   >
                   <input
-                    [id]="svc.service + '-' + field.key"
+                    [id]="svc().service + '-' + field.key"
                     [type]="field.field_type === 'password' ? 'password' : 'text'"
                     [placeholder]="field.placeholder"
                     [value]="getFieldValue(field.key)"
@@ -123,7 +122,9 @@ export interface SaveCredentialsEvent {
                 class="my-4 rounded ring-1 ring-[var(--line)] bg-[var(--bg-2)] p-4"
                 data-testid="oauth-section"
               >
-                @if (!deviceCodeInfo && oauthStatus !== 'polling' && oauthStatus !== 'starting') {
+                @if (
+                  !deviceCodeInfo() && oauthStatus() !== 'polling' && oauthStatus() !== 'starting'
+                ) {
                   <button
                     type="button"
                     class="mono rounded ring-1 ring-[var(--accent-dim)] bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90"
@@ -132,7 +133,7 @@ export interface SaveCredentialsEvent {
                     Sign in with Microsoft
                   </button>
                 }
-                @if (oauthStatus === 'starting') {
+                @if (oauthStatus() === 'starting') {
                   <p
                     class="mono text-[12px] text-[var(--ink-dim)] my-2"
                     data-testid="polling-status"
@@ -148,30 +149,30 @@ export interface SaveCredentialsEvent {
                     Cancel
                   </button>
                 }
-                @if (deviceCodeInfo) {
+                @if (deviceCodeInfo(); as info) {
                   <p class="mono text-[12px] text-[var(--ink-dim)]">Enter this code:</p>
                   <div
                     class="mono text-[24px] font-bold tracking-[4px] text-[var(--accent)] my-3 text-center"
                     data-testid="user-code"
                   >
-                    {{ deviceCodeInfo.user_code }}
+                    {{ info.user_code }}
                   </div>
                   <div class="flex items-center gap-2.5 my-2 flex-wrap">
                     <button
                       type="button"
                       class="mono rounded ring-1 ring-[var(--accent-dim)] bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90"
                       data-testid="btn-link"
-                      (click)="openVerificationUrl.emit(deviceCodeInfo.verification_uri)"
+                      (click)="openVerificationUrl.emit(info.verification_uri)"
                     >
                       Open Microsoft Sign-in
                     </button>
                     <span
                       class="mono text-[11px] text-[var(--ink-dim)] select-all break-all"
                       data-testid="verification-url"
-                      >{{ deviceCodeInfo.verification_uri }}</span
+                      >{{ info.verification_uri }}</span
                     >
                   </div>
-                  @if (oauthStatus === 'polling') {
+                  @if (oauthStatus() === 'polling') {
                     <p
                       class="mono text-[12px] text-[var(--ink-dim)] my-2"
                       data-testid="polling-status"
@@ -188,14 +189,14 @@ export interface SaveCredentialsEvent {
                     Cancel
                   </button>
                 }
-                @if (oauthStatus === 'success') {
+                @if (oauthStatus() === 'success') {
                   <p class="mono text-[12px] text-[var(--green)]" data-testid="oauth-success">
                     Authentication successful
                   </p>
                 }
-                @if (oauthStatus === 'error' || oauthStatus === 'expired') {
+                @if (oauthStatus() === 'error' || oauthStatus() === 'expired') {
                   <p class="mono text-[12px] text-red-300" data-testid="oauth-error">
-                    {{ oauthStatusMessage }}
+                    {{ oauthStatusMessage() }}
                   </p>
                 }
               </div>
@@ -205,15 +206,15 @@ export interface SaveCredentialsEvent {
               <button
                 type="submit"
                 class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-50"
-                [attr.data-testid]="'integrations-save-' + svc.service"
+                [attr.data-testid]="'integrations-save-' + svc().service"
               >
                 Save
               </button>
               <button
                 type="button"
                 class="mono rounded ring-1 ring-red-500/40 px-3 py-1 text-[11px] text-red-300 hover:bg-red-500/10"
-                [attr.data-testid]="'integrations-remove-' + svc.service"
-                (click)="deleteCredentials.emit(svc)"
+                [attr.data-testid]="'integrations-remove-' + svc().service"
+                (click)="deleteCredentials.emit(svc())"
               >
                 Remove Credentials
               </button>
@@ -225,22 +226,22 @@ export interface SaveCredentialsEvent {
   `,
 })
 export class ServiceCardComponent {
-  @Input({ required: true }) svc!: IntegrationStatusEntry;
-  @Input() expanded = false;
-  @Input() oauthStatus: string | null = null;
-  @Input() deviceCodeInfo: DeviceCodeInfo | null = null;
-  @Input() oauthStatusMessage = '';
+  readonly svc = input.required<IntegrationStatusEntry>();
+  readonly expanded = input(false);
+  readonly oauthStatus = input<string | null>(null);
+  readonly deviceCodeInfo = input<DeviceCodeInfo | null>(null);
+  readonly oauthStatusMessage = input('');
 
-  @Output() toggleExpand = new EventEmitter<string>();
-  @Output() toggleService = new EventEmitter<{ svc: IntegrationStatusEntry; event: Event }>();
-  @Output() saveCredentials = new EventEmitter<SaveCredentialsEvent>();
-  @Output() deleteCredentials = new EventEmitter<IntegrationStatusEntry>();
-  @Output() startOAuth = new EventEmitter<{
+  readonly toggleExpand = output<string>();
+  readonly toggleService = output<{ svc: IntegrationStatusEntry; event: Event }>();
+  readonly saveCredentials = output<SaveCredentialsEvent>();
+  readonly deleteCredentials = output<IntegrationStatusEntry>();
+  readonly startOAuth = output<{
     svc: IntegrationStatusEntry;
     credentials: Record<string, string>;
   }>();
-  @Output() cancelOAuth = new EventEmitter<void>();
-  @Output() openVerificationUrl = new EventEmitter<string>();
+  readonly cancelOAuth = output<void>();
+  readonly openVerificationUrl = output<string>();
 
   editedValues: Record<string, string> = {};
 
@@ -249,9 +250,11 @@ export class ServiceCardComponent {
    * `data-status-dot` attribute used by tests and AXE.
    */
   statusDotKey(): ServiceStatusDot {
-    if (this.oauthStatus === 'error' || this.oauthStatus === 'expired') return 'error';
-    if (this.svc.enabled && this.svc.configured) return 'connected';
-    if (this.expanded || this.oauthStatus === 'starting' || this.oauthStatus === 'polling') {
+    const oauth = this.oauthStatus();
+    if (oauth === 'error' || oauth === 'expired') return 'error';
+    const svc = this.svc();
+    if (svc.enabled && svc.configured) return 'connected';
+    if (this.expanded() || oauth === 'starting' || oauth === 'polling') {
       return 'configuring';
     }
     return 'disabled';
@@ -280,14 +283,14 @@ export class ServiceCardComponent {
    * Credentials buttons to avoid nonsensical empty prompts.
    */
   get hasConfigurableFields(): boolean {
-    return this.svc.auth_fields.length > 0;
+    return this.svc().auth_fields.length > 0;
   }
 
   /**
    * Returns whether any auth fields use the OAuth flow.
    */
   hasOAuthFields(): boolean {
-    return this.svc.auth_fields.some((f) => f.oauth_flow);
+    return this.svc().auth_fields.some((f) => f.oauth_flow);
   }
 
   /**
@@ -295,7 +298,7 @@ export class ServiceCardComponent {
    * @param key - the field key to look up
    */
   getFieldValue(key: string): string {
-    return this.editedValues[key] ?? this.svc.current_values[key] ?? '';
+    return this.editedValues[key] ?? this.svc().current_values[key] ?? '';
   }
 
   /**
@@ -313,27 +316,29 @@ export class ServiceCardComponent {
    * @param event - the checkbox change event
    */
   onToggle(event: Event): void {
-    if (!this.svc.configured) {
+    const svc = this.svc();
+    if (!svc.configured) {
       (event.target as HTMLInputElement).checked = false;
-      this.toggleExpand.emit(this.svc.service);
+      this.toggleExpand.emit(svc.service);
       return;
     }
-    this.toggleService.emit({ svc: this.svc, event });
+    this.toggleService.emit({ svc, event });
   }
 
   /**
    * Emits startOAuth with fresh form values (non-oauth fields only).
    */
   onStartOAuth(): void {
+    const svc = this.svc();
     const credentials: Record<string, string> = {};
-    for (const field of this.svc.auth_fields) {
+    for (const field of svc.auth_fields) {
       if (field.oauth_flow) continue;
-      const value = this.editedValues[field.key] ?? this.svc.current_values[field.key] ?? '';
+      const value = this.editedValues[field.key] ?? svc.current_values[field.key] ?? '';
       if (value !== '') {
         credentials[field.key] = value;
       }
     }
-    this.startOAuth.emit({ svc: this.svc, credentials });
+    this.startOAuth.emit({ svc, credentials });
   }
 
   /**
@@ -342,9 +347,10 @@ export class ServiceCardComponent {
    */
   onSave(event: Event): void {
     event.preventDefault();
+    const svc = this.svc();
     const credentials: Record<string, string> = {};
 
-    for (const field of this.svc.auth_fields) {
+    for (const field of svc.auth_fields) {
       const value = this.editedValues[field.key];
       if (value !== undefined && value !== '') {
         credentials[field.key] = value;
@@ -359,7 +365,7 @@ export class ServiceCardComponent {
     if (Object.keys(credentials).length === 0) return;
 
     this.saveCredentials.emit({
-      svc: this.svc,
+      svc,
       credentials,
       mappings: null,
     });

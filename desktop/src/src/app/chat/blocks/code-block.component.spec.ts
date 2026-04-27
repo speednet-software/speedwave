@@ -39,7 +39,7 @@ describe('CodeBlockComponent', () => {
   });
 
   it('renders the code content verbatim inside <pre><code>', () => {
-    component.code = 'const x = 1;\nconst y = 2;';
+    fixture.componentRef.setInput('code', 'const x = 1;\nconst y = 2;');
     fixture.detectChanges();
 
     const body = fixture.nativeElement.querySelector('[data-testid="code-block-body"]');
@@ -49,7 +49,7 @@ describe('CodeBlockComponent', () => {
   });
 
   it('applies the rounded ring-1 wrapper classes from the design system', () => {
-    component.code = 'x';
+    fixture.componentRef.setInput('code', 'x');
     fixture.detectChanges();
 
     const wrapper = fixture.nativeElement.querySelector(
@@ -58,42 +58,44 @@ describe('CodeBlockComponent', () => {
     expect(wrapper.className).toContain('overflow-hidden');
     expect(wrapper.className).toContain('rounded');
     expect(wrapper.className).toContain('ring-1');
-    expect(wrapper.className).toContain('ring-line');
-    expect(wrapper.className).toContain('bg-bg-1');
+    expect(wrapper.className).toContain('ring-[var(--line)]');
+    expect(wrapper.className).toContain('bg-[var(--bg-1)]');
     // The wrapper itself must not carry a border-b (would clash with the ring).
     expect(wrapper.className).not.toContain('border-b');
   });
 
   it('renders the filename header when filename input is set', () => {
-    component.code = 'x';
-    component.filename = 'containers/compose.template.yml';
+    fixture.componentRef.setInput('code', 'x');
+    fixture.componentRef.setInput('filename', 'containers/compose.template.yml');
     fixture.detectChanges();
 
     const header = fixture.nativeElement.querySelector('[data-testid="code-block-header"]');
     expect(header).not.toBeNull();
     expect(header.textContent).toContain('containers/compose.template.yml');
     const pathSpan = header.querySelector('span');
-    expect(pathSpan?.className).toContain('text-teal');
+    expect(pathSpan?.className).toContain('text-[var(--teal)]');
     expect(pathSpan?.className).toContain('mono');
     // Header must not carry a border-b (would create corner artifacts inside rounded ring).
     expect((header as HTMLElement).className).not.toContain('border-b');
   });
 
   it('omits the filename span when filename is empty but keeps the copy row', () => {
-    component.code = 'x';
+    fixture.componentRef.setInput('code', 'x');
     fixture.detectChanges();
 
     const header = fixture.nativeElement.querySelector(
       '[data-testid="code-block-header"]'
     ) as HTMLElement | null;
     expect(header).not.toBeNull();
-    expect(header?.querySelector('span.text-teal')).toBeNull();
+    // The teal filename span is identified by its mono+text-[var(--teal)] classes; when
+    // no filename is set, no span carrying the filename text is rendered.
+    expect(header?.querySelector('span.mono')).toBeNull();
     expect(header?.querySelector('[data-testid="code-block-copy"]')).not.toBeNull();
   });
 
   it('omits the entire header row when both filename and copyable are off', () => {
-    component.code = 'x';
-    component.copyable = false;
+    fixture.componentRef.setInput('code', 'x');
+    fixture.componentRef.setInput('copyable', false);
     fixture.detectChanges();
 
     const header = fixture.nativeElement.querySelector('[data-testid="code-block-header"]');
@@ -101,8 +103,8 @@ describe('CodeBlockComponent', () => {
   });
 
   it('renders the copy button with aria-label="Copy code"', () => {
-    component.code = 'hello';
-    component.filename = 'file.txt';
+    fixture.componentRef.setInput('code', 'hello');
+    fixture.componentRef.setInput('filename', 'file.txt');
     fixture.detectChanges();
 
     const btn = fixture.nativeElement.querySelector('[data-testid="code-block-copy"]');
@@ -112,9 +114,9 @@ describe('CodeBlockComponent', () => {
   });
 
   it('hides the copy button when copyable is false', () => {
-    component.code = 'x';
-    component.filename = 'f.txt';
-    component.copyable = false;
+    fixture.componentRef.setInput('code', 'x');
+    fixture.componentRef.setInput('filename', 'f.txt');
+    fixture.componentRef.setInput('copyable', false);
     fixture.detectChanges();
 
     const btn = fixture.nativeElement.querySelector('[data-testid="code-block-copy"]');
@@ -122,7 +124,7 @@ describe('CodeBlockComponent', () => {
   });
 
   it('shows a standalone copy button even without a filename', () => {
-    component.code = 'x';
+    fixture.componentRef.setInput('code', 'x');
     fixture.detectChanges();
 
     const btn = fixture.nativeElement.querySelector('[data-testid="code-block-copy"]');
@@ -130,7 +132,7 @@ describe('CodeBlockComponent', () => {
   });
 
   it('calls navigator.clipboard.writeText on copy and toggles justCopied', async () => {
-    component.code = 'copy me';
+    fixture.componentRef.setInput('code', 'copy me');
     fixture.detectChanges();
 
     expect(component.justCopied()).toBe(false);
@@ -153,7 +155,7 @@ describe('CodeBlockComponent', () => {
   });
 
   it('handles an empty code input without error', () => {
-    component.code = '';
+    fixture.componentRef.setInput('code', '');
     fixture.detectChanges();
 
     const body = fixture.nativeElement.querySelector('[data-testid="code-block-body"]');
@@ -162,7 +164,7 @@ describe('CodeBlockComponent', () => {
   });
 
   it('applies whitespace-pre and overflow-x-auto to the <pre> body', () => {
-    component.code = 'x';
+    fixture.componentRef.setInput('code', 'x');
     fixture.detectChanges();
 
     const body = fixture.nativeElement.querySelector(
@@ -176,7 +178,7 @@ describe('CodeBlockComponent', () => {
   it('logs clipboard errors and leaves justCopied false', async () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     writeTextSpy.mockRejectedValueOnce(new Error('not allowed'));
-    component.code = 'blocked';
+    fixture.componentRef.setInput('code', 'blocked');
     fixture.detectChanges();
 
     await component.copy();
@@ -190,7 +192,7 @@ describe('CodeBlockComponent', () => {
   });
 
   it('cancels the copied-confirmation timer when the component is destroyed', async () => {
-    component.code = 'x';
+    fixture.componentRef.setInput('code', 'x');
     fixture.detectChanges();
 
     await component.copy();

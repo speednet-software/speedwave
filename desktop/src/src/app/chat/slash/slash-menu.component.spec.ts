@@ -36,8 +36,8 @@ describe('SlashMenuComponent', () => {
     });
     fixture = TestBed.createComponent(SlashMenuComponent);
     component = fixture.componentInstance;
-    component.open = true;
-    component.query = '';
+    fixture.componentRef.setInput('open', true);
+    fixture.componentRef.setInput('query', '');
   });
 
   describe('filter ranking', () => {

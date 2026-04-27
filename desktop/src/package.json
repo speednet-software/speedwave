@@ -15,7 +15,7 @@
     "start": "ng serve",
     "build": "ng build",
     "test": "ng test",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "ng test --no-watch --coverage",
     "lint": "eslint 'src/**/*.ts' 'src/**/*.html'",
     "lint:fix": "eslint --fix 'src/**/*.ts' 'src/**/*.html'"
   },
@@ -46,6 +46,7 @@
     "@eslint/js": "^10.0.1",
     "@tailwindcss/postcss": "^4.2.2",
     "@tauri-apps/cli": "^2.10.1",
+    "@types/node": "^25.6.0",
     "@vitest/coverage-v8": "^4.1.2",
     "angular-eslint": "^21.3.1",
     "axe-core": "^4.11.3",

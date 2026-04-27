@@ -14,17 +14,29 @@ import { filter } from 'rxjs/operators';
 import { ProjectSwitcherComponent } from '../project-switcher/project-switcher.component';
 import { UpdateNotificationComponent } from '../update-notification/update-notification.component';
 import { ProjectStateService } from '../services/project-state.service';
+import { ThemeService } from '../services/theme.service';
 import { UiStateService } from '../services/ui-state.service';
-import {
-  ViewSwitcherComponent,
-  type ViewSwitcherEntry,
-} from './view-switcher/view-switcher.component';
+import { CommandPaletteComponent } from './command-palette/command-palette.component';
+import { ModalOverlayComponent } from './modal-overlay/modal-overlay.component';
+import { NavRailComponent, type NavRailEntry } from './nav-rail/nav-rail.component';
+
+/** SVG `d` paths for the rail icons (kept short — single-path glyphs). */
+const ICON_CHAT =
+  'M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 0 1-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z';
+const ICON_INTEGRATIONS = 'M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4';
+const ICON_PLUGINS = 'M20 7 12 3 4 7m16 0-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4';
+const ICON_SETTINGS =
+  'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 0 0-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 0 0-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 0 0-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 0 0-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 0 0 1.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z';
+const ICON_LOGS =
+  'M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414a1 1 0 0 1 .293.707V19a2 2 0 0 1-2 2z';
 
 /**
- * Main application shell with header navigation and project switcher.
+ * Application shell — hosts the left icon rail, the routed main content, and
+ * the global keyboard shortcuts (⌘1/⌘2/⌘3/⌘L for view nav, ⌘B for the
+ * conversations drawer, ⌘K for the command palette, ⌘T to cycle accent themes).
  *
- * Wires the ⌘B / Ctrl+B keyboard shortcut to `UiStateService.toggleSidebar()` —
- * the sidebar's open-state is shared via signals, not local component state.
+ * Blocking overlays (loading / check-failed / restart-required / error banner)
+ * live here because they must cover the rail and the routed content alike.
  */
 @Component({
   selector: 'app-shell',
@@ -32,26 +44,29 @@ import {
     RouterOutlet,
     ProjectSwitcherComponent,
     UpdateNotificationComponent,
-    ViewSwitcherComponent,
+    NavRailComponent,
+    ModalOverlayComponent,
+    CommandPaletteComponent,
   ],
-  host: { '(document:keydown)': 'onKeydown($event)' },
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { '(document:keydown)': 'onKeydown($event)' },
   template: `
-    <div class="flex flex-col h-screen bg-sw-bg-darkest text-sw-text">
+    <div class="flex h-screen flex-col bg-[var(--bg)] text-[var(--ink)]">
       @if (projectState.status !== 'ready' && projectState.status !== 'auth_required') {
         @if (projectState.status === 'check_failed') {
           <div
-            class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-sw-bg-darkest"
+            class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-[var(--bg)]"
             data-testid="blocking-check-failed"
           >
-            <span class="text-sw-accent text-lg font-mono font-bold">System Check Failed</span>
+            <span class="mono text-lg font-bold text-[var(--accent)]">System Check Failed</span>
             <p
-              class="mt-4 max-w-lg text-center font-mono text-sm text-sw-text-muted whitespace-pre-line"
+              class="mono mt-4 max-w-lg whitespace-pre-line text-center text-sm text-[var(--ink-mute)]"
             >
               {{ projectState.error }}
             </p>
             <button
-              class="mt-6 px-6 py-2.5 rounded text-sm font-semibold font-mono border-none cursor-pointer transition-colors bg-sw-accent text-white hover:bg-sw-accent-hover"
+              type="button"
+              class="mono mt-6 cursor-pointer rounded border-none bg-[var(--accent)] px-6 py-2.5 text-sm font-semibold text-[var(--on-accent)] transition-opacity hover:opacity-90"
               data-testid="check-retry-btn"
               (click)="retryCheck()"
             >
@@ -60,19 +75,21 @@ import {
           </div>
         } @else if (projectState.status === 'error') {
           <div
-            class="flex items-center justify-between px-4 py-2 bg-[#3d0000] border-b border-sw-accent text-sw-accent text-[13px] font-mono"
+            class="mono flex items-center justify-between border-b border-red-500/40 bg-red-500/10 px-4 py-2 text-[13px] text-red-300"
             data-testid="blocking-error"
           >
             <span>{{ projectState.error }}</span>
             <div class="flex gap-2">
               <button
-                class="bg-transparent border border-sw-accent text-sw-accent px-2.5 py-0.5 rounded text-xs cursor-pointer"
+                type="button"
+                class="cursor-pointer rounded border border-red-500/50 bg-transparent px-2.5 py-0.5 text-xs text-red-300"
                 (click)="retry()"
               >
                 Retry
               </button>
               <button
-                class="bg-transparent border border-sw-accent text-sw-accent px-2.5 py-0.5 rounded text-xs cursor-pointer"
+                type="button"
+                class="cursor-pointer rounded border border-[var(--line)] bg-transparent px-2.5 py-0.5 text-xs text-[var(--ink-mute)]"
                 (click)="dismiss()"
               >
                 Dismiss
@@ -81,138 +98,138 @@ import {
           </div>
         } @else {
           <div
-            class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-sw-bg-darkest/[0.92]"
+            class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-[var(--bg)]/[0.92]"
             role="alertdialog"
             aria-modal="true"
             [attr.aria-label]="statusMessage"
             data-testid="blocking-overlay"
           >
             <div
-              class="w-8 h-8 border-[3px] border-sw-border-dark border-t-sw-accent rounded-full animate-sw-spin"
+              class="spin h-8 w-8 rounded-full border-[3px] border-[var(--line-strong)] border-t-[var(--accent)]"
             ></div>
-            <p class="mt-4 font-mono text-sm text-sw-text">{{ statusMessage }}</p>
+            <p class="mono mt-4 text-sm text-[var(--ink)]">{{ statusMessage }}</p>
           </div>
         }
       }
       @if (projectState.needsRestart && projectState.status === 'ready') {
-        <div
-          class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-sw-bg-darkest/[0.92]"
-          role="alertdialog"
-          aria-modal="true"
-          aria-label="Container restart required"
-          data-testid="restart-overlay"
-        >
-          @if (projectState.restarting) {
+        @if (projectState.restarting) {
+          <div
+            class="fixed inset-0 z-[900] flex items-center justify-center bg-black/75 backdrop-blur-sm"
+            role="alertdialog"
+            aria-modal="true"
+            aria-label="Restarting containers"
+            data-testid="restart-overlay"
+          >
             <div
-              class="w-8 h-8 border-[3px] border-sw-border-dark border-t-sw-accent rounded-full animate-sw-spin"
-            ></div>
-            <p class="mt-4 font-mono text-sm text-sw-text">Restarting containers...</p>
-            <p class="mt-2 font-mono text-[11px] text-sw-text-faint">
-              This may take a minute while containers are recreated
-            </p>
-          } @else {
-            <span class="text-sw-accent text-lg font-mono font-bold">Restart Required</span>
-            <p class="mt-3 max-w-md text-center font-mono text-sm text-sw-text-muted">
-              Changes require container restart to take effect.
-            </p>
-            @if (projectState.restartError) {
-              <div
-                class="mt-3 px-3 py-2 bg-sw-error-bg border border-sw-accent rounded text-sw-accent text-[13px] max-w-md text-center"
-                data-testid="restart-error"
-              >
-                {{ projectState.restartError }}
+              class="w-[min(24rem,calc(100vw-2rem))] rounded border border-[var(--line-strong)] bg-[var(--bg-1)] p-5"
+            >
+              <div class="flex flex-col items-center">
+                <div
+                  class="spin h-8 w-8 rounded-full border-[3px] border-[var(--line-strong)] border-t-[var(--accent)]"
+                ></div>
+                <p class="mono mt-4 text-sm text-[var(--ink)]">Restarting containers...</p>
+                <p class="mono mt-2 text-[11px] text-[var(--ink-mute)]">
+                  This may take a minute while containers are recreated
+                </p>
               </div>
-            }
-            <div class="mt-6 flex gap-3">
-              <button
-                class="px-6 py-2.5 rounded text-sm font-semibold font-mono border-none cursor-pointer transition-colors bg-sw-accent text-white hover:bg-sw-accent-hover"
-                data-testid="restart-now-btn"
-                (click)="restartContainers()"
-              >
-                Restart Now
-              </button>
-              <button
-                class="px-6 py-2.5 rounded text-sm font-semibold font-mono border border-sw-border bg-transparent text-sw-text cursor-pointer transition-colors hover:bg-sw-bg-dark"
-                data-testid="restart-later-btn"
-                (click)="dismissRestart()"
-              >
-                Later
-              </button>
             </div>
-          }
-        </div>
+          </div>
+        } @else {
+          <app-modal-overlay
+            [open]="true"
+            kicker="⚠ restart required"
+            kickerColor="amber"
+            title="Container config changed"
+            body="Enabling/disabling services needs a container restart. Running conversations will pause briefly."
+            note="estimated: ~8s · lima keeps running"
+            [inlineError]="projectState.restartError"
+            primaryLabel="restart now"
+            secondaryLabel="later"
+            testId="restart-overlay"
+            primaryTestId="restart-now-btn"
+            secondaryTestId="restart-later-btn"
+            inlineErrorTestId="restart-error"
+            (primary)="restartContainers()"
+            (secondary)="dismissRestart()"
+            (closed)="dismissRestart()"
+          />
+        }
       }
       <app-update-notification />
-      <header
-        class="grid grid-cols-3 items-center px-4 py-2 bg-sw-bg-dark border-b border-sw-border"
-      >
-        <span class="flex items-center justify-self-start" data-testid="shell-title">
-          <svg
-            viewBox="0 0 82 80"
-            class="h-[36px] w-auto"
-            role="img"
-            aria-label="Speedwave"
-            fill="none"
-            xmlns="http://www.w3.org/2000/svg"
-          >
-            <path
-              d="M82 27.4473L68.4717 52.2275L24.4268 80L0 66.2764V9.62598L33.1777 0L82 27.4473Z"
-              fill="#000000"
-            />
-            <path
-              d="M31 51H39.5L50 38V47H53.5L61 33H57.1631L53.5 39.5L53.5811 33H48.5L39 45L45.5 33L43 29L31 51Z"
-              fill="#FFFFFF"
-            />
-            <path
-              d="M10 41.5H27.5L26.2695 43.7061H8.85254L7 47H29.0293L33.8281 38.3525H16.7383L17.9121 36.2939H35L37 33H15L10 41.5Z"
-              fill="#FFFFFF"
-            />
-          </svg>
-        </span>
-        <nav class="justify-self-center" data-testid="app-nav">
-          <app-view-switcher [views]="visibleViews()" [activeId]="activeViewId()" />
-        </nav>
-        <div class="justify-self-end">
-          <app-project-switcher />
+
+      <div class="flex flex-1 overflow-hidden">
+        <app-nav-rail
+          [entries]="visibleEntries()"
+          [activeId]="activeViewId()"
+          (paletteOpened)="ui.togglePalette()"
+        />
+        <div class="flex flex-1 flex-col overflow-hidden">
+          <main class="flex-1 overflow-hidden">
+            <router-outlet />
+          </main>
         </div>
-      </header>
-      <main class="flex-1 overflow-y-auto overflow-x-hidden">
-        <router-outlet />
-      </main>
+      </div>
+
+      <!-- Project switcher dropdown — anchored to viewport, toggled by chat header / palette. -->
+      <app-project-switcher />
+
+      <!-- Command palette modal — ⌘K opens, ESC (handled in shell) closes. -->
+      <app-command-palette />
     </div>
   `,
 })
 export class ShellComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
   readonly ui = inject(UiStateService);
+  readonly theme = inject(ThemeService);
   private cdr = inject(ChangeDetectorRef);
   private router = inject(Router);
   private unsubscribe: (() => void) | null = null;
   private routerSub: Subscription | null = null;
 
-  private readonly viewCatalog: readonly ViewSwitcherEntry[] = [
-    { id: 'chat', label: 'Chat', route: '/chat' },
-    { id: 'integrations', label: 'Integrations', route: '/integrations' },
-    { id: 'plugins', label: 'Plugins', route: '/plugins' },
-    { id: 'system', label: 'System', route: '/system' },
-    { id: 'logs', label: 'Logs', route: '/logs' },
-    { id: 'settings', label: 'Settings', route: '/settings' },
+  /** Catalog of every nav entry — order matches the rail top-down. */
+  private readonly entryCatalog: readonly NavRailEntry[] = [
+    { id: 'chat', label: 'Chat', route: '/chat', iconPath: ICON_CHAT, shortcut: '⌘1' },
+    {
+      id: 'integrations',
+      label: 'Integrations',
+      route: '/integrations',
+      iconPath: ICON_INTEGRATIONS,
+      shortcut: '⌘2',
+    },
+    {
+      id: 'plugins',
+      label: 'Plugins',
+      route: '/plugins',
+      iconPath: ICON_PLUGINS,
+      shortcut: '⌘3',
+    },
+    {
+      id: 'settings',
+      label: 'Settings',
+      route: '/settings',
+      iconPath: ICON_SETTINGS,
+      shortcut: '⌘,',
+    },
+    { id: 'logs', label: 'Logs & Health', route: '/logs', iconPath: ICON_LOGS, shortcut: '⌘L' },
   ];
 
   private readonly currentUrlSignal = signal<string>(this.router.url);
   private readonly statusSignal = signal(this.projectState.status);
 
-  /** Top-nav views — hides `chat` until auth is settled. */
-  readonly visibleViews = computed(() => {
+  /** Catalog filtered for the current project status — hides chat when not ready. */
+  readonly visibleEntries = computed(() => {
     const status = this.statusSignal();
     const hideChat = status !== 'ready' && status !== 'error';
-    return hideChat ? this.viewCatalog.filter((v) => v.id !== 'chat') : this.viewCatalog;
+    return hideChat ? this.entryCatalog.filter((e) => e.id !== 'chat') : this.entryCatalog;
   });
 
-  /** Active view id derived from the current router URL. */
+  /** Active entry id derived from the current router URL — used by the rail. */
   readonly activeViewId = computed(() => {
     const url = this.currentUrlSignal();
-    const match = this.viewCatalog.find((v) => url.startsWith(v.route));
+    // longest-route-prefix wins so /settings beats /settings-something nonexistent etc.
+    const sorted = [...this.entryCatalog].sort((a, b) => b.route.length - a.route.length);
+    const match = sorted.find((v) => url.startsWith(v.route));
     return match?.id ?? '';
   });
 
@@ -249,14 +266,71 @@ export class ShellComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * ⌘B / Ctrl+B toggles the conversations sidebar via the shared UI-state signal.
-   * @param event - keyboard event from the document; consumed (preventDefault) on match.
+   * Global keyboard shortcuts. Wired via `host: { '(document:keydown)': … }` —
+   * the `HostListener` decorator is forbidden by the project's best-practices
+   * rules.
+   * @param event - keyboard event from the document; consumed (preventDefault)
+   *   on every match so the platform doesn't apply the default action.
    */
   onKeydown(event: KeyboardEvent): void {
-    const isCmdB = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'b';
-    if (!isCmdB) return;
-    event.preventDefault();
-    this.ui.toggleSidebar();
+    const cmd = event.metaKey || event.ctrlKey;
+    const key = event.key;
+
+    // ⎋ closes any open overlay first — independent of cmd modifier.
+    if (key === 'Escape') {
+      let consumed = false;
+      if (this.ui.paletteOpen()) {
+        this.ui.closePalette();
+        consumed = true;
+      }
+      if (this.ui.projectSwitcherOpen()) {
+        this.ui.closeProjectSwitcher();
+        consumed = true;
+      }
+      if (consumed) {
+        event.preventDefault();
+      }
+      return;
+    }
+
+    if (!cmd) return;
+
+    switch (key.toLowerCase()) {
+      case 'k':
+        event.preventDefault();
+        this.ui.togglePalette();
+        return;
+      case 'b':
+        event.preventDefault();
+        this.ui.toggleSidebar();
+        return;
+      case 't':
+        event.preventDefault();
+        this.theme.cycle();
+        return;
+      case '1':
+        event.preventDefault();
+        void this.router.navigateByUrl('/chat');
+        return;
+      case '2':
+        event.preventDefault();
+        void this.router.navigateByUrl('/integrations');
+        return;
+      case '3':
+        event.preventDefault();
+        void this.router.navigateByUrl('/plugins');
+        return;
+      case ',':
+        event.preventDefault();
+        void this.router.navigateByUrl('/settings');
+        return;
+      case 'l':
+        event.preventDefault();
+        void this.router.navigateByUrl('/logs');
+        return;
+      default:
+        return;
+    }
   }
 
   /** Retries the container lifecycle (used by the error banner). */

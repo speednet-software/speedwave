@@ -292,4 +292,76 @@ describe('SetupWizardComponent', () => {
     expect(component.steps[3].status).toBe('done');
     expect(component.steps[3].detail).toBe('Using existing project: my-project');
   });
+
+  describe('terminal-minimal overlay shape', () => {
+    it('renders the welcome headline + subtitle + description', () => {
+      expect(fixture.nativeElement.querySelector('[data-testid="setup-headline"]')).not.toBeNull();
+      const subtitle = fixture.nativeElement.querySelector('[data-testid="setup-subtitle"]');
+      expect(subtitle).not.toBeNull();
+      expect(subtitle.textContent).toContain('first-run setup');
+      const desc = fixture.nativeElement.querySelector('[data-testid="setup-description"]');
+      expect(desc).not.toBeNull();
+      expect(desc.textContent).toContain('Nothing leaves your machine');
+    });
+
+    it('renders a step row per pipeline entry with the correct data-status', async () => {
+      await component.startSetup();
+      await fixture.whenStable();
+      fixture.detectChanges();
+      const rows = fixture.nativeElement.querySelectorAll('[data-testid="setup-step"]');
+      expect(rows.length).toBe(component.steps.length);
+      for (let i = 0; i < rows.length; i++) {
+        expect(rows[i].getAttribute('data-status')).toBe(component.steps[i].status);
+      }
+    });
+
+    it('renders the footer summary with step N of M', async () => {
+      await component.startSetup();
+      await fixture.whenStable();
+      fixture.detectChanges();
+      const summary = fixture.nativeElement.querySelector('[data-testid="setup-progress-summary"]');
+      expect(summary).not.toBeNull();
+      expect(summary.textContent).toMatch(/step \d+ of \d+/);
+    });
+
+    it('totalSteps signal returns the number of pipeline entries', () => {
+      expect(component.totalSteps()).toBe(component.steps.length);
+    });
+
+    it('etaSeconds signal recomputes when a step transitions to done', async () => {
+      const before = component.etaSeconds();
+      await component.startSetup();
+      await fixture.whenStable();
+      const after = component.etaSeconds();
+      expect(after).toBeLessThanOrEqual(before);
+    });
+
+    it('emits viewLogs output when "view logs" is clicked', async () => {
+      await component.startSetup();
+      await fixture.whenStable();
+      fixture.detectChanges();
+      const emitted: number[] = [];
+      const sub = component.viewLogs.subscribe(() => emitted.push(1));
+      const btn = fixture.nativeElement.querySelector(
+        '[data-testid="setup-view-logs"]'
+      ) as HTMLButtonElement;
+      btn.click();
+      sub.unsubscribe();
+      expect(emitted.length).toBe(1);
+    });
+
+    it('emits exitSetup output when "exit setup" is clicked', async () => {
+      await component.startSetup();
+      await fixture.whenStable();
+      fixture.detectChanges();
+      const emitted: number[] = [];
+      const sub = component.exitSetup.subscribe(() => emitted.push(1));
+      const btn = fixture.nativeElement.querySelector(
+        '[data-testid="setup-exit"]'
+      ) as HTMLButtonElement;
+      btn.click();
+      sub.unsubscribe();
+      expect(emitted.length).toBe(1);
+    });
+  });
 });

@@ -125,12 +125,37 @@ Additionally:
   on navy, components today use `sw-text` (9.47 : 1) or `sw-text-dim`
   (5.38 : 1), so there is no regression in the current branch.
 
+## Theming context — no light theme ships
+
+The terminal-minimal palette is **dark-only by design**. `:root` declares
+`color-scheme: dark` and the six accent variants exposed in
+`ThemeService` (`crimson` default, `mint`, `amber`, `iris`, `cyan`, `sand`)
+rotate ONLY the accent family — backgrounds, ink and lines stay constant.
+There is no `[data-theme='light']` selector, no `prefers-color-scheme:
+light` media query, and no light-mode token set in the codebase.
+
+The implementation prompt's acceptance criterion #3 says "AXE clean … in
+both light and dark modes (if both exist — the mockup is dark-first)".
+"If both exist" does not apply here: only dark exists. Per the prompt's
+guidance ("the app must honor whichever theme token set ships in its
+existing `styles.css`"), the AXE sweep instead iterates every accent
+variant the app actually ships, ensuring the contrast and ARIA passes
+hold across the full production theme surface — not a hypothetical
+light mode.
+
+If a light theme is ever added, this section must be updated with the
+new contrast matrix and the `a11y.spec.ts` sweep must add the new
+variant to its `THEME_IDS` iteration (it already loops the variant
+list verbatim from `ThemeService`).
+
 ## How these numbers are verified
 
 1. Ratios computed by the WCAG sRGB relative-luminance formula.
 2. `desktop/src/src/app/a11y.spec.ts` runs axe-core `wcag2a`, `wcag2aa`,
-   `wcag21a`, and `wcag21aa` rulesets against every routed view — including
-   the `color-contrast` rule, which uses the same formula.
+   `wcag21a`, and `wcag21aa` rulesets against every routed view —
+   ITERATED ACROSS EVERY ACCENT THEME (`crimson`, `mint`, `amber`,
+   `iris`, `cyan`, `sand`). The `color-contrast` rule uses the same
+   formula as this report.
 3. `desktop/src/src/app/forbidden-patterns.spec.ts` asserts that no
    legacy pattern (`*ngIf`, `[ngClass]`, `: any`, `.mutate(`, `TODO`
    marker comments, `@deprecated`, etc.) reappears in `desktop/src/`.

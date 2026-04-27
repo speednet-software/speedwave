@@ -2,58 +2,56 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
-  Input,
   OnDestroy,
   inject,
+  input,
 } from '@angular/core';
 import { ChatStateService } from '../../services/chat-state.service';
 
-/** Display window for the post-copy confirmation indicator (milliseconds). */
 const COPY_FEEDBACK_MS = 1_500;
 
 /**
- * Per-assistant-message action bar (copy + retry) — ADR-046.
- *
- * Lives directly under each assistant entry in the message list. The buttons
- * re-evaluate their disabled state on every change-detection cycle by reading
- * `chat.isStreaming` and `chat.canRetryLastAssistant()` directly — both are
- * cheap and recomputed only when the OnPush parent triggers CD.
+ * Per-assistant action row — `[copy] [retry] ✓ copied` (mockup lines 920–924).
+ * Per-turn metadata (model · edited · tokens · cache · cost) lives in the
+ * sibling `<app-message-metadata>` component.
  */
 @Component({
   selector: 'app-message-actions',
-  standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  host: { class: 'flex gap-1 mt-1 text-xs' },
+  host: {
+    class: 'mono mt-3 flex items-center gap-3 text-[11px] text-[var(--ink-mute)]',
+  },
   template: `
     <button
       type="button"
       data-testid="message-copy"
-      class="px-2 py-1 rounded text-sw-muted hover:text-sw-text hover:bg-sw-bg-darkest transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+      class="hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-50"
       [attr.aria-label]="copied ? 'Copied to clipboard' : 'Copy message'"
       [disabled]="copyBusy"
       (click)="onCopy()"
     >
-      {{ copied ? '✓ copied' : 'Copy' }}
+      copy
     </button>
-    @if (isLast) {
+    @if (isLast()) {
       <button
         type="button"
         data-testid="message-retry"
-        class="px-2 py-1 rounded text-sw-muted hover:text-sw-text hover:bg-sw-bg-darkest transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        [attr.aria-label]="'Retry last response'"
+        class="hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-50"
+        aria-label="Retry last response"
         [disabled]="!canRetry()"
         (click)="onRetry()"
       >
-        Retry
+        retry
       </button>
+    }
+    @if (copied) {
+      <span data-testid="message-copied" class="text-[var(--green)]">✓ copied</span>
     }
   `,
 })
 export class MessageActionsComponent implements OnDestroy {
-  /** Index of the message entry this action bar acts on. */
-  @Input({ required: true }) entryIndex!: number;
-  /** Whether this is the last assistant entry — gates the retry button. */
-  @Input() isLast = false;
+  readonly entryIndex = input.required<number>();
+  readonly isLast = input(false);
 
   /** Showing the post-copy confirmation. */
   copied = false;
@@ -64,9 +62,8 @@ export class MessageActionsComponent implements OnDestroy {
   private readonly cdr = inject(ChangeDetectorRef);
   private copyTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /** Returns whether the retry button is currently enabled. */
+  /** Whether the retry button is currently enabled. */
   canRetry(): boolean {
-    // canRetryLastAssistant() already checks isStreaming via findRetryAnchor.
     return this.chat.canRetryLastAssistant();
   }
 
@@ -75,7 +72,7 @@ export class MessageActionsComponent implements OnDestroy {
     if (this.copyBusy) return;
     this.copyBusy = true;
     this.cdr.markForCheck();
-    const ok = await this.chat.copyMessage(this.entryIndex);
+    const ok = await this.chat.copyMessage(this.entryIndex());
     this.copyBusy = false;
     if (ok) {
       this.copied = true;
@@ -97,7 +94,7 @@ export class MessageActionsComponent implements OnDestroy {
     await this.chat.retryLastAssistant();
   }
 
-  /** Clears any pending "copied" confirmation timer to avoid setting a signal after destroy. */
+  /** Clears any pending "copied" timer to avoid setting state after destroy. */
   ngOnDestroy(): void {
     if (this.copyTimer !== null) {
       clearTimeout(this.copyTimer);

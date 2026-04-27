@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, Input, computed, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
 import type { SessionStats } from '../../models/chat';
 
 /** Shared bar segment indices — module-level constant to avoid per-instance allocation. */
@@ -8,94 +8,79 @@ const BAR_INDICES: readonly number[] = [0, 1, 2, 3, 4];
 const NUMBER_FMT = new Intl.NumberFormat('en-US');
 
 /**
- * Terminal-style session stats strip rendered as a single monospaced line:
- *   `model · ctx <bar> <pct> · <used>/<max> · limit <bar> <pct> · resets <HH:MM> ·
- *    tokens in <n> · cr <n> · cw <n> · out <n> · cost $<x.xxxx>`
+ * Terminal-minimal session stats strip — a single mono line shown below the
+ * composer. Matches the mockup (lines 1143–1177):
  *
- * Bars use 5 inline segments of `h-2 w-2` whose fill color comes from the
- * percentage bucket (green/amber/red).
+ *   `in: <n> · out: <n> · ctx [▮▮▮▯▯] N% · 116k/200k · limit [▮▮▮▯▯] N% · resets HH:MM · session: $0.018`
+ *
+ * Bars are 5 inline 6×6px segments coloured per-bucket (green ≤49% / amber
+ * ≤76% / red). Optional segments (ctx + bar / limit + bar / cost) hide on
+ * smaller breakpoints to preserve the single-line shape.
  */
 @Component({
   selector: 'app-session-stats',
-  standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
-    @if (statsSignal(); as stats) {
+    @if (stats(); as s) {
       <div
         data-testid="session-stats"
-        class="mono flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line bg-bg-1 px-4 py-1.5 text-[11px] text-ink-mute"
+        class="mono flex flex-wrap items-center gap-x-3 gap-y-1 px-1 py-3 text-[10px] text-[var(--ink-mute)]"
       >
-        <!-- Model -->
-        <span class="text-teal whitespace-nowrap" title="AI model used for this session">{{
-          stats.model || 'Claude'
-        }}</span>
+        <!-- Tokens in/out -->
+        @if (s.usage; as usage) {
+          <span class="whitespace-nowrap">
+            in: <span class="text-[var(--teal)]">{{ formatNum(totalInput()) }}</span>
+          </span>
+          <span class="whitespace-nowrap">
+            out:
+            <span class="text-[var(--accent)]">{{ formatNum(s.total_output_tokens) }}</span>
+          </span>
+        }
 
-        <!-- Context usage -->
+        <!-- Context bar (sm+) -->
         @if (ctxPct() > 0) {
-          <span class="flex items-center gap-1.5 whitespace-nowrap">
-            <span>ctx</span>
+          <span class="hidden items-center gap-1.5 whitespace-nowrap sm:inline-flex">
+            ctx
             <span class="flex gap-px" [attr.aria-label]="'Context: ' + ctxPct() + '% used'">
               @for (i of barIndices; track i) {
                 <span
-                  class="inline-block h-2 w-2"
-                  [class]="i < ctxFilled() ? ctxBarColor() : 'bg-line-strong'"
+                  class="inline-block h-1.5 w-1.5"
+                  [class]="i < ctxFilled() ? ctxBarColor() : 'bg-[var(--line-strong)]'"
                 ></span>
               }
             </span>
-            <span class="text-ink-dim">{{ ctxPct() }}%</span>
+            <span class="text-[var(--ink-dim)]">{{ ctxPct() }}%</span>
             @if (ctxUsedMax(); as um) {
-              <span>&middot; {{ um }}</span>
+              <span>· {{ um }}</span>
             }
           </span>
         }
 
-        <!-- Rate limit -->
-        @if (stats.rate_limit) {
-          <span class="flex items-center gap-1.5 whitespace-nowrap">
-            <span>limit</span>
+        <!-- Rate-limit bar (md+) -->
+        @if (s.rate_limit) {
+          <span class="hidden items-center gap-1.5 whitespace-nowrap md:inline-flex">
+            limit
             <span class="flex gap-px" [attr.aria-label]="'Rate limit: ' + rlPct() + '% used'">
               @for (i of barIndices; track i) {
                 <span
-                  class="inline-block h-2 w-2"
-                  [class]="i < rlFilled() ? rlBarColor() : 'bg-line-strong'"
+                  class="inline-block h-1.5 w-1.5"
+                  [class]="i < rlFilled() ? rlBarColor() : 'bg-[var(--line-strong)]'"
                 ></span>
               }
             </span>
-            <span class="text-ink-dim">{{ rlPct() }}%</span>
+            <span class="text-[var(--ink-dim)]">{{ rlPct() }}%</span>
             @if (rlResetTime()) {
-              <span>&middot; resets {{ rlResetTime() }}</span>
+              <span>· resets {{ rlResetTime() }}</span>
             }
           </span>
         }
 
-        <!-- Token breakdown -->
-        @if (stats.usage; as usage) {
-          <span class="whitespace-nowrap">
-            tokens in <span class="text-ink-dim">{{ formatNum(usage.input_tokens) }}</span>
-          </span>
-          @if (usage.cache_read_tokens) {
-            <span class="whitespace-nowrap">
-              &middot; cr
-              <span class="text-ink-dim">{{ formatNum(usage.cache_read_tokens) }}</span>
-            </span>
-          }
-          @if (usage.cache_write_tokens) {
-            <span class="whitespace-nowrap">
-              &middot; cw
-              <span class="text-ink-dim">{{ formatNum(usage.cache_write_tokens) }}</span>
-            </span>
-          }
-          <span class="whitespace-nowrap">
-            &middot; out
-            <span class="text-ink-dim">{{ formatNum(stats.total_output_tokens) }}</span>
-          </span>
-        }
-
-        <!-- Cost (right-aligned) -->
-        @if (stats.total_cost > 0) {
-          <span class="ml-auto whitespace-nowrap">
-            cost <span class="text-ink-dim">\${{ stats.total_cost.toFixed(4) }}</span>
+        <!-- Cost (right-aligned, sm+) -->
+        @if (s.total_cost > 0) {
+          <span class="ml-auto hidden whitespace-nowrap sm:inline">
+            session:
+            <span class="text-[var(--ink-dim)]">\${{ s.total_cost.toFixed(4) }}</span>
           </span>
         }
       </div>
@@ -106,21 +91,16 @@ export class SessionStatsComponent {
   /** Shared segment indices exposed to the template. */
   readonly barIndices = BAR_INDICES;
 
-  /** Signal mirroring the legacy `@Input` setter so template bindings re-evaluate. */
-  readonly statsSignal = signal<SessionStats | null>(null);
-
-  /** Legacy setter — keeps `[stats]="..."` binding contract stable across the rewrite. */
-  @Input() set stats(value: SessionStats | null) {
-    this.statsSignal.set(value);
-  }
+  /** Stats input (signal). */
+  readonly stats = input<SessionStats | null>(null);
 
   /**
    * Total input tokens consumed from the context window (sum of `input`,
    * `cache_read`, `cache_write`). Matches the statusline.sh calculation —
    * `output_tokens` are excluded because they don't occupy the prompt context.
    */
-  private readonly totalInput = computed<number>(() => {
-    const usage = this.statsSignal()?.usage;
+  readonly totalInput = computed<number>(() => {
+    const usage = this.stats()?.usage;
     if (!usage) return 0;
     return usage.input_tokens + (usage.cache_read_tokens ?? 0) + (usage.cache_write_tokens ?? 0);
   });
@@ -129,7 +109,7 @@ export class SessionStatsComponent {
   readonly ctxPct = computed<number>(() => {
     const total = this.totalInput();
     if (total <= 0) return 0;
-    const windowSize = this.statsSignal()?.context_window_size ?? 200_000;
+    const windowSize = this.stats()?.context_window_size ?? 200_000;
     return Math.min(100, Math.round((total / windowSize) * 100));
   });
 
@@ -143,13 +123,13 @@ export class SessionStatsComponent {
   readonly ctxUsedMax = computed<string>(() => {
     const total = this.totalInput();
     if (total <= 0) return '';
-    const windowSize = this.statsSignal()?.context_window_size ?? 200_000;
+    const windowSize = this.stats()?.context_window_size ?? 200_000;
     return `${shortK(total)}/${shortK(windowSize)}`;
   });
 
   /** Rate-limit utilisation as an integer percentage (0–100). */
   readonly rlPct = computed<number>(() => {
-    const stats = this.statsSignal();
+    const stats = this.stats();
     return Math.round(stats?.rate_limit?.utilization ?? 0);
   });
 
@@ -161,7 +141,7 @@ export class SessionStatsComponent {
 
   /** Reset time for rate limit formatted as HH:MM (local), or empty string. */
   readonly rlResetTime = computed<string>(() => {
-    const epoch = this.statsSignal()?.rate_limit?.resets_at;
+    const epoch = this.stats()?.rate_limit?.resets_at;
     if (!epoch) return '';
     const d = new Date(epoch * 1000);
     return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
@@ -181,11 +161,9 @@ export class SessionStatsComponent {
  * @param pct - Percentage in the range 0–100.
  */
 function barColor(pct: number): string {
-  // Uses Tailwind's built-in `*-500` palette so the bar stays readable in both
-  // light and dark backgrounds. Buckets match the terminal-minimal mockup.
   if (pct >= 77) return 'bg-red-500';
-  if (pct >= 50) return 'bg-amber-500';
-  return 'bg-green-500';
+  if (pct >= 50) return 'bg-[var(--amber)]';
+  return 'bg-[var(--green)]';
 }
 
 /**

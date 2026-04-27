@@ -79,10 +79,12 @@ impl std::fmt::Debug for LogMsg {
 }
 
 /// Approximate the serialized byte cost of a message for the history cap.
+///
+/// `LogMsg` variants are always serde-serializable, but we compute a fallback
+/// size rather than panicking — a corrupted message in the broadcast channel
+/// must not bring down the session's history accounting.
 fn size_of(msg: &LogMsg) -> usize {
-    serde_json::to_vec(msg)
-        .map(|v| v.len())
-        .expect("LogMsg variants are always serde-serializable")
+    serde_json::to_vec(msg).map_or(std::mem::size_of::<LogMsg>(), |v| v.len())
 }
 
 struct Inner {

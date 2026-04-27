@@ -32,7 +32,7 @@ describe('AskUserBlockComponent', () => {
   });
 
   function setQuestion(q: AskUserQuestionBlock): void {
-    component.question = q;
+    fixture.componentRef.setInput('question', q);
     fixture.detectChanges();
   }
 
@@ -106,7 +106,7 @@ describe('AskUserBlockComponent', () => {
     component.toggleOption('banana');
     fixture.detectChanges();
     const sendBtn = el().querySelector('[data-testid="ask-send-btn"]') as HTMLButtonElement | null;
-    expect(sendBtn?.textContent).toContain('Send (2)');
+    expect(sendBtn?.textContent).toContain('confirm (2)');
   });
 
   it('answered: renders locked badges and hides controls', () => {
@@ -177,7 +177,7 @@ describe('AskUserBlockComponent', () => {
     expect(spy).toHaveBeenCalledWith({ toolId: 'toolu_ask1', values: ['apple'] });
   });
 
-  it('shows visual hint and mutes textarea when option is selected and freeform is non-empty', () => {
+  it('shows visual hint and mutes the freeform input when option is selected and freeform is non-empty', () => {
     setQuestion(makeQuestion({ multi_select: false }));
     component.toggleOption('apple');
     component.freeformText.set('typed text');
@@ -185,8 +185,9 @@ describe('AskUserBlockComponent', () => {
 
     expect(component.freeformSilenced()).toBe(true);
     expect(el().querySelector('[data-testid="ask-freeform-hint"]')).toBeTruthy();
-    const textarea = el().querySelector('[data-testid="ask-input"]') as HTMLTextAreaElement | null;
-    expect(textarea?.classList.contains('freeform-muted')).toBe(true);
+    const input = el().querySelector('[data-testid="ask-input"]') as HTMLInputElement | null;
+    // Production swaps in a muted Tailwind utility set when the freeform is silenced.
+    expect(input?.classList.contains('opacity-50')).toBe(true);
   });
 
   it('hides freeform hint when only the option is selected (no freeform text)', () => {

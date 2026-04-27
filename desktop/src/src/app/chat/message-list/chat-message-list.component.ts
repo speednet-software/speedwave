@@ -3,11 +3,10 @@ import {
   ChangeDetectionStrategy,
   Component,
   ElementRef,
-  EventEmitter,
-  Input,
   OnChanges,
-  Output,
   ViewChild,
+  input,
+  output,
 } from '@angular/core';
 import type { ChatMessage, MessageBlock } from '../../models/chat';
 import { ChatMessageComponent } from '../message/chat-message.component';
@@ -18,7 +17,6 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
 /** Scrollable message list with auto-scroll-to-bottom that pauses while the user reads earlier messages. */
 @Component({
   selector: 'app-chat-message-list',
-  standalone: true,
   imports: [ChatMessageComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block flex-1 min-h-0' },
@@ -33,22 +31,22 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
       (scroll)="onScroll()"
     >
       <div class="mx-auto max-w-3xl space-y-8">
-        @for (msg of messages; track msg.timestamp; let i = $index) {
+        @for (msg of messages(); track msg.timestamp; let i = $index) {
           <app-chat-message
             [blocks]="msg.blocks"
             [role]="msg.role"
             [timestamp]="msg.timestamp"
             [entryIndex]="i"
-            [isLast]="i === lastAssistantIndex"
+            [isLast]="i === lastAssistantIndex()"
             [entry]="msg"
             [precedingEdited]="isPrecedingUserEdited(i)"
             (questionAnswered)="questionAnswered.emit($event)"
           />
         }
-        @if (showStreaming) {
+        @if (showStreaming()) {
           <app-chat-message
             data-testid="chat-message-list-streaming"
-            [blocks]="currentBlocks"
+            [blocks]="currentBlocks()"
             role="assistant"
             [streaming]="true"
             (questionAnswered)="questionAnswered.emit($event)"
@@ -59,17 +57,17 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
   `,
 })
 export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
-  @Input({ required: true }) messages!: readonly ChatMessage[];
-  @Input() currentBlocks: readonly MessageBlock[] = [];
-  @Input() isStreaming = false;
+  readonly messages = input.required<readonly ChatMessage[]>();
+  readonly currentBlocks = input<readonly MessageBlock[]>([]);
+  readonly isStreaming = input(false);
   /**
    * Index of the most recent assistant entry in `messages`; `-1` when none.
    * Used to gate the per-message Retry button (only the latest assistant
    * message is retryable).
    */
-  @Input() lastAssistantIndex = -1;
+  readonly lastAssistantIndex = input(-1);
 
-  @Output() questionAnswered = new EventEmitter<{ toolId: string; values: string[] }>();
+  readonly questionAnswered = output<{ toolId: string; values: string[] }>();
 
   @ViewChild('scrollContainer') scrollContainer!: ElementRef<HTMLDivElement>;
 
@@ -77,8 +75,8 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   private pendingScrollSync = false;
 
   /** Whether to render the streaming placeholder as the last entry. */
-  get showStreaming(): boolean {
-    return this.isStreaming && this.currentBlocks.length > 0;
+  showStreaming(): boolean {
+    return this.isStreaming() && this.currentBlocks().length > 0;
   }
 
   /**
@@ -90,9 +88,10 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
    */
   isPrecedingUserEdited(i: number): boolean {
     if (i <= 0) return false;
-    const self = this.messages[i];
+    const list = this.messages();
+    const self = list[i];
     if (!self || self.role !== 'assistant') return false;
-    const prev = this.messages[i - 1];
+    const prev = list[i - 1];
     return prev?.role === 'user' && typeof prev.edited_at === 'number';
   }
 

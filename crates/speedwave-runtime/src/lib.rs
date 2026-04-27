@@ -14,6 +14,7 @@ pub mod plugin;
 pub mod project;
 pub mod resources;
 pub mod runtime;
+pub mod session;
 pub mod signing;
 pub mod slash;
 pub mod stream;

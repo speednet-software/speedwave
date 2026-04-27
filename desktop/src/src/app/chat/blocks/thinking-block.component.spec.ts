@@ -17,48 +17,65 @@ describe('ThinkingBlockComponent', () => {
     el = fixture.nativeElement as HTMLElement;
   });
 
+  /**
+   * Simulates a native `<details>` toggle, which jsdom does not fire from a
+   * `summary.click()` call. Sets `open` on the `<details>` element and then
+   * dispatches the native `toggle` event so the production component's
+   * `(toggle)` handler runs and the `collapsed()` signal updates.
+   */
+  function activateToggle(): void {
+    const details = el.querySelector('details') as HTMLDetailsElement;
+    details.open = !details.open;
+    details.dispatchEvent(new Event('toggle'));
+    fixture.detectChanges();
+  }
+
   // happy — collapsed by default
-  it('is collapsed by default (hides content, shows ▶)', () => {
-    component.content = 'thinking...';
+  it('is collapsed by default (details closed, chevron not rotated)', () => {
+    fixture.componentRef.setInput('content', 'thinking...');
     fixture.detectChanges();
 
-    expect(el.querySelector('[data-testid="thinking-content"]')).toBeNull();
+    const details = el.querySelector('details') as HTMLDetailsElement;
+    expect(details.open).toBe(false);
     const toggle = el.querySelector('[data-testid="thinking-toggle"]');
-    expect(toggle?.textContent).toContain('▶');
-    expect(toggle?.textContent).toContain('Thinking');
+    expect(toggle?.textContent).toContain('thinking');
+    const chevron = toggle?.querySelector('svg');
+    expect(chevron?.classList.contains('rotate-90')).toBe(false);
   });
 
-  // state — clicking toggle expands
-  it('expands when the toggle is clicked (▶ → ▼)', () => {
-    component.content = 'I should check the file';
+  // state — toggling expands
+  it('expands when the toggle is activated (chevron rotates 90°)', () => {
+    fixture.componentRef.setInput('content', 'I should check the file');
     fixture.detectChanges();
 
-    const toggle = el.querySelector('[data-testid="thinking-toggle"]') as HTMLButtonElement;
-    toggle.click();
-    fixture.detectChanges();
+    activateToggle();
 
+    const details = el.querySelector('details') as HTMLDetailsElement;
+    expect(details.open).toBe(true);
     const content = el.querySelector('[data-testid="thinking-content"]');
     expect(content?.textContent?.trim()).toBe('I should check the file');
-    expect(toggle.textContent).toContain('▼');
+    const toggle = el.querySelector('[data-testid="thinking-toggle"]') as HTMLElement;
+    const chevron = toggle.querySelector('svg');
+    expect(chevron?.classList.contains('rotate-90')).toBe(true);
   });
 
-  it('collapses again on a second click', () => {
-    component.content = 'loop';
+  it('collapses again on a second toggle', () => {
+    fixture.componentRef.setInput('content', 'loop');
     fixture.detectChanges();
 
-    const toggle = el.querySelector('[data-testid="thinking-toggle"]') as HTMLButtonElement;
-    toggle.click();
-    fixture.detectChanges();
-    toggle.click();
-    fixture.detectChanges();
+    activateToggle();
+    activateToggle();
 
-    expect(el.querySelector('[data-testid="thinking-content"]')).toBeNull();
-    expect(toggle.textContent).toContain('▶');
+    const details = el.querySelector('details') as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    const toggle = el.querySelector('[data-testid="thinking-toggle"]') as HTMLElement;
+    const chevron = toggle.querySelector('svg');
+    expect(chevron?.classList.contains('rotate-90')).toBe(false);
   });
 
   it('respects collapsedDefault=false input — starts expanded', () => {
-    component.content = 'visible up front';
-    component.collapsedDefault = false;
+    fixture.componentRef.setInput('content', 'visible up front');
+    fixture.componentRef.setInput('collapsedDefault', false);
     fixture.detectChanges();
 
     const content = el.querySelector('[data-testid="thinking-content"]');
@@ -67,8 +84,8 @@ describe('ThinkingBlockComponent', () => {
 
   // edge — empty / long content
   it('renders empty content without error', () => {
-    component.content = '';
-    component.collapsedDefault = false;
+    fixture.componentRef.setInput('content', '');
+    fixture.componentRef.setInput('collapsedDefault', false);
     fixture.detectChanges();
 
     const content = el.querySelector('[data-testid="thinking-content"]');
@@ -78,8 +95,8 @@ describe('ThinkingBlockComponent', () => {
 
   it('renders multi-paragraph long content preserving newlines (whitespace-pre-wrap)', () => {
     const long = 'paragraph one\n\nparagraph two\n\n' + 'line '.repeat(500);
-    component.content = long;
-    component.collapsedDefault = false;
+    fixture.componentRef.setInput('content', long);
+    fixture.componentRef.setInput('collapsedDefault', false);
     fixture.detectChanges();
 
     const content = el.querySelector('[data-testid="thinking-content"]');
@@ -88,8 +105,8 @@ describe('ThinkingBlockComponent', () => {
   });
 
   it('renders content as plain text (markdown is NOT interpreted)', () => {
-    component.content = '**not bold** and `not code`';
-    component.collapsedDefault = false;
+    fixture.componentRef.setInput('content', '**not bold** and `not code`');
+    fixture.componentRef.setInput('collapsedDefault', false);
     fixture.detectChanges();
 
     const content = el.querySelector('[data-testid="thinking-content"]');
@@ -100,61 +117,60 @@ describe('ThinkingBlockComponent', () => {
 
   // ARIA — aria-expanded reflects state, aria-controls pairs correctly
   it('wires aria-expanded to reflect collapsed state', () => {
-    component.content = 'x';
+    fixture.componentRef.setInput('content', 'x');
     fixture.detectChanges();
-    const toggle = el.querySelector('[data-testid="thinking-toggle"]') as HTMLButtonElement;
+    const toggle = el.querySelector('[data-testid="thinking-toggle"]') as HTMLElement;
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
 
-    toggle.click();
-    fixture.detectChanges();
+    activateToggle();
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
   });
 
   it('wires aria-controls on the toggle to the id of the expanded content region', () => {
-    component.content = 'x';
-    component.collapsedDefault = false;
+    fixture.componentRef.setInput('content', 'x');
+    fixture.componentRef.setInput('collapsedDefault', false);
     fixture.detectChanges();
 
-    const toggle = el.querySelector('[data-testid="thinking-toggle"]') as HTMLButtonElement;
+    const toggle = el.querySelector('[data-testid="thinking-toggle"]') as HTMLElement;
     const content = el.querySelector('[data-testid="thinking-content"]') as HTMLElement;
     const controls = toggle.getAttribute('aria-controls');
     expect(controls).toBeTruthy();
     expect(content.id).toBe(controls);
   });
 
-  it('omits aria-controls when collapsed (target element absent from DOM)', () => {
-    // ARIA forbids aria-controls referencing a non-existent element.
-    component.content = 'x';
-    component.collapsedDefault = true;
+  it('omits aria-controls when collapsed (details closed)', () => {
+    // ARIA forbids aria-controls referencing a non-visible region; the
+    // production component nulls the attribute while collapsed even though
+    // <details> keeps the content in the DOM.
+    fixture.componentRef.setInput('content', 'x');
+    fixture.componentRef.setInput('collapsedDefault', true);
     fixture.detectChanges();
 
-    const toggle = el.querySelector('[data-testid="thinking-toggle"]') as HTMLButtonElement;
+    const toggle = el.querySelector('[data-testid="thinking-toggle"]') as HTMLElement;
+    const details = el.querySelector('details') as HTMLDetailsElement;
     expect(toggle.getAttribute('aria-controls')).toBeNull();
-    expect(el.querySelector('[data-testid="thinking-content"]')).toBeNull();
+    expect(details.open).toBe(false);
   });
 
-  it('renders the toggle as a <button type="button">', () => {
-    component.content = 'x';
+  it('renders the toggle as a <summary> inside <details>', () => {
+    fixture.componentRef.setInput('content', 'x');
     fixture.detectChanges();
-    const toggle = el.querySelector('[data-testid="thinking-toggle"]') as HTMLButtonElement;
-    expect(toggle.tagName).toBe('BUTTON');
-    expect(toggle.getAttribute('type')).toBe('button');
+    const toggle = el.querySelector('[data-testid="thinking-toggle"]') as HTMLElement;
+    expect(toggle.tagName).toBe('SUMMARY');
+    expect(toggle.parentElement?.tagName).toBe('DETAILS');
   });
 
-  it('toggles when the button is activated (Enter/Space dispatch click on a native button)', () => {
-    // Native <button> elements receive a synthesised `click` from Enter/Space
-    // key presses; we assert the click pathway here, since browser-level
-    // key→click translation is provided by the platform, not our code.
-    component.content = 'click activates';
+  it('toggles the collapsed signal when the native <details> toggle event fires', () => {
+    // Native <summary> elements toggle the parent <details> on click in real
+    // browsers, but jsdom does not fire the toggle event from a summary click.
+    // We dispatch the toggle event manually to verify the (toggle) handler
+    // updates the signal — browser-level click→toggle translation is provided
+    // by the platform, not our code.
+    fixture.componentRef.setInput('content', 'click activates');
     fixture.detectChanges();
 
-    const toggle = fixture.nativeElement.querySelector(
-      '[data-testid="thinking-toggle"]'
-    ) as HTMLButtonElement;
-    expect(toggle.tagName).toBe('BUTTON');
     const before = component.collapsed();
-    toggle.click();
-    fixture.detectChanges();
+    activateToggle();
 
     expect(component.collapsed()).toBe(!before);
   });

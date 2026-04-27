@@ -2,10 +2,9 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
-  EventEmitter,
   OnInit,
-  Output,
   inject,
+  output,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
@@ -40,30 +39,38 @@ type DiscoveryState =
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <section class="mb-6">
-      <h2 class="text-[15px] text-sw-text m-0 mb-3">LLM Provider</h2>
-      <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-4">
-        <div class="flex justify-between items-center py-2">
-          <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="llm-provider"
-            >Provider</label
+    <section id="section-llm-provider">
+      <h2 class="view-title text-[16px] text-[var(--ink)]">LLM provider</h2>
+      <p class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
+        Where Claude Code routes model requests. Local providers keep everything on-device.
+      </p>
+
+      <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+        <div>
+          <label
+            class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+            for="llm-provider"
+            >provider</label
           >
           <select
             id="llm-provider"
             [(ngModel)]="provider"
             (ngModelChange)="onProviderChange()"
-            class="flex-1 px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
+            class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
             data-testid="settings-llm-provider"
           >
-            <option value="anthropic">Anthropic</option>
-            <option value="ollama">Ollama</option>
-            <option value="lmstudio">LM Studio</option>
+            <option value="anthropic">anthropic</option>
+            <option value="ollama">ollama</option>
+            <option value="lmstudio">lm studio</option>
             <option value="llamacpp">llama.cpp</option>
           </select>
         </div>
         @if (provider !== 'anthropic') {
-          <div class="flex justify-between items-center py-2 border-t border-sw-border">
-            <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="llm-base-url"
-              >Base URL</label
+          <div>
+            <label
+              class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+              for="llm-base-url"
+              >base_url</label
             >
             <input
               id="llm-base-url"
@@ -71,83 +78,92 @@ type DiscoveryState =
               [(ngModel)]="baseUrl"
               [placeholder]="defaultBaseUrl || baseUrlPlaceholder()"
               (blur)="discoverModels(false)"
-              class="flex-1 px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
+              class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
               data-testid="settings-llm-base-url"
             />
           </div>
-          <div class="flex justify-between items-center py-2 border-t border-sw-border">
-            <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="llm-model"
-              >Model</label
+          <div class="md:col-span-2">
+            <label
+              class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+              for="llm-model"
+              >default_model</label
             >
-            <div class="flex flex-1 gap-2">
-              @if (discoveryState.kind === 'ready') {
-                <select
-                  id="llm-model"
-                  [(ngModel)]="model"
-                  class="flex-1 px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
-                  data-testid="settings-llm-model"
-                >
-                  @if (model && !discoveryState.models.includes(model)) {
-                    <option [value]="model">{{ model }}</option>
-                  }
-                  @for (m of discoveryState.models; track m) {
-                    <option [value]="m">{{ m }}</option>
-                  }
-                </select>
-              } @else {
-                <input
-                  id="llm-model"
-                  type="text"
-                  [(ngModel)]="model"
-                  [placeholder]="modelPlaceholder()"
-                  class="flex-1 px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
-                  data-testid="settings-llm-model"
-                />
-              }
-              <button
-                type="button"
-                data-testid="settings-llm-refresh"
-                class="px-3 py-1.5 bg-transparent text-sw-text-muted border border-sw-border rounded text-[12px] font-mono cursor-pointer hover:enabled:text-sw-text hover:enabled:border-sw-accent disabled:opacity-40 disabled:cursor-not-allowed"
-                [disabled]="discoveryState.kind === 'in-flight'"
-                (click)="discoverModels(true)"
-                title="Fetch the list of models from the server"
+            @if (discoveryState.kind === 'ready') {
+              <select
+                id="llm-model"
+                [(ngModel)]="model"
+                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                data-testid="settings-llm-model"
               >
-                @if (discoveryState.kind === 'in-flight') {
-                  Discovering...
-                } @else {
-                  Refresh
+                @if (model && !discoveryState.models.includes(model)) {
+                  <option [value]="model">{{ model }}</option>
                 }
-              </button>
-            </div>
-          </div>
-          @if (discoveryState.kind === 'failed') {
-            <div class="flex justify-end pb-1">
-              <span class="text-[11px] text-sw-warning" data-testid="settings-llm-discovery-error">
+                @for (m of discoveryState.models; track m) {
+                  <option [value]="m">{{ m }}</option>
+                }
+              </select>
+            } @else {
+              <input
+                id="llm-model"
+                type="text"
+                [(ngModel)]="model"
+                [placeholder]="modelPlaceholder()"
+                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                data-testid="settings-llm-model"
+              />
+            }
+            @if (discoveryState.kind === 'failed') {
+              <p
+                class="mono mt-1 text-[11px] text-[var(--amber)]"
+                data-testid="settings-llm-discovery-error"
+              >
                 {{ discoveryFailureMessage() }}
-              </span>
-            </div>
-          }
-          @if (discoveryState.kind === 'in-flight') {
-            <div class="flex justify-end pb-1">
-              <span class="text-[11px] text-sw-text-muted" data-testid="settings-llm-discovering">
+              </p>
+            }
+            @if (discoveryState.kind === 'in-flight') {
+              <p
+                class="mono mt-1 text-[11px] text-[var(--ink-mute)]"
+                data-testid="settings-llm-discovering"
+              >
                 Probing {{ discoveryState.url }}...
-              </span>
-            </div>
-          }
+              </p>
+            }
+          </div>
         }
-        <div class="flex items-center gap-3 pt-3 pb-1">
-          <button
-            class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-abyss disabled:opacity-40 disabled:cursor-not-allowed"
-            data-testid="settings-llm-save"
-            (click)="saveConfig()"
-            [disabled]="saving"
-          >
-            {{ saving ? 'Saving...' : 'Save' }}
-          </button>
-          @if (saved) {
-            <span class="text-sw-success text-[13px]" data-testid="settings-llm-saved">Saved!</span>
+      </div>
+
+      @if (provider !== 'anthropic') {
+        <button
+          type="button"
+          data-testid="settings-llm-refresh"
+          class="mono mt-3 text-[11px] text-[var(--accent)] hover:underline disabled:opacity-40 disabled:no-underline"
+          [disabled]="discoveryState.kind === 'in-flight'"
+          (click)="discoverModels(true)"
+          title="Fetch the list of models from the server"
+        >
+          @if (discoveryState.kind === 'in-flight') {
+            &#8635; discovering...
+          } @else {
+            &#8635; discover models
           }
-        </div>
+        </button>
+      }
+
+      <div class="mt-3 flex items-center gap-3">
+        <button
+          type="button"
+          class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+          data-testid="settings-llm-save"
+          (click)="saveConfig()"
+          [disabled]="saving"
+        >
+          {{ saving ? 'saving...' : 'save' }}
+        </button>
+        @if (saved) {
+          <span class="mono text-[11px] text-[var(--green)]" data-testid="settings-llm-saved"
+            >saved!</span
+          >
+        }
       </div>
     </section>
   `,
@@ -194,8 +210,8 @@ export class LlmProviderComponent implements OnInit {
    */
   private defaultBaseUrlsByProvider: Record<string, string> = {};
 
-  @Output() providerChange = new EventEmitter<string>();
-  @Output() errorOccurred = new EventEmitter<string>();
+  readonly providerChange = output<string>();
+  readonly errorOccurred = output<string>();
 
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);

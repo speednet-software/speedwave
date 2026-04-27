@@ -20,7 +20,7 @@ describe('TextBlockComponent', () => {
 
   // happy
   it('renders markdown content as HTML', () => {
-    component.content = '**bold text**';
+    fixture.componentRef.setInput('content', '**bold text**');
     fixture.detectChanges();
 
     const strong = el.querySelector('strong');
@@ -28,7 +28,7 @@ describe('TextBlockComponent', () => {
   });
 
   it('renders code blocks', () => {
-    component.content = '```\nconst x = 1;\n```';
+    fixture.componentRef.setInput('content', '```\nconst x = 1;\n```');
     fixture.detectChanges();
 
     const code = el.querySelector('code');
@@ -36,7 +36,7 @@ describe('TextBlockComponent', () => {
   });
 
   it('renders plain text paragraphs', () => {
-    component.content = 'Hello world';
+    fixture.componentRef.setInput('content', 'Hello world');
     fixture.detectChanges();
 
     expect(el.textContent).toContain('Hello world');
@@ -44,7 +44,10 @@ describe('TextBlockComponent', () => {
 
   // ── security (DomSanitizer behavior locked in from dev) ──────────────────
   it('strips script tags via Angular DomSanitizer', () => {
-    component.content = "Safe **bold** text <script>alert('xss')</script> tail";
+    fixture.componentRef.setInput(
+      'content',
+      "Safe **bold** text <script>alert('xss')</script> tail"
+    );
     fixture.detectChanges();
 
     expect(el.querySelector('script')).toBeNull();
@@ -53,7 +56,7 @@ describe('TextBlockComponent', () => {
   });
 
   it('strips event-handler attributes via Angular DomSanitizer', () => {
-    component.content = '<img src=x onerror="alert(1)">';
+    fixture.componentRef.setInput('content', '<img src=x onerror="alert(1)">');
     fixture.detectChanges();
 
     expect(el.innerHTML).not.toContain('onerror');
@@ -62,7 +65,7 @@ describe('TextBlockComponent', () => {
   });
 
   it('rewrites javascript: URLs to unsafe:javascript: via Angular DomSanitizer', () => {
-    component.content = '[click](javascript:alert(1))';
+    fixture.componentRef.setInput('content', '[click](javascript:alert(1))');
     fixture.detectChanges();
 
     const href = el.querySelector('a')?.getAttribute('href') ?? '';
@@ -79,7 +82,7 @@ describe('TextBlockComponent', () => {
     // it cannot assume Angular's HTML sanitizer will block these schemes.
     // This test locks that contract in so a future refactor can't silently
     // widen the trust boundary.
-    component.content = '[d](data:text/html,x) [v](vbscript:MsgBox(1))';
+    fixture.componentRef.setInput('content', '[d](data:text/html,x) [v](vbscript:MsgBox(1))');
     fixture.detectChanges();
 
     const anchors = fixture.nativeElement.querySelectorAll('a');
@@ -87,23 +90,23 @@ describe('TextBlockComponent', () => {
     expect(anchors[1]?.getAttribute('href')).toMatch(/^vbscript:/);
   });
 
-  it('rendered getter returns unsanitized HTML containing script tags', () => {
-    component.content = '<script>alert(1)</script>';
-    // The getter itself does not sanitize — sanitization happens at [innerHTML] binding time.
-    expect(component.rendered).toContain('<script>');
+  it('rendered() returns unsanitized HTML containing script tags', () => {
+    fixture.componentRef.setInput('content', '<script>alert(1)</script>');
+    // The computed itself does not sanitize — sanitization happens at [innerHTML] binding time.
+    expect(component.rendered()).toContain('<script>');
   });
 
-  it('rendered getter throws if marked.parse returns a Promise', () => {
+  it('rendered() throws if marked.parse returns a Promise', () => {
     vi.spyOn(marked, 'parse').mockReturnValueOnce(Promise.resolve('<p>hi</p>') as never);
-    component.content = 'irrelevant';
-    expect(() => component.rendered).toThrow(
+    fixture.componentRef.setInput('content', 'irrelevant');
+    expect(() => component.rendered()).toThrow(
       'marked.parse returned a Promise; async option must remain false'
     );
   });
 
   // ── edge ──────────────────────────────────────────────────────────────────
   it('renders empty content without error', () => {
-    component.content = '';
+    fixture.componentRef.setInput('content', '');
     fixture.detectChanges();
 
     expect(el.querySelector('.prose-sw')).not.toBeNull();
@@ -112,14 +115,14 @@ describe('TextBlockComponent', () => {
 
   it('renders very long content without crashing', () => {
     const long = 'paragraph '.repeat(2000);
-    component.content = long;
+    fixture.componentRef.setInput('content', long);
     fixture.detectChanges();
 
     expect((el.textContent ?? '').length).toBeGreaterThan(1000);
   });
 
   it('renders unicode/special characters correctly', () => {
-    component.content = 'mañana — Ω 🚀 — **ok**';
+    fixture.componentRef.setInput('content', 'mañana — Ω 🚀 — **ok**');
     fixture.detectChanges();
 
     expect(el.textContent).toContain('mañana');
@@ -129,35 +132,34 @@ describe('TextBlockComponent', () => {
 
   // ── error — malformed markdown should not throw ──────────────────────────
   it('renders malformed markdown without throwing', () => {
-    component.content = '```unbalanced\nno closing fence';
+    fixture.componentRef.setInput('content', '```unbalanced\nno closing fence');
     expect(() => fixture.detectChanges()).not.toThrow();
     expect(el.querySelector('.prose-sw')).not.toBeNull();
   });
 
   // ── state transitions — streaming caret on/off ───────────────────────────
   it('shows the streaming caret when streaming is true', () => {
-    component.content = 'partial';
-    component.streaming = true;
+    fixture.componentRef.setInput('content', 'partial');
+    fixture.componentRef.setInput('streaming', true);
     fixture.detectChanges();
 
     expect(el.querySelector('[data-testid="streaming-caret"]')).not.toBeNull();
   });
 
   it('hides the streaming caret when streaming is false', () => {
-    component.content = 'done';
-    component.streaming = false;
+    fixture.componentRef.setInput('content', 'done');
+    fixture.componentRef.setInput('streaming', false);
     fixture.detectChanges();
 
     expect(el.querySelector('[data-testid="streaming-caret"]')).toBeNull();
   });
 
   it('toggles the caret reactively when streaming changes', () => {
-    component.content = 'text';
-    component.streaming = true;
+    fixture.componentRef.setInput('content', 'text');
+    fixture.componentRef.setInput('streaming', true);
     fixture.detectChanges();
     expect(el.querySelector('[data-testid="streaming-caret"]')).not.toBeNull();
 
-    // setInput is required here (not direct assignment) so OnPush re-renders the @if block.
     fixture.componentRef.setInput('streaming', false);
     fixture.detectChanges();
     expect(el.querySelector('[data-testid="streaming-caret"]')).toBeNull();
@@ -165,8 +167,8 @@ describe('TextBlockComponent', () => {
 
   // ── ARIA ─────────────────────────────────────────────────────────────────
   it('sets role="status" and aria-live="polite" on the host while streaming', () => {
-    component.content = 'streaming...';
-    component.streaming = true;
+    fixture.componentRef.setInput('content', 'streaming...');
+    fixture.componentRef.setInput('streaming', true);
     fixture.detectChanges();
 
     expect(el.getAttribute('role')).toBe('status');
@@ -174,7 +176,7 @@ describe('TextBlockComponent', () => {
   });
 
   it('does not set role/aria-live when not streaming', () => {
-    component.content = 'static';
+    fixture.componentRef.setInput('content', 'static');
     fixture.detectChanges();
 
     expect(el.getAttribute('role')).toBeNull();

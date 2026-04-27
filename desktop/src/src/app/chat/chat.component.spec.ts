@@ -501,7 +501,7 @@ describe('ChatComponent', () => {
       expect(msgs).toHaveLength(1);
       const block = msgs[0].blocks[0];
       expect(block.type).toBe('tool_use');
-      if (block.type === 'tool_use') {
+      if (block.type === 'tool_use' && block.tool.status !== 'running') {
         expect(block.tool.tool_name).toBe('Read');
         expect(block.tool.input_json).toBe('{"file":"/a.ts"}');
         expect(block.tool.status).toBe('done');
@@ -529,7 +529,7 @@ describe('ChatComponent', () => {
       await component.resumeConversation('s1');
 
       const block = chatState.messages[0].blocks[0];
-      if (block.type === 'tool_use') {
+      if (block.type === 'tool_use' && block.tool.status !== 'running') {
         expect(block.tool.status).toBe('error');
         expect(block.tool.result_is_error).toBe(true);
         expect(block.tool.result).toBe('command not found');

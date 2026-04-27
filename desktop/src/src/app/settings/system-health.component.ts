@@ -3,11 +3,11 @@ import {
   ChangeDetectorRef,
   Component,
   ElementRef,
-  Input,
   OnDestroy,
   OnInit,
   ViewChild,
   inject,
+  input,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
@@ -207,7 +207,7 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
             class="px-3 py-1 bg-sw-bg-navy text-sw-text border border-sw-border rounded text-xs font-mono cursor-pointer transition-colors duration-200 hover:enabled:bg-sw-btn-hover disabled:opacity-40 disabled:cursor-not-allowed"
             data-testid="health-recreate"
             (click)="recreateContainers()"
-            [disabled]="recreating || !project"
+            [disabled]="recreating || !project()"
           >
             {{ recreating ? 'Recreating...' : 'Recreate' }}
           </button>
@@ -365,7 +365,7 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
   `,
 })
 export class SystemHealthComponent implements OnInit, OnDestroy {
-  @Input() project: string | null = null;
+  readonly project = input<string | null>(null);
 
   report: HealthReport | null = null;
   loading = false;
@@ -476,7 +476,7 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
     this.error = null;
     try {
       const result = await this.tauri.invoke<HealthReport>('get_health', {
-        project: this.project,
+        project: this.project(),
       });
       this.report = result ?? null;
       if (
@@ -538,12 +538,13 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
 
   /** Recreates all containers for the active project (compose down + render + up). */
   async recreateContainers(): Promise<void> {
-    if (!this.project) return;
+    const project = this.project();
+    if (!project) return;
     this.recreating = true;
     this.error = null;
     this.cdr.markForCheck();
     try {
-      await this.tauri.invoke('recreate_project_containers', { project: this.project });
+      await this.tauri.invoke('recreate_project_containers', { project });
       await this.refresh();
     } catch (err) {
       this.error = `Recreate failed: ${err}`;
@@ -563,7 +564,7 @@ export class SystemHealthComponent implements OnInit, OnDestroy {
     try {
       if (this.showAllLogs) {
         this.logContent = await this.tauri.invoke<string>('get_compose_logs', {
-          project: this.project,
+          project: this.project(),
           tail: lines,
         });
       } else if (this.selectedContainer?.endsWith('_claude')) {
