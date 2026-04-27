@@ -25,7 +25,8 @@ import { ChangeDetectionStrategy, Component, input } from '@angular/core';
         stroke="currentColor"
         stroke-width="3"
         stroke-linecap="round"
-        stroke-dasharray="42 14"
+        pathLength="100"
+        stroke-dasharray="75 25"
       />
     </svg>
   `,

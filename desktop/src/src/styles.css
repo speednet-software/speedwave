@@ -263,7 +263,13 @@
   }
 
   /* Spinning loader (replaces the legacy `animate-sw-spin`). */
-  .spin { animation: spin 0.8s linear infinite; }
+  .spin {
+    animation: spin 0.8s linear infinite;
+    /* SVG roots default to `transform-origin: 0 0` in some engines — force
+       the centre so the rotation doesn't translate the shape every frame. */
+    transform-origin: 50% 50%;
+    transform-box: fill-box;
+  }
 
   /* Streaming caret block. */
   .caret {
