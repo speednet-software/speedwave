@@ -56,8 +56,10 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
           <!-- Streaming has started but no block has arrived yet. Show a
                blinking caret so the user has visual confirmation that
                the assistant is working — same caret used inline during
-               text streaming, just rendered as a standalone placeholder. -->
-          <div data-testid="chat-message-list-awaiting" class="px-1">
+               text streaming, just rendered as a standalone placeholder.
+               No horizontal padding so the caret aligns flush-left with
+               the rule columns of the surrounding tool/thinking blocks. -->
+          <div data-testid="chat-message-list-awaiting">
             <span class="caret" aria-label="Assistant is responding"></span>
           </div>
         }
