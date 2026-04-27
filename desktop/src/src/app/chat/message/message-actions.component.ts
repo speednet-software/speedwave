@@ -38,7 +38,7 @@ const COPY_FEEDBACK_MS = 1_500;
         data-testid="message-retry"
         class="hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-50"
         aria-label="Retry last response"
-        [disabled]="!canRetry()"
+        [disabled]="!chat.retryEnabled()"
         (click)="onRetry()"
       >
         retry
@@ -58,7 +58,7 @@ export class MessageActionsComponent implements OnDestroy {
   /** Disables copy button while clipboard write is in flight. */
   copyBusy = false;
 
-  private readonly chat = inject(ChatStateService);
+  protected readonly chat = inject(ChatStateService);
   private readonly cdr = inject(ChangeDetectorRef);
   private copyTimer: ReturnType<typeof setTimeout> | null = null;
 

@@ -128,6 +128,35 @@ export class ChatStateService {
   readonly isStreamingFromState: Signal<boolean> = computed(() => this._state().is_streaming);
 
   /**
+   * Signal mirror of {@link canRetryLastAssistant}. Backed by the same
+   * `_state` projection that drives `messagesFromState`, so OnPush
+   * components binding `[disabled]="!retryEnabled()"` re-evaluate without
+   * a manual `markForCheck` whenever the retry anchor flips.
+   */
+  readonly retryEnabled: Signal<boolean> = computed(() => {
+    const tree = this._state();
+    if (tree.is_streaming) return false;
+    if (!tree.session_id) return false;
+    const entries = tree.entries;
+    let lastAssistantIdx = -1;
+    for (let i = entries.length - 1; i >= 0; i -= 1) {
+      if (entries[i].role === 'assistant') {
+        lastAssistantIdx = i;
+        break;
+      }
+    }
+    if (lastAssistantIdx < 0) return false;
+    const assistant = entries[lastAssistantIdx];
+    if (assistant.uuid_status !== 'committed') return false;
+    for (let i = lastAssistantIdx - 1; i >= 0; i -= 1) {
+      const m = entries[i];
+      if (m.role !== 'user') continue;
+      return Boolean(m.uuid) && m.uuid_status === 'committed';
+    }
+    return false;
+  });
+
+  /**
    * ADR-042 — projection of the live (uncommitted) trailing entry's blocks.
    * "Live" means: the trailing entry is an assistant turn that has no
    * meta yet (Result hasn't fired) AND no committed UUID. Once Result

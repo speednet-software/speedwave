@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { signal } from '@angular/core';
 import { MessageActionsComponent } from './message-actions.component';
 import { ChatStateService } from '../../services/chat-state.service';
 
@@ -8,6 +9,16 @@ class FakeChatState {
   copyMessage = vi.fn().mockResolvedValue(true);
   retryLastAssistant = vi.fn().mockResolvedValue(undefined);
   canRetryLastAssistant = vi.fn().mockReturnValue(true);
+  /**
+   * Mirrors the real `ChatStateService.retryEnabled` signal — the component's
+   * template binds `[disabled]="!chat.retryEnabled()"` so we expose a writable
+   * signal here whose `set(...)` lets each test toggle the disabled state.
+   */
+  private readonly retrySig = signal(true);
+  retryEnabled = this.retrySig.asReadonly();
+  setRetryEnabled(v: boolean): void {
+    this.retrySig.set(v);
+  }
 }
 
 describe('MessageActionsComponent', () => {
@@ -127,18 +138,21 @@ describe('MessageActionsComponent', () => {
   it('disables retry button when chat.isStreaming is true', () => {
     chat.isStreaming = true;
     chat.canRetryLastAssistant = vi.fn().mockReturnValue(false);
+    chat.setRetryEnabled(false);
     refresh();
     expect(retryButton()?.disabled).toBe(true);
   });
 
-  it('disables retry button when canRetryLastAssistant returns false', () => {
+  it('disables retry button when retryEnabled signal is false', () => {
     chat.canRetryLastAssistant = vi.fn().mockReturnValue(false);
+    chat.setRetryEnabled(false);
     refresh();
     expect(retryButton()?.disabled).toBe(true);
   });
 
   it('does not invoke retryLastAssistant when retry is disabled', async () => {
     chat.canRetryLastAssistant = vi.fn().mockReturnValue(false);
+    chat.setRetryEnabled(false);
     fixture.detectChanges();
     await component.onRetry();
     expect(chat.retryLastAssistant).not.toHaveBeenCalled();
