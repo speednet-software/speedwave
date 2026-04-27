@@ -136,7 +136,7 @@ export class ChatStateService {
   readonly retryEnabled: Signal<boolean> = computed(() => {
     const tree = this._state();
     if (tree.is_streaming || !tree.session_id) return false;
-    return hasRetryAnchor(tree.entries, 'committed');
+    return findRetryAnchorIn(tree.entries, 'committed') !== null;
   });
 
   /**
@@ -892,23 +892,8 @@ export class ChatStateService {
     if (this.isStreaming) return null;
     const sessionId = this._sessionStats?.session_id;
     if (!sessionId) return null;
-    let lastAssistantIdx = -1;
-    for (let i = this._messages.length - 1; i >= 0; i -= 1) {
-      if (this._messages[i].role === 'assistant') {
-        lastAssistantIdx = i;
-        break;
-      }
-    }
-    if (lastAssistantIdx < 0) return null;
-    const assistant = this._messages[lastAssistantIdx];
-    if (assistant.uuid_status && assistant.uuid_status !== 'Committed') return null;
-    for (let i = lastAssistantIdx - 1; i >= 0; i -= 1) {
-      const m = this._messages[i];
-      if (m.role !== 'user') continue;
-      if (!m.uuid || (m.uuid_status && m.uuid_status !== 'Committed')) return null;
-      return { sessionId, userUuid: m.uuid, lastAssistantIdx, userIdx: i };
-    }
-    return null;
+    const anchor = findRetryAnchorIn(this._messages, 'Committed');
+    return anchor === null ? null : { sessionId, ...anchor };
   }
 
   /**
@@ -1127,22 +1112,25 @@ function updateToolInput(blocks: MessageBlock[], toolId: string, delta: string):
  * @param resolvedModel - Model id already resolved by the reducer.
  */
 /**
- * True when `entries` ends with a committed assistant turn whose
- * preceding user entry also has a committed uuid — the precondition for
- * `retry_last_turn` (ADR-046). Generic over the casing of `committedTag`
- * because the legacy ChatMessage shape uses 'Committed' while the
- * state-tree shape uses 'committed'.
+ * Locates the retry anchor — the (assistant, user) pair at the tail of
+ * `entries` whose user entry can be replayed via `retry_last_turn`
+ * (ADR-046). Returns the matched indices and the user uuid, or `null`.
+ *
+ * `committedTag` is parametrised because the legacy ChatMessage shape
+ * uses 'Committed' while the state-tree shape uses 'committed'. An
+ * `undefined` `uuid_status` is treated as committed for backward
+ * compatibility with pre-ADR-046 transcript entries.
  * @param entries - Conversation entries in order, oldest first.
  * @param committedTag - The literal value that means "uuid is durable".
  */
-function hasRetryAnchor(
+function findRetryAnchorIn(
   entries: readonly {
     role: 'user' | 'assistant';
     uuid?: string | null;
     uuid_status?: string;
   }[],
   committedTag: string
-): boolean {
+): { userUuid: string; lastAssistantIdx: number; userIdx: number } | null {
   let lastAssistantIdx = -1;
   for (let i = entries.length - 1; i >= 0; i -= 1) {
     if (entries[i].role === 'assistant') {
@@ -1150,14 +1138,17 @@ function hasRetryAnchor(
       break;
     }
   }
-  if (lastAssistantIdx < 0) return false;
-  if (entries[lastAssistantIdx].uuid_status !== committedTag) return false;
+  if (lastAssistantIdx < 0) return null;
+  const assistantStatus = entries[lastAssistantIdx].uuid_status;
+  if (assistantStatus !== undefined && assistantStatus !== committedTag) return null;
   for (let i = lastAssistantIdx - 1; i >= 0; i -= 1) {
     const m = entries[i];
     if (m.role !== 'user') continue;
-    return Boolean(m.uuid) && m.uuid_status === committedTag;
+    if (!m.uuid) return null;
+    if (m.uuid_status !== undefined && m.uuid_status !== committedTag) return null;
+    return { userUuid: m.uuid, lastAssistantIdx, userIdx: i };
   }
-  return false;
+  return null;
 }
 
 function buildEntryMeta(

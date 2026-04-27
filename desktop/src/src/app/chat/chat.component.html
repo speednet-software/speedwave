@@ -58,7 +58,7 @@
             (queueCancelled)="onQueueCancelled()"
             (stopRequested)="onStopClicked()"
           />
-          <app-session-stats [stats]="chat.sessionStats" [branch]="gitBranch" />
+          <app-session-stats [stats]="chat.sessionStats" [branch]="gitBranch()" />
         </div>
       </div>
     </div>

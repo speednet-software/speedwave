@@ -7,6 +7,7 @@ import {
   ViewChild,
   effect,
   inject,
+  signal,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Router, RouterLink } from '@angular/router';
@@ -61,7 +62,7 @@ export class ChatComponent implements OnInit, OnDestroy {
    * the project is not a git repo. Re-read after each turn finishes because
    * the assistant may have switched branches via a shell tool.
    */
-  gitBranch: string | null = null;
+  readonly gitBranch = signal<string | null>(null);
   /**
    * Cached index of the most recent assistant message in `chat.messages`,
    * recomputed on every state-change notification. Avoids the O(n) scan in
@@ -172,7 +173,9 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.projectMemory = '';
       this.memoryError = '';
       this.cdr.markForCheck();
-      await this.refreshGitBranch();
+      // Bypass the TTL — switching projects is a strong signal the branch
+      // could be different.
+      await this.refreshGitBranch(true);
       if (wasHistoryOpen) {
         await this.loadConversations();
       }
@@ -183,22 +186,38 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
+   * Min interval between two `get_git_branch` IPC roundtrips. Branches
+   * rarely change mid-session; a short TTL eliminates 90%+ of forks
+   * during rapid turns without making the chip feel stale.
+   */
+  private static readonly GIT_BRANCH_TTL_MS = 1500;
+  /** Epoch-ms of the last branch read; `0` forces the next call. */
+  private gitBranchLastReadAt = 0;
+
+  /**
    * Pulls the current git branch from the backend for the active project.
    * Silent on errors — the chip just hides when the read fails so a missing
-   * git binary or non-repo project doesn't surface a noisy error.
+   * git binary or non-repo project doesn't surface a noisy error. Reads
+   * within the TTL window are no-ops.
+   * @param force - Skip the TTL check (used after a project switch).
    */
-  private async refreshGitBranch(): Promise<void> {
+  private async refreshGitBranch(force = false): Promise<void> {
     const project = this.projectState.activeProject;
     if (!project) {
-      this.gitBranch = null;
+      this.gitBranch.set(null);
       return;
     }
-    try {
-      this.gitBranch = await this.tauri.invoke<string | null>('get_git_branch', { project });
-    } catch {
-      this.gitBranch = null;
+    const now = Date.now();
+    if (!force && now - this.gitBranchLastReadAt < ChatComponent.GIT_BRANCH_TTL_MS) {
+      return;
     }
-    this.cdr.markForCheck();
+    this.gitBranchLastReadAt = now;
+    try {
+      const branch = await this.tauri.invoke<string | null>('get_git_branch', { project });
+      this.gitBranch.set(branch);
+    } catch {
+      this.gitBranch.set(null);
+    }
   }
 
   /** True if the current turn is paused on an unanswered AskUserQuestion. */
