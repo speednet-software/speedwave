@@ -7,9 +7,17 @@
       [conversations]="conversations"
       [currentSessionId]="currentViewSessionId"
       (closed)="ui.closeSidebar()"
-      (newConversation)="newConversation()"
       (resumeConversation)="resumeConversation($event.session_id)"
     />
+    @if (ui.sidebarOpen() || ui.memoryOpen()) {
+      <button
+        type="button"
+        class="absolute inset-0 z-30 cursor-default bg-black/50"
+        data-testid="chat-drawer-backdrop"
+        aria-label="Close drawer"
+        (click)="onBackdropClick()"
+      ></button>
+    }
 
     <!-- Main column: header + body (messages or transcript) + composer. -->
     <div class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">

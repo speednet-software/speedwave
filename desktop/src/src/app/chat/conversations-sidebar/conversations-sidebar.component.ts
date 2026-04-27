@@ -64,13 +64,13 @@ const BUCKET_ORDER: readonly { key: string; label: string }[] = [
  * - The parent (chat) toggles `body.sidebar-drawer-open` via `UiStateService`
  *   — the global stylesheet then animates the drawer in and dims the
  *   backdrop via `body.sidebar-drawer-open::before`.
- * - Header: mono "conversations" + accent pill count + new-conversation icon.
+ * - Header: mono "conversations" + accent pill count + close icon.
  * - Search input bar (UI-only filter for now — narrows the buckets below).
  * - Body: conversations grouped by today / yesterday / older with mono
  *   uppercase section labels and an accent left-border on the active row.
  *
  * Outputs match the legacy contract so chat.component continues to drive
- * view / resume / new actions without change.
+ * view / resume actions without change.
  */
 @Component({
   selector: 'app-conversations-sidebar',
@@ -93,25 +93,6 @@ const BUCKET_ORDER: readonly { key: string; label: string }[] = [
       <button
         type="button"
         class="ml-auto text-[var(--ink-mute)] hover:text-[var(--ink)]"
-        data-testid="conversations-sidebar-new"
-        title="New conversation"
-        aria-label="New conversation"
-        (click)="newConversation.emit()"
-      >
-        <svg
-          class="h-4 w-4"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-          stroke-width="1.75"
-          aria-hidden="true"
-        >
-          <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
-        </svg>
-      </button>
-      <button
-        type="button"
-        class="text-[var(--ink-mute)] hover:text-[var(--ink)]"
         data-testid="conversations-sidebar-close"
         aria-label="Close conversations sidebar"
         (click)="closed.emit()"
@@ -207,8 +188,6 @@ export class ConversationsSidebarComponent {
 
   /** Drawer requested to close (close button or backdrop click in parent). */
   readonly closed = output<void>();
-  /** New conversation requested. */
-  readonly newConversation = output<void>();
   /** Resume `conv` as the live session — emitted on row click (primary action). */
   readonly resumeConversation = output<ConversationSummary>();
 

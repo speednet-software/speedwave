@@ -14,7 +14,6 @@ import type { ConversationSummary } from '../../models/chat';
       [conversations]="conversations"
       [currentSessionId]="currentSessionId"
       (closed)="onClosed()"
-      (newConversation)="onNew()"
       (resumeConversation)="onResume($event)"
     />
   `,
@@ -24,14 +23,10 @@ class HostComponent {
   conversations: readonly ConversationSummary[] = [];
   currentSessionId: string | null = null;
   closedCount = 0;
-  newCount = 0;
   resumedPayload: ConversationSummary | null = null;
 
   onClosed(): void {
     this.closedCount += 1;
-  }
-  onNew(): void {
-    this.newCount += 1;
   }
   onResume(payload: ConversationSummary): void {
     this.resumedPayload = payload;
@@ -181,17 +176,6 @@ describe('ConversationsSidebarComponent', () => {
         ) as HTMLButtonElement
       ).click();
       expect(host.closedCount).toBe(1);
-    });
-
-    it('emits newConversation when + new clicked', () => {
-      host.conversations = sample;
-      fixture.detectChanges();
-      (
-        fixture.nativeElement.querySelector(
-          '[data-testid="conversations-sidebar-new"]'
-        ) as HTMLButtonElement
-      ).click();
-      expect(host.newCount).toBe(1);
     });
 
     it('emits resumeConversation when any row is clicked (primary action)', () => {

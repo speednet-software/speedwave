@@ -430,13 +430,6 @@
   will-change: transform;
 }
 body.sidebar-drawer-open .collapsible-sidebar { transform: translateX(0); }
-body.sidebar-drawer-open::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  z-index: 30;
-}
 
 .memory-drawer {
   position: absolute;
@@ -452,13 +445,6 @@ body.sidebar-drawer-open::before {
   display: flex;
 }
 body.memory-open .memory-drawer { transform: translateX(0); }
-body.memory-open::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  z-index: 30;
-}
 
 /* ── Base styles ── */
 @layer base {
