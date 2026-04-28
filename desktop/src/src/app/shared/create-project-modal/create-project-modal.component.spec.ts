@@ -4,12 +4,7 @@ import { CreateProjectModalComponent } from './create-project-modal.component';
 import { TauriService } from '../../services/tauri.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 
-// `vi.mock` without a factory routes to `__mocks__/@tauri-apps/plugin-dialog.ts`
-// (project-root-relative). That file exports a single `vi.fn()` instance
-// shared across every spec in the run, which avoids the hoist race
-// that two sibling specs would otherwise trigger by each declaring
-// their own factory under Angular's `isolate: false` Vitest setup.
-vi.mock('@tauri-apps/plugin-dialog');
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 import { open } from '@tauri-apps/plugin-dialog';
 const openMock = vi.mocked(open);
 
