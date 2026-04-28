@@ -282,6 +282,13 @@ describe('ShellComponent', () => {
   });
 
   describe('restart overlay', () => {
+    // Modal contents render through CDK Dialog (a portal attached to
+    // document.body), not inside the host fixture, so we query the global
+    // document for any element underneath the overlay.
+    function q(sel: string): HTMLElement | null {
+      return document.querySelector(sel) as HTMLElement | null;
+    }
+
     beforeEach(async () => {
       await component.ngOnInit();
       await fixture.whenStable();
@@ -295,11 +302,11 @@ describe('ShellComponent', () => {
       component['cdr'].markForCheck();
       fixture.detectChanges();
 
-      const overlay = fixture.nativeElement.querySelector('[data-testid="restart-overlay"]');
+      const overlay = q('[data-testid="restart-overlay"]');
       expect(overlay).not.toBeNull();
       // Terminal-minimal restart overlay copy.
-      expect(overlay.textContent).toContain('restart required');
-      expect(overlay.textContent).toContain('Container config changed');
+      expect(overlay!.textContent).toContain('restart required');
+      expect(overlay!.textContent).toContain('Container config changed');
     });
 
     it('hides overlay when needsRestart is false', () => {
@@ -307,7 +314,7 @@ describe('ShellComponent', () => {
       component['cdr'].markForCheck();
       fixture.detectChanges();
 
-      expect(fixture.nativeElement.querySelector('[data-testid="restart-overlay"]')).toBeNull();
+      expect(q('[data-testid="restart-overlay"]')).toBeNull();
     });
 
     it('hides overlay during blocking states', () => {
@@ -326,7 +333,7 @@ describe('ShellComponent', () => {
         fixture.detectChanges();
 
         expect(
-          fixture.nativeElement.querySelector('[data-testid="restart-overlay"]'),
+          q('[data-testid="restart-overlay"]'),
           `overlay should be hidden for status=${status}`
         ).toBeNull();
       }
@@ -338,7 +345,7 @@ describe('ShellComponent', () => {
       component['cdr'].markForCheck();
       fixture.detectChanges();
 
-      expect(fixture.nativeElement.querySelector('[data-testid="restart-overlay"]')).toBeNull();
+      expect(q('[data-testid="restart-overlay"]')).toBeNull();
     });
 
     it('hides overlay when status is error', () => {
@@ -347,7 +354,7 @@ describe('ShellComponent', () => {
       component['cdr'].markForCheck();
       fixture.detectChanges();
 
-      expect(fixture.nativeElement.querySelector('[data-testid="restart-overlay"]')).toBeNull();
+      expect(q('[data-testid="restart-overlay"]')).toBeNull();
     });
 
     it('Restart Now button calls projectState.restartContainers', () => {
@@ -356,9 +363,7 @@ describe('ShellComponent', () => {
       fixture.detectChanges();
 
       const spy = vi.spyOn(projectState, 'restartContainers').mockResolvedValue();
-      const btn = fixture.nativeElement.querySelector(
-        '[data-testid="restart-now-btn"]'
-      ) as HTMLButtonElement;
+      const btn = q('[data-testid="restart-now-btn"]') as HTMLButtonElement;
       btn.click();
 
       expect(spy).toHaveBeenCalled();
@@ -371,9 +376,7 @@ describe('ShellComponent', () => {
       fixture.detectChanges();
 
       const spy = vi.spyOn(projectState, 'dismissRestart');
-      const btn = fixture.nativeElement.querySelector(
-        '[data-testid="restart-later-btn"]'
-      ) as HTMLButtonElement;
+      const btn = q('[data-testid="restart-later-btn"]') as HTMLButtonElement;
       btn.click();
 
       expect(spy).toHaveBeenCalled();
@@ -386,13 +389,15 @@ describe('ShellComponent', () => {
       component['cdr'].markForCheck();
       fixture.detectChanges();
 
+      // The spinner branch lives inside the host template (not the modal),
+      // so it stays in the fixture DOM.
       const overlay = fixture.nativeElement.querySelector('[data-testid="restart-overlay"]');
       expect(overlay).not.toBeNull();
       expect(overlay.textContent).toContain('Restarting containers...');
       expect(overlay.textContent).toContain('This may take a while');
       expect(overlay.textContent).not.toContain('restart required');
-      expect(fixture.nativeElement.querySelector('[data-testid="restart-now-btn"]')).toBeNull();
-      expect(fixture.nativeElement.querySelector('[data-testid="restart-later-btn"]')).toBeNull();
+      expect(q('[data-testid="restart-now-btn"]')).toBeNull();
+      expect(q('[data-testid="restart-later-btn"]')).toBeNull();
     });
 
     it('shows error when restartError is set', () => {
@@ -401,9 +406,9 @@ describe('ShellComponent', () => {
       component['cdr'].markForCheck();
       fixture.detectChanges();
 
-      const errorEl = fixture.nativeElement.querySelector('[data-testid="restart-error"]');
+      const errorEl = q('[data-testid="restart-error"]');
       expect(errorEl).not.toBeNull();
-      expect(errorEl.textContent).toContain('compose failed');
+      expect(errorEl!.textContent).toContain('compose failed');
     });
 
     it('Restart Now is visible when restartError is set for retry', () => {
@@ -412,11 +417,11 @@ describe('ShellComponent', () => {
       component['cdr'].markForCheck();
       fixture.detectChanges();
 
-      const btn = fixture.nativeElement.querySelector('[data-testid="restart-now-btn"]');
+      const btn = q('[data-testid="restart-now-btn"]') as HTMLButtonElement | null;
       expect(btn).not.toBeNull();
 
       const spy = vi.spyOn(projectState, 'restartContainers').mockResolvedValue();
-      btn.click();
+      btn!.click();
       expect(spy).toHaveBeenCalled();
       spy.mockRestore();
     });
@@ -426,13 +431,13 @@ describe('ShellComponent', () => {
       component['cdr'].markForCheck();
       fixture.detectChanges();
 
-      expect(fixture.nativeElement.querySelector('[data-testid="restart-overlay"]')).not.toBeNull();
+      expect(q('[data-testid="restart-overlay"]')).not.toBeNull();
 
       const router = TestBed.inject(Router);
       await router.navigate(['/settings']);
       fixture.detectChanges();
 
-      expect(fixture.nativeElement.querySelector('[data-testid="restart-overlay"]')).not.toBeNull();
+      expect(q('[data-testid="restart-overlay"]')).not.toBeNull();
     });
   });
 
