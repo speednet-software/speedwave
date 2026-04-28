@@ -10,7 +10,7 @@
 // See docs/adr/ADR-041-local-llm-model-discovery.md for the threat model and
 // the RFC1918/loopback/public-domain policy rationale.
 
-use futures_util::future::join_all;
+use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -125,18 +125,26 @@ fn parse_ollama_show(body: &[u8]) -> Option<u32> {
     if let Some(arch) = arch {
         let key = format!("{arch}.context_length");
         if let Some(n) = model_info.get(&key).and_then(|x| x.as_u64()) {
-            return u32::try_from(n).ok();
+            return non_zero_u32(n);
         }
     }
     // Fallback: any `<something>.context_length` key.
     for (k, val) in model_info {
         if k.ends_with(".context_length") {
             if let Some(n) = val.as_u64() {
-                return u32::try_from(n).ok();
+                return non_zero_u32(n);
             }
         }
     }
     None
+}
+
+/// Convert a server-reported context-length to `u32`, treating both overflow
+/// and a literal `0` as "unknown". A zero would otherwise propagate through
+/// to `update_llm_config` and surface as a misleading "context_tokens must
+/// be greater than 0" error at save time.
+fn non_zero_u32(n: u64) -> Option<u32> {
+    u32::try_from(n).ok().filter(|&v| v > 0)
 }
 
 fn parse_lmstudio(body: &[u8]) -> anyhow::Result<Vec<DiscoveredModel>> {
@@ -147,7 +155,7 @@ fn parse_lmstudio(body: &[u8]) -> anyhow::Result<Vec<DiscoveredModel>> {
         .into_iter()
         .map(|m| DiscoveredModel {
             id: m.id,
-            context_tokens: m.max_context_length.and_then(|n| u32::try_from(n).ok()),
+            context_tokens: m.max_context_length.and_then(non_zero_u32),
         })
         .collect())
 }
@@ -163,7 +171,7 @@ fn parse_llamacpp(body: &[u8]) -> anyhow::Result<Vec<DiscoveredModel>> {
             context_tokens: m
                 .meta
                 .and_then(|meta| meta.n_ctx_train)
-                .and_then(|n| u32::try_from(n).ok()),
+                .and_then(non_zero_u32),
         })
         .collect())
 }
@@ -226,8 +234,12 @@ pub(crate) fn validate_llm_base_url(url: &str) -> Result<url::Url, String> {
             }
             // Host is guaranteed present here: host_is_localhost requires
             // Some(Domain("localhost")); is_private_on_premise returns true
-            // only for Some(Ipv4) or Some(Ipv6). No None path reaches this arm.
-            let host = candidate.host_str().unwrap_or("unknown");
+            // only for Some(Ipv4) or Some(Ipv6). The `<bug:no-host>` token
+            // is a deliberate giveaway in the warning log: if it ever
+            // appears, the upstream guard regressed and host classification
+            // was bypassed — making it impossible to confuse with a real
+            // hostname.
+            let host = candidate.host_str().unwrap_or("<bug:no-host>");
             if host_is_localhost || is_loopback_host(&candidate) {
                 log::warn!("Allowing loopback address for local LLM: {}", host);
             } else {
@@ -236,10 +248,10 @@ pub(crate) fn validate_llm_base_url(url: &str) -> Result<url::Url, String> {
             candidate
         } else {
             let v = validate_url(url)?;
-            log::warn!(
-                "Allowing public address for local LLM: {}",
-                v.host_str().unwrap_or("unknown")
-            );
+            // Same invariant as above: `validate_url` rejects schemes / IP
+            // classes that lack a host, so `Ok` guarantees `Some` here.
+            let host = v.host_str().unwrap_or("<bug:no-host>");
+            log::warn!("Allowing public address for local LLM: {}", host);
             v
         };
 
@@ -397,11 +409,19 @@ async fn discover_ollama(
     // POST body with `{model: "<name>"}` and returns `model_info` whose
     // `<arch>.context_length` key carries the context window. Probe failures
     // (timeout, server churn during model load) degrade silently.
+    //
+    // Bounded fan-out via `buffer_unordered`: a user with 50+ pulled models
+    // would otherwise fire 50+ simultaneous POSTs, which can saturate
+    // Ollama's per-model lock and time out the listing entirely. Eight
+    // concurrent probes is a safe upper bound for local hardware while
+    // keeping the total wall-clock cost bounded by the slowest probe in the
+    // last batch rather than the slowest single model in the listing.
     let url = format!("{}/api/show", base.as_str().trim_end_matches('/'));
-    let probes = names.iter().map(|name| {
+    // `buffer_unordered` reorders results, so each future carries its index
+    // and we re-sort afterwards to keep the response order matching `names`.
+    let probe_futures = names.iter().cloned().enumerate().map(|(idx, name)| {
         let client = client.clone();
         let url = url.clone();
-        let name = name.clone();
         async move {
             let resp = client
                 .post(&url)
@@ -410,25 +430,41 @@ async fn discover_ollama(
                 .timeout(timeout)
                 .send()
                 .await
-                .ok()?;
-            if !resp.status().is_success() {
-                return None;
-            }
-            let body = read_body_limited(resp, "Ollama /api/show").await.ok()?;
-            parse_ollama_show(&body)
+                .ok();
+            let ctx = match resp {
+                Some(r) if r.status().is_success() => {
+                    match read_body_limited(r, "Ollama /api/show").await {
+                        Ok(body) => parse_ollama_show(&body),
+                        Err(_) => None,
+                    }
+                }
+                _ => None,
+            };
+            (idx, ctx)
         }
     });
-    let context_lengths = join_all(probes).await;
+    let mut indexed: Vec<(usize, Option<u32>)> = stream::iter(probe_futures)
+        .buffer_unordered(MAX_OLLAMA_PROBE_CONCURRENCY)
+        .collect()
+        .await;
+    indexed.sort_by_key(|(idx, _)| *idx);
 
     Ok(names
         .into_iter()
-        .zip(context_lengths)
+        .zip(indexed.into_iter().map(|(_, ctx)| ctx))
         .map(|(id, ctx)| DiscoveredModel {
             id,
             context_tokens: ctx,
         })
         .collect())
 }
+
+/// Maximum number of `/api/show` probes Ollama discovery may have in flight
+/// at once. Higher concurrency floods the server (single-threaded for many
+/// model-loading operations); lower concurrency drags wall-clock latency
+/// for users with large model libraries. Eight is a conservative middle
+/// ground that matches typical CPU-core counts.
+const MAX_OLLAMA_PROBE_CONCURRENCY: usize = 8;
 
 /// LM Studio path: hits the extended `/api/v0/models` listing which carries
 /// `max_context_length` per entry. The OpenAI-compatible `/v1/models`
@@ -732,6 +768,70 @@ mod tests {
         let models = parse_llamacpp(body).unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].context_tokens, None);
+    }
+
+    // ── zero-context_tokens guard ───────────────────────────────────────
+    //
+    // A literal `0` from the server (or an overflow on `u32::try_from`)
+    // would otherwise propagate to `update_llm_config`, which rejects it
+    // with a misleading "context_tokens must be greater than 0" error
+    // — confusing because it's an internal invariant, not a user mistake.
+    // `non_zero_u32` flips zero to `None` so the chat fallback chain
+    // takes over instead.
+
+    #[test]
+    fn parse_lmstudio_treats_zero_max_context_length_as_unknown() {
+        let body = br#"{
+            "data": [
+                { "id": "broken-model", "max_context_length": 0 },
+                { "id": "ok-model", "max_context_length": 32768 }
+            ]
+        }"#;
+        let models = parse_lmstudio(body).unwrap();
+        assert_eq!(models[0].context_tokens, None, "zero must become None");
+        assert_eq!(models[1].context_tokens, Some(32_768));
+    }
+
+    #[test]
+    fn parse_llamacpp_treats_zero_n_ctx_train_as_unknown() {
+        let body = br#"{
+            "data": [
+                { "id": "broken", "meta": { "n_ctx_train": 0 } }
+            ]
+        }"#;
+        let models = parse_llamacpp(body).unwrap();
+        assert_eq!(models[0].context_tokens, None);
+    }
+
+    #[test]
+    fn parse_ollama_show_treats_zero_context_length_as_unknown() {
+        // Arch-specific key path.
+        let body = br#"{
+            "model_info": {
+                "general.architecture": "llama",
+                "llama.context_length": 0
+            }
+        }"#;
+        assert_eq!(parse_ollama_show(body), None);
+    }
+
+    #[test]
+    fn parse_ollama_show_treats_zero_in_fallback_scan_as_unknown() {
+        // Generic *.context_length scan path — same zero handling.
+        let body = br#"{
+            "model_info": {
+                "qwen2.context_length": 0
+            }
+        }"#;
+        assert_eq!(parse_ollama_show(body), None);
+    }
+
+    #[test]
+    fn non_zero_u32_helper_filters_zero_and_overflow() {
+        assert_eq!(super::non_zero_u32(0), None);
+        assert_eq!(super::non_zero_u32(1), Some(1));
+        assert_eq!(super::non_zero_u32(u32::MAX as u64), Some(u32::MAX));
+        assert_eq!(super::non_zero_u32(u32::MAX as u64 + 1), None);
     }
 
     // ── validate_llm_base_url: branch coverage ──────────────────────────
