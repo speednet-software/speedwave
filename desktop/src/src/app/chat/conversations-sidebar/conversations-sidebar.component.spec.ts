@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { ChangeDetectionStrategy, Component } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ConversationsSidebarComponent } from './conversations-sidebar.component';
@@ -44,6 +44,16 @@ const sample: readonly ConversationSummary[] = [
   { session_id: 's3', preview: '', timestamp: null, message_count: 0 },
 ];
 
+/**
+ * Query the drawer content rendered into the CDK overlay container.
+ * The component renders via CDK Overlay portal attached to `document.body`,
+ * not inside the host fixture, so we query the global document.
+ * @param sel CSS selector to locate the element under document.
+ */
+function q(sel: string): HTMLElement | null {
+  return document.querySelector(sel) as HTMLElement | null;
+}
+
 describe('ConversationsSidebarComponent', () => {
   let fixture: ComponentFixture<HostComponent>;
   let host: HostComponent;
@@ -54,42 +64,46 @@ describe('ConversationsSidebarComponent', () => {
     host = fixture.componentInstance;
   });
 
+  afterEach(() => {
+    // Tear down the overlay so each test starts with a clean container.
+    host.open = false;
+    fixture.detectChanges();
+    fixture.destroy();
+  });
+
   describe('visibility', () => {
-    it('marks the drawer aria-hidden + inert when open=false', () => {
+    it('renders no drawer DOM when open=false', () => {
       host.open = false;
       host.conversations = sample;
       fixture.detectChanges();
-      const drawer = fixture.nativeElement.querySelector('[data-testid="conversations-sidebar"]');
-      expect(drawer).not.toBeNull();
-      expect(drawer.getAttribute('aria-hidden')).toBe('true');
-      expect(drawer.hasAttribute('inert')).toBe(true);
+      expect(q('[data-testid="conversations-sidebar"]')).toBeNull();
     });
 
-    it('renders drawer with no aria-hidden / inert when open=true', () => {
+    it('renders the drawer in the overlay container when open=true', () => {
       host.conversations = sample;
       fixture.detectChanges();
-      const drawer = fixture.nativeElement.querySelector('[data-testid="conversations-sidebar"]');
-      expect(drawer).not.toBeNull();
-      expect(drawer.getAttribute('aria-hidden')).toBeNull();
-      expect(drawer.hasAttribute('inert')).toBe(false);
+      expect(q('[data-testid="conversations-sidebar"]')).not.toBeNull();
     });
 
-    it('toggles body.sidebar-drawer-open with the open input', () => {
+    it('detaches the overlay when open transitions back to false', () => {
       // Drive the child input directly to bypass OnPush propagation issues
-      // when mutating the host wrapper's plain fields. The effect registered
-      // in the child's constructor is what we're verifying — it must
-      // synchronize the global body class with the open signal.
+      // when mutating the host wrapper's plain fields. Verifies that the
+      // CDK overlay portal attaches/detaches in lockstep with the open input.
+      // The shared host fixture defaults to open=true, so destroy it first to
+      // avoid having two drawers in the overlay container at the same time.
+      fixture.destroy();
       const childFixture = TestBed.createComponent(ConversationsSidebarComponent);
       childFixture.componentRef.setInput('conversations', sample);
       childFixture.componentRef.setInput('open', true);
       childFixture.detectChanges();
       TestBed.tick();
-      expect(document.body.classList.contains('sidebar-drawer-open')).toBe(true);
+      expect(q('[data-testid="conversations-sidebar"]')).not.toBeNull();
 
       childFixture.componentRef.setInput('open', false);
       childFixture.detectChanges();
       TestBed.tick();
-      expect(document.body.classList.contains('sidebar-drawer-open')).toBe(false);
+      expect(q('[data-testid="conversations-sidebar"]')).toBeNull();
+      childFixture.destroy();
     });
   });
 
@@ -97,9 +111,10 @@ describe('ConversationsSidebarComponent', () => {
     it('has role="navigation" and aria-label="Conversations"', () => {
       host.conversations = sample;
       fixture.detectChanges();
-      const el = fixture.nativeElement.querySelector('[data-testid="conversations-sidebar"]');
-      expect(el.getAttribute('role')).toBe('navigation');
-      expect(el.getAttribute('aria-label')).toBe('Conversations');
+      const el = q('[data-testid="conversations-sidebar"]');
+      expect(el).not.toBeNull();
+      expect(el!.getAttribute('role')).toBe('navigation');
+      expect(el!.getAttribute('aria-label')).toBe('Conversations');
     });
   });
 
@@ -107,10 +122,10 @@ describe('ConversationsSidebarComponent', () => {
     it('shows placeholder when conversations is empty', () => {
       host.conversations = [];
       fixture.detectChanges();
-      expect(fixture.nativeElement.textContent).toContain('no conversations yet');
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="conversations-sidebar-row"]')
-      ).toBeNull();
+      const drawer = q('[data-testid="conversations-sidebar"]');
+      expect(drawer).not.toBeNull();
+      expect(drawer!.textContent).toContain('no conversations yet');
+      expect(q('[data-testid="conversations-sidebar-row"]')).toBeNull();
     });
   });
 
@@ -118,23 +133,23 @@ describe('ConversationsSidebarComponent', () => {
     it('renders one row per conversation', () => {
       host.conversations = sample;
       fixture.detectChanges();
-      const rows = fixture.nativeElement.querySelectorAll(
-        '[data-testid="conversations-sidebar-row"]'
-      );
+      const rows = document.querySelectorAll('[data-testid="conversations-sidebar-row"]');
       expect(rows.length).toBe(3);
     });
 
     it('renders preview text and count', () => {
       host.conversations = sample;
       fixture.detectChanges();
-      expect(fixture.nativeElement.textContent).toContain('Refactoring container runtime');
-      expect(fixture.nativeElement.textContent).toContain('14 · 2m');
+      const drawer = q('[data-testid="conversations-sidebar"]')!;
+      expect(drawer.textContent).toContain('Refactoring container runtime');
+      expect(drawer.textContent).toContain('14 · 2m');
     });
 
     it('falls back to "untitled" when preview is empty', () => {
       host.conversations = sample;
       fixture.detectChanges();
-      expect(fixture.nativeElement.textContent).toContain('untitled');
+      const drawer = q('[data-testid="conversations-sidebar"]')!;
+      expect(drawer.textContent).toContain('untitled');
     });
 
     it('falls back to a dash when timestamp is null', () => {
@@ -142,7 +157,8 @@ describe('ConversationsSidebarComponent', () => {
       // (e.g. "2m", "1h", "3d") and uses "—" for missing values.
       host.conversations = sample;
       fixture.detectChanges();
-      expect(fixture.nativeElement.textContent).toContain('0 · —');
+      const drawer = q('[data-testid="conversations-sidebar"]')!;
+      expect(drawer.textContent).toContain('0 · —');
     });
   });
 
@@ -153,15 +169,16 @@ describe('ConversationsSidebarComponent', () => {
       fixture.detectChanges();
       // Row click resumes directly (single primary action), so the test-id is
       // `conversation-resume-<sid>` rather than the legacy `view-<sid>`.
-      const active = fixture.nativeElement.querySelector('[data-testid="conversation-resume-s2"]');
-      expect(active.getAttribute('aria-current')).toBe('true');
+      const active = q('[data-testid="conversation-resume-s2"]');
+      expect(active).not.toBeNull();
+      expect(active!.getAttribute('aria-current')).toBe('true');
     });
 
     it('no aria-current when no match', () => {
       host.conversations = sample;
       host.currentSessionId = 'unknown';
       fixture.detectChanges();
-      const els = fixture.nativeElement.querySelectorAll('[aria-current="true"]');
+      const els = document.querySelectorAll('[aria-current="true"]');
       expect(els.length).toBe(0);
     });
   });
@@ -170,22 +187,18 @@ describe('ConversationsSidebarComponent', () => {
     it('emits closed when close button clicked', () => {
       host.conversations = sample;
       fixture.detectChanges();
-      (
-        fixture.nativeElement.querySelector(
-          '[data-testid="conversations-sidebar-close"]'
-        ) as HTMLButtonElement
-      ).click();
+      const btn = q('[data-testid="conversations-sidebar-close"]') as HTMLButtonElement | null;
+      expect(btn).not.toBeNull();
+      btn!.click();
       expect(host.closedCount).toBe(1);
     });
 
     it('emits resumeConversation when any row is clicked (primary action)', () => {
       host.conversations = sample;
       fixture.detectChanges();
-      (
-        fixture.nativeElement.querySelector(
-          '[data-testid="conversation-resume-s1"]'
-        ) as HTMLButtonElement
-      ).click();
+      const row = q('[data-testid="conversation-resume-s1"]') as HTMLButtonElement | null;
+      expect(row).not.toBeNull();
+      row!.click();
       expect(host.resumedPayload?.session_id).toBe('s1');
     });
   });
