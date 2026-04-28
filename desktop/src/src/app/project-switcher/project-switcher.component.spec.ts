@@ -46,8 +46,8 @@ describe('ProjectSwitcherComponent', () => {
   });
 
   it('has correct initial state', () => {
-    expect(component.projects).toEqual([]);
-    expect(component.activeProject).toBeNull();
+    expect(component.projects()).toEqual([]);
+    expect(component.activeProject()).toBeNull();
     expect(component.showAddForm()).toBe(false);
     expect(component.filter()).toBe('');
   });
@@ -99,11 +99,11 @@ describe('ProjectSwitcherComponent', () => {
       await component.ngOnInit();
 
       expect(invokeSpy).toHaveBeenCalledWith('list_projects');
-      expect(component.projects).toEqual([
+      expect(component.projects()).toEqual([
         { name: 'alpha', dir: '/tmp/alpha' },
         { name: 'beta', dir: '/tmp/beta' },
       ]);
-      expect(component.activeProject).toBe('beta');
+      expect(component.activeProject()).toBe('beta');
     });
 
     it('keeps defaults when invoke fails', async () => {
@@ -113,8 +113,8 @@ describe('ProjectSwitcherComponent', () => {
 
       await component.ngOnInit();
 
-      expect(component.projects).toEqual([]);
-      expect(component.activeProject).toBeNull();
+      expect(component.projects()).toEqual([]);
+      expect(component.activeProject()).toBeNull();
     });
   });
 
@@ -264,7 +264,7 @@ describe('ProjectSwitcherComponent', () => {
 
       await projectState.init();
       await component.ngOnInit();
-      expect(component.activeProject).toBe('alpha');
+      expect(component.activeProject()).toBe('alpha');
 
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_projects')
@@ -281,11 +281,11 @@ describe('ProjectSwitcherComponent', () => {
       mockTauri.dispatchEvent('project_switch_succeeded', { project: 'beta' });
       await fixture.whenStable();
 
-      expect(component.projects).toEqual([
+      expect(component.projects()).toEqual([
         { name: 'alpha', dir: '/tmp/alpha' },
         { name: 'beta', dir: '/tmp/beta' },
       ]);
-      expect(component.activeProject).toBe('beta');
+      expect(component.activeProject()).toBe('beta');
     });
 
     it('cleans up project settled listener on destroy', async () => {

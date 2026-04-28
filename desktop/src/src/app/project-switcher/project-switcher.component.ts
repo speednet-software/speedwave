@@ -131,10 +131,14 @@ const SWATCH_TOKENS = ['var(--violet)', 'var(--teal)', 'var(--amber)', 'var(--ac
   `,
 })
 export class ProjectSwitcherComponent implements OnInit, OnDestroy {
-  /** Backend-loaded list of projects, refreshed on settled events. */
-  projects: ProjectEntry[] = [];
+  /**
+   * Backend-loaded list of projects, refreshed on settled events. Must be a
+   * signal — `visibleProjects` is a computed and would not recompute on a
+   * plain field reassignment, leaving the dropdown stale after `add_project`.
+   */
+  readonly projects = signal<ProjectEntry[]>([]);
   /** Slug of the currently active project — drives the "current" pill. */
-  activeProject: string | null = null;
+  readonly activeProject = signal<string | null>(null);
 
   /** Whether the shared create-project modal is currently visible. */
   readonly showAddForm = signal<boolean>(false);
@@ -162,9 +166,8 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
   async ngOnInit(): Promise<void> {
     try {
       const result = await this.tauri.invoke<ProjectList>('list_projects');
-      this.projects = result.projects;
-      this.activeProject = result.active_project;
-      this.cdr.markForCheck();
+      this.projects.set(result.projects);
+      this.activeProject.set(result.active_project);
     } catch {
       // Not running inside Tauri or command not registered yet.
     }
@@ -173,9 +176,8 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
     this.unsubProjectSettled = this.projectState.onProjectSettled(async () => {
       try {
         const result = await this.tauri.invoke<ProjectList>('list_projects');
-        this.projects = result.projects;
-        this.activeProject = result.active_project;
-        this.cdr.markForCheck();
+        this.projects.set(result.projects);
+        this.activeProject.set(result.active_project);
       } catch (err) {
         console.error('project settled: failed to refresh project list:', err);
       }
@@ -245,7 +247,7 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
     isActive: boolean;
   }> {
     const needle = this.filter().trim().toLowerCase();
-    return this.projects
+    return this.projects()
       .map((project, index) => ({
         project,
         swatch: SWATCH_TOKENS[index % SWATCH_TOKENS.length],
@@ -260,6 +262,6 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
   }
 
   private isActive(project: ProjectEntry): boolean {
-    return project.name === this.activeProject;
+    return project.name === this.activeProject();
   }
 }
