@@ -17,6 +17,7 @@ import {
 } from '@angular/core';
 import { filter } from 'rxjs/operators';
 import type { ConversationSummary } from '../../models/chat';
+import { IconComponent } from '../../shared/icon.component';
 
 /**
  * Buckets a conversation summary into a relative-day group.
@@ -79,7 +80,7 @@ const BUCKET_ORDER: readonly { key: string; label: string }[] = [
  */
 @Component({
   selector: 'app-conversations-sidebar',
-  imports: [A11yModule],
+  imports: [A11yModule, IconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <ng-template #content>
@@ -102,16 +103,7 @@ const BUCKET_ORDER: readonly { key: string; label: string }[] = [
             aria-label="Close conversations sidebar"
             (click)="closed.emit()"
           >
-            <svg
-              class="h-4 w-4"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-              stroke-width="1.75"
-              aria-hidden="true"
-            >
-              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <app-icon name="x" class="h-4 w-4" />
           </button>
         </div>
 
