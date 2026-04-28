@@ -143,6 +143,204 @@ fn prepare_build_context_with_home(build_root: &Path, home: &Path) -> anyhow::Re
     Ok(cache)
 }
 
+/// Backoffs applied between retry attempts of `retry_on_eof`.
+///
+/// On macOS, `nerdctl` invoked through `limactl shell` occasionally bails out
+/// with `level=fatal msg=EOF` while tearing down containers — this is a known
+/// race in the SSH transport between containerd and the Lima VM and the host.
+/// A short backoff is enough to let containerd finish whatever it was doing
+/// in the previous call. With 3 attempts the third entry (`1 s`) is unused;
+/// it is kept here so widening the retry window in the future is a one-line
+/// change.
+const RETRY_DELAYS: [std::time::Duration; 3] = [
+    std::time::Duration::from_millis(200),
+    std::time::Duration::from_millis(500),
+    std::time::Duration::from_secs(1),
+];
+
+/// Maximum number of attempts (initial call + retries) for `retry_on_eof`.
+const RETRY_MAX_ATTEMPTS: usize = 3;
+
+/// Returns `true` if the error string looks like an `EOF` from `limactl shell`.
+///
+/// The exact wording observed in practice is `level=fatal msg=EOF`. We also
+/// treat a bare `EOF` at the end of the message as the same condition, because
+/// some failure paths trim the level/msg prefix when they bubble up through
+/// `runner.run()`.
+fn is_eof_error(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+    if msg.contains("fatal msg=EOF") {
+        return true;
+    }
+    let trimmed = msg.trim_end();
+    trimmed == "EOF" || trimmed.ends_with(": EOF") || trimmed.ends_with("\nEOF")
+}
+
+/// Runs `f` up to `RETRY_MAX_ATTEMPTS` times, retrying only when the error
+/// looks like a transient `EOF` from `limactl shell`. Other errors propagate
+/// immediately (no retry). The retry boundary is logged at `info` so we can
+/// see it in the wild without spamming `warn!` on success.
+fn retry_on_eof<T>(label: &str, f: impl FnMut() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    retry_on_eof_with_delays(label, &RETRY_DELAYS, f)
+}
+
+/// Variant of `retry_on_eof` that takes the backoff schedule as a parameter,
+/// so tests can pass `Duration::ZERO` and run in milliseconds.
+fn retry_on_eof_with_delays<T>(
+    label: &str,
+    delays: &[std::time::Duration],
+    mut f: impl FnMut() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let mut attempt = 1usize;
+    loop {
+        match f() {
+            Ok(value) => return Ok(value),
+            Err(e) if is_eof_error(&e) && attempt < RETRY_MAX_ATTEMPTS => {
+                let delay = delays.get(attempt - 1).copied().unwrap_or_default();
+                log::info!(
+                    "{label}: transient EOF on attempt {attempt}/{RETRY_MAX_ATTEMPTS}, \
+                     retrying after {:?} ({e})",
+                    delay
+                );
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Lima-flavoured `compose down + cleanup`. Wraps the compose-down call in
+/// `retry_on_eof` to absorb the `level=fatal msg=EOF` hiccups that `limactl
+/// shell` produces during shutdown, then runs the per-container cleanup with
+/// the same retry policy.
+///
+/// Behavioural parity with `super::compose_down_and_cleanup`:
+/// * cleanup runs even when compose-down fails
+/// * the compose-down error is the function's return value
+fn compose_down_and_cleanup_with_retry(
+    runner: &dyn CommandRunner,
+    cmd: &str,
+    project: &str,
+    compose_down_args: &[&str],
+    nerdctl_prefix: &[&str],
+) -> anyhow::Result<()> {
+    let down_result = retry_on_eof("compose_down", || {
+        runner.run(cmd, compose_down_args).map(|_| ())
+    });
+    if let Err(ref e) = down_result {
+        log::warn!("compose_down_and_cleanup: compose down failed for {project}: {e}");
+    }
+
+    force_remove_project_containers_with_retry(runner, cmd, project, nerdctl_prefix);
+    down_result
+}
+
+/// Lima-flavoured force-remove. Same shape as
+/// `super::force_remove_project_containers`, but every per-container `rm -f`
+/// is wrapped in `retry_on_eof`, and the **last** attempt appends `--time=0`
+/// so nerdctl skips the graceful SIGTERM/SIGKILL window. Without `--time=0`
+/// the last attempt would just hit the same EOF: at that point we want a hard
+/// kill, not another graceful stop.
+fn force_remove_project_containers_with_retry(
+    runner: &dyn CommandRunner,
+    cmd: &str,
+    project: &str,
+    nerdctl_prefix: &[&str],
+) {
+    let filter = format!("label=com.docker.compose.project={project}");
+    let mut ps_args: Vec<&str> = nerdctl_prefix.to_vec();
+    ps_args.extend_from_slice(&["ps", "-a", "--filter", &filter, "-q"]);
+
+    // ps is read-only; an EOF here just means we lose the id list, not a
+    // half-removed container. Keep the original best-effort behaviour.
+    let id_targets = match runner.run(cmd, &ps_args) {
+        Ok(output) => super::cleanup_targets_from_ps_output(&output),
+        Err(e) => {
+            log::debug!("force_remove_project_containers: ps failed for {project}: {e}");
+            Vec::new()
+        }
+    };
+    let name_targets = super::configured_project_container_names(project);
+
+    if id_targets.is_empty() && name_targets.is_empty() {
+        return;
+    }
+
+    if !id_targets.is_empty() {
+        log::info!(
+            "force_remove_project_containers: removing {} stale container id(s) for {project}",
+            id_targets.len()
+        );
+        let label = format!("force_remove_project_containers ids({project})");
+        let mut attempt = 0usize;
+        let result = retry_on_eof(&label, || {
+            attempt += 1;
+            // On the final attempt we escalate to `--time=0` so nerdctl
+            // sends SIGKILL immediately instead of waiting for another
+            // graceful stop window that we already know times out.
+            let force_kill = attempt == RETRY_MAX_ATTEMPTS;
+            run_rm_force_lima(runner, cmd, nerdctl_prefix, &id_targets, force_kill)
+        });
+        if let Err(e) = result {
+            log::warn!("force_remove_project_containers: rm -f by id failed for {project}: {e}");
+        }
+    }
+
+    for container_name in &name_targets {
+        let single_target = vec![container_name.clone()];
+        let label = format!("force_remove_project_containers name({container_name})");
+        let mut attempt = 0usize;
+        let result = retry_on_eof(&label, || {
+            attempt += 1;
+            // Same `--time=0` escalation as the id branch above: we'd rather
+            // hard-kill the container than log another graceful-stop EOF.
+            let force_kill = attempt == RETRY_MAX_ATTEMPTS;
+            run_rm_force_lima(runner, cmd, nerdctl_prefix, &single_target, force_kill)
+        });
+        match result {
+            Ok(()) => {}
+            Err(e) if super::is_missing_container_error(&e) => {
+                log::debug!(
+                    "force_remove_project_containers: {project} target '{container_name}' already gone: {e}"
+                );
+            }
+            Err(e) => {
+                log::warn!(
+                    "force_remove_project_containers: rm -f by name failed for {project} target '{container_name}': {e}"
+                );
+            }
+        }
+    }
+}
+
+/// Runs `nerdctl rm -f [--time=0] <targets...>` through the supplied runner.
+/// `force_kill` toggles the `--time=0` flag so callers can escalate to a hard
+/// kill on the final retry without duplicating the argv plumbing.
+fn run_rm_force_lima(
+    runner: &dyn CommandRunner,
+    cmd: &str,
+    nerdctl_prefix: &[&str],
+    targets: &[String],
+    force_kill: bool,
+) -> anyhow::Result<()> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let mut rm_args: Vec<&str> = nerdctl_prefix.to_vec();
+    rm_args.extend_from_slice(&["rm", "-f"]);
+    if force_kill {
+        rm_args.push("--time=0");
+    }
+    for target in targets {
+        rm_args.push(target.as_str());
+    }
+    runner.run(cmd, &rm_args).map(|_| ())
+}
+
 impl ContainerRuntime for LimaRuntime {
     fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
@@ -192,7 +390,7 @@ impl ContainerRuntime for LimaRuntime {
         self.require_running()?;
         let vm = consts::lima_vm_name();
         let compose_file = super::compose_file_path(project)?;
-        super::compose_down_and_cleanup(
+        compose_down_and_cleanup_with_retry(
             &*self.runner,
             "limactl",
             project,
@@ -418,6 +616,9 @@ impl ContainerRuntime for LimaRuntime {
         self.require_running()?;
         let compose_file = super::compose_file_path(project)?;
         let tail_str = tail.to_string();
+        // `--timestamps` prefixes every line with an RFC3339 stamp so the
+        // System health log view can render full date + time, not just the
+        // hour the application happened to log internally.
         self.runner.run_with_stderr(
             "limactl",
             &[
@@ -432,6 +633,7 @@ impl ContainerRuntime for LimaRuntime {
                 "-p",
                 project,
                 "logs",
+                "--timestamps",
                 "--tail",
                 &tail_str,
             ],
@@ -788,6 +990,197 @@ mod tests {
         );
         assert_eq!(LimaRuntime::parse_version("0.10.0"), Some((0, 10, 0)));
         assert_eq!(LimaRuntime::parse_version("garbage"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // retry_on_eof tests
+    // -----------------------------------------------------------------------
+
+    /// Backoff schedule used in retry tests — zero so the suite stays fast.
+    const TEST_NO_DELAYS: [std::time::Duration; 3] = [
+        std::time::Duration::ZERO,
+        std::time::Duration::ZERO,
+        std::time::Duration::ZERO,
+    ];
+
+    #[test]
+    fn test_is_eof_error_recognises_limactl_fatal_eof() {
+        assert!(is_eof_error(&anyhow::anyhow!(
+            "limactl failed: ... level=fatal msg=EOF"
+        )));
+        assert!(is_eof_error(&anyhow::anyhow!("EOF")));
+        assert!(is_eof_error(&anyhow::anyhow!(
+            "limactl failed: connection closed: EOF"
+        )));
+    }
+
+    #[test]
+    fn test_is_eof_error_rejects_non_eof_messages() {
+        assert!(!is_eof_error(&anyhow::anyhow!("permission denied")));
+        assert!(!is_eof_error(&anyhow::anyhow!("No such container: foo")));
+        // "EOF" appearing mid-message should not match — we only retry the
+        // exact "fatal msg=EOF" / trailing-EOF shape limactl produces.
+        assert!(!is_eof_error(&anyhow::anyhow!(
+            "EOF reached but file still open"
+        )));
+    }
+
+    #[test]
+    fn test_retry_on_eof_succeeds_on_first_attempt() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let calls_clone = Arc::clone(&calls);
+        let result = retry_on_eof_with_delays::<&'static str>("test", &TEST_NO_DELAYS, || {
+            *calls_clone.lock().unwrap() += 1;
+            Ok("ok")
+        });
+        assert_eq!(result.unwrap(), "ok");
+        assert_eq!(*calls.lock().unwrap(), 1, "happy path must not retry");
+    }
+
+    #[test]
+    fn test_retry_on_eof_recovers_on_second_attempt_after_eof() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let calls_clone = Arc::clone(&calls);
+        let result = retry_on_eof_with_delays::<&'static str>("test", &TEST_NO_DELAYS, || {
+            let mut c = calls_clone.lock().unwrap();
+            *c += 1;
+            if *c == 1 {
+                Err(anyhow::anyhow!("limactl failed: level=fatal msg=EOF"))
+            } else {
+                Ok("ok")
+            }
+        });
+        assert_eq!(result.unwrap(), "ok");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            2,
+            "must succeed on the second attempt after one EOF"
+        );
+    }
+
+    #[test]
+    fn test_retry_on_eof_gives_up_after_three_eofs() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let calls_clone = Arc::clone(&calls);
+        let result = retry_on_eof_with_delays::<()>("test", &TEST_NO_DELAYS, || {
+            *calls_clone.lock().unwrap() += 1;
+            Err(anyhow::anyhow!("level=fatal msg=EOF"))
+        });
+        let err = result.expect_err("three consecutive EOFs must surface as Err");
+        assert!(is_eof_error(&err));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            RETRY_MAX_ATTEMPTS,
+            "must stop after RETRY_MAX_ATTEMPTS attempts"
+        );
+    }
+
+    #[test]
+    fn test_retry_on_eof_propagates_non_eof_error_without_retry() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let calls_clone = Arc::clone(&calls);
+        let result = retry_on_eof_with_delays::<()>("test", &TEST_NO_DELAYS, || {
+            *calls_clone.lock().unwrap() += 1;
+            Err(anyhow::anyhow!("permission denied"))
+        });
+        let err = result.expect_err("non-EOF error must propagate");
+        assert!(err.to_string().contains("permission denied"));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            1,
+            "non-EOF errors must not be retried"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // run_rm_force_lima --time=0 escalation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_run_rm_force_lima_appends_time_zero_only_when_force_kill() {
+        let runner = MockRunner::new()
+            .with_response("nerdctl rm -f a", "")
+            .with_response("nerdctl rm -f --time=0 a", "");
+
+        // Graceful path — no --time=0
+        run_rm_force_lima(&runner, "nerdctl", &[], &["a".to_string()], false).unwrap();
+        // Force-kill path — emits --time=0
+        run_rm_force_lima(&runner, "nerdctl", &[], &["a".to_string()], true).unwrap();
+    }
+
+    /// End-to-end check that `force_remove_project_containers_with_retry`
+    /// (a) retries on EOF, (b) escalates to `--time=0` on the **last** attempt
+    /// rather than giving up. This is the actual production fix.
+    #[test]
+    fn test_force_remove_with_retry_escalates_to_time_zero_on_last_attempt() {
+        struct ScriptedRunner {
+            calls: Arc<Mutex<Vec<String>>>,
+        }
+        impl CommandRunner for ScriptedRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                self.calls.lock().unwrap().push(key.clone());
+                if key.contains(" ps -a ") {
+                    return Ok("stale-id\n".to_string());
+                }
+                // First two `rm -f` (without --time=0) fail with EOF; the
+                // third — with --time=0 — succeeds. This is the real-world
+                // shape we observed during shutdown.
+                if key.contains("rm -f --time=0") {
+                    return Ok(String::new());
+                }
+                if key.contains("rm -f") {
+                    return Err(anyhow::anyhow!("limactl failed: level=fatal msg=EOF"));
+                }
+                Err(anyhow::anyhow!("unexpected: {key}"))
+            }
+        }
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = ScriptedRunner {
+            calls: Arc::clone(&calls),
+        };
+
+        // Use a project name with no compose file on disk, so only the id
+        // branch fires (configured_project_container_names returns empty).
+        let project = format!(
+            "lima-retry-test-{}",
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .subsec_nanos()
+        );
+
+        // We exercise the full helper rather than retry_on_eof directly so
+        // that the escalation logic is verified end-to-end. The production
+        // backoff (200 ms / 500 ms) runs through real sleep here, but it's
+        // bounded to ~700 ms which is fine for a unit test.
+        force_remove_project_containers_with_retry(&runner, "nerdctl", &project, &[]);
+
+        let observed = calls.lock().unwrap().clone();
+        // ps + 3 rm-f attempts (two graceful + one --time=0)
+        assert_eq!(
+            observed.len(),
+            4,
+            "expected ps + 3 rm-f attempts, got: {:?}",
+            observed
+        );
+        assert!(observed[0].contains("ps -a"), "first call must be ps");
+        assert!(
+            observed[1].contains("rm -f stale-id") && !observed[1].contains("--time=0"),
+            "attempt 1 must be graceful rm -f, got: {}",
+            observed[1]
+        );
+        assert!(
+            observed[2].contains("rm -f stale-id") && !observed[2].contains("--time=0"),
+            "attempt 2 must still be graceful rm -f, got: {}",
+            observed[2]
+        );
+        assert!(
+            observed[3].contains("rm -f --time=0 stale-id"),
+            "attempt 3 must escalate to --time=0, got: {}",
+            observed[3]
+        );
     }
 
     #[test]
@@ -1337,7 +1730,7 @@ mod tests {
         let compose_file = crate::runtime::compose_file_path("acme").unwrap();
         let runner = mock_runner_with_vm_running().with_response(
             &format!(
-                "limactl shell {} -- sudo nerdctl compose -f {} -p acme logs --tail 200",
+                "limactl shell {} -- sudo nerdctl compose -f {} -p acme logs --timestamps --tail 200",
                 consts::LIMA_VM_NAME,
                 compose_file
             ),
