@@ -5,9 +5,9 @@ import { provideRouter } from '@angular/router';
 import { NavRailComponent, type NavRailEntry } from './nav-rail.component';
 
 const ENTRIES: readonly NavRailEntry[] = [
-  { id: 'chat', label: 'Chat', route: '/chat', iconPath: 'M0 0', shortcut: '⌘1' },
-  { id: 'integrations', label: 'Integrations', route: '/integrations', iconPath: 'M0 0' },
-  { id: 'settings', label: 'Settings', route: '/settings', iconPath: 'M0 0' },
+  { id: 'chat', label: 'Chat', route: '/chat', iconName: 'message-circle', shortcut: '⌘1' },
+  { id: 'integrations', label: 'Integrations', route: '/integrations', iconName: 'code' },
+  { id: 'settings', label: 'Settings', route: '/settings', iconName: 'settings' },
 ];
 
 @Component({
