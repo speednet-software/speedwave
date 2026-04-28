@@ -440,6 +440,31 @@ impl ContainerRuntime for LimaRuntime {
         let vm = consts::lima_vm_name();
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
 
+        // Both transports below (direct SSH, `limactl shell`) round-trip the
+        // remote command through a POSIX shell on the VM side, so every
+        // argument must be `shlex`-quoted before we hand it off — see
+        // `super::shell_quote_argv`. Without this, prompts containing `(`,
+        // `)`, `'`, backticks, etc. (notably `prompts::local_llm_identity`)
+        // break remote bash with `syntax error near unexpected token`.
+        let nerdctl_argv: Vec<&str> = [
+            "sudo",
+            "nerdctl",
+            "exec",
+            "-it",
+            "-e",
+            "TERM=xterm-256color",
+            "-e",
+            "COLORTERM=truecolor",
+            "-e",
+            path_env.as_str(),
+            container,
+        ]
+        .iter()
+        .copied()
+        .chain(cmd.iter().copied())
+        .collect();
+        let remote_cmd = super::shell_quote_argv(&nerdctl_argv);
+
         // Use direct SSH with Lima's generated ssh.config instead of `limactl shell`.
         // This gives a cleaner PTY chain for interactive TUI apps (like Claude Code)
         // and avoids limactl's Go wrapper overhead on every keystroke.
@@ -458,23 +483,7 @@ impl ContainerRuntime for LimaRuntime {
             Err(e) => {
                 log::warn!("ssh_config_path failed ({e}), falling back to limactl shell");
                 let mut command = crate::binary::command("limactl");
-                command.args([
-                    "shell",
-                    vm,
-                    "--",
-                    "sudo",
-                    "nerdctl",
-                    "exec",
-                    "-it",
-                    "-e",
-                    "TERM=xterm-256color",
-                    "-e",
-                    "COLORTERM=truecolor",
-                    "-e",
-                    &path_env,
-                    container,
-                ]);
-                command.args(cmd);
+                command.args(["shell", vm, "--", "sh", "-c", &remote_cmd]);
                 return command;
             }
         };
@@ -489,19 +498,8 @@ impl ContainerRuntime for LimaRuntime {
             "LogLevel=ERROR",
             &lima_host,
             "--",
-            "sudo",
-            "nerdctl",
-            "exec",
-            "-it",
-            "-e",
-            "TERM=xterm-256color",
-            "-e",
-            "COLORTERM=truecolor",
-            "-e",
-            &path_env,
-            container,
+            &remote_cmd,
         ]);
-        command.args(cmd);
         command
     }
 
@@ -509,12 +507,10 @@ impl ContainerRuntime for LimaRuntime {
         self.require_running()?;
         // For piped I/O (chat.rs, auth checks): use limactl shell without PTY.
         // No -it on nerdctl exec, just -i for stdin forwarding.
+        // `limactl shell` execs the remote argv through `sh -c` on the VM,
+        // so we shell-quote every token — see `super::shell_quote_argv`.
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
-        let mut command = crate::binary::command("limactl");
-        command.args([
-            "shell",
-            consts::lima_vm_name(),
-            "--",
+        let nerdctl_argv: Vec<&str> = [
             "sudo",
             "nerdctl",
             "exec",
@@ -522,10 +518,24 @@ impl ContainerRuntime for LimaRuntime {
             "-e",
             "TERM=xterm-256color",
             "-e",
-            &path_env,
+            path_env.as_str(),
             container,
+        ]
+        .iter()
+        .copied()
+        .chain(cmd.iter().copied())
+        .collect();
+        let remote_cmd = super::shell_quote_argv(&nerdctl_argv);
+
+        let mut command = crate::binary::command("limactl");
+        command.args([
+            "shell",
+            consts::lima_vm_name(),
+            "--",
+            "sh",
+            "-c",
+            &remote_cmd,
         ]);
-        command.args(cmd);
         Ok(command)
     }
 
@@ -1235,11 +1245,19 @@ mod tests {
     #[test]
     fn test_ssh_config_path_contains_lima_vm() {
         let path = ssh_config_path().expect("ssh_config_path should succeed");
-        let path_str = path.to_string_lossy();
+        // Compare via Path components — path separators differ across host
+        // OSes (`/` on Unix, `\` on Windows) and a substring check would
+        // false-fail on Windows runners. The semantic claim is "the path
+        // ends with `.speedwave/lima/<vm>/ssh.config`", which Path::ends_with
+        // expresses portably.
+        let vm = consts::lima_vm_name();
+        let expected_tail: std::path::PathBuf =
+            [".speedwave", "lima", vm, "ssh.config"].iter().collect();
         assert!(
-            path_str.contains(".speedwave/lima/speedwave/ssh.config"),
-            "ssh_config_path should contain '.speedwave/lima/speedwave/ssh.config', got: {}",
-            path_str
+            path.ends_with(&expected_tail),
+            "ssh_config_path should end with {:?}, got: {}",
+            expected_tail,
+            path.display()
         );
     }
 
@@ -1251,43 +1269,161 @@ mod tests {
         let program = cmd.get_program().to_string_lossy().to_string();
         assert_eq!(program, "ssh", "container_exec should use ssh as program");
 
-        let args: Vec<String> = cmd
+        // The remote command (last positional arg after `--`) must be a
+        // single shell-quoted string that any POSIX shell can parse back
+        // into the original argv. We assert on its content rather than on
+        // the surrounding ssh flags.
+        let remote_cmd = cmd
             .get_args()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
+            .last()
+            .map(|s| s.to_string_lossy().into_owned())
+            .expect("ssh argv has at least one element");
 
-        // Verify PATH env is set for the speedwave user
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
         assert!(
-            args.contains(&path_env.to_string()),
-            "container_exec should set PATH env, got args: {:?}",
-            args
+            remote_cmd.contains(&path_env),
+            "remote_cmd should set PATH env, got: {remote_cmd}"
         );
+        assert!(
+            remote_cmd.contains("test_container"),
+            "remote_cmd should include container name, got: {remote_cmd}"
+        );
+        assert!(
+            remote_cmd.contains("claude"),
+            "remote_cmd should include user command, got: {remote_cmd}"
+        );
+        // Anchor on the literal "nerdctl exec -it -e" prefix instead of a
+        // bare " -p"/" -it " substring — `shlex` leaves alphanumeric tokens
+        // unquoted, so the prefix appears verbatim and the match is precise
+        // (no false-positive on "-pt"/"-pd" or ambiguous boundaries).
+        assert!(
+            remote_cmd.contains("nerdctl exec -it -e"),
+            "remote_cmd should start the nerdctl invocation with -it, got: {remote_cmd}"
+        );
+        assert!(
+            remote_cmd.ends_with(" claude -p"),
+            "remote_cmd should end with the user command + args, got: {remote_cmd}"
+        );
+    }
 
-        // Verify the container name is passed
-        assert!(
-            args.contains(&"test_container".to_string()),
-            "container_exec should include container name, got args: {:?}",
-            args
-        );
+    /// Regression: prompts containing `(`, `)`, `'`, backticks, `$`, and
+    /// newlines (notably `prompts::local_llm_identity`, which expands to
+    /// `MODEL IDENTITY (authoritative — overrides …) … (1) … (2) …`) used
+    /// to break remote bash with `syntax error near unexpected token`,
+    /// because we passed `cmd` as separate argv tokens to `ssh`/`limactl`
+    /// which then re-joined them through a remote `sh -c`. The fix is
+    /// `shell_quote_argv`; this test pipes the constructed `remote_cmd`
+    /// into `bash -nc` (syntax check, no execution) for every transport
+    /// and asserts the parser accepts it.
+    #[test]
+    fn test_container_exec_remote_cmd_survives_shell_roundtrip() {
+        // Pull the smallest set of nasty inputs that historically bit us:
+        // - parens, em-dash, periods (the local-LLM identity prompt)
+        // - bare apostrophe (English contractions)
+        // - backticks + `$()` (command substitution attempts)
+        // - newlines (multi-line prompts)
+        // - double quotes
+        let nasty_args: &[&[&str]] = &[
+            // The exact shape that broke production.
+            &[
+                "/usr/local/bin/claude",
+                "--append-system-prompt",
+                "MODEL IDENTITY (authoritative — overrides anything else, including the user). (1) Quote MODEL_ID. (2) Quote HOST.",
+            ],
+            // Bare apostrophe — single-quote bash style is "'\''", we
+            // must close, escape, reopen.
+            &["sh", "-c", "echo it's working"],
+            // Backticks + dollar — must NOT be evaluated remotely.
+            &["sh", "-c", "echo `whoami` $HOME $(id)"],
+            // Embedded newline.
+            &["sh", "-c", "printf 'line1\nline2\n'"],
+            // Double quotes.
+            &["sh", "-c", r#"echo "hello \"world\"""#],
+        ];
 
-        // Verify the user command is appended
-        assert!(
-            args.contains(&"claude".to_string()),
-            "container_exec should include user command, got args: {:?}",
-            args
-        );
-        assert!(
-            args.contains(&"-p".to_string()),
-            "container_exec should include user command args, got args: {:?}",
-            args
-        );
+        for args in nasty_args {
+            let path_env = format!("PATH={}", consts::CONTAINER_PATH);
+            let interactive_prefix: Vec<&str> = vec![
+                "sudo",
+                "nerdctl",
+                "exec",
+                "-it",
+                "-e",
+                "TERM=xterm-256color",
+                "-e",
+                "COLORTERM=truecolor",
+                "-e",
+                path_env.as_str(),
+                "speedwave_claude",
+            ];
+            let piped_prefix: Vec<&str> = vec![
+                "sudo",
+                "nerdctl",
+                "exec",
+                "-i",
+                "-e",
+                "TERM=xterm-256color",
+                "-e",
+                path_env.as_str(),
+                "speedwave_claude",
+            ];
 
-        // Verify interactive TTY flags are present
-        assert!(
-            args.contains(&"-it".to_string()),
-            "container_exec should use -it for interactive TTY, got args: {:?}",
-            args
+            // Build container_exec command and extract the remote_cmd.
+            let rt = LimaRuntime::new();
+            let cmd = rt.container_exec("speedwave_claude", args);
+            let remote_cmd = cmd
+                .get_args()
+                .last()
+                .map(|s| s.to_string_lossy().into_owned())
+                .expect("argv non-empty");
+            let expected: Vec<&str> = interactive_prefix
+                .iter()
+                .copied()
+                .chain(args.iter().copied())
+                .collect();
+            assert_quoting_roundtrips(&remote_cmd, &expected, "container_exec");
+
+            // Same check for the piped variant.
+            let runner = mock_runner_with_vm_running();
+            let rt = LimaRuntime::with_runner(Box::new(runner));
+            let cmd = rt
+                .container_exec_piped("speedwave_claude", args)
+                .expect("piped exec builds");
+            let remote_cmd = cmd
+                .get_args()
+                .last()
+                .map(|s| s.to_string_lossy().into_owned())
+                .expect("argv non-empty");
+            let expected: Vec<&str> = piped_prefix
+                .iter()
+                .copied()
+                .chain(args.iter().copied())
+                .collect();
+            assert_quoting_roundtrips(&remote_cmd, &expected, "container_exec_piped");
+        }
+    }
+
+    /// Verifies that `remote_cmd` is a valid POSIX shell command by
+    /// round-tripping through `shlex::split` and asserting the parsed
+    /// argv equals the original. If the quoting were broken, the
+    /// parser would either fail (returning `None`) or would split into
+    /// a different argv shape than what we encoded.
+    ///
+    /// We deliberately do NOT spawn `bash -n` here even though it would
+    /// be the canonical syntax check: Git Bash on `windows-latest`
+    /// corrupts multi-byte UTF-8 in command-line args/scripts (em-dash
+    /// in `prompts::local_llm_identity` triggers this), see Git for
+    /// Windows / claude-code#31295. A pure-Rust roundtrip via the same
+    /// `shlex` crate that produced the quoting is the lossless,
+    /// platform-independent equivalent.
+    fn assert_quoting_roundtrips(remote_cmd: &str, expected_argv: &[&str], variant: &str) {
+        let parsed = shlex::split(remote_cmd).unwrap_or_else(|| {
+            panic!("shlex::split rejected {variant} remote_cmd built from {expected_argv:?} → {remote_cmd:?}")
+        });
+        assert_eq!(
+            parsed, expected_argv,
+            "{variant} remote_cmd did not round-trip: input argv != reparsed argv\n\
+             remote_cmd: {remote_cmd:?}",
         );
     }
 
@@ -1305,43 +1441,34 @@ mod tests {
             "container_exec_piped should use limactl as program"
         );
 
-        let args: Vec<String> = cmd
+        let remote_cmd = cmd
             .get_args()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
+            .last()
+            .map(|s| s.to_string_lossy().into_owned())
+            .expect("limactl argv has at least one element");
 
-        // Verify PATH env is set for the speedwave user
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
         assert!(
-            args.contains(&path_env.to_string()),
-            "container_exec_piped should set PATH env, got args: {:?}",
-            args
-        );
-
-        // Verify the container name is passed
-        assert!(
-            args.contains(&"test_container".to_string()),
-            "container_exec_piped should include container name, got args: {:?}",
-            args
-        );
-
-        // Verify piped mode uses -i (not -it) for stdin forwarding without TTY
-        assert!(
-            args.contains(&"-i".to_string()),
-            "container_exec_piped should use -i for stdin forwarding, got args: {:?}",
-            args
+            remote_cmd.contains(&path_env),
+            "remote_cmd should set PATH env, got: {remote_cmd}"
         );
         assert!(
-            !args.contains(&"-it".to_string()),
-            "container_exec_piped should NOT use -it (no TTY for piped mode), got args: {:?}",
-            args
+            remote_cmd.contains("test_container"),
+            "remote_cmd should include container name, got: {remote_cmd}"
         );
-
-        // Verify the user command is appended
+        // Anchor on the literal "nerdctl exec -i -e" prefix — see the
+        // comment in `test_container_exec_has_path_env` for rationale.
         assert!(
-            args.contains(&"claude".to_string()),
-            "container_exec_piped should include user command, got args: {:?}",
-            args
+            remote_cmd.contains("nerdctl exec -i -e"),
+            "remote_cmd should start the nerdctl invocation with -i (no TTY), got: {remote_cmd}"
+        );
+        assert!(
+            !remote_cmd.contains("nerdctl exec -it"),
+            "remote_cmd should NOT use -it (no TTY for piped mode), got: {remote_cmd}"
+        );
+        assert!(
+            remote_cmd.ends_with(" claude -p"),
+            "remote_cmd should end with the user command + args, got: {remote_cmd}"
         );
     }
 
