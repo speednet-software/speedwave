@@ -940,16 +940,21 @@ mod tests {
 
     /// Invokes `bash -n` (POSIX syntax check, no execution) on `remote_cmd`.
     /// See `runtime::lima::tests::assert_bash_n` for the full rationale on
-    /// the env knobs (UTF-8 locale + MSYS path-conversion disable).
+    /// why we hand the script to bash via a file rather than `-nc`.
     fn assert_bash_n(remote_cmd: &str, args: &[&str], variant: &str) {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().expect("create temp file");
+        f.write_all(remote_cmd.as_bytes())
+            .expect("write remote_cmd");
+        f.flush().expect("flush remote_cmd");
         let status = std::process::Command::new("bash")
-            .args(["-nc", remote_cmd])
+            .arg("-n")
+            .arg(f.path())
             .env("LANG", "C.UTF-8")
             .env("LC_ALL", "C.UTF-8")
-            .env("MSYS_NO_PATHCONV", "1")
-            .env("MSYS2_ARG_CONV_EXCL", "*")
             .status()
             .expect("bash -n must be available on the host");
+        drop(f);
         assert!(
             status.success(),
             "bash -n rejected {variant} remote_cmd built from {args:?} → {remote_cmd:?}",

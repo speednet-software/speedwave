@@ -1377,23 +1377,30 @@ mod tests {
 
     /// Invokes `bash -n` (POSIX syntax check, no execution) on `remote_cmd`.
     ///
-    /// Cross-platform tweaks:
-    /// - `LANG=C.UTF-8`: Git Bash on `windows-latest` defaults to the `C`
-    ///   locale, which rejects multi-byte UTF-8 sequences (the em-dash in
-    ///   `prompts::local_llm_identity`) and bails with a bogus syntax error.
-    ///   Forcing UTF-8 makes the parser see `—` as one grapheme, matching
-    ///   the production Linux container's behaviour.
-    /// - `MSYS_NO_PATHCONV=1` / `MSYS2_ARG_CONV_EXCL=*`: belt-and-braces
-    ///   against MSYS rewriting `/usr/...` tokens before bash sees them.
+    /// Implementation note: we write the script to a temp file and pass
+    /// the path to `bash -n`, instead of `bash -nc <string>`. On the
+    /// `windows-latest` GitHub Actions runner, Git Bash + MSYS2 mangle
+    /// the command-line argument (em-dash, embedded `/usr/...` paths) by
+    /// the time bash sees it, producing spurious syntax errors. A file
+    /// argument bypasses the entire arg-conversion path: bash reads the
+    /// raw bytes off disk and parses them in its own UTF-8 locale.
     fn assert_bash_n(remote_cmd: &str, args: &[&str], variant: &str) {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().expect("create temp file");
+        f.write_all(remote_cmd.as_bytes())
+            .expect("write remote_cmd");
+        f.flush().expect("flush remote_cmd");
+        // Keep `f` alive until after the bash invocation — its Drop impl
+        // deletes the file. On Windows, `bash` opens the path read-only
+        // even while we still hold the writer, so this works on all OSes.
         let status = std::process::Command::new("bash")
-            .args(["-nc", remote_cmd])
+            .arg("-n")
+            .arg(f.path())
             .env("LANG", "C.UTF-8")
             .env("LC_ALL", "C.UTF-8")
-            .env("MSYS_NO_PATHCONV", "1")
-            .env("MSYS2_ARG_CONV_EXCL", "*")
             .status()
             .expect("bash -n must be available on the host");
+        drop(f);
         assert!(
             status.success(),
             "bash -n rejected {variant} remote_cmd built from {args:?} → {remote_cmd:?}",
