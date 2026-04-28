@@ -13,5 +13,9 @@
     "@wdio/spec-reporter": "^9.19.0",
     "typescript": "~5.9.0",
     "ts-node": "^10.9.0"
+  },
+  "overrides": {
+    "serialize-javascript": "^7.0.4",
+    "basic-ftp": "^5.3.1"
   }
 }
