@@ -20,19 +20,19 @@
     "lint:fix": "eslint --fix 'src/**/*.ts' 'src/**/*.html'"
   },
   "dependencies": {
-    "@angular/animations": "^21.2.7",
-    "@angular/common": "^21.2.7",
-    "@angular/compiler": "^21.2.7",
-    "@angular/core": "^21.2.7",
-    "@angular/forms": "^21.2.7",
-    "@angular/platform-browser": "^21.2.7",
-    "@angular/platform-browser-dynamic": "^21.2.7",
-    "@angular/router": "^21.2.7",
+    "@angular/animations": "^21.2.10",
+    "@angular/common": "^21.2.10",
+    "@angular/compiler": "^21.2.10",
+    "@angular/core": "^21.2.10",
+    "@angular/forms": "^21.2.10",
+    "@angular/platform-browser": "^21.2.10",
+    "@angular/platform-browser-dynamic": "^21.2.10",
+    "@angular/router": "^21.2.10",
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-dialog": "^2.7.0",
     "@tauri-apps/plugin-log": "^2",
     "diff": "^9.0.0",
-    "marked": "^17.0.5",
+    "marked": "^18.0.2",
     "rxjs": "^7.8.0",
     "tslib": "^2.6.0"
   },
@@ -40,14 +40,14 @@
     "undici": "^7.24.0"
   },
   "devDependencies": {
-    "@angular/build": "^21.2.7",
-    "@angular/cli": "^21.2.7",
-    "@angular/compiler-cli": "^21.2.7",
+    "@angular/build": "^21.2.8",
+    "@angular/cli": "^21.2.8",
+    "@angular/compiler-cli": "^21.2.10",
     "@eslint/js": "^10.0.1",
     "@tailwindcss/postcss": "^4.2.2",
     "@tauri-apps/cli": "^2.10.1",
     "@types/node": "^25.6.0",
-    "@vitest/coverage-v8": "^4.1.2",
+    "@vitest/coverage-v8": "^4.1.5",
     "angular-eslint": "^21.3.1",
     "axe-core": "^4.11.3",
     "eslint": "^10",
@@ -55,11 +55,11 @@
     "eslint-plugin-jsdoc": "^62.9.0",
     "eslint-plugin-prettier": "^5",
     "jsdom": "^28.1.0",
-    "postcss": "^8.5.8",
+    "postcss": "^8.5.12",
     "prettier": "^3",
     "tailwindcss": "^4.2.1",
     "typescript": "~5.9.0",
-    "typescript-eslint": "^8",
-    "vitest": "^4.0.18"
+    "typescript-eslint": "^8.59.1",
+    "vitest": "^4.1.5"
   }
 }
