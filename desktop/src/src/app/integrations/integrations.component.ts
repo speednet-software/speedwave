@@ -293,13 +293,18 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
-  private unsubProjectReady: (() => void) | null = null;
+  private unsubProjectSettled: (() => void) | null = null;
 
   /** Loads the active project and integrations on init. */
   async ngOnInit(): Promise<void> {
     await this.loadActiveProject();
     await this.loadIntegrations();
-    this.unsubProjectReady = this.projectState.onProjectReady(async () => {
+    // Subscribe to settled (not just ready) so we also reload after
+    // `auth_required` / `error` settle — the integrations table itself
+    // does not require Claude auth, so users still need to see and toggle
+    // services in those states. Without this, navigating to /integrations
+    // before the shell has fully initialized leaves the table empty.
+    this.unsubProjectSettled = this.projectState.onProjectSettled(async () => {
       if (this.activeOAuthRequestId || this.oauthStatus === 'starting') {
         await this.handleCancelOAuth();
       }
@@ -343,9 +348,9 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
 
   /** Cleans up event listeners. */
   ngOnDestroy(): void {
-    if (this.unsubProjectReady) {
-      this.unsubProjectReady();
-      this.unsubProjectReady = null;
+    if (this.unsubProjectSettled) {
+      this.unsubProjectSettled();
+      this.unsubProjectSettled = null;
     }
     if (this.unlistenOAuth) {
       this.unlistenOAuth();

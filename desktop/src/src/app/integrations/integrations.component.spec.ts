@@ -598,14 +598,14 @@ describe('IntegrationsComponent', () => {
 
       // Verify the unsub function exists before destroy
       expect(
-        (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
+        (component as unknown as { unsubProjectSettled: unknown })['unsubProjectSettled']
       ).not.toBeNull();
 
       component.ngOnDestroy();
 
       // Verify unsub was called and nulled
       expect(
-        (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
+        (component as unknown as { unsubProjectSettled: unknown })['unsubProjectSettled']
       ).toBeNull();
     });
 
