@@ -1169,7 +1169,7 @@ fn main() {
                         let app_clone = app.clone();
                         tauri::async_runtime::spawn(async move {
                             match updater::check_for_update(&app_clone).await {
-                                Ok(Some(info)) => {
+                                Ok(updater::UpdateCheckOutcome::UpdateAvailable(info)) => {
                                     log::info!("tray: update available: {}", info.version);
                                     use tauri::Emitter;
                                     if let Err(e) = app_clone.emit("update_available", &info) {
@@ -1178,8 +1178,15 @@ fn main() {
                                         );
                                     }
                                 }
-                                Ok(None) => {
+                                Ok(updater::UpdateCheckOutcome::UpToDate) => {
                                     log::info!("tray: already up to date");
+                                }
+                                Ok(updater::UpdateCheckOutcome::ManagedExternally {
+                                    manager,
+                                }) => {
+                                    log::info!(
+                                        "tray: updates managed by '{manager}' — no network check"
+                                    );
                                 }
                                 Err(e) => {
                                     log::error!("tray: check failed: {e}");

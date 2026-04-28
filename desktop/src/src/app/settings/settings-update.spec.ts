@@ -19,7 +19,7 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
         case 'set_update_settings':
           return undefined;
         case 'check_for_update':
-          return null;
+          return { kind: 'up_to_date' };
         case 'get_platform':
           return 'macos';
         default:
@@ -108,7 +108,14 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
   describe('checkForUpdate()', () => {
     it('sets updateResult to available when update found', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'check_for_update') return { version: '3.0.0', body: null, date: null };
+        if (cmd === 'check_for_update')
+          return {
+            kind: 'update_available',
+            version: '3.0.0',
+            body: null,
+            date: null,
+            is_critical: false,
+          };
         return undefined;
       };
       await component.checkForUpdate();
@@ -118,7 +125,7 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
 
     it('sets updateResult to up-to-date when no update', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'check_for_update') return null;
+        if (cmd === 'check_for_update') return { kind: 'up_to_date' };
         return undefined;
       };
       await component.checkForUpdate();

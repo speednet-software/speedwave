@@ -9,7 +9,7 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { TauriService } from '../../services/tauri.service';
-import { UpdateInfo, UpdateSettings } from '../../models/update';
+import { UpdateCheckOutcome, UpdateSettings } from '../../models/update';
 
 /** Displays app update controls, container update/rollback, and auto-check settings. */
 @Component({
@@ -19,7 +19,7 @@ import { UpdateInfo, UpdateSettings } from '../../models/update';
   host: { class: 'block' },
   template: `
     <section id="section-updates" class="border-t border-[var(--line)] pt-6">
-      <h2 class="view-title text-[16px] text-[var(--ink)]">Updates</h2>
+      <h2 class="view-title view-title-section text-[var(--ink)]">Updates</h2>
       <div class="mt-3 rounded border border-[var(--line)]">
         <div class="flex items-center justify-between px-4 py-3">
           <div>
@@ -62,6 +62,14 @@ import { UpdateInfo, UpdateSettings } from '../../models/update';
                 </button>
               }
             }
+            @if (updateResult === 'managed-externally') {
+              <span
+                class="mono text-[11px] text-[var(--ink-mute)]"
+                data-testid="settings-update-managed-externally"
+              >
+                run <code>sudo {{ managedManager }} upgrade speedwave</code>
+              </span>
+            }
           </div>
         </div>
       </div>
@@ -99,8 +107,10 @@ export class UpdateSectionComponent implements OnInit {
   updateAutoCheck = true;
   updateIntervalHours = UpdateSectionComponent.DEFAULT_INTERVAL_HOURS;
   updateChecking = false;
-  updateResult: 'none' | 'up-to-date' | 'available' = 'none';
+  updateResult: 'none' | 'up-to-date' | 'available' | 'managed-externally' = 'none';
   updateAvailableVersion = '';
+  /** Name of the package manager that owns this install (apt/dnf/...). */
+  managedManager = '';
   updateInstalling = false;
   isLinux = false;
   updateInstallError = '';
@@ -126,6 +136,9 @@ export class UpdateSectionComponent implements OnInit {
     if (this.updateResult === 'up-to-date') return '✓ up to date';
     if (this.updateResult === 'available') {
       return '⚠ update available: v' + this.updateAvailableVersion;
+    }
+    if (this.updateResult === 'managed-externally') {
+      return 'managed by your system package manager';
     }
     return 'tap "check now" to look for updates';
   }
@@ -194,16 +207,23 @@ export class UpdateSectionComponent implements OnInit {
     this.error = '';
     this.cdr.markForCheck();
     try {
-      const info = await this.tauri.invoke<UpdateInfo | null>('check_for_update');
-      if (info) {
-        this.updateResult = 'available';
-        this.updateAvailableVersion = info.version;
-      } else {
-        this.updateResult = 'up-to-date';
-        setTimeout(() => {
-          this.updateResult = 'none';
-          this.cdr.markForCheck();
-        }, 3000);
+      const outcome = await this.tauri.invoke<UpdateCheckOutcome>('check_for_update');
+      switch (outcome.kind) {
+        case 'update_available':
+          this.updateResult = 'available';
+          this.updateAvailableVersion = outcome.version;
+          break;
+        case 'managed_externally':
+          this.updateResult = 'managed-externally';
+          this.managedManager = outcome.manager;
+          break;
+        case 'up_to_date':
+          this.updateResult = 'up-to-date';
+          setTimeout(() => {
+            this.updateResult = 'none';
+            this.cdr.markForCheck();
+          }, 3000);
+          break;
       }
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);

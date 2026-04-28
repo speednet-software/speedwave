@@ -161,7 +161,14 @@ describe('UpdateSectionComponent', () => {
   describe('checkForUpdate()', () => {
     it('sets updateResult to available when update found', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'check_for_update') return { version: '3.0.0', body: null, date: null };
+        if (cmd === 'check_for_update')
+          return {
+            kind: 'update_available',
+            version: '3.0.0',
+            body: null,
+            date: null,
+            is_critical: false,
+          };
         return undefined;
       };
       await component.checkForUpdate();
@@ -171,11 +178,21 @@ describe('UpdateSectionComponent', () => {
 
     it('sets updateResult to up-to-date when no update', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'check_for_update') return null;
+        if (cmd === 'check_for_update') return { kind: 'up_to_date' };
         return undefined;
       };
       await component.checkForUpdate();
       expect(component.updateResult).toBe('up-to-date');
+    });
+
+    it('sets updateResult to managed-externally when system package manages updates', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'check_for_update') return { kind: 'managed_externally', manager: 'apt' };
+        return undefined;
+      };
+      await component.checkForUpdate();
+      expect(component.updateResult).toBe('managed-externally');
+      expect(component.managedManager).toBe('apt');
     });
 
     it('sets error on failure and emits errorOccurred', async () => {
