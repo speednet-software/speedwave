@@ -422,26 +422,6 @@
     border-radius: 1px;
   }
 
-  /* Tooltip shown next to rail buttons on hover. */
-  .tooltip {
-    position: absolute;
-    left: calc(100% + 12px);
-    top: 50%;
-    transform: translateY(-50%);
-    background: var(--bg-3);
-    border: 1px solid var(--line-strong);
-    padding: 4px 8px;
-    border-radius: 4px;
-    font-size: 11px;
-    color: var(--ink);
-    white-space: nowrap;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.1s;
-    z-index: 100;
-  }
-  .rail-btn:hover .tooltip { opacity: 1; }
-
   /* Theme card — used in Settings → Appearance. */
   .theme-card .check { opacity: 0; }
   .theme-card.active {
