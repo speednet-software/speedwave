@@ -91,7 +91,7 @@ export type IconName =
           <path d="M9 5l7 7-7 7" />
         }
         @case ('chevron-down') {
-          <path d="M2 4l3 3 3-3" />
+          <path d="M6 9l6 6 6-6" />
         }
         @case ('alert-triangle') {
           <path
