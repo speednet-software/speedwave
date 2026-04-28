@@ -69,7 +69,11 @@ HOST_REPO_DIR="${SPEEDWAVE_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # Check if remote machine has required tools; run setup if not.
 
 ensure_provisioned_linux() {
-    if linux_ssh "command -v npm && command -v cargo" >/dev/null 2>&1; then
+    # Source ~/.cargo/env explicitly — cargo is installed by rustup-init under
+    # ~/.cargo/bin which is only on PATH for interactive/login shells. SSH
+    # commands here run as a non-interactive, non-login shell, so without
+    # sourcing the env we'd always see cargo as "missing" and re-run setup.
+    if linux_ssh '. "$HOME/.cargo/env" 2>/dev/null; command -v npm && command -v cargo' >/dev/null 2>&1; then
         echo "[linux] Provisioning: OK (npm + cargo found)"
         return
     fi
@@ -149,7 +153,7 @@ if [ -x "$NERDCTL" ]; then
 fi
 # Remove installed .deb if present
 sudo dpkg --remove speedwave 2>/dev/null || sudo dpkg --remove speedwave-desktop 2>/dev/null || true
-sudo apt-get autoremove -y 2>/dev/null || true
+sudo DEBIAN_FRONTEND=noninteractive apt-get autoremove -y 2>/dev/null || true
 # Stop rootless containerd + buildkit (installed as systemd --user services by setup wizard)
 systemctl --user stop buildkit 2>/dev/null || true
 systemctl --user disable buildkit 2>/dev/null || true
@@ -512,8 +516,9 @@ SCRIPT
 
     linux_ssh bash <<'SCRIPT'
 set -euo pipefail
-# Install .deb — this also installs the AppArmor profile and declares deps
-sudo apt install -y /tmp/speedwave.deb
+# Install .deb — this also installs the AppArmor profile and declares deps.
+# Use apt-get (stable CLI for scripts; apt prints "no stable CLI" warning).
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/speedwave.deb
 SCRIPT
 
     # Copy E2E test suite — only wdio specs and deps, not the full repo
@@ -544,7 +549,7 @@ SCRIPT
 
     echo "[linux] Reinstalling .deb..."
     linux_ssh "cp ~/Desktop/speedwave.deb /tmp/speedwave.deb"
-    linux_ssh "sudo apt install -y /tmp/speedwave.deb"
+    linux_ssh "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/speedwave.deb"
 
     # Re-copy E2E test suite (linux_clean_state removed /tmp/speedwave-e2e)
     # shellcheck disable=SC2086
@@ -1159,7 +1164,7 @@ preview_linux() {
 
     echo "[linux] Installing .deb..."
     linux_ssh "cp ~/Desktop/speedwave.deb /tmp/speedwave.deb"
-    linux_ssh "sudo apt install -y /tmp/speedwave.deb"
+    linux_ssh "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/speedwave.deb"
 
     # Launch with Xvfb (headless) — for manual testing, use VNC or connect
     # to the machine's physical display instead.
