@@ -212,6 +212,7 @@ export class ModalOverlayComponent {
     if (this.dialogRef) return;
     const ref = this.dialog.open(this.content(), {
       hasBackdrop: true,
+      backdropClass: 'cdk-overlay-dark-backdrop',
       ariaLabel: this.modalTitle(),
       panelClass: 'modal-overlay-panel',
       disableClose: false,

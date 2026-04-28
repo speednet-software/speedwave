@@ -44,6 +44,13 @@ describe('UiStateService', () => {
       service.toggleSidebar();
       expect(service.memoryOpen()).toBe(false);
     });
+
+    it('opens sidebar while memory is open → closes memory', () => {
+      service.toggleMemory();
+      service.toggleSidebar();
+      expect(service.memoryOpen()).toBe(false);
+      expect(service.sidebarOpen()).toBe(true);
+    });
   });
 
   describe('toggleMemory', () => {
@@ -61,6 +68,13 @@ describe('UiStateService', () => {
     it('does not affect sidebarOpen', () => {
       service.toggleMemory();
       expect(service.sidebarOpen()).toBe(false);
+    });
+
+    it('opens memory while sidebar is open → closes sidebar', () => {
+      service.toggleSidebar();
+      service.toggleMemory();
+      expect(service.sidebarOpen()).toBe(false);
+      expect(service.memoryOpen()).toBe(true);
     });
   });
 

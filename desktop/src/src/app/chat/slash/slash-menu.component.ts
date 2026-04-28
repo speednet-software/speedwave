@@ -49,6 +49,8 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
           class="mono w-full bg-transparent text-[12px] text-[var(--ink)] placeholder-[var(--ink-mute)] focus:outline-none"
           placeholder="search skills &amp; commands..."
           aria-label="Filter slash commands"
+          aria-controls="slash-listbox"
+          [attr.aria-activedescendant]="optionId(activeIndex())"
           [value]="query()"
           (input)="onQueryInput($event)"
           (keydown)="onSearchKeydown($event)"
@@ -89,6 +91,7 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
           <ul
             cdkListbox
             cdkListboxUseActiveDescendant
+            id="slash-listbox"
             aria-label="Slash commands"
             (cdkListboxValueChange)="onListboxChange($event)"
             class="m-0 list-none p-0"
