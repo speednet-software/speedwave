@@ -40,7 +40,7 @@ import { SlashService, type SlashCommand } from './slash.service';
       <div class="flex items-center gap-2 border-b border-[var(--line)] px-3 py-2">
         <span class="mono text-[12px] text-[var(--accent)]" aria-hidden="true">/</span>
         <input
-          type="search"
+          type="text"
           name="slash-query"
           data-testid="slash-menu-query"
           class="mono w-full bg-transparent text-[12px] text-[var(--ink)] placeholder-[var(--ink-mute)] focus:outline-none"
