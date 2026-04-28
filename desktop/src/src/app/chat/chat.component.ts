@@ -25,7 +25,6 @@ import { ChatHeaderComponent } from './header/chat-header.component';
 import { ChatMessageListComponent } from './message-list/chat-message-list.component';
 import { ComposerComponent } from './composer/composer.component';
 import { SessionStatsComponent } from './session-stats/session-stats.component';
-import { TextBlockComponent } from './blocks/text-block.component';
 import { MemoryPanelComponent } from './memory-panel/memory-panel.component';
 import { ConversationsSidebarComponent } from './conversations-sidebar/conversations-sidebar.component';
 
@@ -39,7 +38,6 @@ import { ConversationsSidebarComponent } from './conversations-sidebar/conversat
     ChatMessageListComponent,
     ComposerComponent,
     SessionStatsComponent,
-    TextBlockComponent,
     MemoryPanelComponent,
     ConversationsSidebarComponent,
   ],
