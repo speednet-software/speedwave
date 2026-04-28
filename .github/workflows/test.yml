@@ -290,15 +290,18 @@ jobs:
       - name: Run Swift tests
         run: make test-swift
 
-  # Runtime tests on Windows — covers the WSL transport path
+  # Runtime exec-transport tests on Windows — locks in the WSL path
   # (`wsl.exe -d distro -- sh -c <quoted>`). Without a Windows runner,
   # `runtime::wsl::container_exec` shell-quoting could regress silently
-  # because every other job runs on Linux/macOS. The job builds the
-  # `speedwave-runtime` library only (no Tauri, no MCP, no Lima) and
-  # runs the same `bash -nc` shell-roundtrip regression that catches
-  # POSIX quoting bugs — Git for Windows ships bash so the test is
-  # portable. Lima/SSH paths are exercised by the macOS `test` job above;
-  # Linux-only `nerdctl` direct-exec doesn't need shell quoting at all.
+  # because every other job runs on Linux/macOS. We deliberately restrict
+  # the test set to `runtime::lima` and `runtime::wsl` modules: the rest
+  # of `speedwave-runtime` (binary resolution, build context, compose
+  # rendering, consts) was authored for Linux/macOS hosts and uses
+  # `/`-rooted paths in fixtures, which fail on Windows for reasons
+  # unrelated to this PR. Git Bash ships on the windows-latest image, so
+  # the `bash -nc` shell-roundtrip regression in those modules runs as-is.
+  # Lima/SSH paths are exercised by the macOS `test` job above; Linux-only
+  # `nerdctl` direct-exec needs no shell quoting at all.
   runtime-windows:
     runs-on: windows-latest
     timeout-minutes: 15
@@ -322,5 +325,8 @@ jobs:
           key: ${{ runner.os }}-cargo-runtime-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-runtime-
 
-      - name: cargo test -p speedwave-runtime
-        run: cargo test -p speedwave-runtime --lib
+      - name: cargo test runtime::lima
+        run: cargo test -p speedwave-runtime --lib "runtime::lima::"
+
+      - name: cargo test runtime::wsl
+        run: cargo test -p speedwave-runtime --lib "runtime::wsl::"

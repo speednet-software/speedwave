@@ -502,10 +502,22 @@ fn is_stale_container_error(message: &str) -> bool {
 /// back into the original argv.
 pub(crate) fn shell_quote_argv(argv: &[&str]) -> String {
     argv.iter()
-        .map(|a| {
-            shlex::try_quote(a)
-                .expect("argv token must not contain null bytes")
-                .into_owned()
+        .map(|a| match shlex::try_quote(a) {
+            Ok(quoted) => quoted.into_owned(),
+            // `shlex::try_quote` only fails on null bytes, which can't
+            // legitimately appear in argv (the OS rejects them at execve).
+            // If one ever slips through anyway, drop it from the quoted
+            // string and log — silently truncating at the null would break
+            // the remote command in subtler ways.
+            Err(_) => {
+                log::error!(
+                    "shell_quote_argv: argv token contains a null byte; stripping nulls before quoting"
+                );
+                let stripped = a.replace('\0', "");
+                shlex::try_quote(stripped.as_str())
+                    .map(|s| s.into_owned())
+                    .unwrap_or(stripped)
+            }
         })
         .collect::<Vec<_>>()
         .join(" ")
