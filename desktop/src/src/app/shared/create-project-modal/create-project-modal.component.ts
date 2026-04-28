@@ -8,6 +8,7 @@ import {
   output,
   signal,
 } from '@angular/core';
+import { form, FormField, required } from '@angular/forms/signals';
 import { open } from '@tauri-apps/plugin-dialog';
 import { TauriService } from '../../services/tauri.service';
 import { SpinIconComponent } from '../spin-icon.component';
@@ -27,10 +28,15 @@ export interface CreatedProject {
  *
  * Reused by the setup-wizard (where it is non-dismissible — user must create
  * a project to finish setup) and the project-switcher dropdown (dismissible).
+ *
+ * Uses Angular Signal Forms (`@angular/forms/signals`) for the editable
+ * project-name field. Signal Forms are signal-driven and OnPush-safe — they
+ * avoid the second change-detection pass that the legacy `NgModel` directive
+ * schedules, which Angular 21.2.x crashes on inside embedded views.
  */
 @Component({
   selector: 'app-create-project-modal',
-  imports: [SpinIconComponent],
+  imports: [SpinIconComponent, FormField],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (open()) {
@@ -96,8 +102,7 @@ export interface CreatedProject {
           <input
             id="create-project-name"
             type="text"
-            [value]="name()"
-            (input)="onNameInput($event)"
+            [formField]="projectForm.name"
             placeholder="my-project"
             data-testid="create-project-name"
             class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1 text-[12px] text-[var(--ink)]"
@@ -170,16 +175,29 @@ export class CreateProjectModalComponent {
   private readonly tauri = inject(TauriService);
   private readonly cdr = inject(ChangeDetectorRef);
 
+  /**
+   * Reactive model backing the Signal Forms tree. `dir` is set programmatically
+   * by `browse()`; `name` is auto-filled from the dir basename then editable.
+   */
+  protected readonly model = signal<CreatedProject>({ name: '', dir: '' });
+  /**
+   * Signal Forms field tree. The name input binds via `[formField]` — this
+   * routes user input directly through the model and tracks dirty state for
+   * us, replacing the legacy `[value]+(input)` workaround and the manual
+   * `nameTouched` flag.
+   */
+  protected readonly projectForm = form(this.model, (path) => {
+    required(path.name, { message: 'Project name is required' });
+  });
+
   /** Currently chosen directory (full absolute path). */
-  protected readonly dir = signal<string>('');
+  protected readonly dir = computed<string>(() => this.model().dir);
   /** Project name — auto-filled from the dir basename, editable by the user. */
-  protected readonly name = signal<string>('');
+  protected readonly name = computed<string>(() => this.model().name);
   /** Whether `create_project` is in flight. */
   protected readonly busy = signal<boolean>(false);
   /** Inline error from the OS picker or `create_project`. */
   protected readonly error = signal<string | null>(null);
-  /** Whether the user has manually edited the name (stops auto-fill on next browse). */
-  private nameTouched = false;
 
   /** Submit button is enabled iff a directory and a non-empty name are present. */
   protected readonly canSubmit = computed(
@@ -200,21 +218,30 @@ export class CreateProjectModalComponent {
     if (typeof selected !== 'string' || selected.length === 0) {
       return;
     }
-    this.dir.set(selected);
-    if (!this.nameTouched) {
-      this.name.set(slugify(basename(selected)));
-    }
+    // Auto-fill name only when the user has not yet edited it. Signal Forms
+    // marks the `name` field as dirty whenever its value flows through the
+    // `[formField]` binding, so `dirty()` is the SSOT for "user touched it".
+    const nameDirty = this.projectForm.name().dirty();
+    this.model.update((m) => ({
+      ...m,
+      dir: selected as string,
+      name: nameDirty ? m.name : slugify(basename(selected as string)),
+    }));
     this.cdr.markForCheck();
   }
 
   /**
    * Handles manual edits to the project-name input.
-   * @param event - Native `input` event from the name field.
+   *
+   * In production the `[formField]` directive owns the input event and writes
+   * directly to the form's control value. This method exists so unit tests can
+   * simulate user typing without spinning up a full DOM event — it routes
+   * through the same control-value setter, which keeps `dirty()` honest.
+   * @param event - Native `input` event (or test stand-in) from the name field.
    */
   onNameInput(event: Event): void {
     const value = (event.target as HTMLInputElement).value;
-    this.nameTouched = true;
-    this.name.set(value);
+    this.projectForm.name().controlValue.set(value);
   }
 
   /** Invokes `create_project` and emits `created` on success. */
@@ -259,10 +286,11 @@ export class CreateProjectModalComponent {
   }
 
   private reset(): void {
-    this.dir.set('');
-    this.name.set('');
+    this.model.set({ name: '', dir: '' });
+    // Clear the form's dirty/touched flags so the next `browse()` is treated
+    // as a fresh selection rather than a continuation of the previous edit.
+    this.projectForm().reset();
     this.error.set(null);
-    this.nameTouched = false;
   }
 }
 
