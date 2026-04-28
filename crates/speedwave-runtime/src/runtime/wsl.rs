@@ -406,6 +406,7 @@ impl ContainerRuntime for WslRuntime {
                 "-p",
                 project,
                 "logs",
+                "--timestamps",
                 "--tail",
                 &tail_str,
             ],
@@ -812,7 +813,7 @@ mod tests {
         let compose_file = crate::runtime::compose_file_path("acme").unwrap();
         let runner = MockRunner::new().with_response(
             &format!(
-                "wsl.exe -d Speedwave -- nerdctl compose -f {} -p acme logs --tail 200",
+                "wsl.exe -d Speedwave -- nerdctl compose -f {} -p acme logs --timestamps --tail 200",
                 compose_file
             ),
             "hub | started\nclaude | ready",

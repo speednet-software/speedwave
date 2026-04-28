@@ -36,8 +36,8 @@ describe('UpdateSectionComponent — section visibility', () => {
     component.ngOnInit();
     await fixture.whenStable();
     fixture.detectChanges();
-    const headings = fixture.nativeElement.querySelectorAll('h2');
-    const texts = Array.from(headings).map((h: Element) => h.textContent?.trim());
+    const headings = fixture.nativeElement.querySelectorAll('h2') as NodeListOf<Element>;
+    const texts = Array.from(headings).map((h) => h.textContent?.trim());
     expect(texts).toContain('Updates');
   });
 
@@ -45,8 +45,8 @@ describe('UpdateSectionComponent — section visibility', () => {
     component.ngOnInit();
     await fixture.whenStable();
     fixture.detectChanges();
-    const headings = fixture.nativeElement.querySelectorAll('h2');
-    const texts = Array.from(headings).map((h: Element) => h.textContent?.trim());
+    const headings = fixture.nativeElement.querySelectorAll('h2') as NodeListOf<Element>;
+    const texts = Array.from(headings).map((h) => h.textContent?.trim());
     expect(texts).not.toContain('Container Updates');
   });
 });

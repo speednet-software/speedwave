@@ -3,6 +3,9 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { LlmProviderComponent } from './llm-provider.component';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
+import { AnthropicModelsService } from '../../services/anthropic-models.service';
+import { ChatStateService } from '../../services/chat-state.service';
+import { type AnthropicModel } from '../../models/llm';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 
 const DEFAULT_BASE_URLS: Record<string, string> = {
@@ -10,6 +13,31 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
   lmstudio: 'http://host.docker.internal:1234',
   llamacpp: 'http://host.docker.internal:8080',
 };
+
+/**
+ * Drains pending microtasks. After triggering `ngOnInit`, the component fires
+ * `loadConfig` as fire-and-forget; chained awaits inside it (auto-probe via
+ * `discoverModels`) require multiple microtask cycles before the discovery
+ * state settles. `whenStable` only flushes Zone tasks — these promises live
+ * outside Zone in vitest, so we drain them explicitly.
+ * @param cycles - How many `await Promise.resolve()` ticks to drain.
+ */
+async function flushMicrotasks(cycles = 10): Promise<void> {
+  for (let i = 0; i < cycles; i++) {
+    await Promise.resolve();
+  }
+}
+
+/**
+ * Stable test fixture mirroring `speedwave_runtime::defaults::AnthropicModelInfo`.
+ * Keep `context_tokens` values in sync with `crates/speedwave-runtime/src/defaults.rs`.
+ */
+const TEST_ANTHROPIC_MODELS = [
+  { id: 'claude-opus-4-7', family: 'Opus 4.7', context_tokens: 1_000_000, latest: true },
+  { id: 'claude-sonnet-4-6', family: 'Sonnet 4.6', context_tokens: 1_000_000, latest: true },
+  { id: 'claude-haiku-4-5', family: 'Haiku 4.5', context_tokens: 200_000, latest: true },
+  { id: 'claude-opus-4-6', family: 'Opus 4.6', context_tokens: 1_000_000, latest: false },
+];
 
 function setupMockTauri(mockTauri: MockTauriService, provider = 'anthropic'): void {
   mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
@@ -23,6 +51,8 @@ function setupMockTauri(mockTauri: MockTauriService, provider = 'anthropic'): vo
         };
       case 'get_default_base_url':
         return DEFAULT_BASE_URLS[(args?.['provider'] as string) ?? ''] ?? null;
+      case 'list_anthropic_models':
+        return TEST_ANTHROPIC_MODELS;
       case 'update_llm_config':
         return undefined;
       case 'discover_llm_models':
@@ -48,6 +78,10 @@ describe('LlmProviderComponent', () => {
       imports: [LlmProviderComponent],
       providers: [{ provide: TauriService, useValue: mockTauri }],
     }).compileComponents();
+
+    // AnthropicModelsService is providedIn root and caches the catalog
+    // across tests — reset so each spec sees its own mock response.
+    TestBed.inject(AnthropicModelsService).resetForTesting();
 
     fixture = TestBed.createComponent(LlmProviderComponent);
     component = fixture.componentInstance;
@@ -139,9 +173,10 @@ describe('LlmProviderComponent', () => {
 
     await component.saveConfig();
 
-    expect(invokedArgs['provider']).toBe('ollama');
-    expect(invokedArgs['model']).toBe('llama3.3');
-    expect(invokedArgs['baseUrl']).toBe('http://localhost:11434');
+    const update = invokedArgs['update'] as Record<string, unknown>;
+    expect(update['provider']).toBe('ollama');
+    expect(update['model']).toBe('llama3.3');
+    expect(update['base_url']).toBe('http://localhost:11434');
     expect(component.saved).toBe(true);
     expect(component.saving).toBe(false);
   });
@@ -217,33 +252,246 @@ describe('LlmProviderComponent', () => {
 
     await component.saveConfig();
 
-    expect(invokedArgs['model']).toBeNull();
-    expect(invokedArgs['baseUrl']).toBeNull();
-    expect(invokedArgs['apiKeyEnv']).toBeUndefined();
+    const update = invokedArgs['update'] as Record<string, unknown>;
+    expect(update['model']).toBeNull();
+    expect(update['base_url']).toBeNull();
+    expect(update['apiKeyEnv']).toBeUndefined();
   });
 
-  it('renders provider select', async () => {
+  describe('resolveContextTokensForSave (via saveConfig payload)', () => {
+    async function captureUpdate(): Promise<Record<string, unknown>> {
+      let captured: Record<string, unknown> = {};
+      const prevHandler = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'update_llm_config') {
+          captured = (args?.['update'] as Record<string, unknown>) ?? {};
+          return undefined;
+        }
+        return prevHandler(cmd, args);
+      };
+      await component.saveConfig();
+      return captured;
+    }
+
+    it('resolves Anthropic context_tokens from the SSOT catalog', async () => {
+      // Pre-populate the catalog signal that the component uses for the save
+      // path. The catalog is loaded via AnthropicModelsService → list_anthropic_models;
+      // we set it directly to keep the test focused on the resolution logic.
+      const cmp = component as unknown as {
+        anthropicCatalog: { set: (v: AnthropicModel[]) => void };
+      };
+      cmp.anthropicCatalog.set(TEST_ANTHROPIC_MODELS);
+      component.provider = 'anthropic';
+      component.model = 'claude-opus-4-7';
+      const update = await captureUpdate();
+      expect(update['context_tokens']).toBe(1_000_000);
+    });
+
+    it('resolves local-provider context_tokens from the discovery payload', async () => {
+      const cmp = component as unknown as {
+        discoveryState: { kind: 'ready'; models: { id: string; context_tokens?: number }[] };
+      };
+      cmp.discoveryState = {
+        kind: 'ready',
+        models: [{ id: 'llama3.3', context_tokens: 32_768 }],
+      };
+      component.provider = 'ollama';
+      component.model = 'llama3.3';
+      component.baseUrl = 'http://localhost:11434';
+      const update = await captureUpdate();
+      expect(update['context_tokens']).toBe(32_768);
+    });
+
+    it('falls back to loadedLocalContextTokens when discovery has not run', async () => {
+      // Simulates: user opens Settings, the cache from get_llm_config carries
+      // a previously-discovered context window, the user saves without
+      // clicking "Refresh models" — we must not wipe the persisted value.
+      const cmp = component as unknown as {
+        discoveryState: { kind: string };
+        loadedLocalContextTokens: number | null;
+      };
+      cmp.discoveryState = { kind: 'idle' };
+      cmp.loadedLocalContextTokens = 16_384;
+      component.provider = 'ollama';
+      component.model = 'llama3.3';
+      component.baseUrl = 'http://localhost:11434';
+      const update = await captureUpdate();
+      expect(update['context_tokens']).toBe(16_384);
+    });
+
+    it('sends null context_tokens when the model is empty', async () => {
+      component.provider = 'anthropic';
+      component.model = '';
+      const update = await captureUpdate();
+      expect(update['context_tokens']).toBeNull();
+    });
+
+    it('sends null context_tokens when the model is unknown to the Anthropic catalog', async () => {
+      const cmp = component as unknown as {
+        anthropicCatalog: { set: (v: AnthropicModel[]) => void };
+      };
+      cmp.anthropicCatalog.set(TEST_ANTHROPIC_MODELS);
+      component.provider = 'anthropic';
+      component.model = 'claude-fictional-9-9';
+      const update = await captureUpdate();
+      expect(update['context_tokens']).toBeNull();
+    });
+  });
+
+  it('refreshes ChatStateService cache after a successful save', async () => {
+    // Without this, the chat footer keeps showing the previous model's
+    // context window until the next session starts.
+    const chatState = TestBed.inject(ChatStateService);
+    const refreshSpy = vi.spyOn(chatState, 'refreshLlmConfigCache').mockResolvedValue();
+    component.provider = 'ollama';
+    component.model = 'llama3.3';
+    component.baseUrl = 'http://localhost:11434';
+    await component.saveConfig();
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not refresh ChatStateService cache when save fails', async () => {
+    const chatState = TestBed.inject(ChatStateService);
+    const refreshSpy = vi.spyOn(chatState, 'refreshLlmConfigCache').mockResolvedValue();
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'update_llm_config') throw new Error('save failed');
+      return undefined;
+    };
+    component.provider = 'ollama';
+    component.model = 'llama3.3';
+    await component.saveConfig();
+    expect(refreshSpy).not.toHaveBeenCalled();
+  });
+
+  it('renders four provider cards in a radiogroup', async () => {
     component.ngOnInit();
     await fixture.whenStable();
     fixture.detectChanges();
 
-    const select = fixture.nativeElement.querySelector('[data-testid="settings-llm-provider"]');
-    expect(select).not.toBeNull();
-    expect(select.tagName).toBe('SELECT');
+    const cards = fixture.nativeElement.querySelectorAll('[data-testid^="settings-llm-provider-"]');
+    expect(cards.length).toBe(4);
+    const ids = Array.from(cards).map((c) =>
+      (c as HTMLElement).getAttribute('data-testid')?.replace('settings-llm-provider-', '')
+    );
+    expect(ids).toEqual(['anthropic', 'ollama', 'lmstudio', 'llamacpp']);
   });
 
-  it('hides model and base URL fields for anthropic provider', async () => {
+  it('marks the active provider card with aria-checked=true', async () => {
     component.provider = 'anthropic';
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
 
-    const modelInput = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
-    expect(modelInput).toBeNull();
+    const anthropicCard = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-provider-anthropic"]'
+    );
+    const ollamaCard = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-provider-ollama"]'
+    );
+    expect(anthropicCard.getAttribute('aria-checked')).toBe('true');
+    expect(ollamaCard.getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('shows base URL and a backend-served model dropdown for anthropic', async () => {
+    component.provider = 'anthropic';
+    component.ngOnInit();
+    await fixture.whenStable();
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
 
     const baseUrlInput = fixture.nativeElement.querySelector(
       '[data-testid="settings-llm-base-url"]'
     );
-    expect(baseUrlInput).toBeNull();
+    expect(baseUrlInput).not.toBeNull();
+    expect(baseUrlInput.readOnly).toBe(true);
+
+    const modelEl = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
+    expect(modelEl).not.toBeNull();
+    expect(modelEl.tagName).toBe('SELECT');
+    const options = Array.from(modelEl.querySelectorAll('option')).map(
+      (o) => (o as HTMLOptionElement).value
+    );
+    // Default option (empty value, "let Claude Code choose") plus every
+    // catalog id served by the backend SSOT — the component must not add
+    // or drop entries on its own. Order mirrors the catalog: latest first,
+    // legacy after.
+    expect(options).toEqual([
+      '',
+      'claude-opus-4-7',
+      'claude-sonnet-4-6',
+      'claude-haiku-4-5',
+      'claude-opus-4-6',
+    ]);
+    const defaultLabel = (
+      modelEl.querySelector('option[value=""]') as HTMLOptionElement
+    )?.textContent?.trim();
+    expect(defaultLabel).toContain('default');
+
+    // Latest entries land in an optgroup labelled "Latest" so users see
+    // the recommended families at the top.
+    const latestGroup = modelEl.querySelector('optgroup[label="Latest"]') as HTMLOptGroupElement;
+    expect(latestGroup).not.toBeNull();
+    const latestIds = Array.from(latestGroup.querySelectorAll('option')).map(
+      (o) => (o as HTMLOptionElement).value
+    );
+    expect(latestIds).toEqual(['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5']);
+
+    // Legacy entries are visible but quarantined to the "Legacy" optgroup.
+    const legacyGroup = modelEl.querySelector('optgroup[label="Legacy"]') as HTMLOptGroupElement;
+    expect(legacyGroup).not.toBeNull();
+    const legacyIds = Array.from(legacyGroup.querySelectorAll('option')).map(
+      (o) => (o as HTMLOptionElement).value
+    );
+    expect(legacyIds).toEqual(['claude-opus-4-6']);
+
+    // Labels carry the family + context window so users see the same
+    // ctx value the chat footer reports (1M for Opus 4.7, 200k for Haiku).
+    const opus47Label = (
+      modelEl.querySelector('option[value="claude-opus-4-7"]') as HTMLOptionElement
+    )?.textContent?.trim();
+    expect(opus47Label).toContain('Opus 4.7');
+    expect(opus47Label).toContain('1M ctx');
+    const haikuLabel = (
+      modelEl.querySelector('option[value="claude-haiku-4-5"]') as HTMLOptionElement
+    )?.textContent?.trim();
+    expect(haikuLabel).toContain('200k ctx');
+  });
+
+  it('preserves a previously-saved model id that is no longer in the SSOT catalog', async () => {
+    // A user might have persisted a model id that has since been pulled
+    // from the catalog (deprecated, retired). Surface it as a stand-alone
+    // option marked "(not in catalog)" instead of silently resetting the
+    // selection — the UI must reflect what is actually in their config.
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      switch (cmd) {
+        case 'get_llm_config':
+          return {
+            provider: 'anthropic',
+            model: 'claude-opus-4-1',
+            base_url: null,
+            default_base_url: null,
+          };
+        case 'get_default_base_url':
+          return DEFAULT_BASE_URLS[(args?.['provider'] as string) ?? ''] ?? null;
+        case 'list_anthropic_models':
+          return TEST_ANTHROPIC_MODELS;
+        default:
+          return undefined;
+      }
+    };
+    component.ngOnInit();
+    await fixture.whenStable();
+    await flushMicrotasks();
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
+
+    const modelEl = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-model"]'
+    ) as HTMLSelectElement;
+    const stray = Array.from(modelEl.querySelectorAll('option'))
+      .map((o) => o as HTMLOptionElement)
+      .find((o) => o.value === 'claude-opus-4-1');
+    expect(stray).toBeTruthy();
+    expect(stray?.textContent).toContain('not in catalog');
   });
 
   it('shows model and base URL fields for ollama provider', async () => {
@@ -315,7 +563,7 @@ describe('LlmProviderComponent', () => {
     fixture.detectChanges();
     const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
     expect(btn).not.toBeNull();
-    expect(btn.textContent.trim()).toContain('Save');
+    expect(btn.textContent.trim().toLowerCase()).toContain('save');
   });
 
   // ── Model discovery (ADR-041) ────────────────────────────────────────
@@ -327,6 +575,8 @@ describe('LlmProviderComponent', () => {
       baseUrl?: string;
       defaultBaseUrl?: string;
       model?: string;
+      // String shape is accepted for test convenience — we lift it to the
+      // new `DiscoveredModel { id, context_tokens? }` DTO before returning.
       discover?: (args?: Record<string, unknown>) => Promise<string[]>;
     } = {}
   ): { discoverCalls: Array<Record<string, unknown> | undefined> } {
@@ -349,12 +599,15 @@ describe('LlmProviderComponent', () => {
           };
           return defaults[p] ?? null;
         }
+        case 'list_anthropic_models':
+          return [];
         case 'update_llm_config':
           return undefined;
         case 'discover_llm_models':
           discoverCalls.push(args);
           if (opts.discover) {
-            return opts.discover(args);
+            const ids = await opts.discover(args);
+            return ids.map((id) => ({ id }));
           }
           return [];
         default:
@@ -369,14 +622,16 @@ describe('LlmProviderComponent', () => {
       provider: 'ollama',
       discover: async () => ['llama3.3', 'qwen2.5'],
     });
-    await component.ngOnInit();
-    await fixture.whenStable();
+    component.ngOnInit();
+    // loadConfig is fire-and-forget inside ngOnInit; flush all queued micro-
+    // tasks (loadConfig → auto-probe discoverModels) before assertions.
+    await flushMicrotasks();
     fixture.detectChanges();
 
     const select = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
     expect(select).not.toBeNull();
     expect(select.tagName).toBe('SELECT');
-    const opts = Array.from(select.querySelectorAll('option')).map((o: Element) =>
+    const opts = Array.from(select.querySelectorAll('option') as NodeListOf<Element>).map((o) =>
       (o.textContent || '').trim()
     );
     expect(opts).toContain('llama3.3');
@@ -392,8 +647,8 @@ describe('LlmProviderComponent', () => {
         throw new Error('offline');
       },
     });
-    await component.ngOnInit();
-    await fixture.whenStable();
+    component.ngOnInit();
+    await flushMicrotasks();
     fixture.detectChanges();
 
     const el = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
@@ -501,8 +756,8 @@ describe('LlmProviderComponent', () => {
       provider: 'ollama',
       discover: async () => ['m'],
     });
-    await component.ngOnInit();
-    await fixture.whenStable();
+    component.ngOnInit();
+    await flushMicrotasks();
     expect(component.discoveryState.kind).toBe('ready');
     // Switching provider resets state synchronously. The new provider has a
     // known defaultBaseUrl so the new discovery probe fires immediately,
@@ -550,15 +805,15 @@ describe('LlmProviderComponent', () => {
       defaultBaseUrl: 'http://host.docker.internal:11434',
       discover: async () => ['legacy', 'a', 'b'],
     });
-    await component.ngOnInit();
-    await fixture.whenStable();
+    component.ngOnInit();
+    await flushMicrotasks();
     fixture.detectChanges();
 
     expect(component.model).toBe('legacy');
     const select = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
     expect(select).not.toBeNull();
     expect(select.tagName).toBe('SELECT');
-    const opts = Array.from(select.querySelectorAll('option')).map((o: Element) =>
+    const opts = Array.from(select.querySelectorAll('option') as NodeListOf<Element>).map((o) =>
       (o.getAttribute('value') || '').toString()
     );
     expect(opts).toContain('legacy');
@@ -746,9 +1001,10 @@ describe('LlmProviderComponent', () => {
 
     await component.saveConfig();
 
-    expect(invokedArgs['baseUrl']).toBe('http://host.docker.internal:11434');
-    expect(invokedArgs['baseUrl']).not.toBeNull();
-    expect(invokedArgs['baseUrl']).not.toBe('');
+    const update = invokedArgs['update'] as Record<string, unknown>;
+    expect(update['base_url']).toBe('http://host.docker.internal:11434');
+    expect(update['base_url']).not.toBeNull();
+    expect(update['base_url']).not.toBe('');
   });
 
   it('save_rejects_local_provider_with_empty_model', async () => {

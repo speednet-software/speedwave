@@ -6,6 +6,7 @@ import { ChatComponent } from './chat.component';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { UiStateService } from '../services/ui-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
 describe('ChatComponent', () => {
@@ -14,6 +15,7 @@ describe('ChatComponent', () => {
   let mockTauri: MockTauriService;
   let chatState: ChatStateService;
   let projectState: ProjectStateService;
+  let uiState: UiStateService;
 
   beforeEach(async () => {
     mockTauri = new MockTauriService();
@@ -52,10 +54,29 @@ describe('ChatComponent', () => {
     component = fixture.componentInstance;
     chatState = TestBed.inject(ChatStateService);
     projectState = TestBed.inject(ProjectStateService);
+    uiState = TestBed.inject(UiStateService);
 
     // Reset service state between tests
     chatState._setState({ messages: [], currentBlocks: [], sessionStats: null });
     chatState.isStreaming = false;
+  });
+
+  // ── Composition — shell sub-components ─────────────────────────────────────
+
+  describe('shell composition', () => {
+    it('renders app-chat-header and app-chat-message-list once project is ready', async () => {
+      projectState.activeProject = 'test';
+      projectState.status = 'ready';
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('app-chat-header')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('app-chat-message-list')).toBeTruthy();
+    });
+
+    // Read-only transcript overlay was removed — sidebar row click resumes
+    // directly. The `viewingTranscript` / `viewConversation` / `closeTranscript`
+    // surface no longer exists, so the related behaviour tests were dropped.
   });
 
   // ── handleStreamChunk: 'Text' ──────────────────────────────────────────────
@@ -172,18 +193,17 @@ describe('ChatComponent', () => {
 
   describe('sendMessage guards', () => {
     it('does not send when input text is empty', async () => {
-      component.inputText = '   ';
-
-      await component.sendMessage();
+      // ComposerComponent contract: emits already-trimmed text, so an empty
+      // payload here represents a whitespace-only or empty composer state.
+      await component.sendMessage({ payload: '', displayText: '' });
 
       expect(chatState.messages).toHaveLength(0);
     });
 
     it('does not send when isStreaming is true', async () => {
-      component.inputText = 'Hello';
       chatState.isStreaming = true;
 
-      await component.sendMessage();
+      await component.sendMessage({ payload: 'Hello', displayText: 'Hello' });
 
       expect(chatState.messages).toHaveLength(0);
     });
@@ -192,18 +212,15 @@ describe('ChatComponent', () => {
   // ── sendMessage success ────────────────────────────────────────────────────
 
   describe('sendMessage success', () => {
-    it('adds user message, clears input, and sets isStreaming', async () => {
+    it('adds user message and sets isStreaming', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       invokeSpy.mockResolvedValue(undefined);
 
-      component.inputText = 'Hello Claude';
-
-      await component.sendMessage();
+      await component.sendMessage({ payload: 'Hello Claude', displayText: 'Hello Claude' });
 
       expect(chatState.messages).toHaveLength(1);
       expect(chatState.messages[0].role).toBe('user');
       expect(chatState.messages[0].blocks[0]).toEqual({ type: 'text', content: 'Hello Claude' });
-      expect(component.inputText).toBe('');
       expect(chatState.isStreaming).toBe(true);
       expect(invokeSpy).toHaveBeenCalledWith('send_message', { message: 'Hello Claude' });
     });
@@ -216,8 +233,7 @@ describe('ChatComponent', () => {
         return undefined;
       };
 
-      component.inputText = 'Hello';
-      await component.sendMessage();
+      await component.sendMessage({ payload: 'Hello', displayText: 'Hello' });
 
       expect(chatState.isStreaming).toBe(false);
       expect(chatState.messages).toHaveLength(2);
@@ -226,29 +242,12 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── onEnter ────────────────────────────────────────────────────────────────
-
-  describe('onEnter', () => {
-    it('calls sendMessage when Enter is pressed without Shift', () => {
-      const sendSpy = vi.spyOn(component, 'sendMessage').mockResolvedValue();
-      const event = new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false });
-      const preventSpy = vi.spyOn(event, 'preventDefault');
-
-      component.onEnter(event);
-
-      expect(preventSpy).toHaveBeenCalled();
-      expect(sendSpy).toHaveBeenCalled();
-    });
-
-    it('does NOT call sendMessage when Shift+Enter is pressed', () => {
-      const sendSpy = vi.spyOn(component, 'sendMessage').mockResolvedValue();
-      const event = new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true });
-      const preventSpy = vi.spyOn(event, 'preventDefault');
-
-      component.onEnter(event);
-
-      expect(preventSpy).not.toHaveBeenCalled();
-      expect(sendSpy).not.toHaveBeenCalled();
+  // ── composer integration ─────────────────────────────────────────────────
+  describe('composer integration', () => {
+    it('mounts app-composer when a live session is active', async () => {
+      projectState.status = 'ready';
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('app-composer')).toBeTruthy();
     });
   });
 
@@ -336,57 +335,13 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── viewConversation ────────────────────────────────────────────────────────
-
-  describe('viewConversation', () => {
-    it('sets viewingTranscript from backend response', async () => {
-      const mockTranscript = {
-        session_id: 's1',
-        messages: [{ role: 'user', content: 'Hi', timestamp: '2026-03-06T10:00:00Z' }],
-      };
-      projectState.activeProject = 'test';
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'get_conversation') return mockTranscript;
-        return undefined;
-      };
-
-      await component.viewConversation('s1');
-
-      expect(component.viewingTranscript).toEqual(mockTranscript);
-    });
-
-    it('sets viewError on backend failure', async () => {
-      projectState.activeProject = 'test';
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'get_conversation') throw new Error('not found');
-        return undefined;
-      };
-
-      await component.viewConversation('s1');
-
-      expect(component.viewError).toContain('Failed to load conversation');
-      expect(component.viewingTranscript).toBeNull();
-      expect(errorSpy).toHaveBeenCalledWith('viewConversation failed:', expect.any(Error));
-      errorSpy.mockRestore();
-    });
-  });
-
   // ── resumeConversation ──────────────────────────────────────────────────────
 
   describe('resumeConversation', () => {
-    it('populates messages from transcript and calls resume_conversation', async () => {
-      const invokeCalls: string[] = [];
-      const mockTranscript = {
-        session_id: 's1',
-        messages: [
-          { role: 'user', content: 'Hi', timestamp: '2026-03-06T10:00:00Z' },
-          { role: 'assistant', content: 'Hello!', timestamp: null },
-        ],
-      };
-      component.viewingTranscript = mockTranscript;
+    it('calls resume_conversation and closes the sidebar', async () => {
       projectState.activeProject = 'test';
-
+      uiState.toggleSidebar();
+      const invokeCalls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
         invokeCalls.push(cmd);
         return undefined;
@@ -394,48 +349,12 @@ describe('ChatComponent', () => {
 
       await component.resumeConversation('s1');
 
-      expect(chatState.messages).toHaveLength(2);
-      expect(chatState.messages[0].role).toBe('user');
-      expect(chatState.messages[0].blocks[0]).toEqual({ type: 'text', content: 'Hi' });
-      expect(chatState.messages[1].role).toBe('assistant');
-      expect(chatState.messages[1].blocks[0]).toEqual({ type: 'text', content: 'Hello!' });
       expect(invokeCalls).toContain('resume_conversation');
-    });
-
-    it('uses msg.blocks when available instead of flat content', async () => {
-      const mockTranscript = {
-        session_id: 's1',
-        messages: [
-          {
-            role: 'user',
-            content: 'Hi',
-            timestamp: null,
-            blocks: [
-              { type: 'text' as const, content: 'Hi' },
-              { type: 'text' as const, content: ' there' },
-            ],
-          },
-        ],
-      };
-      component.viewingTranscript = mockTranscript;
-      projectState.activeProject = 'test';
-
-      await component.resumeConversation('s1');
-
-      expect(chatState.messages).toHaveLength(1);
-      expect(chatState.messages[0].blocks).toHaveLength(2);
-      expect(chatState.messages[0].blocks[0]).toEqual({ type: 'text', content: 'Hi' });
-      expect(chatState.messages[0].blocks[1]).toEqual({ type: 'text', content: ' there' });
+      expect(component.showHistory).toBe(false);
     });
 
     it('shows error message when resume fails', async () => {
-      const mockTranscript = {
-        session_id: 's1',
-        messages: [{ role: 'user', content: 'Hi', timestamp: null }],
-      };
-      component.viewingTranscript = mockTranscript;
       projectState.activeProject = 'test';
-
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'resume_conversation') throw new Error('container not running');
         return undefined;
@@ -453,11 +372,6 @@ describe('ChatComponent', () => {
 
     it('routes auth error in resumeConversation to retryAuth', async () => {
       const retrySpy = vi.spyOn(projectState, 'retryAuth').mockResolvedValue();
-      const mockTranscript = {
-        session_id: 's1',
-        messages: [{ role: 'user', content: 'Hi', timestamp: '2026-03-06T10:00:00Z' }],
-      };
-      component.viewingTranscript = mockTranscript;
       projectState.activeProject = 'test';
 
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -470,114 +384,6 @@ describe('ChatComponent', () => {
       expect(retrySpy).toHaveBeenCalled();
       retrySpy.mockRestore();
     });
-
-    it('normalizes history tool_use blocks into nested format', async () => {
-      component.viewingTranscript = {
-        session_id: 's1',
-        messages: [
-          {
-            role: 'assistant',
-            content: '[Tool: Read]',
-            timestamp: null,
-            blocks: [
-              { type: 'tool_use', tool_name: 'Read', input_json: '{"file":"/a.ts"}' },
-              { type: 'tool_result', content: 'file contents', is_error: false },
-            ] as unknown as import('../models/chat').MessageBlock[],
-          },
-        ],
-      };
-      projectState.activeProject = 'test';
-
-      await component.resumeConversation('s1');
-
-      const msgs = chatState.messages;
-      expect(msgs).toHaveLength(1);
-      const block = msgs[0].blocks[0];
-      expect(block.type).toBe('tool_use');
-      if (block.type === 'tool_use') {
-        expect(block.tool.tool_name).toBe('Read');
-        expect(block.tool.input_json).toBe('{"file":"/a.ts"}');
-        expect(block.tool.status).toBe('done');
-        expect(block.tool.result).toBe('file contents');
-      }
-    });
-
-    it('normalizes history tool_use error result', async () => {
-      component.viewingTranscript = {
-        session_id: 's1',
-        messages: [
-          {
-            role: 'assistant',
-            content: '[Tool: Bash]',
-            timestamp: null,
-            blocks: [
-              { type: 'tool_use', tool_name: 'Bash', input_json: '{"command":"fail"}' },
-              { type: 'tool_result', content: 'command not found', is_error: true },
-            ] as unknown as import('../models/chat').MessageBlock[],
-          },
-        ],
-      };
-      projectState.activeProject = 'test';
-
-      await component.resumeConversation('s1');
-
-      const block = chatState.messages[0].blocks[0];
-      if (block.type === 'tool_use') {
-        expect(block.tool.status).toBe('error');
-        expect(block.tool.result_is_error).toBe(true);
-        expect(block.tool.result).toBe('command not found');
-      }
-    });
-
-    it('passes through already-normalized tool_use blocks', async () => {
-      const normalizedTool = {
-        type: 'tool_use' as const,
-        tool: {
-          type: 'tool_use' as const,
-          tool_id: 't1',
-          tool_name: 'Read',
-          input_json: '{}',
-          status: 'done' as const,
-          result: 'ok',
-          result_is_error: false as const,
-          collapsed: false,
-        },
-      };
-      component.viewingTranscript = {
-        session_id: 's1',
-        messages: [
-          {
-            role: 'assistant',
-            content: 'test',
-            timestamp: null,
-            blocks: [normalizedTool],
-          },
-        ],
-      };
-      projectState.activeProject = 'test';
-
-      await component.resumeConversation('s1');
-
-      const block = chatState.messages[0].blocks[0];
-      expect(block.type).toBe('tool_use');
-      if (block.type === 'tool_use') {
-        expect(block.tool.tool_id).toBe('t1');
-      }
-    });
-
-    it('clears transcript and history state after resuming', async () => {
-      component.viewingTranscript = {
-        session_id: 's1',
-        messages: [{ role: 'user', content: 'Hi', timestamp: null }],
-      };
-      component.showHistory = true;
-      projectState.activeProject = 'test';
-
-      await component.resumeConversation('s1');
-
-      expect(component.viewingTranscript).toBeNull();
-      expect(component.showHistory).toBe(false);
-    });
   });
 
   // ── newConversation ─────────────────────────────────────────────────────────
@@ -588,19 +394,15 @@ describe('ChatComponent', () => {
         messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
         currentBlocks: [{ type: 'text', content: 'stream' }],
       });
-      component.inputText = 'partial';
       chatState.isStreaming = true;
-      component.viewingTranscript = { session_id: 's1', messages: [] };
-      component.showHistory = true;
-      component.showMemory = true;
+      uiState.toggleSidebar();
+      uiState.toggleMemory();
 
       await component.newConversation();
 
       expect(chatState.messages).toEqual([]);
-      expect(component.inputText).toBe('');
       expect(chatState.isStreaming).toBe(false);
       expect(chatState.currentBlocks).toEqual([]);
-      expect(component.viewingTranscript).toBeNull();
       expect(component.showHistory).toBe(false);
       expect(component.showMemory).toBe(false);
     });
@@ -687,17 +489,52 @@ describe('ChatComponent', () => {
 
       expect(component.projectMemory).toBe('');
     });
-  });
 
-  // ── closeTranscript ─────────────────────────────────────────────────────────
+    it('surfaces user-facing memoryError on backend failure (parity with historyError)', async () => {
+      projectState.activeProject = 'test';
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_project_memory') throw new Error('disk failure');
+        return undefined;
+      };
 
-  describe('closeTranscript', () => {
-    it('clears viewingTranscript', () => {
-      component.viewingTranscript = { session_id: 's1', messages: [] };
+      await component.loadProjectMemory();
 
-      component.closeTranscript();
+      expect(component.memoryError).toContain('Failed to load memory');
+      expect(component.memoryError).toContain('disk failure');
+      errorSpy.mockRestore();
+    });
 
-      expect(component.viewingTranscript).toBeNull();
+    it('clears memoryError on a subsequent successful load', async () => {
+      projectState.activeProject = 'test';
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let shouldFail = true;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_project_memory') {
+          if (shouldFail) throw new Error('first failure');
+          return '# recovered';
+        }
+        return undefined;
+      };
+
+      await component.loadProjectMemory();
+      expect(component.memoryError).not.toBe('');
+
+      shouldFail = false;
+      await component.loadProjectMemory();
+
+      expect(component.memoryError).toBe('');
+      expect(component.projectMemory).toBe('# recovered');
+      errorSpy.mockRestore();
+    });
+
+    it('does not set memoryError when no active project', async () => {
+      projectState.activeProject = null;
+      component.memoryError = 'stale';
+
+      await component.loadProjectMemory();
+
+      expect(component.memoryError).toBe('');
     });
   });
 
@@ -809,7 +646,7 @@ describe('ChatComponent', () => {
 
       await projectState.init();
       await component.ngOnInit();
-      component.showHistory = true;
+      uiState.toggleSidebar();
       component.conversations = [
         { session_id: 's1', timestamp: '2026-03-06T10:00:00Z', preview: 'old', message_count: 1 },
       ];
@@ -827,34 +664,6 @@ describe('ChatComponent', () => {
       await fixture.whenStable();
 
       expect(component.conversations).toEqual(newConversations);
-    });
-
-    it('closes transcript view on project switch', async () => {
-      projectState.activeProject = 'test';
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'list_projects')
-          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
-        if (cmd === 'get_bundle_reconcile_state')
-          return {
-            phase: 'done',
-            in_progress: false,
-            last_error: null,
-            pending_running_projects: [],
-            applied_bundle_id: null,
-          };
-        if (cmd === 'check_containers_running') return true;
-        if (cmd === 'start_chat') return undefined;
-        return undefined;
-      };
-
-      await projectState.init();
-      await component.ngOnInit();
-      component.viewingTranscript = { session_id: 's1', messages: [] };
-
-      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other-project' });
-      await fixture.whenStable();
-
-      expect(component.viewingTranscript).toBeNull();
     });
 
     it('cleans up project ready listener on destroy', async () => {
@@ -934,18 +743,20 @@ describe('ChatComponent', () => {
   });
 
   describe('Stop button and ESC handler', () => {
-    it('shows Stop button when streaming, Send button when idle', () => {
+    it('shows Stop button when streaming, hides it when idle', () => {
+      // After Unit 9 (composer extraction), the Send button lives inside
+      // <app-composer>; chat.component owns only the Stop button alongside.
       projectState.status = 'ready';
       chatState.isStreaming = false;
       fixture.detectChanges();
-      expect(fixture.nativeElement.querySelector('[data-testid="chat-send"]')).toBeTruthy();
       expect(fixture.nativeElement.querySelector('[data-testid="chat-stop"]')).toBeNull();
+      expect(fixture.nativeElement.querySelector('app-composer')).toBeTruthy();
 
       chatState.isStreaming = true;
       chatState['notifyChange']();
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="chat-stop"]')).toBeTruthy();
-      expect(fixture.nativeElement.querySelector('[data-testid="chat-send"]')).toBeNull();
+      expect(fixture.nativeElement.querySelector('app-composer')).toBeTruthy();
     });
 
     it('clicking Stop calls stopConversation', () => {
@@ -1027,6 +838,61 @@ describe('ChatComponent', () => {
       chatState.isStreaming = true;
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
       expect(spy).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── isLastAssistant: O(1) cached lookup ────────────────────────────────────
+
+  describe('isLastAssistant', () => {
+    it('returns false when there are no messages', () => {
+      chatState.loadMessages([]);
+      expect(component.isLastAssistant(0)).toBe(false);
+    });
+
+    it('returns true for the most recent assistant message', () => {
+      chatState.loadMessages([
+        { role: 'user', blocks: [{ type: 'text', content: 'hi' }], timestamp: 1 },
+        { role: 'assistant', blocks: [{ type: 'text', content: 'A1' }], timestamp: 2 },
+        { role: 'user', blocks: [{ type: 'text', content: 'next' }], timestamp: 3 },
+        { role: 'assistant', blocks: [{ type: 'text', content: 'A2' }], timestamp: 4 },
+      ]);
+      expect(component.isLastAssistant(3)).toBe(true);
+      expect(component.isLastAssistant(1)).toBe(false);
+    });
+
+    it('returns false for non-assistant rows even at the tail', () => {
+      chatState.loadMessages([
+        { role: 'assistant', blocks: [{ type: 'text', content: 'A1' }], timestamp: 1 },
+        { role: 'user', blocks: [{ type: 'text', content: 'after' }], timestamp: 2 },
+      ]);
+      expect(component.isLastAssistant(0)).toBe(true);
+      expect(component.isLastAssistant(1)).toBe(false);
+    });
+
+    it('returns false for every row when no assistant message exists', () => {
+      chatState.loadMessages([
+        { role: 'user', blocks: [{ type: 'text', content: 'q1' }], timestamp: 1 },
+        { role: 'user', blocks: [{ type: 'text', content: 'q2' }], timestamp: 2 },
+      ]);
+      expect(component.isLastAssistant(0)).toBe(false);
+      expect(component.isLastAssistant(1)).toBe(false);
+    });
+
+    it('updates the cached last index when new messages are appended', () => {
+      chatState.loadMessages([
+        { role: 'user', blocks: [{ type: 'text', content: 'q' }], timestamp: 1 },
+        { role: 'assistant', blocks: [{ type: 'text', content: 'A1' }], timestamp: 2 },
+      ]);
+      expect(component.isLastAssistant(1)).toBe(true);
+
+      chatState.loadMessages([
+        { role: 'user', blocks: [{ type: 'text', content: 'q' }], timestamp: 1 },
+        { role: 'assistant', blocks: [{ type: 'text', content: 'A1' }], timestamp: 2 },
+        { role: 'user', blocks: [{ type: 'text', content: 'q2' }], timestamp: 3 },
+        { role: 'assistant', blocks: [{ type: 'text', content: 'A2' }], timestamp: 4 },
+      ]);
+      expect(component.isLastAssistant(1)).toBe(false);
+      expect(component.isLastAssistant(3)).toBe(true);
     });
   });
 });

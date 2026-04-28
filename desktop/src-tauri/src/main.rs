@@ -14,6 +14,7 @@ mod container_logs_cmd;
 mod containers_cmd;
 mod diagnostics;
 mod fs_perms;
+mod git_cmd;
 mod health;
 mod history;
 mod http_util;
@@ -24,10 +25,15 @@ mod log_file;
 mod logging_cmd;
 mod mcp_os_process;
 mod oauth_cmd;
+mod patch_emitter;
 mod plugin_cmd;
+mod queue_cmd;
 mod reconcile;
 mod redmine_api_cmd;
+mod retry_cmd;
 mod setup_wizard;
+mod slash_cmd;
+mod subscribe_cmd;
 mod tray;
 mod types;
 mod update_commands;
@@ -935,6 +941,8 @@ fn main() {
 
     let initial_session: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("default")));
     let compose_lock: ComposeLock = Arc::new(Mutex::new(()));
+    let queue_service = speedwave_runtime::session::QueuedMessageService::new();
+    let msg_store_registry = subscribe_cmd::MsgStoreRegistry::new();
 
     // Shared state for IDE Bridge, mcp-os process, auto-check handle, and tray update version
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
@@ -1058,6 +1066,8 @@ fn main() {
         .manage(compose_lock.clone())
         .manage(ide_bridge.clone())
         .manage(mcp_os.clone())
+        .manage(queue_service.clone())
+        .manage(msg_store_registry.clone())
         .setup(move |app| {
             // Restore persisted log level (default: Info)
             let initial_level = config::load_user_config()
@@ -1159,7 +1169,7 @@ fn main() {
                         let app_clone = app.clone();
                         tauri::async_runtime::spawn(async move {
                             match updater::check_for_update(&app_clone).await {
-                                Ok(Some(info)) => {
+                                Ok(updater::UpdateCheckOutcome::UpdateAvailable(info)) => {
                                     log::info!("tray: update available: {}", info.version);
                                     use tauri::Emitter;
                                     if let Err(e) = app_clone.emit("update_available", &info) {
@@ -1168,8 +1178,15 @@ fn main() {
                                         );
                                     }
                                 }
-                                Ok(None) => {
+                                Ok(updater::UpdateCheckOutcome::UpToDate) => {
                                     log::info!("tray: already up to date");
+                                }
+                                Ok(updater::UpdateCheckOutcome::ManagedExternally {
+                                    manager,
+                                }) => {
+                                    log::info!(
+                                        "tray: updates managed by '{manager}' — no network check"
+                                    );
                                 }
                                 Err(e) => {
                                     log::error!("tray: check failed: {e}");
@@ -1344,6 +1361,7 @@ fn main() {
             containers_cmd::factory_reset,
             containers_cmd::get_llm_config,
             containers_cmd::get_default_base_url,
+            containers_cmd::list_anthropic_models,
             containers_cmd::update_llm_config,
             llm_cmd::discover_llm_models,
             // Authentication
@@ -1360,6 +1378,13 @@ fn main() {
             send_message,
             answer_question,
             stop_chat,
+            retry_cmd::retry_last_turn,
+            // Queued messages (ADR-045)
+            queue_cmd::queue_message,
+            queue_cmd::cancel_queued_message,
+            queue_cmd::peek_queued_message,
+            // JSON-Patch stream protocol (ADR-042/043)
+            subscribe_cmd::subscribe_session,
             // Chat history
             list_conversations,
             get_conversation,
@@ -1422,6 +1447,11 @@ fn main() {
             plugin_cmd::delete_plugin_credentials,
             plugin_cmd::plugin_save_settings,
             plugin_cmd::plugin_load_settings,
+            // Slash menu discovery
+            slash_cmd::list_slash_commands,
+            slash_cmd::invalidate_slash_cache,
+            // Git introspection (chat status strip)
+            git_cmd::get_git_branch,
         ])
         .on_window_event(move |window, event| {
             match event {

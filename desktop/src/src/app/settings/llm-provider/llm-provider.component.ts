@@ -2,22 +2,23 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
-  EventEmitter,
   OnInit,
-  Output,
+  computed,
   inject,
+  output,
+  signal,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
-
-interface LlmConfigResponse {
-  provider: string | null;
-  model: string | null;
-  base_url: string | null;
-  default_base_url: string | null;
-}
+import { AnthropicModelsService } from '../../services/anthropic-models.service';
+import { ChatStateService } from '../../services/chat-state.service';
+import {
+  AnthropicModel,
+  DiscoveredModel,
+  formatContextLabel,
+  LlmConfigResponse,
+} from '../../models/llm';
 
 /**
  * Discovery state for the LLM model listing. Discriminated union makes the
@@ -31,124 +32,203 @@ interface LlmConfigResponse {
 type DiscoveryState =
   | { kind: 'idle' }
   | { kind: 'in-flight'; url: string; id: number }
-  | { kind: 'ready'; url: string; models: string[] }
+  | { kind: 'ready'; url: string; models: DiscoveredModel[] }
   | { kind: 'failed'; url: string; reason: 'offline' | 'unsupported' | 'other' };
+
+/** Static catalog of provider cards rendered at the top of the section. */
+interface ProviderCard {
+  readonly id: 'anthropic' | 'ollama' | 'lmstudio' | 'llamacpp';
+  readonly label: string;
+  readonly tag: string;
+}
+
+const PROVIDER_CARDS: readonly ProviderCard[] = [
+  { id: 'anthropic', label: 'anthropic', tag: 'cloud · default' },
+  { id: 'ollama', label: 'ollama', tag: 'local' },
+  { id: 'lmstudio', label: 'lm studio', tag: 'local' },
+  { id: 'llamacpp', label: 'llama.cpp', tag: 'local' },
+] as const;
 
 /** Manages LLM provider selection and configuration. */
 @Component({
   selector: 'app-llm-provider',
-  standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block' },
   template: `
-    <section class="mb-6">
-      <h2 class="text-[15px] text-sw-text m-0 mb-3">LLM Provider</h2>
-      <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-4">
-        <div class="flex justify-between items-center py-2">
-          <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="llm-provider"
-            >Provider</label
+    <section id="section-llm-provider">
+      <h2 class="view-title view-title-section text-[var(--ink)]">LLM provider</h2>
+      <p class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
+        Where Claude Code routes model requests. Local providers keep everything on-device.
+      </p>
+
+      <!-- Provider cards (4-col grid on lg) -->
+      <div
+        class="mt-4 grid grid-cols-2 gap-2 lg:grid-cols-4"
+        role="radiogroup"
+        aria-label="LLM provider"
+      >
+        @for (p of providerCards; track p.id) {
+          <button
+            type="button"
+            role="radio"
+            [attr.aria-checked]="provider === p.id"
+            [attr.data-testid]="'settings-llm-provider-' + p.id"
+            class="rounded border px-3 py-2 text-left transition-colors"
+            [class]="
+              provider === p.id
+                ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
+                : 'border-[var(--line)] bg-[var(--bg-1)] hover:border-[var(--line-strong)]'
+            "
+            (click)="selectProvider(p.id)"
           >
-          <select
-            id="llm-provider"
-            [(ngModel)]="provider"
-            (ngModelChange)="onProviderChange()"
-            class="flex-1 px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
-            data-testid="settings-llm-provider"
+            <div
+              class="mono text-[11px] font-medium"
+              [class]="provider === p.id ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'"
+            >
+              {{ p.label }}
+            </div>
+            <div class="mono mt-0.5 text-[10px] text-[var(--ink-mute)]">{{ p.tag }}</div>
+          </button>
+        }
+      </div>
+
+      <!-- BASE_URL + DEFAULT_MODEL row -->
+      <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+        <div>
+          <label
+            class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+            for="llm-base-url"
+            >base_url</label
           >
-            <option value="anthropic">Anthropic</option>
-            <option value="ollama">Ollama</option>
-            <option value="lmstudio">LM Studio</option>
-            <option value="llamacpp">llama.cpp</option>
-          </select>
+          <input
+            id="llm-base-url"
+            type="text"
+            [value]="baseUrl"
+            (input)="baseUrl = $any($event.target).value"
+            [placeholder]="defaultBaseUrl || anthropicBaseUrlHint()"
+            [readOnly]="provider === 'anthropic'"
+            (blur)="discoverModels(false)"
+            class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+            data-testid="settings-llm-base-url"
+          />
         </div>
-        @if (provider !== 'anthropic') {
-          <div class="flex justify-between items-center py-2 border-t border-sw-border">
-            <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="llm-base-url"
-              >Base URL</label
+        <div>
+          <label
+            class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+            for="llm-model"
+            >default_model</label
+          >
+          @if (provider !== 'anthropic' && discoveryState.kind === 'ready') {
+            <select
+              id="llm-model"
+              [value]="model"
+              (change)="onLocalModelChange($any($event.target).value)"
+              class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+              data-testid="settings-llm-model"
             >
-            <input
-              id="llm-base-url"
-              type="text"
-              [(ngModel)]="baseUrl"
-              [placeholder]="defaultBaseUrl || baseUrlPlaceholder()"
-              (blur)="discoverModels(false)"
-              class="flex-1 px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
-              data-testid="settings-llm-base-url"
-            />
-          </div>
-          <div class="flex justify-between items-center py-2 border-t border-sw-border">
-            <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="llm-model"
-              >Model</label
-            >
-            <div class="flex flex-1 gap-2">
-              @if (discoveryState.kind === 'ready') {
-                <select
-                  id="llm-model"
-                  [(ngModel)]="model"
-                  class="flex-1 px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
-                  data-testid="settings-llm-model"
-                >
-                  @if (model && !discoveryState.models.includes(model)) {
-                    <option [value]="model">{{ model }}</option>
-                  }
-                  @for (m of discoveryState.models; track m) {
-                    <option [value]="m">{{ m }}</option>
-                  }
-                </select>
-              } @else {
-                <input
-                  id="llm-model"
-                  type="text"
-                  [(ngModel)]="model"
-                  [placeholder]="modelPlaceholder()"
-                  class="flex-1 px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
-                  data-testid="settings-llm-model"
-                />
+              @if (model && !discoveredModelIds().includes(model)) {
+                <option [value]="model">{{ model }} (not on server)</option>
               }
-              <button
-                type="button"
-                data-testid="settings-llm-refresh"
-                class="px-3 py-1.5 bg-transparent text-sw-text-muted border border-sw-border rounded text-[12px] font-mono cursor-pointer hover:enabled:text-sw-text hover:enabled:border-sw-accent disabled:opacity-40 disabled:cursor-not-allowed"
-                [disabled]="discoveryState.kind === 'in-flight'"
-                (click)="discoverModels(true)"
-                title="Fetch the list of models from the server"
-              >
-                @if (discoveryState.kind === 'in-flight') {
-                  Discovering...
-                } @else {
-                  Refresh
-                }
-              </button>
-            </div>
-          </div>
+              @for (m of discoveryState.models; track m.id) {
+                <option [value]="m.id">{{ formatLocalModelLabel(m) }}</option>
+              }
+            </select>
+          } @else if (provider === 'anthropic') {
+            <select
+              id="llm-model"
+              [value]="model"
+              (change)="model = $any($event.target).value"
+              class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+              data-testid="settings-llm-model"
+            >
+              <!-- Empty value = no ANTHROPIC_MODEL injected; Claude Code
+                   picks its built-in default. -->
+              <option value="">(default — let Claude Code choose)</option>
+              @if (latestAnthropicModels().length > 0) {
+                <optgroup label="Latest">
+                  @for (m of latestAnthropicModels(); track m.id) {
+                    <option [value]="m.id">{{ formatModelLabel(m) }}</option>
+                  }
+                </optgroup>
+              }
+              @if (legacyAnthropicModels().length > 0) {
+                <optgroup label="Legacy">
+                  @for (m of legacyAnthropicModels(); track m.id) {
+                    <option [value]="m.id">{{ formatModelLabel(m) }}</option>
+                  }
+                </optgroup>
+              }
+              <!-- Preserve a previously-saved model that the SSOT no longer
+                   carries (e.g. config persisted before a model was
+                   deprecated) so the user sees what's actually in their
+                   config rather than an empty selection. -->
+              @if (model && !modelInCatalog(model)) {
+                <option [value]="model">{{ model }} (not in catalog)</option>
+              }
+            </select>
+          } @else {
+            <input
+              id="llm-model"
+              type="text"
+              [value]="model"
+              (input)="model = $any($event.target).value"
+              [placeholder]="modelPlaceholder()"
+              class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+              data-testid="settings-llm-model"
+            />
+          }
           @if (discoveryState.kind === 'failed') {
-            <div class="flex justify-end pb-1">
-              <span class="text-[11px] text-sw-warning" data-testid="settings-llm-discovery-error">
-                {{ discoveryFailureMessage() }}
-              </span>
-            </div>
+            <p
+              class="mono mt-1 text-[11px] text-[var(--amber)]"
+              data-testid="settings-llm-discovery-error"
+            >
+              {{ discoveryFailureMessage() }}
+            </p>
           }
           @if (discoveryState.kind === 'in-flight') {
-            <div class="flex justify-end pb-1">
-              <span class="text-[11px] text-sw-text-muted" data-testid="settings-llm-discovering">
-                Probing {{ discoveryState.url }}...
-              </span>
-            </div>
-          }
-        }
-        <div class="flex items-center gap-3 pt-3 pb-1">
-          <button
-            class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-abyss disabled:opacity-40 disabled:cursor-not-allowed"
-            data-testid="settings-llm-save"
-            (click)="saveConfig()"
-            [disabled]="saving"
-          >
-            {{ saving ? 'Saving...' : 'Save' }}
-          </button>
-          @if (saved) {
-            <span class="text-sw-success text-[13px]" data-testid="settings-llm-saved">Saved!</span>
+            <p
+              class="mono mt-1 text-[11px] text-[var(--ink-mute)]"
+              data-testid="settings-llm-discovering"
+            >
+              Probing {{ discoveryState.url }}...
+            </p>
           }
         </div>
+      </div>
+
+      @if (provider !== 'anthropic') {
+        <button
+          type="button"
+          data-testid="settings-llm-refresh"
+          class="mono mt-3 text-[11px] text-[var(--accent)] hover:underline disabled:opacity-40 disabled:no-underline"
+          [disabled]="discoveryState.kind === 'in-flight'"
+          (click)="discoverModels(true)"
+          title="Fetch the list of models from the server"
+        >
+          @if (discoveryState.kind === 'in-flight') {
+            &#8635; discovering...
+          } @else {
+            &#8635; discover models
+          }
+        </button>
+      }
+
+      <div class="mt-3 flex items-center gap-3">
+        <button
+          type="button"
+          class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+          data-testid="settings-llm-save"
+          (click)="saveConfig()"
+          [disabled]="saving"
+        >
+          {{ saving ? 'saving...' : 'save' }}
+        </button>
+        @if (saved) {
+          <span class="mono text-[11px] text-[var(--green)]" data-testid="settings-llm-saved"
+            >saved!</span
+          >
+        }
       </div>
     </section>
   `,
@@ -160,6 +240,19 @@ export class LlmProviderComponent implements OnInit {
   defaultBaseUrl = '';
   saving = false;
   saved = false;
+
+  /**
+   * Context window persisted in `claude.llm.context_tokens` for the active
+   * project — seeded from `get_llm_config` on load. Used as a fallback by
+   * `resolveContextTokensForSave` when the discovery probe hasn't run yet
+   * (typical right after a fresh app start with a saved local provider).
+   * Once discovery yields a value for the picked model, the discoveryState
+   * payload becomes the source of truth and this seed is no longer read.
+   */
+  private loadedLocalContextTokens: number | null = null;
+
+  /** Cards rendered at the top of the section (mockup-aligned). */
+  readonly providerCards: readonly ProviderCard[] = PROVIDER_CARDS;
 
   /** Current state of the model discovery probe. See `DiscoveryState` docstring. */
   discoveryState: DiscoveryState = { kind: 'idle' };
@@ -195,16 +288,130 @@ export class LlmProviderComponent implements OnInit {
    */
   private defaultBaseUrlsByProvider: Record<string, string> = {};
 
-  @Output() providerChange = new EventEmitter<string>();
-  @Output() errorOccurred = new EventEmitter<string>();
+  readonly providerChange = output<string>();
+  readonly errorOccurred = output<string>();
 
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
+  private anthropicModels = inject(AnthropicModelsService);
+  private chatState = inject(ChatStateService);
 
-  /** Loads the LLM configuration from the backend on init. */
+  /**
+   * Cached SSOT catalog of Anthropic models from the backend
+   * (`list_anthropic_models`). Empty until the first fetch settles; UI
+   * gracefully renders nothing in the optgroups while loading.
+   */
+  protected readonly anthropicCatalog = signal<readonly AnthropicModel[]>([]);
+
+  /** Models flagged `latest = true` — rendered in the "Latest" optgroup. */
+  protected readonly latestAnthropicModels = computed<readonly AnthropicModel[]>(() =>
+    this.anthropicCatalog().filter((m) => m.latest)
+  );
+
+  /** Remaining still-available snapshots — rendered in the "Legacy" optgroup. */
+  protected readonly legacyAnthropicModels = computed<readonly AnthropicModel[]>(() =>
+    this.anthropicCatalog().filter((m) => !m.latest)
+  );
+
+  /** Loads the LLM configuration + the SSOT model catalog from the backend on init. */
   ngOnInit(): void {
     this.loadConfig();
+    void this.loadAnthropicCatalog();
+  }
+
+  /**
+   * Format a catalog entry into the dropdown label, e.g.
+   * `"Opus 4.7 · 1M ctx (claude-opus-4-7)"`. Showing the API id keeps users
+   * who copy values into config files honest about which alias they picked.
+   * @param m - Catalog entry returned by the backend SSOT.
+   */
+  protected formatModelLabel(m: AnthropicModel): string {
+    return `${m.family} · ${formatContextLabel(m.context_tokens)} ctx (${m.id})`;
+  }
+
+  /**
+   * Whether the given model id is present in the SSOT catalog.
+   * @param id - Model id (API alias) to check against the cached catalog.
+   */
+  protected modelInCatalog(id: string): boolean {
+    return this.anthropicCatalog().some((m) => m.id === id);
+  }
+
+  /**
+   * Format a discovered local model into a dropdown label. When the
+   * provider exposed a context window we render `id · 32k ctx`; otherwise
+   * we show the bare id so the option still reads honestly.
+   * @param m - Discovered model returned by the backend probe.
+   */
+  protected formatLocalModelLabel(m: DiscoveredModel): string {
+    if (m.context_tokens && m.context_tokens > 0) {
+      return `${m.id} · ${formatContextLabel(m.context_tokens)} ctx`;
+    }
+    return m.id;
+  }
+
+  /** Ids of every model returned by the most recent discovery probe. */
+  protected discoveredModelIds(): string[] {
+    return this.discoveryState.kind === 'ready' ? this.discoveryState.models.map((m) => m.id) : [];
+  }
+
+  /**
+   * Local-model `<select>` change handler. The `context_tokens` for the
+   * picked entry are derived on demand by `resolveContextTokensForSave`
+   * from `discoveryState.models`, so we don't cache them here — keeping
+   * one source of truth (the discovery payload).
+   * @param id - Model id from the dropdown's value attribute.
+   */
+  protected onLocalModelChange(id: string): void {
+    this.model = id;
+  }
+
+  /**
+   * Resolves the value to send as `context_tokens` on save.
+   *
+   * - Anthropic + non-empty model id → SSOT catalog lookup.
+   * - Local provider + discovery loaded → context window from the picked
+   *   `discoveryState.models[]` entry (single source of truth).
+   * - Local provider + discovery not loaded yet → fall back to the value
+   *   we loaded from config so saving without re-running discovery doesn't
+   *   wipe the persisted token count.
+   * - Anything else → `null` (chat fallback chain takes over).
+   */
+  private resolveContextTokensForSave(): number | null {
+    if (!this.model) return null;
+    if (this.provider === 'anthropic') {
+      return this.anthropicCatalog().find((m) => m.id === this.model)?.context_tokens ?? null;
+    }
+    if (this.discoveryState.kind === 'ready') {
+      const picked = this.discoveryState.models.find((m) => m.id === this.model);
+      return picked?.context_tokens ?? null;
+    }
+    return this.loadedLocalContextTokens;
+  }
+
+  /** Loads the catalog through the shared service and pushes it into the signal. */
+  private async loadAnthropicCatalog(): Promise<void> {
+    const list = await this.anthropicModels.list();
+    this.anthropicCatalog.set(list);
+    this.cdr.markForCheck();
+  }
+
+  /**
+   * Click handler for provider cards. Routes through the existing
+   * `onProviderChange` so URL caching, default fetching, and discovery probe
+   * gating all stay intact — the cards are just a different control surface.
+   * @param id - Provider identifier matching a `ProviderCard.id`.
+   */
+  async selectProvider(id: ProviderCard['id']): Promise<void> {
+    if (this.provider === id) return;
+    this.provider = id;
+    await this.onProviderChange();
+  }
+
+  /** Placeholder shown for the read-only Anthropic base URL field. */
+  anthropicBaseUrlHint(): string {
+    return this.provider === 'anthropic' ? 'https://api.anthropic.com' : '';
   }
 
   /** Returns a placeholder model name based on the selected LLM provider. */
@@ -351,7 +558,7 @@ export class LlmProviderComponent implements OnInit {
     this.cdr.markForCheck();
 
     try {
-      const models = await this.tauri.invoke<string[]>('discover_llm_models', {
+      const models = await this.tauri.invoke<DiscoveredModel[]>('discover_llm_models', {
         provider: this.provider,
         baseUrl: effectiveUrl,
       });
@@ -364,8 +571,9 @@ export class LlmProviderComponent implements OnInit {
       // Auto-select the first discovered model when the current value is
       // blank or not on the list — otherwise the <select> renders with no
       // active <option> and Save would persist an empty model name.
-      if (!this.model || !models.includes(this.model)) {
-        this.model = models[0];
+      const ids = models.map((m) => m.id);
+      if (!this.model || !ids.includes(this.model)) {
+        this.model = models[0].id;
       }
     } catch (e: unknown) {
       if (this.discoveryState.kind !== 'in-flight' || this.discoveryState.id !== id) return;
@@ -403,11 +611,18 @@ export class LlmProviderComponent implements OnInit {
       const effectiveBaseUrl =
         this.provider === 'anthropic' ? null : this.baseUrl || this.defaultBaseUrl || null;
       await this.tauri.invoke('update_llm_config', {
-        provider: this.provider,
-        model: this.model || null,
-        baseUrl: effectiveBaseUrl,
+        update: {
+          provider: this.provider,
+          model: this.model || null,
+          base_url: effectiveBaseUrl,
+          context_tokens: this.resolveContextTokensForSave(),
+        },
       });
       this.saved = true;
+      // Push the freshly-persisted context_tokens into ChatStateService so
+      // the chat footer's `used / max` reflects the new model immediately,
+      // not after the next session start.
+      void this.chatState.refreshLlmConfigCache();
       this.providerChange.emit(this.provider);
       this.projectState.requestRestart();
       setTimeout(() => {
@@ -443,6 +658,11 @@ export class LlmProviderComponent implements OnInit {
       this.model = config.model || '';
       this.baseUrl = config.base_url || '';
       this.defaultBaseUrl = config.default_base_url || '';
+      // Seed the local-model context cache so a Save right after load
+      // (without re-running discovery) preserves the persisted value
+      // instead of nulling it out.
+      this.loadedLocalContextTokens =
+        this.provider !== 'anthropic' ? (config.context_tokens ?? null) : null;
       this.lastKnownProvider = this.provider;
       // Seed the per-provider cache with the backend-authoritative default for
       // the persisted provider so `isDefaultBaseUrl` can compare without a

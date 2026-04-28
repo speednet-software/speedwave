@@ -19,6 +19,7 @@ Desktop.ini
 
 # Claude Code
 .claude/*.lock
+.claude/worktrees/
 
 # Superpowers skills (local tooling, not part of the project)
 docs/superpowers/

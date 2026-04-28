@@ -58,13 +58,14 @@ Different projects require different Claude Code settings (model selection, cust
 
 #### Per-project Claude overrides (`claude.*`)
 
-| Field                 | Rust type                         | Description                                                                                                                          |
-| --------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `claude.env`          | `Option<HashMap<String, String>>` | Environment variables injected into the Claude Code process[^1]                                                                      |
-| `claude.llm`          | `Option<LlmConfig>`               | Local LLM provider configuration — see ADR-040                                                                                       |
-| `claude.llm.provider` | `Option<String>`                  | `anthropic` (default), `ollama`, `lmstudio`, `llamacpp`                                                                              |
-| `claude.llm.model`    | `Option<String>`                  | Model name for the local provider (also accepted from repo config)                                                                   |
-| `claude.llm.base_url` | `Option<String>`                  | Optional; overrides the provider default port. **Not accepted from repo config** — only from user config (SSRF prevention, ADR-040). |
+| Field                       | Rust type                         | Description                                                                                                                                                                                                                                                 |
+| --------------------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude.env`                | `Option<HashMap<String, String>>` | Environment variables injected into the Claude Code process[^1]                                                                                                                                                                                             |
+| `claude.llm`                | `Option<LlmConfig>`               | Local LLM provider configuration — see ADR-040                                                                                                                                                                                                              |
+| `claude.llm.provider`       | `Option<String>`                  | `anthropic` (default), `ollama`, `lmstudio`, `llamacpp`                                                                                                                                                                                                     |
+| `claude.llm.model`          | `Option<String>`                  | Model id. For local providers passed via `--model`. For `anthropic` also injected as `ANTHROPIC_MODEL` (compose layer; `claude.env.ANTHROPIC_MODEL` still wins on conflict). Sanitised before embedding in the local-LLM identity prompt — see ADR-040.     |
+| `claude.llm.base_url`       | `Option<String>`                  | Optional; overrides the provider default port. **Not accepted from repo config** — only from user config (SSRF prevention, ADR-040).                                                                                                                        |
+| `claude.llm.context_tokens` | `Option<u32>`                     | Persisted context window in tokens — populated by Settings (Anthropic SSOT lookup or local discovery probe). Consumed by the chat footer's `used / max` ratio before any stream-level value lands. Zero is rejected at save time. See ADR-041 for sourcing. |
 
 #### Global config fields
 
@@ -108,6 +109,6 @@ Resolution logic: `resolve_claude_config()` in `crates/speedwave-runtime/src/con
 
 [^2]: `serde_json::Value` allows arbitrary JSON — see [serde_json::Value docs](https://docs.rs/serde_json/latest/serde_json/enum.Value.html)
 
-[^3]: As of fix #301, `ANTHROPIC_MODEL` is no longer set by `defaults::base_env()`. Users who want a specific model set it explicitly via `claude.env.ANTHROPIC_MODEL` in `.speedwave.json` or `~/.speedwave/config.json`.
+[^3]: As of fix #301, `ANTHROPIC_MODEL` is no longer set by `defaults::base_env()`. Users who want a specific Claude model can populate it from one of two paths: (a) `claude.env.ANTHROPIC_MODEL` in `.speedwave.json` or `~/.speedwave/config.json` (the v1 path; works for any provider), or (b) `claude.llm.model` for the `anthropic` provider, which the runtime injects into `ANTHROPIC_MODEL` at compose-render time. When both are set, `claude.llm.model` wins: `compose::render_compose` calls `inject_claude_env(...)` for `claude.env` first, then `apply_llm_config(...)` runs `inject_claude_env` again with the LLM-derived value, and the second write replaces the first by key. Whitespace/empty values fall through to Claude Code's built-in default.
 
 [^4]: Config merge implementation — `crates/speedwave-runtime/src/config.rs:55-86`

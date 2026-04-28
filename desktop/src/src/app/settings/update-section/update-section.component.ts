@@ -2,122 +2,115 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
-  EventEmitter,
-  Input,
   OnInit,
-  Output,
   inject,
+  input,
+  output,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { TauriService } from '../../services/tauri.service';
-import { UpdateInfo, UpdateSettings } from '../../models/update';
+import { UpdateCheckOutcome, UpdateSettings } from '../../models/update';
 
 /** Displays app update controls, container update/rollback, and auto-check settings. */
 @Component({
   selector: 'app-update-section',
-  standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block' },
   template: `
-    <!-- Updates -->
-    <section class="mb-6">
-      <h2 class="text-[15px] text-sw-text m-0 mb-3">Updates</h2>
-      <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-4">
-        <div class="flex justify-between items-center py-2">
-          <span class="text-[13px] text-sw-text-muted">Current version</span>
-          <span class="text-[13px] font-mono text-sw-text-dim">{{ currentVersion || '—' }}</span>
-        </div>
-        <div class="flex justify-between items-center py-2 border-t border-sw-border">
-          <span class="text-[13px] text-sw-text-muted min-w-[120px]">Auto-check</span>
-          <label class="flex items-center gap-2 cursor-pointer" for="update-auto-check">
-            <input
-              id="update-auto-check"
-              type="checkbox"
-              [checked]="updateAutoCheck"
-              (change)="toggleAutoCheck()"
-              class="accent-sw-accent w-4 h-4 cursor-pointer"
-            />
-            <span class="text-[13px] text-sw-text font-mono">{{
-              updateAutoCheck ? 'On' : 'Off'
-            }}</span>
-          </label>
-        </div>
-        @if (updateAutoCheck) {
-          <div class="flex justify-between items-center py-2 border-t border-sw-border">
-            <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="check-frequency"
-              >Frequency</label
-            >
-            <select
-              id="check-frequency"
-              [ngModel]="updateIntervalHours"
-              (ngModelChange)="setCheckInterval($event)"
-              class="flex-1 max-w-[340px] px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
-            >
-              <option [ngValue]="12">Every 12 hours</option>
-              <option [ngValue]="24">Every 24 hours</option>
-              <option [ngValue]="168">Weekly</option>
-            </select>
+    <section id="section-updates" class="border-t border-[var(--line)] pt-6">
+      <h2 class="view-title view-title-section text-[var(--ink)]">Updates</h2>
+      <div class="mt-3 rounded border border-[var(--line)]">
+        <div class="flex items-center justify-between px-4 py-3">
+          <div>
+            <div class="mono text-[12px] text-[var(--ink)]">
+              speedwave {{ currentVersion ? 'v' + currentVersion : '' }}
+            </div>
+            <div class="mono mt-0.5 text-[11px]" [class]="updateStatusClass()">
+              {{ updateStatusText() }}
+            </div>
           </div>
-        }
-        <div class="flex items-center gap-3 pt-3 pb-1">
-          <button
-            class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-abyss disabled:opacity-40 disabled:cursor-not-allowed"
-            data-testid="settings-check-update"
-            (click)="checkForUpdate()"
-            [disabled]="updateChecking || updateInstalling"
-          >
-            {{ updateChecking ? 'Checking...' : 'Check now' }}
-          </button>
-          @if (updateResult === 'up-to-date') {
-            <span class="text-sw-success text-[13px]">Up to date</span>
-          }
-          @if (updateResult === 'available') {
-            <span class="text-sw-accent text-[13px] font-bold"
-              >v{{ updateAvailableVersion }} available</span
+          <div class="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
+              data-testid="settings-check-update"
+              (click)="checkForUpdate()"
+              [disabled]="updateChecking || updateInstalling"
             >
-            @if (isLinux) {
-              <button
-                class="px-4 py-1.5 bg-sw-accent text-sw-bg-abyss border-none rounded text-[13px] font-mono cursor-pointer transition-opacity duration-200 hover:enabled:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
-                data-testid="settings-download-update"
-                (click)="openReleasesPage()"
-              >
-                Download v{{ updateAvailableVersion }}
-              </button>
-            } @else {
-              <button
-                class="px-4 py-1.5 bg-sw-accent text-sw-bg-abyss border-none rounded text-[13px] font-mono cursor-pointer transition-opacity duration-200 hover:enabled:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
-                data-testid="settings-install-update"
-                (click)="installUpdate()"
-                [disabled]="updateInstalling"
-              >
-                {{ updateInstalling ? 'Installing...' : 'Install & Restart' }}
-              </button>
+              {{ updateChecking ? 'checking...' : 'check now' }}
+            </button>
+            @if (updateResult === 'available') {
+              @if (isLinux) {
+                <button
+                  type="button"
+                  class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+                  data-testid="settings-download-update"
+                  (click)="openReleasesPage()"
+                >
+                  download v{{ updateAvailableVersion }}
+                </button>
+              } @else {
+                <button
+                  type="button"
+                  class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+                  data-testid="settings-install-update"
+                  (click)="installUpdate()"
+                  [disabled]="updateInstalling"
+                >
+                  {{ updateInstalling ? 'installing...' : 'install & restart' }}
+                </button>
+              }
             }
-          }
+            @if (updateResult === 'managed-externally') {
+              <span
+                class="mono text-[11px] text-[var(--ink-mute)]"
+                data-testid="settings-update-managed-externally"
+              >
+                run <code>sudo {{ managedManager }} upgrade speedwave</code>
+              </span>
+            }
+          </div>
         </div>
-        @if (updateInstallError) {
-          <p
-            class="mt-2 mb-4 px-3 py-2 bg-sw-error-bg border border-sw-error rounded text-sw-error text-[13px]"
-          >
-            {{ updateInstallError }}
-          </p>
-        }
       </div>
+
+      @if (updateInstallError) {
+        <p
+          class="mono mt-3 rounded border border-red-500/40 bg-red-500/5 px-3 py-2 text-[11px] text-red-300"
+        >
+          {{ updateInstallError }}
+        </p>
+      }
+
+      <!-- Auto-check is always on with a fixed 12h interval — there is no
+           user-facing control. The values are persisted on init by the
+           component so the backend stays in sync. -->
     </section>
   `,
 })
 export class UpdateSectionComponent implements OnInit {
-  @Input() activeProject: string | null = null;
+  readonly activeProject = input<string | null>(null);
 
-  @Output() errorOccurred = new EventEmitter<string>();
+  readonly errorOccurred = output<string>();
+
+  /**
+   * Hard-coded auto-check interval in hours — every user is opted in to a
+   *  12 h check, the UI no longer exposes a toggle or frequency dropdown.
+   */
+  private static readonly DEFAULT_INTERVAL_HOURS = 12;
 
   currentVersion = '';
+  /**
+   * Always true — auto-check is non-negotiable, kept as a field so the
+   *  existing backend-sync helper (`saveUpdateSettings`) compiles unchanged.
+   */
   updateAutoCheck = true;
-  updateIntervalHours = 24;
+  updateIntervalHours = UpdateSectionComponent.DEFAULT_INTERVAL_HOURS;
   updateChecking = false;
-  updateResult: 'none' | 'up-to-date' | 'available' = 'none';
+  updateResult: 'none' | 'up-to-date' | 'available' | 'managed-externally' = 'none';
   updateAvailableVersion = '';
+  /** Name of the package manager that owns this install (apt/dnf/...). */
+  managedManager = '';
   updateInstalling = false;
   isLinux = false;
   updateInstallError = '';
@@ -133,6 +126,34 @@ export class UpdateSectionComponent implements OnInit {
     this.detectPlatform();
   }
 
+  /**
+   * Human-readable status line shown under the version label.
+   * Maps the four UI states (idle, checking, up-to-date, available) to the
+   * mockup's status copy so the status row mirrors the design.
+   */
+  updateStatusText(): string {
+    if (this.updateChecking) return 'checking for updates...';
+    if (this.updateResult === 'up-to-date') return '✓ up to date';
+    if (this.updateResult === 'available') {
+      return '⚠ update available: v' + this.updateAvailableVersion;
+    }
+    if (this.updateResult === 'managed-externally') {
+      return 'managed by your system package manager';
+    }
+    return 'tap "check now" to look for updates';
+  }
+
+  /**
+   * Tailwind class applied to the status line. Green for "up to date", amber
+   * for "available", muted for the idle/checking states. Returned as a single
+   * string so the template uses `[class]="..."` rather than `ngClass`.
+   */
+  updateStatusClass(): string {
+    if (this.updateResult === 'up-to-date') return 'text-[var(--green)]';
+    if (this.updateResult === 'available') return 'text-[var(--amber)]';
+    return 'text-[var(--ink-mute)]';
+  }
+
   private async loadCurrentVersion(): Promise<void> {
     try {
       this.currentVersion = await this.tauri.getVersion();
@@ -142,11 +163,22 @@ export class UpdateSectionComponent implements OnInit {
     this.cdr.markForCheck();
   }
 
+  /**
+   * Backend-sync on init. Auto-check + 12 h interval are non-negotiable in
+   * the UI, so on first read we *force* the persisted settings to those
+   * defaults if they drift (e.g. from an older version that exposed the
+   * dropdown). The frontend never reads `settings.check_interval_hours` for
+   * display — it just keeps the backend in sync.
+   */
   private async loadUpdateSettings(): Promise<void> {
     try {
       const settings = await this.tauri.invoke<UpdateSettings>('get_update_settings');
-      this.updateAutoCheck = settings.auto_check;
-      this.updateIntervalHours = settings.check_interval_hours;
+      const needsRewrite =
+        !settings.auto_check ||
+        settings.check_interval_hours !== UpdateSectionComponent.DEFAULT_INTERVAL_HOURS;
+      if (needsRewrite) {
+        await this.saveUpdateSettings();
+      }
     } catch {
       // Not running inside Tauri
     }
@@ -168,21 +200,6 @@ export class UpdateSectionComponent implements OnInit {
     }
   }
 
-  /** Toggles the auto-check setting and persists it. */
-  async toggleAutoCheck(): Promise<void> {
-    this.updateAutoCheck = !this.updateAutoCheck;
-    await this.saveUpdateSettings();
-  }
-
-  /**
-   * Updates the check interval and persists it.
-   * @param hours - The interval in hours between automatic update checks.
-   */
-  async setCheckInterval(hours: number): Promise<void> {
-    this.updateIntervalHours = hours;
-    await this.saveUpdateSettings();
-  }
-
   /** Manually checks for available updates. */
   async checkForUpdate(): Promise<void> {
     this.updateChecking = true;
@@ -190,16 +207,23 @@ export class UpdateSectionComponent implements OnInit {
     this.error = '';
     this.cdr.markForCheck();
     try {
-      const info = await this.tauri.invoke<UpdateInfo | null>('check_for_update');
-      if (info) {
-        this.updateResult = 'available';
-        this.updateAvailableVersion = info.version;
-      } else {
-        this.updateResult = 'up-to-date';
-        setTimeout(() => {
-          this.updateResult = 'none';
-          this.cdr.markForCheck();
-        }, 3000);
+      const outcome = await this.tauri.invoke<UpdateCheckOutcome>('check_for_update');
+      switch (outcome.kind) {
+        case 'update_available':
+          this.updateResult = 'available';
+          this.updateAvailableVersion = outcome.version;
+          break;
+        case 'managed_externally':
+          this.updateResult = 'managed-externally';
+          this.managedManager = outcome.manager;
+          break;
+        case 'up_to_date':
+          this.updateResult = 'up-to-date';
+          setTimeout(() => {
+            this.updateResult = 'none';
+            this.cdr.markForCheck();
+          }, 3000);
+          break;
       }
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);

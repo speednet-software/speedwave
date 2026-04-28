@@ -39,6 +39,18 @@ Speedwave also detects external IDEs (VS Code, Cursor, JetBrains) that write the
 4. Verifies liveness: checks PID is alive (`kill -0` on Unix, `tasklist` on Windows) **and** TCP port is reachable (50ms timeout).
 5. Reports detected IDEs in the health dashboard.
 
+### `selected_ide` — SSOT for "actively connected"
+
+`get_system_health.ide_bridge.selected_ide` is the single source of truth for whether an IDE is actively routed through the Bridge. The status bar in `/logs` and the IDE Bridge integrations panel both read from it.
+
+The field is `null` in three cases that the UI should treat identically (show "not connected"):
+
+1. The user has not yet selected an IDE via the picker (`select_ide` Tauri command).
+2. The previously selected IDE is no longer detected — for example the editor process exited between health polls, or its lock file was removed. The runtime resolves `selected_ide` by joining the user-config selection against the live `detected_ides` list, so a stale port from a crashed IDE never surfaces.
+3. The backend config read failed (a `log::warn!` is emitted in `health.rs::build_bridge_health` so the regression is traceable).
+
+`detected_ides` may contain multiple entries (the daemon scans every lock file under `~/.claude/ide/`); `selected_ide` always resolves to at most one of them. The top-level `port` and `ws_url` describe the _first_ detected IDE for legacy compatibility — frontends that need the routed-through port should prefer `selected_ide.port` and `selected_ide.ws_url`.
+
 ## Supported IDEs
 
 Any editor that implements the Claude Code IDE protocol is supported:

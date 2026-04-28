@@ -2,12 +2,11 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
-  EventEmitter,
-  inject,
-  Input,
   OnDestroy,
   OnInit,
-  Output,
+  inject,
+  input,
+  output,
 } from '@angular/core';
 import { TauriService } from '../services/tauri.service';
 
@@ -18,62 +17,54 @@ import { TauriService } from '../services/tauri.service';
  */
 @Component({
   selector: 'app-auth-terminal',
-  standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [],
   template: `
-    <div class="bg-sw-bg-darkest border border-sw-border rounded-lg p-4 mt-3">
-      <p class="text-[13px] text-sw-text m-0 mb-3 leading-relaxed">
-        Open a terminal and run the following command, then type <code>/login</code> to
-        authenticate:
+    <div class="mt-3 rounded border border-[var(--line)] bg-[var(--bg-1)] p-4">
+      <p class="text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
+        Open a terminal and run the following command. Claude Code will launch its interactive setup
+        and walk you through the login flow.
       </p>
       @if (command) {
         <div
-          class="flex items-center gap-2 mb-3 bg-sw-bg-dark border border-sw-border rounded px-3 py-2"
+          class="mt-3 flex items-center gap-2 rounded border border-[var(--line)] bg-[var(--bg-2)] px-3 py-2"
         >
           <code
-            class="text-[13px] text-sw-accent font-mono flex-1 select-all break-all"
+            class="mono flex-1 select-all break-all text-[12px] text-[var(--accent)]"
             data-testid="auth-command"
             >{{ command }}</code
           >
           <button
-            class="px-3 py-1 bg-sw-accent text-sw-bg-abyss border-none rounded text-[12px] font-mono cursor-pointer transition-colors duration-200 hover:bg-sw-accent-hover shrink-0"
+            type="button"
+            class="mono shrink-0 rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90"
             data-testid="auth-copy-command"
             (click)="copyCommand()"
           >
-            {{ copied ? 'Copied!' : 'Copy' }}
+            {{ copied ? 'copied!' : 'copy' }}
           </button>
         </div>
       }
       @if (isWindows) {
-        <p class="text-xs text-sw-text-faint m-0 mb-2 leading-relaxed">
+        <p class="mono mt-2 text-[10px] leading-relaxed text-[var(--ink-mute)]">
           On Windows, run this in a WSL or bash terminal.
         </p>
       }
       @if (error) {
         <div
-          class="bg-sw-error-bg border border-sw-error rounded px-3 py-2 mb-3 text-sw-error-text text-[13px] leading-snug"
+          class="mt-3 rounded border border-red-500/40 bg-red-500/5 px-3 py-2 text-[12px] leading-snug text-red-300"
           data-testid="auth-error"
         >
           {{ error }}
         </div>
       }
-      <p class="text-xs text-sw-text-faint m-0 mb-3 leading-relaxed">
-        This page updates automatically when authentication completes.
-      </p>
-      <div class="flex items-center gap-2 text-[13px] text-sw-text-muted">
-        <span
-          class="w-3.5 h-3.5 border-2 border-sw-border border-t-sw-accent rounded-full animate-sw-spin shrink-0"
-        ></span>
-        <span>Waiting for authentication...</span>
-      </div>
     </div>
   `,
 })
 export class AuthTerminalComponent implements OnInit, OnDestroy {
   /** Project name for auth status polling. */
-  @Input() project = '';
+  readonly project = input('');
   /** Emits when the OAuth session finishes. */
-  @Output() done = new EventEmitter<boolean>();
+  readonly done = output<boolean>();
 
   /** CLI command to display for the user to copy. */
   command = '';
@@ -92,7 +83,7 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
   /** Fetches the CLI command, detects platform, and starts polling for auth status. */
   ngOnInit(): void {
     this.tauri
-      .invoke<string>('get_auth_command', { project: this.project })
+      .invoke<string>('get_auth_command', { project: this.project() })
       .then((cmd) => {
         this.command = cmd;
         this.cdr.markForCheck();
@@ -141,7 +132,7 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
         const result = await this.tauri.invoke<{ oauth_authenticated: boolean }>(
           'get_auth_status',
           {
-            project: this.project,
+            project: this.project(),
           }
         );
         if (result.oauth_authenticated) {

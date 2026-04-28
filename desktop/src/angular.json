@@ -18,7 +18,14 @@
             "tsConfig": "tsconfig.app.json",
             "polyfills": [],
             "styles": ["src/styles.css"],
-            "scripts": []
+            "scripts": [],
+            "assets": [
+              {
+                "glob": "**/*",
+                "input": "public",
+                "output": "/"
+              }
+            ]
           },
           "configurations": {
             "production": {

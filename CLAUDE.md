@@ -7,6 +7,8 @@ Security-first AI platform connecting Claude Code with external services (Slack,
 - **SSOT: `crates/speedwave-runtime/`** — all Lima/WSL2/nerdctl logic. CLI and Desktop both import it as a Cargo dependency
 - **SSOT: `mcp-servers/shared/`** — MCP protocol utilities shared by all servers
 - **SSOT: `containers/compose.template.yml`** — container definitions. `render_compose()` generates per-project files
+- **SSOT: `crates/speedwave-runtime/src/defaults.rs::ANTHROPIC_MODELS`** — Anthropic model catalog (id, family, context window, latest flag). Frontend reads it via the `list_anthropic_models` Tauri command and `AnthropicModelsService`. Bumping a model = editing one const; do NOT hard-code model strings in Angular.
+- **SSOT: `crates/speedwave-runtime/src/prompts.rs::local_llm_identity`** — dynamic identity prompt appended to local-LLM sessions via `--append-system-prompt`. Do NOT duplicate the wording in `containers/claude-resources/system-prompts/local-llm.md`; the file there carries the static base prompt only and the runtime layers identity on top.
 - **SSOT alignment:** `scripts/bundle-build-context.sh` IMAGES list must stay aligned with `crates/speedwave-runtime/src/build.rs` IMAGES constant
 - **SSOT alignment:** `scripts/sign-bundled-binaries.sh` SIGN_TARGETS must stay aligned with `desktop/src-tauri/tauri.macos.conf.json` bundle.resources — every bundled Mach-O must be signed, and binaries using restricted platform APIs need entitlements plists in `desktop/src-tauri/entitlements/`
 - **Per-project isolation:** `~/.speedwave/tokens/<project>/<service>/` (read-only mount), `speedwave_<project>_network` (isolated network)

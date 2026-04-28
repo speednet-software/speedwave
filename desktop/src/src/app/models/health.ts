@@ -36,6 +36,18 @@ export interface IdeBridgeHealth {
   port: number | null;
   ws_url: string | null;
   detected_ides: DetectedIde[];
+  /**
+   * SSOT for "is an IDE actively connected to the bridge". `null` in three
+   * cases the UI should treat identically (show "not connected"):
+   * 1. No IDE selected yet via `select_ide`.
+   * 2. Previously selected IDE no longer detected (process exited between
+   *    health polls).
+   * 3. Backend config read failed (see the `log::warn!` in `build_bridge_health`).
+   *
+   * `port` / `ws_url` above describe the first detected IDE and may differ
+   * from `selected_ide`; prefer `selected_ide.{port, ws_url}` when present.
+   */
+  selected_ide: DetectedIde | null;
 }
 
 /** Aggregated system health report across all Speedwave subsystems. */

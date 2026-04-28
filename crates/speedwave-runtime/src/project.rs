@@ -23,6 +23,11 @@ fn cleanup_project_dirs_in(project: &str, data_dir: &Path) {
 }
 
 /// Creates project directories under a given data directory.
+///
+/// Directories are created directly with restrictive `0o700` permissions on
+/// Unix so that `fs_security::ensure_data_dir_permissions` does not have to
+/// chmod them on every app launch (the post-fix runs as a `[WARN]` and is
+/// purely a recovery path for tampered or pre-existing trees).
 fn init_project_dirs_in(project: &str, data_dir: &Path) -> anyhow::Result<()> {
     validation::validate_project_name(project)?;
     let dirs_to_create = [
@@ -35,9 +40,25 @@ fn init_project_dirs_in(project: &str, data_dir: &Path) -> anyhow::Result<()> {
         data_dir.join("claude-home").join(project),
     ];
     for dir in &dirs_to_create {
-        std::fs::create_dir_all(dir)?;
+        create_dir_all_secure(dir)?;
     }
     Ok(())
+}
+
+/// `create_dir_all` that applies mode `0o700` to every directory level it
+/// creates on Unix. `DirBuilder::recursive(true)` skips already-existing
+/// directories (their permissions are left intact and reconciled by
+/// `fs_security::ensure_data_dir_permissions`). On Windows, ACLs are
+/// inherited from the parent — Windows ignores Unix mode bits.
+fn create_dir_all_secure(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
 }
 
 /// Saves the rendered compose YAML under a given data directory.
@@ -203,6 +224,67 @@ mod tests {
         std::fs::create_dir_all(&data_dir).unwrap();
         // Should not panic or error even when dirs don't exist
         cleanup_project_dirs_in("nonexistent-test-project-xyz", &data_dir);
+    }
+
+    /// Newly-created project directories must already be `0o700` so
+    /// `fs_security::ensure_data_dir_permissions` does not have to chmod
+    /// them on every launch (it logs a `[WARN]` per fix-up).
+    #[cfg(unix)]
+    #[test]
+    fn init_project_dirs_creates_with_mode_0o700() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        init_project_dirs_in("modecheck", &data_dir).unwrap();
+
+        let dirs = [
+            data_dir.join("tokens").join("modecheck"),
+            data_dir.join("tokens").join("modecheck").join("slack"),
+            data_dir.join("tokens").join("modecheck").join("sharepoint"),
+            data_dir.join("tokens").join("modecheck").join("redmine"),
+            data_dir.join("tokens").join("modecheck").join("gitlab"),
+            data_dir.join("compose").join("modecheck"),
+            data_dir.join("context").join("modecheck"),
+            data_dir.join("claude-home").join("modecheck"),
+        ];
+        for dir in &dirs {
+            let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o700,
+                "{} created with {:#05o}, expected 0o700",
+                dir.display(),
+                mode
+            );
+        }
+    }
+
+    /// Pre-existing directories with looser permissions are left intact —
+    /// `fs_security::ensure_data_dir_permissions` is the SSOT for fixing
+    /// those, and `create_dir_all_secure` must not silently widen its scope
+    /// to chmod existing trees (that would race with the security check).
+    #[cfg(unix)]
+    #[test]
+    fn create_dir_all_secure_leaves_existing_dir_perms_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("preexisting");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Re-running create_dir_all_secure on an existing dir is a no-op
+        // for permissions (DirBuilder::recursive matches Rust's
+        // create_dir_all semantics).
+        create_dir_all_secure(&parent).unwrap();
+        let mode = std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "create_dir_all_secure must not chmod existing dirs"
+        );
     }
 
     #[test]

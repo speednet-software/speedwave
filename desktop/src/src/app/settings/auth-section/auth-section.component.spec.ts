@@ -42,27 +42,48 @@ describe('AuthSectionComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  it('defaults to api_key auth method', () => {
-    expect(component.authMethod).toBe('api_key');
+  it('defaults to oauth auth method', () => {
+    // OAuth via claude.ai is the recommended path; the api-key tab stays
+    // available but users should land on the friendlier flow first.
+    expect(component.authMethod).toBe('oauth');
   });
 
   it('defaults to anthropic llm provider', () => {
-    expect(component.llmProvider).toBe('anthropic');
+    expect(component.llmProvider()).toBe('anthropic');
   });
 
   it('shows anthropic auth section when llmProvider is anthropic', () => {
-    component.llmProvider = 'anthropic';
+    fixture.componentRef.setInput('llmProvider', 'anthropic');
     fixture.detectChanges();
     const heading = fixture.nativeElement.querySelector('h2');
     expect(heading?.textContent).toContain('Authentication');
-    const methodSelect = fixture.nativeElement.querySelector(
-      '[data-testid="settings-auth-method"]'
+    // Method picker is now two segmented buttons (mockup-aligned), not a <select>.
+    const apiKeyTab = fixture.nativeElement.querySelector(
+      '[data-testid="settings-auth-method-api-key"]'
     );
-    expect(methodSelect).not.toBeNull();
+    const oauthTab = fixture.nativeElement.querySelector(
+      '[data-testid="settings-auth-method-oauth"]'
+    );
+    expect(apiKeyTab).not.toBeNull();
+    expect(oauthTab).not.toBeNull();
+    // OAuth is the default — checked on first render, api-key off.
+    expect(oauthTab.getAttribute('aria-checked')).toBe('true');
+    expect(apiKeyTab.getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('clicking the api-key tab switches authMethod away from the default', () => {
+    fixture.componentRef.setInput('llmProvider', 'anthropic');
+    fixture.detectChanges();
+    const apiKeyTab = fixture.nativeElement.querySelector(
+      '[data-testid="settings-auth-method-api-key"]'
+    ) as HTMLButtonElement;
+    apiKeyTab.click();
+    fixture.detectChanges();
+    expect(component.authMethod).toBe('api_key');
   });
 
   it('shows local provider note when llmProvider is ollama', () => {
-    component.llmProvider = 'ollama';
+    fixture.componentRef.setInput('llmProvider', 'ollama');
     fixture.detectChanges();
     const note = fixture.nativeElement.querySelector('[data-testid="auth-note"]');
     expect(note?.textContent).toContain('No authentication needed for local model providers');
@@ -75,21 +96,14 @@ describe('AuthSectionComponent', () => {
     ['custom', true],
     ['anthropic', false],
   ])('isLocalProvider() returns %s for provider %s', (provider, expected) => {
-    component.llmProvider = provider;
+    fixture.componentRef.setInput('llmProvider', provider);
     expect(component.isLocalProvider()).toBe(expected);
   });
 
   it('loads auth status when activeProject changes', async () => {
     const spy = vi.spyOn(component, 'loadAuthStatus');
-    component.activeProject = 'test-project';
-    component.ngOnChanges({
-      activeProject: {
-        currentValue: 'test-project',
-        previousValue: null,
-        firstChange: true,
-        isFirstChange: () => true,
-      },
-    });
+    fixture.componentRef.setInput('activeProject', 'test-project');
+    fixture.detectChanges();
     expect(spy).toHaveBeenCalled();
   });
 
@@ -100,7 +114,7 @@ describe('AuthSectionComponent', () => {
       }
       return undefined;
     };
-    component.activeProject = 'test-project';
+    fixture.componentRef.setInput('activeProject', 'test-project');
     await component.loadAuthStatus();
     expect(component.apiKeyConfigured).toBe(true);
   });
@@ -112,7 +126,7 @@ describe('AuthSectionComponent', () => {
       }
       return undefined;
     };
-    component.activeProject = 'test-project';
+    fixture.componentRef.setInput('activeProject', 'test-project');
     await component.loadAuthStatus();
     expect(component.oauthAuthenticated).toBe(true);
   });
@@ -127,7 +141,7 @@ describe('AuthSectionComponent', () => {
       return undefined;
     };
 
-    component.activeProject = 'test';
+    fixture.componentRef.setInput('activeProject', 'test');
     await component.loadAuthStatus();
 
     expect(applySpy).toHaveBeenCalledWith({
@@ -147,7 +161,7 @@ describe('AuthSectionComponent', () => {
       return undefined;
     };
 
-    component.activeProject = 'test';
+    fixture.componentRef.setInput('activeProject', 'test');
     await component.loadAuthStatus();
 
     expect(applySpy).toHaveBeenCalledWith({ api_key_configured: true, oauth_authenticated: false });
@@ -155,7 +169,7 @@ describe('AuthSectionComponent', () => {
   });
 
   it('does not load auth status when activeProject is null', async () => {
-    component.activeProject = null;
+    fixture.componentRef.setInput('activeProject', null);
     await component.loadAuthStatus();
     expect(component.apiKeyConfigured).toBe(false);
   });
@@ -172,7 +186,7 @@ describe('AuthSectionComponent', () => {
       }
       return undefined;
     };
-    component.activeProject = 'test-project';
+    fixture.componentRef.setInput('activeProject', 'test-project');
     component.apiKeyInput = 'sk-ant-test123';
     await component.saveApiKey();
     expect(savedKey).toBe('sk-ant-test123');
@@ -187,7 +201,7 @@ describe('AuthSectionComponent', () => {
       if (cmd === 'save_api_key') invoked = true;
       return undefined;
     };
-    component.activeProject = null;
+    fixture.componentRef.setInput('activeProject', null);
     component.apiKeyInput = 'sk-ant-test123';
     await component.saveApiKey();
     expect(invoked).toBe(false);
@@ -199,7 +213,7 @@ describe('AuthSectionComponent', () => {
       if (cmd === 'save_api_key') invoked = true;
       return undefined;
     };
-    component.activeProject = 'test-project';
+    fixture.componentRef.setInput('activeProject', 'test-project');
     component.apiKeyInput = '';
     await component.saveApiKey();
     expect(invoked).toBe(false);
@@ -215,7 +229,7 @@ describe('AuthSectionComponent', () => {
     };
     const errorSpy = vi.fn();
     component.errorOccurred.subscribe(errorSpy);
-    component.activeProject = 'test-project';
+    fixture.componentRef.setInput('activeProject', 'test-project');
     component.apiKeyInput = 'sk-ant-test123';
     await component.saveApiKey();
     expect(errorSpy).toHaveBeenCalledWith('write failed');
@@ -233,7 +247,7 @@ describe('AuthSectionComponent', () => {
       }
       return undefined;
     };
-    component.activeProject = 'test-project';
+    fixture.componentRef.setInput('activeProject', 'test-project');
     await component.deleteApiKey();
     expect(deleted).toBe(true);
   });
@@ -244,7 +258,7 @@ describe('AuthSectionComponent', () => {
       if (cmd === 'delete_api_key') invoked = true;
       return undefined;
     };
-    component.activeProject = null;
+    fixture.componentRef.setInput('activeProject', null);
     await component.deleteApiKey();
     expect(invoked).toBe(false);
   });
@@ -259,37 +273,40 @@ describe('AuthSectionComponent', () => {
     };
     const errorSpy = vi.fn();
     component.errorOccurred.subscribe(errorSpy);
-    component.activeProject = 'test-project';
+    fixture.componentRef.setInput('activeProject', 'test-project');
     await component.deleteApiKey();
     expect(errorSpy).toHaveBeenCalledWith('delete failed');
   });
 
-  it('resets authMethod to api_key on OAuth done', async () => {
+  it('keeps the user on the oauth tab after OAuth completes', async () => {
+    // Previously the component bounced back to the api-key tab once OAuth
+    // finished — confusing for users who picked OAuth on purpose. Now we
+    // stay on the same tab and just refresh the auth status pill.
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_auth_status') {
         return { api_key_configured: false, oauth_authenticated: true };
       }
       return undefined;
     };
-    component.activeProject = 'test-project';
+    fixture.componentRef.setInput('activeProject', 'test-project');
     component.authMethod = 'oauth';
     await component.onOAuthDone(true);
-    expect(component.authMethod).toBe('api_key');
+    expect(component.authMethod).toBe('oauth');
     expect(component.oauthAuthenticated).toBe(true);
   });
 
   it('does not render AuthTerminalComponent when activeProject is null even with oauth method', () => {
     component.authMethod = 'oauth';
-    component.llmProvider = 'anthropic';
-    component.activeProject = null;
+    fixture.componentRef.setInput('llmProvider', 'anthropic');
+    fixture.componentRef.setInput('activeProject', null);
     fixture.detectChanges();
     const authEl = fixture.nativeElement.querySelector('app-auth-terminal');
     expect(authEl).toBeNull();
   });
 
   it('renders AuthTerminalComponent when activeProject is set and authMethod is oauth', () => {
-    component.llmProvider = 'anthropic';
-    component.activeProject = 'test-project';
+    fixture.componentRef.setInput('llmProvider', 'anthropic');
+    fixture.componentRef.setInput('activeProject', 'test-project');
     component.authMethod = 'oauth';
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
@@ -297,21 +314,46 @@ describe('AuthSectionComponent', () => {
     expect(authEl).not.toBeNull();
   });
 
-  it('displays API Key configured status when key is set', () => {
-    component.llmProvider = 'anthropic';
+  it('renders a `connected` pill alongside an `api key` method pill when the key is set', () => {
+    fixture.componentRef.setInput('llmProvider', 'anthropic');
     component.apiKeyConfigured = true;
     fixture.detectChanges();
     const statusEl = fixture.nativeElement.querySelector('[data-testid="auth-status-value"]');
-    expect(statusEl?.textContent).toContain('API Key configured');
+    const methodEl = fixture.nativeElement.querySelector('[data-testid="auth-status-method"]');
+    expect(statusEl?.textContent?.trim()).toContain('connected');
+    expect(statusEl?.classList.contains('pill')).toBe(true);
+    expect(statusEl?.classList.contains('green')).toBe(true);
+    expect(methodEl?.textContent?.trim()).toBe('api key');
+    expect(methodEl?.classList.contains('pill')).toBe(true);
+    expect(methodEl?.classList.contains('green')).toBe(true);
   });
 
-  it('displays Not authenticated status when no auth configured', () => {
-    component.llmProvider = 'anthropic';
+  it('renders a `connected` pill alongside an `oauth` method pill when oauth is authenticated', () => {
+    fixture.componentRef.setInput('llmProvider', 'anthropic');
+    component.apiKeyConfigured = false;
+    component.oauthAuthenticated = true;
+    fixture.detectChanges();
+    const statusEl = fixture.nativeElement.querySelector('[data-testid="auth-status-value"]');
+    const methodEl = fixture.nativeElement.querySelector('[data-testid="auth-status-method"]');
+    expect(statusEl?.textContent?.trim()).toContain('connected');
+    expect(statusEl?.classList.contains('pill')).toBe(true);
+    expect(statusEl?.classList.contains('green')).toBe(true);
+    expect(methodEl?.textContent?.trim()).toBe('oauth');
+    expect(methodEl?.classList.contains('pill')).toBe(true);
+    expect(methodEl?.classList.contains('green')).toBe(true);
+  });
+
+  it('renders an amber not-configured pill (no method pill) when no auth is set', () => {
+    fixture.componentRef.setInput('llmProvider', 'anthropic');
     component.apiKeyConfigured = false;
     component.oauthAuthenticated = false;
     fixture.detectChanges();
     const valueEl = fixture.nativeElement.querySelector('[data-testid="auth-status-value"]');
-    expect(valueEl?.textContent?.trim()).toContain('Not authenticated');
+    expect(valueEl?.textContent?.trim()).toBe('not configured');
+    expect(valueEl?.classList.contains('pill')).toBe(true);
+    expect(valueEl?.classList.contains('amber')).toBe(true);
+    // The method pill is only rendered alongside `connected`; absent here.
+    expect(fixture.nativeElement.querySelector('[data-testid="auth-status-method"]')).toBeNull();
   });
 
   it('calls applyAuthStatus after saving API key', async () => {
@@ -325,7 +367,7 @@ describe('AuthSectionComponent', () => {
       return undefined;
     };
 
-    component.activeProject = 'test';
+    fixture.componentRef.setInput('activeProject', 'test');
     component.apiKeyInput = 'sk-ant-test';
     await component.saveApiKey();
 
@@ -344,7 +386,7 @@ describe('AuthSectionComponent', () => {
       return undefined;
     };
 
-    component.activeProject = 'test';
+    fixture.componentRef.setInput('activeProject', 'test');
     await component.deleteApiKey();
 
     expect(applySpy).toHaveBeenCalledWith({
@@ -364,7 +406,7 @@ describe('AuthSectionComponent', () => {
       return undefined;
     };
 
-    component.activeProject = 'test';
+    fixture.componentRef.setInput('activeProject', 'test');
     await component.onOAuthDone(true);
 
     expect(applySpy).toHaveBeenCalledWith({ api_key_configured: false, oauth_authenticated: true });

@@ -13,7 +13,7 @@ Both problems had one solution in common: query the server's advertised model li
 
 ## Decision
 
-Add a Tauri command `discover_llm_models(provider, base_url) -> Vec<String>` that probes the local LLM server and returns the list of available models, so Settings can render a `<select>` instead of a free-text input. Introduce a shared URL validator `validate_llm_base_url` used by **both** the discovery command and `update_llm_config`. The validator follows the existing Redmine pattern (`validate_redmine_host_url`[^18]) but allows loopback — required because Speedwave's `default_base_url` for every local provider uses `host.docker.internal`, which the Desktop host-side code rewrites to `127.0.0.1` before probing.
+Add a Tauri command `discover_llm_models(provider, base_url) -> Vec<DiscoveredModel>` that probes the local LLM server and returns the list of available models, so Settings can render a `<select>` instead of a free-text input. Introduce a shared URL validator `validate_llm_base_url` used by **both** the discovery command and `update_llm_config`. The validator follows the existing Redmine pattern (`validate_redmine_host_url`[^18]) but allows loopback — required because Speedwave's `default_base_url` for every local provider uses `host.docker.internal`, which the Desktop host-side code rewrites to `127.0.0.1` before probing.
 
 **Single SSRF policy, two callsites:**
 
@@ -45,10 +45,11 @@ IPv6-mapped IPv4 bypasses (`::ffff:169.254.169.254`) are handled by the underlyi
 
 **Endpoint selection:**
 
-- `ollama` → `GET {base}/api/tags`[^13]
-- `lmstudio`, `llamacpp` → `GET {base}/v1/models`[^14][^15]
+- `ollama` → `GET {base}/api/tags`[^13] for the id list, then a parallel fan-out of `POST {base}/api/show` per id to read `model_info.<arch>.context_length` (falls back to the first numeric `*.context_length` field for unrecognised archs). Individual `/api/show` failures degrade silently — the model still appears in the list, but with `context_tokens: None`.
+- `lmstudio` → `GET {base}/api/v0/models`[^14] (extended listing carrying `max_context_length` per entry). The previous OpenAI-compat `/v1/models` fallback was removed: id-only listings forced a second round-trip and a duplicate parser without delivering the per-model context window the UI now consumes.
+- `llamacpp` → `GET {base}/v1/models`[^15] reading `meta.n_ctx_train` per entry. The runtime `--ctx-size` flag may constrain the live limit lower (visible via `/props`); we report the trained value as the best-available approximation rather than racing a slot-config change.
 
-Empty model lists return `Err("empty")` so the UI falls back to the free-text input. A `404` on `/v1/models` (or any other non-2xx response) triggers the same graceful fallback.
+The Tauri command signature is `discover_llm_models(provider, base_url) -> Vec<DiscoveredModel>` where `DiscoveredModel = { id: String, context_tokens: Option<u32> }`. `context_tokens` stays `None` when the provider does not advertise a window — the chat fallback chain takes over rather than guessing. Empty model lists return `Err("empty")` so the UI falls back to the free-text input. A `404` (or any other non-2xx response) triggers the same graceful fallback. Discovered models with empty `id` strings are dropped before the response is returned.
 
 **Container-host alias rewrite.** The `host.*.internal` aliases injected into `extra_hosts` (`compose.template.yml`) do not resolve from the Desktop host process — Speedwave does not bundle Docker Desktop, so Docker's /etc/hosts injection does not happen. A new helper `speedwave_runtime::compose::rewrite_container_alias_to_loopback` rewrites `host.docker.internal`, `host.lima.internal`, `host.containers.internal`, `host.speedwave.internal` to `127.0.0.1` before the probe. All four aliases live in a single `CONTAINER_HOST_ALIASES` constant composed from the existing per-platform `LIMA_HOST`, `NERDCTL_LINUX_HOST`, `WSL_HOST`, `CONTAINERS_HOST` named consts — one SSOT.
 
@@ -113,7 +114,7 @@ Empty model lists return `Err("empty")` so the UI falls back to the free-text in
 
 [^13]: Ollama API — `/api/tags` list local models — https://github.com/ollama/ollama/blob/main/docs/api.md#list-local-models
 
-[^14]: LM Studio — OpenAI-compatible API endpoints — https://lmstudio.ai/docs/app/api/endpoints/openai
+[^14]: LM Studio — REST API (extended `/api/v0/models` listing with `max_context_length`) — https://lmstudio.ai/docs/app/api/endpoints/rest
 
 [^15]: llama.cpp — HTTP server — https://github.com/ggml-org/llama.cpp/tree/master/examples/server
 
