@@ -10,7 +10,6 @@ import {
   input,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/health';
@@ -18,7 +17,7 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
 /** Displays real-time system health status including VM, containers, IDE bridge, and mcp-os. */
 @Component({
   selector: 'app-system-health',
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="max-w-[700px] mx-auto p-0" data-testid="health-container">
@@ -283,7 +282,8 @@ import type { BridgeStatus, ContainerHealth, HealthReport } from '../models/heal
                 <input
                   type="number"
                   class="w-[60px] px-1.5 py-0.5 bg-sw-bg-darkest border border-sw-border rounded-sm text-sw-text font-mono text-xs"
-                  [(ngModel)]="tailLines"
+                  [value]="tailLines"
+                  (input)="tailLines = +$any($event.target).value"
                   min="1"
                   max="10000"
                   data-testid="lines-input"

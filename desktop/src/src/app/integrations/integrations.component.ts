@@ -6,7 +6,6 @@ import {
   OnInit,
   inject,
 } from '@angular/core';
-import { FormsModule } from '@angular/forms';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import {
@@ -44,13 +43,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
 /** Manages MCP service integrations and native OS integration toggles. */
 @Component({
   selector: 'app-integrations',
-  imports: [
-    FormsModule,
-    ServiceCardComponent,
-    RedmineConfigComponent,
-    IdeBridgeComponent,
-    ProjectPillComponent,
-  ],
+  imports: [ServiceCardComponent, RedmineConfigComponent, IdeBridgeComponent, ProjectPillComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div

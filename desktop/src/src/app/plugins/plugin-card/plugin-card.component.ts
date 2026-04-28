@@ -1,5 +1,4 @@
 import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
-import { FormsModule } from '@angular/forms';
 import { PluginStatusEntry } from '../../models/plugin';
 
 /** Payload emitted when the user saves credentials for a plugin. */
@@ -11,7 +10,7 @@ export interface SavePluginCredentialsEvent {
 /** Reusable card for a single installed plugin. */
 @Component({
   selector: 'app-plugin-card',
-  imports: [FormsModule],
+  imports: [],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div

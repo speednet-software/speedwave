@@ -7,7 +7,6 @@ import {
   output,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
 
@@ -50,7 +49,7 @@ const PROVIDER_CARDS: readonly ProviderCard[] = [
 /** Manages LLM provider selection and configuration. */
 @Component({
   selector: 'app-llm-provider',
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
@@ -102,7 +101,8 @@ const PROVIDER_CARDS: readonly ProviderCard[] = [
           <input
             id="llm-base-url"
             type="text"
-            [(ngModel)]="baseUrl"
+            [value]="baseUrl"
+            (input)="baseUrl = $any($event.target).value"
             [placeholder]="defaultBaseUrl || anthropicBaseUrlHint()"
             [readOnly]="provider === 'anthropic'"
             (blur)="discoverModels(false)"
@@ -119,7 +119,8 @@ const PROVIDER_CARDS: readonly ProviderCard[] = [
           @if (provider !== 'anthropic' && discoveryState.kind === 'ready') {
             <select
               id="llm-model"
-              [(ngModel)]="model"
+              [value]="model"
+              (change)="model = $any($event.target).value"
               class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
               data-testid="settings-llm-model"
             >
@@ -133,7 +134,8 @@ const PROVIDER_CARDS: readonly ProviderCard[] = [
           } @else if (provider === 'anthropic') {
             <select
               id="llm-model"
-              [(ngModel)]="model"
+              [value]="model"
+              (change)="model = $any($event.target).value"
               class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
               data-testid="settings-llm-model"
             >
@@ -145,7 +147,8 @@ const PROVIDER_CARDS: readonly ProviderCard[] = [
             <input
               id="llm-model"
               type="text"
-              [(ngModel)]="model"
+              [value]="model"
+              (input)="model = $any($event.target).value"
               [placeholder]="modelPlaceholder()"
               class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
               data-testid="settings-llm-model"

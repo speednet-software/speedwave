@@ -1,12 +1,11 @@
 import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { JsonSchema } from '../../models/plugin';
 
 /** Renders a settings form dynamically from a JSON Schema definition. */
 @Component({
   selector: 'app-plugin-settings-form',
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (schema(); as s) {

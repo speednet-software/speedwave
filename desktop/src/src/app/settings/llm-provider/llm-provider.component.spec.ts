@@ -11,6 +11,20 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
   llamacpp: 'http://host.docker.internal:8080',
 };
 
+/**
+ * Drains pending microtasks. After triggering `ngOnInit`, the component fires
+ * `loadConfig` as fire-and-forget; chained awaits inside it (auto-probe via
+ * `discoverModels`) require multiple microtask cycles before the discovery
+ * state settles. `whenStable` only flushes Zone tasks — these promises live
+ * outside Zone in vitest, so we drain them explicitly.
+ * @param cycles - How many `await Promise.resolve()` ticks to drain.
+ */
+async function flushMicrotasks(cycles = 10): Promise<void> {
+  for (let i = 0; i < cycles; i++) {
+    await Promise.resolve();
+  }
+}
+
 function setupMockTauri(mockTauri: MockTauriService, provider = 'anthropic'): void {
   mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
     switch (cmd) {
@@ -395,8 +409,10 @@ describe('LlmProviderComponent', () => {
       provider: 'ollama',
       discover: async () => ['llama3.3', 'qwen2.5'],
     });
-    await component.ngOnInit();
-    await fixture.whenStable();
+    component.ngOnInit();
+    // loadConfig is fire-and-forget inside ngOnInit; flush all queued micro-
+    // tasks (loadConfig → auto-probe discoverModels) before assertions.
+    await flushMicrotasks();
     fixture.detectChanges();
 
     const select = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
@@ -418,8 +434,8 @@ describe('LlmProviderComponent', () => {
         throw new Error('offline');
       },
     });
-    await component.ngOnInit();
-    await fixture.whenStable();
+    component.ngOnInit();
+    await flushMicrotasks();
     fixture.detectChanges();
 
     const el = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
@@ -527,8 +543,8 @@ describe('LlmProviderComponent', () => {
       provider: 'ollama',
       discover: async () => ['m'],
     });
-    await component.ngOnInit();
-    await fixture.whenStable();
+    component.ngOnInit();
+    await flushMicrotasks();
     expect(component.discoveryState.kind).toBe('ready');
     // Switching provider resets state synchronously. The new provider has a
     // known defaultBaseUrl so the new discovery probe fires immediately,
@@ -576,8 +592,8 @@ describe('LlmProviderComponent', () => {
       defaultBaseUrl: 'http://host.docker.internal:11434',
       discover: async () => ['legacy', 'a', 'b'],
     });
-    await component.ngOnInit();
-    await fixture.whenStable();
+    component.ngOnInit();
+    await flushMicrotasks();
     fixture.detectChanges();
 
     expect(component.model).toBe('legacy');

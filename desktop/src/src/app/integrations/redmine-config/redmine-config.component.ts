@@ -9,7 +9,6 @@ import {
   output,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { IntegrationStatusEntry } from '../../models/integration';
 import { SaveCredentialsEvent } from '../service-card/service-card.component';
 import { TauriService } from '../../services/tauri.service';
@@ -128,7 +127,7 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
 /** Wizard-based configuration component for the Redmine integration. */
 @Component({
   selector: 'app-redmine-config',
-  imports: [CommonModule, FormsModule, SpinIconComponent],
+  imports: [CommonModule, SpinIconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -268,12 +267,12 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
                     id="redmine-project-select"
                     data-testid="redmine-project-dropdown"
                     class="w-full px-3 py-2.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-sm font-mono box-border focus:border-sw-accent focus:outline-none"
-                    [ngModel]="selectedProjectId"
-                    (ngModelChange)="selectedProjectId = $event"
+                    [value]="selectedProjectId ?? ''"
+                    (change)="onProjectSelectChange($event)"
                   >
-                    <option [ngValue]="null">All projects</option>
+                    <option value="">All projects</option>
                     @for (proj of enumerations?.projects ?? []; track proj.id) {
-                      <option [ngValue]="proj.id">{{ proj.name }}</option>
+                      <option [value]="proj.id">{{ proj.name }}</option>
                     }
                   </select>
                   @if (enumerations?.projects_truncated) {
@@ -303,12 +302,12 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
                         <select
                           class="flex-[2] px-2 py-1.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-[13px] font-mono"
                           [attr.data-testid]="'redmine-mapping-' + key"
-                          [ngModel]="getMappingValue(key)"
-                          (ngModelChange)="setMappingValue(key, $event)"
+                          [value]="getMappingValue(key) ?? ''"
+                          (change)="onMappingChange(key, $event)"
                         >
-                          <option [ngValue]="null">Not mapped</option>
+                          <option value="">Not mapped</option>
                           @for (entry of getEntriesForCategory(category); track entry.id) {
-                            <option [ngValue]="entry.id">{{ entry.name }} (#{{ entry.id }})</option>
+                            <option [value]="entry.id">{{ entry.name }} (#{{ entry.id }})</option>
                           }
                         </select>
                       </div>
@@ -403,7 +402,21 @@ export class RedmineConfigComponent implements OnDestroy {
   validating = false;
   validationError = '';
   loadingEnumerations = false;
-  enumerations: RedmineEnumerations | null = null;
+  /**
+   * Backing field for the {@link enumerations} accessor. Direct mutation goes
+   * through the setter so the OnPush template always re-renders without each
+   * caller having to remember `markForCheck`.
+   */
+  private _enumerations: RedmineEnumerations | null = null;
+  /** Currently loaded enumerations (projects, statuses, trackers, etc.). */
+  get enumerations(): RedmineEnumerations | null {
+    return this._enumerations;
+  }
+  /** Updates enumerations and notifies the OnPush template of the change. */
+  set enumerations(value: RedmineEnumerations | null) {
+    this._enumerations = value;
+    this.cdr.markForCheck();
+  }
   selectedProjectId: number | null = null;
   editedMappings: Record<string, number | null> = {};
 
@@ -523,6 +536,29 @@ export class RedmineConfigComponent implements OnDestroy {
    */
   setMappingValue(key: string, value: number | null): void {
     this.editedMappings[key] = value;
+  }
+
+  /**
+   * Native `<select>` handler for the project picker. Empty string maps to
+   * `null` ("All projects"); anything else is parsed as the numeric Redmine
+   * project id.
+   * @param event - The native `change` event from the project `<select>`.
+   */
+  onProjectSelectChange(event: Event): void {
+    const raw = (event.target as HTMLSelectElement).value;
+    this.selectedProjectId = raw === '' ? null : Number(raw);
+  }
+
+  /**
+   * Native `<select>` handler for a mapping picker. Mirrors
+   * `onProjectSelectChange` but writes through `setMappingValue` so the
+   * edited-mappings dictionary stays the SSOT.
+   * @param key - The mapping key being edited.
+   * @param event - The native `change` event from the mapping `<select>`.
+   */
+  onMappingChange(key: string, event: Event): void {
+    const raw = (event.target as HTMLSelectElement).value;
+    this.setMappingValue(key, raw === '' ? null : Number(raw));
   }
 
   /**

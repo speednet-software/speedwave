@@ -1,5 +1,4 @@
 import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
-import { FormsModule } from '@angular/forms';
 import { DeviceCodeInfo, IntegrationStatusEntry } from '../../models/integration';
 
 /** Semantic states the header status dot can reflect. */
@@ -15,7 +14,7 @@ export interface SaveCredentialsEvent {
 /** Reusable card for a single MCP integration service. */
 @Component({
   selector: 'app-service-card',
-  imports: [FormsModule],
+  imports: [],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div

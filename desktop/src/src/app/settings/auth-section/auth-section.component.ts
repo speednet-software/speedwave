@@ -8,7 +8,6 @@ import {
   output,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService, AuthStatusResponse } from '../../services/project-state.service';
 import { AuthTerminalComponent } from '../auth-terminal.component';
@@ -16,7 +15,7 @@ import { AuthTerminalComponent } from '../auth-terminal.component';
 /** Displays authentication status and controls for API key / OAuth login. */
 @Component({
   selector: 'app-auth-section',
-  imports: [CommonModule, FormsModule, AuthTerminalComponent],
+  imports: [CommonModule, AuthTerminalComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
@@ -84,7 +83,8 @@ import { AuthTerminalComponent } from '../auth-terminal.component';
             <input
               id="api-key-input"
               type="password"
-              [(ngModel)]="apiKeyInput"
+              [value]="apiKeyInput"
+              (input)="apiKeyInput = $any($event.target).value"
               placeholder="sk-ant-..."
               class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
               data-testid="settings-api-key"
