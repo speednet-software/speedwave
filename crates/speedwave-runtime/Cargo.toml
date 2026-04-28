@@ -23,7 +23,7 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 sha2 = "0.11"
 base64 = "0.22"
-rand = "0.8"
+rand = "0.8.6"
 semver = "1"
 url = "2"
 json-patch = "4"
