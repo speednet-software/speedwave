@@ -808,13 +808,14 @@ mod tests {
         assert_eq!(logs, "log output here");
     }
 
-    /// `compose_file_path()` returns a host-specific path (includes the current
-    /// user's home directory). This is fine: both the test setup and the
-    /// production `WslRuntime::compose_logs()` call the same function, so the
-    /// mock key always matches regardless of the machine running the test.
+    /// Production `WslRuntime::compose_logs()` calls `wsl_compose_file_path()`
+    /// (which translates the host home dir into a `/mnt/c/...` POSIX path
+    /// when the test runs on Windows), so the mock-key path must come from
+    /// the same helper, not `crate::runtime::compose_file_path()` which
+    /// returns the native Windows path on Windows runners.
     #[test]
     fn test_compose_logs() {
-        let compose_file = crate::runtime::compose_file_path("acme").unwrap();
+        let compose_file = wsl_compose_file_path("acme").unwrap();
         let runner = MockRunner::new().with_response(
             &format!(
                 "wsl.exe -d Speedwave -- nerdctl compose -f {} -p acme logs --timestamps --tail 200",
@@ -988,7 +989,11 @@ mod tests {
 
     #[test]
     fn test_compose_down_includes_remove_orphans() {
-        let compose_file = crate::runtime::compose_file_path("wsl-cleanup-test").unwrap();
+        // Use `wsl_compose_file_path` (the same helper production code
+        // calls) so the mock key matches on Windows runners where the
+        // host home dir gets translated to `/mnt/c/...` before being
+        // passed into wsl.exe.
+        let compose_file = wsl_compose_file_path("wsl-cleanup-test").unwrap();
         let expected_key = format!(
             "wsl.exe -d Speedwave -- nerdctl compose -f {} -p wsl-cleanup-test down --remove-orphans",
             compose_file
@@ -1006,7 +1011,7 @@ mod tests {
 
     #[test]
     fn test_compose_up_recreate_includes_force_recreate() {
-        let compose_file = crate::runtime::compose_file_path("acme").unwrap();
+        let compose_file = wsl_compose_file_path("acme").unwrap();
         let expected_key = format!(
             "wsl.exe -d Speedwave -- nerdctl compose -f {} -p acme up -d --force-recreate --remove-orphans",
             compose_file
