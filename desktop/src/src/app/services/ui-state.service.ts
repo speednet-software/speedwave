@@ -31,14 +31,29 @@ export class UiStateService {
   /** Read-only signal reflecting the project switcher dropdown's open state. */
   readonly projectSwitcherOpen: Signal<boolean> = this.projectSwitcherOpenSignal.asReadonly();
 
-  /** Flips the conversations sidebar drawer between open and closed. */
+  /**
+   * Flips the conversations sidebar drawer between open and closed.
+   * Closes the memory drawer first — both share the left-edge anchor and
+   * cannot be open simultaneously without overlapping.
+   */
   toggleSidebar(): void {
-    this.sidebarOpenSignal.update((open) => !open);
+    this.sidebarOpenSignal.update((open) => {
+      const next = !open;
+      if (next) this.memoryOpenSignal.set(false);
+      return next;
+    });
   }
 
-  /** Flips the memory panel drawer between open and closed. */
+  /**
+   * Flips the memory panel drawer between open and closed.
+   * Closes the conversations drawer first — both share the left-edge anchor.
+   */
   toggleMemory(): void {
-    this.memoryOpenSignal.update((open) => !open);
+    this.memoryOpenSignal.update((open) => {
+      const next = !open;
+      if (next) this.sidebarOpenSignal.set(false);
+      return next;
+    });
   }
 
   /** Flips the command palette modal between open and closed. ⌘K binds here. */
