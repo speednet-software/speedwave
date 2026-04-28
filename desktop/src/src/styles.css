@@ -452,10 +452,11 @@
   .theme-card.active .check  { opacity: 1; }
 }
 
-/* ── Drawer mechanics (left conversations sidebar + right memory panel) ──
-   Both drawers live as siblings in the chat layout. They are absolutely
-   positioned overlays that slide in via a transform. The body class toggles
-   visibility and adds the dimmed backdrop pseudo-element. */
+/* ── Drawer mechanics (left conversations sidebar + left memory panel) ──
+   Both drawers live as siblings in the chat layout, anchored to the left
+   edge. They are absolutely positioned overlays that slide in via a
+   transform. The body class toggles visibility and adds the dimmed backdrop
+   pseudo-element. */
 
 .collapsible-sidebar {
   position: absolute;
@@ -476,15 +477,40 @@ body.sidebar-drawer-open .collapsible-sidebar { transform: translateX(0); }
   z-index: 40;
   top: 0;
   bottom: 0;
-  right: 0;
+  left: 0;
   width: min(22rem, 90vw);
-  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.4);
+  box-shadow: 8px 0 24px rgba(0, 0, 0, 0.4);
   transition: transform 0.18s ease;
-  transform: translateX(100%);
+  transform: translateX(-100%);
   will-change: transform;
   display: flex;
 }
 body.memory-open .memory-drawer { transform: translateX(0); }
+
+/* ── Custom tooltip (driven by `appTooltip` directive via CDK Overlay) ──
+   The CDK Overlay handles positioning via `cdk-overlay-pane` — we just style
+   the tooltip body. Mirrors the terminal-minimal mockup `.tooltip` rule. */
+
+.app-tooltip {
+  display: inline-block;
+  background: var(--bg-3);
+  border: 1px solid var(--line-strong);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ink);
+  max-width: min(40rem, calc(100vw - 32px));
+  overflow-wrap: anywhere;
+  white-space: normal;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s ease;
+}
+
+.app-tooltip[data-state='open'] {
+  opacity: 1;
+}
 
 /* ── Base styles ── */
 @layer base {
