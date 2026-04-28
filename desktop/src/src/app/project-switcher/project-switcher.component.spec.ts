@@ -152,17 +152,20 @@ describe('ProjectSwitcherComponent', () => {
     // and is exercised by its own spec; here we only assert that the switcher
     // opens, closes, and reacts to the `created` event correctly.
 
-    it('openAddForm() makes the modal visible', () => {
+    it('openAddForm() makes the modal visible and closes the dropdown', () => {
+      ui.toggleProjectSwitcher();
+      expect(ui.projectSwitcherOpen()).toBe(true);
       component.openAddForm();
       expect(component.showAddForm()).toBe(true);
+      expect(ui.projectSwitcherOpen()).toBe(false);
     });
 
-    it('closeAddForm() hides the modal without touching the dropdown', () => {
+    it('closeAddForm() hides the modal and leaves the dropdown closed', () => {
       ui.toggleProjectSwitcher();
       component.openAddForm();
       component.closeAddForm();
       expect(component.showAddForm()).toBe(false);
-      expect(ui.projectSwitcherOpen()).toBe(true);
+      expect(ui.projectSwitcherOpen()).toBe(false);
     });
 
     it('onProjectAdded() closes both the modal and the switcher dropdown', () => {

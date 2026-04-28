@@ -15,6 +15,7 @@ import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import type { ProjectEntry, ProjectList } from '../models/update';
 import { CreateProjectModalComponent } from '../shared/create-project-modal/create-project-modal.component';
+import { TooltipDirective } from '../shared/tooltip.directive';
 
 /**
  * Color swatches cycled through in the row left-edge tile.
@@ -35,7 +36,7 @@ const SWATCH_TOKENS = ['var(--violet)', 'var(--teal)', 'var(--amber)', 'var(--ac
  */
 @Component({
   selector: 'app-project-switcher',
-  imports: [CommonModule, CreateProjectModalComponent],
+  imports: [CommonModule, CreateProjectModalComponent, TooltipDirective],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (ui.projectSwitcherOpen()) {
@@ -75,27 +76,66 @@ const SWATCH_TOKENS = ['var(--violet)', 'var(--teal)', 'var(--amber)', 'var(--ac
           <!-- Body: project rows -->
           <div class="max-h-64 overflow-y-auto p-1">
             @for (entry of visibleProjects(); track entry.project.name; let i = $index) {
-              <button
-                type="button"
-                class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left"
-                [class]="entry.isActive ? rowActiveClasses : rowInactiveClasses"
-                [attr.data-testid]="'project-switcher-item-' + entry.project.name"
-                (click)="switchProject(entry.project.name)"
-              >
-                <div class="h-4 w-4 rounded-sm" [style.background]="entry.swatch"></div>
-                <span
-                  class="mono text-[12px]"
-                  [class]="entry.isActive ? 'text-[var(--ink)]' : 'text-[var(--ink-dim)]'"
-                  >{{ entry.project.name }}</span
+              @if (entry.isActive) {
+                <div
+                  class="flex items-center gap-1 rounded px-2 py-1.5"
+                  [class]="rowActiveClasses"
+                  [attr.data-testid]="'project-switcher-item-' + entry.project.name"
                 >
-                @if (entry.isActive) {
-                  <span class="pill accent ml-auto">current</span>
-                } @else if (entry.shortcut) {
-                  <span class="mono ml-auto text-[10px] text-[var(--ink-mute)]">{{
-                    entry.shortcut
+                  <div
+                    class="mono inline-flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-sm px-0.5 text-[8px] font-bold leading-none text-[#07090f]"
+                    [style.background]="entry.swatch"
+                    aria-hidden="true"
+                  >
+                    {{ entry.project.name.slice(0, 2).toLowerCase() }}
+                  </div>
+                  <span class="mono flex-1 truncate text-[12px] text-[var(--ink)]">{{
+                    entry.project.name
                   }}</span>
-                }
-              </button>
+                  <span class="pill accent mr-1.5">current</span>
+                  <span
+                    class="mono flex h-3.5 w-3.5 flex-shrink-0 cursor-default select-none items-center justify-center rounded-full border border-[var(--line-strong)] text-[9px] text-[var(--ink-mute)]"
+                    [appTooltip]="entry.project.dir"
+                    placement="top"
+                    [attr.aria-label]="'Project directory: ' + entry.project.dir"
+                    [attr.data-testid]="'project-switcher-item-info-' + entry.project.name"
+                    tabindex="0"
+                    >i</span
+                  >
+                </div>
+              } @else {
+                <div
+                  class="flex items-center gap-1 rounded px-2 py-1.5"
+                  [class]="rowInactiveClasses"
+                >
+                  <button
+                    type="button"
+                    class="flex min-w-0 flex-1 items-center gap-2 text-left"
+                    [attr.data-testid]="'project-switcher-item-' + entry.project.name"
+                    (click)="switchProject(entry.project.name)"
+                  >
+                    <div
+                      class="mono inline-flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-sm px-0.5 text-[8px] font-bold leading-none text-[#07090f]"
+                      [style.background]="entry.swatch"
+                      aria-hidden="true"
+                    >
+                      {{ entry.project.name.slice(0, 2).toLowerCase() }}
+                    </div>
+                    <span class="mono truncate text-[12px] text-[var(--ink-dim)]">{{
+                      entry.project.name
+                    }}</span>
+                  </button>
+                  <span
+                    class="mono flex h-3.5 w-3.5 flex-shrink-0 cursor-default select-none items-center justify-center rounded-full border border-[var(--line-strong)] text-[9px] text-[var(--ink-mute)]"
+                    [appTooltip]="entry.project.dir"
+                    placement="top"
+                    [attr.aria-label]="'Project directory: ' + entry.project.dir"
+                    [attr.data-testid]="'project-switcher-item-info-' + entry.project.name"
+                    tabindex="0"
+                    >i</span
+                  >
+                </div>
+              }
             } @empty {
               <div
                 class="mono px-2 py-2 text-[11px] text-[var(--ink-mute)]"
@@ -222,6 +262,7 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
 
   /** Opens the shared create-project modal from the dropdown footer. */
   openAddForm(): void {
+    this.ui.closeProjectSwitcher();
     this.showAddForm.set(true);
     this.cdr.markForCheck();
   }
@@ -236,14 +277,12 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Annotates the current `projects` list with the swatch color, optional
-   * keyboard shortcut hint (⌘2, ⌘3…) and the `isActive` flag, then filters
-   * by the search input.
+   * Annotates the current `projects` list with the swatch color and the
+   * `isActive` flag, then filters by the search input.
    */
   private projectsWithMeta(): ReadonlyArray<{
     project: ProjectEntry;
     swatch: string;
-    shortcut: string | null;
     isActive: boolean;
   }> {
     const needle = this.filter().trim().toLowerCase();
@@ -251,9 +290,6 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
       .map((project, index) => ({
         project,
         swatch: SWATCH_TOKENS[index % SWATCH_TOKENS.length],
-        // Mockup hints ⌘2 / ⌘3 next to non-active rows. Only surface for the
-        // first ~9 projects since after that the modifier is ambiguous.
-        shortcut: !this.isActive(project) && index >= 1 && index <= 9 ? `⌘${index + 1}` : null,
         isActive: this.isActive(project),
       }))
       .filter(({ project }) =>
