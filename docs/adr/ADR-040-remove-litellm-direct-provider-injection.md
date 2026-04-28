@@ -87,12 +87,22 @@ A malicious `.speedwave.json` in a cloned repository could previously set `provi
 
 ## CLI Flag Injection for Local Providers
 
-When a local provider is active, `resolve_project_config` appends two flags to the Claude Code command:
+When a local provider is active, `resolve_project_config` appends three flags to the Claude Code command:
 
 - `--system-prompt-file /speedwave/resources/system-prompts/local-llm.md` — replaces Claude Code's default system prompt with a compact, local-LLM-optimised variant. The default prompt is Anthropic-centric and verbose; small-context local models benefit from a shorter, model-agnostic prompt.
 - `--model <user_model>` — pins the user-configured model name as the default in Claude Code's `/model` picker, so the session starts with the correct local model selected rather than the Anthropic default.
+- `--append-system-prompt <identity>` — runtime-built identity payload from `prompts::local_llm_identity(model, provider)` (`crates/speedwave-runtime/src/prompts.rs`). The base `local-llm.md` cannot bake in a runtime-resolved model id; this append closes the loop so an "what model are you?" question gets a concrete answer (`"I am \`qwen3:35b\` hosted by Ollama"`) instead of the generic disclaimer baked into the file. The wording is hard-coded with explicit anti-suffix and anti-followup rules because small local models otherwise fold under follow-up pressure ("are you sure?", "really?") or hallucinate `-AWQ`/`-instruct` suffixes that aren't in the actual model id.
 
-Neither flag is injected for the `anthropic` provider. See ADR-041[^10] for the model discovery flow that populates `<user_model>`.
+None of these flags is injected for the `anthropic` provider — the system prompt and identity stay at Claude Code's defaults. See ADR-041[^10] for the model discovery flow that populates `<user_model>`.
+
+### Identity prompt injection — security
+
+Both `claude.llm.model` and `claude.llm.provider` reach `local_llm_identity` from layered config (defaults → repo `.speedwave.json` → user `~/.speedwave/config.json`). A malicious `.speedwave.json` committed by an untrusted collaborator could otherwise inject newlines / quotes into the identity payload to override Claude Code's system rules. Two-layer mitigation:
+
+1. `local_llm_identity` returns `Option<String>` — `None` for any model name containing characters outside `[A-Za-z0-9._:/+-]`, leading dashes, empty strings, or values longer than 128 chars. The resolver skips `--append-system-prompt` entirely in that case.
+2. `containers_cmd::update_llm_config` rejects model names starting with `-` (CLI flag collision guard) at save time so the broken value never persists.
+
+The Anthropic provider is exempt at the outer-layer — the `is_local_provider(...)` guard in `resolve_project_config` skips the entire local-flag block for it.
 
 ## Authentication Bypass for Local Providers
 

@@ -23,6 +23,14 @@ export type StreamChunk =
         usage?: UsageInfo;
         result_text?: string;
         context_window_size?: number;
+        /** UUID of the assistant message that just completed (ADR-046). */
+        assistant_uuid?: string;
+        /** Per-turn token usage delta (since the last Result). */
+        turn_usage?: TurnUsage;
+        /** Per-turn cost in USD — prefers CLI's authoritative total_cost_usd delta when available. */
+        turn_cost?: number;
+        /** Model name for this turn, if known at emission time. */
+        model?: string;
       };
     }
   | { chunk_type: 'Error'; data: { content: string } }
@@ -30,6 +38,20 @@ export type StreamChunk =
   | {
       chunk_type: 'RateLimit';
       data: { status: string; utilization: number | null; resets_at: number | null };
+    }
+  | {
+      /** Commits a retry-anchor UUID onto the most recent user entry (ADR-046). */
+      chunk_type: 'UserMessageCommit';
+      data: { uuid: string };
+    }
+  | {
+      /**
+       * One-slot queued message (ADR-045) was drained server-side after the
+       * previous turn ended. Frontend clears `pendingQueue` on receipt — the
+       * queued payload is already in flight via stdin.
+       */
+      chunk_type: 'QueueDrained';
+      data: { session_id: string; text: string };
     };
 
 /** A single selectable option in an AskUserQuestion prompt. */
@@ -46,13 +68,67 @@ export interface UsageInfo {
   cache_write_tokens?: number;
 }
 
+/**
+ * Optional discriminator for error-block visual variants. `undefined` (or any
+ * unknown value) renders as the generic red-timeline variant.
+ */
+export type ErrorBlockKind =
+  | 'rate_limit'
+  | 'network'
+  | 'session_exited'
+  | 'broken_pipe'
+  | 'no_active_project'
+  | 'session_starting'
+  | 'auth_required'
+  | 'stopped_by_user'
+  | 'generic';
+
+/**
+ * Per-turn token usage. Unlike `UsageInfo`, all cache fields are required
+ * numbers (missing values are normalized to 0 by the backend).
+ */
+export interface TurnUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+}
+
+/**
+ * Per-turn metadata for an assistant message: model, token usage, and cost.
+ * Populated from `Result` chunks. Missing fields hide their corresponding
+ * rendered segment, not the whole row.
+ */
+export interface EntryMeta {
+  model?: string;
+  usage?: TurnUsage;
+  cost?: number;
+}
+
+/**
+ * One-slot queued message (ADR-045). Mirrors the Rust `QueuedMessage` type;
+ * the composer surfaces `text` as the "queued: …" preview and exposes a
+ * cancel button that drops the slot via the `cancel_queued_message`
+ * Tauri command.
+ */
+export interface QueuedMessage {
+  text: string;
+  queued_at: number;
+}
+
 /** A block within a chat message */
 export type MessageBlock =
   | { type: 'text'; content: string }
   | { type: 'thinking'; content: string; collapsed: boolean }
   | { type: 'tool_use'; tool: ToolUseBlock }
   | { type: 'ask_user'; question: AskUserQuestionBlock }
-  | { type: 'error'; content: string };
+  | { type: 'error'; content: string; kind?: ErrorBlockKind }
+  | {
+      type: 'permission_prompt';
+      command: string;
+      description?: string;
+      decided?: 'allow_once' | 'allow_always' | 'deny';
+    };
 
 /** State for an interactive AskUserQuestion block within a message. */
 export interface AskUserQuestionBlock {
@@ -73,7 +149,6 @@ export type ToolUseBlock =
       tool_name: string;
       input_json: string;
       status: 'running';
-      collapsed: boolean;
     }
   | {
       type: 'tool_use';
@@ -83,7 +158,6 @@ export type ToolUseBlock =
       status: 'done';
       result: string;
       result_is_error: false;
-      collapsed: boolean;
     }
   | {
       type: 'tool_use';
@@ -93,7 +167,6 @@ export type ToolUseBlock =
       status: 'error';
       result: string;
       result_is_error: true;
-      collapsed: boolean;
     };
 
 /** Normalized tool input for display */
@@ -110,11 +183,34 @@ export type NormalizedToolInput =
   | { kind: 'agent'; description: string }
   | { kind: 'generic'; raw_json: string };
 
+/** Retry-anchor UUID commit state for a ChatMessage (ADR-046). */
+export type UuidStatus = 'Pending' | 'Committed';
+
 /** Replaces old flat ChatMessage — shared between live chat and transcript */
 export interface ChatMessage {
   role: 'user' | 'assistant';
   blocks: MessageBlock[];
   timestamp: number;
+  /**
+   * Retry-anchor UUID (ADR-046). User UUIDs commit immediately; assistant
+   * UUIDs stay `Pending` until the matching `Result` event commits them.
+   * Absent for legacy transcript messages and for local-LLM turns that
+   * omit `message.id` — those entries can't be used as retry targets.
+   */
+  uuid?: string;
+  /** Status of the above UUID. Defaults to `Committed` when `uuid` is set. */
+  uuid_status?: UuidStatus;
+  /**
+   * Per-turn metadata (assistant messages only — undefined for user messages).
+   * Populated from the `Result` chunk that terminated the turn.
+   */
+  meta?: EntryMeta;
+  /**
+   * Epoch-ms timestamp of the most recent retry against this entry. Set on
+   * user entries whose turn has been retried via `retry_last_turn`. Surfaces
+   * as `· edited` in the metadata line of the assistant that follows.
+   */
+  edited_at?: number;
 }
 
 /** Rate limit info from rate_limit_event. */
@@ -161,4 +257,10 @@ export interface ConversationMessage {
   content: string;
   timestamp: string | null;
   blocks?: MessageBlock[];
+  /**
+   * Stable JSONL uuid that anchors the retry-last-turn flow (ADR-046).
+   * `undefined` for synthesized entries (e.g. `result` lines) — those never
+   * become a retry target.
+   */
+  uuid?: string;
 }

@@ -598,14 +598,14 @@ describe('IntegrationsComponent', () => {
 
       // Verify the unsub function exists before destroy
       expect(
-        (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
+        (component as unknown as { unsubProjectSettled: unknown })['unsubProjectSettled']
       ).not.toBeNull();
 
       component.ngOnDestroy();
 
       // Verify unsub was called and nulled
       expect(
-        (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
+        (component as unknown as { unsubProjectSettled: unknown })['unsubProjectSettled']
       ).toBeNull();
     });
 
@@ -653,6 +653,98 @@ describe('IntegrationsComponent', () => {
     fixture.detectChanges();
     const ideBridge = fixture.nativeElement.querySelector('app-ide-bridge');
     expect(ideBridge).not.toBeNull();
+  });
+
+  describe('terminal-minimal restyle', () => {
+    it('renders the header with the view-title page heading', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const title = fixture.nativeElement.querySelector('[data-testid="integrations-title"]');
+      expect(title).not.toBeNull();
+      expect(title.textContent).toContain('Service integrations');
+      expect(title.classList.contains('view-title')).toBe(true);
+    });
+
+    it('header right slot only surfaces the project pill (count was removed)', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      // The "X services · Y running" counter was dropped — the integrations
+      // table itself already conveys per-row status, so the header counter
+      // was redundant noise.
+      const count = fixture.nativeElement.querySelector('[data-testid="integrations-count"]');
+      expect(count).toBeNull();
+
+      // Project pill is the shared <app-project-pill> component.
+      const pill = fixture.nativeElement.querySelector('app-project-pill');
+      expect(pill).not.toBeNull();
+    });
+
+    it('renders the integrations table with a header row and one row per service', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const wrapper = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-table-wrapper"]'
+      );
+      expect(wrapper).not.toBeNull();
+      // Scope the row count to the integrations table — `<app-ide-bridge>`
+      // now also renders a tbody, so a global `tbody tr` selector picks up
+      // unrelated rows.
+      const rows = wrapper.querySelectorAll('tbody tr');
+      expect(rows.length).toBe(component.services.length);
+    });
+
+    it('row exposes a service name, status pill, mount cell, and toggle', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const row = fixture.nativeElement.querySelector('[data-testid="integrations-row-gitlab"]');
+      expect(row).not.toBeNull();
+      const status = row.querySelector('[data-testid="integrations-row-status"]');
+      expect(status).not.toBeNull();
+      const toggle = row.querySelector('[data-testid="integrations-row-toggle-gitlab"]');
+      expect(toggle).not.toBeNull();
+    });
+
+    it('clicking a row toggle flips the enabled state without expanding', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const before = component.services[0].enabled;
+      const svc = component.services[0];
+      // Use the parent click handler directly — the JSDOM click() does not
+      // bubble through stopPropagation reliably across the @if scope.
+      await component.onRowToggle(svc, new MouseEvent('click'));
+      expect(svc.enabled).toBe(!before);
+      // Row click must NOT expand because onRowToggle calls stopPropagation.
+      expect(component.expandedService).toBeNull();
+    });
+
+    it('expanding a row reveals the inline configuration block', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      component.toggleExpand('gitlab');
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const expanded = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-expanded-gitlab"]'
+      );
+      expect(expanded).not.toBeNull();
+    });
+
+    it('mounts the IDE bridge child component below the table', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const slot = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-ide-bridge-slot"]'
+      );
+      expect(slot).not.toBeNull();
+      expect(slot.querySelector('app-ide-bridge')).not.toBeNull();
+    });
   });
 
   // -- OAuth flow tests --
@@ -1137,15 +1229,14 @@ describe('IntegrationsComponent', () => {
   });
 
   describe('cancel button visibility in starting state', () => {
-    it('shows cancel button during starting state', async () => {
+    it('expanding sharepoint while oauthStatus is starting renders the service-card child', async () => {
       await component.ngOnInit();
       component.oauthStatus = 'starting';
+      component.toggleExpand('sharepoint');
       fixture.changeDetectorRef.markForCheck();
       fixture.detectChanges();
 
       const serviceCards = fixture.nativeElement.querySelectorAll('app-service-card');
-      // Find the sharepoint card — it should get oauthStatus='starting'
-      // We verify that the parent passes the starting state correctly
       expect(component.oauthStatus).toBe('starting');
       expect(serviceCards.length).toBeGreaterThan(0);
     });

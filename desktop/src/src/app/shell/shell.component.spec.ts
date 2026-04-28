@@ -4,6 +4,7 @@ import { Router, RouterModule } from '@angular/router';
 import { ShellComponent } from './shell.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { UiStateService } from '../services/ui-state.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 
 describe('ShellComponent', () => {
@@ -31,7 +32,10 @@ describe('ShellComponent', () => {
         ShellComponent,
         RouterModule.forRoot([
           { path: 'chat', component: ShellComponent },
+          { path: 'integrations', component: ShellComponent },
+          { path: 'plugins', component: ShellComponent },
           { path: 'settings', component: ShellComponent },
+          { path: 'logs', component: ShellComponent },
         ]),
       ],
       providers: [{ provide: TauriService, useValue: mockTauri }],
@@ -40,6 +44,10 @@ describe('ShellComponent', () => {
     fixture = TestBed.createComponent(ShellComponent);
     component = fixture.componentInstance;
     projectState = TestBed.inject(ProjectStateService);
+    // Reset shared UI state so ⌘B keybinding tests start from a clean slate.
+    const ui = TestBed.inject(UiStateService);
+    ui.closeSidebar();
+    ui.closeMemory();
     fixture.detectChanges();
   });
 
@@ -222,17 +230,25 @@ describe('ShellComponent', () => {
     ).toBeNull();
   });
 
-  it('hides Chat nav link when status is auth_required', async () => {
+  it('keeps the Chat nav link visible when status is auth_required', async () => {
+    // Mockup-aligned behaviour: the chat icon is always present in the rail.
+    // When auth is missing the chat view itself surfaces an inline
+    // "auth required" block with a link to Settings instead of disappearing.
     await component.ngOnInit();
     projectState.status = 'auth_required';
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
-    const nav = fixture.nativeElement.querySelector('[data-testid="app-nav"]');
-    const links = Array.from(nav.querySelectorAll('a')) as HTMLAnchorElement[];
-    const labels = links.map((a) => a.textContent?.trim());
-    expect(labels).toEqual(['Integrations', 'Plugins', 'Settings']);
-    expect(labels).not.toContain('Chat');
+    const nav = fixture.nativeElement.querySelector('[data-testid="nav-rail"]');
+    const links = Array.from(nav.querySelectorAll('a[data-testid^="nav-"]')) as HTMLAnchorElement[];
+    const ids = links.map((a) => a.getAttribute('data-testid'));
+    expect(ids).toEqual([
+      'nav-chat',
+      'nav-integrations',
+      'nav-plugins',
+      'nav-settings',
+      'nav-logs',
+    ]);
   });
 
   it('shows Chat nav link when status is ready', async () => {
@@ -242,10 +258,16 @@ describe('ShellComponent', () => {
     component['cdr'].markForCheck();
     fixture.detectChanges();
 
-    const nav = fixture.nativeElement.querySelector('[data-testid="app-nav"]');
-    const links = Array.from(nav.querySelectorAll('a')) as HTMLAnchorElement[];
-    const labels = links.map((a) => a.textContent?.trim());
-    expect(labels).toEqual(['Chat', 'Integrations', 'Plugins', 'Settings']);
+    const nav = fixture.nativeElement.querySelector('[data-testid="nav-rail"]');
+    const links = Array.from(nav.querySelectorAll('a[data-testid^="nav-"]')) as HTMLAnchorElement[];
+    const ids = links.map((a) => a.getAttribute('data-testid'));
+    expect(ids).toEqual([
+      'nav-chat',
+      'nav-integrations',
+      'nav-plugins',
+      'nav-settings',
+      'nav-logs',
+    ]);
   });
 
   it('shows Chat nav link when status is error', async () => {
@@ -275,8 +297,9 @@ describe('ShellComponent', () => {
 
       const overlay = fixture.nativeElement.querySelector('[data-testid="restart-overlay"]');
       expect(overlay).not.toBeNull();
-      expect(overlay.textContent).toContain('Restart Required');
-      expect(overlay.textContent).toContain('Changes require container restart');
+      // Terminal-minimal restart overlay copy.
+      expect(overlay.textContent).toContain('restart required');
+      expect(overlay.textContent).toContain('Container config changed');
     });
 
     it('hides overlay when needsRestart is false', () => {
@@ -366,8 +389,8 @@ describe('ShellComponent', () => {
       const overlay = fixture.nativeElement.querySelector('[data-testid="restart-overlay"]');
       expect(overlay).not.toBeNull();
       expect(overlay.textContent).toContain('Restarting containers...');
-      expect(overlay.textContent).toContain('This may take a minute');
-      expect(overlay.textContent).not.toContain('Restart Required');
+      expect(overlay.textContent).toContain('This may take a while');
+      expect(overlay.textContent).not.toContain('restart required');
       expect(fixture.nativeElement.querySelector('[data-testid="restart-now-btn"]')).toBeNull();
       expect(fixture.nativeElement.querySelector('[data-testid="restart-later-btn"]')).toBeNull();
     });
@@ -410,6 +433,53 @@ describe('ShellComponent', () => {
       fixture.detectChanges();
 
       expect(fixture.nativeElement.querySelector('[data-testid="restart-overlay"]')).not.toBeNull();
+    });
+  });
+
+  describe('Cmd+B / Ctrl+B keyboard shortcut', () => {
+    it('toggles the conversations sidebar on Cmd+B', () => {
+      const ui = TestBed.inject(UiStateService);
+      expect(ui.sidebarOpen()).toBe(false);
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', metaKey: true }));
+
+      expect(ui.sidebarOpen()).toBe(true);
+    });
+
+    it('toggles the conversations sidebar on Ctrl+B', () => {
+      const ui = TestBed.inject(UiStateService);
+      expect(ui.sidebarOpen()).toBe(false);
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'B', ctrlKey: true }));
+
+      expect(ui.sidebarOpen()).toBe(true);
+    });
+
+    it('flips the sidebar back closed on a second Cmd+B', () => {
+      const ui = TestBed.inject(UiStateService);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', metaKey: true }));
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', metaKey: true }));
+
+      expect(ui.sidebarOpen()).toBe(false);
+    });
+
+    it('ignores plain `b` keypress without modifier', () => {
+      const ui = TestBed.inject(UiStateService);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b' }));
+      expect(ui.sidebarOpen()).toBe(false);
+    });
+
+    it('ignores Cmd+other keys', () => {
+      const ui = TestBed.inject(UiStateService);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', metaKey: true }));
+      expect(ui.sidebarOpen()).toBe(false);
+    });
+
+    it('does not fire after the component is destroyed', () => {
+      const ui = TestBed.inject(UiStateService);
+      fixture.destroy();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', metaKey: true }));
+      expect(ui.sidebarOpen()).toBe(false);
     });
   });
 });

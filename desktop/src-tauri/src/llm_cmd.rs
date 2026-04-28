@@ -10,7 +10,8 @@
 // See docs/adr/ADR-041-local-llm-model-discovery.md for the threat model and
 // the RFC1918/loopback/public-domain policy rationale.
 
-use serde::Deserialize;
+use futures_util::stream::{self, StreamExt};
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use crate::http_util::{read_body_limited, MAX_RESPONSE_BODY_BYTES};
@@ -22,7 +23,26 @@ use crate::url_validation::{is_private_on_premise, validate_url, PrivatePolicy};
 const DISCOVERY_TIMEOUT_SECS: u64 = 5;
 
 // ---------------------------------------------------------------------------
-// Response DTOs
+// Public DTO surfaced through Tauri to the frontend
+// ---------------------------------------------------------------------------
+
+/// One discovered model from a local LLM server.
+///
+/// `context_tokens` is `None` when the provider's listing endpoint did not
+/// expose the model's context window — the frontend then leaves the chat
+/// footer's `used / max` ratio derived from the stream-level
+/// `context_window_size` (when available) or falls back to the global
+/// default. We deliberately do not invent a value: silent guesses
+/// undermine the SSOT goal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiscoveredModel {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u32>,
+}
+
+// ---------------------------------------------------------------------------
+// Wire-format response DTOs (per provider)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -30,40 +50,130 @@ struct OllamaTagsResponse {
     /// Ollama returns the list under `models`. Additional fields (`model`,
     /// `modified_at`, `size`, `digest`, `details`) are ignored — no
     /// `deny_unknown_fields` so a future Ollama schema extension won't break us.
-    models: Vec<OllamaModel>,
+    models: Vec<OllamaTagEntry>,
 }
 
 #[derive(Debug, Deserialize)]
-struct OllamaModel {
+struct OllamaTagEntry {
     name: String,
 }
 
+/// LM Studio's extended listing endpoint (`GET /api/v0/models`) advertises
+/// `max_context_length` per entry. The response shape is mostly
+/// OpenAI-compatible (`{object, data: [...]}`) but every entry carries
+/// extra fields — we extract just the ones we need.
 #[derive(Debug, Deserialize)]
-struct OpenAIModelsResponse {
-    /// OpenAI-compatible servers (LM Studio, llama.cpp) advertise models under
-    /// `data`.
-    data: Vec<OpenAIModel>,
+struct LmStudioModelsResponse {
+    data: Vec<LmStudioModelEntry>,
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenAIModel {
+struct LmStudioModelEntry {
     id: String,
+    #[serde(default)]
+    max_context_length: Option<u64>,
+}
+
+/// llama.cpp's `/v1/models` endpoint surfaces `meta.n_ctx_train` — the
+/// model's training-time context window, which is also the maximum the
+/// engine will accept at generation time. The runtime `--ctx-size` flag may
+/// constrain it lower (visible via `/props`); we report `n_ctx_train` here
+/// because it's the value Claude Code negotiates against, and a separate
+/// `/props` round-trip would just race the user changing the slot config.
+#[derive(Debug, Deserialize)]
+struct LlamaCppModelsResponse {
+    data: Vec<LlamaCppModelEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LlamaCppModelEntry {
+    id: String,
+    #[serde(default)]
+    meta: Option<LlamaCppMeta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LlamaCppMeta {
+    #[serde(default)]
+    n_ctx_train: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
 // Pure parsers (tested in isolation, no HTTP)
 // ---------------------------------------------------------------------------
 
-fn parse_ollama(body: &[u8]) -> anyhow::Result<Vec<String>> {
+fn parse_ollama_tags(body: &[u8]) -> anyhow::Result<Vec<String>> {
     let resp: OllamaTagsResponse = serde_json::from_slice(body)
         .map_err(|e| anyhow::anyhow!("failed to parse Ollama /api/tags response: {e}"))?;
     Ok(resp.models.into_iter().map(|m| m.name).collect())
 }
 
-fn parse_openai(body: &[u8]) -> anyhow::Result<Vec<String>> {
-    let resp: OpenAIModelsResponse = serde_json::from_slice(body)
-        .map_err(|e| anyhow::anyhow!("failed to parse OpenAI /v1/models response: {e}"))?;
-    Ok(resp.data.into_iter().map(|m| m.id).collect())
+/// Parses the JSON returned by `POST /api/show` and locates the model's
+/// context window. The key is dynamic: `model_info["<arch>.context_length"]`
+/// where `<arch>` is the value of `model_info["general.architecture"]`
+/// (`"llama"`, `"qwen2"`, `"mistral"`…). When the architecture key is
+/// absent we still scan for any key ending in `.context_length` so we
+/// degrade gracefully against future Ollama schema tweaks. Returns `None`
+/// when no context length is found — caller persists `context_tokens: None`
+/// and the chat fallback chain takes over.
+fn parse_ollama_show(body: &[u8]) -> Option<u32> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let model_info = v.get("model_info")?.as_object()?;
+    let arch = model_info
+        .get("general.architecture")
+        .and_then(|x| x.as_str());
+    if let Some(arch) = arch {
+        let key = format!("{arch}.context_length");
+        if let Some(n) = model_info.get(&key).and_then(|x| x.as_u64()) {
+            return non_zero_u32(n);
+        }
+    }
+    // Fallback: any `<something>.context_length` key.
+    for (k, val) in model_info {
+        if k.ends_with(".context_length") {
+            if let Some(n) = val.as_u64() {
+                return non_zero_u32(n);
+            }
+        }
+    }
+    None
+}
+
+/// Convert a server-reported context-length to `u32`, treating both overflow
+/// and a literal `0` as "unknown". A zero would otherwise propagate through
+/// to `update_llm_config` and surface as a misleading "context_tokens must
+/// be greater than 0" error at save time.
+fn non_zero_u32(n: u64) -> Option<u32> {
+    u32::try_from(n).ok().filter(|&v| v > 0)
+}
+
+fn parse_lmstudio(body: &[u8]) -> anyhow::Result<Vec<DiscoveredModel>> {
+    let resp: LmStudioModelsResponse = serde_json::from_slice(body)
+        .map_err(|e| anyhow::anyhow!("failed to parse LM Studio /api/v0/models response: {e}"))?;
+    Ok(resp
+        .data
+        .into_iter()
+        .map(|m| DiscoveredModel {
+            id: m.id,
+            context_tokens: m.max_context_length.and_then(non_zero_u32),
+        })
+        .collect())
+}
+
+fn parse_llamacpp(body: &[u8]) -> anyhow::Result<Vec<DiscoveredModel>> {
+    let resp: LlamaCppModelsResponse = serde_json::from_slice(body)
+        .map_err(|e| anyhow::anyhow!("failed to parse llama.cpp /v1/models response: {e}"))?;
+    Ok(resp
+        .data
+        .into_iter()
+        .map(|m| DiscoveredModel {
+            id: m.id,
+            context_tokens: m
+                .meta
+                .and_then(|meta| meta.n_ctx_train)
+                .and_then(non_zero_u32),
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -124,8 +234,12 @@ pub(crate) fn validate_llm_base_url(url: &str) -> Result<url::Url, String> {
             }
             // Host is guaranteed present here: host_is_localhost requires
             // Some(Domain("localhost")); is_private_on_premise returns true
-            // only for Some(Ipv4) or Some(Ipv6). No None path reaches this arm.
-            let host = candidate.host_str().unwrap_or("unknown");
+            // only for Some(Ipv4) or Some(Ipv6). The `<bug:no-host>` token
+            // is a deliberate giveaway in the warning log: if it ever
+            // appears, the upstream guard regressed and host classification
+            // was bypassed — making it impossible to confuse with a real
+            // hostname.
+            let host = candidate.host_str().unwrap_or("<bug:no-host>");
             if host_is_localhost || is_loopback_host(&candidate) {
                 log::warn!("Allowing loopback address for local LLM: {}", host);
             } else {
@@ -134,10 +248,10 @@ pub(crate) fn validate_llm_base_url(url: &str) -> Result<url::Url, String> {
             candidate
         } else {
             let v = validate_url(url)?;
-            log::warn!(
-                "Allowing public address for local LLM: {}",
-                v.host_str().unwrap_or("unknown")
-            );
+            // Same invariant as above: `validate_url` rejects schemes / IP
+            // classes that lack a host, so `Ok` guarantees `Some` here.
+            let host = v.host_str().unwrap_or("<bug:no-host>");
+            log::warn!("Allowing public address for local LLM: {}", host);
             v
         };
 
@@ -185,21 +299,6 @@ fn build_llm_probe_client() -> Result<reqwest::Client, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Endpoint selection
-// ---------------------------------------------------------------------------
-
-/// Returns the path suffix to append to the validated base URL for the given
-/// provider, or `Err("unsupported")` for unknown / anthropic providers.
-fn endpoint_path(provider: &str) -> Result<&'static str, String> {
-    match provider {
-        "anthropic" => Err("unsupported".to_string()),
-        "ollama" => Ok("/api/tags"),
-        "lmstudio" | "llamacpp" => Ok("/v1/models"),
-        _ => Err("unsupported".to_string()),
-    }
-}
-
-// ---------------------------------------------------------------------------
 // URL normalisation pipeline
 // ---------------------------------------------------------------------------
 
@@ -234,38 +333,15 @@ fn normalize_and_validate_discovery_url(base_url: &str) -> Result<url::Url, Stri
 // Core logic (parameterized timeout for testing)
 // ---------------------------------------------------------------------------
 
-/// Discovers available models from a local LLM server.
-///
-/// `timeout` controls both the reqwest-level request timeout. Production uses
-/// `DISCOVERY_TIMEOUT_SECS` via the Tauri wrapper; tests pass shorter
-/// durations to keep the suite fast.
-///
-/// Returns `Err("empty")` when the server responds OK but with no models (a
-/// server up without any model loaded). The UI treats this the same as an
-/// offline server and falls back to the free-text input.
-pub(crate) async fn do_discover_llm_models(
-    provider: &str,
-    base_url: &str,
+/// Issues a GET against `<base>/<path>` with shared status / content-type /
+/// body-size guards. Returns the validated body bytes ready for parsing.
+async fn fetch_json(
+    base: &url::Url,
+    path: &str,
     client: &reqwest::Client,
     timeout: Duration,
-) -> Result<Vec<String>, String> {
-    // 1. Short-circuit anthropic — there's no local model-list endpoint.
-    if provider == "anthropic" {
-        return Err("unsupported".to_string());
-    }
-
-    // 2. Normalise URL: strip /v1, rewrite container aliases, SSRF-validate.
-    let validated = normalize_and_validate_discovery_url(base_url)?;
-
-    // 3. Compose the endpoint URL.
-    let endpoint_suffix = endpoint_path(provider)?;
-    let url = format!(
-        "{}{}",
-        validated.as_str().trim_end_matches('/'),
-        endpoint_suffix
-    );
-
-    // 4. Issue the GET with the requested timeout.
+) -> Result<Vec<u8>, String> {
+    let url = format!("{}{}", base.as_str().trim_end_matches('/'), path);
     let resp = client
         .get(&url)
         .header("Accept", "application/json")
@@ -277,10 +353,6 @@ pub(crate) async fn do_discover_llm_models(
             format!("LLM model discovery: request failed: {e}")
         })?;
 
-    // 5. Status check. 3xx is treated as non-2xx because we disabled redirect
-    //    following — a 3xx here means the server tried to bounce us, which is
-    //    either a misconfiguration or an SSRF attempt. warn!-level for
-    //    security auditability.
     let status = resp.status();
     if !status.is_success() {
         if status.is_redirection() {
@@ -298,9 +370,6 @@ pub(crate) async fn do_discover_llm_models(
         return Err(format!("LLM server returned HTTP {}", status.as_u16()));
     }
 
-    // 6. Content-Type sanity. A 200 with text/html body means the user
-    //    probably pointed at a Grafana / admin UI rather than an LLM server.
-    //    Case-insensitive prefix match (charset params vary).
     if let Some(ct) = resp
         .headers()
         .get("content-type")
@@ -312,20 +381,165 @@ pub(crate) async fn do_discover_llm_models(
         }
     }
 
-    // 7. Body read with size cap (protects against OOM).
     let body = read_body_limited(resp, "LLM model discovery").await?;
+    debug_assert!(body.len() <= MAX_RESPONSE_BODY_BYTES);
+    Ok(body)
+}
 
-    // 8. Parse per provider.
-    let models = match provider {
-        "ollama" => parse_ollama(&body).map_err(|e| {
-            log::debug!("LLM model discovery: Ollama parse failed: {e}");
-            format!("Failed to parse Ollama response: {e}")
-        })?,
-        _ => parse_openai(&body).map_err(|e| {
-            log::debug!("LLM model discovery: OpenAI parse failed: {e}");
-            format!("Failed to parse OpenAI-compatible response: {e}")
-        })?,
+/// Ollama path: list models via `/api/tags`, then resolve the per-model
+/// context window with `POST /api/show` requests issued in parallel. Models
+/// whose `/api/show` probe fails come back with `context_tokens: None` —
+/// the listing still succeeds so the user can pick one.
+async fn discover_ollama(
+    base: &url::Url,
+    client: &reqwest::Client,
+    timeout: Duration,
+) -> Result<Vec<DiscoveredModel>, String> {
+    let body = fetch_json(base, "/api/tags", client, timeout).await?;
+    let names = parse_ollama_tags(&body).map_err(|e| {
+        log::debug!("LLM model discovery: Ollama parse failed: {e}");
+        format!("Failed to parse Ollama response: {e}")
+    })?;
+
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Issue /api/show in parallel for every model name. The endpoint takes a
+    // POST body with `{model: "<name>"}` and returns `model_info` whose
+    // `<arch>.context_length` key carries the context window. Probe failures
+    // (timeout, server churn during model load) degrade silently.
+    //
+    // Bounded fan-out via `buffer_unordered`: a user with 50+ pulled models
+    // would otherwise fire 50+ simultaneous POSTs, which can saturate
+    // Ollama's per-model lock and time out the listing entirely. Eight
+    // concurrent probes is a safe upper bound for local hardware while
+    // keeping the total wall-clock cost bounded by the slowest probe in the
+    // last batch rather than the slowest single model in the listing.
+    let url = format!("{}/api/show", base.as_str().trim_end_matches('/'));
+    // `buffer_unordered` reorders results, so each future carries its index
+    // and we re-sort afterwards to keep the response order matching `names`.
+    let probe_futures = names.iter().cloned().enumerate().map(|(idx, name)| {
+        let client = client.clone();
+        let url = url.clone();
+        async move {
+            let resp = client
+                .post(&url)
+                .header("Accept", "application/json")
+                .json(&serde_json::json!({ "model": name }))
+                .timeout(timeout)
+                .send()
+                .await
+                .ok();
+            let ctx = match resp {
+                Some(r) if r.status().is_success() => {
+                    match read_body_limited(r, "Ollama /api/show").await {
+                        Ok(body) => parse_ollama_show(&body),
+                        Err(_) => None,
+                    }
+                }
+                _ => None,
+            };
+            (idx, ctx)
+        }
+    });
+    let mut indexed: Vec<(usize, Option<u32>)> = stream::iter(probe_futures)
+        .buffer_unordered(MAX_OLLAMA_PROBE_CONCURRENCY)
+        .collect()
+        .await;
+    indexed.sort_by_key(|(idx, _)| *idx);
+
+    Ok(names
+        .into_iter()
+        .zip(indexed.into_iter().map(|(_, ctx)| ctx))
+        .map(|(id, ctx)| DiscoveredModel {
+            id,
+            context_tokens: ctx,
+        })
+        .collect())
+}
+
+/// Maximum number of `/api/show` probes Ollama discovery may have in flight
+/// at once. Higher concurrency floods the server (single-threaded for many
+/// model-loading operations); lower concurrency drags wall-clock latency
+/// for users with large model libraries. Eight is a conservative middle
+/// ground that matches typical CPU-core counts.
+const MAX_OLLAMA_PROBE_CONCURRENCY: usize = 8;
+
+/// LM Studio path: hits the extended `/api/v0/models` listing which carries
+/// `max_context_length` per entry. The OpenAI-compatible `/v1/models`
+/// fallback was removed — it returns ids only, so the dropdown gets the
+/// same ids minus the context window data we actually want, in exchange
+/// for a second round-trip and a duplicate parser. Modern LM Studio always
+/// exposes `/api/v0/models`.
+async fn discover_lmstudio(
+    base: &url::Url,
+    client: &reqwest::Client,
+    timeout: Duration,
+) -> Result<Vec<DiscoveredModel>, String> {
+    let body = fetch_json(base, "/api/v0/models", client, timeout).await?;
+    parse_lmstudio(&body).map_err(|e| {
+        log::debug!("LLM model discovery: LM Studio /api/v0/models parse failed: {e}");
+        format!("Failed to parse LM Studio response: {e}")
+    })
+}
+
+/// llama.cpp path: a single `/v1/models` request returns ids plus
+/// `meta.n_ctx_train` for every model — no second round-trip needed.
+async fn discover_llamacpp(
+    base: &url::Url,
+    client: &reqwest::Client,
+    timeout: Duration,
+) -> Result<Vec<DiscoveredModel>, String> {
+    let body = fetch_json(base, "/v1/models", client, timeout).await?;
+    parse_llamacpp(&body).map_err(|e| {
+        log::debug!("LLM model discovery: llama.cpp parse failed: {e}");
+        format!("Failed to parse llama.cpp response: {e}")
+    })
+}
+
+/// Discovers available models from a local LLM server.
+///
+/// `timeout` controls the reqwest-level request timeout for every
+/// individual HTTP call (Ollama issues `1 + N` calls, others `1`).
+/// Production uses `DISCOVERY_TIMEOUT_SECS` via the Tauri wrapper; tests
+/// pass shorter durations to keep the suite fast.
+///
+/// Returns `Err("empty")` when the server responds OK but with no models (a
+/// server up without any model loaded). The UI treats this the same as an
+/// offline server and falls back to the free-text input.
+pub(crate) async fn do_discover_llm_models(
+    provider: &str,
+    base_url: &str,
+    client: &reqwest::Client,
+    timeout: Duration,
+) -> Result<Vec<DiscoveredModel>, String> {
+    // 1. Short-circuit anthropic — there's no local model-list endpoint.
+    if provider == "anthropic" {
+        return Err("unsupported".to_string());
+    }
+
+    // 2. Normalise URL: strip /v1, rewrite container aliases, SSRF-validate.
+    let validated = normalize_and_validate_discovery_url(base_url)?;
+
+    // 3. Provider-specific discovery (each helper handles its own endpoints
+    //    so we can fan out for Ollama and use the extended LM Studio listing
+    //    where it gives us context windows for free).
+    let raw_models = match provider {
+        "ollama" => discover_ollama(&validated, client, timeout).await?,
+        "lmstudio" => discover_lmstudio(&validated, client, timeout).await?,
+        "llamacpp" => discover_llamacpp(&validated, client, timeout).await?,
+        _ => return Err("unsupported".to_string()),
     };
+
+    // Drop entries with an empty id: a server returning `"name": ""` would
+    // otherwise show up in the dropdown as a blank `<option>` that the user
+    // can't meaningfully select. The chat fallback chain already handles
+    // empty lists gracefully.
+    let models: Vec<DiscoveredModel> = raw_models
+        .into_iter()
+        .filter(|m| !m.id.is_empty())
+        .collect();
 
     log::debug!(
         "LLM model discovery: {} returned {} model(s)",
@@ -333,15 +547,9 @@ pub(crate) async fn do_discover_llm_models(
         models.len()
     );
 
-    // 9. Empty list is a failure — UI will show the free-text input.
     if models.is_empty() {
         return Err("empty".to_string());
     }
-
-    // Sanity: ensure we haven't accidentally accepted a body larger than the
-    // cap. This is defensive — read_body_limited already enforces.
-    debug_assert!(body.len() <= MAX_RESPONSE_BODY_BYTES);
-
     Ok(models)
 }
 
@@ -355,7 +563,7 @@ pub(crate) async fn do_discover_llm_models(
 pub async fn discover_llm_models(
     provider: String,
     base_url: String,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<DiscoveredModel>, String> {
     let client = build_llm_probe_client()?;
     do_discover_llm_models(
         &provider,
@@ -375,6 +583,12 @@ pub async fn discover_llm_models(
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
+
+    /// Convenience extractor — discovery returns rich `DiscoveredModel`s but
+    /// most happy-path assertions only care about the id list.
+    fn model_ids(models: &[DiscoveredModel]) -> Vec<&str> {
+        models.iter().map(|m| m.id.as_str()).collect()
+    }
 
     // ── normalize_and_validate_discovery_url ────────────────────────────
 
@@ -413,7 +627,7 @@ mod tests {
     // ── Pure parsers ────────────────────────────────────────────────────
 
     #[test]
-    fn parse_ollama_happy_path() {
+    fn parse_ollama_tags_happy_path() {
         // Extra fields (`model`, `modified_at`, …) MUST NOT break parse — we
         // deliberately do not set `deny_unknown_fields`.
         let body = br#"{
@@ -429,55 +643,195 @@ mod tests {
                 { "name": "qwen2.5" }
             ]
         }"#;
-        assert_eq!(parse_ollama(body).unwrap(), vec!["llama3.3", "qwen2.5"]);
+        assert_eq!(
+            parse_ollama_tags(body).unwrap(),
+            vec!["llama3.3", "qwen2.5"]
+        );
     }
 
     #[test]
-    fn parse_ollama_empty_list() {
+    fn parse_ollama_tags_empty_list() {
         let body = br#"{ "models": [] }"#;
-        assert!(parse_ollama(body).unwrap().is_empty());
+        assert!(parse_ollama_tags(body).unwrap().is_empty());
     }
 
     #[test]
-    fn parse_ollama_malformed_json() {
-        assert!(parse_ollama(b"not json at all").is_err());
+    fn parse_ollama_tags_malformed_json() {
+        assert!(parse_ollama_tags(b"not json at all").is_err());
     }
 
     #[test]
-    fn parse_ollama_wrong_outer_type() {
-        assert!(parse_ollama(b"[]").is_err());
+    fn parse_ollama_tags_wrong_outer_type() {
+        assert!(parse_ollama_tags(b"[]").is_err());
     }
 
     #[test]
-    fn parse_ollama_wrong_field_type_for_name() {
+    fn parse_ollama_tags_wrong_field_type_for_name() {
         let body = br#"{ "models": [ { "name": 42 } ] }"#;
-        assert!(parse_ollama(body).is_err());
+        assert!(parse_ollama_tags(body).is_err());
     }
 
     #[test]
-    fn parse_openai_happy_path() {
+    fn parse_ollama_show_resolves_arch_specific_context_length() {
+        // Real /api/show response shape (truncated): `general.architecture`
+        // selects which `<arch>.context_length` key carries the window.
         let body = br#"{
+            "license": "...",
+            "modelfile": "...",
+            "model_info": {
+                "general.architecture": "qwen2",
+                "qwen2.context_length": 32768,
+                "qwen2.attention.head_count": 28
+            }
+        }"#;
+        assert_eq!(parse_ollama_show(body), Some(32768));
+    }
+
+    #[test]
+    fn parse_ollama_show_falls_back_to_any_context_length_key() {
+        // If the `general.architecture` key is missing we still grab any
+        // `<X>.context_length` we can find. Future Ollama schema tweaks
+        // shouldn't silently drop us back to 200k.
+        let body = br#"{
+            "model_info": {
+                "llama.context_length": 8192
+            }
+        }"#;
+        assert_eq!(parse_ollama_show(body), Some(8192));
+    }
+
+    #[test]
+    fn parse_ollama_show_returns_none_without_context_length() {
+        let body = br#"{
+            "model_info": {
+                "general.architecture": "llama",
+                "llama.attention.head_count": 32
+            }
+        }"#;
+        assert_eq!(parse_ollama_show(body), None);
+    }
+
+    #[test]
+    fn parse_ollama_show_returns_none_on_malformed_json() {
+        assert_eq!(parse_ollama_show(b"not json"), None);
+    }
+
+    #[test]
+    fn parse_lmstudio_extracts_max_context_length() {
+        // /api/v0/models — context window is in the listing, no follow-up
+        // request needed.
+        let body = br#"{
+            "object": "list",
             "data": [
-                { "id": "gpt-oss", "object": "model", "owned_by": "organization" },
-                { "id": "qwen" }
+                {
+                    "id": "qwen2.5-coder",
+                    "object": "model",
+                    "type": "llm",
+                    "max_context_length": 32768
+                },
+                { "id": "embed-only", "object": "model", "type": "embeddings" }
             ]
         }"#;
-        assert_eq!(parse_openai(body).unwrap(), vec!["gpt-oss", "qwen"]);
+        let models = parse_lmstudio(body).unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "qwen2.5-coder");
+        assert_eq!(models[0].context_tokens, Some(32768));
+        // `embed-only` lacks max_context_length — context_tokens=None.
+        assert_eq!(models[1].id, "embed-only");
+        assert_eq!(models[1].context_tokens, None);
     }
 
     #[test]
-    fn parse_openai_empty_list() {
-        assert!(parse_openai(br#"{ "data": [] }"#).unwrap().is_empty());
+    fn parse_llamacpp_extracts_n_ctx_train() {
+        // llama.cpp /v1/models exposes meta.n_ctx_train per entry.
+        let body = br#"{
+            "object": "list",
+            "data": [
+                {
+                    "id": "../models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+                    "object": "model",
+                    "meta": {
+                        "n_ctx_train": 131072,
+                        "n_vocab": 128256
+                    }
+                }
+            ]
+        }"#;
+        let models = parse_llamacpp(body).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].context_tokens, Some(131072));
     }
 
     #[test]
-    fn parse_openai_malformed_json() {
-        assert!(parse_openai(b"{bad").is_err());
+    fn parse_llamacpp_handles_missing_meta() {
+        let body = br#"{ "data": [{ "id": "model-without-meta" }] }"#;
+        let models = parse_llamacpp(body).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].context_tokens, None);
+    }
+
+    // ── zero-context_tokens guard ───────────────────────────────────────
+    //
+    // A literal `0` from the server (or an overflow on `u32::try_from`)
+    // would otherwise propagate to `update_llm_config`, which rejects it
+    // with a misleading "context_tokens must be greater than 0" error
+    // — confusing because it's an internal invariant, not a user mistake.
+    // `non_zero_u32` flips zero to `None` so the chat fallback chain
+    // takes over instead.
+
+    #[test]
+    fn parse_lmstudio_treats_zero_max_context_length_as_unknown() {
+        let body = br#"{
+            "data": [
+                { "id": "broken-model", "max_context_length": 0 },
+                { "id": "ok-model", "max_context_length": 32768 }
+            ]
+        }"#;
+        let models = parse_lmstudio(body).unwrap();
+        assert_eq!(models[0].context_tokens, None, "zero must become None");
+        assert_eq!(models[1].context_tokens, Some(32_768));
     }
 
     #[test]
-    fn parse_openai_wrong_outer_type() {
-        assert!(parse_openai(b"[]").is_err());
+    fn parse_llamacpp_treats_zero_n_ctx_train_as_unknown() {
+        let body = br#"{
+            "data": [
+                { "id": "broken", "meta": { "n_ctx_train": 0 } }
+            ]
+        }"#;
+        let models = parse_llamacpp(body).unwrap();
+        assert_eq!(models[0].context_tokens, None);
+    }
+
+    #[test]
+    fn parse_ollama_show_treats_zero_context_length_as_unknown() {
+        // Arch-specific key path.
+        let body = br#"{
+            "model_info": {
+                "general.architecture": "llama",
+                "llama.context_length": 0
+            }
+        }"#;
+        assert_eq!(parse_ollama_show(body), None);
+    }
+
+    #[test]
+    fn parse_ollama_show_treats_zero_in_fallback_scan_as_unknown() {
+        // Generic *.context_length scan path — same zero handling.
+        let body = br#"{
+            "model_info": {
+                "qwen2.context_length": 0
+            }
+        }"#;
+        assert_eq!(parse_ollama_show(body), None);
+    }
+
+    #[test]
+    fn non_zero_u32_helper_filters_zero_and_overflow() {
+        assert_eq!(super::non_zero_u32(0), None);
+        assert_eq!(super::non_zero_u32(1), Some(1));
+        assert_eq!(super::non_zero_u32(u32::MAX as u64), Some(u32::MAX));
+        assert_eq!(super::non_zero_u32(u32::MAX as u64 + 1), None);
     }
 
     // ── validate_llm_base_url: branch coverage ──────────────────────────
@@ -781,7 +1135,7 @@ mod tests {
         let models = do_discover_llm_models("ollama", &base_url, &client, Duration::from_secs(2))
             .await
             .unwrap();
-        assert_eq!(models, vec!["test-model"]);
+        assert_eq!(model_ids(&models), vec!["test-model"]);
         mock.assert_async().await;
     }
 
@@ -802,18 +1156,26 @@ mod tests {
             do_discover_llm_models("ollama", &server.url(), &client, Duration::from_secs(2))
                 .await
                 .unwrap();
-        assert_eq!(models, vec!["llama3.3", "qwen2.5"]);
+        assert_eq!(model_ids(&models), vec!["llama3.3", "qwen2.5"]);
         mock.assert_async().await;
     }
 
     #[tokio::test]
-    async fn integration_lmstudio_happy_path() {
+    async fn integration_lmstudio_extended_api_includes_context_window() {
         let mut server = mockito::Server::new_async().await;
+        // /api/v0/models is the only endpoint we hit since the /v1/models
+        // fallback was removed. The extended listing carries `max_context_length`
+        // per entry — verify it propagates into `DiscoveredModel.context_tokens`.
         let mock = server
-            .mock("GET", "/v1/models")
+            .mock("GET", "/api/v0/models")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"data":[{"id":"gpt-oss"},{"id":"qwen"}]}"#)
+            .with_body(
+                r#"{"data":[
+                    {"id":"gpt-oss","max_context_length":131072},
+                    {"id":"qwen","max_context_length":32768}
+                ]}"#,
+            )
             .create_async()
             .await;
         let client = build_llm_probe_client().unwrap();
@@ -821,8 +1183,28 @@ mod tests {
             do_discover_llm_models("lmstudio", &server.url(), &client, Duration::from_secs(2))
                 .await
                 .unwrap();
-        assert_eq!(models, vec!["gpt-oss", "qwen"]);
+        assert_eq!(model_ids(&models), vec!["gpt-oss", "qwen"]);
+        assert_eq!(models[0].context_tokens, Some(131_072));
+        assert_eq!(models[1].context_tokens, Some(32_768));
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn integration_lmstudio_extended_api_failure_propagates() {
+        // /api/v0/models is the sole endpoint — without a fallback, a 500
+        // response surfaces as an error rather than silently producing an
+        // empty list.
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/api/v0/models")
+            .with_status(500)
+            .create_async()
+            .await;
+        let client = build_llm_probe_client().unwrap();
+        let result =
+            do_discover_llm_models("lmstudio", &server.url(), &client, Duration::from_secs(2))
+                .await;
+        assert!(result.is_err(), "expected Err on /api/v0/models 500");
     }
 
     #[tokio::test]
@@ -840,7 +1222,7 @@ mod tests {
             do_discover_llm_models("llamacpp", &server.url(), &client, Duration::from_secs(2))
                 .await
                 .unwrap();
-        assert_eq!(models, vec!["bielik"]);
+        assert_eq!(model_ids(&models), vec!["bielik"]);
         mock.assert_async().await;
     }
 
@@ -863,6 +1245,10 @@ mod tests {
         assert_eq!(err, "unsupported");
     }
 
+    // Generic HTTP-layer integration tests use llama.cpp because it shares the
+    // OpenAI-compatible `/v1/models` endpoint exercised by mockito. They cover
+    // status / content-type / size / timeout / redirect behaviour of
+    // `fetch_json` and apply equally to LM Studio's `/api/v0/models` path.
     #[tokio::test]
     async fn integration_returns_err_on_500() {
         let mut server = mockito::Server::new_async().await;
@@ -873,7 +1259,7 @@ mod tests {
             .await;
         let client = build_llm_probe_client().unwrap();
         assert!(
-            do_discover_llm_models("lmstudio", &server.url(), &client, Duration::from_secs(2),)
+            do_discover_llm_models("llamacpp", &server.url(), &client, Duration::from_secs(2),)
                 .await
                 .is_err()
         );
@@ -889,7 +1275,7 @@ mod tests {
             .await;
         let client = build_llm_probe_client().unwrap();
         assert!(
-            do_discover_llm_models("lmstudio", &server.url(), &client, Duration::from_secs(2),)
+            do_discover_llm_models("llamacpp", &server.url(), &client, Duration::from_secs(2),)
                 .await
                 .is_err()
         );
@@ -905,7 +1291,7 @@ mod tests {
             .await;
         let client = build_llm_probe_client().unwrap();
         assert!(
-            do_discover_llm_models("lmstudio", &server.url(), &client, Duration::from_secs(2),)
+            do_discover_llm_models("llamacpp", &server.url(), &client, Duration::from_secs(2),)
                 .await
                 .is_err()
         );
@@ -924,7 +1310,7 @@ mod tests {
             .await;
         let client = build_llm_probe_client().unwrap();
         let err =
-            do_discover_llm_models("lmstudio", &server.url(), &client, Duration::from_secs(2))
+            do_discover_llm_models("llamacpp", &server.url(), &client, Duration::from_secs(2))
                 .await
                 .unwrap_err();
         assert!(err.to_lowercase().contains("html"));
@@ -944,10 +1330,10 @@ mod tests {
             .await;
         let client = build_llm_probe_client().unwrap();
         let models =
-            do_discover_llm_models("lmstudio", &server.url(), &client, Duration::from_secs(2))
+            do_discover_llm_models("llamacpp", &server.url(), &client, Duration::from_secs(2))
                 .await
                 .unwrap();
-        assert_eq!(models, vec!["x"]);
+        assert_eq!(model_ids(&models), vec!["x"]);
     }
 
     #[tokio::test]
@@ -962,7 +1348,7 @@ mod tests {
             .await;
         let client = build_llm_probe_client().unwrap();
         let err =
-            do_discover_llm_models("lmstudio", &server.url(), &client, Duration::from_secs(2))
+            do_discover_llm_models("llamacpp", &server.url(), &client, Duration::from_secs(2))
                 .await
                 .unwrap_err();
         assert_eq!(err, "empty");
@@ -981,7 +1367,7 @@ mod tests {
             .await;
         let client = build_llm_probe_client().unwrap();
         let err =
-            do_discover_llm_models("lmstudio", &server.url(), &client, Duration::from_secs(2))
+            do_discover_llm_models("llamacpp", &server.url(), &client, Duration::from_secs(2))
                 .await
                 .unwrap_err();
         assert!(err.to_lowercase().contains("too large"));
@@ -1004,7 +1390,7 @@ mod tests {
             .await;
         let client = build_llm_probe_client().unwrap();
         assert!(do_discover_llm_models(
-            "lmstudio",
+            "llamacpp",
             &server.url(),
             &client,
             Duration::from_millis(100),
@@ -1035,7 +1421,7 @@ mod tests {
 
         let client = build_llm_probe_client().unwrap();
         assert!(do_discover_llm_models(
-            "lmstudio",
+            "llamacpp",
             &redirect.url(),
             &client,
             Duration::from_secs(2),
@@ -1064,7 +1450,7 @@ mod tests {
         let client = build_llm_probe_client().unwrap();
         let result = tokio::time::timeout(
             Duration::from_millis(500),
-            do_discover_llm_models("lmstudio", &server.url(), &client, Duration::from_secs(2)),
+            do_discover_llm_models("llamacpp", &server.url(), &client, Duration::from_secs(2)),
         )
         .await
         .expect("operation must complete within 500ms — otherwise redirect was followed");

@@ -59,35 +59,98 @@ setup_ubuntu() {
 
     echo "[linux] Installing system dependencies..."
     linux_ssh bash <<'SCRIPT'
-sudo DEBIAN_FRONTEND=noninteractive apt-get update
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+set -euo pipefail
+# Set DEBIAN_FRONTEND once for the whole apt-get chain — non-interactive,
+# no debconf prompts. We use apt-get (not apt) because apt is explicitly
+# "not stable for scripts" (it prints a warning).
+export DEBIAN_FRONTEND=noninteractive
+
+# Disarm the /etc/apt/apt.conf.d/20packagekit hook on systems where the
+# packagekit.service is masked (e2e VMs mask it to save RAM). The hook
+# unconditionally calls `gdbus … org.freedesktop.PackageKit` after every
+# `apt-get update` and dpkg run; with the unit masked, gdbus prints
+# "Error: GDBus.Error:org.freedesktop.systemd1.UnitMasked: Unit
+# packagekit.service is masked." on stderr. APT's `-o '…::='` syntax
+# only appends an empty list entry — it cannot REMOVE the gdbus entry
+# the conf.d file already added. The only reliable, scoped fix is to
+# disable the hook file itself. Idempotent: skip if already disabled.
+if [ -f /etc/apt/apt.conf.d/20packagekit ] && \
+   ! systemctl is-enabled packagekit.service >/dev/null 2>&1; then
+    sudo mv /etc/apt/apt.conf.d/20packagekit \
+            /etc/apt/apt.conf.d/20packagekit.disabled
+fi
+
+sudo -E apt-get update
+sudo -E apt-get install -y \
     git make curl ca-certificates build-essential pkg-config libssl-dev \
     libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
     librsvg2-dev patchelf \
     webkit2gtk-driver xvfb xauth \
-    uidmap rsync
+    uidmap rsync gnupg
 SCRIPT
 
     echo "[linux] Installing Node.js 24..."
     linux_ssh bash <<'SCRIPT'
-curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+# Idempotency: Node 24 already installed → skip the NodeSource setup pipe.
+if command -v node >/dev/null 2>&1 && node --version | grep -q '^v24\.'; then
+    echo "Node.js already installed: $(node --version)"
+    exit 0
+fi
+# Ensure user's ~/.gnupg exists with 0700 perms BEFORE any tool that may
+# invoke gpg, so gpg never warns "unsafe ownership on homedir".
+# Files inside .gnupg must be 0600.
+install -d -m 0700 "$HOME/.gnupg"
+find "$HOME/.gnupg" -type f -exec chmod 0600 {} + 2>/dev/null || true
+# Run NodeSource setup script as root WITHOUT -E so root's gpg uses
+# /root/.gnupg (created by gpg itself with correct 0700 perms) instead of
+# the user's ~/.gnupg — which would otherwise be touched by root and end
+# up with mismatched ownership, triggering "unsafe ownership" on the next
+# user-side gpg call.
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo bash -
+sudo -E apt-get install -y nodejs
 SCRIPT
 
     echo "[linux] Installing Rust..."
     linux_ssh bash <<'SCRIPT'
-if command -v rustc >/dev/null 2>&1; then
+set -euo pipefail
+# Source the rustup env so `rustup`/`rustc` are visible in this
+# non-interactive, non-login shell. Without this the gate below would
+# always miss and rustup-init would re-run, producing the
+# "existing rustup settings file" warning and wasting 1-2 minutes.
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+if command -v rustup >/dev/null 2>&1; then
     echo "Rust already installed: $(rustc --version)"
-else
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    exit 0
 fi
+# Defensive gnupg perms — rustup-init does not call gpg, but other tools
+# triggered later might, and this is a cheap one-liner.
+install -d -m 0700 "$HOME/.gnupg"
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 SCRIPT
 
     echo "[linux] Installing tauri-driver and tauri-cli..."
     linux_ssh bash <<'SCRIPT'
+set -euo pipefail
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo install tauri-driver --locked
-cargo install tauri-cli --locked
+# Idempotency: skip cargo install if the binary is already on PATH.
+# `cargo install` re-downloads + recompiles (~minutes) every time even
+# when the binary is up-to-date with --locked, so a `command -v` gate
+# turns subsequent provisioning runs into no-ops.
+if command -v tauri-driver >/dev/null 2>&1; then
+    # tauri-driver does not implement --version, so we just confirm the binary
+    # is present on PATH; cargo install would otherwise re-download + recompile.
+    echo "tauri-driver already installed: $(command -v tauri-driver)"
+else
+    cargo install tauri-driver --locked
+fi
+if command -v cargo-tauri >/dev/null 2>&1; then
+    echo "tauri-cli already installed: $(cargo tauri --version 2>&1 || true)"
+else
+    cargo install tauri-cli --locked
+fi
 SCRIPT
 
     echo "[linux] Configuring rootless containers (subuid/subgid + userns)..."
@@ -139,7 +202,7 @@ echo "npm:  $(npm --version)"
 echo "Rust: $(rustc --version)"
 echo "Cargo: $(cargo --version)"
 echo "tauri-cli: $(cargo tauri --version 2>/dev/null || echo 'not found')"
-echo "tauri-driver: $(tauri-driver --version 2>/dev/null || echo 'not found')"
+echo "tauri-driver: $(command -v tauri-driver || echo 'not found')"
 SCRIPT
 
     echo "[linux] DONE"

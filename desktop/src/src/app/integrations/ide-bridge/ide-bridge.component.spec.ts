@@ -174,7 +174,7 @@ describe('IdeBridgeComponent', () => {
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
     const btn = fixture.nativeElement.querySelector('[data-testid="connect-btn"]');
-    expect(btn.textContent.trim()).toBe('Connected');
+    expect(btn.textContent.trim()).toBe('connected');
     expect(btn.getAttribute('data-active')).toBe('true');
   });
 

@@ -210,7 +210,17 @@ jobs:
 
       - name: Angular tests + coverage
         working-directory: desktop/src
-        run: npx vitest run --coverage
+        # Use `ng test` rather than `npx vitest run` directly: the
+        # `@angular/build:unit-test` builder generates the
+        # `init-testbed.js` bootstrap chunk that calls
+        # `TestBed.initTestEnvironment()` and the jsdom DOM. Calling
+        # vitest directly skips that chunk and every spec fails with
+        # "Need to call TestBed.initTestEnvironment() first" /
+        # "document is not defined".
+        # `--runner-config vitest.config.ts` opts in to `retry: 2`,
+        # which covers a hoist race in Vitest's `isolate: false` mode
+        # forced by the Angular unit-test builder. See vitest.config.ts.
+        run: npx ng test --no-watch --coverage --runner-config vitest.config.ts
 
       - name: Install bats
         run: sudo apt-get update && sudo apt-get install -y bats

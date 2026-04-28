@@ -11,94 +11,195 @@ import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { PluginStatusEntry, PluginsResponse } from '../models/plugin';
-import {
-  PluginCardComponent,
-  SavePluginCredentialsEvent,
-} from './plugin-card/plugin-card.component';
+import { ProjectPillComponent } from '../project-switcher/project-pill.component';
+import { SpinIconComponent } from '../shared/spin-icon.component';
 import { open } from '@tauri-apps/plugin-dialog';
+
+/** Per-row plugin dot colour cycle. */
+const PLUGIN_DOT_COLOURS: readonly string[] = [
+  'var(--accent)',
+  'var(--violet)',
+  'var(--teal)',
+  'var(--amber)',
+  'var(--green)',
+];
+
+/**
+ * Returns a deterministic dot colour for a plugin row based on its index.
+ * @param index - the row index in the rendered list
+ */
+function dotColourFor(index: number): string {
+  return PLUGIN_DOT_COLOURS[index % PLUGIN_DOT_COLOURS.length];
+}
 
 /** Manages installed plugins: list, install, remove, enable/disable, credentials. */
 @Component({
   selector: 'app-plugins',
-  standalone: true,
-  imports: [CommonModule, PluginCardComponent],
+  imports: [CommonModule, ProjectPillComponent, SpinIconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (installing) {
       <div
-        class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-sw-bg-darkest/[0.92]"
+        class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-[var(--bg)]/[0.92]"
         role="alertdialog"
         aria-modal="true"
         aria-label="Installing plugin"
         data-testid="plugins-install-overlay"
       >
-        <div
-          class="w-8 h-8 border-[3px] border-sw-border-dark border-t-sw-accent rounded-full animate-sw-spin"
-        ></div>
-        <p class="mt-4 font-mono text-sm text-sw-text">Installing plugin…</p>
+        <app-spin-icon class="block h-8 w-8 text-[var(--accent)]" />
+        <p class="mono mt-4 text-[12px] text-[var(--ink)]">Installing plugin…</p>
       </div>
     }
 
-    <div>
-      <h1 class="text-xl text-sw-accent m-0 mb-6">Plugins</h1>
-
-      @if (error) {
-        <div
-          class="mb-4 px-3 py-2 bg-sw-error-bg border border-sw-accent rounded text-sw-accent text-[13px]"
-          data-testid="plugins-error"
-        >
-          {{ error }}
-        </div>
-      }
-      @if (success) {
-        <div
-          class="mb-4 px-3 py-2 bg-sw-success-dark border border-sw-success-text rounded text-sw-success-text text-[13px]"
-          data-testid="plugins-success"
-        >
-          {{ success }}
-        </div>
-      }
-
-      <div class="mb-6">
+    <div
+      class="flex h-11 flex-shrink-0 items-center gap-3 border-b border-[var(--line)] bg-[var(--bg-1)] px-4 md:px-6"
+      data-testid="plugins-header"
+    >
+      <h1 class="view-title view-title-page truncate text-[var(--ink)]" data-testid="plugins-title">
+        Installed plugins
+      </h1>
+      <div class="ml-auto flex flex-shrink-0 items-center gap-3">
         <button
-          class="px-5 py-2 bg-transparent text-sw-accent border border-dashed border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-darkest disabled:opacity-60 disabled:cursor-not-allowed"
+          type="button"
+          class="mono hidden rounded border border-[var(--accent-dim)] bg-[var(--accent)] px-2.5 py-0.5 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 md:inline-flex"
           data-testid="plugins-install"
-          (click)="installPlugin()"
           [disabled]="installing"
+          (click)="installPlugin()"
         >
-          @if (installing) {
-            <span
-              class="inline-block w-3 h-3 border-2 border-sw-accent/30 border-t-sw-accent rounded-full animate-sw-spin"
-            ></span>
-            Installing...
-          } @else {
-            + Install Plugin
-          }
+          $ install plugin
         </button>
+        <span class="hidden text-[var(--line-strong)] md:inline">·</span>
+        <app-project-pill />
       </div>
+    </div>
 
-      <section class="mb-6" data-testid="plugins-list">
+    <div class="flex-1 overflow-y-auto p-4 md:p-6" data-testid="plugins-body">
+      <div class="mx-auto max-w-3xl">
+        @if (error) {
+          <div
+            class="mb-4 rounded ring-1 ring-red-500/40 bg-red-500/[0.06] px-3 py-2 text-[12px] text-red-300"
+            data-testid="plugins-error"
+            role="alert"
+          >
+            {{ error }}
+          </div>
+        }
+        @if (success) {
+          <div
+            class="mb-4 rounded ring-1 ring-[rgba(52,211,153,0.4)] bg-[rgba(52,211,153,0.06)] px-3 py-2 text-[12px] text-[var(--green)]"
+            data-testid="plugins-success"
+            role="status"
+          >
+            {{ success }}
+          </div>
+        }
+
         @if (plugins.length === 0) {
-          <p class="text-sw-text-dim text-[13px] py-5 text-center" data-testid="empty-state">
-            No plugins installed. Click "Install Plugin" to add one.
+          <p
+            class="mono py-10 text-center text-[12px] text-[var(--ink-mute)]"
+            data-testid="empty-state"
+          >
+            No plugins installed. Click "$ install plugin" to add one.
           </p>
+        } @else {
+          <div
+            class="overflow-hidden rounded border border-[var(--line)]"
+            data-testid="plugins-table-wrapper"
+          >
+            <table class="w-full text-[13px]" data-testid="plugins-table">
+              <caption class="sr-only">
+                Installed plugins
+              </caption>
+              <thead
+                class="mono border-b border-[var(--line)] bg-[var(--bg-1)] text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+              >
+                <tr>
+                  <th class="px-4 py-2 text-left font-normal" scope="col">plugin</th>
+                  <th class="px-4 py-2 text-left font-normal" scope="col">type</th>
+                  <th class="hidden px-4 py-2 text-left font-normal md:table-cell" scope="col">
+                    ver
+                  </th>
+                  <th class="hidden px-4 py-2 text-left font-normal md:table-cell" scope="col">
+                    tools
+                  </th>
+                  <th class="hidden px-4 py-2 text-left font-normal lg:table-cell" scope="col">
+                    signed
+                  </th>
+                  <th class="px-4 py-2 text-right font-normal" scope="col">on</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-[var(--line)]">
+                @for (plugin of plugins; track plugin.slug; let idx = $index) {
+                  <tr
+                    class="hover-bg cursor-pointer"
+                    [attr.data-testid]="'plugins-row-' + plugin.slug"
+                    (click)="navigateToPlugin(plugin.slug)"
+                    (keydown.enter)="navigateToPlugin(plugin.slug)"
+                    tabindex="0"
+                    role="link"
+                    [attr.aria-label]="'Open ' + plugin.name"
+                  >
+                    <td class="px-4 py-2.5">
+                      <div class="flex items-center gap-2">
+                        <span [style.color]="dotColour(idx)" aria-hidden="true">●</span>
+                        <div>
+                          <div class="text-[var(--ink)]" data-testid="plugins-row-name">
+                            {{ plugin.name }}
+                          </div>
+                          <div
+                            class="mono text-[10px] text-[var(--ink-mute)]"
+                            data-testid="plugins-row-tagline"
+                          >
+                            {{ plugin.description }}
+                          </div>
+                        </div>
+                      </div>
+                    </td>
+                    <td class="px-4 py-2.5">
+                      @if (plugin.service_id) {
+                        <span class="pill teal" data-testid="plugins-row-type">mcp</span>
+                      } @else {
+                        <span class="pill" data-testid="plugins-row-type">resource</span>
+                      }
+                    </td>
+                    <td
+                      class="mono hidden px-4 py-2.5 text-[var(--ink-mute)] md:table-cell"
+                      data-testid="plugins-row-ver"
+                    >
+                      v{{ plugin.version }}
+                    </td>
+                    <td
+                      class="mono hidden px-4 py-2.5 text-[var(--ink-dim)] md:table-cell"
+                      data-testid="plugins-row-tools"
+                    >
+                      {{ toolsLabelFor(plugin) }}
+                    </td>
+                    <td class="hidden px-4 py-2.5 lg:table-cell">
+                      <span class="pill green" data-testid="plugins-row-signed">✓ ed25519</span>
+                    </td>
+                    <td class="px-4 py-2.5 text-right">
+                      <button
+                        type="button"
+                        class="toggle ml-auto"
+                        [class.on]="plugin.enabled"
+                        [attr.aria-pressed]="plugin.enabled"
+                        [attr.aria-label]="(plugin.enabled ? 'Disable ' : 'Enable ') + plugin.name"
+                        [attr.data-testid]="'plugins-row-toggle-' + plugin.slug"
+                        (click)="onRowToggle(plugin, $event)"
+                      ></button>
+                    </td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
         }
-        @for (plugin of plugins; track plugin.slug) {
-          <app-plugin-card
-            [plugin]="plugin"
-            [expanded]="expandedPlugin === plugin.slug"
-            (toggleExpand)="toggleExpand($event)"
-            (openPlugin)="navigateToPlugin($event)"
-            (togglePlugin)="handleTogglePlugin($event)"
-            (saveCredentials)="handleSaveCredentials($event)"
-            (deleteCredentials)="handleDeleteCredentials($event)"
-            (removePlugin)="handleRemovePlugin($event)"
-          />
-        }
-      </section>
+      </div>
     </div>
   `,
-  host: { class: 'block bg-sw-bg-darkest min-h-screen p-6 text-sw-text' },
+  host: {
+    class: 'flex h-full flex-1 flex-col overflow-hidden bg-[var(--bg)] text-[var(--ink)]',
+  },
 })
 export class PluginsComponent implements OnInit, OnDestroy {
   plugins: PluginStatusEntry[] = [];
@@ -150,6 +251,25 @@ export class PluginsComponent implements OnInit, OnDestroy {
       this.error = e instanceof Error ? e.message : String(e);
     }
     this.cdr.markForCheck();
+  }
+
+  /**
+   * Returns the dot colour for a row based on its index.
+   * @param idx - the row index
+   */
+  dotColour(idx: number): string {
+    return dotColourFor(idx);
+  }
+
+  /**
+   * Tools-column label — em-dash for resource plugins (no MCP worker).
+   * @param plugin - the plugin status entry
+   */
+  toolsLabelFor(plugin: PluginStatusEntry): string {
+    if (!plugin.service_id) return '—';
+    // We don't currently expose tool counts via get_plugins, so render a stable
+    // "—" placeholder and let plugin-detail report the real number per worker.
+    return '—';
   }
 
   /**
@@ -206,7 +326,33 @@ export class PluginsComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Handles the togglePlugin event from a plugin card.
+   * Click handler for row toggle pill — flips state without navigating.
+   * @param plugin - the plugin to toggle
+   * @param event - the click event (used to stop propagation)
+   */
+  async onRowToggle(plugin: PluginStatusEntry, event: Event): Promise<void> {
+    event.stopPropagation();
+    const previous = plugin.enabled;
+    const next = !previous;
+    plugin.enabled = next;
+    this.cdr.markForCheck();
+    const sid = plugin.service_id ?? plugin.slug;
+    try {
+      await this.tauri.invoke<void>('set_plugin_enabled', {
+        project: this.activeProject,
+        serviceId: sid,
+        enabled: next,
+      });
+      this.projectState.requestRestart();
+    } catch (e: unknown) {
+      plugin.enabled = previous;
+      this.error = e instanceof Error ? e.message : String(e);
+    }
+    this.cdr.markForCheck();
+  }
+
+  /**
+   * Handles the togglePlugin event from a plugin card (legacy entry point).
    * @param payload - the plugin and checkbox event to process
    * @param payload.plugin - the plugin to toggle
    * @param payload.event - the checkbox change event
@@ -231,10 +377,15 @@ export class PluginsComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Handles the saveCredentials event from a plugin card.
+   * Handles the saveCredentials event from a plugin card (legacy entry point).
    * @param payload - the plugin and credentials to save
+   * @param payload.plugin Plugin whose credentials are being saved.
+   * @param payload.credentials Map of credential field name to user-provided value.
    */
-  async handleSaveCredentials(payload: SavePluginCredentialsEvent): Promise<void> {
+  async handleSaveCredentials(payload: {
+    plugin: PluginStatusEntry;
+    credentials: Record<string, string>;
+  }): Promise<void> {
     this.error = '';
     this.success = '';
     try {
@@ -265,7 +416,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Removes all credential files for a plugin.
+   * Removes all credential files for a plugin (legacy entry point).
    * @param plugin - the plugin to delete credentials for
    */
   async handleDeleteCredentials(plugin: PluginStatusEntry): Promise<void> {

@@ -261,7 +261,22 @@ fn inject_claude_env(yaml: &str, env: &std::collections::HashMap<String, String>
 fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
     let provider = llm.provider.as_deref().unwrap_or("anthropic");
     match provider {
-        "anthropic" => Ok(yaml.to_string()),
+        "anthropic" => {
+            // When the user picks an explicit model in Settings, propagate it
+            // through ANTHROPIC_MODEL so Claude Code respects the choice.
+            // Leaving the field blank keeps base_env() free of the variable
+            // (see defaults.rs::base_env_does_not_set_model) — Claude Code
+            // then falls back to its built-in default model.
+            let model = llm.model.as_deref().map(str::trim).unwrap_or("");
+            if model.is_empty() {
+                return Ok(yaml.to_string());
+            }
+            let extra_env = std::collections::HashMap::from([(
+                "ANTHROPIC_MODEL".to_string(),
+                model.to_string(),
+            )]);
+            Ok(inject_claude_env(yaml, &extra_env))
+        }
         "ollama" | "lmstudio" | "llamacpp" => {
             let base_url = llm
                 .base_url
@@ -3372,6 +3387,7 @@ services:
                 provider: Some("ollama".to_string()),
                 model: Some("llama3.3".to_string()),
                 base_url: None,
+                context_tokens: None,
             },
         };
         let yaml = render_compose(
@@ -3398,6 +3414,7 @@ services:
                 provider: Some("ollama".to_string()),
                 model: None,
                 base_url: None,
+                context_tokens: None,
             },
         };
         let result = render_compose(
@@ -3486,6 +3503,7 @@ services:
                 provider: Some("ollama".to_string()),
                 model: Some("llama3.3".to_string()),
                 base_url: None,
+                context_tokens: None,
             },
         };
         let yaml = render_compose(
@@ -3556,6 +3574,7 @@ services:
                 provider: Some("lmstudio".to_string()),
                 model: Some("qwen2.5-coder".to_string()),
                 base_url: None,
+                context_tokens: None,
             },
         };
         let yaml = render_compose(
@@ -3583,6 +3602,7 @@ services:
                 provider: Some("llamacpp".to_string()),
                 model: Some("deepseek-r1".to_string()),
                 base_url: None,
+                context_tokens: None,
             },
         };
         let yaml = render_compose(
@@ -3610,6 +3630,7 @@ services:
                 provider: Some("openrouter".to_string()),
                 model: Some("some-model".to_string()),
                 base_url: Some("http://host.docker.internal:9999".to_string()),
+                context_tokens: None,
             },
         };
         let result = render_compose(
@@ -3640,6 +3661,7 @@ services:
                 provider: Some("custom".to_string()),
                 model: Some("my-model".to_string()),
                 base_url: Some("http://host.docker.internal:9999".to_string()),
+                context_tokens: None,
             },
         };
         let result = render_compose(
@@ -3681,6 +3703,7 @@ services:
             provider: Some("ollama".to_string()),
             model: Some("llama3.3".to_string()),
             base_url: None,
+            context_tokens: None,
         };
         let result1 = apply_llm_config(COMPOSE_TEMPLATE, &llm).unwrap();
         let result2 = apply_llm_config(&result1, &llm).unwrap();
@@ -3785,11 +3808,72 @@ services:
     }
 
     #[test]
+    fn test_anthropic_with_model_injects_anthropic_model_env() {
+        // Settings → LLM Provider → Model dropdown writes the chosen value
+        // into claude.llm.model. compose must translate that into the
+        // ANTHROPIC_MODEL env var so Claude Code respects the user's pick
+        // (without this, the dropdown was silently ignored — Claude Code
+        // kept falling back to its built-in default).
+        let llm = LlmConfig {
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            base_url: None,
+            context_tokens: None,
+        };
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm).unwrap();
+        let env = get_claude_env(&rendered);
+        assert!(
+            env.iter().any(|e| e == "ANTHROPIC_MODEL=claude-sonnet-4-6"),
+            "Anthropic + explicit model must inject ANTHROPIC_MODEL, got: {env:?}"
+        );
+        // Local-provider envs must not leak in for the anthropic provider.
+        assert!(
+            !env.iter().any(|e| e.starts_with("ANTHROPIC_BASE_URL=")),
+            "Anthropic provider must not set ANTHROPIC_BASE_URL, got: {env:?}"
+        );
+    }
+
+    #[test]
+    fn test_anthropic_without_model_does_not_inject_anthropic_model() {
+        // Empty/unset model = "let Claude Code pick its default". compose
+        // must keep base_env() free of ANTHROPIC_MODEL so the fallback path
+        // documented in defaults.rs::base_env_does_not_set_model holds.
+        let llm = LlmConfig {
+            provider: Some("anthropic".to_string()),
+            model: None,
+            base_url: None,
+            context_tokens: None,
+        };
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm).unwrap();
+        let env = get_claude_env(&rendered);
+        assert!(
+            !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
+            "Anthropic + no model must not set ANTHROPIC_MODEL, got: {env:?}"
+        );
+
+        // An empty string after trim should behave the same as None — a
+        // user clearing the dropdown from the UI sends "" through Tauri.
+        let llm_blank = LlmConfig {
+            provider: Some("anthropic".to_string()),
+            model: Some("   ".to_string()),
+            base_url: None,
+            context_tokens: None,
+        };
+        let rendered_blank = apply_llm_config(COMPOSE_TEMPLATE, &llm_blank).unwrap();
+        let env_blank = get_claude_env(&rendered_blank);
+        assert!(
+            !env_blank.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
+            "Anthropic + whitespace-only model must not set ANTHROPIC_MODEL, got: {env_blank:?}"
+        );
+    }
+
+    #[test]
     fn test_switching_provider_ollama_to_anthropic() {
         let llm_ollama = LlmConfig {
             provider: Some("ollama".to_string()),
             model: Some("llama3.3".to_string()),
             base_url: None,
+            context_tokens: None,
         };
         let llm_anthropic = LlmConfig::default();
 
@@ -3837,6 +3921,7 @@ services:
                 provider: Some("llamacpp".to_string()),
                 model: Some("deepseek-r1".to_string()),
                 base_url: None,
+                context_tokens: None,
             },
         };
         let yaml = render_compose(
@@ -3864,6 +3949,7 @@ services:
                 provider: Some("lmstudio".to_string()),
                 model: Some("qwen2.5-coder".to_string()),
                 base_url: None,
+                context_tokens: None,
             },
         };
         let yaml = render_compose(

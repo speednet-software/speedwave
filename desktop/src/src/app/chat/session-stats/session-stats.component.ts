@@ -1,197 +1,244 @@
-import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
-import { DecimalPipe } from '@angular/common';
+import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
+import { NgTemplateOutlet } from '@angular/common';
 import type { SessionStats } from '../../models/chat';
+import { DEFAULT_CONTEXT_TOKENS, formatContextLabel } from '../../models/llm';
 
 /** Shared bar segment indices — module-level constant to avoid per-instance allocation. */
 const BAR_INDICES: readonly number[] = [0, 1, 2, 3, 4];
 
+/** Shared number formatter for thousands separators (Intl instances are not free). */
+const NUMBER_FMT = new Intl.NumberFormat('en-US');
+
 /**
- * Displays session stats matching the container statusline layout:
- *  model │ CTX bar % │ rate limit │ cost │ In / Cache R / Cache W / Out
+ * Terminal-minimal session stats strip — a single mono line shown below the
+ * composer. Matches the mockup (lines 1143–1177):
+ *
+ *   `in: <n> · out: <n> · ctx [▮▮▮▯▯] N% · 116k/200k · limit [▮▮▮▯▯] N% · resets HH:MM · session: $0.018`
+ *
+ * Bars are 5 inline 6×6px segments coloured per-bucket (green ≤49% / amber
+ * ≤76% / red). Optional segments (ctx + bar / limit + bar / cost) hide on
+ * smaller breakpoints to preserve the single-line shape.
  */
 @Component({
   selector: 'app-session-stats',
-  standalone: true,
-  imports: [DecimalPipe],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [NgTemplateOutlet],
   host: { class: 'block' },
   template: `
-    @if (stats) {
+    @if (stats(); as s) {
       <div
         data-testid="session-stats"
-        class="flex items-center gap-3 px-4 py-1.5 text-xs border-t border-sw-border-dark"
+        class="mono flex flex-wrap items-center gap-x-3 gap-y-1 px-1 py-3 text-[10px] text-[var(--ink-mute)]"
       >
-        <!-- Model name -->
-        <span
-          class="text-sw-teal font-bold whitespace-nowrap"
-          title="AI model used for this session"
-          >{{ stats.model || 'Claude' }}</span
-        >
-
-        <!-- Context usage bar (from per-step flat usage) -->
-        @if (ctxPct > 0) {
-          <span class="text-sw-text-ghost">│</span>
-          <span
-            class="whitespace-nowrap"
-            title="Context window usage — percentage of the model's token limit consumed by the current conversation"
-          >
-            <span class="text-sw-text-dim">CTX</span>
-            <span class="ml-1 inline-flex gap-px align-middle">
-              @for (i of barIndices; track i) {
-                <span
-                  class="inline-block w-1.5 h-2.5 rounded-sm"
-                  [class]="i < ctxFilled ? ctxBarColor : 'bg-sw-text-ghost/20'"
-                ></span>
-              }
-            </span>
-            <span class="ml-1" [class]="ctxTextColor">{{ ctxPct }}%</span>
+        <!-- Tokens in/out -->
+        @if (s.usage; as usage) {
+          <span class="whitespace-nowrap">
+            in: <span class="text-[var(--teal)]">{{ formatNum(totalInput()) }}</span>
+          </span>
+          <span class="whitespace-nowrap">
+            out:
+            <span class="text-[var(--accent)]">{{ formatNum(s.total_output_tokens) }}</span>
           </span>
         }
 
-        <!-- Rate limit -->
-        @if (stats.rate_limit) {
-          <span class="text-sw-text-ghost">│</span>
-          <span
-            class="whitespace-nowrap"
-            title="Subscription rate limit — percentage of your 5-hour usage quota consumed"
-          >
-            <span class="text-sw-text-dim">Limit</span>
-            <span class="ml-1 inline-flex gap-px align-middle">
+        <!-- Context bar (sm+) -->
+        @if (ctxPct() > 0) {
+          <span class="hidden items-center gap-1.5 whitespace-nowrap sm:inline-flex">
+            ctx
+            <span class="flex gap-px" [attr.aria-label]="'Context: ' + ctxPct() + '% used'">
               @for (i of barIndices; track i) {
                 <span
-                  class="inline-block w-1.5 h-2.5 rounded-sm"
-                  [class]="i < rlFilled ? rlBarColor : 'bg-sw-text-ghost/20'"
+                  class="inline-block h-1.5 w-1.5"
+                  [class]="i < ctxFilled() ? ctxBarColor() : 'bg-[var(--line-strong)]'"
                 ></span>
               }
             </span>
-            <span class="ml-1" [class]="rlTextColor">{{ rlPct }}%</span>
-            @if (rlResetTime) {
-              <span class="text-sw-text-dim ml-1">reset {{ rlResetTime }}</span>
+            <span class="text-[var(--ink-dim)]">{{ ctxPct() }}%</span>
+            @if (ctxUsedMax(); as um) {
+              <span>· {{ um }}</span>
             }
           </span>
         }
 
-        <!-- Cost -->
-        @if (stats.total_cost > 0) {
-          <span class="text-sw-text-ghost">│</span>
-          <span
-            class="text-sw-text-dim whitespace-nowrap"
-            title="Estimated API cost — how much this session would cost at API pricing"
-            >\${{ stats.total_cost.toFixed(4) }}</span
-          >
+        <!-- Rate-limit bar (md+) -->
+        @if (s.rate_limit) {
+          <span class="hidden items-center gap-1.5 whitespace-nowrap md:inline-flex">
+            limit
+            <span class="flex gap-px" [attr.aria-label]="'Rate limit: ' + rlPct() + '% used'">
+              @for (i of barIndices; track i) {
+                <span
+                  class="inline-block h-1.5 w-1.5"
+                  [class]="i < rlFilled() ? rlBarColor() : 'bg-[var(--line-strong)]'"
+                ></span>
+              }
+            </span>
+            <span class="text-[var(--ink-dim)]">{{ rlPct() }}%</span>
+            @if (rlResetTime()) {
+              <span>· resets {{ rlResetTime() }}</span>
+            }
+          </span>
         }
 
-        <!-- Token breakdown -->
-        @if (stats.usage) {
-          <span class="text-sw-text-ghost">│</span>
-          <span
-            class="text-sw-code-gray whitespace-nowrap"
-            title="Input tokens — new tokens sent to the model (not from cache)"
-          >
-            In: {{ stats.usage.input_tokens | number }}
-          </span>
-          @if (stats.usage.cache_read_tokens) {
-            <span
-              class="text-sw-code-gray whitespace-nowrap"
-              title="Cache Read — tokens loaded from prompt cache (system prompt, conversation history)"
-            >
-              CR: {{ stats.usage.cache_read_tokens | number }}
-            </span>
-          }
-          @if (stats.usage.cache_write_tokens) {
-            <span
-              class="text-sw-code-gray whitespace-nowrap"
-              title="Cache Write — tokens written to prompt cache for future turns"
-            >
-              CW: {{ stats.usage.cache_write_tokens | number }}
-            </span>
-          }
-          <span
-            class="text-sw-code-gray whitespace-nowrap"
-            title="Output tokens — total tokens generated by the model across all turns"
-          >
-            Out: {{ stats.total_output_tokens | number }}
+        <ng-container *ngTemplateOutlet="branchChip" />
+
+        @if (s.total_cost > 0) {
+          <span class="hidden whitespace-nowrap sm:inline" [class.ml-auto]="!branch()">
+            session:
+            <span class="text-[var(--ink-dim)]">\${{ s.total_cost.toFixed(4) }}</span>
           </span>
         }
       </div>
+    } @else {
+      <!-- Zero-state: same row, just with all counters at 0. Always visible
+           so the user sees the metric set even before the first turn — it
+           also preserves vertical rhythm so the composer never reflows. -->
+      <div
+        data-testid="session-stats-placeholder"
+        class="mono flex flex-wrap items-center gap-x-3 gap-y-1 px-1 py-3 text-[10px] text-[var(--ink-mute)]"
+      >
+        <span class="whitespace-nowrap"> in: <span class="text-[var(--teal)]">0</span> </span>
+        <span class="whitespace-nowrap"> out: <span class="text-[var(--accent)]">0</span> </span>
+        <span class="hidden items-center gap-1.5 whitespace-nowrap sm:inline-flex">
+          ctx
+          <span class="flex gap-px" aria-label="Context: 0% used">
+            @for (i of barIndices; track i) {
+              <span class="inline-block h-1.5 w-1.5 bg-[var(--line-strong)]"></span>
+            }
+          </span>
+          <span class="text-[var(--ink-dim)]">0%</span>
+        </span>
+        <span class="hidden items-center gap-1.5 whitespace-nowrap md:inline-flex">
+          limit
+          <span class="flex gap-px" aria-label="Rate limit: 0% used">
+            @for (i of barIndices; track i) {
+              <span class="inline-block h-1.5 w-1.5 bg-[var(--line-strong)]"></span>
+            }
+          </span>
+          <span class="text-[var(--ink-dim)]">0%</span>
+        </span>
+        <ng-container *ngTemplateOutlet="branchChip" />
+        <span class="hidden whitespace-nowrap sm:inline" [class.ml-auto]="!branch()">
+          session: <span class="text-[var(--ink-dim)]">$0.0000</span>
+        </span>
+      </div>
     }
+
+    <ng-template #branchChip>
+      @if (branch(); as br) {
+        <span
+          class="ml-auto hidden items-center gap-1.5 whitespace-nowrap sm:inline-flex"
+          data-testid="session-stats-branch"
+        >
+          <svg
+            class="h-3 w-3"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+            stroke-width="1.75"
+            aria-hidden="true"
+          >
+            <circle cx="6" cy="6" r="2" />
+            <circle cx="6" cy="18" r="2" />
+            <circle cx="18" cy="8" r="2" />
+            <path stroke-linecap="round" d="M6 8v8m0-8a6 6 0 0 0 6 6h4" />
+          </svg>
+          <span class="text-[var(--ink-dim)]">{{ br }}</span>
+        </span>
+      }
+    </ng-template>
   `,
 })
 export class SessionStatsComponent {
-  @Input() stats: SessionStats | null = null;
-
-  /** Reference to the module-level constant — shared across all instances. */
+  /** Shared segment indices exposed to the template. */
   readonly barIndices = BAR_INDICES;
 
+  /** Stats input (signal). */
+  readonly stats = input<SessionStats | null>(null);
+
   /**
-   * Context usage % from per-step flat usage and actual context window size.
-   *  Matches statusline.sh: input_tokens + cache_creation + cache_read (no output_tokens).
+   * Current git branch of the active project's working tree, or `null` when
+   * the project isn't a git repo. Renders as the branch-icon chip on the
+   * right side of the strip.
    */
-  get ctxPct(): number {
-    if (!this.stats?.usage) return 0;
-    const totalInput =
-      this.stats.usage.input_tokens +
-      (this.stats.usage.cache_read_tokens ?? 0) +
-      (this.stats.usage.cache_write_tokens ?? 0);
-    if (totalInput <= 0) return 0;
-    const windowSize = this.stats.context_window_size || 200_000;
-    return Math.min(100, Math.round((totalInput / windowSize) * 100));
-  }
+  readonly branch = input<string | null>(null);
 
-  /** Number of filled bar segments (0–5) for context usage. */
-  get ctxFilled(): number {
-    return Math.floor((this.ctxPct * 5) / 100);
-  }
+  /**
+   * Total input tokens consumed from the context window (sum of `input`,
+   * `cache_read`, `cache_write`). Matches the statusline.sh calculation —
+   * `output_tokens` are excluded because they don't occupy the prompt context.
+   */
+  readonly totalInput = computed<number>(() => {
+    const usage = this.stats()?.usage;
+    if (!usage) return 0;
+    return usage.input_tokens + (usage.cache_read_tokens ?? 0) + (usage.cache_write_tokens ?? 0);
+  });
 
-  /** Tailwind background color class for context usage bar segments. */
-  get ctxBarColor(): string {
-    return barColor(this.ctxPct);
-  }
+  /** Context window usage as an integer percentage (0–100). */
+  readonly ctxPct = computed<number>(() => {
+    const total = this.totalInput();
+    if (total <= 0) return 0;
+    const windowSize = this.stats()?.context_window_size ?? DEFAULT_CONTEXT_TOKENS;
+    return Math.min(100, Math.round((total / windowSize) * 100));
+  });
 
-  /** Tailwind text color class for context usage percentage. */
-  get ctxTextColor(): string {
-    return textColor(this.ctxPct);
-  }
+  /** Filled segments (0–5) for the context bar, rounded to nearest. */
+  readonly ctxFilled = computed<number>(() => bucketFilled(this.ctxPct()));
 
-  /** Rate limit utilization as integer percentage (0–100). */
-  get rlPct(): number {
-    return Math.round(this.stats?.rate_limit?.utilization ?? 0);
-  }
+  /** Tailwind class for filled context-bar segments. */
+  readonly ctxBarColor = computed<string>(() => barColor(this.ctxPct()));
 
-  /** Number of filled bar segments (0–5) for rate limit. */
-  get rlFilled(): number {
-    return Math.floor((this.rlPct * 5) / 100);
-  }
+  /** `used/max` label in short-form (e.g. `116k/200k`); empty string if not derivable. */
+  readonly ctxUsedMax = computed<string>(() => {
+    const total = this.totalInput();
+    if (total <= 0) return '';
+    const windowSize = this.stats()?.context_window_size ?? DEFAULT_CONTEXT_TOKENS;
+    return `${formatContextLabel(total)}/${formatContextLabel(windowSize)}`;
+  });
 
-  /** Tailwind background color class for rate limit bar segments. */
-  get rlBarColor(): string {
-    return barColor(this.rlPct);
-  }
+  /** Rate-limit utilisation as an integer percentage (0–100). */
+  readonly rlPct = computed<number>(() => {
+    const stats = this.stats();
+    return Math.round(stats?.rate_limit?.utilization ?? 0);
+  });
 
-  /** Tailwind text color class for rate limit percentage. */
-  get rlTextColor(): string {
-    return textColor(this.rlPct);
-  }
+  /** Filled segments (0–5) for the rate-limit bar. */
+  readonly rlFilled = computed<number>(() => bucketFilled(this.rlPct()));
 
-  /** Formatted reset time (HH:MM) for rate limit, or empty string if absent. */
-  get rlResetTime(): string {
-    const epoch = this.stats?.rate_limit?.resets_at;
+  /** Tailwind class for filled rate-limit-bar segments. */
+  readonly rlBarColor = computed<string>(() => barColor(this.rlPct()));
+
+  /** Reset time for rate limit formatted as HH:MM (local), or empty string. */
+  readonly rlResetTime = computed<string>(() => {
+    const epoch = this.stats()?.rate_limit?.resets_at;
     if (!epoch) return '';
     const d = new Date(epoch * 1000);
     return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+  });
+
+  /**
+   * Formats an integer with `Intl.NumberFormat('en-US')` (thousands separators).
+   * @param n - Integer token count to format.
+   */
+  formatNum(n: number): string {
+    return NUMBER_FMT.format(n);
   }
 }
 
+/**
+ * Bucket the percentage into one of three Tailwind bar-segment colors.
+ * @param pct - Percentage in the range 0–100.
+ */
 function barColor(pct: number): string {
-  if (pct >= 90) return 'bg-red-500';
-  if (pct >= 76) return 'bg-red-400';
-  if (pct >= 50) return 'bg-yellow-400';
-  return 'bg-green-500';
+  if (pct >= 77) return 'bg-red-500';
+  if (pct >= 50) return 'bg-[var(--amber)]';
+  return 'bg-[var(--green)]';
 }
 
-function textColor(pct: number): string {
-  if (pct >= 90) return 'text-red-500 font-bold';
-  if (pct >= 76) return 'text-red-400';
-  if (pct >= 50) return 'text-yellow-400';
-  return 'text-green-500';
+/**
+ * Converts a percentage (0–100) to the number of filled segments (0–5), rounded.
+ * 30% → 1.5 → 2; 80% → 4.
+ * @param pct - Percentage in the range 0–100.
+ */
+function bucketFilled(pct: number): number {
+  return Math.min(5, Math.round((pct / 100) * 5));
 }

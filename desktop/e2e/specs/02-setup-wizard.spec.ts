@@ -2,18 +2,22 @@
  * Setup Wizard E2E tests — full happy-path flow.
  *
  * Drives through the entire setup wizard:
- *   1. Welcome screen → click Start Setup
- *   2. Auto steps: System Check → Initialize VM → Build Images
- *   3. Fill project form (name + directory) → click Create Project
- *   4. Auto steps: Start Containers → Finalize
- *   5. Success message → auto-redirect to /settings
+ *   1. Welcome screen → click `setup-start-btn`
+ *   2. Auto steps: check environment → start virtual machine → build images
+ *   3. Create-project modal opens → mock the OS folder picker, fill name,
+ *      click `create-project-submit`
+ *   4. Auto steps: start containers → finalize
+ *   5. Success message → auto-redirect to `/settings`
  *
  * Every step MUST succeed. If any step fails, the test fails with the
  * actual error message — no conditional branching that silently accepts errors.
  *
- * The project directory must exist before the test runs.
- * The e2e runner (Makefile / e2e-vm.sh) creates it.
+ * The project directory must exist before the test runs. The e2e runner
+ * (Makefile / e2e-vm.sh) creates it. All assertions are based on
+ * `data-testid` attributes — never on UX-volatile text content.
  */
+
+import { mockDialogOpen, clearDialogMock } from '../helpers/dialog-mock';
 
 const E2E_PROJECT_NAME = 'e2e-test';
 const E2E_PROJECT_DIR = process.env.E2E_PROJECT_DIR || '/tmp/speedwave-e2e-project';
@@ -29,8 +33,8 @@ const E2E_PROJECT_DIR = process.env.E2E_PROJECT_DIR || '/tmp/speedwave-e2e-proje
  */
 async function isSetupComplete(): Promise<boolean> {
   return browser.executeAsync((done: (result: boolean) => void) => {
-    (window as any).__TAURI_INTERNALS__
-      .invoke('is_setup_complete')
+    (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string) => Promise<boolean> } })
+      .__TAURI_INTERNALS__.invoke('is_setup_complete')
       .then((result: boolean) => done(result))
       .catch(() => done(false));
   });
@@ -87,7 +91,9 @@ async function assertStepDone(index: number, timeout: number): Promise<void> {
   const status = await waitForStepTerminal(index, timeout);
   if (status === 'error') {
     const errorBanner = await $('[data-testid="setup-error"]');
-    const errorText = (await errorBanner.isExisting()) ? await errorBanner.getText() : 'unknown error';
+    const errorText = (await errorBanner.isExisting())
+      ? await errorBanner.getText()
+      : 'unknown error';
     throw new Error(`Step ${index} failed: ${errorText}`);
   }
   expect(status).toBe('done');
@@ -100,12 +106,15 @@ describe('Setup Wizard — Full Flow', function () {
     const wizard = await $('[data-testid="setup-wizard"]');
     await wizard.waitForExist({ timeout: 10_000 });
 
-    const h1 = await wizard.$('h1');
-    expect((await h1.getText()).trim()).toBe('Speedwave Setup');
+    // The wizard renders the headline + subtitle + description region — assert
+    // each by testid. Text content is intentionally not checked: it is part of
+    // the design copy and changes between releases.
+    await wizard.$('[data-testid="setup-headline"]').waitForExist({ timeout: 5_000 });
+    await wizard.$('[data-testid="setup-subtitle"]').waitForExist({ timeout: 5_000 });
+    await wizard.$('[data-testid="setup-description"]').waitForExist({ timeout: 5_000 });
 
     const btn = await $('[data-testid="setup-start-btn"]');
     expect(await btn.isDisplayed()).toBe(true);
-    expect((await btn.getText()).trim()).toBe('Start Setup');
   });
 
   it('should show all 6 progress steps after clicking Start Setup', async function () {
@@ -115,100 +124,104 @@ describe('Setup Wizard — Full Flow', function () {
     await btn.click();
 
     // Wait for step container and verify all 6 steps rendered.
-    // Use setup-step elements (data-status attribute) rather than nested step-title
-    // because msedge WebDriver intermittently fails to resolve child text nodes
-    // inside Angular @for loops on Windows.
     await browser.waitUntil(
-      async () => (await $$('[data-testid="setup-step"]')).length === 6,
+      async () => (await $$('[data-testid="setup-step"]').length) === 6,
       { timeout: 30_000, timeoutMsg: 'Expected 6 setup steps but not all rendered' },
     );
     const stepElements = await $$('[data-testid="setup-step"]');
-    expect(stepElements.length).toBe(6);
+    expect(await stepElements.length).toBe(6);
 
-    // Verify first step is active or done (wizard started processing)
+    // Verify first step is active or done (wizard started processing).
     const firstStatus = await stepElements[0].getAttribute('data-status');
     expect(['active', 'done']).toContain(firstStatus);
 
-    // Assert first step label to catch rename regressions (querying child of
-    // an already-resolved parent avoids the msedge @for race)
+    // Each step row exposes a step-title sub-element; presence is enough,
+    // text varies with platform (e.g. macOS "Verify Lima / nerdctl" vs Linux
+    // "Verify nerdctl (rootless)") and would couple the test to copy.
     const firstTitle = await stepElements[0].$('[data-testid="step-title"]');
     await firstTitle.waitForExist({ timeout: 5_000 });
-    expect((await firstTitle.getText()).trim()).toBe('System Check');
   });
 
-  it('should complete System Check (step 0)', async function () {
+  it('should complete check environment (step 0)', async function () {
     this.timeout(60_000);
     await assertStepDone(0, 30_000);
   });
 
-  it('should complete Initialize VM (step 1)', async function () {
+  it('should complete start virtual machine (step 1)', async function () {
     // 5 minutes — installs rootless containerd (Linux), creates Lima VM (macOS),
     // or sets up WSL2 (Windows). May already be 'done' if runtime was Ready.
     this.timeout(300_000);
     await assertStepDone(1, 240_000);
   });
 
-  it('should complete Build Images (step 2)', async function () {
+  it('should complete build images (step 2)', async function () {
     // 20 minutes — builds all container images. This is the longest step.
     this.timeout(1_200_000);
     await assertStepDone(2, 1_100_000);
   });
 
-  it('should pause at Create Project (step 3) and show the project form', async function () {
+  it('should pause at create your first project (step 3) and show the modal', async function () {
     this.timeout(30_000);
 
-    const nameInput = await $('[data-testid="setup-project-name"]');
-    await nameInput.waitForExist({ timeout: 10_000 });
+    const modal = await $('[data-testid="create-project-modal"]');
+    await modal.waitForExist({ timeout: 10_000 });
 
-    const dirInput = await $('[data-testid="setup-project-dir"]');
-    expect(await dirInput.isExisting()).toBe(true);
+    const browseBtn = await modal.$('[data-testid="create-project-browse"]');
+    expect(await browseBtn.isExisting()).toBe(true);
 
-    const createBtn = await $('[data-testid="setup-create-project-btn"]');
-    expect(await createBtn.isExisting()).toBe(true);
+    const submitBtn = await modal.$('[data-testid="create-project-submit"]');
+    expect(await submitBtn.isExisting()).toBe(true);
+    // Submit must be disabled until both name and dir are populated.
+    expect(await submitBtn.isEnabled()).toBe(false);
 
-    // Button should be disabled when fields are empty
-    expect(await createBtn.isEnabled()).toBe(false);
-
-    // Verify step 3 is active
+    // Step 3 row should be active.
     const steps = await $$('[data-testid="setup-step"]');
-    const step3status = await steps[3].getAttribute('data-status');
-    expect(step3status).toBe('active');
+    expect(await steps[3].getAttribute('data-status')).toBe('active');
   });
 
-  it('should fill project form and create the project', async function () {
+  it('should fill the project form via the picker stub and create the project', async function () {
     this.timeout(60_000);
 
-    const nameInput = await $('[data-testid="setup-project-name"]');
-    await nameInput.waitForExist({
-      timeout: 15_000,
-      timeoutMsg: 'Project name input not found — Create Project step may not have rendered yet',
+    // Stub the OS folder picker BEFORE clicking browse — the native dialog
+    // cannot be driven by WebDriver; we intercept the plugin-dialog IPC
+    // channel and resolve to a known path.
+    await mockDialogOpen(E2E_PROJECT_DIR);
+
+    const modal = await $('[data-testid="create-project-modal"]');
+    await modal.waitForExist({ timeout: 10_000 });
+
+    const browseBtn = await modal.$('[data-testid="create-project-browse"]');
+    await browseBtn.click();
+
+    const dirInput = await modal.$('[data-testid="create-project-dir"]');
+    await browser.waitUntil(async () => (await dirInput.getValue()) === E2E_PROJECT_DIR, {
+      timeout: 10_000,
+      timeoutMsg: 'Project directory was not populated by the dialog stub',
     });
+
+    // Name auto-fills from the dir basename. Override with the canonical e2e
+    // project name so other specs can reference it deterministically.
+    const nameInput = await modal.$('[data-testid="create-project-name"]');
     await nameInput.setValue(E2E_PROJECT_NAME);
     expect(await nameInput.getValue()).toBe(E2E_PROJECT_NAME);
 
-    const dirInput = await $('[data-testid="setup-project-dir"]');
-    await dirInput.setValue(E2E_PROJECT_DIR);
-    expect(await dirInput.getValue()).toBe(E2E_PROJECT_DIR);
+    const submitBtn = await modal.$('[data-testid="create-project-submit"]');
+    await browser.waitUntil(async () => await submitBtn.isEnabled(), {
+      timeout: 5_000,
+      timeoutMsg: 'Create-project submit did not become enabled',
+    });
+    await submitBtn.click();
 
-    const createBtn = await $('[data-testid="setup-create-project-btn"]');
-    // Button should now be enabled
-    await browser.waitUntil(
-      async () => await createBtn.isEnabled(),
-      { timeout: 5_000, timeoutMsg: 'Create Project button did not become enabled' },
-    );
-
-    await createBtn.click();
-
-    // Wait for step 3 to complete
     await assertStepDone(3, 30_000);
+    await clearDialogMock();
   });
 
-  it('should complete Start Containers (step 4)', async function () {
+  it('should complete start containers (step 4)', async function () {
     this.timeout(360_000);
     await assertStepDone(4, 300_000);
   });
 
-  it('should complete Finalize (step 5)', async function () {
+  it('should complete finalize (step 5)', async function () {
     this.timeout(120_000);
     await assertStepDone(5, 60_000);
   });
@@ -220,16 +233,15 @@ describe('Setup Wizard — Full Flow', function () {
     const complete = await isSetupComplete();
     expect(complete).toBe(true);
 
-    // Ensure we end up on the main shell with the settings route.
     // The wizard's setTimeout + router.navigate redirect can be blocked by
     // stale-element JS exceptions injected by WebDriver DOM polling during
-    // fast step transitions. This does NOT happen in normal (non-WebDriver)
-    // usage. Navigate to root so setupCompleteGuard re-evaluates and routes
-    // to the main shell (equivalent to a fresh app launch after setup).
+    // fast step transitions. Force a navigation to root so setupCompleteGuard
+    // re-evaluates and routes to the main shell.
     await browser.execute(() => (window.location.href = '/'));
 
-    const shellTitle = await $('[data-testid="shell-title"]');
-    await shellTitle.waitForExist({ timeout: 15_000 });
-    expect((await shellTitle.getText()).trim()).toBe('Speedwave');
+    // The shell is identified by the project pill in the header — it appears
+    // exactly when the user is past the setup phase and inside the main app.
+    const projectPill = await $('[data-testid="project-pill"]');
+    await projectPill.waitForExist({ timeout: 15_000 });
   });
 });

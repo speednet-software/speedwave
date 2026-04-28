@@ -19,7 +19,7 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
         case 'set_update_settings':
           return undefined;
         case 'check_for_update':
-          return null;
+          return { kind: 'up_to_date' };
         case 'get_platform':
           return 'macos';
         default:
@@ -36,45 +36,10 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
     component = fixture.componentInstance;
   });
 
-  describe('toggleAutoCheck()', () => {
-    it('flips updateAutoCheck from true to false', async () => {
-      component.updateAutoCheck = true;
-      await component.toggleAutoCheck();
-      expect(component.updateAutoCheck).toBe(false);
-    });
-
-    it('flips updateAutoCheck from false to true', async () => {
-      component.updateAutoCheck = false;
-      await component.toggleAutoCheck();
-      expect(component.updateAutoCheck).toBe(true);
-    });
-
-    it('awaits saveUpdateSettings (invokes set_update_settings)', async () => {
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      component.updateAutoCheck = true;
-      await component.toggleAutoCheck();
-      expect(invokeSpy).toHaveBeenCalledWith('set_update_settings', {
-        settings: { auto_check: false, check_interval_hours: component.updateIntervalHours },
-      });
-    });
-  });
-
-  describe('setCheckInterval()', () => {
-    it('updates updateIntervalHours to the given value', async () => {
-      component.updateIntervalHours = 24;
-      await component.setCheckInterval(168);
-      expect(component.updateIntervalHours).toBe(168);
-    });
-
-    it('awaits saveUpdateSettings (invokes set_update_settings)', async () => {
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      component.updateAutoCheck = true;
-      await component.setCheckInterval(12);
-      expect(invokeSpy).toHaveBeenCalledWith('set_update_settings', {
-        settings: { auto_check: true, check_interval_hours: 12 },
-      });
-    });
-  });
+  // toggleAutoCheck/setCheckInterval were removed alongside the UI controls.
+  // Auto-check is now hard-coded to true with a 12 h interval; the component
+  // self-rewrites persisted state on init when it drifts (covered by the
+  // dedicated update-section.component.spec.ts).
 
   describe('installUpdate()', () => {
     it('calls install_update_and_reconcile with expectedVersion', async () => {
@@ -143,7 +108,14 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
   describe('checkForUpdate()', () => {
     it('sets updateResult to available when update found', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'check_for_update') return { version: '3.0.0', body: null, date: null };
+        if (cmd === 'check_for_update')
+          return {
+            kind: 'update_available',
+            version: '3.0.0',
+            body: null,
+            date: null,
+            is_critical: false,
+          };
         return undefined;
       };
       await component.checkForUpdate();
@@ -153,7 +125,7 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
 
     it('sets updateResult to up-to-date when no update', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'check_for_update') return null;
+        if (cmd === 'check_for_update') return { kind: 'up_to_date' };
         return undefined;
       };
       await component.checkForUpdate();

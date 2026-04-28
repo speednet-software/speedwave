@@ -31,7 +31,7 @@ describe('AuthTerminalComponent', () => {
 
     fixture = TestBed.createComponent(AuthTerminalComponent);
     component = fixture.componentInstance;
-    component.project = 'test-project';
+    fixture.componentRef.setInput('project', 'test-project');
   });
 
   afterEach(() => {

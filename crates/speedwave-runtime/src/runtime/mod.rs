@@ -375,7 +375,7 @@ fn compose_file_path_in(data_dir: &std::path::Path, project: &str) -> String {
         .to_string()
 }
 
-fn configured_project_container_names(project: &str) -> Vec<String> {
+pub(crate) fn configured_project_container_names(project: &str) -> Vec<String> {
     let compose_file = match compose_file_path(project) {
         Ok(path) => path,
         Err(e) => {
@@ -432,7 +432,7 @@ fn push_unique_target(targets: &mut Vec<String>, target: String) {
     }
 }
 
-fn cleanup_targets_from_ps_output(ps_output: &str) -> Vec<String> {
+pub(crate) fn cleanup_targets_from_ps_output(ps_output: &str) -> Vec<String> {
     let mut targets = Vec::new();
 
     for id in ps_output
@@ -476,7 +476,7 @@ fn is_missing_container_error_msg(message: &str) -> bool {
         || lower.contains("not exist")
 }
 
-fn is_missing_container_error(err: &anyhow::Error) -> bool {
+pub(crate) fn is_missing_container_error(err: &anyhow::Error) -> bool {
     is_missing_container_error_msg(&err.to_string())
 }
 

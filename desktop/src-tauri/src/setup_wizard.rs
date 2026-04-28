@@ -1913,6 +1913,7 @@ mod tests {
                     provider: provider.map(str::to_string),
                     model: None,
                     base_url: None,
+                    context_tokens: None,
                 }),
             }),
             integrations: None,
