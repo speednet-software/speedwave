@@ -40,7 +40,10 @@ export type ModalBorderColor = 'default' | 'red';
           <div class="mono text-[11px] uppercase tracking-widest" [class]="kickerClasses()">
             {{ kicker() }}
           </div>
-          <h3 class="view-title mt-1 text-[16px] text-[var(--ink)]" data-testid="modal-title">
+          <h3
+            class="view-title view-title-section mt-1 text-[var(--ink)]"
+            data-testid="modal-title"
+          >
             {{ title() }}
           </h3>
           @if (body()) {
@@ -60,7 +63,7 @@ export type ModalBorderColor = 'default' | 'red';
           }
           @if (note()) {
             <div
-              class="mono mt-3 rounded border border-[var(--line)] bg-[var(--bg)] p-2 text-[11px] text-[var(--ink-mute)]"
+              class="mono mt-3 break-all rounded border border-[var(--line)] bg-[var(--bg)] p-2 text-[11px] text-[var(--ink-mute)]"
               data-testid="modal-note"
             >
               {{ note() }}

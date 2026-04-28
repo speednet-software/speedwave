@@ -2,7 +2,9 @@ import { Injectable, computed, inject, signal, type Signal } from '@angular/core
 import { type UnlistenFn } from '@tauri-apps/api/event';
 import { TauriService } from './tauri.service';
 import { ProjectStateService } from './project-state.service';
+import { AnthropicModelsService } from './anthropic-models.service';
 import { calculateCost } from '../chat/pricing';
+import { DEFAULT_CONTEXT_TOKENS, type LlmConfigResponse } from '../models/llm';
 import { applyPatch, type Patch } from './json-patch';
 import {
   DEFAULT_STATE_TREE,
@@ -77,7 +79,18 @@ export class ChatStateService {
   private _model = '';
   private _rateLimit: RateLimitInfo | null = null;
   private _totalOutputTokens = 0;
-  private _contextWindowSize = 200_000;
+  private _contextWindowSize = DEFAULT_CONTEXT_TOKENS;
+
+  /**
+   * Last-known persisted context window from `claude.llm.context_tokens`
+   * (`get_llm_config`). Refreshed on init / project change / explicit
+   * `refreshLlmConfigCache()` calls (Settings invokes that after save).
+   * Populated from the real provider API for local providers
+   * (Ollama / LM Studio / llama.cpp) and from the SSOT for Anthropic, so
+   * the chat footer can show an accurate `used / max` ratio before any
+   * stream-level value lands.
+   */
+  private _persistedContextTokens: number | null = null;
 
   /**
    * Monotonically increasing turn id. Bumped by both `sendMessage` (new turn
@@ -98,6 +111,7 @@ export class ChatStateService {
   private startingSession = false;
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
+  private anthropicModels = inject(AnthropicModelsService);
   private unsubProjectChange: (() => void) | null = null;
 
   /**
@@ -241,6 +255,9 @@ export class ChatStateService {
       this.listenerReady = true;
       await this.setupStreamListener();
       this.setupProjectStateListeners();
+      // Best-effort cache warm so the chat footer has a context window
+      // ready before the first Result chunk lands.
+      void this.refreshLlmConfigCache();
     }
     if (!this.initialized) {
       this.initialized = true;
@@ -656,9 +673,10 @@ export class ChatStateService {
         if (chunk.data.usage) {
           this._totalOutputTokens += chunk.data.usage.output_tokens;
         }
-        if (chunk.data.context_window_size) {
-          this._contextWindowSize = chunk.data.context_window_size;
-        }
+        this._contextWindowSize = this.resolveContextWindow(
+          chunk.data.context_window_size,
+          resolvedModel
+        );
         this._sessionStats = {
           session_id: chunk.data.session_id,
           total_cost: chunk.data.total_cost ?? 0,
@@ -750,7 +768,7 @@ export class ChatStateService {
     this._model = '';
     this._rateLimit = null;
     this._totalOutputTokens = 0;
-    this._contextWindowSize = 200_000;
+    this._contextWindowSize = DEFAULT_CONTEXT_TOKENS;
     this._pendingQueue = null;
     this.initialized = false;
     this.startingSession = false;
@@ -776,9 +794,12 @@ export class ChatStateService {
   seedResumedSession(sessionId: string): void {
     if (!sessionId) return;
     if (this._sessionStats?.session_id === sessionId) return;
+    // The seed is replaced as soon as the next `Result` chunk arrives with
+    // an authoritative `context_window_size`.
+    const seeded = this.resolveContextWindow(undefined, this._sessionStats?.model);
     this._sessionStats = {
       total_cost: 0,
-      context_window_size: 200_000,
+      context_window_size: seeded,
       total_output_tokens: 0,
       ...this._sessionStats,
       session_id: sessionId,
@@ -955,10 +976,58 @@ export class ChatStateService {
         this._model = '';
         this._rateLimit = null;
         this._totalOutputTokens = 0;
-        this._contextWindowSize = 200_000;
+        this._contextWindowSize = DEFAULT_CONTEXT_TOKENS;
+        this._persistedContextTokens = null;
         this.notifyChange();
+      } else if (this.projectState.status === 'ready') {
+        // Project just settled — re-pull the persisted context tokens so
+        // the chat footer reflects whatever the user picked in Settings.
+        void this.refreshLlmConfigCache();
       }
     });
+  }
+
+  /**
+   * Single fallback chain for the chat footer's context-window value.
+   * Order: live stream value → Anthropic SSOT lookup → persisted
+   * `claude.llm.context_tokens` → previous `_contextWindowSize` →
+   * {@link DEFAULT_CONTEXT_TOKENS}. The same chain is used by the Result
+   * chunk handler, `seedResumedSession`, and `refreshLlmConfigCache`.
+   * @param liveValue - Authoritative value carried by the stream (highest priority).
+   * @param model - Resolved model id used for the SSOT lookup.
+   */
+  private resolveContextWindow(liveValue: number | undefined, model: string | undefined): number {
+    if (liveValue) return liveValue;
+    const fromSsot = this.anthropicModels.contextTokensFor(model);
+    if (fromSsot) return fromSsot;
+    if (this._persistedContextTokens) return this._persistedContextTokens;
+    if (this._contextWindowSize) return this._contextWindowSize;
+    return DEFAULT_CONTEXT_TOKENS;
+  }
+
+  /**
+   * Re-reads `get_llm_config().context_tokens` from the backend and updates
+   * the cache used by the chat fallback chain. Public so Settings can call
+   * it after `update_llm_config` settles — without that, the chat footer
+   * would keep showing the previous model's window until the next session.
+   */
+  async refreshLlmConfigCache(): Promise<void> {
+    try {
+      const config = await this.tauri.invoke<LlmConfigResponse>('get_llm_config');
+      this._persistedContextTokens = config.context_tokens ?? null;
+      // If we have no live stream value yet, surface the persisted one
+      // through `_contextWindowSize` so the next `notifyChange` rebuilds
+      // session stats with the right `used / max`.
+      if (this._persistedContextTokens && !this._sessionStats?.usage) {
+        this._contextWindowSize = this._persistedContextTokens;
+      }
+      this.notifyChange();
+    } catch (err) {
+      // Browser dev mode or backend unavailable — log so backend renames /
+      // serialisation regressions surface during development without
+      // disrupting the UI.
+      console.debug('[chat-state] refreshLlmConfigCache failed', err);
+    }
   }
 
   /** Sets up the Tauri event listener for streaming chat responses. */

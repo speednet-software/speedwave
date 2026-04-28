@@ -21,16 +21,19 @@ import { AuthTerminalComponent } from '../auth-terminal.component';
   template: `
     @if (llmProvider() === 'anthropic') {
       <section id="section-authentication" class="border-t border-[var(--line)] pt-6">
-        <h2 class="view-title text-[16px] text-[var(--ink)]">Authentication</h2>
+        <h2 class="view-title view-title-section text-[var(--ink)]">Authentication</h2>
 
-        <!-- Pill replaces the "status" label entirely (mockup-aligned with the
-             integrations table convention): green for authenticated states,
-             amber when action is needed. -->
-        <div class="mt-3 flex items-center">
-          @if (apiKeyConfigured) {
-            <span class="pill green" data-testid="auth-status-value">api key</span>
-          } @else if (oauthAuthenticated) {
-            <span class="pill green" data-testid="auth-status-value">oauth</span>
+        <!-- Status row: when authenticated, render two pills side by side —
+             a green connected indicator plus the auth-method type pill so
+             both pieces of information are visible at a glance (mockup
+             alignment). When nothing is configured we fall back to a single
+             amber pill that signals action is needed. -->
+        <div class="mt-3 flex flex-wrap items-center gap-2" data-testid="auth-status-row">
+          @if (apiKeyConfigured || oauthAuthenticated) {
+            <span class="pill green" data-testid="auth-status-value">● connected</span>
+            <span class="pill green" data-testid="auth-status-method">{{
+              apiKeyConfigured ? 'api key' : 'oauth'
+            }}</span>
           } @else {
             <span class="pill amber" data-testid="auth-status-value">not configured</span>
           }
@@ -44,23 +47,8 @@ import { AuthTerminalComponent } from '../auth-terminal.component';
           <button
             type="button"
             role="radio"
-            [attr.aria-checked]="authMethod === 'api_key'"
-            class="mono flex-1 border-r border-[var(--line)] px-3 py-2 text-[11px] transition-colors"
-            [class]="
-              authMethod === 'api_key'
-                ? 'bg-[var(--bg-2)] text-[var(--ink)]'
-                : 'text-[var(--ink-mute)] hover:text-[var(--ink)]'
-            "
-            data-testid="settings-auth-method-api-key"
-            (click)="authMethod = 'api_key'"
-          >
-            api key
-          </button>
-          <button
-            type="button"
-            role="radio"
             [attr.aria-checked]="authMethod === 'oauth'"
-            class="mono flex-1 px-3 py-2 text-[11px] transition-colors"
+            class="mono flex-1 border-r border-[var(--line)] px-3 py-2 text-[11px] transition-colors"
             [class]="
               authMethod === 'oauth'
                 ? 'bg-[var(--bg-2)] text-[var(--ink)]'
@@ -70,6 +58,21 @@ import { AuthTerminalComponent } from '../auth-terminal.component';
             (click)="authMethod = 'oauth'"
           >
             oauth (claude.ai)
+          </button>
+          <button
+            type="button"
+            role="radio"
+            [attr.aria-checked]="authMethod === 'api_key'"
+            class="mono flex-1 px-3 py-2 text-[11px] transition-colors"
+            [class]="
+              authMethod === 'api_key'
+                ? 'bg-[var(--bg-2)] text-[var(--ink)]'
+                : 'text-[var(--ink-mute)] hover:text-[var(--ink)]'
+            "
+            data-testid="settings-auth-method-api-key"
+            (click)="authMethod = 'api_key'"
+          >
+            api key
           </button>
         </div>
 
@@ -121,7 +124,7 @@ import { AuthTerminalComponent } from '../auth-terminal.component';
     }
     @if (isLocalProvider()) {
       <section id="section-authentication" class="border-t border-[var(--line)] pt-6">
-        <h2 class="view-title text-[16px] text-[var(--ink)]">Authentication</h2>
+        <h2 class="view-title view-title-section text-[var(--ink)]">Authentication</h2>
         <p class="mono mt-3 text-[11px] text-[var(--ink-mute)]" data-testid="auth-note">
           No authentication needed for local model providers.
         </p>
@@ -135,7 +138,10 @@ export class AuthSectionComponent {
 
   readonly errorOccurred = output<string>();
 
-  authMethod = 'api_key';
+  // OAuth via claude.ai is the recommended path — pre-select it so users
+  // who land on Authentication for the first time see the friendlier flow.
+  // The api-key tab is one click away when an explicit key is preferred.
+  authMethod = 'oauth';
   apiKeyInput = '';
   apiKeySaving = false;
   apiKeySaved = false;
@@ -221,11 +227,12 @@ export class AuthSectionComponent {
   }
 
   /**
-   * Handles the completion of the OAuth terminal session.
+   * Handles the completion of the OAuth terminal session. Stays on the OAuth
+   * tab so the success pill + freshly authenticated state stay visible — the
+   * user picked OAuth, no need to bounce them back to the api-key form.
    * @param _success - whether the auth was successful
    */
   async onOAuthDone(_success: boolean): Promise<void> {
-    this.authMethod = 'api_key';
     await this.loadAuthStatus();
     this.cdr.markForCheck();
   }

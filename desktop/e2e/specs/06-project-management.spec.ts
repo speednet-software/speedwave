@@ -198,8 +198,10 @@ describe('Project Management', function () {
       const nav = await $('[data-testid="nav-settings"]');
       await nav.click();
 
-      const activeProject = await $('[data-testid="settings-active-project"]');
-      await activeProject.waitForExist({ timeout: 10_000 });
+      // Settings ready signal — page heading replaces the legacy active
+      // project info card; project ground truth comes from `activeProjectSlug()`.
+      const title = await $('[data-testid="settings-title"]');
+      await title.waitForExist({ timeout: 10_000 });
 
       // Defer to Tauri SSOT instead of comparing rendered text — the settings
       // copy embeds the slug in human-readable text that may change.

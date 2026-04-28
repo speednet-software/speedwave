@@ -1,8 +1,66 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const CLAUDE_VERSION: &str = "2.1.104";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
+
+/// Single source of truth for the Anthropic models surfaced in the
+/// Settings → LLM Provider dropdown.
+///
+/// Sourced from the official catalog at
+/// <https://platform.claude.com/docs/en/about-claude/models/overview>.
+/// Bump this list when Anthropic ships a new family — every consumer
+/// (frontend dropdown, future CLI flags, docs) reads from here.
+///
+/// `latest` flags the actively recommended families (rendered in the
+/// "Latest" optgroup); the rest are legacy entries that still work but
+/// should nudge users toward the current generation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnthropicModelInfo {
+    /// Stable API alias (no snapshot date). Sent to Claude Code via
+    /// `ANTHROPIC_MODEL`. Pinning the dated form would force a config
+    /// migration on every model snapshot — Anthropic guarantees the alias
+    /// resolves to the current snapshot.
+    pub id: &'static str,
+    /// Display label shown in the dropdown ("Opus 4.7", "Sonnet 4.6", …).
+    pub family: &'static str,
+    /// Context window in tokens (1_000_000 for 1M-context models).
+    pub context_tokens: u32,
+    /// Whether this entry belongs to the "Latest" group. `false` for
+    /// still-available legacy snapshots; deprecated/retired models are
+    /// removed from the list outright.
+    pub latest: bool,
+}
+
+/// Curated list of Anthropic models available via Claude Code.
+/// **Order matters** — frontend renders this list as-is.
+///
+/// We surface only the actively-recommended generation. Legacy snapshots
+/// can still be selected by typing the id manually (the frontend "(not in
+/// catalog)" escape hatch handles existing configs that pin a removed
+/// alias), but we don't pre-populate the dropdown with them — encouraging
+/// their use was the opposite of what the `latest` flag intended.
+pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
+    AnthropicModelInfo {
+        id: "claude-opus-4-7",
+        family: "Opus 4.7",
+        context_tokens: 1_000_000,
+        latest: true,
+    },
+    AnthropicModelInfo {
+        id: "claude-sonnet-4-6",
+        family: "Sonnet 4.6",
+        context_tokens: 1_000_000,
+        latest: true,
+    },
+    AnthropicModelInfo {
+        id: "claude-haiku-4-5",
+        family: "Haiku 4.5",
+        context_tokens: 200_000,
+        latest: true,
+    },
+];
 
 pub const DEFAULT_FLAGS: &[&str] = &[
     // SECURITY RATIONALE: --dangerously-skip-permissions is safe in this context because:
@@ -162,5 +220,81 @@ mod tests {
             MCP_CONFIG_PATH,
             "--mcp-config must be followed by MCP_CONFIG_PATH"
         );
+    }
+
+    #[test]
+    fn anthropic_models_list_is_non_empty_and_starts_with_latest() {
+        // The dropdown depends on at least one entry being available. The
+        // first entry is what the UI surfaces as the topmost option in the
+        // "Latest" group, so it must be flagged `latest = true`.
+        assert!(!ANTHROPIC_MODELS.is_empty(), "model list must not be empty");
+        assert!(
+            ANTHROPIC_MODELS[0].latest,
+            "first model must be in the Latest group so the dropdown opens with a current option"
+        );
+    }
+
+    #[test]
+    fn anthropic_model_ids_are_unique_and_well_formed() {
+        // Duplicate IDs would render as duplicate <option>s; malformed IDs
+        // would silently fail when written into ANTHROPIC_MODEL. Catch both
+        // at compile-test time.
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for m in ANTHROPIC_MODELS {
+            assert!(seen.insert(m.id), "duplicate model id: {}", m.id);
+            assert!(
+                m.id.starts_with("claude-"),
+                "model id must start with 'claude-', got: {}",
+                m.id
+            );
+            assert!(
+                !m.family.is_empty(),
+                "family label must not be empty for {}",
+                m.id
+            );
+            // The smallest plausible Claude context window is 200k (Haiku).
+            // A "couple hundred" tokens would clearly be wrong; we use a
+            // floor that catches accidental zeros / typos without coupling
+            // the test to current Anthropic context-window economics.
+            assert!(
+                m.context_tokens >= 1_000,
+                "context_tokens looks too small for {}: {}",
+                m.id,
+                m.context_tokens
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_models_have_at_least_one_latest_entry() {
+        // The "Latest" optgroup must render something — without a flagged
+        // entry the dropdown opens on a legacy id, defeating the point of
+        // the flag. (The full Latest-before-Legacy ordering invariant is
+        // checked by `anthropic_models_latest_entries_precede_legacy`.)
+        assert!(
+            ANTHROPIC_MODELS.iter().any(|m| m.latest),
+            "at least one Latest entry required so the dropdown opens with a current option"
+        );
+    }
+
+    #[test]
+    fn anthropic_models_latest_entries_precede_legacy() {
+        // Frontend renders the slice as-is into two optgroups. If a
+        // `latest = false` entry appears before any `latest = true` entry
+        // the optgroup boundary breaks. Guard the structural invariant
+        // explicitly so the comment on `ANTHROPIC_MODELS` remains true
+        // without manual review.
+        let mut seen_legacy = false;
+        for m in ANTHROPIC_MODELS {
+            if !m.latest {
+                seen_legacy = true;
+            } else {
+                assert!(
+                    !seen_legacy,
+                    "latest entry {} must not appear after a legacy entry",
+                    m.id
+                );
+            }
+        }
     }
 }

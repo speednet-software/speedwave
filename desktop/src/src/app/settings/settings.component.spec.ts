@@ -79,7 +79,7 @@ describe('SettingsComponent', () => {
     expect(link.textContent).toContain('system health');
   });
 
-  it('does not embed the SystemHealthComponent inline (moved to /logs)', async () => {
+  it('does not embed a system-health view inline (moved to /logs)', async () => {
     component.ngOnInit();
     await fixture.whenStable();
     fixture.changeDetectorRef.markForCheck();
@@ -180,17 +180,12 @@ describe('SettingsComponent', () => {
       expect(pill).not.toBeNull();
     });
 
-    it('project section uses divide-y rows inside a bordered wrapper', () => {
+    it('does not render the legacy Project info section (project info now lives in the project-pill tooltip)', () => {
       fixture.detectChanges();
       const section = fixture.nativeElement.querySelector(
         '[data-testid="settings-section-project"]'
       );
-      expect(section).not.toBeNull();
-      // Mockup wraps the section in a single border + divide-y between rows.
-      const wrapper = section.querySelector('.border');
-      expect(wrapper).not.toBeNull();
-      const divider = wrapper.querySelector('.divide-y');
-      expect(divider).not.toBeNull();
+      expect(section).toBeNull();
     });
   });
 

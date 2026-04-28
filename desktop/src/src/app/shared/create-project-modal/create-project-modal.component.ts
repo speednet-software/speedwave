@@ -59,7 +59,10 @@ export interface CreatedProject {
           <div class="mono text-[11px] uppercase tracking-widest text-[var(--accent)]">
             new project
           </div>
-          <h3 class="view-title mt-1 text-[16px] text-[var(--ink)]" data-testid="modal-title">
+          <h3
+            class="view-title view-title-section mt-1 text-[var(--ink)]"
+            data-testid="modal-title"
+          >
             Create your project
           </h3>
           <p class="mt-2 text-[13px] leading-relaxed text-[var(--ink-dim)]">

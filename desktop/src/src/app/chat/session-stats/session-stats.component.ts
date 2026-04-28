@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
 import { NgTemplateOutlet } from '@angular/common';
 import type { SessionStats } from '../../models/chat';
+import { DEFAULT_CONTEXT_TOKENS, formatContextLabel } from '../../models/llm';
 
 /** Shared bar segment indices — module-level constant to avoid per-instance allocation. */
 const BAR_INDICES: readonly number[] = [0, 1, 2, 3, 4];
@@ -176,7 +177,7 @@ export class SessionStatsComponent {
   readonly ctxPct = computed<number>(() => {
     const total = this.totalInput();
     if (total <= 0) return 0;
-    const windowSize = this.stats()?.context_window_size ?? 200_000;
+    const windowSize = this.stats()?.context_window_size ?? DEFAULT_CONTEXT_TOKENS;
     return Math.min(100, Math.round((total / windowSize) * 100));
   });
 
@@ -190,8 +191,8 @@ export class SessionStatsComponent {
   readonly ctxUsedMax = computed<string>(() => {
     const total = this.totalInput();
     if (total <= 0) return '';
-    const windowSize = this.stats()?.context_window_size ?? 200_000;
-    return `${shortK(total)}/${shortK(windowSize)}`;
+    const windowSize = this.stats()?.context_window_size ?? DEFAULT_CONTEXT_TOKENS;
+    return `${formatContextLabel(total)}/${formatContextLabel(windowSize)}`;
   });
 
   /** Rate-limit utilisation as an integer percentage (0–100). */
@@ -240,16 +241,4 @@ function barColor(pct: number): string {
  */
 function bucketFilled(pct: number): number {
   return Math.min(5, Math.round((pct / 100) * 5));
-}
-
-/**
- * Short-form thousands suffix — `116400 → 116k`, `1234 → 1k`, `800 → 800`.
- * Used for the compact `used/max` label under the context bar.
- * @param n - Integer count to convert to a short-form label.
- */
-function shortK(n: number): string {
-  if (n >= 1000) {
-    return `${Math.round(n / 1000)}k`;
-  }
-  return String(n);
 }

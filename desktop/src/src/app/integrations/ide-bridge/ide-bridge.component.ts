@@ -16,8 +16,8 @@ import { DetectedIde } from '../../models/health';
   imports: [CommonModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <section class="mb-6" data-testid="integrations-ide-bridge">
-      <h2 class="view-title text-[16px] text-[var(--ink)]">IDE Bridge</h2>
+    <section id="ide-bridge" class="mb-6" data-testid="integrations-ide-bridge">
+      <h2 class="view-title view-title-section text-[var(--ink)]">IDE Bridge</h2>
 
       @if (lastEvent) {
         <div

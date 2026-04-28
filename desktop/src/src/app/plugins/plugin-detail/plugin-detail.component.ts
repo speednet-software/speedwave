@@ -45,7 +45,7 @@ interface ExposedTool {
         ←<span class="hidden md:inline"> all plugins</span>
       </button>
       <span class="hidden flex-shrink-0 text-[var(--line-strong)] md:inline">·</span>
-      <h1 class="view-title truncate text-[14px] text-[var(--ink)]" data-testid="detail-title">
+      <h1 class="view-title view-title-page truncate text-[var(--ink)]" data-testid="detail-title">
         {{ plugin?.name || 'Plugin' }}
       </h1>
       @if (plugin) {

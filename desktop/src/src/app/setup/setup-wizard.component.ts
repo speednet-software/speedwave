@@ -59,7 +59,10 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
               height="36"
             />
             <div>
-              <div class="view-title text-[22px] text-[var(--ink)]" data-testid="setup-headline">
+              <div
+                class="view-title view-title-display text-[var(--ink)]"
+                data-testid="setup-headline"
+              >
                 Welcome to Speedwave.<span class="caret ml-1"></span>
               </div>
               <div class="mono mt-1 text-[12px] text-[var(--ink-dim)]" data-testid="setup-subtitle">

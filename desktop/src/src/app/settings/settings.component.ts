@@ -58,7 +58,10 @@ const THEME_CARDS: readonly ThemeCard[] = [
     <div
       class="flex h-11 flex-shrink-0 items-center gap-3 border-b border-[var(--line)] bg-[var(--bg-1)] px-4 md:px-6"
     >
-      <h1 class="view-title truncate text-[14px] text-[var(--ink)]" data-testid="settings-title">
+      <h1
+        class="view-title view-title-page truncate text-[var(--ink)]"
+        data-testid="settings-title"
+      >
         Settings
       </h1>
       <div class="ml-auto flex flex-shrink-0 items-center gap-3">
@@ -86,38 +89,6 @@ const THEME_CARDS: readonly ThemeCard[] = [
           </div>
         }
 
-        <section data-testid="settings-section-project">
-          <h2 class="view-title text-[16px] text-[var(--ink)]">Project</h2>
-          <div class="mt-3 overflow-hidden rounded border border-[var(--line)] bg-[var(--bg-1)]">
-            <div class="divide-y divide-[var(--line)]">
-              <div class="flex items-center justify-between gap-3 px-4 py-3">
-                <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                  >active project</span
-                >
-                <span
-                  class="mono text-[12px] text-[var(--ink)]"
-                  data-testid="settings-active-project"
-                  >{{ activeProject || '—' }}</span
-                >
-              </div>
-              <div class="flex items-center justify-between gap-3 px-4 py-3">
-                <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                  >directory</span
-                >
-                <span class="mono truncate text-[12px] text-[var(--ink-dim)]">{{
-                  projectDir || '—'
-                }}</span>
-              </div>
-              <div class="flex items-center justify-between gap-3 px-4 py-3">
-                <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                  >data directory</span
-                >
-                <span class="mono text-[12px] text-[var(--ink-dim)]">~/.speedwave/</span>
-              </div>
-            </div>
-          </div>
-        </section>
-
         <app-llm-provider
           (providerChange)="llmProvider = $event"
           (errorOccurred)="error = $event"
@@ -136,7 +107,7 @@ const THEME_CARDS: readonly ThemeCard[] = [
           class="border-t border-[var(--line)] pt-6"
           data-testid="settings-section-appearance"
         >
-          <h2 class="view-title text-[16px] text-[var(--ink)]">Appearance</h2>
+          <h2 class="view-title view-title-section text-[var(--ink)]">Appearance</h2>
           <p class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
             Choose an accent color for buttons, links and syntax highlighting. Backgrounds stay dark
             across all themes.
@@ -178,7 +149,6 @@ const THEME_CARDS: readonly ThemeCard[] = [
         </section>
 
         <app-advanced-section
-          [activeProject]="activeProject"
           (errorOccurred)="error = $event"
           (resetCompleted)="onResetCompleted()"
         />
@@ -188,7 +158,6 @@ const THEME_CARDS: readonly ThemeCard[] = [
 })
 export class SettingsComponent implements OnInit, OnDestroy {
   activeProject: string | null = null;
-  projectDir = '';
   error = '';
   llmProvider = 'anthropic';
 
@@ -231,8 +200,6 @@ export class SettingsComponent implements OnInit, OnDestroy {
     try {
       const result = await this.tauri.invoke<ProjectList>('list_projects');
       this.activeProject = result.active_project;
-      const entry = result.projects.find((p) => p.name === result.active_project);
-      this.projectDir = entry?.dir ?? '';
     } catch {
       // Not running inside Tauri
     }

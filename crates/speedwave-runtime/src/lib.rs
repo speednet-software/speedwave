@@ -12,6 +12,7 @@ pub mod log_sanitizer;
 pub mod os_prereqs;
 pub mod plugin;
 pub mod project;
+pub mod prompts;
 pub mod resources;
 pub mod runtime;
 pub mod session;

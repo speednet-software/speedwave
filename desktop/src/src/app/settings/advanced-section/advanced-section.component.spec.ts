@@ -26,86 +26,16 @@ describe('AdvancedSectionComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  it('renders Diagnostics and Danger Zone sections', () => {
+  it('renders the Danger Zone section only (Diagnostics moved to /logs)', () => {
     fixture.detectChanges();
     const headings = fixture.nativeElement.querySelectorAll('h2') as NodeListOf<Element>;
     const texts = Array.from(headings).map((h) => h.textContent?.trim());
-    expect(texts).toContain('Diagnostics');
     expect(texts).toContain('Danger Zone');
-  });
-
-  describe('forced log level on init', () => {
-    // The user-facing log-level dropdown was removed — every install now
-    // logs at `trace` so exported diagnostics always carry full context.
-    it('invokes set_log_level("trace") when the component initialises', async () => {
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      component.ngOnInit();
-      await new Promise<void>((r) => setTimeout(r, 0));
-      expect(invokeSpy).toHaveBeenCalledWith('set_log_level', { level: 'trace' });
-    });
-
-    it('does not surface backend failures to the user', async () => {
-      const errorSpy = vi.fn();
-      component.errorOccurred.subscribe(errorSpy);
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'set_log_level') throw new Error('not in tauri');
-        return undefined;
-      };
-      component.ngOnInit();
-      await new Promise<void>((r) => setTimeout(r, 0));
-      // Forced log-level write is fire-and-forget — failures stay silent
-      // so a missing backend doesn't block the rest of the settings page.
-      expect(errorSpy).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('exportDiagnostics()', () => {
-    it('calls export_diagnostics with active project', async () => {
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      fixture.componentRef.setInput('activeProject', 'test');
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'export_diagnostics') return '/tmp/diag.zip';
-        return undefined;
-      };
-      await component.exportDiagnostics();
-      expect(invokeSpy).toHaveBeenCalledWith('export_diagnostics', { project: 'test' });
-      expect(component.diagnosticsPath).toBe('/tmp/diag.zip');
-    });
-
-    it('sets diagnosticsExporting during export', async () => {
-      fixture.componentRef.setInput('activeProject', 'test');
-      let resolveFn!: (v: string) => void;
-      mockTauri.invokeHandler = (cmd: string) =>
-        new Promise<string>((resolve) => {
-          if (cmd === 'export_diagnostics') resolveFn = resolve;
-          else resolve('');
-        });
-      const promise = component.exportDiagnostics();
-      expect(component.diagnosticsExporting).toBe(true);
-      resolveFn('/tmp/test.zip');
-      await promise;
-      expect(component.diagnosticsExporting).toBe(false);
-    });
-
-    it('does nothing without activeProject', async () => {
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      fixture.componentRef.setInput('activeProject', null);
-      await component.exportDiagnostics();
-      expect(invokeSpy).not.toHaveBeenCalledWith('export_diagnostics', expect.anything());
-    });
-
-    it('emits errorOccurred on failure', async () => {
-      const errorSpy = vi.fn();
-      component.errorOccurred.subscribe(errorSpy);
-      fixture.componentRef.setInput('activeProject', 'test');
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'export_diagnostics') throw new Error('zip failed');
-        return undefined;
-      };
-      await component.exportDiagnostics();
-      expect(errorSpy).toHaveBeenCalledWith('zip failed');
-      expect(component.diagnosticsExporting).toBe(false);
-    });
+    expect(texts).not.toContain('Diagnostics');
+    // Diagnostics export now lives in the logs view; settings must not duplicate it.
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="settings-export-diagnostics"]')
+    ).toBeNull();
   });
 
   describe('resetEnvironment()', () => {
@@ -172,24 +102,6 @@ describe('AdvancedSectionComponent', () => {
       expect(component.confirmReset).toBe(false);
       const resetBtn = fixture.nativeElement.querySelector('[data-testid="settings-reset-btn"]');
       expect(resetBtn).not.toBeNull();
-    });
-
-    it('disables Export Diagnostics when no activeProject', () => {
-      fixture.componentRef.setInput('activeProject', null);
-      fixture.detectChanges();
-      const btn: HTMLButtonElement = fixture.nativeElement.querySelector(
-        '[data-testid="settings-export-diagnostics"]'
-      );
-      expect(btn.disabled).toBe(true);
-    });
-
-    it('enables Export Diagnostics when activeProject is set', () => {
-      fixture.componentRef.setInput('activeProject', 'test');
-      fixture.detectChanges();
-      const btn: HTMLButtonElement = fixture.nativeElement.querySelector(
-        '[data-testid="settings-export-diagnostics"]'
-      );
-      expect(btn.disabled).toBe(false);
     });
   });
 });

@@ -265,11 +265,32 @@
   /* Monospaced text — used everywhere status/labels/code surfaces appear. */
   .mono { font-family: var(--font-mono); font-variant-ligatures: none; }
 
-  /* View titles — slightly wider letter-spacing, IBM Plex when available. */
+  /* View titles — slightly wider letter-spacing, IBM Plex when available.
+     Base class carries shared typography only; consumers always pair it
+     with one of the size modifiers below so font-size lives in the design
+     system, not in arbitrary Tailwind classes. */
   .view-title {
     font-family: var(--font-view-title);
     font-weight: 500;
     letter-spacing: -0.005em;
+  }
+
+  /* Page header (top-of-view <h1> band, 44px header strip). */
+  .view-title-page {
+    font-size: 14px;
+    line-height: 1.2;
+  }
+
+  /* Section header (<h2>/<h3> inside settings cards, modals, etc.). */
+  .view-title-section {
+    font-size: 16px;
+    line-height: 1.35;
+  }
+
+  /* Display headline (setup wizard headline only). */
+  .view-title-display {
+    font-size: 22px;
+    line-height: 1.3;
   }
 
   /* Two-layer Material spinner (see `@keyframes spin-svg` / `spin-circle`). */

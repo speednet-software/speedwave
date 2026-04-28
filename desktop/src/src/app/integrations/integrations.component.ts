@@ -51,7 +51,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
       data-testid="integrations-header"
     >
       <h1
-        class="view-title truncate text-[14px] text-[var(--ink)]"
+        class="view-title view-title-page truncate text-[var(--ink)]"
         data-testid="integrations-title"
       >
         Service integrations
@@ -72,6 +72,13 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
             {{ error }}
           </div>
         }
+
+        <h2
+          class="view-title view-title-section mb-3 text-[var(--ink)]"
+          data-testid="integrations-services-title"
+        >
+          Services
+        </h2>
 
         <div
           class="overflow-hidden rounded border border-[var(--line)]"
@@ -232,12 +239,13 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
 
         @if (osIntegrations.length > 0) {
           <section class="mt-6" data-testid="integrations-os">
+            <h2
+              class="view-title view-title-section mb-3 text-[var(--ink)]"
+              data-testid="integrations-os-title"
+            >
+              OS Integrations
+            </h2>
             <div class="overflow-hidden rounded border border-[var(--line)]">
-              <div
-                class="mono border-b border-[var(--line)] bg-[var(--bg-1)] px-4 py-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-              >
-                os integrations
-              </div>
               <div class="divide-y divide-[var(--line)]">
                 @for (os of osIntegrations; track os.service) {
                   <div class="flex items-center gap-3 px-4 py-2.5">

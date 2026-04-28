@@ -9,7 +9,6 @@ import {
   output,
 } from '@angular/core';
 import { TauriService } from '../services/tauri.service';
-import { SpinIconComponent } from '../shared/spin-icon.component';
 
 /**
  * OAuth login instructions card.
@@ -19,12 +18,12 @@ import { SpinIconComponent } from '../shared/spin-icon.component';
 @Component({
   selector: 'app-auth-terminal',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [SpinIconComponent],
+  imports: [],
   template: `
     <div class="mt-3 rounded border border-[var(--line)] bg-[var(--bg-1)] p-4">
       <p class="text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
-        Open a terminal and run the following command, then type <code class="mono">/login</code> to
-        authenticate:
+        Open a terminal and run the following command. Claude Code will launch its interactive setup
+        and walk you through the login flow.
       </p>
       @if (command) {
         <div
@@ -58,13 +57,6 @@ import { SpinIconComponent } from '../shared/spin-icon.component';
           {{ error }}
         </div>
       }
-      <p class="mono mt-3 text-[10px] leading-relaxed text-[var(--ink-mute)]">
-        This page updates automatically when authentication completes.
-      </p>
-      <div class="mono mt-3 flex items-center gap-2 text-[11px] text-[var(--ink-dim)]">
-        <app-spin-icon class="shrink-0 text-[var(--accent)]" />
-        <span>Waiting for authentication...</span>
-      </div>
     </div>
   `,
 })

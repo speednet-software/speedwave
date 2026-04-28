@@ -19,6 +19,7 @@ const MOCK_HEALTHY_REPORT: HealthReport = {
     port: 4001,
     ws_url: 'ws://127.0.0.1:4001',
     detected_ides: [],
+    selected_ide: null,
   },
   overall_healthy: false,
 };
@@ -27,7 +28,13 @@ const MOCK_EMPTY_REPORT: HealthReport = {
   containers: [],
   vm: { running: false, vm_type: 'lima' },
   mcp_os: { running: false },
-  ide_bridge: { running: false, port: null, ws_url: null, detected_ides: [] },
+  ide_bridge: {
+    running: false,
+    port: null,
+    ws_url: null,
+    detected_ides: [],
+    selected_ide: null,
+  },
   overall_healthy: false,
 };
 

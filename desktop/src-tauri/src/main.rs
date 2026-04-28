@@ -1361,6 +1361,7 @@ fn main() {
             containers_cmd::factory_reset,
             containers_cmd::get_llm_config,
             containers_cmd::get_default_base_url,
+            containers_cmd::list_anthropic_models,
             containers_cmd::update_llm_config,
             llm_cmd::discover_llm_models,
             // Authentication

@@ -94,9 +94,11 @@ describe('Navigation', function () {
     const settings = await $('[data-testid="nav-settings"]');
     await settings.click();
 
-    const activeProject = await $('[data-testid="settings-active-project"]');
-    await activeProject.waitForExist({ timeout: 10_000 });
-    expect(await activeProject.isDisplayed()).toBe(true);
+    // Project info card was removed; the page heading is the new ready
+    // signal. Settings ground-truth lives in `activeProjectSlug()`.
+    const title = await $('[data-testid="settings-title"]');
+    await title.waitForExist({ timeout: 10_000 });
+    expect(await title.isDisplayed()).toBe(true);
   });
 
   it('should expose the project pill bound to the active project slug', async function () {

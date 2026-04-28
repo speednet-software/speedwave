@@ -42,8 +42,10 @@ describe('AuthSectionComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  it('defaults to api_key auth method', () => {
-    expect(component.authMethod).toBe('api_key');
+  it('defaults to oauth auth method', () => {
+    // OAuth via claude.ai is the recommended path; the api-key tab stays
+    // available but users should land on the friendlier flow first.
+    expect(component.authMethod).toBe('oauth');
   });
 
   it('defaults to anthropic llm provider', () => {
@@ -64,19 +66,20 @@ describe('AuthSectionComponent', () => {
     );
     expect(apiKeyTab).not.toBeNull();
     expect(oauthTab).not.toBeNull();
-    expect(apiKeyTab.getAttribute('aria-checked')).toBe('true');
-    expect(oauthTab.getAttribute('aria-checked')).toBe('false');
+    // OAuth is the default — checked on first render, api-key off.
+    expect(oauthTab.getAttribute('aria-checked')).toBe('true');
+    expect(apiKeyTab.getAttribute('aria-checked')).toBe('false');
   });
 
-  it('clicking the oauth tab switches authMethod', () => {
+  it('clicking the api-key tab switches authMethod away from the default', () => {
     fixture.componentRef.setInput('llmProvider', 'anthropic');
     fixture.detectChanges();
-    const oauthTab = fixture.nativeElement.querySelector(
-      '[data-testid="settings-auth-method-oauth"]'
+    const apiKeyTab = fixture.nativeElement.querySelector(
+      '[data-testid="settings-auth-method-api-key"]'
     ) as HTMLButtonElement;
-    oauthTab.click();
+    apiKeyTab.click();
     fixture.detectChanges();
-    expect(component.authMethod).toBe('oauth');
+    expect(component.authMethod).toBe('api_key');
   });
 
   it('shows local provider note when llmProvider is ollama', () => {
@@ -275,7 +278,10 @@ describe('AuthSectionComponent', () => {
     expect(errorSpy).toHaveBeenCalledWith('delete failed');
   });
 
-  it('resets authMethod to api_key on OAuth done', async () => {
+  it('keeps the user on the oauth tab after OAuth completes', async () => {
+    // Previously the component bounced back to the api-key tab once OAuth
+    // finished — confusing for users who picked OAuth on purpose. Now we
+    // stay on the same tab and just refresh the auth status pill.
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_auth_status') {
         return { api_key_configured: false, oauth_authenticated: true };
@@ -285,7 +291,7 @@ describe('AuthSectionComponent', () => {
     fixture.componentRef.setInput('activeProject', 'test-project');
     component.authMethod = 'oauth';
     await component.onOAuthDone(true);
-    expect(component.authMethod).toBe('api_key');
+    expect(component.authMethod).toBe('oauth');
     expect(component.oauthAuthenticated).toBe(true);
   });
 
@@ -308,28 +314,36 @@ describe('AuthSectionComponent', () => {
     expect(authEl).not.toBeNull();
   });
 
-  it('renders a green api-key pill when the key is set', () => {
+  it('renders a `connected` pill alongside an `api key` method pill when the key is set', () => {
     fixture.componentRef.setInput('llmProvider', 'anthropic');
     component.apiKeyConfigured = true;
     fixture.detectChanges();
     const statusEl = fixture.nativeElement.querySelector('[data-testid="auth-status-value"]');
-    expect(statusEl?.textContent?.trim()).toBe('api key');
+    const methodEl = fixture.nativeElement.querySelector('[data-testid="auth-status-method"]');
+    expect(statusEl?.textContent?.trim()).toContain('connected');
     expect(statusEl?.classList.contains('pill')).toBe(true);
     expect(statusEl?.classList.contains('green')).toBe(true);
+    expect(methodEl?.textContent?.trim()).toBe('api key');
+    expect(methodEl?.classList.contains('pill')).toBe(true);
+    expect(methodEl?.classList.contains('green')).toBe(true);
   });
 
-  it('renders a green oauth pill when oauth is authenticated', () => {
+  it('renders a `connected` pill alongside an `oauth` method pill when oauth is authenticated', () => {
     fixture.componentRef.setInput('llmProvider', 'anthropic');
     component.apiKeyConfigured = false;
     component.oauthAuthenticated = true;
     fixture.detectChanges();
     const statusEl = fixture.nativeElement.querySelector('[data-testid="auth-status-value"]');
-    expect(statusEl?.textContent?.trim()).toBe('oauth');
+    const methodEl = fixture.nativeElement.querySelector('[data-testid="auth-status-method"]');
+    expect(statusEl?.textContent?.trim()).toContain('connected');
     expect(statusEl?.classList.contains('pill')).toBe(true);
     expect(statusEl?.classList.contains('green')).toBe(true);
+    expect(methodEl?.textContent?.trim()).toBe('oauth');
+    expect(methodEl?.classList.contains('pill')).toBe(true);
+    expect(methodEl?.classList.contains('green')).toBe(true);
   });
 
-  it('renders an amber not-configured pill when no auth is set', () => {
+  it('renders an amber not-configured pill (no method pill) when no auth is set', () => {
     fixture.componentRef.setInput('llmProvider', 'anthropic');
     component.apiKeyConfigured = false;
     component.oauthAuthenticated = false;
@@ -338,6 +352,8 @@ describe('AuthSectionComponent', () => {
     expect(valueEl?.textContent?.trim()).toBe('not configured');
     expect(valueEl?.classList.contains('pill')).toBe(true);
     expect(valueEl?.classList.contains('amber')).toBe(true);
+    // The method pill is only rendered alongside `connected`; absent here.
+    expect(fixture.nativeElement.querySelector('[data-testid="auth-status-method"]')).toBeNull();
   });
 
   it('calls applyAuthStatus after saving API key', async () => {

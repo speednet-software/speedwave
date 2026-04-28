@@ -2,56 +2,25 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
-  OnInit,
   inject,
-  input,
   output,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { TauriService } from '../../services/tauri.service';
 
 /**
- * Hard-coded log level — diagnostics value the backend should always run at.
- *  No user-facing control: every install logs at the most verbose level so
- *  exported diagnostics never depend on the user's current setting.
+ * Settings → Danger Zone. Diagnostics export and forced trace-level logging
+ * live in the System health view (`/logs`); Settings only owns the
+ * destructive factory-reset action now.
  */
-const FORCED_LOG_LEVEL = 'trace';
-
-/** Displays diagnostics export and factory reset (danger zone). */
 @Component({
   selector: 'app-advanced-section',
   imports: [CommonModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
-    <!-- Diagnostics — log level is always max (trace) on init, no UI control. -->
-    <section id="section-diagnostics" class="border-t border-[var(--line)] pt-6">
-      <h2 class="view-title text-[16px] text-[var(--ink)]">Diagnostics</h2>
-
-      <div class="mt-3 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
-          data-testid="settings-export-diagnostics"
-          (click)="exportDiagnostics()"
-          [disabled]="diagnosticsExporting || !activeProject()"
-        >
-          {{ diagnosticsExporting ? 'exporting...' : 'export diagnostics' }}
-        </button>
-        @if (diagnosticsPath) {
-          <span class="mono text-[11px] text-[var(--green)]">{{ diagnosticsPath }}</span>
-        }
-      </div>
-      <p class="mono mt-2 text-[10px] text-[var(--ink-mute)]">
-        Collects app logs, container logs, and system info into a sanitized ZIP (no tokens or
-        secrets).
-      </p>
-    </section>
-
-    <!-- Danger zone — extra top margin adds breathing room between the
-         diagnostics block above and the red separator. -->
-    <section id="section-danger" class="mt-8 border-t border-red-500/20 pt-6">
-      <h2 class="view-title text-[16px] text-red-300">Danger Zone</h2>
+    <section id="section-danger" class="border-t border-red-500/20 pt-6">
+      <h2 class="view-title view-title-section text-red-300">Danger Zone</h2>
       <div class="mt-3 rounded border border-red-500/30 bg-red-500/5 p-4">
         <div class="mono text-[12px] text-red-200">factory reset</div>
         <p class="mt-1 text-[12px] leading-relaxed text-[var(--ink-dim)]">
@@ -96,54 +65,15 @@ const FORCED_LOG_LEVEL = 'trace';
     </section>
   `,
 })
-export class AdvancedSectionComponent implements OnInit {
-  readonly activeProject = input<string | null>(null);
+export class AdvancedSectionComponent {
   readonly errorOccurred = output<string>();
   readonly resetCompleted = output<void>();
 
   confirmReset = false;
   resetting = false;
-  diagnosticsExporting = false;
-  diagnosticsPath = '';
 
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
-
-  /**
-   * Forces the backend log level to the most verbose value (trace) on init.
-   * The user no longer has a knob — diagnostics should always capture
-   * maximum detail so exported ZIPs are useful by default.
-   */
-  ngOnInit(): void {
-    void this.forceMaxLogLevel();
-  }
-
-  private async forceMaxLogLevel(): Promise<void> {
-    try {
-      await this.tauri.invoke('set_log_level', { level: FORCED_LOG_LEVEL });
-    } catch {
-      // Not in Tauri (browser dev mode) or backend unavailable — silent.
-    }
-  }
-
-  /** Exports diagnostic data as a sanitized ZIP archive. */
-  async exportDiagnostics(): Promise<void> {
-    const project = this.activeProject();
-    if (!project) return;
-    this.diagnosticsExporting = true;
-    this.diagnosticsPath = '';
-    this.cdr.markForCheck();
-    try {
-      const path = await this.tauri.invoke<string>('export_diagnostics', {
-        project,
-      });
-      this.diagnosticsPath = path;
-    } catch (e: unknown) {
-      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
-    }
-    this.diagnosticsExporting = false;
-    this.cdr.markForCheck();
-  }
 
   /**
    * Performs a factory reset, destroying containers and VM.

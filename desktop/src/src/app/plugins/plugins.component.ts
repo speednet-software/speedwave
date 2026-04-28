@@ -55,7 +55,7 @@ function dotColourFor(index: number): string {
       class="flex h-11 flex-shrink-0 items-center gap-3 border-b border-[var(--line)] bg-[var(--bg-1)] px-4 md:px-6"
       data-testid="plugins-header"
     >
-      <h1 class="view-title truncate text-[14px] text-[var(--ink)]" data-testid="plugins-title">
+      <h1 class="view-title view-title-page truncate text-[var(--ink)]" data-testid="plugins-title">
         Installed plugins
       </h1>
       <div class="ml-auto flex flex-shrink-0 items-center gap-3">

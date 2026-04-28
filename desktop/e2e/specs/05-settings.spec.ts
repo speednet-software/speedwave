@@ -20,14 +20,16 @@ describe('Settings', function () {
     });
     await nav.click();
 
-    const project = await $('[data-testid="settings-active-project"]');
-    await project.waitForExist({ timeout: 10_000 });
+    // Settings ready signal — the legacy "active project" info card was
+    // replaced by an info-glyph tooltip on the shared project-pill, so we
+    // wait for the page heading instead. Active-project verification still
+    // happens through `activeProjectSlug()` (backend ground truth).
+    const title = await $('[data-testid="settings-title"]');
+    await title.waitForExist({ timeout: 10_000 });
   });
 
   it('should expose the active project surface bound to the e2e-test slug', async function () {
     this.timeout(15_000);
-    const activeProject = await $('[data-testid="settings-active-project"]');
-    expect(await activeProject.isDisplayed()).toBe(true);
     expect(await activeProjectSlug()).toBe('e2e-test');
   });
 

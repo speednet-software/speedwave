@@ -3,8 +3,10 @@ import { TestBed } from '@angular/core/testing';
 import { ChatStateService } from './chat-state.service';
 import { ProjectStateService } from './project-state.service';
 import { TauriService } from './tauri.service';
+import { AnthropicModelsService } from './anthropic-models.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import type { StreamChunk } from '../models/chat';
+import { DEFAULT_CONTEXT_TOKENS } from '../models/llm';
 
 describe('ChatStateService', () => {
   let service: ChatStateService;
@@ -2142,6 +2144,118 @@ describe('ChatStateService', () => {
       service._setState({ messages: [], currentBlocks: [], sessionStats: null });
       service.seedResumedSession('');
       expect(service.sessionStats).toBeNull();
+    });
+  });
+
+  describe('refreshLlmConfigCache', () => {
+    it('updates the persisted context_tokens cache from the backend', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_llm_config') return { context_tokens: 32_768 };
+        return undefined;
+      };
+      await service.refreshLlmConfigCache();
+      // Internal state — accessed through a controlled cast since the field
+      // is intentionally private.
+      const internal = service as unknown as { _persistedContextTokens: number | null };
+      expect(internal._persistedContextTokens).toBe(32_768);
+    });
+
+    it('clears the cache when the backend reports null context_tokens', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_llm_config') return { context_tokens: null };
+        return undefined;
+      };
+      const internal = service as unknown as { _persistedContextTokens: number | null };
+      internal._persistedContextTokens = 99;
+      await service.refreshLlmConfigCache();
+      expect(internal._persistedContextTokens).toBeNull();
+    });
+
+    it('logs at debug level on backend failure without throwing', async () => {
+      const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_llm_config') throw new Error('backend gone');
+        return undefined;
+      };
+      await expect(service.refreshLlmConfigCache()).resolves.toBeUndefined();
+      expect(debugSpy).toHaveBeenCalled();
+      debugSpy.mockRestore();
+    });
+
+    it('does not dedupe — every call hits the backend', async () => {
+      // Regression guard: the previous implementation skipped re-fetches
+      // when the active project hadn't changed, which silently broke the
+      // post-save chat-footer refresh. The dedupe was removed because the
+      // command is cheap.
+      let calls = 0;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_llm_config') {
+          calls++;
+          return { context_tokens: 1_000_000 };
+        }
+        return undefined;
+      };
+      await service.refreshLlmConfigCache();
+      await service.refreshLlmConfigCache();
+      await service.refreshLlmConfigCache();
+      expect(calls).toBe(3);
+    });
+  });
+
+  describe('resolveContextWindow priority chain', () => {
+    // resolveContextWindow is private; the chain is exercised through the
+    // public surface (Result-chunk handler / seedResumedSession). We hit it
+    // here through a controlled cast for direct assertions on each tier.
+    type Internal = {
+      resolveContextWindow: (live: number | undefined, model: string | undefined) => number;
+      _persistedContextTokens: number | null;
+      _contextWindowSize: number;
+    };
+
+    it('prefers the live stream value over every fallback', () => {
+      const internal = service as unknown as Internal;
+      internal._persistedContextTokens = 16_384;
+      internal._contextWindowSize = 8_192;
+      expect(internal.resolveContextWindow(500_000, 'claude-opus-4-7')).toBe(500_000);
+    });
+
+    it('falls back to the Anthropic SSOT when no live value is available', async () => {
+      // The ChatStateService injects AnthropicModelsService — populate the
+      // shared cache by going through its public list() once with a fixture
+      // backend.
+      const anthropic = TestBed.inject(AnthropicModelsService);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'list_anthropic_models') {
+          return [
+            { id: 'claude-opus-4-7', family: 'Opus 4.7', context_tokens: 1_000_000, latest: true },
+          ];
+        }
+        return undefined;
+      };
+      await anthropic.list();
+      const internal = service as unknown as Internal;
+      expect(internal.resolveContextWindow(undefined, 'claude-opus-4-7')).toBe(1_000_000);
+    });
+
+    it('falls back to persisted context_tokens when SSOT and live are absent', () => {
+      const internal = service as unknown as Internal;
+      internal._persistedContextTokens = 32_768;
+      internal._contextWindowSize = 8_192;
+      expect(internal.resolveContextWindow(undefined, 'unknown-model')).toBe(32_768);
+    });
+
+    it('falls back to previous _contextWindowSize when persisted is also absent', () => {
+      const internal = service as unknown as Internal;
+      internal._persistedContextTokens = null;
+      internal._contextWindowSize = 65_536;
+      expect(internal.resolveContextWindow(undefined, 'unknown-model')).toBe(65_536);
+    });
+
+    it('falls back to DEFAULT_CONTEXT_TOKENS as the last resort', () => {
+      const internal = service as unknown as Internal;
+      internal._persistedContextTokens = null;
+      internal._contextWindowSize = 0;
+      expect(internal.resolveContextWindow(undefined, undefined)).toBe(DEFAULT_CONTEXT_TOKENS);
     });
   });
 });

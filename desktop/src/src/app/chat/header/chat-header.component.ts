@@ -62,7 +62,10 @@ import { ProjectPillComponent } from '../../project-switcher/project-pill.compon
         </svg>
       </button>
 
-      <h1 data-testid="chat-header-title" class="view-title truncate text-[14px] text-[var(--ink)]">
+      <h1
+        data-testid="chat-header-title"
+        class="view-title view-title-page truncate text-[var(--ink)]"
+      >
         {{ title() }}
       </h1>
 

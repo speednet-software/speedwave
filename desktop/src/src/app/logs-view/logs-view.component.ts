@@ -1,19 +1,22 @@
 import {
-  AfterViewChecked,
   ChangeDetectionStrategy,
   Component,
   ElementRef,
+  Injector,
   OnDestroy,
   OnInit,
   ViewChild,
+  afterNextRender,
   computed,
   inject,
   signal,
 } from '@angular/core';
+import { RouterLink } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { SystemHealthService } from '../services/system-health.service';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
-import type { HealthReport } from '../models/health';
+import { ModalOverlayComponent } from '../shell/modal-overlay/modal-overlay.component';
 
 /** Log severity levels recognised by the logs-view filter chips. */
 export type LogLevel = 'all' | 'debug' | 'info' | 'warn' | 'error';
@@ -38,12 +41,22 @@ export const LOGS_TAIL_LINES = 500;
 /** Available level chips rendered in the toolbar. */
 export const LEVEL_CHIPS: readonly LogLevel[] = ['all', 'debug', 'info', 'warn', 'error'];
 
-/** Polling cadence for the system health grid (ms). */
-export const HEALTH_REFRESH_INTERVAL_MS = 5000;
+// Polling cadence for the system health grid lives in `SystemHealthService`
+// (`services/system-health.service.ts`) — the SSOT for the polling loop.
+
+/**
+ * Trace-level diagnostics is forced at view init so an exported diagnostics
+ * ZIP always carries full context regardless of any prior runtime setting.
+ */
+const FORCED_LOG_LEVEL = 'trace';
 
 const COMPOSE_RE = /^([\w.-]+)\s*\|\s*(.*)$/;
 const BRACKETED_TIME_RE = /^\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]\s*(.*)$/;
 const ISO_TIME_RE = /^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)\s+(.*)$/;
+/** ISO date+time at the start of a stamped log line (e.g. `2026-04-28T12:34:56.123Z`). */
+const FORMAT_TIME_ISO_RE = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/;
+/** Bare `HH:MM:SS` prefix used by some compose log lines. Date is filled in from the host clock. */
+const FORMAT_TIME_HMS_RE = /^(\d{2}:\d{2}:\d{2})/;
 const LEVEL_RE = /^(DEBUG|INFO|WARN|WARNING|ERROR|TRACE)\s+(.*)$/i;
 const CONTAINER_PREFIX_RE = /^speedwave_[^_]+_([^_]+)(?:_\d+)?$/;
 const TRAILING_INDEX_RE = /_\d+$/;
@@ -95,19 +108,21 @@ function stripContainerPrefix(container: string): string {
 }
 
 /**
- * Logs view — fetches the compose-log tail, renders filtered/parsed lines,
- * and surfaces an aggregated system-health grid above the log stream.
+ * Logs view — renders a full-width status bar above a filter toolbar and the
+ * log stream. Status sections (overall, VM, containers, IDE bridge) wrap on
+ * narrow widths; an expandable details row exposes per-container and
+ * detected-IDE diagnostics without permanently stealing vertical space.
  */
 @Component({
   selector: 'app-logs-view',
-  imports: [ProjectPillComponent],
+  imports: [ProjectPillComponent, ModalOverlayComponent, RouterLink],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
       class="flex h-11 flex-shrink-0 items-center gap-3 border-b border-[var(--line)] bg-[var(--bg-1)] px-4 md:px-6"
       data-testid="logs-header"
     >
-      <h1 class="view-title truncate text-[14px] text-[var(--ink)]" data-testid="logs-title">
+      <h1 class="view-title view-title-page truncate text-[var(--ink)]" data-testid="logs-title">
         System health
       </h1>
       <div class="ml-auto flex flex-shrink-0 items-center gap-3">
@@ -123,129 +138,122 @@ function stripContainerPrefix(container: string): string {
     </div>
 
     <div
-      class="border-b border-[var(--line)] bg-[var(--bg-1)] px-4 py-4 md:px-6"
-      data-testid="logs-health-grid"
+      class="flex flex-wrap items-center gap-x-5 gap-y-2 border-b border-[var(--line)] bg-[var(--bg-1)] px-4 py-2.5 md:px-6"
+      data-testid="logs-status-bar"
+      role="status"
+      aria-label="System health summary"
     >
-      <div class="mx-auto grid max-w-3xl grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <div
-          class="rounded border border-[var(--line)] bg-[var(--bg-2)] p-3"
-          data-testid="health-overall"
+      <button
+        type="button"
+        class="flex items-center gap-2 text-[13px]"
+        data-testid="health-overall"
+        [style.color]="overallHealthy() ? 'var(--green)' : 'var(--accent)'"
+        [attr.aria-expanded]="detailsOpen()"
+        aria-controls="logs-status-details"
+        (click)="toggleDetails()"
+        [title]="detailsOpen() ? 'Hide details' : 'Show details'"
+      >
+        <span
+          class="dot"
+          [style.background]="overallHealthy() ? 'var(--green)' : 'var(--accent)'"
+        ></span>
+        <span class="font-medium">{{ overallHealthy() ? 'healthy' : 'degraded' }}</span>
+        <span
+          class="mono text-[10px] text-[var(--ink-mute)]"
+          [style.transform]="detailsOpen() ? 'rotate(180deg)' : null"
+          aria-hidden="true"
+          >▾</span
         >
-          <div class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
-            overall
-          </div>
-          <div
-            class="mt-1 flex items-center gap-2 text-[14px]"
-            [style.color]="overallHealthy() ? 'var(--green)' : 'var(--accent)'"
-          >
-            <span
-              class="dot"
-              [style.background]="overallHealthy() ? 'var(--green)' : 'var(--accent)'"
-            ></span>
-            {{ overallHealthy() ? 'healthy' : 'degraded' }}
-          </div>
-          <div class="mono mt-1 text-[10px] text-[var(--ink-mute)]">
-            {{ overallDetail() }}
-          </div>
-        </div>
+      </button>
 
-        <div
-          class="rounded border border-[var(--line)] bg-[var(--bg-2)] p-3"
-          data-testid="health-vm"
-        >
-          <div class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">vm</div>
-          <div
-            class="mt-1 flex items-center gap-2 text-[14px]"
-            [style.color]="vmRunning() ? 'var(--green)' : 'var(--accent)'"
-          >
-            <span
-              class="dot"
-              [style.background]="vmRunning() ? 'var(--green)' : 'var(--accent)'"
-            ></span>
-            {{ vmLabel() }}
-          </div>
-          <div class="mono mt-1 text-[10px] text-[var(--ink-mute)]">
-            {{ vmDetail() }}
-          </div>
-        </div>
+      <span
+        class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
+        aria-hidden="true"
+      ></span>
 
-        <div
-          class="rounded border border-[var(--line)] bg-[var(--bg-2)] p-3"
-          data-testid="health-containers"
-        >
-          <div class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
-            containers
-          </div>
-          <div
-            class="mt-1 flex items-center gap-2 text-[14px]"
-            [style.color]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--green)'"
-          >
-            <span
-              class="dot"
-              [style.background]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--green)'"
-            ></span>
-            {{ containersLabel() }}
-          </div>
-          <div
-            class="mono mt-1 text-[10px]"
-            [style.color]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--ink-mute)'"
-          >
-            {{ containersDetail() }}
-          </div>
-        </div>
-
-        <div
-          class="rounded border border-[var(--line)] bg-[var(--bg-2)] p-3"
-          data-testid="health-bridge"
-        >
-          <div class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
-            ide_bridge
-          </div>
-          <div
-            class="mt-1 flex items-center gap-2 text-[14px]"
-            [style.color]="bridgeRunning() ? 'var(--green)' : 'var(--ink-mute)'"
-          >
-            <span
-              class="dot"
-              [style.background]="bridgeRunning() ? 'var(--green)' : 'var(--ink-mute)'"
-            ></span>
-            {{ bridgeRunning() ? 'connected' : 'disconnected' }}
-          </div>
-          <div class="mono mt-1 text-[10px] text-[var(--ink-mute)]">
-            {{ bridgeDetail() }}
-          </div>
-        </div>
+      <div class="flex items-center gap-2 text-[12px]" data-testid="health-vm">
+        <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">vm</span>
+        <span
+          class="dot"
+          [style.background]="vmRunning() ? 'var(--green)' : 'var(--accent)'"
+        ></span>
+        <span [style.color]="vmRunning() ? 'var(--ink)' : 'var(--accent)'">{{ vmLabel() }}</span>
+        <span class="mono text-[10px] text-[var(--ink-mute)]">· {{ vmDetail() }}</span>
       </div>
-    </div>
 
-    <div
-      class="border-b border-[var(--line)] bg-[var(--bg-1)] px-4 py-2 md:px-6"
-      data-testid="logs-filters"
-    >
-      <div class="mx-auto flex max-w-3xl items-center gap-2">
-        <div
-          class="mono flex overflow-hidden rounded border border-[var(--line)] text-[11px]"
-          role="group"
-          aria-label="Log source filter"
-          data-testid="logs-source-chips"
+      <span
+        class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
+        aria-hidden="true"
+      ></span>
+
+      <div class="flex items-center gap-2 text-[12px]" data-testid="health-containers">
+        <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+          >containers</span
         >
-          @for (src of sources(); track src) {
-            <button
-              type="button"
-              class="px-2.5 py-1 whitespace-nowrap"
-              [style.background]="filters().source === src ? 'var(--bg-2)' : 'transparent'"
-              [style.color]="filters().source === src ? 'var(--ink)' : 'var(--ink-mute)'"
-              [attr.aria-pressed]="filters().source === src"
-              [attr.data-testid]="'logs-source-' + src"
-              (click)="setSource(src)"
-            >
-              {{ src }}
-            </button>
-          }
-        </div>
+        <span
+          class="dot"
+          [style.background]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--green)'"
+        ></span>
+        <span [style.color]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--ink)'">{{
+          containersLabel()
+        }}</span>
+        <span
+          class="mono text-[10px]"
+          [style.color]="anyContainerUnhealthy() ? 'var(--amber)' : 'var(--ink-mute)'"
+          >· {{ containersDetail() }}</span
+        >
+      </div>
+
+      <span
+        class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
+        aria-hidden="true"
+      ></span>
+
+      <div class="flex items-center gap-2 text-[12px]" data-testid="health-bridge">
+        <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+          >ide_bridge</span
+        >
+        <span
+          class="dot"
+          [style.background]="bridgeConnected() ? 'var(--green)' : 'var(--ink-mute)'"
+        ></span>
+        <span [style.color]="bridgeConnected() ? 'var(--ink)' : 'var(--ink-mute)'">{{
+          bridgeConnected() ? 'connected' : 'disconnected'
+        }}</span>
+        <span class="mono text-[10px] text-[var(--ink-mute)]">· {{ bridgeDetail() }}</span>
+        @if (bridgeShowConnectLink()) {
+          <a
+            routerLink="/integrations"
+            fragment="ide-bridge"
+            class="mono text-[10px] text-[var(--accent)] hover:underline"
+            data-testid="bridge-connect-link"
+            >connect →</a
+          >
+        }
+      </div>
+
+      <span
+        class="hidden h-3 w-px bg-[var(--line-strong)] sm:inline-block"
+        aria-hidden="true"
+      ></span>
+
+      <div class="flex items-center gap-2 text-[12px]" data-testid="health-mcpos">
+        <span class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+          >mcp_os</span
+        >
+        <span
+          class="dot"
+          [style.background]="mcpOsRunning() ? 'var(--green)' : 'var(--ink-mute)'"
+        ></span>
+        <span [style.color]="mcpOsRunning() ? 'var(--ink)' : 'var(--ink-mute)'">{{
+          mcpOsRunning() ? 'running' : 'stopped'
+        }}</span>
+      </div>
+
+      <div class="ml-auto flex items-center gap-2">
         <button
           type="button"
-          class="mono ml-auto flex-shrink-0 rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-50 disabled:cursor-not-allowed"
+          class="mono flex-shrink-0 rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-50 disabled:cursor-not-allowed"
           title="Refresh"
           data-testid="logs-refresh"
           [disabled]="loading()"
@@ -255,15 +263,75 @@ function stripContainerPrefix(container: string): string {
         </button>
         <button
           type="button"
-          class="mono flex-shrink-0 rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
+          class="mono flex-shrink-0 rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
           data-testid="logs-export"
+          [disabled]="diagnosticsExporting() || !projectState.activeProject"
           (click)="exportDiagnostics()"
+          title="Collects app logs, container logs, and system info into a sanitized ZIP (no tokens or secrets)."
         >
-          export diagnostics
+          {{ diagnosticsExporting() ? 'exporting…' : 'export diagnostics' }}
         </button>
       </div>
+    </div>
+
+    @if (detailsOpen()) {
       <div
-        class="mono mx-auto mt-2 flex max-w-3xl overflow-hidden rounded border border-[var(--line)] text-[11px]"
+        id="logs-status-details"
+        class="border-b border-[var(--line)] bg-[var(--bg-1)] px-4 py-3 md:px-6"
+        data-testid="logs-status-details"
+      >
+        <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div>
+            <div class="mono mb-1 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
+              containers
+            </div>
+            @if (containerArray().length === 0) {
+              <div class="mono text-[11px] text-[var(--ink-mute)]">no containers</div>
+            } @else {
+              <ul class="space-y-0.5">
+                @for (c of containerArray(); track c.name) {
+                  <li
+                    class="mono flex items-center gap-2 text-[11px]"
+                    [attr.data-testid]="'health-container-' + stripPrefix(c.name)"
+                  >
+                    <span
+                      class="dot"
+                      [style.background]="c.healthy ? 'var(--green)' : 'var(--amber)'"
+                    ></span>
+                    <span class="text-[var(--ink)]">{{ stripPrefix(c.name) }}</span>
+                    <span class="text-[var(--ink-mute)]">· {{ c.status }}</span>
+                  </li>
+                }
+              </ul>
+            }
+          </div>
+          <div>
+            <div class="mono mb-1 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
+              detected ides
+            </div>
+            @if (detectedIdes().length === 0) {
+              <div class="mono text-[11px] text-[var(--ink-mute)]">none detected</div>
+            } @else {
+              <ul class="space-y-0.5">
+                @for (ide of detectedIdes(); track ide.ide_name) {
+                  <li class="mono text-[11px]" data-testid="health-ide-row">
+                    <span class="text-[var(--ink)]">{{ ide.ide_name }}</span>
+                    <span class="text-[var(--ink-mute)]"> :{{ ide.port ?? '—' }}</span>
+                  </li>
+                }
+              </ul>
+            }
+          </div>
+        </div>
+      </div>
+    }
+
+    <div
+      class="flex flex-wrap items-center gap-3 border-b border-[var(--line)] bg-[var(--bg-1)] px-4 py-2 md:px-6"
+      data-testid="logs-filters"
+    >
+      <div
+        class="mono flex overflow-hidden rounded border border-[var(--line)] text-[11px]"
         role="group"
         aria-label="Log level filter"
         data-testid="logs-level-chips"
@@ -282,6 +350,21 @@ function stripContainerPrefix(container: string): string {
           </button>
         }
       </div>
+
+      <label class="mono flex items-center gap-2 text-[11px] text-[var(--ink-mute)]">
+        <span>source</span>
+        <select
+          class="mono min-w-[12rem] rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
+          data-testid="logs-source-select"
+          aria-label="Filter logs by source"
+          [value]="filters().source"
+          (change)="onSourceChange($event)"
+        >
+          @for (opt of sourceOptions(); track opt.value) {
+            <option [value]="opt.value">{{ opt.label }}</option>
+          }
+        </select>
+      </label>
     </div>
 
     @if (error()) {
@@ -291,7 +374,7 @@ function stripContainerPrefix(container: string): string {
         role="alert"
       >
         <div
-          class="mx-auto max-w-3xl rounded ring-1 ring-red-500/40 bg-red-500/[0.06] px-3 py-2 text-[12px] text-red-300 mono"
+          class="rounded ring-1 ring-red-500/40 bg-red-500/[0.06] px-3 py-2 text-[12px] text-red-300 mono"
         >
           {{ error() }}
         </div>
@@ -306,11 +389,7 @@ function stripContainerPrefix(container: string): string {
       aria-live="polite"
       aria-label="Application logs"
     >
-      <!-- Full-width log surface with a small horizontal pad so long lines
-           breathe but still don't run edge-to-edge with the rail. The
-           dashboard cards above keep their narrower max-w-3xl frame; only
-           the log stream needs the extra width. -->
-      <div class="mono w-full px-2 md:px-4" data-testid="logs-list">
+      <div class="mono w-full" data-testid="logs-list">
         @if (loading() && lines().length === 0) {
           <p
             class="mono text-[12px] text-[var(--ink-mute)] py-8 text-center"
@@ -331,24 +410,20 @@ function stripContainerPrefix(container: string): string {
           </p>
         } @else {
           @for (line of visibleLines(); track $index) {
-            <!-- Row layout: fixed-width time + source + level columns
-                 truncate their content (min-w-0 + truncate) so a long
-                 source name like dev_speedwave_mcp_hub cannot bleed into
-                 the level/message columns. The message column owns the
-                 rest of the row and wraps with break-words on long lines. -->
             <div
               class="flex items-start gap-3 py-1 hover:bg-[var(--bg-1)]"
               data-testid="logs-line"
               [style.background]="line.level === 'error' ? 'rgba(239, 68, 68, 0.05)' : null"
             >
               <span
-                class="w-[72px] flex-shrink-0 text-[var(--ink-mute)] tabular-nums"
+                class="w-[152px] flex-shrink-0 text-[var(--ink-mute)] tabular-nums"
                 data-testid="logs-time"
+                [title]="line.time"
               >
-                {{ line.time }}
+                {{ formatTime(line.time) }}
               </span>
               <span
-                class="hidden w-56 flex-shrink-0 truncate md:inline-block"
+                class="hidden w-80 flex-shrink-0 truncate md:inline-block"
                 [style.color]="sourceColour(line)"
                 [title]="line.source"
                 data-testid="logs-source"
@@ -380,12 +455,29 @@ function stripContainerPrefix(container: string): string {
         }
       </div>
     </div>
+
+    <app-modal-overlay
+      [open]="exportDialogOpen()"
+      kicker="✓ export complete"
+      kickerColor="green"
+      title="Diagnostics archive saved"
+      body="The sanitized ZIP is ready. Share the path below with support or attach the file directly."
+      [note]="diagnosticsPath()"
+      [primaryLabel]="copyButtonLabel()"
+      secondaryLabel="close"
+      testId="export-diagnostics-overlay"
+      primaryTestId="export-diagnostics-copy"
+      secondaryTestId="export-diagnostics-close"
+      (primary)="copyDiagnosticsPath()"
+      (secondary)="closeExportDialog()"
+      (closed)="closeExportDialog()"
+    />
   `,
   host: {
     class: 'flex h-full flex-1 flex-col overflow-hidden bg-[var(--bg)] text-[var(--ink)]',
   },
 })
-export class LogsViewComponent implements OnInit, OnDestroy, AfterViewChecked {
+export class LogsViewComponent implements OnInit, OnDestroy {
   @ViewChild('logScroll') private logScroll: ElementRef<HTMLDivElement> | null = null;
 
   /** All parsed log lines from the most recent fetch. */
@@ -396,20 +488,53 @@ export class LogsViewComponent implements OnInit, OnDestroy, AfterViewChecked {
   readonly loading = signal<boolean>(true);
   /** Error message from the last fetch, empty when healthy. */
   readonly error = signal<string>('');
+  private readonly systemHealth = inject(SystemHealthService);
   /** Latest health report shown above the logs (null until first fetch). */
-  readonly health = signal<HealthReport | null>(null);
+  readonly health = this.systemHealth.health;
+  /** Whether the expandable details row is open. */
+  readonly detailsOpen = signal<boolean>(false);
+  /** True while a diagnostics export is in flight. */
+  readonly diagnosticsExporting = signal<boolean>(false);
+  /** Path to the most recently exported diagnostics ZIP (empty when none). */
+  readonly diagnosticsPath = signal<string>('');
+  /** Visibility of the post-export confirmation dialog. */
+  readonly exportDialogOpen = signal<boolean>(false);
+  /** Whether the path was just copied — flips the primary button label briefly. */
+  readonly diagnosticsCopied = signal<boolean>(false);
+  /** Label for the modal's primary button (toggles after a successful copy). */
+  readonly copyButtonLabel = computed<string>(() =>
+    this.diagnosticsCopied() ? 'copied ✓' : 'copy path'
+  );
 
   /** Distinct source names found in the current log set plus `'all'`. */
   readonly sources = computed<string[]>(() => {
     const distinct = new Set<string>();
     for (const line of this.lines()) distinct.add(line.source);
-    // Filter 'all' from observed sources so the hard-coded chip is never duplicated.
     return [
       'all',
       ...Array.from(distinct)
         .filter((s) => s !== 'all')
         .sort(),
     ];
+  });
+
+  /** Per-source line counts for the source select. */
+  private readonly sourceCounts = computed<Map<string, number>>(() => {
+    const counts = new Map<string, number>();
+    for (const line of this.lines()) {
+      counts.set(line.source, (counts.get(line.source) ?? 0) + 1);
+    }
+    return counts;
+  });
+
+  /** Source dropdown options with line counts (`all` shows the total). */
+  readonly sourceOptions = computed<{ value: string; label: string }[]>(() => {
+    const counts = this.sourceCounts();
+    const total = this.lines().length;
+    return this.sources().map((src) => {
+      if (src === 'all') return { value: 'all', label: `all sources (${total})` };
+      return { value: src, label: `${src} (${counts.get(src) ?? 0})` };
+    });
   });
 
   /** Lines after applying the current filters. */
@@ -426,13 +551,6 @@ export class LogsViewComponent implements OnInit, OnDestroy, AfterViewChecked {
 
   /** Whether the overall system is healthy. */
   readonly overallHealthy = computed<boolean>(() => this.health()?.overall_healthy ?? false);
-
-  /** Detail line for the overall health card. */
-  readonly overallDetail = computed<string>(() => {
-    const r = this.health();
-    if (!r) return 'no data';
-    return r.overall_healthy ? 'all checks pass' : 'one or more checks failing';
-  });
 
   /** Whether the VM is reported as running. */
   readonly vmRunning = computed<boolean>(() => {
@@ -477,66 +595,136 @@ export class LogsViewComponent implements OnInit, OnDestroy, AfterViewChecked {
     return 'all healthy';
   });
 
-  /** True when the IDE bridge is running. */
-  readonly bridgeRunning = computed<boolean>(() => {
+  /**
+   * SSOT for "is an IDE actively connected": true only when the user has
+   * selected an IDE via `select_ide` and that IDE is still detected. The
+   * bridge daemon may be `running` (scanning) without any IDE routed
+   * through it — that is `disconnected`, not `connected`.
+   */
+  readonly bridgeConnected = computed<boolean>(() => {
     const b = this.health()?.ide_bridge;
-    return typeof b === 'object' && b !== null ? b.running === true : false;
+    if (!b || typeof b !== 'object') return false;
+    return b.selected_ide !== null && b.selected_ide !== undefined;
   });
 
-  /** Detail line for the bridge card. */
+  /**
+   * Detail line for the bridge card — IDE name + port when connected, a count
+   * when bridges are detected but none selected, or `no IDE detected`. The
+   * "connect" call-to-action is rendered as a separate routerLink (see
+   * `bridgeShowConnectLink`) so users can jump straight to the
+   * `/integrations` table where the actual connection happens.
+   */
   readonly bridgeDetail = computed<string>(() => {
     const b = this.health()?.ide_bridge;
     if (!b || typeof b !== 'object') return '—';
-    if (!b.running) return 'no IDE attached';
-    const ides = Array.isArray(b.detected_ides) ? b.detected_ides : [];
-    if (ides.length === 0) return `:${b.port ?? '—'}`;
-    const top = ides[0];
-    return `${top.ide_name} :${top.port ?? '—'}`;
+    const sel = b.selected_ide;
+    if (sel) return `${sel.ide_name} :${sel.port ?? '—'}`;
+    const detected = Array.isArray(b.detected_ides) ? b.detected_ides : [];
+    if (detected.length === 0) return 'no IDE detected';
+    return `${detected.length} detected`;
+  });
+
+  /**
+   * Whether to render the inline `connect →` anchor next to the bridge
+   * detail. Visible only when the daemon has at least one detected IDE but
+   * none has been selected — clicking the link takes the user to the
+   * `/integrations` view anchored at `#ide-bridge`.
+   */
+  readonly bridgeShowConnectLink = computed<boolean>(() => {
+    const b = this.health()?.ide_bridge;
+    if (!b || typeof b !== 'object') return false;
+    if (b.selected_ide) return false;
+    const detected = Array.isArray(b.detected_ides) ? b.detected_ides : [];
+    return detected.length > 0;
+  });
+
+  /** True when the host-side mcp-os worker is reported as running. */
+  readonly mcpOsRunning = computed<boolean>(() => {
+    const m = this.health()?.mcp_os;
+    return typeof m === 'object' && m !== null ? m.running === true : false;
+  });
+
+  /** Detected IDEs surfaced in the expandable details row. */
+  readonly detectedIdes = computed(() => {
+    const b = this.health()?.ide_bridge;
+    if (!b || typeof b !== 'object') return [];
+    return Array.isArray(b.detected_ides) ? b.detected_ides : [];
   });
 
   /** Defensive accessor — returns an array even when the health snapshot is malformed. */
-  private containerArray(): { name: string; status: string; healthy: boolean }[] {
+  readonly containerArray = computed<{ name: string; status: string; healthy: boolean }[]>(() => {
     const containers = this.health()?.containers;
     return Array.isArray(containers) ? containers : [];
-  }
+  });
 
+  protected readonly projectState = inject(ProjectStateService);
   private readonly tauri = inject(TauriService);
-  private readonly projectState = inject(ProjectStateService);
-  private scrollDirty = false;
-  private healthRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly injector = inject(Injector);
+  private unsubProjectSettled: (() => void) | null = null;
 
-  /** Kicks off the initial log fetch + health refresh + polling. */
+  /**
+   * Kicks off the initial log fetch + health refresh + polling. Re-runs the
+   * fetch whenever the project lifecycle settles so the view recovers from
+   * the boot race where the shell loads `activeProject` after this component
+   * has already mounted (without this, the user sees a "No active project"
+   * banner even though the project pill in the header reads correctly).
+   */
   async ngOnInit(): Promise<void> {
+    void this.forceMaxLogLevel();
     await this.refresh();
-    await this.refreshHealth();
-    this.healthRefreshTimer = setInterval(() => {
-      void this.refreshHealth();
-    }, HEALTH_REFRESH_INTERVAL_MS);
+    // SystemHealthService owns the polling loop and the project-settled
+    // health refresh; we just kick it off and read its `health` signal.
+    // Await so the initial snapshot is committed before view tests assert
+    // on it.
+    await this.systemHealth.ensurePolling();
+    this.unsubProjectSettled = this.projectState.onProjectSettled(() => {
+      void this.refresh();
+    });
   }
 
-  /** Cancels the health-poll interval. */
+  /** Cancels the project-settled subscription (health polling lives in the service). */
   ngOnDestroy(): void {
-    if (this.healthRefreshTimer !== null) {
-      clearInterval(this.healthRefreshTimer);
-      this.healthRefreshTimer = null;
+    if (this.unsubProjectSettled) {
+      this.unsubProjectSettled();
+      this.unsubProjectSettled = null;
     }
   }
 
-  /** Auto-scroll to bottom when new lines arrive. */
-  ngAfterViewChecked(): void {
-    if (this.scrollDirty && this.logScroll) {
-      const el = this.logScroll.nativeElement;
-      el.scrollTop = el.scrollHeight;
-      this.scrollDirty = false;
-    }
+  /**
+   * Pin the log surface to the bottom after Angular commits the freshly
+   * rendered rows to the DOM. `afterNextRender({ write })` is the official
+   * post-render hook (Angular 16+) and runs in the browser only, after the
+   * commit — so `scrollHeight` reflects the final layout, unlike
+   * `ngAfterViewChecked` + `requestAnimationFrame` which fired before the
+   * `@for` block had finished extending the document.
+   */
+  private scrollToBottom(): void {
+    afterNextRender(
+      {
+        write: () => {
+          const el = this.logScroll?.nativeElement;
+          if (el) el.scrollTop = el.scrollHeight;
+        },
+      },
+      { injector: this.injector }
+    );
   }
 
   /** Re-fetch the tail of compose logs and re-parse into typed lines. */
   protected async refresh(): Promise<void> {
     const project = this.projectState.activeProject;
     if (!project) {
-      this.loading.set(false);
-      this.error.set('No active project');
+      // While the shell still boots the project lifecycle the active project
+      // is transiently null — surface a quiet loading state instead of an
+      // error banner, the onProjectSettled callback re-runs this fetch as
+      // soon as the project is ready.
+      if (this.projectState.status === 'loading') {
+        this.loading.set(true);
+        this.error.set('');
+      } else {
+        this.loading.set(false);
+        this.error.set('No active project');
+      }
       return;
     }
     this.loading.set(true);
@@ -551,7 +739,8 @@ export class LogsViewComponent implements OnInit, OnDestroy, AfterViewChecked {
         .map(parseLogLine);
       this.lines.set(parsed);
       this.error.set('');
-      this.scrollDirty = true;
+      this.scrollToBottom();
+      this.reconcileSourceFilter(parsed);
     } catch (e: unknown) {
       this.error.set(e instanceof Error ? e.message : String(e));
     } finally {
@@ -559,32 +748,97 @@ export class LogsViewComponent implements OnInit, OnDestroy, AfterViewChecked {
     }
   }
 
-  /** Re-fetch the system health report — non-fatal on error. */
-  protected async refreshHealth(): Promise<void> {
+  /**
+   * Force a health refresh outside the regular cadence — used by the
+   * "Refresh" button in the toolbar. The polling loop and per-project
+   * refresh are owned by `SystemHealthService`.
+   */
+  protected refreshHealth(): Promise<void> {
+    return this.systemHealth.refresh();
+  }
+
+  /**
+   * Triggers a backend export of diagnostics. On success surfaces the output
+   * path through a confirmation dialog (mockup-aligned); failures are routed
+   * to the error banner so the toolbar stays calm.
+   */
+  protected async exportDiagnostics(): Promise<void> {
     const project = this.projectState.activeProject;
     if (!project) return;
+    this.diagnosticsExporting.set(true);
+    this.diagnosticsPath.set('');
+    this.diagnosticsCopied.set(false);
     try {
-      const report = await this.tauri.invoke<HealthReport>('get_health', { project });
-      // Only commit a structurally valid report — otherwise keep prior snapshot.
-      if (report && typeof report === 'object' && 'vm' in report && 'ide_bridge' in report) {
-        this.health.set(report);
+      const path = await this.tauri.invoke<string>('export_diagnostics', { project });
+      const trimmed = (path ?? '').trim();
+      this.diagnosticsPath.set(trimmed);
+      // Only open the dialog when we actually have something to show — an
+      // empty path would render an empty `note` and confuse the user.
+      if (trimmed.length > 0) {
+        this.exportDialogOpen.set(true);
       }
-    } catch {
-      // Health is non-critical; keep the previous snapshot.
+    } catch (e: unknown) {
+      this.error.set(e instanceof Error ? e.message : String(e));
+    } finally {
+      this.diagnosticsExporting.set(false);
     }
   }
 
   /**
-   * Triggers a backend export of diagnostics (best-effort).
+   * Copies the diagnostics path to the clipboard and flips the primary button
+   * label to `copied ✓` for a short moment. Falls back to the error banner if
+   * the clipboard API rejects (e.g. permission denied).
    */
-  protected async exportDiagnostics(): Promise<void> {
+  protected async copyDiagnosticsPath(): Promise<void> {
+    const path = this.diagnosticsPath();
+    if (!path) return;
     try {
-      await this.tauri.invoke('export_diagnostics', {
-        project: this.projectState.activeProject,
-      });
+      await navigator.clipboard.writeText(path);
+      this.diagnosticsCopied.set(true);
     } catch (e: unknown) {
       this.error.set(e instanceof Error ? e.message : String(e));
+      this.exportDialogOpen.set(false);
     }
+  }
+
+  /** Close the confirmation dialog and reset its transient copy state. */
+  protected closeExportDialog(): void {
+    this.exportDialogOpen.set(false);
+    this.diagnosticsCopied.set(false);
+  }
+
+  /**
+   * Format a parsed timestamp for display.
+   *
+   * - ISO stamps from `nerdctl compose logs --timestamps`
+   *   (e.g. `2026-04-28T11:32:56.123456Z`) are shortened to
+   *   `YYYY-MM-DD HH:MM:SS`.
+   * - Bracketed `HH:MM:SS[.ms]` stamps emitted by the application inside
+   *   the container are prefixed with today's date so the column always
+   *   carries a day — without this, two consecutive entries logged on
+   *   different days are indistinguishable. The fallback is a best-effort
+   *   approximation: we use the host's current date, which is correct for
+   *   the tail-N most recent entries we display, but the day prefix is
+   *   only a hint when the container clock or timezone diverges from the
+   *   host (for example, a containerised process logging in UTC while the
+   *   host shows local time).
+   *
+   * The original raw value is always exposed through `[title]` so the
+   * approximation is recoverable on hover.
+   * @param raw - the parsed `time` field from a log line
+   */
+  protected formatTime(raw: string): string {
+    if (!raw) return '';
+    const isoMatch = FORMAT_TIME_ISO_RE.exec(raw);
+    if (isoMatch) return `${isoMatch[1]} ${isoMatch[2]}`;
+    const hmsMatch = FORMAT_TIME_HMS_RE.exec(raw);
+    if (hmsMatch) return `${this.todayIso()} ${hmsMatch[1]}`;
+    return raw;
+  }
+
+  /** Today's date in ISO `YYYY-MM-DD` form — extracted for ease of mocking in tests. */
+  protected todayIso(): string {
+    return new Date().toISOString().slice(0, 10);
   }
 
   /**
@@ -608,6 +862,14 @@ export class LogsViewComponent implements OnInit, OnDestroy, AfterViewChecked {
     return 'var(--ink-mute)';
   }
 
+  /** Toggle visibility of the expandable per-container / detected-IDE row. */
+  protected toggleDetails(): void {
+    this.detailsOpen.update((v) => !v);
+  }
+
+  /** Strip the `speedwave_<project>_` prefix from a container name for display. */
+  protected readonly stripPrefix = stripContainerPrefix;
+
   /**
    * Select a level chip.
    * @param level - Level to filter on, or `'all'` to disable the filter.
@@ -617,10 +879,45 @@ export class LogsViewComponent implements OnInit, OnDestroy, AfterViewChecked {
   }
 
   /**
-   * Select a source chip.
+   * Select a source from the dropdown.
    * @param source - Source to filter on, or `'all'` to disable the filter.
    */
   protected setSource(source: string): void {
     this.filters.update((f) => ({ ...f, source }));
+  }
+
+  /**
+   * Native `<select>` change handler — narrows `EventTarget` to `HTMLSelectElement`.
+   * @param event - DOM change event from the source dropdown.
+   */
+  protected onSourceChange(event: Event): void {
+    const target = event.target as HTMLSelectElement | null;
+    if (target) this.setSource(target.value);
+  }
+
+  /**
+   * If the active source filter no longer appears in the latest log set
+   * (container stopped, name changed), fall back to `all` so the empty
+   * "no logs match" state can't be triggered by stale selection alone.
+   * @param lines - Most recent parsed log batch.
+   */
+  private reconcileSourceFilter(lines: readonly LogLine[]): void {
+    const active = this.filters().source;
+    if (active === 'all') return;
+    if (lines.some((l) => l.source === active)) return;
+    this.filters.update((f) => ({ ...f, source: 'all' }));
+  }
+
+  /** Force trace-level diagnostics on init; failures log at debug. */
+  private async forceMaxLogLevel(): Promise<void> {
+    try {
+      await this.tauri.invoke('set_log_level', { level: FORCED_LOG_LEVEL });
+    } catch (err) {
+      // Backend unavailable in browser dev mode (expected) or the command
+      // was renamed/removed (regression). Log so a typo surfaces during
+      // development without breaking log rendering, which doesn't depend
+      // on the trace-level upgrade.
+      console.debug('[logs-view] set_log_level failed', err);
+    }
   }
 }
