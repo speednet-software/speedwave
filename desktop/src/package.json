@@ -55,7 +55,7 @@
     "eslint-plugin-jsdoc": "^62.9.0",
     "eslint-plugin-prettier": "^5",
     "jsdom": "^28.1.0",
-    "postcss": "^8.5.8",
+    "postcss": "^8.5.12",
     "prettier": "^3",
     "tailwindcss": "^4.2.1",
     "typescript": "~5.9.0",
