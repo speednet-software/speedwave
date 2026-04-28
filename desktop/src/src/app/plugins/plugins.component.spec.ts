@@ -7,10 +7,14 @@ import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
-vi.mock('@tauri-apps/plugin-dialog', () => ({
-  open: vi.fn(),
-}));
+// `vi.mock` without a factory routes to `__mocks__/@tauri-apps/plugin-dialog.ts`
+// — the same shared `vi.fn()` instance the companion spec at
+// `shared/create-project-modal/create-project-modal.component.spec.ts`
+// uses. Avoids the hoist race that two factory-style mocks would trigger
+// under Angular's `isolate: false` Vitest setup.
+vi.mock('@tauri-apps/plugin-dialog');
 import { open } from '@tauri-apps/plugin-dialog';
+const openMock = vi.mocked(open);
 
 const MOCK_PLUGINS = {
   plugins: [
@@ -80,6 +84,17 @@ describe('PluginsComponent', () => {
   let projectState: ProjectStateService;
 
   beforeEach(async () => {
+    // The Angular `unit-test` builder configures Vitest with
+    // `isolate: false` (see @angular/build/.../vitest/executor.js), which
+    // means module mocks live across spec files in the same run. Without
+    // an explicit reset here, `openMock` retains whatever mockResolvedValue
+    // the previous spec configured — most visibly,
+    // `create-project-modal.component.spec.ts` resolves `open` to a path
+    // string, and the next plugins-spec test that calls `open` without
+    // setting its own resolved value gets that stale path back. Reset
+    // first thing in every beforeEach to keep specs self-contained.
+    openMock.mockReset();
+
     mockTauri = new MockTauriService();
     setupMockTauri(mockTauri);
 
@@ -355,7 +370,7 @@ describe('PluginsComponent', () => {
   describe('installPlugin()', () => {
     it('calls open dialog and installs on selection', async () => {
       await component.ngOnInit();
-      vi.mocked(open).mockResolvedValue('/tmp/presale-1.0.0.zip');
+      openMock.mockResolvedValue('/tmp/presale-1.0.0.zip');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'install_plugin') return 'Plugin installed';
         if (cmd === 'list_projects')
@@ -377,7 +392,7 @@ describe('PluginsComponent', () => {
 
     it('does nothing when dialog is cancelled', async () => {
       await component.ngOnInit();
-      vi.mocked(open).mockResolvedValue(null);
+      openMock.mockResolvedValue(null);
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       await component.installPlugin();
       expect(invokeSpy).not.toHaveBeenCalledWith('install_plugin', expect.anything());
@@ -386,7 +401,7 @@ describe('PluginsComponent', () => {
 
     it('sets error on install failure', async () => {
       await component.ngOnInit();
-      vi.mocked(open).mockResolvedValue('/tmp/bad.zip');
+      openMock.mockResolvedValue('/tmp/bad.zip');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'install_plugin') throw new Error('signature invalid');
         return undefined;
@@ -398,7 +413,7 @@ describe('PluginsComponent', () => {
 
     it('sets error when file dialog throws', async () => {
       await component.ngOnInit();
-      vi.mocked(open).mockRejectedValue(new Error('dialog permission denied'));
+      openMock.mockRejectedValue(new Error('dialog permission denied'));
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       await component.installPlugin();
       expect(component.error).toBe('dialog permission denied');
@@ -410,7 +425,7 @@ describe('PluginsComponent', () => {
   describe('install overlay', () => {
     it('shows overlay during installPlugin() and hides after completion', async () => {
       await component.ngOnInit();
-      vi.mocked(open).mockResolvedValue('/tmp/plugin.zip');
+      openMock.mockResolvedValue('/tmp/plugin.zip');
 
       let resolveFn!: (value: string) => void;
       mockTauri.invokeHandler = (cmd: string) => {

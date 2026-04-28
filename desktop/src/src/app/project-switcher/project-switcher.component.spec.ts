@@ -8,6 +8,10 @@ import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
+// ProjectSwitcherComponent mounts CreateProjectModalComponent which
+// imports `@tauri-apps/plugin-dialog`. Route to the shared `__mocks__`.
+vi.mock('@tauri-apps/plugin-dialog');
+
 describe('ProjectSwitcherComponent', () => {
   let component: ProjectSwitcherComponent;
   let fixture: ComponentFixture<ProjectSwitcherComponent>;

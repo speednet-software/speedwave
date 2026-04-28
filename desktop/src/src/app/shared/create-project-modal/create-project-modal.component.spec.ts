@@ -4,11 +4,14 @@ import { CreateProjectModalComponent } from './create-project-modal.component';
 import { TauriService } from '../../services/tauri.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 
-vi.mock('@tauri-apps/plugin-dialog', () => ({
-  open: vi.fn(),
-}));
-
+// `vi.mock` without a factory routes to `__mocks__/@tauri-apps/plugin-dialog.ts`
+// (project-root-relative). That file exports a single `vi.fn()` instance
+// shared across every spec in the run, which avoids the hoist race
+// that two sibling specs would otherwise trigger by each declaring
+// their own factory under Angular's `isolate: false` Vitest setup.
+vi.mock('@tauri-apps/plugin-dialog');
 import { open } from '@tauri-apps/plugin-dialog';
+const openMock = vi.mocked(open);
 
 describe('CreateProjectModalComponent', () => {
   let component: CreateProjectModalComponent;
@@ -17,7 +20,7 @@ describe('CreateProjectModalComponent', () => {
 
   beforeEach(async () => {
     mockTauri = new MockTauriService();
-    vi.mocked(open).mockReset();
+    openMock.mockReset();
 
     await TestBed.configureTestingModule({
       imports: [CreateProjectModalComponent],
@@ -69,7 +72,7 @@ describe('CreateProjectModalComponent', () => {
 
   describe('browse() — folder picker', () => {
     it('updates dir and auto-fills the name on a fresh selection', async () => {
-      vi.mocked(open).mockResolvedValue('/Users/me/projects/Acme Corp');
+      openMock.mockResolvedValue('/Users/me/projects/Acme Corp');
       await component.browse();
       fixture.detectChanges();
 
@@ -84,7 +87,7 @@ describe('CreateProjectModalComponent', () => {
     });
 
     it('preserves a manually edited name when the user picks another folder', async () => {
-      vi.mocked(open).mockResolvedValueOnce('/Users/me/projects/first');
+      openMock.mockResolvedValueOnce('/Users/me/projects/first');
       await component.browse();
       fixture.detectChanges();
 
@@ -97,7 +100,7 @@ describe('CreateProjectModalComponent', () => {
       expect(nameInput.value).toBe('custom');
 
       // A second browse must keep the user's edit instead of clobbering it.
-      vi.mocked(open).mockResolvedValueOnce('/Users/me/projects/second');
+      openMock.mockResolvedValueOnce('/Users/me/projects/second');
       await component.browse();
       fixture.detectChanges();
       const refreshedName = fixture.nativeElement.querySelector(
@@ -107,7 +110,7 @@ describe('CreateProjectModalComponent', () => {
     });
 
     it('is a no-op when the user cancels the picker (returns null)', async () => {
-      vi.mocked(open).mockResolvedValue(null);
+      openMock.mockResolvedValue(null);
       await component.browse();
       fixture.detectChanges();
       const dirInput = fixture.nativeElement.querySelector(
@@ -117,7 +120,7 @@ describe('CreateProjectModalComponent', () => {
     });
 
     it('surfaces a picker error inline', async () => {
-      vi.mocked(open).mockRejectedValue(new Error('picker permission denied'));
+      openMock.mockRejectedValue(new Error('picker permission denied'));
       await component.browse();
       fixture.detectChanges();
       const err = fixture.nativeElement.querySelector('[data-testid="create-project-error"]');
@@ -131,7 +134,7 @@ describe('CreateProjectModalComponent', () => {
       const created = vi.fn();
       component.created.subscribe(created);
 
-      vi.mocked(open).mockResolvedValue('/Users/me/projects/demo');
+      openMock.mockResolvedValue('/Users/me/projects/demo');
       await component.browse();
       fixture.detectChanges();
 
@@ -158,7 +161,7 @@ describe('CreateProjectModalComponent', () => {
       const created = vi.fn();
       component.created.subscribe(created);
 
-      vi.mocked(open).mockResolvedValue('/Users/me/projects/demo');
+      openMock.mockResolvedValue('/Users/me/projects/demo');
       await component.browse();
       await component.submit();
       fixture.detectChanges();
@@ -170,7 +173,7 @@ describe('CreateProjectModalComponent', () => {
 
     it('trims whitespace around the project name before invoking', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
-      vi.mocked(open).mockResolvedValue('/Users/me/projects/demo');
+      openMock.mockResolvedValue('/Users/me/projects/demo');
       await component.browse();
       component.onNameInput({ target: { value: '  my-name  ' } } as unknown as Event);
       await component.submit();
@@ -210,7 +213,7 @@ describe('CreateProjectModalComponent', () => {
       const closed = vi.fn();
       component.closed.subscribe(closed);
 
-      vi.mocked(open).mockResolvedValue('/Users/me/projects/demo');
+      openMock.mockResolvedValue('/Users/me/projects/demo');
       await component.browse();
       // Fire-and-forget: do not await — busy must stay true for this assertion.
       void component.submit();

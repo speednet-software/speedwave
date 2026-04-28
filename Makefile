@@ -301,7 +301,7 @@ endif
 # ── Angular tests ───────────────────────────────────────────────────────────
 
 test-angular:
-	cd desktop/src && npx ng test --no-watch
+	cd desktop/src && npx ng test --no-watch --runner-config vitest.config.ts
 	@echo "✅ Angular tests passed"
 
 # ── MCP server tests ────────────────────────────────────────────────────────

@@ -17,9 +17,15 @@
  *
  * Waivers (with justification) go in docs/accessibility/contrast-report.md.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterModule } from '@angular/router';
+
+// Routes `@tauri-apps/plugin-dialog` to `__mocks__/@tauri-apps/plugin-dialog.ts`
+// so `PluginsComponent` (and any other component this sweep mounts)
+// gets a no-op `open` instead of the real Tauri dialog API. See the
+// `__mocks__` file for the cross-spec rationale.
+vi.mock('@tauri-apps/plugin-dialog');
 import type { Type } from '@angular/core';
 import type { AxeResults } from 'axe-core';
 import axe from 'axe-core';
