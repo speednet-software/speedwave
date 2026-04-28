@@ -2,6 +2,7 @@ import { ChangeDetectionStrategy, Component, computed, input } from '@angular/co
 import { NgTemplateOutlet } from '@angular/common';
 import type { SessionStats } from '../../models/chat';
 import { DEFAULT_CONTEXT_TOKENS, formatContextLabel } from '../../models/llm';
+import { IconComponent } from '../../shared/icon.component';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 
 /** Shared bar segment indices — module-level constant to avoid per-instance allocation. */
@@ -23,7 +24,7 @@ const NUMBER_FMT = new Intl.NumberFormat('en-US');
 @Component({
   selector: 'app-session-stats',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [NgTemplateOutlet, TooltipDirective],
+  imports: [NgTemplateOutlet, TooltipDirective, IconComponent],
   host: { class: 'block' },
   template: `
     @if (stats(); as s) {
@@ -188,19 +189,7 @@ const NUMBER_FMT = new Intl.NumberFormat('en-US');
           [appTooltip]="'Current git branch: ' + br"
           placement="top"
         >
-          <svg
-            class="h-3 w-3"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-            stroke-width="1.75"
-            aria-hidden="true"
-          >
-            <circle cx="6" cy="6" r="2" />
-            <circle cx="6" cy="18" r="2" />
-            <circle cx="18" cy="8" r="2" />
-            <path stroke-linecap="round" d="M6 8v8m0-8a6 6 0 0 0 6 6h4" />
-          </svg>
+          <app-icon name="git-branch" class="h-3 w-3" />
           <span class="text-[var(--ink-dim)]">{{ br }}</span>
         </span>
       }
