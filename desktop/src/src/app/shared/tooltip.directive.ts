@@ -3,7 +3,6 @@ import {
   Overlay,
   OverlayPositionBuilder,
   OverlayRef,
-  ScrollDispatcher,
   ScrollStrategyOptions,
 } from '@angular/cdk/overlay';
 import { ComponentPortal } from '@angular/cdk/portal';
@@ -164,7 +163,6 @@ export class TooltipDirective implements OnDestroy {
   private readonly host = inject(ElementRef<HTMLElement>);
   private readonly overlay = inject(Overlay);
   private readonly positionBuilder = inject(OverlayPositionBuilder);
-  private readonly scrollDispatcher = inject(ScrollDispatcher);
   private readonly scrollStrategies = inject(ScrollStrategyOptions);
 
   private overlayRef: OverlayRef | null = null;
