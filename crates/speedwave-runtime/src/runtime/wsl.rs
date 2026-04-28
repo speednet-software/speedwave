@@ -917,6 +917,28 @@ mod tests {
         ];
 
         for args in nasty_args {
+            let path_env = format!("PATH={}", consts::CONTAINER_PATH);
+            let interactive_prefix: Vec<&str> = vec![
+                "nerdctl",
+                "exec",
+                "-it",
+                "-e",
+                "TERM=xterm-256color",
+                "-e",
+                "COLORTERM=truecolor",
+                "-e",
+                path_env.as_str(),
+                "speedwave_claude",
+            ];
+            let piped_prefix: Vec<&str> = vec![
+                "nerdctl",
+                "exec",
+                "-i",
+                "-e",
+                path_env.as_str(),
+                "speedwave_claude",
+            ];
+
             let rt = WslRuntime::new();
             let cmd = rt.container_exec("speedwave_claude", args);
             let remote_cmd = cmd
@@ -924,7 +946,12 @@ mod tests {
                 .last()
                 .map(|s| s.to_string_lossy().into_owned())
                 .expect("argv non-empty");
-            assert_bash_n(&remote_cmd, args, "container_exec");
+            let expected: Vec<&str> = interactive_prefix
+                .iter()
+                .copied()
+                .chain(args.iter().copied())
+                .collect();
+            assert_quoting_roundtrips(&remote_cmd, &expected, "container_exec");
 
             let cmd = rt
                 .container_exec_piped("speedwave_claude", args)
@@ -934,30 +961,28 @@ mod tests {
                 .last()
                 .map(|s| s.to_string_lossy().into_owned())
                 .expect("argv non-empty");
-            assert_bash_n(&remote_cmd, args, "container_exec_piped");
+            let expected: Vec<&str> = piped_prefix
+                .iter()
+                .copied()
+                .chain(args.iter().copied())
+                .collect();
+            assert_quoting_roundtrips(&remote_cmd, &expected, "container_exec_piped");
         }
     }
 
-    /// Invokes `bash -n` (POSIX syntax check, no execution) on `remote_cmd`.
-    /// See `runtime::lima::tests::assert_bash_n` for the full rationale on
-    /// why we hand the script to bash via a file rather than `-nc`.
-    fn assert_bash_n(remote_cmd: &str, args: &[&str], variant: &str) {
-        use std::io::Write;
-        let mut f = tempfile::NamedTempFile::new().expect("create temp file");
-        f.write_all(remote_cmd.as_bytes())
-            .expect("write remote_cmd");
-        f.flush().expect("flush remote_cmd");
-        let status = std::process::Command::new("bash")
-            .arg("-n")
-            .arg(f.path())
-            .env("LANG", "C.UTF-8")
-            .env("LC_ALL", "C.UTF-8")
-            .status()
-            .expect("bash -n must be available on the host");
-        drop(f);
-        assert!(
-            status.success(),
-            "bash -n rejected {variant} remote_cmd built from {args:?} → {remote_cmd:?}",
+    /// Verifies that `remote_cmd` is a valid POSIX shell command by
+    /// round-tripping through `shlex::split`. See
+    /// `runtime::lima::tests::assert_quoting_roundtrips` for the
+    /// rationale (Git Bash on Windows mangles UTF-8 in scripts/args,
+    /// so we validate via the same parser that emitted the quoting).
+    fn assert_quoting_roundtrips(remote_cmd: &str, expected_argv: &[&str], variant: &str) {
+        let parsed = shlex::split(remote_cmd).unwrap_or_else(|| {
+            panic!("shlex::split rejected {variant} remote_cmd built from {expected_argv:?} → {remote_cmd:?}")
+        });
+        assert_eq!(
+            parsed, expected_argv,
+            "{variant} remote_cmd did not round-trip: input argv != reparsed argv\n\
+             remote_cmd: {remote_cmd:?}",
         );
     }
 

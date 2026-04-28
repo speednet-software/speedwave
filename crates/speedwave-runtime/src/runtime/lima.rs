@@ -1342,6 +1342,32 @@ mod tests {
         ];
 
         for args in nasty_args {
+            let path_env = format!("PATH={}", consts::CONTAINER_PATH);
+            let interactive_prefix: Vec<&str> = vec![
+                "sudo",
+                "nerdctl",
+                "exec",
+                "-it",
+                "-e",
+                "TERM=xterm-256color",
+                "-e",
+                "COLORTERM=truecolor",
+                "-e",
+                path_env.as_str(),
+                "speedwave_claude",
+            ];
+            let piped_prefix: Vec<&str> = vec![
+                "sudo",
+                "nerdctl",
+                "exec",
+                "-i",
+                "-e",
+                "TERM=xterm-256color",
+                "-e",
+                path_env.as_str(),
+                "speedwave_claude",
+            ];
+
             // Build container_exec command and extract the remote_cmd.
             let rt = LimaRuntime::new();
             let cmd = rt.container_exec("speedwave_claude", args);
@@ -1350,15 +1376,12 @@ mod tests {
                 .last()
                 .map(|s| s.to_string_lossy().into_owned())
                 .expect("argv non-empty");
-
-            // bash -n parses the script without executing it. If our
-            // shell-quoting ever regresses, this exits non-zero and the
-            // assertion catches it locally — no Lima/SSH stack required.
-            // On Git Bash for Windows, MSYS path conversion would mangle
-            // the embedded `/usr/local/bin/...` and `/home/...` tokens
-            // before bash parses them; disabling it via MSYS2_ARG_CONV_EXCL
-            // keeps the test deterministic across all three host OSes.
-            assert_bash_n(&remote_cmd, args, "container_exec");
+            let expected: Vec<&str> = interactive_prefix
+                .iter()
+                .copied()
+                .chain(args.iter().copied())
+                .collect();
+            assert_quoting_roundtrips(&remote_cmd, &expected, "container_exec");
 
             // Same check for the piped variant.
             let runner = mock_runner_with_vm_running();
@@ -1371,39 +1394,36 @@ mod tests {
                 .last()
                 .map(|s| s.to_string_lossy().into_owned())
                 .expect("argv non-empty");
-            assert_bash_n(&remote_cmd, args, "container_exec_piped");
+            let expected: Vec<&str> = piped_prefix
+                .iter()
+                .copied()
+                .chain(args.iter().copied())
+                .collect();
+            assert_quoting_roundtrips(&remote_cmd, &expected, "container_exec_piped");
         }
     }
 
-    /// Invokes `bash -n` (POSIX syntax check, no execution) on `remote_cmd`.
+    /// Verifies that `remote_cmd` is a valid POSIX shell command by
+    /// round-tripping through `shlex::split` and asserting the parsed
+    /// argv equals the original. If the quoting were broken, the
+    /// parser would either fail (returning `None`) or would split into
+    /// a different argv shape than what we encoded.
     ///
-    /// Implementation note: we write the script to a temp file and pass
-    /// the path to `bash -n`, instead of `bash -nc <string>`. On the
-    /// `windows-latest` GitHub Actions runner, Git Bash + MSYS2 mangle
-    /// the command-line argument (em-dash, embedded `/usr/...` paths) by
-    /// the time bash sees it, producing spurious syntax errors. A file
-    /// argument bypasses the entire arg-conversion path: bash reads the
-    /// raw bytes off disk and parses them in its own UTF-8 locale.
-    fn assert_bash_n(remote_cmd: &str, args: &[&str], variant: &str) {
-        use std::io::Write;
-        let mut f = tempfile::NamedTempFile::new().expect("create temp file");
-        f.write_all(remote_cmd.as_bytes())
-            .expect("write remote_cmd");
-        f.flush().expect("flush remote_cmd");
-        // Keep `f` alive until after the bash invocation — its Drop impl
-        // deletes the file. On Windows, `bash` opens the path read-only
-        // even while we still hold the writer, so this works on all OSes.
-        let status = std::process::Command::new("bash")
-            .arg("-n")
-            .arg(f.path())
-            .env("LANG", "C.UTF-8")
-            .env("LC_ALL", "C.UTF-8")
-            .status()
-            .expect("bash -n must be available on the host");
-        drop(f);
-        assert!(
-            status.success(),
-            "bash -n rejected {variant} remote_cmd built from {args:?} → {remote_cmd:?}",
+    /// We deliberately do NOT spawn `bash -n` here even though it would
+    /// be the canonical syntax check: Git Bash on `windows-latest`
+    /// corrupts multi-byte UTF-8 in command-line args/scripts (em-dash
+    /// in `prompts::local_llm_identity` triggers this), see Git for
+    /// Windows / claude-code#31295. A pure-Rust roundtrip via the same
+    /// `shlex` crate that produced the quoting is the lossless,
+    /// platform-independent equivalent.
+    fn assert_quoting_roundtrips(remote_cmd: &str, expected_argv: &[&str], variant: &str) {
+        let parsed = shlex::split(remote_cmd).unwrap_or_else(|| {
+            panic!("shlex::split rejected {variant} remote_cmd built from {expected_argv:?} → {remote_cmd:?}")
+        });
+        assert_eq!(
+            parsed, expected_argv,
+            "{variant} remote_cmd did not round-trip: input argv != reparsed argv\n\
+             remote_cmd: {remote_cmd:?}",
         );
     }
 
