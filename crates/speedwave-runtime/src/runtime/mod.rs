@@ -491,6 +491,22 @@ fn is_stale_container_error(message: &str) -> bool {
     lower.contains("mount namespace root") || lower.contains("container breakout detected")
 }
 
+/// POSIX-shell-quotes each argument and joins with spaces — for transports
+/// that re-evaluate the command line through a remote shell (`ssh`, `wsl.exe`,
+/// `limactl shell`).
+///
+/// Without this, prompts containing `(`, `)`, `'`, `` ` ``, `$`, newlines, etc.
+/// produced by `--append-system-prompt` (see `prompts::local_llm_identity`)
+/// would break remote bash with `syntax error near unexpected token`. Using
+/// `shlex::try_quote` per arg yields a string that any POSIX shell parses
+/// back into the original argv.
+pub(crate) fn shell_quote_argv(argv: &[&str]) -> String {
+    argv.iter()
+        .map(|a| shlex::try_quote(a).unwrap().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Probes whether `nerdctl exec` works on the given container by running a
 /// trivial command (`true`).  Returns `Ok(())` on success, or the stderr
 /// content as an error.

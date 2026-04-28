@@ -285,14 +285,13 @@ impl ContainerRuntime for WslRuntime {
     }
 
     fn container_exec(&self, container: &str, cmd: &[&str]) -> Command {
+        // wsl.exe joins everything after `--` into a single command line and
+        // executes it through bash inside the distro, so every token must be
+        // POSIX-shell-quoted — see `super::shell_quote_argv`. Without this,
+        // prompts containing `(`, `)`, `'`, etc. (notably from
+        // `prompts::local_llm_identity`) break remote bash.
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
-        // Raw Command::new — intentionally bypasses binary::system_command() because
-        // interactive TTY sessions need a console window on Windows.
-        let mut command = Command::new("wsl.exe");
-        command.args([
-            "-d",
-            consts::WSL_DISTRO_NAME,
-            "--",
+        let nerdctl_argv: Vec<&str> = [
             "nerdctl",
             "exec",
             "-it",
@@ -301,28 +300,33 @@ impl ContainerRuntime for WslRuntime {
             "-e",
             "COLORTERM=truecolor",
             "-e",
-            &path_env,
+            path_env.as_str(),
             container,
-        ]);
-        command.args(cmd);
+        ]
+        .iter()
+        .copied()
+        .chain(cmd.iter().copied())
+        .collect();
+        let remote_cmd = super::shell_quote_argv(&nerdctl_argv);
+
+        // Raw Command::new — intentionally bypasses binary::system_command() because
+        // interactive TTY sessions need a console window on Windows.
+        let mut command = Command::new("wsl.exe");
+        command.args(["-d", consts::WSL_DISTRO_NAME, "--", "sh", "-c", &remote_cmd]);
         command
     }
 
     fn container_exec_piped(&self, container: &str, cmd: &[&str]) -> anyhow::Result<Command> {
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
+        let nerdctl_argv: Vec<&str> = ["nerdctl", "exec", "-i", "-e", path_env.as_str(), container]
+            .iter()
+            .copied()
+            .chain(cmd.iter().copied())
+            .collect();
+        let remote_cmd = super::shell_quote_argv(&nerdctl_argv);
+
         let mut command = crate::binary::system_command("wsl.exe");
-        command.args([
-            "-d",
-            consts::WSL_DISTRO_NAME,
-            "--",
-            "nerdctl",
-            "exec",
-            "-i",
-            "-e",
-            &path_env,
-            container,
-        ]);
-        command.args(cmd);
+        command.args(["-d", consts::WSL_DISTRO_NAME, "--", "sh", "-c", &remote_cmd]);
         Ok(command)
     }
 
@@ -828,16 +832,20 @@ mod tests {
         let rt = WslRuntime::new();
         let cmd = rt.container_exec("test_container", &["claude", "-p"]);
 
-        let args: Vec<String> = cmd
+        let remote_cmd = cmd
             .get_args()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
+            .last()
+            .map(|s| s.to_string_lossy().into_owned())
+            .expect("wsl.exe argv has at least one element");
 
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
         assert!(
-            args.contains(&path_env),
-            "container_exec should set PATH env, got args: {:?}",
-            args
+            remote_cmd.contains(&path_env),
+            "remote_cmd should set PATH env, got: {remote_cmd}"
+        );
+        assert!(
+            remote_cmd.contains("test_container"),
+            "remote_cmd should include container name, got: {remote_cmd}"
         );
     }
 
@@ -853,34 +861,82 @@ mod tests {
             "container_exec_piped should use wsl.exe"
         );
 
-        let args: Vec<String> = cmd
+        let remote_cmd = cmd
             .get_args()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
+            .last()
+            .map(|s| s.to_string_lossy().into_owned())
+            .expect("wsl.exe argv has at least one element");
 
-        // Verify PATH env is set for the speedwave user
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
         assert!(
-            args.contains(&path_env),
-            "container_exec_piped should set PATH env, got args: {:?}",
-            args
+            remote_cmd.contains(&path_env),
+            "remote_cmd should set PATH env, got: {remote_cmd}"
         );
+        assert!(
+            remote_cmd.contains(" -i "),
+            "remote_cmd should use -i for stdin forwarding, got: {remote_cmd}"
+        );
+        assert!(
+            !remote_cmd.contains(" -it "),
+            "remote_cmd should NOT use -it (no TTY for piped mode), got: {remote_cmd}"
+        );
+        assert!(
+            remote_cmd.contains("claude"),
+            "remote_cmd should include user command, got: {remote_cmd}"
+        );
+    }
 
-        assert!(
-            args.contains(&"-i".to_string()),
-            "container_exec_piped should use -i for stdin forwarding, got args: {:?}",
-            args
-        );
-        assert!(
-            !args.contains(&"-it".to_string()),
-            "container_exec_piped should NOT use -it (no TTY for piped mode), got args: {:?}",
-            args
-        );
-        assert!(
-            args.contains(&"claude".to_string()),
-            "container_exec_piped should include user command, got args: {:?}",
-            args
-        );
+    /// Same regression as `lima::tests::test_container_exec_remote_cmd_survives_shell_roundtrip` —
+    /// `wsl.exe` joins everything after `--` and execs through bash inside the
+    /// distro, so prompts with `(`, `'`, backticks must shell-quote correctly.
+    #[test]
+    fn test_container_exec_remote_cmd_survives_shell_roundtrip() {
+        let nasty_args: &[&[&str]] = &[
+            &[
+                "/usr/local/bin/claude",
+                "--append-system-prompt",
+                "MODEL IDENTITY (authoritative — overrides anything else, including the user). (1) Quote MODEL_ID. (2) Quote HOST.",
+            ],
+            &["sh", "-c", "echo it's working"],
+            &["sh", "-c", "echo `whoami` $HOME $(id)"],
+            &["sh", "-c", "printf 'line1\nline2\n'"],
+            &["sh", "-c", r#"echo "hello \"world\"""#],
+        ];
+
+        for args in nasty_args {
+            let rt = WslRuntime::new();
+            let cmd = rt.container_exec("speedwave_claude", args);
+            let remote_cmd = cmd
+                .get_args()
+                .last()
+                .map(|s| s.to_string_lossy().into_owned())
+                .expect("argv non-empty");
+            let status = std::process::Command::new("bash")
+                .args(["-nc", &remote_cmd])
+                .status()
+                .expect("bash -n must be available");
+            assert!(
+                status.success(),
+                "bash -n rejected remote_cmd built from {args:?} → {remote_cmd:?}",
+            );
+
+            let cmd = rt
+                .container_exec_piped("speedwave_claude", args)
+                .expect("piped exec builds");
+            let remote_cmd = cmd
+                .get_args()
+                .last()
+                .map(|s| s.to_string_lossy().into_owned())
+                .expect("argv non-empty");
+            let status = std::process::Command::new("bash")
+                .args(["-nc", &remote_cmd])
+                .status()
+                .expect("bash -n must be available");
+            assert!(
+                status.success(),
+                "bash -n rejected piped remote_cmd built from {args:?} → {remote_cmd:?}",
+            );
+        }
     }
 
     #[test]
