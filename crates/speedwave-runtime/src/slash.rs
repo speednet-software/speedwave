@@ -148,17 +148,29 @@ pub fn discover_slash_commands(
 /// a plugin is installed / removed, when the active project changes, or
 /// when the user explicitly asks for a refresh.
 pub fn invalidate_cache(project_name: &str) {
-    if let Ok(mut map) = cache().lock() {
-        map.remove(project_name);
+    match cache().lock() {
+        Ok(mut map) => {
+            map.remove(project_name);
+        }
+        Err(e) => log_cache_poisoned("invalidate_cache", &e),
     }
 }
 
 /// Invalidates every cached discovery. Useful on factory reset and at
 /// the end of tests that share process state.
 pub fn invalidate_all_caches() {
-    if let Ok(mut map) = cache().lock() {
-        map.clear();
+    match cache().lock() {
+        Ok(mut map) => map.clear(),
+        Err(e) => log_cache_poisoned("invalidate_all_caches", &e),
     }
+}
+
+/// Surface a poisoned-mutex condition at `warn!` so the diagnostic trail
+/// is visible. The fallback (skip the cache update) is benign — the next
+/// caller re-runs discovery — but a silent `.ok()?` hides every panic in
+/// a worker thread that touched the cache.
+fn log_cache_poisoned<G>(site: &str, err: &std::sync::PoisonError<G>) {
+    log::warn!("slash discovery cache mutex poisoned at {site}: {err}; cache update skipped");
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +190,13 @@ fn cache() -> &'static Mutex<HashMap<String, CachedDiscovery>> {
 }
 
 fn cache_get(project_name: &str) -> Option<SlashDiscovery> {
-    let mut map = cache().lock().ok()?;
+    let mut map = match cache().lock() {
+        Ok(map) => map,
+        Err(e) => {
+            log_cache_poisoned("cache_get", &e);
+            return None;
+        }
+    };
     let entry = map.get(project_name)?;
     if entry.stored_at.elapsed() < CACHE_STALENESS {
         Some(entry.discovery.clone())
@@ -189,14 +207,17 @@ fn cache_get(project_name: &str) -> Option<SlashDiscovery> {
 }
 
 fn cache_put(project_name: &str, discovery: SlashDiscovery) {
-    if let Ok(mut map) = cache().lock() {
-        map.insert(
-            project_name.to_string(),
-            CachedDiscovery {
-                stored_at: Instant::now(),
-                discovery,
-            },
-        );
+    match cache().lock() {
+        Ok(mut map) => {
+            map.insert(
+                project_name.to_string(),
+                CachedDiscovery {
+                    stored_at: Instant::now(),
+                    discovery,
+                },
+            );
+        }
+        Err(e) => log_cache_poisoned("cache_put", &e),
     }
 }
 

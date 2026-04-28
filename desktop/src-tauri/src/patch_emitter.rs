@@ -87,21 +87,33 @@ impl PatchEmitter {
     }
 
     /// Rebind to a registry-backed store the first time we know the session id.
+    ///
+    /// Order matters: the pre-bind queue (`self.pending`) carries patches that
+    /// already allocated indices via the local fallback in `next_index()`.
+    /// Those indices live in `self.blocks_for_entry` but the entries themselves
+    /// have not yet hit the store. The post-bind index provider must therefore
+    /// be derived **after** flushing the queue, so `EntryIndexProvider::start_from`
+    /// reads the real `max + 1` from the populated store rather than restarting
+    /// at 0. Without this, a multi-turn conversation that goes through ADR-045's
+    /// queue-drain path allocates Turn 2's first entry at index 0, colliding
+    /// with the user entry already committed in Turn 1.
+    ///
+    /// `registry.get_or_create` is bypassed in favour of `store_for` so we
+    /// don't fork an `EntryIndexProvider` against an empty store before the
+    /// flush. The stored `SessionStreams.indices` field is no longer
+    /// consulted by this caller.
     fn bind_to(&mut self, registry: &MsgStoreRegistry, session_id: &str) {
         if self.store.is_some() {
             return;
         }
-        let streams = registry.get_or_create(session_id);
-        self.store = Some(streams.store);
-        self.indices = Some(streams.indices);
+        let store = registry.store_for(session_id);
+        self.store = Some(store.clone());
         self.session_id = Some(session_id.to_string());
-        // Flush buffered patches in order.
-        let drained = std::mem::take(&mut self.pending);
-        if let Some(store) = &self.store {
-            for msg in drained {
-                store.push(msg);
-            }
+        // Flush pre-bind patches first so `start_from` sees the real history.
+        for msg in std::mem::take(&mut self.pending) {
+            store.push(msg);
         }
+        self.indices = Some(EntryIndexProvider::start_from(&store));
     }
 
     fn push(&mut self, msg: LogMsg) {
@@ -279,8 +291,12 @@ impl PatchEmitter {
                     ConversationPatch::replace_session_totals(self.totals),
                 ));
                 self.set_streaming(false);
-                // End of turn: clear per-turn state so the next Text starts a fresh assistant entry.
+                // End of turn: clear per-turn state so the next Text starts
+                // a fresh assistant entry and the next UserMessageCommit
+                // creates a fresh user entry instead of overwriting the
+                // previous turn's user UUID.
                 self.current_assistant = None;
+                self.last_user_idx = None;
                 self.tool_blocks.clear();
             }
             StreamChunk::RateLimit { .. } => {
@@ -679,6 +695,90 @@ mod tests {
         );
         let snapshot = r.store_for("s-q").snapshot_state();
         assert!(snapshot.pending_queue.is_none());
+    }
+
+    /// Regression guard: in a multi-turn conversation that goes through
+    /// ADR-045's queue-drain path the same `PatchEmitter` instance handles
+    /// Turn 1 (pre-bind), `Result` (bind + flush), and Turn 2 (post-bind).
+    /// Before the bind_to fix the post-bind index provider was forked from
+    /// an empty store and started at 0, so Turn 2's first allocation
+    /// collided with the user/assistant entries already at index 0/1.
+    /// After the fix the provider is derived after the flush, so Turn 2
+    /// allocates `max(pre_bind) + 1`.
+    #[test]
+    fn bind_to_post_bind_indices_continue_after_pre_bind_entries() {
+        let r = registry();
+        let mut e = PatchEmitter::new();
+        // Turn 1 (pre-bind): one user commit + one assistant text chunk.
+        e.handle_chunk(
+            &StreamChunk::UserMessageCommit {
+                uuid: "u-turn1".into(),
+            },
+            &r,
+        );
+        e.handle_chunk(
+            &StreamChunk::Text {
+                content: "Turn 1 reply".into(),
+            },
+            &r,
+        );
+        // Result fires the bind + flush.
+        e.handle_chunk(
+            &StreamChunk::Result {
+                session_id: "s-multi".into(),
+                total_cost: None,
+                usage: None,
+                result_text: None,
+                context_window_size: None,
+                assistant_uuid: None,
+                turn_usage: None,
+                turn_cost: None,
+                model: None,
+            },
+            &r,
+        );
+        let after_turn_1 = r.store_for("s-multi").snapshot_state();
+        assert_eq!(
+            after_turn_1.entries.len(),
+            2,
+            "turn 1 must commit one user + one assistant entry before turn 2 starts"
+        );
+
+        // Turn 2 (post-bind): another user commit + assistant text.
+        // If the index provider regressed, both of these would re-allocate
+        // index 0 / 1 and clobber turn 1 in-place.
+        e.handle_chunk(
+            &StreamChunk::UserMessageCommit {
+                uuid: "u-turn2".into(),
+            },
+            &r,
+        );
+        e.handle_chunk(
+            &StreamChunk::Text {
+                content: "Turn 2 reply".into(),
+            },
+            &r,
+        );
+        let snapshot = r.store_for("s-multi").snapshot_state();
+        assert_eq!(
+            snapshot.entries.len(),
+            4,
+            "turn 2 must append two new entries; collision would keep len at 2 \
+             (entries: {:?})",
+            snapshot.entries.iter().map(|e| &e.role).collect::<Vec<_>>()
+        );
+        // Turn 1 entries must be preserved intact.
+        assert_eq!(snapshot.entries[0].uuid.as_deref(), Some("u-turn1"));
+        match &snapshot.entries[1].blocks[0] {
+            PatchBlock::Text { content } => assert_eq!(content, "Turn 1 reply"),
+            other => panic!("turn 1 assistant block clobbered: {other:?}"),
+        }
+        // Turn 2 entries must occupy fresh indices.
+        assert_eq!(snapshot.entries[2].uuid.as_deref(), Some("u-turn2"));
+        match &snapshot.entries[3].blocks[0] {
+            PatchBlock::Text { content } => assert_eq!(content, "Turn 2 reply"),
+            other => panic!("turn 2 assistant block missing: {other:?}"),
+        }
     }
 
     #[test]

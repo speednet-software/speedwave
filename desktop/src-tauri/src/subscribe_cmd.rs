@@ -20,28 +20,24 @@ use futures_core::stream::BoxStream;
 use futures_util::StreamExt;
 use serde::Serialize;
 use speedwave_runtime::stream::msg_store::LogMsg;
-use speedwave_runtime::stream::{EntryIndexProvider, MsgStore};
+use speedwave_runtime::stream::MsgStore;
 use tauri::{AppHandle, Emitter};
 
-/// Pair of per-session services: a MsgStore for patches and an
-/// EntryIndexProvider for stable monotonic indices (ADR-044).
-///
-/// They live together in the registry because the index counter must
-/// recover from the store's history when a session reconnects — keeping
-/// them lockstep removes the chance of drift.
-#[derive(Clone)]
-pub struct SessionStreams {
-    pub store: Arc<MsgStore>,
-    pub indices: EntryIndexProvider,
-}
-
-/// Per-session SessionStreams registry, kept in Tauri-managed state.
+/// Per-session message-store registry, kept in Tauri-managed state.
 ///
 /// Cloning is cheap (`Arc` clone). Tauri commands and the chat reader
 /// thread both grab handles via `state::<MsgStoreRegistry>()`.
+///
+/// The registry tracks only `MsgStore` handles. Each `PatchEmitter` derives
+/// its own `EntryIndexProvider` via `EntryIndexProvider::start_from(&store)`
+/// **after** flushing any pre-bind patches, which guarantees the post-bind
+/// allocator starts at `max(history) + 1`. A registry-level provider is
+/// avoided to prevent the pre-bind/post-bind index collision that would
+/// otherwise break multi-turn conversations going through ADR-045's
+/// queue-drain path.
 #[derive(Clone, Default)]
 pub struct MsgStoreRegistry {
-    inner: Arc<DashMap<String, SessionStreams>>,
+    inner: Arc<DashMap<String, Arc<MsgStore>>>,
 }
 
 impl MsgStoreRegistry {
@@ -49,32 +45,24 @@ impl MsgStoreRegistry {
         Self::default()
     }
 
-    /// Get-or-create the SessionStreams for `session_id`.
-    pub fn get_or_create(&self, session_id: &str) -> SessionStreams {
+    /// Get-or-create the `MsgStore` for `session_id`.
+    pub fn store_for(&self, session_id: &str) -> Arc<MsgStore> {
         if let Some(existing) = self.inner.get(session_id) {
             return existing.value().clone();
         }
         let store: Arc<MsgStore> = Arc::new(MsgStore::new());
-        let indices = EntryIndexProvider::start_from(&store);
-        let streams = SessionStreams { store, indices };
-        self.inner.insert(session_id.to_string(), streams.clone());
-        streams
-    }
-
-    /// Convenience accessor — returns just the MsgStore handle for sites
-    /// that don't need the index provider.
-    pub fn store_for(&self, session_id: &str) -> Arc<MsgStore> {
-        self.get_or_create(session_id).store
+        self.inner.insert(session_id.to_string(), store.clone());
+        store
     }
 
     /// Read-only handle for the MsgStore of `session_id`, when one exists.
     #[cfg(test)]
     pub fn get(&self, session_id: &str) -> Option<Arc<MsgStore>> {
-        self.inner.get(session_id).map(|r| r.value().store.clone())
+        self.inner.get(session_id).map(|r| r.value().clone())
     }
 
     /// Drop the streams for `session_id`. Called when a session ends — the
-    /// next session under the same id starts with a fresh store/indices.
+    /// next session under the same id starts with a fresh store.
     #[cfg(test)]
     pub fn remove(&self, session_id: &str) {
         self.inner.remove(session_id);
@@ -133,9 +121,11 @@ pub async fn subscribe_session(
     state: tauri::State<'_, MsgStoreRegistry>,
     app: AppHandle,
 ) -> Result<SubscribeAck, String> {
-    if session_id.is_empty() {
-        return Err("session_id required".to_string());
-    }
+    // Same validation surface as `retry_last_turn`. A non-UUID session_id
+    // would otherwise create a `DashMap` entry in the registry and surface
+    // verbatim in the `chat_patch::<session_id>` event name — leaking
+    // arbitrary user-controlled strings into the Tauri event channel.
+    crate::history::validate_session_id(&session_id).map_err(|e| e.to_string())?;
     let store = state.store_for(&session_id);
     let event_name = patch_event_name(&session_id);
     let stream = store.history_plus_stream();
@@ -157,29 +147,18 @@ mod tests {
     }
 
     #[test]
-    fn registry_get_or_create_returns_same_arc_on_second_call() {
+    fn registry_store_for_returns_same_arc_on_second_call() {
         let r = MsgStoreRegistry::new();
-        let a = r.get_or_create("s-1");
-        let b = r.get_or_create("s-1");
-        assert!(Arc::ptr_eq(&a.store, &b.store));
+        let a = r.store_for("s-1");
+        let b = r.store_for("s-1");
+        assert!(Arc::ptr_eq(&a, &b));
         assert_eq!(r.len(), 1);
-    }
-
-    #[test]
-    fn registry_streams_carry_index_provider() {
-        let r = MsgStoreRegistry::new();
-        let s = r.get_or_create("s-idx");
-        assert_eq!(s.indices.next(), 0);
-        assert_eq!(s.indices.next(), 1);
-        // Same session id reuses the same provider.
-        let s2 = r.get_or_create("s-idx");
-        assert_eq!(s2.indices.next(), 2);
     }
 
     #[test]
     fn registry_get_after_create_returns_handle() {
         let r = MsgStoreRegistry::new();
-        let _ = r.get_or_create("s-2");
+        let _ = r.store_for("s-2");
         assert!(r.get("s-2").is_some());
         assert!(r.get("other").is_none());
     }
@@ -187,9 +166,40 @@ mod tests {
     #[test]
     fn registry_remove_drops_store() {
         let r = MsgStoreRegistry::new();
-        let _ = r.get_or_create("s-3");
+        let _ = r.store_for("s-3");
         r.remove("s-3");
         assert!(r.get("s-3").is_none());
+    }
+
+    #[test]
+    fn subscribe_session_rejects_non_uuid_session_id() {
+        // Regression guard: `subscribe_session` previously only rejected
+        // empty strings, so any non-empty arbitrary input would create a
+        // `DashMap` entry in the registry and surface verbatim in the
+        // `chat_patch::<session_id>` event name. The fix delegates to
+        // `crate::history::validate_session_id` (UUID format + length)
+        // matching `retry_last_turn`. We exercise the validator directly
+        // since spinning up a real Tauri AppHandle / state in a unit test
+        // would only test the wiring — the validator behaviour is the
+        // invariant we care about.
+        for bad in [
+            "",
+            "not-a-uuid",
+            "../../etc/passwd",
+            "550e8400-e29b-41d4-a716", // truncated
+            "550e8400-e29b-41d4-a716-446655440000-extra",
+            "550e8400_e29b_41d4_a716_446655440000", // wrong separators
+            "ZZZe8400-e29b-41d4-a716-446655440000", // non-hex
+        ] {
+            assert!(
+                crate::history::validate_session_id(bad).is_err(),
+                "validator must reject {bad:?}"
+            );
+        }
+        // Sanity: the canonical UUID still passes.
+        assert!(
+            crate::history::validate_session_id("550e8400-e29b-41d4-a716-446655440000").is_ok()
+        );
     }
 
     #[test]
@@ -201,7 +211,7 @@ mod tests {
     #[test]
     fn registry_debug_redacts_session_ids() {
         let r = MsgStoreRegistry::new();
-        let _ = r.get_or_create("super-secret-session");
+        let _ = r.store_for("super-secret-session");
         let dbg = format!("{r:?}");
         assert!(!dbg.contains("super-secret-session"));
         assert!(dbg.contains("session_count"));
