@@ -3,12 +3,12 @@ import {
   Component,
   DestroyRef,
   TemplateRef,
-  ViewChild,
   computed,
   effect,
   inject,
   input,
   output,
+  viewChild,
 } from '@angular/core';
 import { Dialog, DialogRef } from '@angular/cdk/dialog';
 
@@ -142,8 +142,7 @@ export class ModalOverlayComponent {
   /** Emitted when the dialog closes via backdrop, Esc, or programmatic close. */
   readonly closed = output<void>();
 
-  @ViewChild('content', { static: true })
-  private readonly content!: TemplateRef<unknown>;
+  protected readonly content = viewChild.required<TemplateRef<unknown>>('content');
 
   private readonly dialog = inject(Dialog);
   private dialogRef: DialogRef<unknown, unknown> | null = null;
@@ -211,7 +210,7 @@ export class ModalOverlayComponent {
 
   private openDialog(): void {
     if (this.dialogRef) return;
-    const ref = this.dialog.open(this.content, {
+    const ref = this.dialog.open(this.content(), {
       hasBackdrop: true,
       ariaLabel: this.modalTitle(),
       panelClass: 'modal-overlay-panel',
