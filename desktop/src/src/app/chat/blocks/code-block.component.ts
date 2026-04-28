@@ -1,4 +1,12 @@
-import { ChangeDetectionStrategy, Component, OnDestroy, input, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  OnDestroy,
+  inject,
+  input,
+  signal,
+} from '@angular/core';
+import { Clipboard } from '@angular/cdk/clipboard';
 
 /**
  * Terminal-minimal code block with optional filename header and copy button.
@@ -58,13 +66,12 @@ export class CodeBlockComponent implements OnDestroy {
   readonly justCopied = signal(false);
 
   private copiedTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly clipboard = inject(Clipboard);
 
   /** Writes `code` to the clipboard and flashes the "copied" confirmation for 1.5s. */
-  async copy(): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(this.code());
-    } catch (err) {
-      console.error('code-block: clipboard write failed', err);
+  copy(): void {
+    if (!this.clipboard.copy(this.code())) {
+      console.error('code-block: clipboard write failed');
       return;
     }
     this.justCopied.set(true);

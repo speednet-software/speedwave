@@ -6,7 +6,7 @@ import { ChatStateService } from '../../services/chat-state.service';
 
 class FakeChatState {
   isStreaming = false;
-  copyMessage = vi.fn().mockResolvedValue(true);
+  copyMessage = vi.fn().mockReturnValue(true);
   retryLastAssistant = vi.fn().mockResolvedValue(undefined);
   canRetryLastAssistant = vi.fn().mockReturnValue(true);
   /**
@@ -120,7 +120,7 @@ describe('MessageActionsComponent', () => {
   });
 
   it('does NOT show "✓ copied" when copyMessage returns false', async () => {
-    chat.copyMessage = vi.fn().mockResolvedValue(false);
+    chat.copyMessage = vi.fn().mockReturnValue(false);
     copyButton().click();
     await Promise.resolve();
     await Promise.resolve();
@@ -158,21 +158,19 @@ describe('MessageActionsComponent', () => {
     expect(chat.retryLastAssistant).not.toHaveBeenCalled();
   });
 
-  it('disables copy button while a copy is in flight', async () => {
-    let resolveCopy: (v: boolean) => void = () => {};
-    chat.copyMessage = vi.fn().mockReturnValue(
-      new Promise<boolean>((resolve) => {
-        resolveCopy = resolve;
-      })
-    );
+  it('briefly disables copy button while copyMessage runs and re-enables after', () => {
+    // CDK Clipboard.copy is synchronous, so the disabled flag is observed
+    // via the busy guard: while the handler is running the button is disabled,
+    // and after it returns the button is re-enabled (and the "✓ copied"
+    // indicator appears separately for 1.5s).
+    let observedDisabledDuringCopy = false;
+    chat.copyMessage = vi.fn().mockImplementation(() => {
+      observedDisabledDuringCopy = component.copyBusy;
+      return true;
+    });
     copyButton().click();
-    await Promise.resolve();
     fixture.detectChanges();
-    expect(copyButton().disabled).toBe(true);
-    resolveCopy(true);
-    await Promise.resolve();
-    await Promise.resolve();
-    fixture.detectChanges();
+    expect(observedDisabledDuringCopy).toBe(true);
     expect(copyButton().disabled).toBe(false);
   });
 

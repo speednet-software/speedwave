@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { Clipboard } from '@angular/cdk/clipboard';
 import { AuthTerminalComponent } from './auth-terminal.component';
 import { TauriService } from '../services/tauri.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
@@ -39,14 +40,16 @@ describe('AuthTerminalComponent', () => {
     vi.restoreAllMocks();
   });
 
-  // navigator.clipboard may not exist in test environments (jsdom/happy-dom).
-  // Provide a minimal mock so vi.spyOn works.
-  function mockClipboard(impl: () => Promise<void>): void {
-    Object.defineProperty(navigator, 'clipboard', {
-      value: { writeText: impl },
-      writable: true,
-      configurable: true,
-    });
+  /**
+   * Replace the CDK `Clipboard.copy` implementation with the supplied
+   * spy/return value. Returns the spy for assertions.
+   * @param returns - Boolean to return from `Clipboard.copy`.
+   */
+  function mockClipboard(returns: boolean): ReturnType<typeof vi.fn> {
+    const spy = vi.fn().mockReturnValue(returns);
+    const cdkClipboard = TestBed.inject(Clipboard);
+    cdkClipboard.copy = spy as unknown as typeof cdkClipboard.copy;
+    return spy;
   }
 
   it('creates the component', () => {
@@ -136,41 +139,40 @@ describe('AuthTerminalComponent', () => {
     expect(banner).toBeNull();
   });
 
-  it('copies command to clipboard on click', async () => {
-    const writeTextFn = vi.fn().mockResolvedValue(undefined);
-    mockClipboard(writeTextFn);
+  it('copies command to clipboard on click', () => {
+    const spy = mockClipboard(true);
     component.command = SAMPLE_COMMAND;
-    await component.copyCommand();
-    expect(writeTextFn).toHaveBeenCalledWith(SAMPLE_COMMAND);
+    component.copyCommand();
+    expect(spy).toHaveBeenCalledWith(SAMPLE_COMMAND);
   });
 
-  it('shows Copied! feedback after copy', async () => {
-    mockClipboard(vi.fn().mockResolvedValue(undefined));
+  it('shows Copied! feedback after copy', () => {
+    mockClipboard(true);
     component.command = SAMPLE_COMMAND;
-    await component.copyCommand();
+    component.copyCommand();
     expect(component.copied).toBe(true);
   });
 
-  it('resets Copied! feedback after 2 seconds', async () => {
-    mockClipboard(vi.fn().mockResolvedValue(undefined));
+  it('resets Copied! feedback after 2 seconds', () => {
+    mockClipboard(true);
     component.command = SAMPLE_COMMAND;
-    await component.copyCommand();
+    component.copyCommand();
     expect(component.copied).toBe(true);
     vi.advanceTimersByTime(2000);
     expect(component.copied).toBe(false);
   });
 
-  it('handles clipboard write failure', async () => {
-    mockClipboard(vi.fn().mockRejectedValue(new Error('clipboard denied')));
+  it('handles clipboard write failure', () => {
+    mockClipboard(false);
     component.command = SAMPLE_COMMAND;
-    await component.copyCommand();
+    component.copyCommand();
     expect(component.error).toBe('Failed to copy to clipboard');
   });
 
-  it('cleans up copy timer on destroy', async () => {
-    mockClipboard(vi.fn().mockResolvedValue(undefined));
+  it('cleans up copy timer on destroy', () => {
+    mockClipboard(true);
     component.command = SAMPLE_COMMAND;
-    await component.copyCommand();
+    component.copyCommand();
     expect(component.copied).toBe(true);
     component.ngOnDestroy();
     vi.advanceTimersByTime(2000);
