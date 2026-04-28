@@ -1284,13 +1284,17 @@ mod tests {
             remote_cmd.contains("claude"),
             "remote_cmd should include user command, got: {remote_cmd}"
         );
+        // Anchor on the literal "nerdctl exec -it -e" prefix instead of a
+        // bare " -p"/" -it " substring — `shlex` leaves alphanumeric tokens
+        // unquoted, so the prefix appears verbatim and the match is precise
+        // (no false-positive on "-pt"/"-pd" or ambiguous boundaries).
         assert!(
-            remote_cmd.contains(" -p"),
-            "remote_cmd should include user command args, got: {remote_cmd}"
+            remote_cmd.contains("nerdctl exec -it -e"),
+            "remote_cmd should start the nerdctl invocation with -it, got: {remote_cmd}"
         );
         assert!(
-            remote_cmd.contains(" -it "),
-            "remote_cmd should use -it for interactive TTY, got: {remote_cmd}"
+            remote_cmd.ends_with(" claude -p"),
+            "remote_cmd should end with the user command + args, got: {remote_cmd}"
         );
     }
 
@@ -1402,17 +1406,19 @@ mod tests {
             remote_cmd.contains("test_container"),
             "remote_cmd should include container name, got: {remote_cmd}"
         );
+        // Anchor on the literal "nerdctl exec -i -e" prefix — see the
+        // comment in `test_container_exec_has_path_env` for rationale.
         assert!(
-            remote_cmd.contains(" -i "),
-            "remote_cmd should use -i for stdin forwarding, got: {remote_cmd}"
+            remote_cmd.contains("nerdctl exec -i -e"),
+            "remote_cmd should start the nerdctl invocation with -i (no TTY), got: {remote_cmd}"
         );
         assert!(
-            !remote_cmd.contains(" -it "),
+            !remote_cmd.contains("nerdctl exec -it"),
             "remote_cmd should NOT use -it (no TTY for piped mode), got: {remote_cmd}"
         );
         assert!(
-            remote_cmd.contains("claude"),
-            "remote_cmd should include user command, got: {remote_cmd}"
+            remote_cmd.ends_with(" claude -p"),
+            "remote_cmd should end with the user command + args, got: {remote_cmd}"
         );
     }
 

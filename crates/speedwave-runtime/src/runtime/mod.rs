@@ -502,7 +502,11 @@ fn is_stale_container_error(message: &str) -> bool {
 /// back into the original argv.
 pub(crate) fn shell_quote_argv(argv: &[&str]) -> String {
     argv.iter()
-        .map(|a| shlex::try_quote(a).unwrap().into_owned())
+        .map(|a| {
+            shlex::try_quote(a)
+                .expect("argv token must not contain null bytes")
+                .into_owned()
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
