@@ -209,7 +209,14 @@ export class CreateProjectModalComponent {
     this.error.set(null);
     let selected: string | string[] | null;
     try {
-      selected = await open({ directory: true, multiple: false });
+      // E2E test seam: WebDriver cannot drive the OS folder picker, so the
+      // suite plants `window.__E2E_DIALOG_PATH__` to short-circuit the
+      // native call. `string` resolves the picker, `null` simulates cancel.
+      // Anything else (`undefined`, missing) falls through to the real API.
+      const e2eOverride = (window as unknown as { __E2E_DIALOG_PATH__?: string | null })
+        .__E2E_DIALOG_PATH__;
+      selected =
+        e2eOverride !== undefined ? e2eOverride : await open({ directory: true, multiple: false });
     } catch (e: unknown) {
       this.error.set(e instanceof Error ? e.message : String(e));
       this.cdr.markForCheck();
