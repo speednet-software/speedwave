@@ -54,6 +54,17 @@ describe('TooltipDirective', () => {
     expect(tooltip!.textContent).toContain('hello');
   });
 
+  it('shows overlay panel on focusin', async () => {
+    const btn = getButton(fixture!);
+    btn.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    fixture!.detectChanges();
+    await fixture!.whenStable();
+
+    const tooltip = queryTooltip();
+    expect(tooltip).not.toBeNull();
+    expect(tooltip!.textContent).toContain('hello');
+  });
+
   it('hides on mouseleave', async () => {
     const btn = getButton(fixture!);
     btn.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
