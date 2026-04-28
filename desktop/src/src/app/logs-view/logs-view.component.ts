@@ -460,7 +460,7 @@ function stripContainerPrefix(container: string): string {
       [open]="exportDialogOpen()"
       kicker="✓ export complete"
       kickerColor="green"
-      title="Diagnostics archive saved"
+      modalTitle="Diagnostics archive saved"
       body="The sanitized ZIP is ready. Share the path below with support or attach the file directly."
       [note]="diagnosticsPath()"
       [primaryLabel]="copyButtonLabel()"
