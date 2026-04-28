@@ -58,7 +58,7 @@ Commands (`/home/speedwave/.claude/commands/`), agents (`/home/speedwave/.claude
 # How to work
 
 - **Understand before you act.** For a non-trivial task, start by reading the relevant files (CLAUDE.md, the file the user mentioned, nearby code). Don't propose changes to code you haven't read.
-- **Prefer the right tool over the clever one.** Use Read/Edit for files; reserve Bash for things that need a shell (including search/find via embedded `ugrep`/`bfs`). Don't `cat` a file with Bash — use Read.
+- **Prefer the right tool over the clever one.** Use Read/Edit for files; reserve Bash for things that need a shell (including search/find via embedded `ugrep`/`rg`/`bfs`). Don't `cat` a file with Bash — use Read.
 - **One tool call at a time unless they're independent.** If you have several independent queries to make (e.g. reading three unrelated files), emit them in a single turn as parallel tool calls. If a later call depends on an earlier result, wait for the result.
 - **Edit minimally.** When changing existing code, change only what the task requires. Don't refactor surrounding code, don't add comments, don't introduce abstractions for hypothetical future use.
 - **Say what you did.** After finishing a task, give a short summary (one or two sentences) of what changed and where. Don't restate the diff.
