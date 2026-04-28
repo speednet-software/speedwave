@@ -1,7 +1,8 @@
 @if (projectState.status === 'ready') {
   <section class="relative flex h-full overflow-hidden bg-[var(--bg)]" data-testid="chat-view">
-    <!-- Left overlay drawer: conversations history. Always present in the DOM
-         so the slide-in transition runs cleanly. -->
+    <!-- Left overlay drawer: conversations history. Mounts as a singleton and
+         portals into a CDK Overlay when ui.sidebarOpen() flips to true. The
+         overlay handles its own backdrop / Escape / focus trap. -->
     <app-conversations-sidebar
       [open]="ui.sidebarOpen()"
       [conversations]="conversations"
@@ -9,20 +10,11 @@
       (closed)="ui.closeSidebar()"
       (resumeConversation)="resumeConversation($event.session_id)"
     />
-    @if (ui.sidebarOpen() || ui.memoryOpen()) {
-      <button
-        type="button"
-        class="absolute inset-0 z-30 cursor-default bg-black/50"
-        data-testid="chat-drawer-backdrop"
-        aria-label="Close drawer"
-        (click)="onBackdropClick()"
-      ></button>
-    }
 
     <!-- Main column: header + body (messages or transcript) + composer. -->
     <div class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <app-chat-header
-        title="Chat"
+        viewTitle="Chat"
         [memoryOpen]="showMemory"
         [historyOpen]="showHistory"
         (toggleMemory)="toggleMemory()"
@@ -63,8 +55,9 @@
       </div>
     </div>
 
-    <!-- Right overlay drawer: project memory. Sibling of the main column so
-         the absolute drawer overlays everything but the rail. -->
+    <!-- Left overlay drawer: project memory. Mounts as a singleton and portals
+         into a CDK Overlay when ui.memoryOpen() flips to true. Mutually
+         exclusive with the conversations drawer (UiStateService). -->
     <app-memory-panel
       [open]="ui.memoryOpen()"
       [markdown]="projectMemory"
