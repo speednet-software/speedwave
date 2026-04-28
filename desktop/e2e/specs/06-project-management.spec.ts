@@ -15,6 +15,7 @@
 import { waitForHealthy } from '../helpers/health';
 import { mockDialogOpen, clearDialogMock } from '../helpers/dialog-mock';
 import { activeProjectSlug } from '../helpers/projects';
+import { waitForShellReady } from '../helpers/shell';
 
 const SECOND_PROJECT_NAME = 'e2e-second';
 const SECOND_PROJECT_DIR = process.env.E2E_SECOND_PROJECT_DIR || '/tmp/speedwave-e2e-project-2';
@@ -33,7 +34,11 @@ describe('Project Management', function () {
 
   describe('Add Project', function () {
     it('should open the project switcher dropdown', async function () {
-      this.timeout(15_000);
+      this.timeout(60_000);
+
+      // Setup wizard finalize → settings redirect can leave the shell briefly
+      // in `auth_required` (blocking-overlay up) before settling to ready.
+      await waitForShellReady();
 
       const pill = await $('[data-testid="project-pill"]');
       await pill.click();
@@ -115,7 +120,12 @@ describe('Project Management', function () {
     });
 
     it('should list both projects in the dropdown', async function () {
-      this.timeout(15_000);
+      this.timeout(60_000);
+
+      // After `add_project`, projectState transitions through
+      // starting → ready (or auth_required), with the blocking-overlay up.
+      // Wait for it to clear before clicking the pill.
+      await waitForShellReady();
 
       const pill = await $('[data-testid="project-pill"]');
       await pill.click();
@@ -144,6 +154,10 @@ describe('Project Management', function () {
   describe('Switch Project', function () {
     it('should switch back to e2e-test project', async function () {
       this.timeout(180_000);
+
+      // Wait for the previous switch's blocking-overlay to clear before
+      // attempting another pill click — the overlay covers the header.
+      await waitForShellReady();
 
       const pill = await $('[data-testid="project-pill"]');
       await pill.click();

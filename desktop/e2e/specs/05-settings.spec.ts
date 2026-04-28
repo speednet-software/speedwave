@@ -61,9 +61,12 @@ describe('Settings', function () {
     expect(await updateBtn.isDisplayed()).toBe(true);
   });
 
-  it('should expose the export-diagnostics button', async function () {
+  it('should not duplicate the export-diagnostics control (moved to /logs)', async function () {
     this.timeout(15_000);
+    // Diagnostics export was relocated to System health (/logs). The settings
+    // page must no longer render its own copy — assert absence so a future
+    // accidental re-introduction trips the suite immediately.
     const exportBtn = await $('[data-testid="settings-export-diagnostics"]');
-    expect(await exportBtn.isDisplayed()).toBe(true);
+    expect(await exportBtn.isExisting()).toBe(false);
   });
 });
