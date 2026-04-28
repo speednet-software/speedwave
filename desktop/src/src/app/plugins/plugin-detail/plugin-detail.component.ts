@@ -14,6 +14,7 @@ import { PluginStatusEntry, PluginsResponse } from '../../models/plugin';
 import { IntegrationsResponse } from '../../models/integration';
 import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-settings-form.component';
 import { ProjectPillComponent } from '../../project-switcher/project-pill.component';
+import { TooltipDirective } from '../../shared/tooltip.directive';
 
 /** Tabs available in the plugin-detail view. */
 export type PluginDetailTab = 'dashboard' | 'settings' | 'tools' | 'logs';
@@ -28,7 +29,7 @@ interface ExposedTool {
 /** Detail page for a single plugin with Dashboard / Settings / Tools / Logs tabs. */
 @Component({
   selector: 'app-plugin-detail',
-  imports: [CommonModule, PluginSettingsFormComponent, ProjectPillComponent],
+  imports: [CommonModule, PluginSettingsFormComponent, ProjectPillComponent, TooltipDirective],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -38,7 +39,8 @@ interface ExposedTool {
       <button
         type="button"
         class="mono flex-shrink-0 text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
-        title="Back to plugins"
+        appTooltip="Back to plugins"
+        placement="bottom"
         data-testid="back-link"
         (click)="goBack()"
       >

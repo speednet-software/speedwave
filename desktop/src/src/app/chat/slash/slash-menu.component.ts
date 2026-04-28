@@ -11,6 +11,7 @@ import {
 import { A11yModule } from '@angular/cdk/a11y';
 import { CdkListbox, CdkOption, type ListboxValueChangeEvent } from '@angular/cdk/listbox';
 import { SlashService, type SlashCommand } from './slash.service';
+import { TooltipDirective } from '../../shared/tooltip.directive';
 
 /**
  * Popover listing every slash command Claude Code exposes for the active
@@ -21,7 +22,7 @@ import { SlashService, type SlashCommand } from './slash.service';
 @Component({
   selector: 'app-slash-menu',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [A11yModule, CdkListbox, CdkOption],
+  imports: [A11yModule, CdkListbox, CdkOption, TooltipDirective],
   host: {
     class: 'block',
     '[class.hidden]': '!open()',
@@ -57,7 +58,9 @@ import { SlashService, type SlashCommand } from './slash.service';
           class="text-[var(--ink-mute)] hover:text-[var(--ink)]"
           data-testid="slash-menu-close"
           aria-label="Close slash menu"
-          title="Close (esc)"
+          appTooltip="Close"
+          tooltipKbd="esc"
+          placement="bottom"
           (click)="closed.emit()"
         >
           ×

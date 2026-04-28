@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router, RouterModule } from '@angular/router';
 import { CommandPaletteComponent } from './command-palette.component';
@@ -8,7 +8,29 @@ import { ThemeService } from '../../services/theme.service';
 import { UiStateService } from '../../services/ui-state.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 
+/**
+ * The palette renders through CDK Dialog into the document-level overlay
+ * container, so tests must query the global `document` rather than the
+ * fixture's native element.
+ * @param selector CSS selector to look up in the document root.
+ */
+function q(selector: string): HTMLElement | null {
+  return document.querySelector(selector) as HTMLElement | null;
+}
+
 describe('CommandPaletteComponent', () => {
+  // CdkListbox calls `Element.scrollIntoView()` in `setActiveStyles()` when an
+  // option is clicked — jsdom does not implement it, which surfaces as an
+  // unhandled exception that pollutes the test report. Stub it for this suite.
+  beforeAll(() => {
+    const proto = Element.prototype as unknown as { scrollIntoView?: () => void };
+    if (typeof proto.scrollIntoView !== 'function') {
+      proto.scrollIntoView = () => {
+        // jsdom shim — intentional no-op.
+      };
+    }
+  });
+
   let component: CommandPaletteComponent;
   let fixture: ComponentFixture<CommandPaletteComponent>;
   let mockTauri: MockTauriService;
@@ -56,23 +78,29 @@ describe('CommandPaletteComponent', () => {
     fixture.detectChanges();
   });
 
+  afterEach(() => {
+    // CDK Dialog leaves its overlay container attached to the document body.
+    // Closing via the signal lets the next test start with a clean DOM.
+    ui.closePalette();
+    fixture.detectChanges();
+  });
+
   describe('visibility binding', () => {
     it('renders nothing when paletteOpen() is false', () => {
-      expect(fixture.nativeElement.querySelector('[data-testid="command-palette"]')).toBeNull();
+      expect(q('[data-testid="command-palette"]')).toBeNull();
     });
 
     it('renders the modal when paletteOpen() is true', () => {
       ui.togglePalette();
       fixture.detectChanges();
-      expect(fixture.nativeElement.querySelector('[data-testid="command-palette"]')).not.toBeNull();
+      expect(q('[data-testid="command-palette"]')).not.toBeNull();
     });
 
-    it('clicking the backdrop closes the palette', () => {
+    it('clicking the CDK backdrop closes the palette', () => {
       ui.togglePalette();
       fixture.detectChanges();
-      const backdrop = fixture.nativeElement.querySelector(
-        '[data-testid="command-palette-backdrop"]'
-      ) as HTMLDivElement;
+      const backdrop = q('.cdk-overlay-backdrop') as HTMLElement;
+      expect(backdrop).not.toBeNull();
       backdrop.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       fixture.detectChanges();
       expect(ui.paletteOpen()).toBe(false);
@@ -81,11 +109,9 @@ describe('CommandPaletteComponent', () => {
     it('clicking inside the modal does NOT close the palette', () => {
       ui.togglePalette();
       fixture.detectChanges();
-      const inner = fixture.nativeElement.querySelector(
-        '[data-testid="command-palette"]'
-      ) as HTMLElement;
+      const inner = q('[data-testid="command-palette"]') as HTMLElement;
       inner.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      // Backdrop click handler ignores clicks where target !== currentTarget.
+      // Clicks inside the overlay panel must not bubble to the backdrop.
       expect(ui.paletteOpen()).toBe(true);
     });
   });
@@ -98,79 +124,41 @@ describe('CommandPaletteComponent', () => {
     });
 
     it('renders the navigate section header and 5 routes', () => {
-      const section = fixture.nativeElement.querySelector(
-        '[data-testid="palette-section-navigate"]'
-      );
+      const section = q('[data-testid="palette-section-navigate"]');
       expect(section).not.toBeNull();
-      expect(section.textContent).toContain('navigate');
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="palette-item-nav-chat"]')
-      ).not.toBeNull();
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="palette-item-nav-integrations"]')
-      ).not.toBeNull();
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="palette-item-nav-plugins"]')
-      ).not.toBeNull();
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="palette-item-nav-settings"]')
-      ).not.toBeNull();
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="palette-item-nav-logs"]')
-      ).not.toBeNull();
+      expect(section?.textContent).toContain('navigate');
+      expect(q('[data-testid="palette-item-nav-chat"]')).not.toBeNull();
+      expect(q('[data-testid="palette-item-nav-integrations"]')).not.toBeNull();
+      expect(q('[data-testid="palette-item-nav-plugins"]')).not.toBeNull();
+      expect(q('[data-testid="palette-item-nav-settings"]')).not.toBeNull();
+      expect(q('[data-testid="palette-item-nav-logs"]')).not.toBeNull();
     });
 
     it('renders the actions section with 6 actions', () => {
-      const section = fixture.nativeElement.querySelector(
-        '[data-testid="palette-section-actions"]'
-      );
+      const section = q('[data-testid="palette-section-actions"]');
       expect(section).not.toBeNull();
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="palette-item-action-new-conversation"]')
-      ).not.toBeNull();
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="palette-item-action-install-plugin"]')
-      ).not.toBeNull();
-      expect(
-        fixture.nativeElement.querySelector(
-          '[data-testid="palette-item-action-restart-containers"]'
-        )
-      ).not.toBeNull();
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="palette-item-action-check-updates"]')
-      ).not.toBeNull();
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="palette-item-action-toggle-sidebar"]')
-      ).not.toBeNull();
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="palette-item-action-change-accent"]')
-      ).not.toBeNull();
+      expect(q('[data-testid="palette-item-action-new-conversation"]')).not.toBeNull();
+      expect(q('[data-testid="palette-item-action-install-plugin"]')).not.toBeNull();
+      expect(q('[data-testid="palette-item-action-restart-containers"]')).not.toBeNull();
+      expect(q('[data-testid="palette-item-action-check-updates"]')).not.toBeNull();
+      expect(q('[data-testid="palette-item-action-toggle-sidebar"]')).not.toBeNull();
+      expect(q('[data-testid="palette-item-action-change-accent"]')).not.toBeNull();
     });
 
     it('renders dynamic projects section excluding the active project', () => {
-      const section = fixture.nativeElement.querySelector(
-        '[data-testid="palette-section-projects"]'
-      );
+      const section = q('[data-testid="palette-section-projects"]');
       expect(section).not.toBeNull();
       // Active project ("speedwave") should be excluded.
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="palette-item-project-speedwave"]')
-      ).toBeNull();
-      expect(
-        fixture.nativeElement.querySelector(
-          '[data-testid="palette-item-project-speedwave-plugins"]'
-        )
-      ).not.toBeNull();
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="palette-item-project-experiments"]')
-      ).not.toBeNull();
+      expect(q('[data-testid="palette-item-project-speedwave"]')).toBeNull();
+      expect(q('[data-testid="palette-item-project-speedwave-plugins"]')).not.toBeNull();
+      expect(q('[data-testid="palette-item-project-experiments"]')).not.toBeNull();
     });
 
     it('renders the navigation hint footer', () => {
-      const root = fixture.nativeElement.querySelector('[data-testid="command-palette"]');
-      expect(root.textContent).toContain('navigate');
-      expect(root.textContent).toContain('select');
-      expect(root.textContent).toContain('close');
+      const root = q('[data-testid="command-palette"]');
+      expect(root?.textContent).toContain('navigate');
+      expect(root?.textContent).toContain('select');
+      expect(root?.textContent).toContain('close');
     });
   });
 
@@ -182,41 +170,31 @@ describe('CommandPaletteComponent', () => {
     });
 
     it('narrows the visible items by case-insensitive substring', () => {
-      const input = fixture.nativeElement.querySelector(
-        '[data-testid="palette-input"]'
-      ) as HTMLInputElement;
+      const input = q('[data-testid="palette-input"]') as HTMLInputElement;
       input.value = 'SETT';
       input.dispatchEvent(new Event('input'));
       fixture.detectChanges();
       // Only the settings nav row should remain (label: "go to settings").
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="palette-item-nav-settings"]')
-      ).not.toBeNull();
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="palette-item-nav-chat"]')
-      ).toBeNull();
+      expect(q('[data-testid="palette-item-nav-settings"]')).not.toBeNull();
+      expect(q('[data-testid="palette-item-nav-chat"]')).toBeNull();
     });
 
     it('shows the empty placeholder when nothing matches', () => {
-      const input = fixture.nativeElement.querySelector(
-        '[data-testid="palette-input"]'
-      ) as HTMLInputElement;
+      const input = q('[data-testid="palette-input"]') as HTMLInputElement;
       input.value = 'zzznosuchthing';
       input.dispatchEvent(new Event('input'));
       fixture.detectChanges();
-      expect(fixture.nativeElement.querySelector('[data-testid="palette-empty"]')).not.toBeNull();
+      expect(q('[data-testid="palette-empty"]')).not.toBeNull();
     });
 
-    it('resets the highlight index on filter change', () => {
-      // Move the highlight forward, then narrow the list.
-      component.setHighlight(4);
-      const input = fixture.nativeElement.querySelector(
-        '[data-testid="palette-input"]'
-      ) as HTMLInputElement;
+    it('resets the active index on filter change', () => {
+      // Move the active index forward, then narrow the list.
+      component.activeIndex.set(4);
+      const input = q('[data-testid="palette-input"]') as HTMLInputElement;
       input.value = 'sett';
       input.dispatchEvent(new Event('input'));
       fixture.detectChanges();
-      expect(component.highlightedIndex()).toBe(0);
+      expect(component.activeIndex()).toBe(0);
     });
   });
 
@@ -227,35 +205,43 @@ describe('CommandPaletteComponent', () => {
       fixture.detectChanges();
     });
 
-    it('arrow down advances the highlight index', () => {
-      const start = component.highlightedIndex();
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
-      expect(component.highlightedIndex()).toBe(start + 1);
+    it('arrow down advances the active index', () => {
+      const input = q('[data-testid="palette-input"]') as HTMLInputElement;
+      const start = component.activeIndex();
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      expect(component.activeIndex()).toBe(start + 1);
     });
 
     it('arrow up wraps to the last item from index 0', () => {
-      component.setHighlight(0);
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp' }));
-      expect(component.highlightedIndex()).toBe(component.filteredItems().length - 1);
+      const input = q('[data-testid="palette-input"]') as HTMLInputElement;
+      component.activeIndex.set(0);
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+      expect(component.activeIndex()).toBe(component.filteredItems().length - 1);
     });
 
-    it('enter invokes the highlighted item', async () => {
-      // Highlight "go to settings" (index 3 in the navigate section).
-      component.setHighlight(3);
+    it('enter invokes the active item', async () => {
+      const input = q('[data-testid="palette-input"]') as HTMLInputElement;
+      // Active "go to settings" (index 3 in the navigate section).
+      component.activeIndex.set(3);
       const navSpy = vi.spyOn(router, 'navigateByUrl').mockResolvedValue(true);
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
       await fixture.whenStable();
       expect(navSpy).toHaveBeenCalledWith('/settings');
       navSpy.mockRestore();
     });
 
-    it('arrow keys are no-ops when the palette is closed', () => {
-      ui.closePalette();
-      fixture.detectChanges();
-      component.setHighlight(0);
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
-      // Still 0 — handler short-circuits when paletteOpen() is false.
-      expect(component.highlightedIndex()).toBe(0);
+    it('home key moves the active index to 0', () => {
+      const input = q('[data-testid="palette-input"]') as HTMLInputElement;
+      component.activeIndex.set(4);
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+      expect(component.activeIndex()).toBe(0);
+    });
+
+    it('end key moves the active index to the last item', () => {
+      const input = q('[data-testid="palette-input"]') as HTMLInputElement;
+      component.activeIndex.set(0);
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+      expect(component.activeIndex()).toBe(component.filteredItems().length - 1);
     });
   });
 
@@ -268,9 +254,7 @@ describe('CommandPaletteComponent', () => {
 
     it('clicking a nav item routes to the target URL and closes the palette', async () => {
       const navSpy = vi.spyOn(router, 'navigateByUrl').mockResolvedValue(true);
-      const btn = fixture.nativeElement.querySelector(
-        '[data-testid="palette-item-nav-integrations"]'
-      ) as HTMLButtonElement;
+      const btn = q('[data-testid="palette-item-nav-integrations"]') as HTMLElement;
       btn.click();
       await fixture.whenStable();
       expect(navSpy).toHaveBeenCalledWith('/integrations');
@@ -280,9 +264,7 @@ describe('CommandPaletteComponent', () => {
 
     it('clicking "change accent color" cycles ThemeService', async () => {
       const before = theme.theme();
-      const btn = fixture.nativeElement.querySelector(
-        '[data-testid="palette-item-action-change-accent"]'
-      ) as HTMLButtonElement;
+      const btn = q('[data-testid="palette-item-action-change-accent"]') as HTMLElement;
       btn.click();
       await fixture.whenStable();
       expect(theme.theme()).not.toBe(before);
@@ -290,9 +272,7 @@ describe('CommandPaletteComponent', () => {
 
     it('clicking "restart containers" requests a restart', async () => {
       const spy = vi.spyOn(projectState, 'requestRestart');
-      const btn = fixture.nativeElement.querySelector(
-        '[data-testid="palette-item-action-restart-containers"]'
-      ) as HTMLButtonElement;
+      const btn = q('[data-testid="palette-item-action-restart-containers"]') as HTMLElement;
       btn.click();
       await fixture.whenStable();
       expect(spy).toHaveBeenCalled();
@@ -302,9 +282,7 @@ describe('CommandPaletteComponent', () => {
 
     it('clicking "toggle sidebar" toggles UiState', async () => {
       const before = ui.sidebarOpen();
-      const btn = fixture.nativeElement.querySelector(
-        '[data-testid="palette-item-action-toggle-sidebar"]'
-      ) as HTMLButtonElement;
+      const btn = q('[data-testid="palette-item-action-toggle-sidebar"]') as HTMLElement;
       btn.click();
       await fixture.whenStable();
       expect(ui.sidebarOpen()).toBe(!before);
@@ -312,9 +290,7 @@ describe('CommandPaletteComponent', () => {
 
     it('clicking a project row calls projectState.switchProject', async () => {
       const spy = vi.spyOn(projectState, 'switchProject').mockResolvedValue();
-      const btn = fixture.nativeElement.querySelector(
-        '[data-testid="palette-item-project-experiments"]'
-      ) as HTMLButtonElement;
+      const btn = q('[data-testid="palette-item-project-experiments"]') as HTMLElement;
       btn.click();
       await fixture.whenStable();
       expect(spy).toHaveBeenCalledWith('experiments');
@@ -357,9 +333,7 @@ describe('CommandPaletteComponent', () => {
       ui.togglePalette();
       fixture.detectChanges();
 
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="palette-item-project-beta"]')
-      ).not.toBeNull();
+      expect(q('[data-testid="palette-item-project-beta"]')).not.toBeNull();
     });
   });
 });
