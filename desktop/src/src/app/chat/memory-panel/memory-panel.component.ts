@@ -1,15 +1,32 @@
-import { ChangeDetectionStrategy, Component, computed, effect, input, output } from '@angular/core';
+import { A11yModule } from '@angular/cdk/a11y';
+import { Overlay, OverlayRef } from '@angular/cdk/overlay';
+import { TemplatePortal } from '@angular/cdk/portal';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  DestroyRef,
+  TemplateRef,
+  ViewContainerRef,
+  computed,
+  effect,
+  inject,
+  input,
+  output,
+  viewChild,
+} from '@angular/core';
+import { filter } from 'rxjs/operators';
+import { IconComponent } from '../../shared/icon.component';
 import { TextBlockComponent } from '../blocks/text-block.component';
 
 /**
- * Right overlay drawer that surfaces the active project's CLAUDE.md.
+ * Left overlay drawer that surfaces the active project's CLAUDE.md.
  *
- * Layout matches the terminal-minimal mockup (lines 302–319 + 944–970):
- * - Always present in the DOM as a `.memory-drawer` so the
- *   `transform: translateX(...)` transition runs in/out smoothly.
- * - The parent toggles `body.memory-open` via `UiStateService` — the global
- *   stylesheet animates the drawer in and dims the backdrop via
- *   `body.memory-open::before`.
+ * Anchored to the left edge of the viewport via Angular CDK Overlay so the
+ * memory button in the chat header opens its panel in the same place as the
+ * conversations history drawer. The component itself renders no inline DOM —
+ * its template is a single `<ng-template>` portalled by the overlay when the
+ * `open` input flips to `true`.
+ *
  * - Header: mono "memory" + neutral pill with section count + close ×.
  * - Body: when the source markdown contains the canonical section markers
  *   (## User Preferences / ## Feedback / ## Project / ## Reference) we render
@@ -20,83 +37,77 @@ import { TextBlockComponent } from '../blocks/text-block.component';
 @Component({
   selector: 'app-memory-panel',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [TextBlockComponent],
-  host: {
-    role: 'complementary',
-    'aria-label': 'Project memory',
-    class:
-      'memory-drawer w-72 flex-shrink-0 flex-col border-l border-[var(--line)] bg-[var(--bg-1)]',
-    '[attr.data-testid]': '"memory-panel"',
-    '[attr.aria-hidden]': '!open() ? "true" : null',
-    '[attr.inert]': '!open() ? "" : null',
-  },
+  imports: [TextBlockComponent, A11yModule, IconComponent],
   template: `
-    <div class="flex h-11 items-center gap-2 border-b border-[var(--line)] px-3">
-      <span class="mono text-[11px] text-[var(--ink-mute)]">memory</span>
-      @if (sectionCount() > 0) {
-        <span class="pill" data-testid="memory-panel-count">{{ sectionLabel() }}</span>
-      }
-      <button
-        type="button"
-        class="ml-auto text-[var(--ink-mute)] hover:text-[var(--ink)]"
-        data-testid="memory-panel-close"
-        aria-label="Close memory panel"
-        (click)="closed.emit()"
+    <ng-template #content>
+      <div
+        class="flex h-full w-72 flex-col border-r border-[var(--line)] bg-[var(--bg-1)]"
+        role="complementary"
+        aria-label="Project memory"
+        data-testid="memory-panel"
+        cdkTrapFocus
       >
-        <svg
-          class="h-4 w-4"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-          stroke-width="1.75"
-          aria-hidden="true"
-        >
-          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-        </svg>
-      </button>
-    </div>
+        <div class="flex h-11 items-center gap-2 border-b border-[var(--line)] px-3">
+          <span class="mono text-[11px] text-[var(--ink-mute)]">memory</span>
+          @if (sectionCount() > 0) {
+            <span class="pill" data-testid="memory-panel-count">{{ sectionLabel() }}</span>
+          }
+          <button
+            type="button"
+            class="ml-auto text-[var(--ink-mute)] hover:text-[var(--ink)]"
+            data-testid="memory-panel-close"
+            aria-label="Close memory panel"
+            (click)="closed.emit()"
+          >
+            <app-icon name="x" class="h-4 w-4" />
+          </button>
+        </div>
 
-    <div
-      class="flex-1 overflow-y-auto p-3 text-[13px] leading-relaxed text-[var(--ink)]"
-      data-testid="memory-panel-body"
-    >
-      @if (error()) {
-        <p
-          class="mono rounded border border-red-500/40 bg-red-500/5 px-2 py-1.5 text-[11.5px] text-red-300"
-          data-testid="memory-panel-error"
-          role="alert"
+        <div
+          class="flex-1 overflow-y-auto p-3 text-[13px] leading-relaxed text-[var(--ink)]"
+          data-testid="memory-panel-body"
         >
-          {{ error() }}
-        </p>
-      } @else if (sections().length > 0) {
-        <div class="mono space-y-3 text-[11.5px]">
-          @for (section of sections(); track section.id) {
-            <section [attr.data-testid]="'memory-section-' + section.id">
-              <div class="text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
-                {{ section.label }}
-              </div>
-              <div class="mt-1 whitespace-pre-wrap text-[var(--ink-dim)]">{{ section.body }}</div>
-            </section>
+          @if (error()) {
+            <p
+              class="mono rounded border border-red-500/40 bg-red-500/5 px-2 py-1.5 text-[11.5px] text-red-300"
+              data-testid="memory-panel-error"
+              role="alert"
+            >
+              {{ error() }}
+            </p>
+          } @else if (sections().length > 0) {
+            <div class="mono space-y-3 text-[11.5px]">
+              @for (section of sections(); track section.id) {
+                <section [attr.data-testid]="'memory-section-' + section.id">
+                  <div class="text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
+                    {{ section.label }}
+                  </div>
+                  <div class="mt-1 whitespace-pre-wrap text-[var(--ink-dim)]">
+                    {{ section.body }}
+                  </div>
+                </section>
+              }
+            </div>
+          } @else if (markdown()) {
+            <app-text-block [content]="markdown()" />
+          } @else {
+            <p class="mono text-[11.5px] text-[var(--ink-mute)]" data-testid="memory-panel-empty">
+              no memory yet
+            </p>
           }
         </div>
-      } @else if (markdown()) {
-        <app-text-block [content]="markdown()" />
-      } @else {
-        <p class="mono text-[11.5px] text-[var(--ink-mute)]" data-testid="memory-panel-empty">
-          no memory yet
-        </p>
-      }
-    </div>
+      </div>
+    </ng-template>
   `,
 })
 export class MemoryPanelComponent {
-  /** Whether the drawer is open. Drives the body class + a11y attrs. */
+  /** Whether the drawer is open. Drives the CDK overlay attach/detach. */
   readonly open = input<boolean>(false);
   /** Raw markdown source (CLAUDE.md). */
   readonly markdown = input<string>('');
   /** Optional error string — when set, replaces the body content. */
   readonly error = input<string>('');
-  /** Drawer requested to close (close button or backdrop). */
+  /** Drawer requested to close (close button, backdrop click, or Escape). */
   readonly closed = output<void>();
 
   /** Parsed sections (kicker + body) when markdown follows the canonical layout. */
@@ -107,16 +118,54 @@ export class MemoryPanelComponent {
     return n === 1 ? '1 entry' : `${n} entries`;
   });
 
+  /** Template containing the drawer content — handed to the CDK overlay portal. */
+  protected readonly content = viewChild.required<TemplateRef<unknown>>('content');
+
+  private readonly overlay = inject(Overlay);
+  private readonly viewContainerRef = inject(ViewContainerRef);
+  private overlayRef: OverlayRef | null = null;
+
   /**
-   * Mirrors the `open` input onto a body class so the panel can animate in.
+   * Sync the `open` input with the CDK overlay lifecycle. Opening builds a
+   * left-anchored full-height panel with a dark backdrop and dispatches close
+   * on backdrop click or Escape. Closing detaches the portal (no DOM remains).
    */
   constructor() {
     effect(() => {
-      const open = this.open();
-      const cls = 'memory-open';
-      if (open) document.body.classList.add(cls);
-      else document.body.classList.remove(cls);
+      if (this.open()) this.openOverlay();
+      else this.closeOverlay();
     });
+    // Defensive: dispose the overlay if the host is torn down while open
+    // (e.g., a route swap with the drawer left open).
+    inject(DestroyRef).onDestroy(() => this.closeOverlay());
+  }
+
+  private openOverlay(): void {
+    if (this.overlayRef !== null) return;
+    const overlayRef = this.overlay.create({
+      positionStrategy: this.overlay.position().global().left('0').top('0'),
+      height: '100%',
+      hasBackdrop: true,
+      backdropClass: 'cdk-overlay-dark-backdrop',
+      panelClass: ['drawer-panel', 'memory-drawer-panel'],
+      scrollStrategy: this.overlay.scrollStrategies.block(),
+    });
+    overlayRef.attach(new TemplatePortal(this.content(), this.viewContainerRef));
+    overlayRef.backdropClick().subscribe(() => this.closed.emit());
+    overlayRef
+      .keydownEvents()
+      .pipe(filter((e) => e.key === 'Escape'))
+      .subscribe((e) => {
+        e.preventDefault();
+        this.closed.emit();
+      });
+    this.overlayRef = overlayRef;
+  }
+
+  private closeOverlay(): void {
+    if (this.overlayRef === null) return;
+    this.overlayRef.dispose();
+    this.overlayRef = null;
   }
 }
 
