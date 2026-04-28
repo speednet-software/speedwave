@@ -129,13 +129,15 @@ pub async fn retry_last_turn(
     app_handle: AppHandle,
     state: tauri::State<'_, SharedChatSession>,
 ) -> Result<(), RetryError> {
-    // Log only a short prefix of the session id to address CodeQL
-    // 'cleartext-logging': the desktop log file is readable by any
-    // process running as the same user, so a full UUID lets a co-resident
-    // process resume an arbitrary session.
+    // Don't log the session_id at all — even a short prefix is flagged by
+    // CodeQL `rust/cleartext-logging`, and the desktop log file is
+    // readable by any process running as the same user. Logging only the
+    // structural metadata (id length / uuid length) keeps the trace useful
+    // for diagnosing malformed-input regressions without leaking either
+    // identifier.
     log::info!(
-        "retry_last_turn: session_prefix={} user_uuid_len={}",
-        &session_id[..8.min(session_id.len())],
+        "retry_last_turn: session_id_len={} user_uuid_len={}",
+        session_id.len(),
         user_uuid.len()
     );
     let session_arc = state.inner().clone();

@@ -17,8 +17,14 @@ use super::state_tree::{
 /// Build a JSON Pointer (RFC 6901) from a printf-style path.
 fn pointer(path: &str) -> PointerBuf {
     // Safe: all call sites use constant or numeric-index paths that are
-    // guaranteed to be valid pointers. A malformed path is a programmer error.
-    PointerBuf::parse(path).unwrap_or_else(|e| panic!("invalid JSON pointer {path:?}: {e}"))
+    // guaranteed to be valid pointers. A malformed path is a programmer
+    // error. The panic message intentionally omits `path` itself: paths
+    // are built from `user_idx`/`assistant_idx` which CodeQL flags as
+    // logged user data on the patch_emitter call chain
+    // (rust/cleartext-logging). The parse error alone is enough to
+    // localise the bug — the offending path is visible in the stack
+    // trace's caller frame.
+    PointerBuf::parse(path).unwrap_or_else(|e| panic!("invalid JSON pointer: {e}"))
 }
 
 fn value_of<T: serde::Serialize>(value: &T) -> serde_json::Value {

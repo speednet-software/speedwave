@@ -598,13 +598,16 @@ mod tests {
         pusher.await.unwrap();
         let collected = consumer.await.unwrap();
 
-        // Every unique session_id must appear exactly once.
+        // Every unique session_id must appear exactly once. The assertion
+        // message must NOT include the session_id verbatim (CodeQL alert
+        // rust/cleartext-logging — even in tests, panic output reaches CI
+        // logs). The dedup HashSet still keys on the full id.
         let mut seen = std::collections::HashSet::new();
-        for msg in &collected {
+        for (pos, msg) in collected.iter().enumerate() {
             if let LogMsg::SessionStarted { session_id } = msg {
                 assert!(
                     seen.insert(session_id.clone()),
-                    "duplicate delivery for session_id: {session_id}"
+                    "duplicate delivery at position {pos} (session_id redacted)"
                 );
             }
         }
