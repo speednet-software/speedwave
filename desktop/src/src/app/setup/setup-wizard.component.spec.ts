@@ -6,10 +6,7 @@ import { SetupWizardComponent } from './setup-wizard.component';
 import { TauriService } from '../services/tauri.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
-// SetupWizardComponent mounts CreateProjectModalComponent which imports
-// `@tauri-apps/plugin-dialog`. Route to the shared `__mocks__` so we
-// don't hit the real Tauri dialog API.
-vi.mock('@tauri-apps/plugin-dialog');
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 
 describe('SetupWizardComponent', () => {
   let component: SetupWizardComponent;

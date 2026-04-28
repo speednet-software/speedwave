@@ -30,7 +30,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Cache Cargo
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7  # v5.0.4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: |
             ~/.cargo/registry/index/
@@ -41,7 +41,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-lint-
 
       - name: Setup Node
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: 24
           cache: npm
@@ -87,7 +87,7 @@ jobs:
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
 
       - name: Cache Cargo
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7  # v5.0.4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: |
             ~/.cargo/registry/index/
@@ -98,7 +98,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-test-
 
       - name: Setup Node
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: 24
           cache: npm
@@ -146,7 +146,7 @@ jobs:
           components: clippy
 
       - name: Cache Cargo
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7  # v5.0.4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: |
             ~/.cargo/registry/index/
@@ -157,7 +157,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-desktop-
 
       - name: Setup Node
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: 24
           cache: npm
@@ -245,7 +245,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Setup Node
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: 24
 
@@ -253,7 +253,7 @@ jobs:
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
 
       - name: Cache Cargo
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7  # v5.0.4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: |
             ~/.cargo/registry/index/
@@ -289,3 +289,44 @@ jobs:
 
       - name: Run Swift tests
         run: make test-swift
+
+  # Runtime exec-transport tests on Windows — locks in the WSL path
+  # (`wsl.exe -d distro -- sh -c <quoted>`). Without a Windows runner,
+  # `runtime::wsl::container_exec` shell-quoting could regress silently
+  # because every other job runs on Linux/macOS. We deliberately restrict
+  # the test set to `runtime::lima` and `runtime::wsl` modules: the rest
+  # of `speedwave-runtime` (binary resolution, build context, compose
+  # rendering, consts) was authored for Linux/macOS hosts and uses
+  # `/`-rooted paths in fixtures, which fail on Windows for reasons
+  # unrelated to this PR. Git Bash ships on the windows-latest image, so
+  # the `bash -nc` shell-roundtrip regression in those modules runs as-is.
+  # Lima/SSH paths are exercised by the macOS `test` job above; Linux-only
+  # `nerdctl` direct-exec needs no shell quoting at all.
+  runtime-windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+
+      - name: Cache Cargo
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-runtime-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-runtime-
+
+      - name: cargo test runtime::lima
+        run: cargo test -p speedwave-runtime --lib "runtime::lima::"
+
+      - name: cargo test runtime::wsl
+        run: cargo test -p speedwave-runtime --lib "runtime::wsl::"
