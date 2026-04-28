@@ -938,12 +938,14 @@ mod tests {
         }
     }
 
-    /// Invokes `bash -n` (POSIX syntax check, no execution) on `remote_cmd`
-    /// with MSYS path conversion disabled so the test is portable to Git
-    /// Bash on `windows-latest` runners.
+    /// Invokes `bash -n` (POSIX syntax check, no execution) on `remote_cmd`.
+    /// See `runtime::lima::tests::assert_bash_n` for the full rationale on
+    /// the env knobs (UTF-8 locale + MSYS path-conversion disable).
     fn assert_bash_n(remote_cmd: &str, args: &[&str], variant: &str) {
         let status = std::process::Command::new("bash")
             .args(["-nc", remote_cmd])
+            .env("LANG", "C.UTF-8")
+            .env("LC_ALL", "C.UTF-8")
             .env("MSYS_NO_PATHCONV", "1")
             .env("MSYS2_ARG_CONV_EXCL", "*")
             .status()

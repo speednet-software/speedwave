@@ -1375,12 +1375,21 @@ mod tests {
         }
     }
 
-    /// Invokes `bash -n` (POSIX syntax check, no execution) on `remote_cmd`
-    /// with MSYS path conversion disabled so the test is portable to Git
-    /// Bash on `windows-latest` runners.
+    /// Invokes `bash -n` (POSIX syntax check, no execution) on `remote_cmd`.
+    ///
+    /// Cross-platform tweaks:
+    /// - `LANG=C.UTF-8`: Git Bash on `windows-latest` defaults to the `C`
+    ///   locale, which rejects multi-byte UTF-8 sequences (the em-dash in
+    ///   `prompts::local_llm_identity`) and bails with a bogus syntax error.
+    ///   Forcing UTF-8 makes the parser see `—` as one grapheme, matching
+    ///   the production Linux container's behaviour.
+    /// - `MSYS_NO_PATHCONV=1` / `MSYS2_ARG_CONV_EXCL=*`: belt-and-braces
+    ///   against MSYS rewriting `/usr/...` tokens before bash sees them.
     fn assert_bash_n(remote_cmd: &str, args: &[&str], variant: &str) {
         let status = std::process::Command::new("bash")
             .args(["-nc", remote_cmd])
+            .env("LANG", "C.UTF-8")
+            .env("LC_ALL", "C.UTF-8")
             .env("MSYS_NO_PATHCONV", "1")
             .env("MSYS2_ARG_CONV_EXCL", "*")
             .status()
