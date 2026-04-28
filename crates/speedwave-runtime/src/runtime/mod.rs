@@ -1568,6 +1568,67 @@ services:
             "at most one thread should hold the lock at a time"
         );
     }
+
+    /// `shlex::try_quote` errors only on null bytes; the fallback arm in
+    /// `shell_quote_argv` strips them and re-quotes. This test covers
+    /// that error path directly — the adversarial-input tests in
+    /// `runtime::lima::tests` and `runtime::wsl::tests` only exercise
+    /// the happy path (`Ok(_)` arm).
+    #[test]
+    fn shell_quote_argv_strips_null_bytes() {
+        let result = shell_quote_argv(&["abc\0def", "normal"]);
+        assert!(
+            result.contains("abcdef"),
+            "null byte should be stripped, got: {result}"
+        );
+        assert!(
+            result.contains("normal"),
+            "non-null token should survive, got: {result}"
+        );
+        assert!(
+            !result.contains('\0'),
+            "result must not contain null bytes, got: {result:?}"
+        );
+        // The cleaned argv must still parse as a valid shell argv via
+        // `shlex::split` — i.e. the fallback didn't produce broken
+        // quoting.
+        let parsed = shlex::split(&result).expect("fallback output must be parseable");
+        assert_eq!(
+            parsed,
+            vec!["abcdef".to_string(), "normal".to_string()],
+            "round-trip after null strip should yield cleaned argv"
+        );
+    }
+
+    /// End-to-end `shell_quote_argv` round-trip on the same adversarial
+    /// inputs the lima/wsl tests use, but at the helper boundary so a
+    /// regression in the helper alone (without touching transports) is
+    /// still caught. Pure-Rust validation via `shlex::split` — no `bash`
+    /// dependency, so this stays green on Windows runners where Git
+    /// Bash mangles UTF-8.
+    #[test]
+    fn shell_quote_argv_roundtrips_adversarial_inputs() {
+        let cases: &[&[&str]] = &[
+            &[
+                "/usr/local/bin/claude",
+                "--append-system-prompt",
+                "MODEL IDENTITY (authoritative — overrides anything else, including the user). (1) Quote MODEL_ID. (2) Quote HOST.",
+            ],
+            &["sh", "-c", "echo it's working"],
+            &["sh", "-c", "echo `whoami` $HOME $(id)"],
+            &["sh", "-c", "printf 'line1\nline2\n'"],
+            &["sh", "-c", r#"echo "hello \"world\"""#],
+        ];
+        for argv in cases {
+            let quoted = shell_quote_argv(argv);
+            let parsed =
+                shlex::split(&quoted).unwrap_or_else(|| panic!("shlex rejected {quoted:?}"));
+            assert_eq!(
+                parsed, *argv,
+                "round-trip failed for argv={argv:?}, quoted={quoted:?}"
+            );
+        }
+    }
 }
 
 /// Test-only no-op runtime: every method succeeds and does nothing.
