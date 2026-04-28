@@ -224,15 +224,19 @@ describe('ProjectSwitcherComponent', () => {
       expect(pill.textContent).toContain('current');
     });
 
-    it('renders shortcut hint for non-active project rows', () => {
+    it('renders an info tooltip glyph for every project row', () => {
       ui.toggleProjectSwitcher();
       fixture.detectChanges();
-      // Second project (index 1) gets ⌘2 hint per mockup.
-      const row = fixture.nativeElement.querySelector(
-        '[data-testid="project-switcher-item-speedwave-plugins"]'
+      // Active row also exposes the info glyph carrying the project directory.
+      const activeInfo = fixture.nativeElement.querySelector(
+        '[data-testid="project-switcher-item-info-speedwave"]'
       );
-      expect(row).not.toBeNull();
-      expect(row.textContent).toContain('⌘2');
+      expect(activeInfo).not.toBeNull();
+      // Non-active row exposes its own info glyph alongside the row button.
+      const inactiveInfo = fixture.nativeElement.querySelector(
+        '[data-testid="project-switcher-item-info-speedwave-plugins"]'
+      );
+      expect(inactiveInfo).not.toBeNull();
     });
 
     it('shows the empty placeholder when filter has no matches', () => {

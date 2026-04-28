@@ -73,42 +73,65 @@ describe('SlashMenuComponent', () => {
     });
   });
 
+  /**
+   * Reads the protected `activeIndex` signal on a SlashMenuComponent without
+   * tunneling through `any` — the component exposes it as `protected` so we
+   * narrow it to its public shape (callable getter + `set()`).
+   * @param c - Component instance whose `activeIndex` signal to read.
+   */
+  const readActive = (c: SlashMenuComponent): number =>
+    (c as unknown as { activeIndex: { (): number; set(v: number): void } }).activeIndex();
+
+  /**
+   * Writes the protected `activeIndex` signal directly for assertion setup.
+   * @param c - Component instance whose `activeIndex` signal to update.
+   * @param v - New active-index value.
+   */
+  const writeActive = (c: SlashMenuComponent, v: number): void =>
+    (c as unknown as { activeIndex: { (): number; set(v: number): void } }).activeIndex.set(v);
+
+  /**
+   * Builds a KeyboardEvent so the component's handler sees the right `key`.
+   * @param key - DOM key value (e.g. `'ArrowDown'`).
+   */
+  const keyEvent = (key: string): KeyboardEvent => new KeyboardEvent('keydown', { key });
+
   describe('keyboard navigation', () => {
     beforeEach(() => {
       service.commands.set([cmd('a'), cmd('b'), cmd('c')]);
       fixture.detectChanges();
-      component.highlighted.set(0);
+      writeActive(component, 0);
     });
 
     it('arrow down advances highlight and wraps at the end', () => {
-      component.handleArrowDown(new KeyboardEvent('keydown'));
-      expect(component.highlighted()).toBe(1);
-      component.handleArrowDown(new KeyboardEvent('keydown'));
-      expect(component.highlighted()).toBe(2);
-      component.handleArrowDown(new KeyboardEvent('keydown'));
-      expect(component.highlighted()).toBe(0);
+      component.onSearchKeydown(keyEvent('ArrowDown'));
+      expect(readActive(component)).toBe(1);
+      component.onSearchKeydown(keyEvent('ArrowDown'));
+      expect(readActive(component)).toBe(2);
+      component.onSearchKeydown(keyEvent('ArrowDown'));
+      expect(readActive(component)).toBe(0);
     });
 
     it('arrow up moves highlight back and wraps at the start', () => {
-      component.handleArrowUp(new KeyboardEvent('keydown'));
-      expect(component.highlighted()).toBe(2);
-      component.handleArrowUp(new KeyboardEvent('keydown'));
-      expect(component.highlighted()).toBe(1);
+      component.onSearchKeydown(keyEvent('ArrowUp'));
+      expect(readActive(component)).toBe(2);
+      component.onSearchKeydown(keyEvent('ArrowUp'));
+      expect(readActive(component)).toBe(1);
     });
 
     it('Home jumps to first; End jumps to last', () => {
-      component.highlighted.set(1);
-      component.handleEnd(new KeyboardEvent('keydown'));
-      expect(component.highlighted()).toBe(2);
-      component.handleHome(new KeyboardEvent('keydown'));
-      expect(component.highlighted()).toBe(0);
+      writeActive(component, 1);
+      component.onSearchKeydown(keyEvent('End'));
+      expect(readActive(component)).toBe(2);
+      component.onSearchKeydown(keyEvent('Home'));
+      expect(readActive(component)).toBe(0);
     });
 
     it('Enter emits selected for the highlighted command', () => {
-      component.highlighted.set(1);
+      writeActive(component, 1);
       const spy = vi.fn();
       component.selected.subscribe(spy);
-      component.handleEnter(new KeyboardEvent('keydown'));
+      component.onSearchKeydown(keyEvent('Enter'));
       expect(spy).toHaveBeenCalledWith({
         name: 'b',
         description: null,
@@ -118,18 +141,28 @@ describe('SlashMenuComponent', () => {
       });
     });
 
+    it('Tab also commits the highlighted selection', () => {
+      writeActive(component, 2);
+      const spy = vi.fn();
+      component.selected.subscribe(spy);
+      component.onSearchKeydown(keyEvent('Tab'));
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ name: 'c' }));
+    });
+
     it('Escape emits closed', () => {
       const spy = vi.fn();
       component.closed.subscribe(spy);
-      component.handleEscape(new KeyboardEvent('keydown'));
+      component.onEscape(keyEvent('Escape'));
       expect(spy).toHaveBeenCalled();
     });
 
-    it('keyboard handlers are no-ops when open is false', () => {
+    it('Escape is a no-op when open is false', () => {
       fixture.componentRef.setInput('open', false);
       fixture.detectChanges();
-      component.handleArrowDown(new KeyboardEvent('keydown'));
-      expect(component.highlighted()).toBe(0);
+      const spy = vi.fn();
+      component.closed.subscribe(spy);
+      component.onEscape(keyEvent('Escape'));
+      expect(spy).not.toHaveBeenCalled();
     });
 
     it('Enter on empty list does not emit', () => {
@@ -137,25 +170,26 @@ describe('SlashMenuComponent', () => {
       fixture.detectChanges();
       const spy = vi.fn();
       component.selected.subscribe(spy);
-      component.handleEnter(new KeyboardEvent('keydown'));
+      component.onSearchKeydown(keyEvent('Enter'));
       expect(spy).not.toHaveBeenCalled();
     });
   });
 
   describe('ARIA', () => {
-    it('role="listbox" and aria-activedescendant point at highlighted option', () => {
+    it('uses cdkListbox + cdkOption with the current highlight as the active class', () => {
       service.commands.set([cmd('a'), cmd('b')]);
       fixture.detectChanges();
-      component.highlighted.set(1);
+      writeActive(component, 1);
       fixture.detectChanges();
 
       const el = fixture.nativeElement as HTMLElement;
-      const listbox = el.querySelector('[data-testid="slash-menu"]');
-      expect(listbox?.getAttribute('role')).toBe('listbox');
-      expect(listbox?.getAttribute('aria-activedescendant')).toBe('slash-menu-option-1');
-
-      const option = el.querySelector('[data-testid="slash-menu-item"][aria-selected="false"]');
-      expect(option?.getAttribute('role')).toBe('option');
+      const listbox = el.querySelector('ul[role="listbox"]');
+      expect(listbox).not.toBeNull();
+      const options = el.querySelectorAll('[data-testid="slash-menu-item"]');
+      expect(options.length).toBe(2);
+      expect(options[0].getAttribute('role')).toBe('option');
+      const active = el.querySelector('[data-testid="slash-menu-item"].is-active');
+      expect(active?.getAttribute('id')).toBe('slash-menu-option-1');
     });
 
     it('loading state uses role="status" with aria-live="polite"', () => {
