@@ -1,4 +1,5 @@
 import { ChangeDetectionStrategy, Component, OnInit, input, signal } from '@angular/core';
+import { IconComponent } from '../../shared/icon.component';
 
 /**
  * Collapsible "thinking" block — terminal-minimal timeline event with a violet
@@ -10,6 +11,7 @@ import { ChangeDetectionStrategy, Component, OnInit, input, signal } from '@angu
 @Component({
   selector: 'app-thinking-block',
   changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [IconComponent],
   host: { class: 'block my-2' },
   template: `
     <details
@@ -23,17 +25,12 @@ import { ChangeDetectionStrategy, Component, OnInit, input, signal } from '@angu
         [attr.aria-expanded]="!collapsed()"
         [attr.aria-controls]="!collapsed() ? panelId : null"
       >
-        <svg
+        <app-icon
+          name="chevron-right"
+          [strokeWidth]="2"
           class="h-3 w-3 transition-transform"
           [class.rotate-90]="!collapsed()"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-          stroke-width="2"
-          aria-hidden="true"
-        >
-          <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
-        </svg>
+        />
         thinking
       </summary>
       <div

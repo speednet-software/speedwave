@@ -1,5 +1,6 @@
 import { Injectable, computed, inject, signal, type Signal } from '@angular/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
+import { Clipboard } from '@angular/cdk/clipboard';
 import { TauriService } from './tauri.service';
 import { ProjectStateService } from './project-state.service';
 import { AnthropicModelsService } from './anthropic-models.service';
@@ -112,6 +113,7 @@ export class ChatStateService {
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private anthropicModels = inject(AnthropicModelsService);
+  private clipboard = inject(Clipboard);
   private unsubProjectChange: (() => void) | null = null;
 
   /**
@@ -860,28 +862,26 @@ export class ChatStateService {
 
   /**
    * Copies the textual content of the message at `index` to the system
-   * clipboard. Returns `true` on success, `false` on failure (out-of-range
-   * index, missing `navigator.clipboard`, write rejection). Block kinds that
-   * carry no user-facing prose — `tool_use`, `thinking`, `ask_user` — are
-   * elided; `text` and `error` blocks are joined with a blank line.
+   * clipboard via Angular CDK's `Clipboard` service. Returns `true` on
+   * success, `false` on failure (out-of-range index, empty content, write
+   * rejection). Block kinds that carry no user-facing prose — `tool_use`,
+   * `thinking`, `ask_user` — are elided; `text` and `error` blocks are
+   * joined with a blank line.
    *
    * The component layer owns the "copied" indicator timing so this method can
    * stay pure and testable.
    * @param index - Index into `messages` of the entry to copy.
    */
-  async copyMessage(index: number): Promise<boolean> {
+  copyMessage(index: number): boolean {
     const msg = this._messages[index];
     if (!msg) return false;
     const text = blocksToPlainText(msg.blocks);
     if (!text) return false;
-    if (typeof navigator === 'undefined' || !navigator.clipboard) return false;
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch (err) {
-      console.warn('[chat-state] copyMessage: clipboard write failed', err);
-      return false;
+    const ok = this.clipboard.copy(text);
+    if (!ok) {
+      console.warn('[chat-state] copyMessage: clipboard write failed');
     }
+    return ok;
   }
 
   /**

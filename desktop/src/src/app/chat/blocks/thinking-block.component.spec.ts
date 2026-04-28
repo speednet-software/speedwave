@@ -39,7 +39,7 @@ describe('ThinkingBlockComponent', () => {
     expect(details.open).toBe(false);
     const toggle = el.querySelector('[data-testid="thinking-toggle"]');
     expect(toggle?.textContent).toContain('thinking');
-    const chevron = toggle?.querySelector('svg');
+    const chevron = toggle?.querySelector('app-icon');
     expect(chevron?.classList.contains('rotate-90')).toBe(false);
   });
 
@@ -55,7 +55,7 @@ describe('ThinkingBlockComponent', () => {
     const content = el.querySelector('[data-testid="thinking-content"]');
     expect(content?.textContent?.trim()).toBe('I should check the file');
     const toggle = el.querySelector('[data-testid="thinking-toggle"]') as HTMLElement;
-    const chevron = toggle.querySelector('svg');
+    const chevron = toggle.querySelector('app-icon');
     expect(chevron?.classList.contains('rotate-90')).toBe(true);
   });
 
@@ -69,7 +69,7 @@ describe('ThinkingBlockComponent', () => {
     const details = el.querySelector('details') as HTMLDetailsElement;
     expect(details.open).toBe(false);
     const toggle = el.querySelector('[data-testid="thinking-toggle"]') as HTMLElement;
-    const chevron = toggle.querySelector('svg');
+    const chevron = toggle.querySelector('app-icon');
     expect(chevron?.classList.contains('rotate-90')).toBe(false);
   });
 

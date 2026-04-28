@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
 import { RouterLink } from '@angular/router';
+import { IconComponent, type IconName } from '../../shared/icon.component';
 
 /** One entry in the left navigation rail. */
 export interface NavRailEntry {
@@ -9,8 +10,8 @@ export interface NavRailEntry {
   label: string;
   /** Router URL — clicking the button navigates here via `[routerLink]`. */
   route: string;
-  /** Inline SVG path string (single `d` attribute). */
-  iconPath: string;
+  /** Icon catalog name rendered via `<app-icon>`. */
+  iconName: IconName;
   /** Hint shown next to the label, e.g. `⌘1`. */
   shortcut?: string;
 }
@@ -26,7 +27,7 @@ export interface NavRailEntry {
  */
 @Component({
   selector: 'app-nav-rail',
-  imports: [RouterLink],
+  imports: [RouterLink, IconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
     role: 'navigation',
@@ -56,16 +57,7 @@ export interface NavRailEntry {
           [class.active]="entry.id === activeId()"
           class="rail-btn"
         >
-          <svg
-            class="h-[18px] w-[18px]"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-            stroke-width="1.75"
-            aria-hidden="true"
-          >
-            <path stroke-linecap="round" stroke-linejoin="round" [attr.d]="entry.iconPath" />
-          </svg>
+          <app-icon [name]="entry.iconName" class="h-[18px] w-[18px]" />
         </a>
       }
     </nav>
@@ -80,16 +72,7 @@ export interface NavRailEntry {
         title="Command palette (⌘K)"
         aria-label="Open command palette"
       >
-        <svg
-          class="h-[18px] w-[18px]"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-          stroke-width="1.75"
-          aria-hidden="true"
-        >
-          <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h7" />
-        </svg>
+        <app-icon name="menu" class="h-[18px] w-[18px]" />
       </button>
     </div>
   `,

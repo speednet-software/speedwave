@@ -1402,17 +1402,16 @@ describe('ChatStateService', () => {
   });
 
   describe('copyMessage', () => {
-    let writeText: ReturnType<typeof vi.fn>;
+    let copySpy: ReturnType<typeof vi.fn>;
 
-    beforeEach(() => {
-      writeText = vi.fn().mockResolvedValue(undefined);
-      Object.defineProperty(navigator, 'clipboard', {
-        value: { writeText },
-        configurable: true,
-      });
+    beforeEach(async () => {
+      const { Clipboard } = await import('@angular/cdk/clipboard');
+      const cdkClipboard = TestBed.inject(Clipboard);
+      copySpy = vi.fn().mockReturnValue(true);
+      cdkClipboard.copy = copySpy as unknown as typeof cdkClipboard.copy;
     });
 
-    it('writes flattened text content to the clipboard and returns true', async () => {
+    it('writes flattened text content to the clipboard and returns true', () => {
       service._setState({
         messages: [
           {
@@ -1437,18 +1436,18 @@ describe('ChatStateService', () => {
           },
         ],
       });
-      const ok = await service.copyMessage(0);
+      const ok = service.copyMessage(0);
       expect(ok).toBe(true);
-      expect(writeText).toHaveBeenCalledWith('Hello\n\nWorld');
+      expect(copySpy).toHaveBeenCalledWith('Hello\n\nWorld');
     });
 
-    it('returns false for an out-of-range index', async () => {
-      const ok = await service.copyMessage(99);
+    it('returns false for an out-of-range index', () => {
+      const ok = service.copyMessage(99);
       expect(ok).toBe(false);
-      expect(writeText).not.toHaveBeenCalled();
+      expect(copySpy).not.toHaveBeenCalled();
     });
 
-    it('returns false when there is no copyable text (only tool_use/thinking)', async () => {
+    it('returns false when there is no copyable text (only tool_use/thinking)', () => {
       service._setState({
         messages: [
           {
@@ -1458,30 +1457,18 @@ describe('ChatStateService', () => {
           },
         ],
       });
-      const ok = await service.copyMessage(0);
+      const ok = service.copyMessage(0);
       expect(ok).toBe(false);
-      expect(writeText).not.toHaveBeenCalled();
+      expect(copySpy).not.toHaveBeenCalled();
     });
 
-    it('returns false when navigator.clipboard is missing', async () => {
-      Object.defineProperty(navigator, 'clipboard', {
-        value: undefined,
-        configurable: true,
-      });
-      service._setState({
-        messages: [{ role: 'assistant', blocks: [{ type: 'text', content: 'x' }], timestamp: 1 }],
-      });
-      const ok = await service.copyMessage(0);
-      expect(ok).toBe(false);
-    });
-
-    it('returns false when clipboard.writeText rejects', async () => {
-      writeText.mockRejectedValueOnce(new Error('denied'));
+    it('returns false and warns when CDK Clipboard.copy returns false', () => {
+      copySpy.mockReturnValueOnce(false);
       service._setState({
         messages: [{ role: 'assistant', blocks: [{ type: 'text', content: 'x' }], timestamp: 1 }],
       });
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const ok = await service.copyMessage(0);
+      const ok = service.copyMessage(0);
       expect(ok).toBe(false);
       expect(warnSpy).toHaveBeenCalled();
       warnSpy.mockRestore();

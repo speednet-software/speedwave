@@ -1,4 +1,16 @@
-import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  DestroyRef,
+  TemplateRef,
+  computed,
+  effect,
+  inject,
+  input,
+  output,
+  viewChild,
+} from '@angular/core';
+import { Dialog, DialogRef } from '@angular/cdk/dialog';
 
 /** Color family applied to the kicker line above the title. */
 export type ModalKickerColor = 'amber' | 'green' | 'red' | 'accent';
@@ -11,94 +23,80 @@ export type ModalBorderColor = 'default' | 'red';
  *
  * Used by the shell to surface the restart-required, update-available, and
  * system-check-failed dialogs from the mockup (lines 1904-1952). All copy and
- * action handlers come from the parent via inputs/outputs; this component owns
- * only the visual chrome plus the backdrop dismissal contract.
+ * action handlers come from the parent via inputs/outputs; this component
+ * delegates positioning, backdrop, focus trap, and Esc handling to the CDK
+ * `Dialog` service so we never re-implement those primitives ourselves.
  */
 @Component({
   selector: 'app-modal-overlay',
   imports: [],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    @if (open()) {
+    <ng-template #content>
       <div
-        class="fixed inset-0 z-[900] flex items-center justify-center bg-black/75 backdrop-blur-sm"
-        role="alertdialog"
-        aria-modal="true"
-        tabindex="-1"
-        [attr.aria-label]="title()"
+        class="rounded p-5 bg-[var(--bg-1)]"
+        role="document"
+        [class]="boxClasses()"
         [attr.data-testid]="testId()"
-        (click)="onBackdropClick($event)"
-        (keydown.escape)="closed.emit()"
       >
-        <div
-          class="rounded p-5 bg-[var(--bg-1)]"
-          role="document"
-          [class]="boxClasses()"
-          (click)="onCardClick($event)"
-          (keydown)="onCardKeydown($event)"
-        >
-          <div class="mono text-[11px] uppercase tracking-widest" [class]="kickerClasses()">
-            {{ kicker() }}
-          </div>
-          <h3
-            class="view-title view-title-section mt-1 text-[var(--ink)]"
-            data-testid="modal-title"
+        <div class="mono text-[11px] uppercase tracking-widest" [class]="kickerClasses()">
+          {{ kicker() }}
+        </div>
+        <h3 class="view-title view-title-section mt-1 text-[var(--ink)]" data-testid="modal-title">
+          {{ modalTitle() }}
+        </h3>
+        @if (body()) {
+          <p
+            class="mt-2 text-[13px] leading-relaxed text-[var(--ink-dim)]"
+            data-testid="modal-body"
           >
-            {{ title() }}
-          </h3>
-          @if (body()) {
-            <p
-              class="mt-2 text-[13px] leading-relaxed text-[var(--ink-dim)]"
-              data-testid="modal-body"
-            >
-              {{ body() }}
-            </p>
-          }
-          @if (code()) {
-            <pre
-              class="mono mt-3 overflow-x-auto rounded border border-red-500/20 bg-red-500/5 p-3 text-[11px] text-red-200"
-              data-testid="modal-code"
-              >{{ code() }}</pre
-            >
-          }
-          @if (note()) {
-            <div
-              class="mono mt-3 break-all rounded border border-[var(--line)] bg-[var(--bg)] p-2 text-[11px] text-[var(--ink-mute)]"
-              data-testid="modal-note"
-            >
-              {{ note() }}
-            </div>
-          }
-          @if (inlineError()) {
-            <div
-              class="mono mt-3 rounded border border-red-500/30 bg-red-500/5 p-2 text-[11.5px] text-red-300"
-              [attr.data-testid]="inlineErrorTestId()"
-            >
-              {{ inlineError() }}
-            </div>
-          }
-          <div class="mt-4 flex justify-end gap-2">
-            <button
-              type="button"
-              class="mono rounded border border-[var(--line)] px-3 py-1 text-[12px] text-[var(--ink-dim)] hover:text-[var(--ink)]"
-              [attr.data-testid]="secondaryTestId()"
-              (click)="secondary.emit()"
-            >
-              {{ secondaryLabel() }}
-            </button>
-            <button
-              type="button"
-              class="mono rounded px-3 py-1 text-[12px] font-medium hover:opacity-90"
-              [class]="primaryClasses()"
-              [attr.data-testid]="primaryTestId()"
-              (click)="primary.emit()"
-            >
-              {{ primaryLabel() }}
-            </button>
+            {{ body() }}
+          </p>
+        }
+        @if (code()) {
+          <pre
+            class="mono mt-3 overflow-x-auto rounded border border-red-500/20 bg-red-500/5 p-3 text-[11px] text-red-200"
+            data-testid="modal-code"
+            >{{ code() }}</pre
+          >
+        }
+        @if (note()) {
+          <div
+            class="mono mt-3 break-all rounded border border-[var(--line)] bg-[var(--bg)] p-2 text-[11px] text-[var(--ink-mute)]"
+            data-testid="modal-note"
+          >
+            {{ note() }}
           </div>
+        }
+        @if (inlineError()) {
+          <div
+            class="mono mt-3 rounded border border-red-500/30 bg-red-500/5 p-2 text-[11.5px] text-red-300"
+            [attr.data-testid]="inlineErrorTestId()"
+          >
+            {{ inlineError() }}
+          </div>
+        }
+        <div class="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            class="mono rounded border border-[var(--line)] px-3 py-1 text-[12px] text-[var(--ink-dim)] hover:text-[var(--ink)]"
+            [attr.data-testid]="secondaryTestId()"
+            (click)="secondary.emit()"
+          >
+            {{ secondaryLabel() }}
+          </button>
+          <button
+            type="button"
+            class="mono rounded px-3 py-1 text-[12px] font-medium hover:opacity-90"
+            [class]="primaryClasses()"
+            [attr.data-testid]="primaryTestId()"
+            (click)="primary.emit()"
+          >
+            {{ primaryLabel() }}
+          </button>
         </div>
       </div>
-    }
+    </ng-template>
   `,
 })
 export class ModalOverlayComponent {
@@ -108,8 +106,12 @@ export class ModalOverlayComponent {
   readonly kicker = input.required<string>();
   /** Color family applied to the kicker — picks one of the semantic palette tokens. */
   readonly kickerColor = input<ModalKickerColor>('accent');
-  /** Title rendered with the view-title font/spacing. */
-  readonly title = input.required<string>();
+  /**
+   * Title rendered with the view-title font/spacing. Renamed from `title` to
+   * avoid the HTML `title` attribute collision (which would surface as a
+   * native browser tooltip on the host element).
+   */
+  readonly modalTitle = input.required<string>();
   /** Body paragraph; pass an empty string to hide the paragraph entirely. */
   readonly body = input<string>('');
   /** Optional pre-formatted block (e.g. stderr trace) inside a red callout. */
@@ -137,8 +139,21 @@ export class ModalOverlayComponent {
   readonly primary = output<void>();
   /** Emitted when the secondary button is clicked. */
   readonly secondary = output<void>();
-  /** Emitted when the backdrop (not the inner card) is clicked. */
+  /** Emitted when the dialog closes via backdrop, Esc, or programmatic close. */
   readonly closed = output<void>();
+
+  protected readonly content = viewChild.required<TemplateRef<unknown>>('content');
+
+  private readonly dialog = inject(Dialog);
+  private dialogRef: DialogRef<unknown, unknown> | null = null;
+
+  /**
+   * True while the host is closing the dialog because `open()` flipped
+   * to false. Used to suppress the `closed` output that the dialog's own
+   * `closed` subscription would otherwise fire (which would echo right back
+   * to the parent that already knows).
+   */
+  private closingProgrammatically = false;
 
   /** CSS classes for the kicker text — picks a semantic color from the palette. */
   readonly kickerClasses = computed(() => {
@@ -176,34 +191,46 @@ export class ModalOverlayComponent {
   });
 
   /**
-   * Closes the overlay when the backdrop (not the inner card) is clicked.
-   * @param event - Mouse click event from the backdrop element.
+   * Wires the dialog lifecycle to the `open()` input — opens/closes the
+   * CDK dialog as the input toggles, and tears down on host destroy.
    */
-  onBackdropClick(event: MouseEvent): void {
-    if (event.target === event.currentTarget) {
-      this.closed.emit();
-    }
+  constructor() {
+    // Sync dialog open/closed state with the `open()` input. CDK Dialog handles
+    // the backdrop click, Esc key, and focus trap entirely on its own.
+    effect(() => {
+      const isOpen = this.open();
+      if (isOpen) this.openDialog();
+      else this.closeDialog();
+    });
+
+    // Ensure the dialog is torn down if the host component is destroyed
+    // mid-flight (e.g. parent collapses the surrounding `@if`).
+    inject(DestroyRef).onDestroy(() => this.closeDialog());
   }
 
-  /**
-   * Stops a click on the inner card from bubbling to the backdrop and
-   * closing the overlay. Always silent — the buttons own their own actions.
-   * @param event - Mouse click event from inside the modal card.
-   */
-  onCardClick(event: MouseEvent): void {
-    event.stopPropagation();
+  private openDialog(): void {
+    if (this.dialogRef) return;
+    const ref = this.dialog.open(this.content(), {
+      hasBackdrop: true,
+      backdropClass: 'cdk-overlay-dark-backdrop',
+      ariaLabel: this.modalTitle(),
+      panelClass: 'modal-overlay-panel',
+      disableClose: false,
+    });
+    this.dialogRef = ref;
+    ref.closed.subscribe(() => {
+      this.dialogRef = null;
+      if (!this.closingProgrammatically) {
+        this.closed.emit();
+      }
+      this.closingProgrammatically = false;
+    });
   }
 
-  /**
-   * No-op keyboard handler attached to the modal card so the
-   * `click-events-have-key-events` accessibility lint rule is satisfied —
-   * actual focusable controls (buttons) live inside the card.
-   * @param event - Keyboard event from inside the modal card; intentionally
-   *   ignored.
-   */
-  onCardKeydown(event: KeyboardEvent): void {
-    // Intentionally ignored — the inner buttons own their own keyboard
-    // handling. Reading the parameter prevents the no-unused-vars rule.
-    void event;
+  private closeDialog(): void {
+    if (!this.dialogRef) return;
+    this.closingProgrammatically = true;
+    this.dialogRef.close();
+    this.dialogRef = null;
   }
 }

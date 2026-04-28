@@ -412,13 +412,6 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
-  /** Click-outside handler: closes whichever drawer is currently open. */
-  onBackdropClick(): void {
-    this.ui.closeSidebar();
-    this.ui.closeMemory();
-    this.cdr.markForCheck();
-  }
-
   /** Fetches the active project's CLAUDE.md; surfaces backend errors via `memoryError` (parity with `historyError`). */
   async loadProjectMemory(): Promise<void> {
     this.memoryError = '';

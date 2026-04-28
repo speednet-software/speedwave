@@ -8,6 +8,7 @@ import {
   input,
   output,
 } from '@angular/core';
+import { Clipboard } from '@angular/cdk/clipboard';
 import { TauriService } from '../services/tauri.service';
 
 /**
@@ -77,6 +78,7 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
 
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
+  private clipboard = inject(Clipboard);
   private pollTimer?: ReturnType<typeof setInterval>;
   private copyTimer?: ReturnType<typeof setTimeout>;
 
@@ -100,19 +102,18 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
   }
 
   /** Copies the CLI command to the clipboard. */
-  async copyCommand(): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(this.command);
-      this.copied = true;
-      this.cdr.markForCheck();
-      this.copyTimer = setTimeout(() => {
-        this.copied = false;
-        this.cdr.markForCheck();
-      }, 2000);
-    } catch {
+  copyCommand(): void {
+    if (!this.clipboard.copy(this.command)) {
       this.error = 'Failed to copy to clipboard';
       this.cdr.markForCheck();
+      return;
     }
+    this.copied = true;
+    this.cdr.markForCheck();
+    this.copyTimer = setTimeout(() => {
+      this.copied = false;
+      this.cdr.markForCheck();
+    }, 2000);
   }
 
   /** Cleans up timers. */

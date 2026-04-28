@@ -17,6 +17,7 @@ import { ProjectStateService } from '../services/project-state.service';
 import { SystemHealthService } from '../services/system-health.service';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import { ModalOverlayComponent } from '../shell/modal-overlay/modal-overlay.component';
+import { TooltipDirective } from '../shared/tooltip.directive';
 
 /** Log severity levels recognised by the logs-view filter chips. */
 export type LogLevel = 'all' | 'debug' | 'info' | 'warn' | 'error';
@@ -115,7 +116,7 @@ function stripContainerPrefix(container: string): string {
  */
 @Component({
   selector: 'app-logs-view',
-  imports: [ProjectPillComponent, ModalOverlayComponent, RouterLink],
+  imports: [ProjectPillComponent, ModalOverlayComponent, RouterLink, TooltipDirective],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -254,7 +255,8 @@ function stripContainerPrefix(container: string): string {
         <button
           type="button"
           class="mono flex-shrink-0 rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-50 disabled:cursor-not-allowed"
-          title="Refresh"
+          appTooltip="Refresh"
+          placement="bottom"
           data-testid="logs-refresh"
           [disabled]="loading()"
           (click)="refresh()"
@@ -267,7 +269,8 @@ function stripContainerPrefix(container: string): string {
           data-testid="logs-export"
           [disabled]="diagnosticsExporting() || !projectState.activeProject"
           (click)="exportDiagnostics()"
-          title="Collects app logs, container logs, and system info into a sanitized ZIP (no tokens or secrets)."
+          appTooltip="Collects app logs, container logs, and system info into a sanitized ZIP (no tokens or secrets)."
+          placement="bottom"
         >
           {{ diagnosticsExporting() ? 'exporting…' : 'export diagnostics' }}
         </button>
@@ -460,7 +463,7 @@ function stripContainerPrefix(container: string): string {
       [open]="exportDialogOpen()"
       kicker="✓ export complete"
       kickerColor="green"
-      title="Diagnostics archive saved"
+      modalTitle="Diagnostics archive saved"
       body="The sanitized ZIP is ready. Share the path below with support or attach the file directly."
       [note]="diagnosticsPath()"
       [primaryLabel]="copyButtonLabel()"

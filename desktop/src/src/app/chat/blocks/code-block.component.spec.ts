@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { Clipboard } from '@angular/cdk/clipboard';
 import { CodeBlockComponent } from './code-block.component';
 
 describe('CodeBlockComponent', () => {
   let fixture: ComponentFixture<CodeBlockComponent>;
   let component: CodeBlockComponent;
-  let writeTextSpy: ReturnType<typeof vi.fn>;
-  let originalClipboard: Clipboard | undefined;
+  let copySpy: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
@@ -16,26 +16,15 @@ describe('CodeBlockComponent', () => {
     fixture = TestBed.createComponent(CodeBlockComponent);
     component = fixture.componentInstance;
 
-    writeTextSpy = vi.fn().mockResolvedValue(undefined);
-    originalClipboard = navigator.clipboard;
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText: writeTextSpy },
-    });
+    copySpy = vi.fn().mockReturnValue(true);
+    const cdkClipboard = TestBed.inject(Clipboard);
+    cdkClipboard.copy = copySpy as unknown as typeof cdkClipboard.copy;
 
     vi.useFakeTimers();
   });
 
   afterEach(() => {
     vi.useRealTimers();
-    if (originalClipboard === undefined) {
-      Reflect.deleteProperty(navigator as unknown as Record<string, unknown>, 'clipboard');
-    } else {
-      Object.defineProperty(navigator, 'clipboard', {
-        configurable: true,
-        value: originalClipboard,
-      });
-    }
   });
 
   it('renders the code content verbatim inside <pre><code>', () => {
@@ -131,17 +120,17 @@ describe('CodeBlockComponent', () => {
     expect(btn).not.toBeNull();
   });
 
-  it('calls navigator.clipboard.writeText on copy and toggles justCopied', async () => {
+  it('calls Clipboard.copy on copy and toggles justCopied', () => {
     fixture.componentRef.setInput('code', 'copy me');
     fixture.detectChanges();
 
     expect(component.justCopied()).toBe(false);
 
-    await component.copy();
+    component.copy();
     fixture.detectChanges();
 
-    expect(writeTextSpy).toHaveBeenCalledOnce();
-    expect(writeTextSpy).toHaveBeenCalledWith('copy me');
+    expect(copySpy).toHaveBeenCalledOnce();
+    expect(copySpy).toHaveBeenCalledWith('copy me');
     expect(component.justCopied()).toBe(true);
 
     const confirmation = fixture.nativeElement.querySelector('[data-testid="code-block-copied"]');
@@ -175,27 +164,27 @@ describe('CodeBlockComponent', () => {
     expect(body.className).toContain('mono');
   });
 
-  it('logs clipboard errors and leaves justCopied false', async () => {
+  it('logs clipboard errors and leaves justCopied false', () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    writeTextSpy.mockRejectedValueOnce(new Error('not allowed'));
+    copySpy.mockReturnValueOnce(false);
     fixture.componentRef.setInput('code', 'blocked');
     fixture.detectChanges();
 
-    await component.copy();
+    component.copy();
     fixture.detectChanges();
 
-    expect(writeTextSpy).toHaveBeenCalledOnce();
+    expect(copySpy).toHaveBeenCalledOnce();
     expect(errSpy).toHaveBeenCalledOnce();
     expect(component.justCopied()).toBe(false);
     expect(fixture.nativeElement.querySelector('[data-testid="code-block-copied"]')).toBeNull();
     errSpy.mockRestore();
   });
 
-  it('cancels the copied-confirmation timer when the component is destroyed', async () => {
+  it('cancels the copied-confirmation timer when the component is destroyed', () => {
     fixture.componentRef.setInput('code', 'x');
     fixture.detectChanges();
 
-    await component.copy();
+    component.copy();
     expect(component.justCopied()).toBe(true);
 
     fixture.destroy();

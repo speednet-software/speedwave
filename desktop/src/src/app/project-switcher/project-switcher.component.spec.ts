@@ -150,17 +150,20 @@ describe('ProjectSwitcherComponent', () => {
     // and is exercised by its own spec; here we only assert that the switcher
     // opens, closes, and reacts to the `created` event correctly.
 
-    it('openAddForm() makes the modal visible', () => {
+    it('openAddForm() makes the modal visible and closes the dropdown', () => {
+      ui.toggleProjectSwitcher();
+      expect(ui.projectSwitcherOpen()).toBe(true);
       component.openAddForm();
       expect(component.showAddForm()).toBe(true);
+      expect(ui.projectSwitcherOpen()).toBe(false);
     });
 
-    it('closeAddForm() hides the modal without touching the dropdown', () => {
+    it('closeAddForm() hides the modal and leaves the dropdown closed', () => {
       ui.toggleProjectSwitcher();
       component.openAddForm();
       component.closeAddForm();
       expect(component.showAddForm()).toBe(false);
-      expect(ui.projectSwitcherOpen()).toBe(true);
+      expect(ui.projectSwitcherOpen()).toBe(false);
     });
 
     it('onProjectAdded() closes both the modal and the switcher dropdown', () => {
@@ -219,15 +222,19 @@ describe('ProjectSwitcherComponent', () => {
       expect(pill.textContent).toContain('current');
     });
 
-    it('renders shortcut hint for non-active project rows', () => {
+    it('renders an info tooltip glyph for every project row', () => {
       ui.toggleProjectSwitcher();
       fixture.detectChanges();
-      // Second project (index 1) gets ⌘2 hint per mockup.
-      const row = fixture.nativeElement.querySelector(
-        '[data-testid="project-switcher-item-speedwave-plugins"]'
+      // Active row also exposes the info glyph carrying the project directory.
+      const activeInfo = fixture.nativeElement.querySelector(
+        '[data-testid="project-switcher-item-info-speedwave"]'
       );
-      expect(row).not.toBeNull();
-      expect(row.textContent).toContain('⌘2');
+      expect(activeInfo).not.toBeNull();
+      // Non-active row exposes its own info glyph alongside the row button.
+      const inactiveInfo = fixture.nativeElement.querySelector(
+        '[data-testid="project-switcher-item-info-speedwave-plugins"]'
+      );
+      expect(inactiveInfo).not.toBeNull();
     });
 
     it('shows the empty placeholder when filter has no matches', () => {

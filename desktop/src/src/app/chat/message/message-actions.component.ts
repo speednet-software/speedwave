@@ -68,11 +68,11 @@ export class MessageActionsComponent implements OnDestroy {
   }
 
   /** Click handler for the copy button. */
-  async onCopy(): Promise<void> {
+  onCopy(): void {
     if (this.copyBusy) return;
     this.copyBusy = true;
     this.cdr.markForCheck();
-    const ok = await this.chat.copyMessage(this.entryIndex());
+    const ok = this.chat.copyMessage(this.entryIndex());
     this.copyBusy = false;
     if (ok) {
       this.copied = true;

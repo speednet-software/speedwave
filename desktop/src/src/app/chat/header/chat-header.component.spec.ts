@@ -16,7 +16,7 @@ describe('ChatHeaderComponent', () => {
   // ── Happy path — title rendering ──────────────────────────────────────
 
   it('renders the title', () => {
-    fixture.componentRef.setInput('title', 'Refactoring container runtime');
+    fixture.componentRef.setInput('viewTitle', 'Refactoring container runtime');
     fixture.detectChanges();
 
     const titleEl = fixture.nativeElement.querySelector(
@@ -126,7 +126,7 @@ describe('ChatHeaderComponent', () => {
   // ── Edge case — Unicode and long titles render unchanged ────────────
 
   it('renders Unicode characters in title verbatim', () => {
-    fixture.componentRef.setInput('title', 'Σφαῖρα — тест 漢字');
+    fixture.componentRef.setInput('viewTitle', 'Σφαῖρα — тест 漢字');
     fixture.detectChanges();
     const titleEl = fixture.nativeElement.querySelector(
       '[data-testid="chat-header-title"]'

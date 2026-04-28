@@ -664,10 +664,10 @@ describe('LogsViewComponent — status bar layout', () => {
     expect(component.diagnosticsPath()).toBe('/tmp/speedwave-diag.zip');
     expect(component.exportDialogOpen()).toBe(true);
 
-    expect(
-      fixture.nativeElement.querySelector('[data-testid="export-diagnostics-overlay"]')
-    ).not.toBeNull();
-    const note = fixture.nativeElement.querySelector('[data-testid="modal-note"]');
+    // CDK Dialog renders the modal into a portal on document.body, not
+    // inside the host fixture, so query the global document.
+    expect(document.querySelector('[data-testid="export-diagnostics-overlay"]')).not.toBeNull();
+    const note = document.querySelector('[data-testid="modal-note"]');
     expect(note?.textContent).toContain('/tmp/speedwave-diag.zip');
   });
 
@@ -688,9 +688,7 @@ describe('LogsViewComponent — status bar layout', () => {
     fixture.detectChanges();
 
     expect(component.exportDialogOpen()).toBe(false);
-    expect(
-      fixture.nativeElement.querySelector('[data-testid="export-diagnostics-overlay"]')
-    ).toBeNull();
+    expect(document.querySelector('[data-testid="export-diagnostics-overlay"]')).toBeNull();
   });
 
   it('copy button writes the path to the clipboard and flips its label to copied', async () => {
@@ -714,7 +712,7 @@ describe('LogsViewComponent — status bar layout', () => {
     await fixture.whenStable();
     fixture.detectChanges();
 
-    const copyBtn = fixture.nativeElement.querySelector(
+    const copyBtn = document.querySelector(
       '[data-testid="export-diagnostics-copy"]'
     ) as HTMLButtonElement;
     expect(copyBtn.textContent?.trim()).toBe('copy path');
@@ -724,7 +722,7 @@ describe('LogsViewComponent — status bar layout', () => {
 
     expect(writeText).toHaveBeenCalledWith('/tmp/speedwave-diag.zip');
     expect(component.diagnosticsCopied()).toBe(true);
-    const updated = fixture.nativeElement.querySelector(
+    const updated = document.querySelector(
       '[data-testid="export-diagnostics-copy"]'
     ) as HTMLButtonElement;
     expect(updated.textContent?.trim()).toBe('copied ✓');
@@ -748,17 +746,13 @@ describe('LogsViewComponent — status bar layout', () => {
     component.diagnosticsCopied.set(true);
 
     (
-      fixture.nativeElement.querySelector(
-        '[data-testid="export-diagnostics-close"]'
-      ) as HTMLButtonElement
+      document.querySelector('[data-testid="export-diagnostics-close"]') as HTMLButtonElement
     ).click();
     fixture.detectChanges();
 
     expect(component.exportDialogOpen()).toBe(false);
     expect(component.diagnosticsCopied()).toBe(false);
-    expect(
-      fixture.nativeElement.querySelector('[data-testid="export-diagnostics-overlay"]')
-    ).toBeNull();
+    expect(document.querySelector('[data-testid="export-diagnostics-overlay"]')).toBeNull();
   });
 
   it('clipboard rejection routes the failure into the error banner and closes the dialog', async () => {
@@ -781,9 +775,7 @@ describe('LogsViewComponent — status bar layout', () => {
     await fixture.whenStable();
     fixture.detectChanges();
     (
-      fixture.nativeElement.querySelector(
-        '[data-testid="export-diagnostics-copy"]'
-      ) as HTMLButtonElement
+      document.querySelector('[data-testid="export-diagnostics-copy"]') as HTMLButtonElement
     ).click();
     await fixture.whenStable();
     fixture.detectChanges();

@@ -2,58 +2,67 @@ import {
   ChangeDetectionStrategy,
   Component,
   computed,
+  effect,
   inject,
-  input,
+  model,
   output,
   signal,
 } from '@angular/core';
+import { A11yModule } from '@angular/cdk/a11y';
+import { CdkListbox, CdkOption, type ListboxValueChangeEvent } from '@angular/cdk/listbox';
 import { SlashService, type SlashCommand } from './slash.service';
+import { TooltipDirective } from '../../shared/tooltip.directive';
 
 /**
  * Popover listing every slash command Claude Code exposes for the active
  * session. Filters the list by the `query` input using a "startsWith
- * above substring" ranking, and exposes keyboard navigation via host
- * bindings.
+ * above substring" ranking, and exposes keyboard navigation via CDK
+ * Listbox primitives.
  */
 @Component({
   selector: 'app-slash-menu',
   changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [A11yModule, CdkListbox, CdkOption, TooltipDirective],
   host: {
     class: 'block',
     '[class.hidden]': '!open()',
-    '(document:keydown.arrowdown)': 'handleArrowDown($event)',
-    '(document:keydown.arrowup)': 'handleArrowUp($event)',
-    '(document:keydown.home)': 'handleHome($event)',
-    '(document:keydown.end)': 'handleEnd($event)',
-    '(document:keydown.enter)': 'handleEnter($event)',
-    '(document:keydown.escape)': 'handleEscape($event)',
   },
   template: `
     <div
       data-testid="slash-menu"
-      role="listbox"
-      aria-label="Slash commands"
-      [attr.aria-activedescendant]="activeDescendantId()"
-      class="absolute bottom-full left-0 right-0 z-40 mb-2 overflow-hidden rounded border border-[var(--line-strong)] bg-[var(--bg-1)] shadow-[0_16px_40px_rgba(0,0,0,0.5)]"
+      cdkTrapFocus
+      [cdkTrapFocusAutoCapture]="open()"
+      tabindex="-1"
+      role="dialog"
+      aria-label="Slash command menu"
+      class="absolute bottom-full left-0 right-0 z-40 mb-2 overflow-hidden rounded border border-[var(--line-strong)] bg-[var(--bg-1)] shadow-[0_16px_40px_rgba(0,0,0,0.5)] focus:outline-none"
+      (keydown.escape)="onEscape($event)"
     >
       <!-- Header: leading slash, query input, match count, close. -->
       <div class="flex items-center gap-2 border-b border-[var(--line)] px-3 py-2">
         <span class="mono text-[12px] text-[var(--accent)]" aria-hidden="true">/</span>
         <input
-          type="search"
+          type="text"
           name="slash-query"
           data-testid="slash-menu-query"
+          cdkFocusInitial
           class="mono w-full bg-transparent text-[12px] text-[var(--ink)] placeholder-[var(--ink-mute)] focus:outline-none"
           placeholder="search skills &amp; commands..."
           aria-label="Filter slash commands"
+          aria-controls="slash-listbox"
+          [attr.aria-activedescendant]="optionId(activeIndex())"
           [value]="query()"
+          (input)="onQueryInput($event)"
+          (keydown)="onSearchKeydown($event)"
         />
         <button
           type="button"
           class="text-[var(--ink-mute)] hover:text-[var(--ink)]"
           data-testid="slash-menu-close"
           aria-label="Close slash menu"
-          title="Close (esc)"
+          appTooltip="Close"
+          tooltipKbd="esc"
+          placement="bottom"
           (click)="closed.emit()"
         >
           ×
@@ -79,69 +88,66 @@ import { SlashService, type SlashCommand } from './slash.service';
             no matches
           </div>
         } @else {
-          @for (group of groups(); track group.key) {
-            <div
-              class="mono px-3 py-1 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-              [attr.data-testid]="'slash-menu-group-' + group.key"
-            >
-              {{ group.label }} · {{ group.items.length }}
-            </div>
-            @for (entry of group.items; track entry.cmd.name) {
-              <button
-                type="button"
-                role="option"
-                tabindex="-1"
-                [id]="optionId(entry.flatIndex)"
-                [attr.aria-selected]="entry.flatIndex === highlighted()"
-                data-testid="slash-menu-item"
-                class="flex w-full items-start gap-3 border-l-2 px-3 py-1.5 text-left"
-                [class]="
-                  entry.flatIndex === highlighted()
-                    ? 'border-[var(--accent)] bg-[var(--bg-2)]'
-                    : 'border-transparent hover-bg'
-                "
-                (mouseenter)="highlighted.set(entry.flatIndex)"
-                (click)="select(entry.cmd)"
+          <ul
+            cdkListbox
+            cdkListboxUseActiveDescendant
+            id="slash-listbox"
+            aria-label="Slash commands"
+            (cdkListboxValueChange)="onListboxChange($event)"
+            class="m-0 list-none p-0"
+          >
+            @for (group of groups(); track group.key) {
+              <li
+                class="mono px-3 py-1 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                [attr.data-testid]="'slash-menu-group-' + group.key"
+                aria-hidden="true"
               >
-                <span
-                  class="mono text-[11px]"
-                  [class]="
-                    entry.flatIndex === highlighted()
-                      ? 'text-[var(--accent)]'
-                      : 'text-[var(--ink-mute)]'
-                  "
-                  aria-hidden="true"
-                  >/</span
+                {{ group.label }} · {{ group.items.length }}
+              </li>
+              @for (entry of group.items; track entry.cmd.name) {
+                <li
+                  [cdkOption]="entry.cmd"
+                  [id]="optionId(entry.flatIndex)"
+                  [class.is-active]="entry.flatIndex === activeIndex()"
+                  data-testid="slash-menu-item"
+                  class="hover-bg flex w-full cursor-pointer items-start gap-3 border-l-2 border-transparent px-3 py-1.5 text-left [&.is-active]:border-[var(--accent)] [&.is-active]:bg-[var(--bg-2)]"
+                  (mouseenter)="activeIndex.set(entry.flatIndex)"
                 >
-                <div class="min-w-0 flex-1">
-                  <div class="mono flex items-center gap-2 text-[12px] text-[var(--ink)]">
-                    @if (entry.cmd.plugin) {
-                      <span class="text-[var(--violet)]">{{ entry.cmd.plugin }}:</span>
-                    }
-                    {{ entry.cmd.name }}
-                    <span
-                      data-testid="slash-menu-badge"
-                      class="pill"
-                      [class.teal]="entry.cmd.kind === 'Skill'"
-                      [class.violet]="entry.cmd.kind === 'Plugin'"
-                      [class.amber]="entry.cmd.kind === 'Agent'"
-                      >{{ badgeText(entry.cmd) }}</span
-                    >
-                    @if (entry.cmd.argument_hint) {
-                      <span class="mono text-[10px] text-[var(--ink-mute)]">{{
-                        entry.cmd.argument_hint
-                      }}</span>
+                  <span
+                    class="mono text-[11px] text-[var(--ink-mute)] [.is-active_&]:text-[var(--accent)]"
+                    aria-hidden="true"
+                    >/</span
+                  >
+                  <div class="min-w-0 flex-1">
+                    <div class="mono flex items-center gap-2 text-[12px] text-[var(--ink)]">
+                      @if (entry.cmd.plugin) {
+                        <span class="text-[var(--violet)]">{{ entry.cmd.plugin }}:</span>
+                      }
+                      {{ entry.cmd.name }}
+                      <span
+                        data-testid="slash-menu-badge"
+                        class="pill"
+                        [class.teal]="entry.cmd.kind === 'Skill'"
+                        [class.violet]="entry.cmd.kind === 'Plugin'"
+                        [class.amber]="entry.cmd.kind === 'Agent'"
+                        >{{ badgeText(entry.cmd) }}</span
+                      >
+                      @if (entry.cmd.argument_hint) {
+                        <span class="mono text-[10px] text-[var(--ink-mute)]">{{
+                          entry.cmd.argument_hint
+                        }}</span>
+                      }
+                    </div>
+                    @if (entry.cmd.description) {
+                      <div class="mt-0.5 text-[11.5px] text-[var(--ink-dim)]">
+                        {{ entry.cmd.description }}
+                      </div>
                     }
                   </div>
-                  @if (entry.cmd.description) {
-                    <div class="mt-0.5 text-[11.5px] text-[var(--ink-dim)]">
-                      {{ entry.cmd.description }}
-                    </div>
-                  }
-                </div>
-              </button>
+                </li>
+              }
             }
-          }
+          </ul>
         }
       </div>
 
@@ -163,10 +169,10 @@ import { SlashService, type SlashCommand } from './slash.service';
   `,
 })
 export class SlashMenuComponent {
-  /** Current filter query (the text after `/` in the composer). */
-  readonly query = input('');
-  /** Whether the popover is visible. Host binding hides the element when false. */
-  readonly open = input(false);
+  /** Current filter query (the text after `/` in the composer). Two-way bindable. */
+  readonly query = model('');
+  /** Whether the popover is visible. Two-way bindable. */
+  readonly open = model(false);
 
   /** Fires when the user picks a command (Enter or click). */
   readonly selected = output<SlashCommand>();
@@ -174,7 +180,21 @@ export class SlashMenuComponent {
   readonly closed = output<void>();
 
   readonly service = inject(SlashService);
-  readonly highlighted = signal(0);
+
+  /** Index of the highlighted entry inside `filtered()`. Reset whenever the query changes. */
+  protected readonly activeIndex = signal(0);
+
+  /**
+   * Sets up an effect that resets the highlighted index whenever the query
+   * changes — ensures the first match is always pre-selected so Enter/Tab
+   * pick the most relevant entry.
+   */
+  constructor() {
+    effect(() => {
+      this.query();
+      this.activeIndex.set(0);
+    });
+  }
 
   /**
    * Commands filtered by the current query, with startsWith ranked above
@@ -204,13 +224,6 @@ export class SlashMenuComponent {
       }
     }
     return [...starts, ...contains];
-  });
-
-  readonly activeDescendantId = computed(() => {
-    const list = this.filtered();
-    if (list.length === 0) return null;
-    const idx = Math.min(this.highlighted(), list.length - 1);
-    return this.optionId(idx);
   });
 
   /**
@@ -266,41 +279,6 @@ export class SlashMenuComponent {
   }
 
   /**
-   * Background colour for a kind badge, using semantic CSS variables.
-   * @param cmd - The slash command being rendered.
-   */
-  badgeBackground(cmd: SlashCommand): string {
-    switch (cmd.kind) {
-      case 'Builtin':
-        return 'var(--green, #22c55e)';
-      case 'Skill':
-        return 'var(--teal, #14b8a6)';
-      case 'Plugin':
-        return 'var(--violet, #8b5cf6)';
-      case 'Agent':
-        return 'var(--amber, #f59e0b)';
-      case 'Command':
-        return 'var(--bg-3, #2a2a2a)';
-    }
-  }
-
-  /**
-   * Foreground colour for a kind badge.
-   * @param cmd - The slash command being rendered.
-   */
-  badgeForeground(cmd: SlashCommand): string {
-    return cmd.kind === 'Command' ? 'var(--ink-dim, #aaa)' : 'var(--on-accent, #fff)';
-  }
-
-  /** Selects the currently highlighted item. */
-  selectHighlighted(): void {
-    const list = this.filtered();
-    if (list.length === 0) return;
-    const idx = Math.min(this.highlighted(), list.length - 1);
-    this.select(list[idx]);
-  }
-
-  /**
    * Selects a specific command (via click or keyboard).
    * @param cmd - The command chosen by the user.
    */
@@ -309,68 +287,65 @@ export class SlashMenuComponent {
   }
 
   /**
-   * Arrow-down handler — advances the highlighted index with wrap-around.
-   * @param event - The DOM event to consume; Angular's `host` metadata types
-   *   the listener as `Event`, so we accept the wider type and consume it.
+   * Search input handler — keeps the `query` model in sync with the field.
+   * @param event - Native input event.
    */
-  handleArrowDown(event: Event): void {
-    if (!this.open()) return;
-    event.preventDefault();
-    const len = this.filtered().length;
-    if (len === 0) return;
-    this.highlighted.update((i) => (i + 1) % len);
+  onQueryInput(event: Event): void {
+    const target = event.target as HTMLInputElement;
+    this.query.set(target.value);
   }
 
   /**
-   * Arrow-up handler — moves the highlight up with wrap-around.
-   * @param event - DOM event from the document keydown.
+   * Keyboard navigation while the search input has focus. Drives the
+   * highlighted index without giving up focus, then commits a selection on
+   * Enter/Tab.
+   * @param event - Native keyboard event.
    */
-  handleArrowUp(event: Event): void {
-    if (!this.open()) return;
-    event.preventDefault();
-    const len = this.filtered().length;
-    if (len === 0) return;
-    this.highlighted.update((i) => (i - 1 + len) % len);
+  onSearchKeydown(event: KeyboardEvent): void {
+    const list = this.filtered();
+    if (list.length === 0) return;
+    switch (event.key) {
+      case 'ArrowDown':
+        event.preventDefault();
+        this.activeIndex.update((i) => (i + 1) % list.length);
+        break;
+      case 'ArrowUp':
+        event.preventDefault();
+        this.activeIndex.update((i) => (i - 1 + list.length) % list.length);
+        break;
+      case 'Home':
+        event.preventDefault();
+        this.activeIndex.set(0);
+        break;
+      case 'End':
+        event.preventDefault();
+        this.activeIndex.set(list.length - 1);
+        break;
+      case 'Enter':
+      case 'Tab': {
+        event.preventDefault();
+        const picked = list[Math.min(this.activeIndex(), list.length - 1)];
+        if (picked) this.select(picked);
+        break;
+      }
+    }
   }
 
   /**
-   * Home-key handler — jumps to the first item.
-   * @param event - DOM event from the document keydown.
+   * CdkListbox change handler — emits the picked command when the user
+   * activates an option via space/click.
+   * @param event - CDK listbox value-change payload (single-select).
    */
-  handleHome(event: Event): void {
-    if (!this.open()) return;
-    event.preventDefault();
-    this.highlighted.set(0);
-  }
-
-  /**
-   * End-key handler — jumps to the last item.
-   * @param event - DOM event from the document keydown.
-   */
-  handleEnd(event: Event): void {
-    if (!this.open()) return;
-    event.preventDefault();
-    const len = this.filtered().length;
-    if (len === 0) return;
-    this.highlighted.set(len - 1);
-  }
-
-  /**
-   * Enter-key handler — emits `selected` with the highlighted command.
-   * @param event - DOM event from the document keydown.
-   */
-  handleEnter(event: Event): void {
-    if (!this.open()) return;
-    if (this.filtered().length === 0) return;
-    event.preventDefault();
-    this.selectHighlighted();
+  onListboxChange(event: ListboxValueChangeEvent<unknown>): void {
+    const value = event.value[0];
+    if (value) this.select(value as SlashCommand);
   }
 
   /**
    * Escape-key handler — emits `closed` so the parent can hide us.
-   * @param event - DOM event from the document keydown.
+   * @param event - DOM event from the keydown.
    */
-  handleEscape(event: Event): void {
+  onEscape(event: Event): void {
     if (!this.open()) return;
     event.preventDefault();
     this.closed.emit();

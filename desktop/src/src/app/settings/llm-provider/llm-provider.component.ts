@@ -13,6 +13,7 @@ import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { AnthropicModelsService } from '../../services/anthropic-models.service';
 import { ChatStateService } from '../../services/chat-state.service';
+import { TooltipDirective } from '../../shared/tooltip.directive';
 import {
   AnthropicModel,
   DiscoveredModel,
@@ -52,7 +53,7 @@ const PROVIDER_CARDS: readonly ProviderCard[] = [
 /** Manages LLM provider selection and configuration. */
 @Component({
   selector: 'app-llm-provider',
-  imports: [CommonModule],
+  imports: [CommonModule, TooltipDirective],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
@@ -204,7 +205,8 @@ const PROVIDER_CARDS: readonly ProviderCard[] = [
           class="mono mt-3 text-[11px] text-[var(--accent)] hover:underline disabled:opacity-40 disabled:no-underline"
           [disabled]="discoveryState.kind === 'in-flight'"
           (click)="discoverModels(true)"
-          title="Fetch the list of models from the server"
+          appTooltip="Fetch the list of models from the server"
+          placement="top"
         >
           @if (discoveryState.kind === 'in-flight') {
             &#8635; discovering...
