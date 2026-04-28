@@ -4,6 +4,7 @@ import {
   Component,
   ElementRef,
   ViewChild,
+  computed,
   effect,
   inject,
   input,
@@ -12,9 +13,16 @@ import {
 } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { FormControl, ReactiveFormsModule } from '@angular/forms';
+import { CdkTextareaAutosize } from '@angular/cdk/text-field';
+import {
+  CdkConnectedOverlay,
+  CdkOverlayOrigin,
+  type ConnectedPosition,
+} from '@angular/cdk/overlay';
 import { ProjectStateService } from '../../services/project-state.service';
 import { SlashMenuComponent } from '../slash/slash-menu.component';
 import { SlashService, type SlashCommand } from '../slash/slash.service';
+import { TooltipDirective } from '../../shared/tooltip.directive';
 
 /** Regex matching `/query` at the very start of input (optionally preceded by whitespace), capturing the query. */
 const SLASH_TRIGGER = /^(\s*)\/([^\s/]*)$/;
@@ -40,7 +48,14 @@ const PLAN_MODE_PREFIX =
  */
 @Component({
   selector: 'app-composer',
-  imports: [ReactiveFormsModule, SlashMenuComponent],
+  imports: [
+    ReactiveFormsModule,
+    SlashMenuComponent,
+    CdkTextareaAutosize,
+    CdkConnectedOverlay,
+    CdkOverlayOrigin,
+    TooltipDirective,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'relative block min-w-0' },
   template: `
@@ -68,7 +83,11 @@ const PLAN_MODE_PREFIX =
       <textarea
         #textarea
         data-testid="chat-input"
-        rows="2"
+        cdkTextareaAutosize
+        cdkAutosizeMinRows="2"
+        cdkAutosizeMaxRows="8"
+        cdkOverlayOrigin
+        #overlayOrigin="cdkOverlayOrigin"
         aria-label="Compose message"
         class="w-full resize-none border-0 bg-transparent px-3 py-2.5 text-[14px] leading-relaxed text-[var(--ink)] placeholder-[var(--ink-mute)] focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
         [placeholder]="effectivePlaceholder()"
@@ -94,51 +113,45 @@ const PLAN_MODE_PREFIX =
               : 'border-[var(--line)] text-[var(--ink-mute)] hover:text-[var(--ink)]'
           "
           [attr.aria-pressed]="planMode()"
-          [title]="
+          [appTooltip]="
             planMode()
               ? 'Plan mode on — Claude will plan, not act'
               : 'Plan mode off — Claude will execute changes'
           "
+          placement="top"
           (click)="togglePlanMode()"
         >
           {{ planMode() ? 'plan' : 'act' }}
         </button>
         <button
           type="button"
-          data-testid="composer-mention"
-          class="hover:text-[var(--ink)]"
-          aria-label="Mention"
-          title="Mention"
-        >
-          &#64;<span class="hidden sm:inline"> mention</span>
-        </button>
-        <button
-          type="button"
-          data-testid="composer-attach"
-          class="hover:text-[var(--ink)]"
-          aria-label="Attach"
-          title="Attach file"
-        >
-          +<span class="hidden sm:inline"> attach</span>
-        </button>
-        <button
-          type="button"
           data-testid="composer-slash"
           class="hover:text-[var(--ink)]"
+          aria-label="Open skill menu"
+          appTooltip="Open skill menu"
+          placement="top"
           (click)="onSlashButtonClick()"
         >
           /<span class="hidden sm:inline"> skill</span>
         </button>
         @if (model()) {
           <span class="mx-1 hidden text-[var(--line-strong)] md:inline">·</span>
-          <span class="hidden text-[var(--teal)] md:inline" data-testid="composer-model">{{
-            model()
-          }}</span>
+          <span
+            class="hidden text-[var(--teal)] md:inline"
+            data-testid="composer-model"
+            appTooltip="Active LLM model"
+            placement="top"
+            >{{ model() }}</span
+          >
         }
         @if (contextLabel()) {
-          <span class="hidden text-[var(--ink-mute)] lg:inline" data-testid="composer-context">{{
-            contextLabel()
-          }}</span>
+          <span
+            class="hidden text-[var(--ink-mute)] lg:inline"
+            data-testid="composer-context"
+            appTooltip="Maximum context window for this model"
+            placement="top"
+            >{{ contextLabel() }}</span
+          >
         }
         <div class="ml-auto flex flex-shrink-0 items-center gap-2">
           @if (streaming()) {
@@ -146,7 +159,9 @@ const PLAN_MODE_PREFIX =
               type="button"
               data-testid="chat-stop"
               aria-label="Stop"
-              title="Stop (Esc)"
+              appTooltip="Stop"
+              tooltipKbd="Esc"
+              placement="top"
               class="rounded border border-red-500/50 bg-red-500/10 px-2.5 py-0.5 font-medium text-red-300 hover:bg-red-500/20"
               (click)="stopRequested.emit()"
             >
@@ -157,6 +172,8 @@ const PLAN_MODE_PREFIX =
               type="button"
               data-testid="chat-send"
               aria-label="Send"
+              appTooltip="Send message"
+              placement="top"
               class="rounded bg-[var(--accent)] px-2.5 py-0.5 font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
               [disabled]="!canSubmit()"
               (click)="submit()"
@@ -167,14 +184,25 @@ const PLAN_MODE_PREFIX =
         </div>
       </div>
     </div>
-    @if (slashOpen()) {
+    <ng-template
+      [cdkConnectedOverlayOrigin]="overlayOrigin"
+      [cdkConnectedOverlayOpen]="slashOpen()"
+      [cdkConnectedOverlayPositions]="slashOverlayPositions"
+      [cdkConnectedOverlayHasBackdrop]="true"
+      cdkConnectedOverlayBackdropClass="cdk-overlay-transparent-backdrop"
+      [cdkConnectedOverlayWidth]="overlayWidth()"
+      (backdropClick)="closeSlash()"
+      (detach)="closeSlash()"
+      (overlayKeydown)="onOverlayKeydown($event)"
+      cdkConnectedOverlay
+    >
       <app-slash-menu
         [open]="true"
         [query]="slashQuery()"
         (selected)="applySelection($event)"
         (closed)="closeSlash()"
       />
-    }
+    </ng-template>
   `,
 })
 export class ComposerComponent implements AfterViewInit {
@@ -242,6 +270,37 @@ export class ComposerComponent implements AfterViewInit {
 
   /** Bridges `FormControl.valueChanges` (RxJS) into the signal graph for OnPush. */
   readonly textValue = toSignal(this.text.valueChanges, { initialValue: '' });
+
+  /** CDK overlay positions for the slash menu (anchored to the textarea). */
+  readonly slashOverlayPositions: ConnectedPosition[] = [
+    {
+      originX: 'start',
+      originY: 'top',
+      overlayX: 'start',
+      overlayY: 'bottom',
+      offsetY: -8,
+    },
+    {
+      originX: 'start',
+      originY: 'bottom',
+      overlayX: 'start',
+      overlayY: 'top',
+      offsetY: 8,
+    },
+  ];
+
+  /** Width binding used so the overlay matches the textarea width. */
+  readonly overlayWidth = computed<string>(() =>
+    this.textareaRef?.nativeElement ? `${this.textareaRef.nativeElement.offsetWidth}px` : 'auto'
+  );
+
+  /**
+   * True when the user explicitly closed the slash menu (Esc / backdrop click)
+   * while the textarea still matches the slash trigger. Prevents the menu from
+   * immediately re-opening on the next keystroke until the user clears the
+   * trigger or explicitly clicks the slash button again.
+   */
+  private slashSuppressedByUser = false;
 
   /**
    * Wires the slash service to the active project and syncs the textarea
@@ -348,6 +407,8 @@ export class ComposerComponent implements AfterViewInit {
    */
   onSlashButtonClick(): void {
     if (this.disabled()) return;
+    // Explicit user request — clear any prior suppression.
+    this.slashSuppressedByUser = false;
     const ta = this.textareaRef.nativeElement;
     const start = ta.selectionStart ?? ta.value.length;
     const end = ta.selectionEnd ?? start;
@@ -388,10 +449,36 @@ export class ComposerComponent implements AfterViewInit {
     this.closeSlash();
   }
 
-  /** Closes the popover and returns focus to the textarea. */
+  /**
+   * Closes the popover and returns focus to the textarea. If the textarea
+   * still matches the slash trigger, suppress automatic re-opening until the
+   * user clears the trigger or explicitly clicks the slash button again.
+   */
   closeSlash(): void {
+    const ta = this.textareaRef?.nativeElement;
+    if (ta) {
+      const caret = ta.selectionStart ?? ta.value.length;
+      const prefix = ta.value.slice(0, caret);
+      if (SLASH_TRIGGER.test(prefix)) {
+        this.slashSuppressedByUser = true;
+      }
+    }
     this.setSlashOpen(false);
     this.slashQuery.set('');
+  }
+
+  /**
+   * Handle keystrokes inside the overlay. Esc closes the menu without
+   * propagating up to the textarea (which would otherwise re-trigger
+   * the menu via `updateSlashState`).
+   * @param event Keyboard event raised by the CDK overlay.
+   */
+  onOverlayKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      this.closeSlash();
+    }
   }
 
   private setSlashOpen(open: boolean): void {
@@ -405,6 +492,11 @@ export class ComposerComponent implements AfterViewInit {
     const prefix = el.value.slice(0, caret);
     const match = SLASH_TRIGGER.exec(prefix);
     if (match) {
+      // Honour user suppression — do not auto-reopen until the trigger clears.
+      if (this.slashSuppressedByUser) {
+        this.slashQuery.set(match[2] ?? '');
+        return;
+      }
       this.slashQuery.set(match[2] ?? '');
       if (!this.slashOpen()) {
         this.setSlashOpen(true);
@@ -413,9 +505,13 @@ export class ComposerComponent implements AfterViewInit {
           void this.slashService.refresh(project);
         }
       }
-    } else if (this.slashOpen()) {
-      this.setSlashOpen(false);
-      this.slashQuery.set('');
+    } else {
+      // Trigger no longer matches — clear suppression and close the menu.
+      this.slashSuppressedByUser = false;
+      if (this.slashOpen()) {
+        this.setSlashOpen(false);
+        this.slashQuery.set('');
+      }
     }
   }
 }
