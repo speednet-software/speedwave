@@ -9,10 +9,13 @@ import {
   signal,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { SpinIconComponent } from '../shared/spin-icon.component';
+import {
+  CreateProjectModalComponent,
+  type CreatedProject,
+} from '../shared/create-project-modal/create-project-modal.component';
 
 /** Lifecycle status of a single setup step. */
 export type StepState = 'pending' | 'active' | 'done' | 'error';
@@ -37,7 +40,7 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
 /** Guides the user through initial environment setup and project creation. */
 @Component({
   selector: 'app-setup-wizard',
-  imports: [CommonModule, FormsModule, SpinIconComponent],
+  imports: [CommonModule, SpinIconComponent, CreateProjectModalComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -73,7 +76,7 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
             Nothing leaves your machine.
           </p>
 
-          @if (phase === 'welcome') {
+          @if (phase() === 'welcome') {
             <button
               type="button"
               class="mono mt-6 self-start rounded border border-[var(--accent-dim)] bg-[var(--accent)] px-4 py-2 text-[12px] font-medium text-[var(--on-accent)] hover:opacity-90"
@@ -82,7 +85,7 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
             >
               $ start setup
             </button>
-          } @else if (phase === 'progress' || phase === 'project') {
+          } @else if (phase() === 'progress' || phase() === 'project') {
             <div
               class="mt-8 rounded border border-[var(--line)] bg-[var(--bg-1)]"
               data-testid="setup-steps"
@@ -156,56 +159,13 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
               }
             </div>
 
-            @if (phase === 'project') {
-              <div
-                class="mt-4 rounded border border-[var(--line)] bg-[var(--bg-1)] p-4"
-                data-testid="setup-project-form"
-              >
-                <label
-                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                  for="setup-project-name"
-                  >project name</label
-                >
-                <input
-                  id="setup-project-name"
-                  type="text"
-                  [(ngModel)]="projectName"
-                  placeholder="acme-corp"
-                  data-testid="setup-project-name"
-                  class="mono mb-3 w-full rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1 text-[12px] text-[var(--ink)]"
-                />
-                <label
-                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                  for="setup-project-dir"
-                  >project directory</label
-                >
-                <input
-                  id="setup-project-dir"
-                  type="text"
-                  [(ngModel)]="projectDir"
-                  placeholder="/Users/you/projects/acme-corp"
-                  data-testid="setup-project-dir"
-                  class="mono mb-3 w-full rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1 text-[12px] text-[var(--ink)]"
-                />
-                <button
-                  type="button"
-                  class="mono rounded border border-[var(--accent-dim)] bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-                  data-testid="setup-create-project-btn"
-                  [disabled]="busy || !projectName || !projectDir"
-                  (click)="createProject()"
-                >
-                  {{ busy ? 'creating…' : '$ create project' }}
-                </button>
-              </div>
-            }
-
-            @if (error) {
+            @if (error()) {
               <div
                 class="mt-4 rounded ring-1 ring-red-500/40 bg-red-500/[0.06] px-3 py-2 text-[12px] text-red-300 mono"
                 data-testid="setup-error"
                 role="alert"
               >
-                {{ error }}
+                {{ error() }}
               </div>
               <div class="mt-3 flex flex-wrap gap-3">
                 <button
@@ -233,7 +193,7 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
                 remaining
               </span>
             </div>
-          } @else if (phase === 'complete') {
+          } @else if (phase() === 'complete') {
             <div
               class="mt-8 rounded border border-[var(--line)] bg-[var(--bg-1)] p-6 text-center"
               data-testid="setup-success"
@@ -246,17 +206,26 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
         </div>
       </div>
     </div>
+
+    <app-create-project-modal
+      [open]="phase() === 'project'"
+      [dismissible]="false"
+      (created)="onProjectCreated($event)"
+    />
   `,
 })
 export class SetupWizardComponent {
   /** When false, the overlay hides itself (used by parent host integrations). */
   readonly visible = input<boolean>(true);
 
-  phase: 'welcome' | 'progress' | 'project' | 'complete' = 'welcome';
-  busy = false;
-  error: string | null = null;
-  projectName = '';
-  projectDir = '';
+  /** Current wizard phase. Read with `phase()`, mutate via `phase.set(...)`. */
+  readonly phase = signal<'welcome' | 'progress' | 'project' | 'complete'>('welcome');
+  /** Latest error message surfaced under the steps panel; `null` when clear. */
+  readonly error = signal<string | null>(null);
+  /** Project name confirmed by the user (preserved across step retries). */
+  readonly projectName = signal<string>('');
+  /** Absolute project directory chosen by the user. */
+  readonly projectDir = signal<string>('');
 
   /** 0-based index of the step currently in progress (or `0` when idle). */
   private readonly currentStepIndexSig = signal<number>(0);
@@ -284,7 +253,7 @@ export class SetupWizardComponent {
     {
       id: 'create_project',
       title: 'create your first project',
-      description: 'Pick a folder — we generate the compose file',
+      description: 'Pick the folder Claude will work in',
       status: 'pending',
     },
     {
@@ -380,8 +349,8 @@ export class SetupWizardComponent {
 
   /** Begins the setup process by transitioning to the progress phase and running auto steps. */
   async startSetup(): Promise<void> {
-    this.phase = 'progress';
-    this.error = null;
+    this.phase.set('progress');
+    this.error.set(null);
     this.resetSteps();
     this.cdr.markForCheck();
     await this.runAutoSteps();
@@ -389,39 +358,36 @@ export class SetupWizardComponent {
 
   /** Resets all steps and returns to the welcome phase. */
   backToWelcome(): void {
-    this.phase = 'welcome';
-    this.error = null;
+    this.phase.set('welcome');
+    this.error.set(null);
     this.resetSteps();
     this.cdr.markForCheck();
   }
 
   /** Retries the current failed step from where it left off. */
   async retryCurrentStep(): Promise<void> {
-    this.error = null;
+    this.error.set(null);
     const idx = this.currentStepIndexSig();
     this.patchStep(idx, { status: 'pending', detail: undefined });
     this.cdr.markForCheck();
     await this.runFromStep(idx);
   }
 
-  /** Creates a new project with the provided name and directory, then continues setup. */
-  async createProject(): Promise<void> {
-    this.busy = true;
-    this.error = null;
-    this.setStep(3, 'active', 'Creating project...');
-    try {
-      await this.tauri.invoke('create_project', { name: this.projectName, dir: this.projectDir });
-      this.setStep(3, 'done');
-      this.currentStepIndexSig.set(4);
-      this.phase = 'progress';
-      this.cdr.markForCheck();
-      await this.runFromStep(4);
-    } catch (err) {
-      this.failStep(3, `Project creation failed: ${err}`);
-    } finally {
-      this.busy = false;
-      this.cdr.markForCheck();
-    }
+  /**
+   * Resumes the setup pipeline after `<app-create-project-modal>` has
+   * successfully created the project on the backend. The modal owns the
+   * `create_project` invocation + inline error handling; this handler only
+   * marks step 3 as done and continues with the remaining auto-steps.
+   * @param payload - Name and directory of the freshly created project.
+   */
+  async onProjectCreated(payload: CreatedProject): Promise<void> {
+    this.projectName.set(payload.name);
+    this.projectDir.set(payload.dir);
+    this.setStep(3, 'done');
+    this.currentStepIndexSig.set(4);
+    this.phase.set('progress');
+    this.cdr.markForCheck();
+    await this.runFromStep(4);
   }
 
   /**
@@ -484,12 +450,12 @@ export class SetupWizardComponent {
         if (this.existingProjects.length > 0) {
           const active = this.existingProjects.find((p) => p.name === this.activeProject);
           const selected = active ?? this.existingProjects[0];
-          this.projectName = selected.name;
-          this.projectDir = selected.dir;
-          this.setStep(3, 'done', `Using existing project: ${this.projectName}`);
+          this.projectName.set(selected.name);
+          this.projectDir.set(selected.dir);
+          this.setStep(3, 'done', `Using existing project: ${this.projectName()}`);
           continue;
         }
-        this.phase = 'project';
+        this.phase.set('project');
         this.setStep(3, 'active', 'Waiting for project details...');
         return;
       }
@@ -505,7 +471,7 @@ export class SetupWizardComponent {
     }
 
     // All done
-    this.phase = 'complete';
+    this.phase.set('complete');
     this.cdr.markForCheck();
     setTimeout(
       () => this.zone.run(() => this.router.navigate(['/settings'], { replaceUrl: true })),
@@ -538,7 +504,7 @@ export class SetupWizardComponent {
           this.setStep(2, 'done');
           break;
         case 4: // Start Containers
-          await this.tauri.invoke('start_containers', { project: this.projectName });
+          await this.tauri.invoke('start_containers', { project: this.projectName() });
           this.setStep(4, 'done');
           break;
         case 5: // Finalize
@@ -589,8 +555,8 @@ export class SetupWizardComponent {
 
   private failStep(index: number, message: string): void {
     this.patchStep(index, { status: 'error', detail: message });
-    this.error = message;
-    this.phase = 'progress';
+    this.error.set(message);
+    this.phase.set('progress');
     this.cdr.markForCheck();
   }
 

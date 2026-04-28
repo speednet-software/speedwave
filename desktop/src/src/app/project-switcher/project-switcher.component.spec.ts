@@ -48,11 +48,7 @@ describe('ProjectSwitcherComponent', () => {
   it('has correct initial state', () => {
     expect(component.projects).toEqual([]);
     expect(component.activeProject).toBeNull();
-    expect(component.showAddForm).toBe(false);
-    expect(component.newProjectName).toBe('');
-    expect(component.newProjectDir).toBe('');
-    expect(component.addBusy).toBe(false);
-    expect(component.addError).toBeNull();
+    expect(component.showAddForm()).toBe(false);
     expect(component.filter()).toBe('');
   });
 
@@ -147,76 +143,30 @@ describe('ProjectSwitcherComponent', () => {
     });
   });
 
-  describe('addProject()', () => {
-    it('shows error when name or dir is empty', async () => {
-      component.newProjectName = '';
-      component.newProjectDir = '';
+  describe('add-project modal lifecycle', () => {
+    // The actual create / error-handling logic lives in CreateProjectModalComponent
+    // and is exercised by its own spec; here we only assert that the switcher
+    // opens, closes, and reacts to the `created` event correctly.
 
-      await component.addProject();
-
-      expect(component.addError).toBe('Name and path are required');
-    });
-
-    it('calls add_project via ProjectStateService, resets form, and closes dropdown', async () => {
-      component.showAddForm = true;
-      ui.toggleProjectSwitcher();
-      component.newProjectName = 'new-proj';
-      component.newProjectDir = '/tmp/new-proj';
-
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-
-      await component.addProject();
-
-      expect(invokeSpy).toHaveBeenCalledWith('add_project', {
-        name: 'new-proj',
-        dir: '/tmp/new-proj',
-      });
-      expect(component.showAddForm).toBe(false);
-      expect(ui.projectSwitcherOpen()).toBe(false);
-      expect(component.addBusy).toBe(false);
-    });
-
-    it('shows error banner on backend failure', async () => {
-      component.showAddForm = true;
-      component.newProjectName = 'bad';
-      component.newProjectDir = '/tmp/bad';
-
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'add_project') throw new Error('duplicate name');
-        return undefined;
-      };
-
-      await component.addProject();
-
-      expect(component.addError).toBe('Error: duplicate name');
-      expect(component.addBusy).toBe(false);
-      expect(component.showAddForm).toBe(true);
-      expect(mockLogError).toHaveBeenCalledWith('Failed to add project: Error: duplicate name');
-    });
-  });
-
-  describe('cancelAdd()', () => {
-    it('resets the add form', () => {
-      component.showAddForm = true;
-      component.newProjectName = 'test';
-      component.newProjectDir = '/tmp/test';
-      component.addError = 'some error';
-
-      component.cancelAdd();
-
-      expect(component.showAddForm).toBe(false);
-      expect(component.newProjectName).toBe('');
-      expect(component.newProjectDir).toBe('');
-      expect(component.addError).toBeNull();
-    });
-  });
-
-  describe('openAddForm()', () => {
-    it('flips showAddForm to true and clears any prior error', () => {
-      component.addError = 'previous';
+    it('openAddForm() makes the modal visible', () => {
       component.openAddForm();
-      expect(component.showAddForm).toBe(true);
-      expect(component.addError).toBeNull();
+      expect(component.showAddForm()).toBe(true);
+    });
+
+    it('closeAddForm() hides the modal without touching the dropdown', () => {
+      ui.toggleProjectSwitcher();
+      component.openAddForm();
+      component.closeAddForm();
+      expect(component.showAddForm()).toBe(false);
+      expect(ui.projectSwitcherOpen()).toBe(true);
+    });
+
+    it('onProjectAdded() closes both the modal and the switcher dropdown', () => {
+      ui.toggleProjectSwitcher();
+      component.openAddForm();
+      component.onProjectAdded();
+      expect(component.showAddForm()).toBe(false);
+      expect(ui.projectSwitcherOpen()).toBe(false);
     });
   });
 

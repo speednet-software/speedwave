@@ -9,12 +9,12 @@ import {
   signal,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { LoggerService } from '../services/logger.service';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import type { ProjectEntry, ProjectList } from '../models/update';
+import { CreateProjectModalComponent } from '../shared/create-project-modal/create-project-modal.component';
 
 /**
  * Color swatches cycled through in the row left-edge tile.
@@ -35,7 +35,7 @@ const SWATCH_TOKENS = ['var(--violet)', 'var(--teal)', 'var(--amber)', 'var(--ac
  */
 @Component({
   selector: 'app-project-switcher',
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, CreateProjectModalComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (ui.projectSwitcherOpen()) {
@@ -106,62 +106,28 @@ const SWATCH_TOKENS = ['var(--violet)', 'var(--teal)', 'var(--amber)', 'var(--ac
             }
           </div>
 
-          <!-- Footer: add project trigger / inline form -->
+          <!-- Footer: opens the shared create-project modal -->
           <div class="border-t border-[var(--line)] p-1">
-            @if (!showAddForm) {
-              <button
-                type="button"
-                class="mono flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[11px] text-[var(--accent)] hover:bg-[var(--bg-2)]"
-                data-testid="add-project-btn"
-                (click)="openAddForm()"
-              >
-                + add project...
-              </button>
-            } @else {
-              <div class="px-2 py-2" data-testid="add-project-form">
-                <input
-                  class="mono mb-1.5 box-border block w-full rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1.5 text-[11px] text-[var(--ink)] focus:outline-none"
-                  placeholder="project name"
-                  data-testid="add-project-name"
-                  [(ngModel)]="newProjectName"
-                />
-                <input
-                  class="mono mb-1.5 box-border block w-full rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1.5 text-[11px] text-[var(--ink)] focus:outline-none"
-                  placeholder="absolute path"
-                  data-testid="add-project-dir"
-                  [(ngModel)]="newProjectDir"
-                />
-                @if (addError) {
-                  <div class="mono mb-1.5 text-[11px] text-red-300" data-testid="add-project-error">
-                    {{ addError }}
-                  </div>
-                }
-                <div class="flex gap-1.5">
-                  <button
-                    type="button"
-                    class="mono flex-1 rounded bg-[var(--accent)] px-2 py-1 text-[11px] text-[var(--on-accent)] disabled:opacity-50"
-                    data-testid="add-project-create"
-                    [disabled]="addBusy"
-                    (click)="addProject()"
-                  >
-                    create
-                  </button>
-                  <button
-                    type="button"
-                    class="mono flex-1 rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink-dim)] disabled:opacity-50"
-                    data-testid="add-project-cancel"
-                    [disabled]="addBusy"
-                    (click)="cancelAdd()"
-                  >
-                    cancel
-                  </button>
-                </div>
-              </div>
-            }
+            <button
+              type="button"
+              class="mono flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[11px] text-[var(--accent)] hover:bg-[var(--bg-2)]"
+              data-testid="add-project-btn"
+              (click)="openAddForm()"
+            >
+              + add project...
+            </button>
           </div>
         </div>
       </div>
     }
+
+    <app-create-project-modal
+      [open]="showAddForm()"
+      [dismissible]="true"
+      command="add_project"
+      (created)="onProjectAdded()"
+      (closed)="closeAddForm()"
+    />
   `,
 })
 export class ProjectSwitcherComponent implements OnInit, OnDestroy {
@@ -170,12 +136,8 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
   /** Slug of the currently active project — drives the "current" pill. */
   activeProject: string | null = null;
 
-  /** Add-project form is collapsed by default; expands on the `+ add project...` row. */
-  showAddForm = false;
-  newProjectName = '';
-  newProjectDir = '';
-  addBusy = false;
-  addError: string | null = null;
+  /** Whether the shared create-project modal is currently visible. */
+  readonly showAddForm = signal<boolean>(false);
 
   /** Search input value — filters {@link visibleProjects} by case-insensitive substring. */
   readonly filter = signal('');
@@ -234,7 +196,7 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
    */
   async switchProject(name: string): Promise<void> {
     this.ui.closeProjectSwitcher();
-    this.resetAddForm();
+    this.showAddForm.set(false);
     try {
       await this.projectState.switchProject(name);
     } catch (err) {
@@ -243,43 +205,22 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
-  /** Adds a new project and closes the form on success. The settled listener handles list refresh. */
-  async addProject(): Promise<void> {
-    const name = this.newProjectName.trim();
-    const dir = this.newProjectDir.trim();
-
-    if (!name || !dir) {
-      this.addError = 'Name and path are required';
-      this.cdr.markForCheck();
-      return;
-    }
-
-    this.addBusy = true;
-    this.addError = null;
-    this.cdr.markForCheck();
-
-    try {
-      await this.projectState.addProject(name, dir);
-      this.resetAddForm();
-      this.ui.closeProjectSwitcher();
-    } catch (err) {
-      this.addError = String(err);
-      this.logger.error(`Failed to add project: ${String(err)}`);
-    }
-    this.addBusy = false;
+  /** Resumes UI flow once the create-project modal has registered a new project. */
+  onProjectAdded(): void {
+    this.showAddForm.set(false);
+    this.ui.closeProjectSwitcher();
     this.cdr.markForCheck();
   }
 
-  /** Resets the add-project form to its initial state. */
-  cancelAdd(): void {
-    this.resetAddForm();
+  /** Closes the create-project modal without registering a new project. */
+  closeAddForm(): void {
+    this.showAddForm.set(false);
     this.cdr.markForCheck();
   }
 
-  /** Reveals the inline add-project form inside the dropdown footer. */
+  /** Opens the shared create-project modal from the dropdown footer. */
   openAddForm(): void {
-    this.showAddForm = true;
-    this.addError = null;
+    this.showAddForm.set(true);
     this.cdr.markForCheck();
   }
 
@@ -290,14 +231,6 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
   onFilterInput(event: Event): void {
     const target = event.target as HTMLInputElement;
     this.filter.set(target.value);
-  }
-
-  private resetAddForm(): void {
-    this.showAddForm = false;
-    this.newProjectName = '';
-    this.newProjectDir = '';
-    this.addBusy = false;
-    this.addError = null;
   }
 
   /**
