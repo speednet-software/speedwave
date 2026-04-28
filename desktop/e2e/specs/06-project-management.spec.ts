@@ -133,13 +133,22 @@ describe('Project Management', function () {
       const dropdown = await $('[data-testid="project-switcher-dropdown"]');
       await dropdown.waitForExist({ timeout: 5_000 });
 
-      const firstProject = await $('[data-testid="project-switcher-item-e2e-test"]');
-      expect(await firstProject.isExisting()).toBe(true);
-
-      const secondProject = await $(
-        `[data-testid="project-switcher-item-${SECOND_PROJECT_NAME}"]`,
+      // The switcher refreshes its list on `onProjectSettled` — that callback
+      // is async, so the dropdown can appear with the stale list before the
+      // refresh fires. Poll until both items render rather than reading once.
+      await browser.waitUntil(
+        async () => {
+          const a = await $('[data-testid="project-switcher-item-e2e-test"]').isExisting();
+          const b = await $(
+            `[data-testid="project-switcher-item-${SECOND_PROJECT_NAME}"]`,
+          ).isExisting();
+          return a && b;
+        },
+        {
+          timeout: 30_000,
+          timeoutMsg: 'Switcher list did not stabilise with both e2e-test and e2e-second',
+        },
       );
-      expect(await secondProject.isExisting()).toBe(true);
 
       // Close dropdown
       await pill.click();
@@ -159,11 +168,18 @@ describe('Project Management', function () {
       // attempting another pill click — the overlay covers the header.
       await waitForShellReady();
 
+      // The previous test may have closed the switcher mid-animation; click
+      // until the dropdown actually appears (defensive against pill toggling).
       const pill = await $('[data-testid="project-pill"]');
-      await pill.click();
-
       const dropdown = await $('[data-testid="project-switcher-dropdown"]');
-      await dropdown.waitForExist({ timeout: 5_000 });
+      await browser.waitUntil(
+        async () => {
+          if (await dropdown.isExisting()) return true;
+          await pill.click();
+          return await dropdown.isExisting();
+        },
+        { timeout: 30_000, interval: 500, timeoutMsg: 'project-switcher-dropdown never opened' },
+      );
 
       const firstProject = await $('[data-testid="project-switcher-item-e2e-test"]');
       await firstProject.click();
