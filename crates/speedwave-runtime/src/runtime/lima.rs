@@ -1245,11 +1245,19 @@ mod tests {
     #[test]
     fn test_ssh_config_path_contains_lima_vm() {
         let path = ssh_config_path().expect("ssh_config_path should succeed");
-        let path_str = path.to_string_lossy();
+        // Compare via Path components — path separators differ across host
+        // OSes (`/` on Unix, `\` on Windows) and a substring check would
+        // false-fail on Windows runners. The semantic claim is "the path
+        // ends with `.speedwave/lima/<vm>/ssh.config`", which Path::ends_with
+        // expresses portably.
+        let vm = consts::lima_vm_name();
+        let expected_tail: std::path::PathBuf =
+            [".speedwave", "lima", vm, "ssh.config"].iter().collect();
         assert!(
-            path_str.contains(".speedwave/lima/speedwave/ssh.config"),
-            "ssh_config_path should contain '.speedwave/lima/speedwave/ssh.config', got: {}",
-            path_str
+            path.ends_with(&expected_tail),
+            "ssh_config_path should end with {:?}, got: {}",
+            expected_tail,
+            path.display()
         );
     }
 
@@ -1346,14 +1354,11 @@ mod tests {
             // bash -n parses the script without executing it. If our
             // shell-quoting ever regresses, this exits non-zero and the
             // assertion catches it locally — no Lima/SSH stack required.
-            let status = std::process::Command::new("bash")
-                .args(["-nc", &remote_cmd])
-                .status()
-                .expect("bash -n must be available on the dev host");
-            assert!(
-                status.success(),
-                "bash -n rejected remote_cmd built from {args:?} → {remote_cmd:?}",
-            );
+            // On Git Bash for Windows, MSYS path conversion would mangle
+            // the embedded `/usr/local/bin/...` and `/home/...` tokens
+            // before bash parses them; disabling it via MSYS2_ARG_CONV_EXCL
+            // keeps the test deterministic across all three host OSes.
+            assert_bash_n(&remote_cmd, args, "container_exec");
 
             // Same check for the piped variant.
             let runner = mock_runner_with_vm_running();
@@ -1366,15 +1371,24 @@ mod tests {
                 .last()
                 .map(|s| s.to_string_lossy().into_owned())
                 .expect("argv non-empty");
-            let status = std::process::Command::new("bash")
-                .args(["-nc", &remote_cmd])
-                .status()
-                .expect("bash -n must be available");
-            assert!(
-                status.success(),
-                "bash -n rejected piped remote_cmd built from {args:?} → {remote_cmd:?}",
-            );
+            assert_bash_n(&remote_cmd, args, "container_exec_piped");
         }
+    }
+
+    /// Invokes `bash -n` (POSIX syntax check, no execution) on `remote_cmd`
+    /// with MSYS path conversion disabled so the test is portable to Git
+    /// Bash on `windows-latest` runners.
+    fn assert_bash_n(remote_cmd: &str, args: &[&str], variant: &str) {
+        let status = std::process::Command::new("bash")
+            .args(["-nc", remote_cmd])
+            .env("MSYS_NO_PATHCONV", "1")
+            .env("MSYS2_ARG_CONV_EXCL", "*")
+            .status()
+            .expect("bash -n must be available on the host");
+        assert!(
+            status.success(),
+            "bash -n rejected {variant} remote_cmd built from {args:?} → {remote_cmd:?}",
+        );
     }
 
     #[test]

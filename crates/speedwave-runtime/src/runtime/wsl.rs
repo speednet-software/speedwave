@@ -924,14 +924,7 @@ mod tests {
                 .last()
                 .map(|s| s.to_string_lossy().into_owned())
                 .expect("argv non-empty");
-            let status = std::process::Command::new("bash")
-                .args(["-nc", &remote_cmd])
-                .status()
-                .expect("bash -n must be available");
-            assert!(
-                status.success(),
-                "bash -n rejected remote_cmd built from {args:?} → {remote_cmd:?}",
-            );
+            assert_bash_n(&remote_cmd, args, "container_exec");
 
             let cmd = rt
                 .container_exec_piped("speedwave_claude", args)
@@ -941,15 +934,24 @@ mod tests {
                 .last()
                 .map(|s| s.to_string_lossy().into_owned())
                 .expect("argv non-empty");
-            let status = std::process::Command::new("bash")
-                .args(["-nc", &remote_cmd])
-                .status()
-                .expect("bash -n must be available");
-            assert!(
-                status.success(),
-                "bash -n rejected piped remote_cmd built from {args:?} → {remote_cmd:?}",
-            );
+            assert_bash_n(&remote_cmd, args, "container_exec_piped");
         }
+    }
+
+    /// Invokes `bash -n` (POSIX syntax check, no execution) on `remote_cmd`
+    /// with MSYS path conversion disabled so the test is portable to Git
+    /// Bash on `windows-latest` runners.
+    fn assert_bash_n(remote_cmd: &str, args: &[&str], variant: &str) {
+        let status = std::process::Command::new("bash")
+            .args(["-nc", remote_cmd])
+            .env("MSYS_NO_PATHCONV", "1")
+            .env("MSYS2_ARG_CONV_EXCL", "*")
+            .status()
+            .expect("bash -n must be available on the host");
+        assert!(
+            status.success(),
+            "bash -n rejected {variant} remote_cmd built from {args:?} → {remote_cmd:?}",
+        );
     }
 
     #[test]
