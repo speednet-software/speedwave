@@ -48,7 +48,7 @@ pub(crate) async fn rollback_containers(project: String) -> Result<(), String> {
 #[tauri::command]
 pub(crate) async fn check_for_update(
     app: tauri::AppHandle,
-) -> Result<Option<updater::UpdateInfo>, String> {
+) -> Result<updater::UpdateCheckOutcome, String> {
     log::info!("check_for_update: starting");
     updater::check_for_update(&app).await.map_err(|e| {
         log::error!("check_for_update: error: {e}");

@@ -1,4 +1,5 @@
 import Foundation
+import SharedCLI
 
 /// Microsoft Outlook for Mac automation via AppleScript.
 enum OutlookClient {
@@ -30,7 +31,7 @@ enum OutlookClient {
         end tell
         """
 
-        let output = try ScriptRunner.run(script)
+        let output = try ScriptRunner.run(script, timeout: 15)
         return parseDelimited(output, fields: ["account", "name", "message_count"])
     }
 
@@ -153,7 +154,7 @@ enum OutlookClient {
         end tell
         """
 
-        _ = try ScriptRunner.run(script)
+        _ = try ScriptRunner.run(script, timeout: 15)
         return ["status": "sent"]
     }
 
@@ -170,7 +171,7 @@ enum OutlookClient {
         end tell
         """
 
-        _ = try ScriptRunner.run(script)
+        _ = try ScriptRunner.run(script, timeout: 15)
         return ["status": "sent"]
     }
 }

@@ -52,10 +52,7 @@ pub fn render_compose(
     let network_name = format!("{}_{}_network", consts::compose_prefix(), project_name);
 
     let port_hub = consts::PORT_BASE;
-    let port_slack = consts::PORT_BASE + 1;
-    let port_sharepoint = consts::PORT_BASE + 2;
-    let port_redmine = consts::PORT_BASE + 3;
-    let port_gitlab = consts::PORT_BASE + 4;
+    let port_worker = consts::PORT_WORKER;
     let bundle_manifest = bundle::load_current_bundle_manifest()?;
 
     let mut yaml = COMPOSE_TEMPLATE.to_string();
@@ -68,10 +65,7 @@ pub fn render_compose(
     yaml = yaml.replace("${NETWORK_NAME}", &network_name);
     yaml = yaml.replace("${CLAUDE_VERSION}", defaults::CLAUDE_VERSION);
     yaml = yaml.replace("${PORT_HUB}", &port_hub.to_string());
-    yaml = yaml.replace("${PORT_SLACK}", &port_slack.to_string());
-    yaml = yaml.replace("${PORT_SHAREPOINT}", &port_sharepoint.to_string());
-    yaml = yaml.replace("${PORT_REDMINE}", &port_redmine.to_string());
-    yaml = yaml.replace("${PORT_GITLAB}", &port_gitlab.to_string());
+    yaml = yaml.replace("${PORT_WORKER}", &port_worker.to_string());
     yaml = yaml.replace(
         "${IMAGE_CLAUDE}",
         &build::image_ref(build::IMAGE_CLAUDE, &bundle_manifest.bundle_id),
@@ -95,6 +89,10 @@ pub fn render_compose(
     yaml = yaml.replace(
         "${IMAGE_MCP_GITLAB}",
         &build::image_ref(build::IMAGE_MCP_GITLAB, &bundle_manifest.bundle_id),
+    );
+    yaml = yaml.replace(
+        "${IMAGE_MCP_PLAYWRIGHT}",
+        &build::image_ref(build::IMAGE_MCP_PLAYWRIGHT, &bundle_manifest.bundle_id),
     );
 
     // Bridge writes lock files directly to ~/.speedwave/ide-bridge/
@@ -120,7 +118,7 @@ pub fn render_compose(
     yaml = inject_claude_env(&yaml, &resolved_config.env);
 
     // Handle LLM provider switching
-    yaml = apply_llm_config(&yaml, project_name, &resolved_config.llm)?;
+    yaml = apply_llm_config(&yaml, &resolved_config.llm)?;
 
     // Ensure plugin images exist (builds pending and missing) before compose generation.
     // Scoped to plugins enabled for this project — a broken plugin in another project
@@ -140,8 +138,19 @@ pub fn render_compose(
         &tokens_dir,
     )?;
 
-    // Inject Anthropic API key from secrets if configured
-    yaml = apply_auth_config(&yaml, project_name)?;
+    // Inject Anthropic API key from secrets if configured.
+    // Skipped when a local LLM provider is active — the dummy
+    // ANTHROPIC_AUTH_TOKEN=sk-no-key-required is all Claude Code needs, and
+    // leaking the real key into a container pointed at a local server would
+    // violate least-privilege for no benefit.
+    let provider = resolved_config
+        .llm
+        .provider
+        .as_deref()
+        .unwrap_or("anthropic");
+    if provider == "anthropic" {
+        yaml = apply_auth_config(&yaml, project_name)?;
+    }
 
     // Inject mcp-os config into hub if auth token exists
     yaml = apply_mcp_os_config(&yaml)?;
@@ -217,7 +226,6 @@ pub fn save_compose(project: &str, yaml: &str) -> anyhow::Result<()> {
 }
 
 fn inject_claude_env(yaml: &str, env: &std::collections::HashMap<String, String>) -> String {
-    // Parse YAML, find claude service, inject env vars
     let mut doc: serde_yaml_ng::Value = match serde_yaml_ng::from_str(yaml) {
         Ok(v) => v,
         Err(_) => return yaml.to_string(),
@@ -228,7 +236,19 @@ fn inject_claude_env(yaml: &str, env: &std::collections::HashMap<String, String>
             if let Some(environment) = claude.get_mut("environment") {
                 if let Some(env_seq) = environment.as_sequence_mut() {
                     for (key, value) in env {
-                        env_seq.push(serde_yaml_ng::Value::String(format!("{}={}", key, value)));
+                        let new_entry = format!("{}={}", key, value);
+                        let existing = env_seq.iter().position(|v| {
+                            v.as_str()
+                                .is_some_and(|s| s.split('=').next() == Some(key.as_str()))
+                        });
+                        match existing {
+                            Some(idx) => {
+                                env_seq[idx] = serde_yaml_ng::Value::String(new_entry);
+                            }
+                            None => {
+                                env_seq.push(serde_yaml_ng::Value::String(new_entry));
+                            }
+                        }
                     }
                 }
             }
@@ -238,98 +258,142 @@ fn inject_claude_env(yaml: &str, env: &std::collections::HashMap<String, String>
     serde_yaml_ng::to_string(&doc).unwrap_or_else(|_| yaml.to_string())
 }
 
-fn apply_llm_config(yaml: &str, project_name: &str, llm: &LlmConfig) -> anyhow::Result<String> {
+fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
     let provider = llm.provider.as_deref().unwrap_or("anthropic");
-
     match provider {
         "anthropic" => {
-            // Default — no proxy needed, Claude Code connects directly to api.anthropic.com
-            Ok(yaml.to_string())
+            // When the user picks an explicit model in Settings, propagate it
+            // through ANTHROPIC_MODEL so Claude Code respects the choice.
+            // Leaving the field blank keeps base_env() free of the variable
+            // (see defaults.rs::base_env_does_not_set_model) — Claude Code
+            // then falls back to its built-in default model.
+            let model = llm.model.as_deref().map(str::trim).unwrap_or("");
+            if model.is_empty() {
+                return Ok(yaml.to_string());
+            }
+            let extra_env = std::collections::HashMap::from([(
+                "ANTHROPIC_MODEL".to_string(),
+                model.to_string(),
+            )]);
+            Ok(inject_claude_env(yaml, &extra_env))
         }
-        "ollama" => {
-            // Ollama: direct connection without proxy
+        "ollama" | "lmstudio" | "llamacpp" => {
             let base_url = llm
                 .base_url
-                .as_deref()
-                .unwrap_or("http://host.docker.internal:11434");
+                .clone()
+                .or_else(|| default_base_url(provider))
+                .ok_or_else(|| anyhow::anyhow!("Provider '{}' requires a base_url.", provider))?;
+            let base_url = strip_trailing_v1(&base_url);
+            validate_base_url(&base_url)?;
+            let model = llm.model.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Provider '{}' requires a model name. \
+                     Configure it in Settings → LLM Provider → Model.",
+                    provider
+                )
+            })?;
             let extra_env = std::collections::HashMap::from([
-                ("ANTHROPIC_BASE_URL".to_string(), format!("{}/v1", base_url)),
-                ("ANTHROPIC_AUTH_TOKEN".to_string(), "ollama".to_string()),
+                ("ANTHROPIC_BASE_URL".to_string(), base_url),
+                (
+                    "ANTHROPIC_AUTH_TOKEN".to_string(),
+                    "sk-no-key-required".to_string(),
+                ),
+                (
+                    "ANTHROPIC_CUSTOM_MODEL_OPTION".to_string(),
+                    model.to_string(),
+                ),
+                (
+                    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".to_string(),
+                    custom_model_display_name(provider, model),
+                ),
+                (
+                    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION".to_string(),
+                    custom_model_description(provider),
+                ),
+                (
+                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
+                    "1".to_string(),
+                ),
+                (
+                    "CLAUDE_CODE_ATTRIBUTION_HEADER".to_string(),
+                    "0".to_string(),
+                ),
             ]);
             Ok(inject_claude_env(yaml, &extra_env))
         }
-        _ => {
-            // External provider: add llm-proxy container (LiteLLM)
-            let proxy_token = uuid::Uuid::new_v4().to_string();
-            let proxy_port = consts::PORT_LLM_PROXY;
-
-            let secrets_dir = consts::data_dir().join("secrets").join(project_name);
-            let llm_env_file = secrets_dir.join("llm.env");
-            let network_name = format!("{}_{}_network", consts::compose_prefix(), project_name);
-
-            // Parse existing YAML and add llm-proxy service
-            let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
-
-            let proxy_service = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&format!(
-                r#"
-image: ghcr.io/berriai/litellm:latest
-container_name: {prefix}_{project}_llm_proxy
-user: "{container_user}"
-cap_drop:
-  - ALL
-security_opt:
-  - no-new-privileges:true
-read_only: true
-tmpfs:
-  - /tmp:noexec,nosuid,size=64m
-ports:
-  - "127.0.0.1:{port}:{port}"
-env_file:
-  - {env_file}
-environment:
-  - PORT={port}
-  - LITELLM_MASTER_KEY={token}
-networks:
-  - {network}
-deploy:
-  resources:
-    limits:
-      cpus: '0.5'
-      memory: 512m
-"#,
-                prefix = consts::compose_prefix(),
-                project = project_name,
-                container_user = container_user(),
-                port = proxy_port,
-                env_file = to_engine_path(&llm_env_file)?,
-                token = proxy_token,
-                network = network_name,
-            ))?;
-
-            if let Some(services) = doc.get_mut("services") {
-                if let Some(services_map) = services.as_mapping_mut() {
-                    services_map.insert(
-                        serde_yaml_ng::Value::String("llm-proxy".to_string()),
-                        proxy_service,
-                    );
-                }
-            }
-
-            let mut result = serde_yaml_ng::to_string(&doc)?;
-
-            // Inject proxy URL into claude container
-            let extra_env = std::collections::HashMap::from([
-                (
-                    "ANTHROPIC_BASE_URL".to_string(),
-                    format!("http://llm-proxy:{}", proxy_port),
-                ),
-                ("ANTHROPIC_AUTH_TOKEN".to_string(), proxy_token),
-            ]);
-            result = inject_claude_env(&result, &extra_env);
-
-            Ok(result)
-        }
+        other => anyhow::bail!(
+            "Unsupported LLM provider '{other}'. \
+             Supported: anthropic, ollama, lmstudio, llamacpp."
+        ),
     }
+}
+
+/// Strips any trailing `/v1` and trailing slashes from a base URL.
+/// Exposed so `update_llm_config` can normalize before validating, keeping
+/// save-time and render-time acceptance consistent.
+pub fn strip_trailing_v1(url: &str) -> String {
+    let stripped = url.trim_end_matches('/');
+    if let Some(without_v1) = stripped.strip_suffix("/v1") {
+        without_v1.to_string()
+    } else {
+        stripped.to_string()
+    }
+}
+
+/// Returns the default base URL for a known local model provider.
+/// Used by the frontend to show a placeholder without duplicating the URL logic.
+pub fn default_base_url(provider: &str) -> Option<String> {
+    match provider {
+        "ollama" => Some("http://host.docker.internal:11434".to_string()),
+        "lmstudio" => Some("http://host.docker.internal:1234".to_string()),
+        "llamacpp" => Some("http://host.docker.internal:8080".to_string()),
+        _ => None,
+    }
+}
+
+/// Human-readable label for a local LLM provider.
+///
+/// Invariant: the only callers (`custom_model_display_name` and
+/// `custom_model_description`) are reached only after `apply_llm_config`
+/// narrows the provider to one of the three local values below. Any other
+/// value at this point indicates a programmer error in `apply_llm_config`.
+fn provider_display_label(provider: &str) -> &'static str {
+    match provider {
+        "ollama" => "Ollama",
+        "lmstudio" => "LM Studio",
+        "llamacpp" => "llama.cpp",
+        other => unreachable!("provider_display_label called with unsupported provider '{other}'"),
+    }
+}
+
+fn custom_model_display_name(provider: &str, model: &str) -> String {
+    format!("{} ({})", model, provider_display_label(provider))
+}
+
+fn custom_model_description(provider: &str) -> String {
+    format!("Local model served by {}", provider_display_label(provider))
+}
+
+/// Validates a base URL for local model providers. Rejects non-HTTP schemes,
+/// credentials, paths, query strings, and fragments.
+pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
+    let parsed =
+        url::Url::parse(raw).map_err(|e| anyhow::anyhow!("Invalid base_url '{}': {}", raw, e))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        s => anyhow::bail!("base_url must use http:// or https://, got: {}", s),
+    }
+    if parsed.username() != "" || parsed.password().is_some() {
+        anyhow::bail!("base_url must not contain credentials");
+    }
+    let path = parsed.path();
+    if path != "/" && !path.is_empty() {
+        anyhow::bail!("base_url must not contain a path (got '{}')", path);
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        anyhow::bail!("base_url must not contain query or fragment");
+    }
+    Ok(())
 }
 
 // --- Plugin integration ---
@@ -383,12 +447,25 @@ fn apply_plugins(
                     service_value,
                 );
             }
-            // Inject WORKER_*_URL into hub
+            // Inject WORKER_*_URL into hub. All workers share PORT_WORKER —
+            // each container has its own network namespace, so port reuse is
+            // safe and DNS disambiguates. See ADR-038.
+            if let Some(declared) = manifest.port {
+                if declared != consts::PORT_WORKER {
+                    log::warn!(
+                        "plugin '{}' sets deprecated 'port' field ({}); ignored — \
+                         all workers use port {}. See ADR-038",
+                        slug,
+                        declared,
+                        consts::PORT_WORKER
+                    );
+                }
+            }
             let worker_env = plugin::derive_worker_env(sid);
             let url = format!(
                 "http://{}:{}",
                 plugin::derive_compose_name(sid),
-                manifest.port.unwrap_or(0)
+                consts::PORT_WORKER
             );
             inject_worker_env(&mut doc, &worker_env, &url);
         }
@@ -1206,7 +1283,7 @@ impl SecurityCheck {
             Self::check_tmpfs_noexec(&doc),
             Self::check_no_tokens_in_claude(&doc),
             Self::check_no_tokens_in_hub(&doc),
-            // PORTS_LOCALHOST: any exposed port must bind 127.0.0.1 (plugins, llm-proxy)
+            // PORTS_LOCALHOST: any exposed port must bind 127.0.0.1 (plugins)
             Self::check_ports_localhost_only(&doc),
             Self::check_claude_no_socket(&doc),
             Self::check_no_external_llm_keys_claude(&doc),
@@ -1541,7 +1618,10 @@ impl SecurityCheck {
     }
 
     /// claude container must not have external LLM API keys
-    /// (OPENAI_*, GEMINI_*, DEEPSEEK_*, OPENROUTER_* — these belong in the proxy)
+    /// (OPENAI_*, AZURE_OPENAI_*, GEMINI_*, DEEPSEEK_*, OPENROUTER_*, COHERE_*,
+    /// MISTRAL_*, TOGETHER_*, GROQ_* — these prefixes are forbidden because external
+    /// LLM API keys must never enter the claude container. Only the dummy
+    /// ANTHROPIC_AUTH_TOKEN (sk-no-key-required) is permitted for local model providers.)
     fn check_no_external_llm_keys_claude(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
         let mut violations = Vec::new();
         let services = match get_services(doc) {
@@ -1551,7 +1631,17 @@ impl SecurityCheck {
 
         if let Some((_name, service)) = services.iter().find(|(n, _)| n == "claude") {
             if let Some(env_seq) = service.get("environment").and_then(|v| v.as_sequence()) {
-                let forbidden_prefixes = ["OPENAI_", "GEMINI_", "DEEPSEEK_", "OPENROUTER_"];
+                let forbidden_prefixes = [
+                    "OPENAI_",
+                    "AZURE_OPENAI_",
+                    "GEMINI_",
+                    "DEEPSEEK_",
+                    "OPENROUTER_",
+                    "COHERE_",
+                    "MISTRAL_",
+                    "TOGETHER_",
+                    "GROQ_",
+                ];
 
                 for item in env_seq {
                     if let Some(env_str) = item.as_str() {
@@ -1570,7 +1660,7 @@ impl SecurityCheck {
                                     var_name
                                 ),
                                 remediation:
-                                    "External LLM keys belong in the llm-proxy container, not in claude.",
+                                    "External LLM API keys must not be injected into the claude container. Use a local model provider instead.",
                             });
                         }
                     }
@@ -1581,7 +1671,7 @@ impl SecurityCheck {
     }
 
     /// MCP workers and hub must NOT expose ports to the host.
-    /// Only dynamically-injected services (llm-proxy, addons) may map ports.
+    /// Only dynamically-injected services (addons) may map ports.
     /// All inter-container communication uses Docker DNS.
     fn check_no_ports_on_workers(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
         let mut violations = Vec::new();
@@ -2141,6 +2231,13 @@ fn get_services(doc: &serde_yaml_ng::Value) -> Option<Vec<(String, &serde_yaml_n
 mod tests {
     use super::*;
 
+    fn default_flags() -> Vec<String> {
+        crate::defaults::DEFAULT_FLAGS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
     fn get_hub_env_seq(doc: &serde_yaml_ng::Value) -> Vec<String> {
         doc.get("services")
             .and_then(|s| s.get("mcp-hub"))
@@ -2207,10 +2304,11 @@ services:
       - /tmp:noexec,nosuid,size=64m
     environment:
       - PORT=4000
-      - WORKER_SLACK_URL=http://mcp-slack:4001
-      - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:4002
-      - WORKER_REDMINE_URL=http://mcp-redmine:4003
-      - WORKER_GITLAB_URL=http://mcp-gitlab:4004
+      - WORKER_SLACK_URL=http://mcp-slack:3000
+      - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:3000
+      - WORKER_REDMINE_URL=http://mcp-redmine:3000
+      - WORKER_GITLAB_URL=http://mcp-gitlab:3000
+      - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:3000
     networks:
       - speedwave_test_network
 
@@ -2225,7 +2323,24 @@ services:
     volumes:
       - /home/user/.speedwave/tokens/test/slack:/tokens:ro
     environment:
-      - PORT=4001
+      - PORT=3000
+    networks:
+      - speedwave_test_network
+
+  mcp-playwright:
+    image: speedwave-mcp-playwright:latest
+    container_name: speedwave_test_mcp_playwright
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=1g
+    shm_size: 2g
+    environment:
+      - PORT=3000
     networks:
       - speedwave_test_network
 
@@ -2437,6 +2552,49 @@ services:
     }
 
     #[test]
+    fn test_security_check_external_llm_keys_covers_major_providers() {
+        // Each prefix on its own line — one violation per leaked key. We assert the
+        // rule fires for every major third-party LLM vendor, not just the four
+        // originally hard-coded.
+        for key in [
+            "OPENAI_API_KEY=sk-x",
+            "AZURE_OPENAI_API_KEY=az-x",
+            "GEMINI_API_KEY=g-x",
+            "DEEPSEEK_API_KEY=ds-x",
+            "OPENROUTER_API_KEY=or-x",
+            "COHERE_API_KEY=co-x",
+            "MISTRAL_API_KEY=mi-x",
+            "TOGETHER_API_KEY=to-x",
+            "GROQ_API_KEY=gq-x",
+        ] {
+            let yaml = format!(
+                r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - {key}
+"#
+            );
+            let violations = SecurityCheck::run(&yaml, "test", &[], &test_expected_paths());
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.rule == SecurityRule::NoExternalLlmKeysClaude),
+                "must flag {key} as an external LLM key"
+            );
+        }
+    }
+
+    #[test]
     fn test_security_check_invalid_yaml() {
         let violations =
             SecurityCheck::run("not: valid: yaml: [[[", "test", &[], &test_expected_paths());
@@ -2449,7 +2607,7 @@ services:
     fn test_render_compose_substitution() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let result = render_compose(
@@ -2483,7 +2641,7 @@ services:
     fn test_render_compose_uses_bundle_scoped_image_refs() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let manifest = bundle::load_current_bundle_manifest().unwrap();
@@ -2528,7 +2686,7 @@ services:
     fn test_rendered_compose_has_sharepoint_workspace_mount() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -2549,11 +2707,208 @@ services:
         );
     }
 
+    /// mcp-playwright appears in a rendered compose when the toggle is enabled,
+    /// carries the hardening profile (cap_drop: ALL, read_only, no-new-privileges,
+    /// shm_size: 2g), and has `PORT=PORT_WORKER`.
+    #[test]
+    fn test_render_compose_playwright_service_present() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let integrations = ResolvedIntegrationsConfig {
+            playwright: true,
+            ..Default::default()
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &integrations,
+            None,
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let pw = doc
+            .get("services")
+            .and_then(|s| s.get("mcp-playwright"))
+            .expect("mcp-playwright service must be present when enabled");
+
+        assert!(
+            pw.get("read_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            "mcp-playwright must set read_only: true"
+        );
+        assert_eq!(
+            pw.get("shm_size").and_then(|v| v.as_str()),
+            Some("2g"),
+            "mcp-playwright must set shm_size: 2g for Chromium IPC"
+        );
+        let cap_drop = pw
+            .get("cap_drop")
+            .and_then(|v| v.as_sequence())
+            .expect("cap_drop must be present");
+        assert!(cap_drop.iter().any(|c| c.as_str() == Some("ALL")));
+        let sec_opt = pw
+            .get("security_opt")
+            .and_then(|v| v.as_sequence())
+            .expect("security_opt must be present");
+        assert!(sec_opt
+            .iter()
+            .any(|s| s.as_str() == Some("no-new-privileges:true")));
+        let env = pw
+            .get("environment")
+            .and_then(|e| e.as_sequence())
+            .expect("environment must be present");
+        let port_line = format!("PORT={}", crate::consts::PORT_WORKER);
+        assert!(
+            env.iter().any(|v| v.as_str() == Some(port_line.as_str())),
+            "mcp-playwright must set PORT={}",
+            crate::consts::PORT_WORKER
+        );
+    }
+
+    /// mcp-playwright has no credentials — the generated compose must not mount
+    /// any `/tokens` volume (attack-surface reduction per ADR).
+    #[test]
+    fn test_render_compose_playwright_no_token_mount() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let integrations = ResolvedIntegrationsConfig {
+            playwright: true,
+            ..Default::default()
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &integrations,
+            None,
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let pw = doc
+            .get("services")
+            .and_then(|s| s.get("mcp-playwright"))
+            .expect("mcp-playwright must be present");
+
+        // Playwright block has no `volumes:` key at all.
+        assert!(
+            pw.get("volumes").is_none(),
+            "mcp-playwright must not declare any volumes; got: {:?}",
+            pw.get("volumes")
+        );
+    }
+
+    /// v1 explicitly refuses the `/workspace` mount — outputs return as base64
+    /// so a compromised Chromium cannot exfiltrate repo contents.
+    #[test]
+    fn test_render_compose_playwright_no_workspace_mount() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let integrations = ResolvedIntegrationsConfig {
+            playwright: true,
+            ..Default::default()
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &integrations,
+            None,
+        )
+        .unwrap();
+
+        // Scan the mcp-playwright block specifically rather than the whole
+        // document — claude and mcp-sharepoint legitimately mount /workspace.
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let pw_yaml = serde_yaml_ng::to_string(
+            doc.get("services")
+                .and_then(|s| s.get("mcp-playwright"))
+                .expect("mcp-playwright must be present"),
+        )
+        .unwrap();
+        assert!(
+            !pw_yaml.contains("/workspace"),
+            "mcp-playwright must not mount /workspace in v1; got block:\n{pw_yaml}"
+        );
+    }
+
+    /// Hub must know where to reach the Playwright worker. The URL is injected
+    /// from the compose template and must point at `:PORT_WORKER`.
+    #[test]
+    fn test_playwright_worker_url_in_hub_env() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let integrations = ResolvedIntegrationsConfig {
+            playwright: true,
+            ..Default::default()
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &integrations,
+            None,
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let hub_env = get_hub_env_seq(&doc);
+        let expected = format!(
+            "WORKER_PLAYWRIGHT_URL=http://mcp-playwright:{}",
+            crate::consts::PORT_WORKER
+        );
+        assert!(
+            hub_env.iter().any(|s| s == &expected),
+            "hub must have '{expected}' in environment; got: {hub_env:?}"
+        );
+    }
+
+    /// Disabling the Playwright toggle must remove both the service block and
+    /// the WORKER_PLAYWRIGHT_URL hub env entry.
+    #[test]
+    fn test_apply_integrations_filter_disables_playwright() {
+        let mut integrations = ResolvedIntegrationsConfig::default();
+        integrations.playwright = false;
+
+        let filtered = apply_integrations_filter(VALID_COMPOSE, &integrations).unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
+
+        let services = doc.get("services").and_then(|s| s.as_mapping()).unwrap();
+        assert!(
+            !services.contains_key(&serde_yaml_ng::Value::String("mcp-playwright".into())),
+            "mcp-playwright must be removed when disabled"
+        );
+
+        let hub_env = get_hub_env_seq(&doc);
+        let has_pw_url = hub_env
+            .iter()
+            .any(|s| s.starts_with("WORKER_PLAYWRIGHT_URL="));
+        assert!(
+            !has_pw_url,
+            "WORKER_PLAYWRIGHT_URL must be removed from hub env when disabled; got: {hub_env:?}"
+        );
+    }
+
     #[test]
     fn test_rendered_compose_has_mcp_hub_port() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -2580,7 +2935,7 @@ services:
         // If these drift apart, entrypoint.sh generates wrong mcp-config.json URL.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -2599,13 +2954,150 @@ services:
         );
     }
 
+    /// ADR-038: every non-hub service in the rendered compose must listen on
+    /// `PORT_WORKER` (3000). The hub itself is exempt — it listens on
+    /// `PORT_BASE` (4000).
+    #[test]
+    fn test_all_workers_use_port_worker() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &all_enabled_integrations(),
+            None,
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let services = doc
+            .get("services")
+            .and_then(|s| s.as_mapping())
+            .expect("services mapping");
+
+        let worker_port_line = format!("PORT={}", crate::consts::PORT_WORKER);
+        for (name_value, svc) in services {
+            let name = name_value.as_str().unwrap_or("");
+            // Only workers have PORT=; claude does not define PORT.
+            if name == "claude" || name == "mcp-hub" {
+                continue;
+            }
+            let env = svc
+                .get("environment")
+                .and_then(|e| e.as_sequence())
+                .unwrap_or_else(|| panic!("service '{name}' missing environment"));
+            let has_worker_port = env
+                .iter()
+                .any(|v| v.as_str().is_some_and(|s| s == worker_port_line));
+            assert!(
+                has_worker_port,
+                "service '{name}' must set {worker_port_line}, got: {env:?}"
+            );
+        }
+    }
+
+    /// ADR-038: every WORKER_*_URL entry in mcp-hub environment must point at
+    /// `:{PORT_WORKER}`.
+    #[test]
+    fn test_hub_worker_urls_use_port_worker() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &all_enabled_integrations(),
+            None,
+        )
+        .unwrap();
+
+        let expected_suffix = format!(":{}", crate::consts::PORT_WORKER);
+        for entry in get_hub_env_seq(&serde_yaml_ng::from_str(&yaml).unwrap()) {
+            if let Some((key, value)) = entry.split_once('=') {
+                if key.starts_with("WORKER_") && key.ends_with("_URL") {
+                    assert!(
+                        value.ends_with(&expected_suffix),
+                        "{key} must point at :{} (ADR-038), got: {value}",
+                        crate::consts::PORT_WORKER
+                    );
+                }
+            }
+        }
+    }
+
+    /// ADR-038: `plugin.json.port` is deprecated and ignored. A plugin
+    /// manifest that requests a non-`PORT_WORKER` port must still be wired up
+    /// at `:{PORT_WORKER}` without failing.
+    #[test]
+    fn test_plugin_manifest_port_is_ignored() {
+        use crate::plugin::{generate_plugin_service, PluginManifest, TokenMount};
+
+        let manifest = PluginManifest {
+            name: "Legacy".to_string(),
+            service_id: Some("legacy".to_string()),
+            slug: "legacy".to_string(),
+            version: "1.0.0".to_string(),
+            description: "legacy port".to_string(),
+            port: Some(9999), // deprecated, must be ignored
+            image_tag: Some("speedwave-mcp-legacy:latest".to_string()),
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+        };
+
+        let tokens_dir = std::path::Path::new("/home/user/.speedwave/tokens/test-project");
+        let service = generate_plugin_service(
+            &manifest,
+            "test-project",
+            "speedwave_test-project_network",
+            tokens_dir,
+            "/home/user/projects/test",
+        )
+        .unwrap();
+
+        let env = service
+            .get("environment")
+            .and_then(|v| v.as_sequence())
+            .expect("plugin service must have environment");
+        let has_worker_port = env.iter().any(|v| {
+            v.as_str()
+                .is_some_and(|s| s == format!("PORT={}", crate::consts::PORT_WORKER))
+        });
+        assert!(
+            has_worker_port,
+            "plugin service must use PORT={} regardless of manifest.port (ADR-038)",
+            crate::consts::PORT_WORKER
+        );
+        let has_deprecated_port = env.iter().any(|v| {
+            v.as_str()
+                .is_some_and(|s| s == format!("PORT={}", manifest.port.unwrap()))
+        });
+        assert!(
+            !has_deprecated_port,
+            "plugin service must not honour deprecated manifest.port"
+        );
+    }
+
     #[test]
     fn test_mcp_hub_port_survives_inject_claude_env() {
         // Regression: inject_claude_env re-parses YAML via serde_yaml_ng.
         // MCP_HUB_PORT must survive the parse → serialize roundtrip.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -2632,7 +3124,7 @@ services:
         // not somewhere else in the compose file.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -2697,7 +3189,7 @@ services:
     fn test_rendered_compose_passes_security_check() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -2890,12 +3382,12 @@ services:
     fn test_render_compose_ollama_provider() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig {
                 provider: Some("ollama".to_string()),
-                model: None,
+                model: Some("llama3.3".to_string()),
                 base_url: None,
-                api_key_env: None,
+                context_tokens: None,
             },
         };
         let yaml = render_compose(
@@ -2906,37 +3398,41 @@ services:
             None,
         )
         .unwrap();
-        // Ollama should inject ANTHROPIC_BASE_URL pointing to Ollama's OpenAI-compatible endpoint
+        // Ollama: direct injection at host.docker.internal:11434 (no /v1 suffix — ADR-040)
         assert!(
-            yaml.contains("11434/v1"),
-            "Ollama provider should set ANTHROPIC_BASE_URL with 11434/v1 port"
+            yaml.contains("ANTHROPIC_BASE_URL=http://host.docker.internal:11434"),
+            "Ollama provider should set ANTHROPIC_BASE_URL to host.docker.internal:11434 (no /v1)"
         );
     }
 
     #[test]
-    fn test_render_compose_openai_provider() {
+    fn test_local_provider_requires_model() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig {
-                provider: Some("openai".to_string()),
-                model: Some("gpt-4o".to_string()),
+                provider: Some("ollama".to_string()),
+                model: None,
                 base_url: None,
-                api_key_env: Some("OPENAI_API_KEY".to_string()),
+                context_tokens: None,
             },
         };
-        let yaml = render_compose(
+        let result = render_compose(
             "test-project",
             "/home/user/projects/test",
             &config,
             &ResolvedIntegrationsConfig::default(),
             None,
-        )
-        .unwrap();
-        // External provider should add an llm-proxy (LiteLLM) service
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
         assert!(
-            yaml.contains("llm-proxy") || yaml.contains("llm_proxy"),
-            "OpenAI provider should add llm-proxy service"
+            msg.contains("requires a model name"),
+            "Error must mention model requirement, got: {msg}"
+        );
+        assert!(
+            msg.contains("ollama"),
+            "Error must mention the provider, got: {msg}"
         );
     }
 
@@ -2944,7 +3440,7 @@ services:
     fn test_render_compose_default_anthropic() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(), // provider = None → defaults to "anthropic"
         };
         let yaml = render_compose(
@@ -2959,6 +3455,14 @@ services:
         assert!(
             !yaml.contains("llm-proxy"),
             "Default anthropic provider should not add llm-proxy"
+        );
+        assert!(
+            !yaml.contains("litellm"),
+            "Default anthropic provider should not reference litellm"
+        );
+        assert!(
+            !yaml.contains("ghcr.io/berriai"),
+            "Default anthropic provider should not reference litellm image"
         );
         // Should not contain base_url override (unless explicitly configured)
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -2978,12 +3482,498 @@ services:
         );
     }
 
+    fn get_claude_env(yaml: &str) -> Vec<String> {
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        doc.get("services")
+            .and_then(|s| s.get("claude"))
+            .and_then(|c| c.get("environment"))
+            .and_then(|e| e.as_sequence())
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn test_ollama_direct_injection() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig {
+                provider: Some("ollama".to_string()),
+                model: Some("llama3.3".to_string()),
+                base_url: None,
+                context_tokens: None,
+            },
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter().any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:11434"),
+            "Ollama must set ANTHROPIC_BASE_URL to host.docker.internal:11434 (no /v1), got: {env:?}"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_AUTH_TOKEN=sk-no-key-required"),
+            "Ollama must set dummy auth token"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_CUSTOM_MODEL_OPTION=llama3.3"),
+            "Ollama must set ANTHROPIC_CUSTOM_MODEL_OPTION to the user model, got: {env:?}"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=llama3.3 (Ollama)"),
+            "Ollama must set ANTHROPIC_CUSTOM_MODEL_OPTION_NAME with provider label, got: {env:?}"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e
+                    == "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION=Local model served by Ollama"),
+            "Ollama must set ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION, got: {env:?}"
+        );
+        assert!(
+            !env
+                .iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_SONNET_MODEL=")
+                    || e.starts_with("ANTHROPIC_DEFAULT_OPUS_MODEL=")
+                    || e.starts_with("ANTHROPIC_DEFAULT_HAIKU_MODEL=")),
+            "Local providers must not override Anthropic alias models — use ANTHROPIC_CUSTOM_MODEL_OPTION \
+             so the /model picker shows a single explicit entry. Got: {env:?}"
+        );
+        assert!(
+            env.iter()
+                .any(|e| e == "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"),
+            "Ollama must disable nonessential traffic"
+        );
+        assert!(
+            env.iter().any(|e| e == "CLAUDE_CODE_ATTRIBUTION_HEADER=0"),
+            "Ollama must disable attribution header"
+        );
+        assert!(!yaml.contains("llm-proxy"), "Ollama must not add llm-proxy");
+        assert!(
+            !yaml.contains("litellm"),
+            "Ollama must not reference litellm"
+        );
+    }
+
+    #[test]
+    fn test_lmstudio_default_url() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig {
+                provider: Some("lmstudio".to_string()),
+                model: Some("qwen2.5-coder".to_string()),
+                base_url: None,
+                context_tokens: None,
+            },
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:1234"),
+            "LM Studio must use port 1234, got: {env:?}"
+        );
+    }
+
+    #[test]
+    fn test_llamacpp_default_url() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig {
+                provider: Some("llamacpp".to_string()),
+                model: Some("deepseek-r1".to_string()),
+                base_url: None,
+                context_tokens: None,
+            },
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_BASE_URL=http://host.docker.internal:8080"),
+            "llama.cpp must use port 8080, got: {env:?}"
+        );
+    }
+
+    #[test]
+    fn test_unsupported_provider_rejected() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig {
+                provider: Some("openrouter".to_string()),
+                model: Some("some-model".to_string()),
+                base_url: Some("http://host.docker.internal:9999".to_string()),
+                context_tokens: None,
+            },
+        };
+        let result = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Unsupported LLM provider") && msg.contains("openrouter"),
+            "Error must mention unsupported provider, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_custom_provider_rejected_after_removal() {
+        // Regression guard: the `custom` provider value was removed end-to-end.
+        // Any lingering config that still sets `provider = "custom"` must now
+        // fall through to the same unknown-provider path used by any other
+        // unsupported value (e.g. `openrouter`), not a bespoke `custom` branch.
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig {
+                provider: Some("custom".to_string()),
+                model: Some("my-model".to_string()),
+                base_url: Some("http://host.docker.internal:9999".to_string()),
+                context_tokens: None,
+            },
+        };
+        let result = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Unsupported LLM provider") && msg.contains("custom"),
+            "Error must treat 'custom' as unsupported, got: {msg}"
+        );
+        assert!(
+            !msg.contains("Custom provider requires a base_url"),
+            "The legacy 'custom requires base_url' error must be gone, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_strip_trailing_v1() {
+        assert_eq!(strip_trailing_v1("http://x:8080/v1"), "http://x:8080");
+        assert_eq!(strip_trailing_v1("http://x:8080/v1/"), "http://x:8080");
+        assert_eq!(strip_trailing_v1("http://x:8080"), "http://x:8080");
+        assert_eq!(strip_trailing_v1(""), "");
+        assert_eq!(strip_trailing_v1("http://x:8080/v1/v1"), "http://x:8080/v1");
+        // Regression: trailing slash without /v1 must be stripped too,
+        // otherwise ANTHROPIC_BASE_URL ends with '/' and produces
+        // double-slash request paths.
+        assert_eq!(strip_trailing_v1("http://x:8080/"), "http://x:8080");
+        assert_eq!(strip_trailing_v1("http://x:8080///"), "http://x:8080");
+    }
+
+    #[test]
+    fn test_idempotent_render() {
+        let llm = LlmConfig {
+            provider: Some("ollama".to_string()),
+            model: Some("llama3.3".to_string()),
+            base_url: None,
+            context_tokens: None,
+        };
+        let result1 = apply_llm_config(COMPOSE_TEMPLATE, &llm).unwrap();
+        let result2 = apply_llm_config(&result1, &llm).unwrap();
+        assert_eq!(
+            result1, result2,
+            "apply_llm_config must be idempotent (no UUID injection)"
+        );
+    }
+
+    #[test]
+    fn test_base_url_rejects_non_http_schemes() {
+        for bad_url in &["javascript:alert(1)", "file:///etc/passwd", "ftp://x:21"] {
+            assert!(
+                validate_base_url(bad_url).is_err(),
+                "Must reject scheme: {bad_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_base_url_rejects_credentials() {
+        assert!(
+            validate_base_url("http://user:pass@host.docker.internal:11434").is_err(),
+            "Must reject credentials in URL"
+        );
+    }
+
+    #[test]
+    fn test_base_url_rejects_path() {
+        assert!(
+            validate_base_url("http://host.docker.internal:11434/api/v1/").is_err(),
+            "Must reject URL with path"
+        );
+    }
+
+    #[test]
+    fn test_base_url_accepts_remote_host() {
+        assert!(
+            validate_base_url("http://192.168.1.100:11434").is_ok(),
+            "Must accept remote IP (LLM on another machine in LAN)"
+        );
+    }
+
+    #[test]
+    fn test_base_url_accepts_localhost() {
+        assert!(
+            validate_base_url("http://localhost:11434").is_ok(),
+            "Must accept localhost"
+        );
+    }
+
+    #[test]
+    fn test_compose_template_contains_all_container_host_aliases() {
+        // compose.template.yml injects all aliases from CONTAINER_HOST_ALIASES via
+        // extra_hosts. Iterating the constant (rather than asserting on a literal)
+        // keeps the test in sync with the SSOT — adding a new alias to the const
+        // without updating the template will fail here.
+        for alias in consts::CONTAINER_HOST_ALIASES {
+            assert!(
+                COMPOSE_TEMPLATE.contains(alias),
+                "compose.template.yml must map {} (named in CONTAINER_HOST_ALIASES)",
+                alias
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_template_aliases_are_in_container_host_aliases() {
+        // Inverse guard: every "host.*.internal" hostname that appears in the
+        // extra_hosts block of compose.template.yml must be named in
+        // CONTAINER_HOST_ALIASES.  Without this check, adding an alias to the
+        // template without updating the constant would silently break host-side
+        // code that uses CONTAINER_HOST_ALIASES to rewrite aliases to loopback.
+        let mut in_extra_hosts = false;
+        for line in COMPOSE_TEMPLATE.lines() {
+            let trimmed = line.trim();
+            if trimmed == "extra_hosts:" {
+                in_extra_hosts = true;
+                continue;
+            }
+            // A non-indented, non-list line signals the end of the extra_hosts block.
+            if in_extra_hosts && !trimmed.starts_with('-') && !trimmed.is_empty() {
+                in_extra_hosts = false;
+            }
+            if !in_extra_hosts {
+                continue;
+            }
+            // Lines look like: - "host.lima.internal:${HOST_GATEWAY}"
+            if let Some(alias) = trimmed
+                .strip_prefix("- \"")
+                .and_then(|s| s.split(':').next())
+                .filter(|h| h.starts_with("host.") && h.ends_with(".internal"))
+            {
+                assert!(
+                    consts::CONTAINER_HOST_ALIASES.contains(&alias),
+                    "compose.template.yml extra_hosts contains '{}' which is not in \
+                     CONTAINER_HOST_ALIASES — add it to the const in consts.rs",
+                    alias
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_anthropic_with_model_injects_anthropic_model_env() {
+        // Settings → LLM Provider → Model dropdown writes the chosen value
+        // into claude.llm.model. compose must translate that into the
+        // ANTHROPIC_MODEL env var so Claude Code respects the user's pick
+        // (without this, the dropdown was silently ignored — Claude Code
+        // kept falling back to its built-in default).
+        let llm = LlmConfig {
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            base_url: None,
+            context_tokens: None,
+        };
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm).unwrap();
+        let env = get_claude_env(&rendered);
+        assert!(
+            env.iter().any(|e| e == "ANTHROPIC_MODEL=claude-sonnet-4-6"),
+            "Anthropic + explicit model must inject ANTHROPIC_MODEL, got: {env:?}"
+        );
+        // Local-provider envs must not leak in for the anthropic provider.
+        assert!(
+            !env.iter().any(|e| e.starts_with("ANTHROPIC_BASE_URL=")),
+            "Anthropic provider must not set ANTHROPIC_BASE_URL, got: {env:?}"
+        );
+    }
+
+    #[test]
+    fn test_anthropic_without_model_does_not_inject_anthropic_model() {
+        // Empty/unset model = "let Claude Code pick its default". compose
+        // must keep base_env() free of ANTHROPIC_MODEL so the fallback path
+        // documented in defaults.rs::base_env_does_not_set_model holds.
+        let llm = LlmConfig {
+            provider: Some("anthropic".to_string()),
+            model: None,
+            base_url: None,
+            context_tokens: None,
+        };
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm).unwrap();
+        let env = get_claude_env(&rendered);
+        assert!(
+            !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
+            "Anthropic + no model must not set ANTHROPIC_MODEL, got: {env:?}"
+        );
+
+        // An empty string after trim should behave the same as None — a
+        // user clearing the dropdown from the UI sends "" through Tauri.
+        let llm_blank = LlmConfig {
+            provider: Some("anthropic".to_string()),
+            model: Some("   ".to_string()),
+            base_url: None,
+            context_tokens: None,
+        };
+        let rendered_blank = apply_llm_config(COMPOSE_TEMPLATE, &llm_blank).unwrap();
+        let env_blank = get_claude_env(&rendered_blank);
+        assert!(
+            !env_blank.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
+            "Anthropic + whitespace-only model must not set ANTHROPIC_MODEL, got: {env_blank:?}"
+        );
+    }
+
+    #[test]
+    fn test_switching_provider_ollama_to_anthropic() {
+        let llm_ollama = LlmConfig {
+            provider: Some("ollama".to_string()),
+            model: Some("llama3.3".to_string()),
+            base_url: None,
+            context_tokens: None,
+        };
+        let llm_anthropic = LlmConfig::default();
+
+        let with_ollama = apply_llm_config(COMPOSE_TEMPLATE, &llm_ollama).unwrap();
+        let with_anthropic = apply_llm_config(COMPOSE_TEMPLATE, &llm_anthropic).unwrap();
+
+        let env_ollama = get_claude_env(&with_ollama);
+        let env_anthropic = get_claude_env(&with_anthropic);
+
+        assert!(
+            env_ollama
+                .iter()
+                .any(|e| e.starts_with("ANTHROPIC_BASE_URL=")),
+            "Ollama must set ANTHROPIC_BASE_URL"
+        );
+        assert!(
+            !env_anthropic
+                .iter()
+                .any(|e| e.starts_with("ANTHROPIC_BASE_URL=")),
+            "Anthropic must not set ANTHROPIC_BASE_URL, got: {env_anthropic:?}"
+        );
+        assert!(
+            !env_anthropic
+                .iter()
+                .any(|e| e == "CLAUDE_CODE_ATTRIBUTION_HEADER=0"),
+            "Anthropic must NOT disable attribution header — it is only stripped \
+             for local providers to avoid breaking llama.cpp/Ollama KV cache. \
+             Got: {env_anthropic:?}"
+        );
+        assert!(
+            !env_anthropic
+                .iter()
+                .any(|e| e.starts_with("ANTHROPIC_CUSTOM_MODEL_OPTION")),
+            "Anthropic provider must NOT inject ANTHROPIC_CUSTOM_MODEL_OPTION — it is only \
+             set for local providers. Got: {env_anthropic:?}"
+        );
+    }
+
+    #[test]
+    fn test_llamacpp_custom_model_option_labels() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig {
+                provider: Some("llamacpp".to_string()),
+                model: Some("deepseek-r1".to_string()),
+                base_url: None,
+                context_tokens: None,
+            },
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=deepseek-r1 (llama.cpp)"),
+            "llamacpp display name must use 'llama.cpp' label, got: {env:?}"
+        );
+    }
+
+    #[test]
+    fn test_lmstudio_custom_model_option_labels() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig {
+                provider: Some("lmstudio".to_string()),
+                model: Some("qwen2.5-coder".to_string()),
+                base_url: None,
+                context_tokens: None,
+            },
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=qwen2.5-coder (LM Studio)"),
+            "lmstudio display name must use 'LM Studio' label, got: {env:?}"
+        );
+    }
+
     #[test]
     fn test_render_compose_claude_version_is_pinned() {
         // Regression guard: CLAUDE_VERSION must be the pinned semver from defaults.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -3015,7 +4005,7 @@ services:
         // This guards against accidentally adding :ro to the workspace mount.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -3376,7 +4366,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     environment:
       - PORT=4000
-      - WORKER_SLACK_URL=http://mcp-slack:4001
+      - WORKER_SLACK_URL=http://mcp-slack:3000
       - SLACK_TOKEN=xoxb-12345
 "#;
         let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
@@ -3499,7 +4489,7 @@ services:
         // Read-only — container only reads the lock file; Speedwave host writes it.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -3674,7 +4664,7 @@ services:
         // CLAUDE_CODE_IDE_HOST_OVERRIDE must be in the claude service environment.
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -3708,7 +4698,7 @@ services:
     fn test_claude_env_has_no_flicker() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -3742,7 +4732,7 @@ services:
     fn test_claude_env_has_effort_level() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let yaml = render_compose(
@@ -3817,7 +4807,7 @@ services:
     security_opt: [no-new-privileges:true]
     tmpfs: ["/tmp:noexec,nosuid,size=64m"]
     environment:
-      - PORT=4001
+      - PORT=3000
 "#;
         let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
         assert!(
@@ -3825,29 +4815,6 @@ services:
                 .iter()
                 .any(|v| v.rule == SecurityRule::NoPortsWorkers),
             "Worker without ports should pass"
-        );
-    }
-
-    #[test]
-    fn test_security_llm_proxy_ports_allowed() {
-        let yaml = r#"
-version: "3"
-services:
-  llm-proxy:
-    image: ghcr.io/berriai/litellm:latest
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    tmpfs: ["/tmp:noexec,nosuid,size=64m"]
-    ports:
-      - "127.0.0.1:4010:4010"
-"#;
-        let violations = SecurityCheck::run(yaml, "test", &[], &test_expected_paths());
-        assert!(
-            !violations
-                .iter()
-                .any(|v| v.rule == SecurityRule::NoPortsWorkers),
-            "llm-proxy is allowed to expose ports"
         );
     }
 
@@ -3897,7 +4864,7 @@ services:
     fn test_render_compose_rejects_invalid_project_name() {
         let resolved = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let integrations = ResolvedIntegrationsConfig::default();
@@ -4086,7 +5053,7 @@ services:
     fn test_render_compose_with_mixed_enabled_disabled_end_to_end() {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
+            flags: default_flags(),
             llm: LlmConfig::default(),
         };
         let mut integrations = ResolvedIntegrationsConfig::default();
@@ -4287,6 +5254,7 @@ services:
             sharepoint: true,
             redmine: true,
             gitlab: true,
+            playwright: true,
             ..ResolvedIntegrationsConfig::default()
         };
         let result =
@@ -4308,40 +5276,6 @@ services:
                 expected
             );
         }
-    }
-
-    #[test]
-    fn test_render_compose_llm_proxy_has_container_user() {
-        let config = ResolvedClaudeConfig {
-            env: crate::defaults::base_env(),
-            flags: crate::defaults::DEFAULT_FLAGS.to_vec(),
-            llm: LlmConfig {
-                provider: Some("openai".to_string()),
-                model: Some("gpt-4o".to_string()),
-                base_url: None,
-                api_key_env: Some("OPENAI_API_KEY".to_string()),
-            },
-        };
-        let yaml = render_compose(
-            "test-project",
-            "/home/user/projects/test",
-            &config,
-            &ResolvedIntegrationsConfig::default(),
-            None,
-        )
-        .unwrap();
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
-        let proxy_user = doc
-            .get("services")
-            .and_then(|s| s.get("llm-proxy"))
-            .and_then(|p| p.get("user"))
-            .and_then(|u| u.as_str());
-        assert_eq!(
-            proxy_user,
-            Some(container_user()),
-            "llm-proxy service must have user: \"{}\"",
-            container_user()
-        );
     }
 
     // ── Plugin SecurityCheck tests ───────────────────────────────────────
@@ -5193,10 +6127,11 @@ services:
       - /tmp:noexec,nosuid,size=64m
     environment:
       - PORT=4000
-      - WORKER_SLACK_URL=http://mcp-slack:4001
-      - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:4002
-      - WORKER_REDMINE_URL=http://mcp-redmine:4003
-      - WORKER_GITLAB_URL=http://mcp-gitlab:4004
+      - WORKER_SLACK_URL=http://mcp-slack:3000
+      - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:3000
+      - WORKER_REDMINE_URL=http://mcp-redmine:3000
+      - WORKER_GITLAB_URL=http://mcp-gitlab:3000
+      - WORKER_PLAYWRIGHT_URL=http://mcp-playwright:3000
     networks:
       - speedwave_test_network
 
@@ -5211,7 +6146,7 @@ services:
     volumes:
       - /home/user/.speedwave/tokens/test/slack:/tokens:ro
     environment:
-      - PORT=4001
+      - PORT=3000
     networks:
       - speedwave_test_network
 
@@ -5227,7 +6162,7 @@ services:
       - /home/user/.speedwave/tokens/test/sharepoint:/tokens:rw
       - /home/user/projects/test:/workspace:rw
     environment:
-      - PORT=4002
+      - PORT=3000
     networks:
       - speedwave_test_network
 
@@ -5242,7 +6177,7 @@ services:
     volumes:
       - /home/user/.speedwave/tokens/test/redmine:/tokens:ro
     environment:
-      - PORT=4003
+      - PORT=3000
     networks:
       - speedwave_test_network
 
@@ -5257,7 +6192,24 @@ services:
     volumes:
       - /home/user/.speedwave/tokens/test/gitlab:/tokens:ro
     environment:
-      - PORT=4004
+      - PORT=3000
+    networks:
+      - speedwave_test_network
+
+  mcp-playwright:
+    image: speedwave-mcp-playwright:latest
+    container_name: speedwave_test_mcp_playwright
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=1g
+    shm_size: 2g
+    environment:
+      - PORT=3000
     networks:
       - speedwave_test_network
 
@@ -5272,6 +6224,7 @@ networks:
             sharepoint: true,
             redmine: true,
             gitlab: true,
+            playwright: true,
             ..Default::default()
         }
     }

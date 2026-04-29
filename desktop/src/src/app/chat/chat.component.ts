@@ -2,49 +2,84 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
-  ElementRef,
-  HostListener,
   OnDestroy,
   OnInit,
   ViewChild,
+  effect,
   inject,
+  signal,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
-import { Router } from '@angular/router';
-import { marked } from 'marked';
+import { Router, RouterLink } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
-import type { ChatMessage, ConversationSummary, ConversationTranscript } from '../models/chat';
-import { ChatMessageComponent } from './message/chat-message.component';
+import { UiStateService } from '../services/ui-state.service';
+import type {
+  ChatMessage,
+  ConversationSummary,
+  ConversationTranscript,
+  MessageBlock,
+} from '../models/chat';
+import { ChatHeaderComponent } from './header/chat-header.component';
+import { ChatMessageListComponent } from './message-list/chat-message-list.component';
+import { ComposerComponent } from './composer/composer.component';
 import { SessionStatsComponent } from './session-stats/session-stats.component';
+import { MemoryPanelComponent } from './memory-panel/memory-panel.component';
+import { ConversationsSidebarComponent } from './conversations-sidebar/conversations-sidebar.component';
 
 /** Chat component that handles message rendering, user input, and streaming responses from Claude. */
 @Component({
   selector: 'app-chat',
-  standalone: true,
-  imports: [CommonModule, FormsModule, ChatMessageComponent, SessionStatsComponent],
+  imports: [
+    CommonModule,
+    RouterLink,
+    ChatHeaderComponent,
+    ChatMessageListComponent,
+    ComposerComponent,
+    SessionStatsComponent,
+    MemoryPanelComponent,
+    ConversationsSidebarComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './chat.component.html',
+  host: {
+    class: 'flex min-h-0 flex-1 flex-col overflow-hidden',
+    '(click)': 'onLinkClick($event)',
+    '(document:keydown.escape)': 'onEscape($event)',
+  },
 })
 export class ChatComponent implements OnInit, OnDestroy {
-  @ViewChild('messageList') messageList!: ElementRef<HTMLDivElement>;
-
-  inputText = '';
-
-  conversations: ConversationSummary[] = [];
-  showHistory = false;
-  viewingTranscript: ConversationTranscript | null = null;
+  conversations: readonly ConversationSummary[] = [];
   historyLoading = false;
   historyError = '';
   projectMemory = '';
-  showMemory = false;
-  viewError = '';
+  memoryError = '';
+  /**
+   * Current git branch of the active project's working tree, or `null` when
+   * the project is not a git repo. Re-read after each turn finishes because
+   * the assistant may have switched branches via a shell tool.
+   */
+  readonly gitBranch = signal<string | null>(null);
+  /**
+   * Cached index of the most recent assistant message in `chat.messages`,
+   * recomputed on every state-change notification. Avoids the O(n) scan in
+   * `isLastAssistant` becoming O(n²) when the template iterates every entry.
+   * `-1` when no assistant message exists.
+   */
+  lastAssistantIndex = -1;
   private resumeInProgress = false;
+
+  /**
+   * Composer reference used to refocus the textarea after parent-driven
+   *  state resets (new conversation, etc.) — autofocus on mount happens
+   *  inside the composer's own `ngAfterViewInit`.
+   */
+  @ViewChild('composer') private composer?: { focusInput: () => void };
 
   readonly chat = inject(ChatStateService);
   readonly projectState = inject(ProjectStateService);
+  readonly ui = inject(UiStateService);
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private router = inject(Router);
@@ -52,19 +87,76 @@ export class ChatComponent implements OnInit, OnDestroy {
   private unsubProjectReady: (() => void) | null = null;
   private unsubAuthWatch: (() => void) | null = null;
 
-  /** Subscribes to state changes from the service. */
+  /** Read-only aliases over the UI-state signals; the template binds these. */
+  get showHistory(): boolean {
+    return this.ui.sidebarOpen();
+  }
+  /** Read-only alias — see {@link showHistory}. */
+  get showMemory(): boolean {
+    return this.ui.memoryOpen();
+  }
+
+  /**
+   * Optimistic session id stamped the moment the user clicks a row in the
+   * conversations drawer. The backend may take a turn or two to surface the
+   * resumed session id in `chat.sessionStats`, so we keep this local override
+   * to drive the drawer's accent indicator without flickering.
+   */
+  private optimisticSessionId: string | null = null;
+
+  /**
+   * Active live-chat session id — backend value when present, otherwise the
+   *  optimistic stamp set on resume.
+   */
+  get currentViewSessionId(): string | null {
+    return this.chat.sessionStats?.session_id ?? this.optimisticSessionId;
+  }
+
+  /** Wires change-detection callbacks and effects that lazy-load data when drawers open. */
   constructor() {
+    let wasStreaming = false;
     this.unsubChange = this.chat.onChange(() => {
+      this.recomputeLastAssistantIndex();
+      // Refresh the branch chip on every streaming -> idle transition so a
+      // turn that ran `git checkout` updates the status strip without a
+      // full page reload.
+      if (wasStreaming && !this.chat.isStreaming) {
+        void this.refreshGitBranch();
+      }
+      wasStreaming = this.chat.isStreaming;
       this.cdr.markForCheck();
-      this.scrollToBottom();
+      // Live-chat scrolling is owned by <app-chat-message-list>; no-op here.
+    });
+
+    // Decouple data loading from the toggle source so the keyboard shortcut
+    // (⌘B in shell.component, which only flips the signal) loads data the
+    // same way the History button does.
+    effect(() => {
+      if (this.ui.sidebarOpen()) void this.loadConversations();
+    });
+    effect(() => {
+      if (this.ui.memoryOpen()) void this.loadProjectMemory();
     });
   }
 
-  /** Initializes chat session (idempotent — no-ops if already running). */
+  /** Recomputes the cached `lastAssistantIndex` from the current messages. */
+  private recomputeLastAssistantIndex(): void {
+    const msgs = this.chat.messages;
+    for (let i = msgs.length - 1; i >= 0; i -= 1) {
+      if (msgs[i].role === 'assistant') {
+        this.lastAssistantIndex = i;
+        return;
+      }
+    }
+    this.lastAssistantIndex = -1;
+  }
+
+  /** Boots the chat session and subscribes to project lifecycle events (auth + ready). */
   async ngOnInit(): Promise<void> {
-    await this.chat.init();
+    // Independent — running in parallel saves one git-fork's latency on
+    // cold start.
+    await Promise.all([this.chat.init(), this.refreshGitBranch()]);
     this.cdr.markForCheck();
-    this.scrollToBottom();
 
     this.unsubAuthWatch = this.projectState.onChange(() => {
       if (this.projectState.status === 'auth_required') {
@@ -73,12 +165,15 @@ export class ChatComponent implements OnInit, OnDestroy {
     });
 
     this.unsubProjectReady = this.projectState.onProjectReady(async () => {
-      this.viewingTranscript = null;
       const wasHistoryOpen = this.showHistory;
       const wasMemoryOpen = this.showMemory;
       this.conversations = [];
       this.projectMemory = '';
+      this.memoryError = '';
       this.cdr.markForCheck();
+      // Bypass the TTL — switching projects is a strong signal the branch
+      // could be different.
+      await this.refreshGitBranch(true);
       if (wasHistoryOpen) {
         await this.loadConversations();
       }
@@ -88,56 +183,122 @@ export class ChatComponent implements OnInit, OnDestroy {
     });
   }
 
-  /** Sends the current input text as a user message and invokes the backend. */
-  async sendMessage(): Promise<void> {
-    const text = this.inputText.trim();
-    if (!text || this.chat.isStreaming) return;
-    this.inputText = '';
-    this.cdr.markForCheck();
-    await this.chat.sendMessage(text);
-  }
+  /**
+   * Min interval between two `get_git_branch` IPC roundtrips. Branches
+   * rarely change mid-session; a short TTL eliminates 90%+ of forks
+   * during rapid turns without making the chip feel stale.
+   */
+  private static readonly GIT_BRANCH_TTL_MS = 1500;
+  /** Epoch-ms of the last branch read; `0` forces the next call. */
+  private gitBranchLastReadAt = 0;
 
   /**
-   * Handles Enter key press to send a message, allowing Shift+Enter for newlines.
-   * @param event - The keyboard event from the input field.
+   * Pulls the current git branch from the backend for the active project.
+   * Silent on errors — the chip just hides when the read fails so a missing
+   * git binary or non-repo project doesn't surface a noisy error. Reads
+   * within the TTL window are no-ops.
+   * @param force - Skip the TTL check (used after a project switch).
    */
-  onEnter(event: KeyboardEvent): void {
-    if (event.shiftKey) {
+  private async refreshGitBranch(force = false): Promise<void> {
+    const project = this.projectState.activeProject;
+    if (!project) {
+      this.gitBranch.set(null);
       return;
     }
-    event.preventDefault();
-    this.sendMessage();
+    const now = Date.now();
+    if (!force && now - this.gitBranchLastReadAt < ChatComponent.GIT_BRANCH_TTL_MS) {
+      return;
+    }
+    this.gitBranchLastReadAt = now;
+    try {
+      const branch = await this.tauri.invoke<string | null>('get_git_branch', { project });
+      this.gitBranch.set(branch);
+    } catch {
+      this.gitBranch.set(null);
+    }
+  }
+
+  /** True if the current turn is paused on an unanswered AskUserQuestion. */
+  private hasUnansweredQuestion(): boolean {
+    return this.chat.currentBlocks.some((b) => b.type === 'ask_user' && !b.question.answered);
   }
 
   /**
-   * Converts markdown content to sanitized HTML for display.
-   * Used by transcript view (which still uses flat content strings).
-   * @param content - The raw markdown string to render.
+   * ESC stops the current turn — but only when no AskUserQuestion is awaiting an answer.
+   *
+   * Wired via `host: { '(document:keydown.escape)': … }` because the project's
+   * best-practices forbid `@HostListener` (use the `host` decorator metadata).
+   * @param event - keyboard event; consumed (preventDefault) when we handle it.
    */
-  renderMarkdown(content: string): string {
-    return marked.parse(content, { async: false }) as string;
+  onEscape(event: Event): void {
+    if (!this.chat.isStreaming) return;
+    if (this.hasUnansweredQuestion()) return; // let the block own ESC semantics
+    event.preventDefault();
+    this.chat.stopConversation();
+  }
+
+  /** Stops the current turn unconditionally (Stop button). */
+  async onStopClicked(): Promise<void> {
+    await this.chat.stopConversation();
   }
 
   /**
-   * Handles a user answering an AskUserQuestion prompt.
-   * @param event - Contains the tool ID and selected answer values.
-   * @param event.toolId - The tool ID of the answered question.
-   * @param event.values - The selected or freeform answer values.
+   * Sends a message as the user's next turn. Called by the composer on submit.
+   * Guards against empty input and in-flight streaming.
+   * @param event - Composer payload object.
+   * @param event.payload - Backend message body (may include plan-mode prefix).
+   * @param event.displayText - Surface text rendered in the local user bubble.
+   */
+  async sendMessage(event: { payload: string; displayText: string }): Promise<void> {
+    if (!event?.payload || this.chat.isStreaming) return;
+    this.cdr.markForCheck();
+    await this.chat.sendMessage(event.payload, event.displayText);
+  }
+
+  /**
+   * ADR-045 — composer signalled a queue request (user sent while streaming).
+   * @param text Trimmed payload to queue.
+   */
+  async onQueueRequested(text: string): Promise<void> {
+    if (!text) return;
+    await this.chat.queueMessage(text);
+    this.cdr.markForCheck();
+  }
+
+  /** ADR-045 — composer signalled queue cancellation (X button). */
+  async onQueueCancelled(): Promise<void> {
+    await this.chat.cancelQueuedMessage();
+    this.cdr.markForCheck();
+  }
+
+  /**
+   * Forwards an answered AskUserQuestion to the chat-state service.
+   * @param event - tool id and the selected values from the question block.
+   * @param event.toolId - id of the tool_use that produced the question.
+   * @param event.values - selected values; one per chosen option.
    */
   async onQuestionAnswered(event: { toolId: string; values: string[] }): Promise<void> {
     await this.chat.answerQuestion(event.toolId, event.values);
   }
 
-  /** Toggles the history sidebar and loads conversations when opening. */
-  async toggleHistory(): Promise<void> {
-    this.showHistory = !this.showHistory;
-    if (this.showHistory) {
-      await this.loadConversations();
-    }
+  /**
+   * Returns true when the assistant entry at `index` is the most recent
+   * assistant message — used to gate the per-message Retry button. Reads a
+   * precomputed index updated on each state-change notification, so the
+   * per-row template lookup is O(1) instead of O(n).
+   * @param index - Index into `chat.messages` of the entry under test.
+   */
+  isLastAssistant(index: number): boolean {
+    return index === this.lastAssistantIndex;
+  }
+
+  /** Flips the sidebar signal; data load is driven by the constructor effect. */
+  toggleHistory(): void {
+    this.ui.toggleSidebar();
     this.cdr.markForCheck();
   }
 
-  /** Loads conversation list from the backend for the active project. */
+  /** Fetches the active project's past sessions; clears state if no active project. */
   async loadConversations(): Promise<void> {
     this.historyLoading = true;
     this.historyError = '';
@@ -162,55 +323,49 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Loads and displays a past conversation transcript in read-only mode.
-   * @param sessionId - The UUID of the conversation to view.
+   * Resumes a session in live chat mode. The drawer click is the primary
+   * action — there is no longer a "view transcript" intermediate step.
+   *
+   * Flow: clear local state -> fetch the persisted transcript and surface its
+   * messages immediately (Claude Code's `--resume` reuses the session but
+   * does not replay history on the stream-json channel) -> invoke
+   * `resume_conversation` so subsequent user turns continue the same session.
+   * @param sessionId - session UUID to resume.
    */
-  async viewConversation(sessionId: string): Promise<void> {
-    this.viewError = '';
+  async resumeConversation(sessionId: string): Promise<void> {
+    if (this.resumeInProgress) return;
+    this.resumeInProgress = true;
+
+    this.chat.resetForNewConversation();
+    // Stamp the active session id immediately so the drawer's accent
+    // indicator follows the user's click without waiting for the backend
+    // to surface session_id on the next stream chunk.
+    this.optimisticSessionId = sessionId;
+    this.ui.closeSidebar();
+    this.cdr.markForCheck();
+
     try {
       const project = this.projectState.activeProject;
       if (!project) return;
-      this.viewingTranscript = await this.tauri.invoke<ConversationTranscript>('get_conversation', {
-        project,
-        sessionId,
-      });
-    } catch (err) {
-      console.error('viewConversation failed:', err);
-      this.viewError = `Failed to load conversation: ${err}`;
-      this.viewingTranscript = null;
-    }
-    this.cdr.markForCheck();
-  }
 
-  /**
-   * Resumes a past conversation: loads its messages and switches to live chat mode.
-   * @param sessionId - The UUID of the conversation to resume.
-   */
-  async resumeConversation(sessionId: string): Promise<void> {
-    if (!this.viewingTranscript || this.resumeInProgress) return;
-    this.resumeInProgress = true;
-    console.debug('[chat] resumeConversation: sessionId=%s', sessionId);
-    const messages: ChatMessage[] = this.viewingTranscript.messages.map((msg) => ({
-      role: msg.role as 'user' | 'assistant',
-      blocks: normalizeHistoryBlocks(
-        msg.blocks ?? [{ type: 'text' as const, content: msg.content }]
-      ),
-      timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
-    }));
+      // Run transcript fetch and the live-session relaunch in parallel —
+      // the two backend calls are independent (resume_conversation does
+      // not need the transcript). When both resolve we load the messages
+      // even if `resume_conversation` finished first.
+      const transcriptPromise = this.tauri
+        .invoke<ConversationTranscript>('get_conversation', { project, sessionId })
+        .catch((err) => {
+          console.error('[chat] get_conversation failed:', err);
+          return null;
+        });
+      const resumePromise = this.tauri.invoke('resume_conversation', { project, sessionId });
 
-    // Load transcript messages immediately so the user sees history while
-    // the backend resumes the session (which may take seconds).
-    this.chat.loadMessages(messages);
-    this.viewingTranscript = null;
-    this.showHistory = false;
-    this.cdr.markForCheck();
-
-    try {
-      const project = this.projectState.activeProject;
-      if (project) {
-        console.debug('[chat] resumeConversation: invoking backend');
-        await this.tauri.invoke('resume_conversation', { project, sessionId });
-        console.debug('[chat] resumeConversation: backend success');
+      const [transcript] = await Promise.all([transcriptPromise, resumePromise]);
+      if (transcript) {
+        this.chat.loadMessages(toChatMessages(transcript));
+        // Seed the session id immediately so retry / queue work without
+        // waiting for the next live `Result` event to land.
+        this.chat.seedResumedSession(sessionId);
       }
     } catch (err) {
       console.error('[chat] resumeConversation failed:', err);
@@ -234,37 +389,32 @@ export class ChatComponent implements OnInit, OnDestroy {
       }
     } finally {
       this.resumeInProgress = false;
+      this.cdr.markForCheck();
     }
   }
 
-  /** Starts a new conversation by clearing all state and re-initialising. */
+  /** Clears all chat + drawer state and re-runs the chat session bootstrap. */
   async newConversation(): Promise<void> {
-    this.inputText = '';
-    this.viewingTranscript = null;
-    this.showHistory = false;
-    this.showMemory = false;
+    this.ui.closeSidebar();
+    this.ui.closeMemory();
+    this.optimisticSessionId = null;
     this.chat.resetForNewConversation();
     this.cdr.markForCheck();
     await this.chat.init();
+    // Re-focus the composer so the user can start typing right after
+    // hitting "+ new conversation" without an extra click.
+    this.composer?.focusInput();
   }
 
-  /** Closes the transcript read-only view. */
-  closeTranscript(): void {
-    this.viewingTranscript = null;
+  /** Flips the memory signal; data load is driven by the constructor effect. */
+  toggleMemory(): void {
+    this.ui.toggleMemory();
     this.cdr.markForCheck();
   }
 
-  /** Toggles the project memory panel and loads memory on open. */
-  async toggleMemory(): Promise<void> {
-    this.showMemory = !this.showMemory;
-    if (this.showMemory) {
-      await this.loadProjectMemory();
-    }
-    this.cdr.markForCheck();
-  }
-
-  /** Loads the project memory (CLAUDE.md contents) from the backend. */
+  /** Fetches the active project's CLAUDE.md; surfaces backend errors via `memoryError` (parity with `historyError`). */
   async loadProjectMemory(): Promise<void> {
+    this.memoryError = '';
     try {
       const project = this.projectState.activeProject;
       if (!project) {
@@ -275,24 +425,15 @@ export class ChatComponent implements OnInit, OnDestroy {
     } catch (err) {
       console.error('loadProjectMemory failed:', err);
       this.projectMemory = '';
+      this.memoryError = `Failed to load memory: ${err}`;
     }
     this.cdr.markForCheck();
   }
 
-  private scrollToBottom(): void {
-    setTimeout(() => {
-      if (this.messageList?.nativeElement) {
-        const el = this.messageList.nativeElement;
-        el.scrollTop = el.scrollHeight;
-      }
-    }, 0);
-  }
-
   /**
-   * Intercepts clicks on external links and opens them in the system browser.
-   * @param event - The mouse click event to inspect for anchor element targets.
+   * Intercept anchor clicks so http(s) links open in the system browser, not in-app.
+   * @param event - the click event; preventDefault is called when we route to open_url.
    */
-  @HostListener('click', ['$event'])
   onLinkClick(event: MouseEvent): void {
     const target = (event.target as HTMLElement).closest('a');
     if (!target) return;
@@ -306,7 +447,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Unsubscribes from change notifications and event listeners on component destruction. */
+  /** Tears down change subscriptions registered in the constructor and ngOnInit. */
   ngOnDestroy(): void {
     if (this.unsubChange) {
       this.unsubChange();
@@ -331,7 +472,7 @@ interface HistoryToolUseBlock {
   input_json: string;
 }
 
-/** Raw tool_result block from Rust history.rs. */
+/** Raw tool_result block from Rust history.rs (consumed during normalization). */
 interface HistoryToolResultBlock {
   type: 'tool_result';
   content: string;
@@ -339,22 +480,52 @@ interface HistoryToolResultBlock {
 }
 
 /**
- * Converts blocks from Rust history format to the Angular live-chat format.
+ * Maps a backend `ConversationTranscript` into the live-chat `ChatMessage[]`
+ * shape used by `ChatStateService.loadMessages`.
+ *
+ * Each transcript entry carries either pre-built `blocks` or a flat `content`
+ * string. We prefer `blocks` so tool calls / thinking sections survive the
+ * round-trip; otherwise we fall back to a single text block.
+ * @param transcript - Backend conversation transcript to convert.
+ */
+function toChatMessages(transcript: ConversationTranscript): ChatMessage[] {
+  return transcript.messages.map((msg) => {
+    const role: 'user' | 'assistant' = msg.role === 'user' ? 'user' : 'assistant';
+    const rawBlocks =
+      msg.blocks && msg.blocks.length > 0
+        ? (msg.blocks as unknown as (MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock)[])
+        : ([{ type: 'text' as const, content: msg.content }] as MessageBlock[]);
+    const blocks = normalizeHistoryBlocks(rawBlocks);
+    const timestamp = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now();
+    // History entries are by definition durable — propagate the JSONL uuid
+    // (when present) and mark it `Committed` so `canRetryLastAssistant`
+    // accepts the resumed conversation as a valid retry anchor (ADR-046).
+    const base: ChatMessage = { role, blocks, timestamp };
+    if (msg.uuid) {
+      base.uuid = msg.uuid;
+      base.uuid_status = 'Committed';
+    }
+    return base;
+  });
+}
+
+/**
+ * Converts blocks from the backend history format to the live-chat format.
+ *
  * History `tool_use` blocks are flat (`{ type, tool_name, input_json }`),
- * while live-chat blocks nest inside `{ type: 'tool_use', tool: ToolUseBlock }`.
- * History `tool_result` blocks are merged into the preceding `tool_use` block.
- * @param blocks - Raw blocks from Rust history (may be flat tool_use or already normalized).
- *   `tool_result` blocks are consumed and merged into the preceding `tool_use`;
- *   they do not appear standalone in the returned array.
+ * while live-chat blocks nest the tool data inside
+ * `{ type: 'tool_use', tool: ToolUseBlock }`. History `tool_result` blocks
+ * are consumed and merged into the preceding `tool_use` block — they never
+ * appear standalone in the returned array.
+ * @param blocks - Raw blocks from the backend history payload.
  */
 function normalizeHistoryBlocks(
-  blocks: (import('../models/chat').MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock)[]
-): import('../models/chat').MessageBlock[] {
-  const result: import('../models/chat').MessageBlock[] = [];
+  blocks: (MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock)[]
+): MessageBlock[] {
+  const result: MessageBlock[] = [];
 
   for (const block of blocks) {
     if (block.type === 'tool_use' && !('tool' in block)) {
-      // History format: flat tool_use → wrap into nested ToolUseBlock
       const hist = block as HistoryToolUseBlock;
       result.push({
         type: 'tool_use',
@@ -366,12 +537,9 @@ function normalizeHistoryBlocks(
           status: 'done',
           result: '',
           result_is_error: false,
-          collapsed: true,
         },
       });
     } else if (block.type === 'tool_result') {
-      // History format: merge result into the preceding tool_use block.
-      // tool_result blocks are consumed here and do not appear standalone.
       const hist = block as HistoryToolResultBlock;
       const prev = result[result.length - 1];
       if (prev?.type === 'tool_use') {
@@ -379,12 +547,9 @@ function normalizeHistoryBlocks(
         prev.tool = hist.is_error
           ? { ...base, status: 'error' as const, result_is_error: true as const }
           : { ...base, status: 'done' as const, result_is_error: false as const };
-      } else {
-        console.warn('[normalizeHistoryBlocks] orphaned tool_result (no preceding tool_use)');
       }
     } else {
-      // text, thinking, error, or already-normalized tool_use — pass through
-      result.push(block as import('../models/chat').MessageBlock);
+      result.push(block as MessageBlock);
     }
   }
 

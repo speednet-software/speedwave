@@ -14,7 +14,7 @@ import { createToolDefinitions } from './tools/index.js';
 // Configuration
 //═══════════════════════════════════════════════════════════════════════════════
 
-const PORT = parseInt(process.env.PORT || '3002', 10);
+const PORT = parseInt(process.env.PORT || '3000', 10);
 const SERVER_NAME = 'mcp-sharepoint';
 const SERVER_VERSION = '1.0.0';
 const AUTH_TOKEN = process.env.MCP_SHAREPOINT_AUTH_TOKEN;

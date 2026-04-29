@@ -154,9 +154,7 @@ The Makefile and CI pipeline enforce checksum verification — builds fail if ch
 
 ---
 
-[^1]: [Debian Policy Manual - Package relationships](https://www.debian.org/doc/debian-policy/ch-relationships.html)
-
-[^3]: [rootless containers — uidmap / newuidmap requirement](https://rootlesscontaine.rs/getting-started/common/uidmap/)
+[^3]: [rootless containers — subuid/subgid + newuidmap/newgidmap requirement](https://rootlesscontaine.rs/getting-started/common/subuid/)
 
 [^4]: [Install WSL - Microsoft Learn](https://learn.microsoft.com/en-us/windows/wsl/install)
 
@@ -167,8 +165,6 @@ The Makefile and CI pipeline enforce checksum verification — builds fail if ch
 [^7]: [Apple Developer - About the PATH environment in macOS apps](https://developer.apple.com/library/archive/qa/qa1067/_index.html)
 
 [^8]: [Rancher Desktop - Lima integration (CNCF sandbox)](https://github.com/rancher-sandbox/rancher-desktop/tree/main/src/go/wsl-helper)
-
-[^9]: [VS Code Linux dependencies - .deb package](https://code.visualstudio.com/docs/setup/linux#_debian-and-ubuntu-based-distributions)
 
 [^10]: [Flatpak sandbox permissions](https://docs.flatpak.org/en/latest/sandbox-permissions.html)
 

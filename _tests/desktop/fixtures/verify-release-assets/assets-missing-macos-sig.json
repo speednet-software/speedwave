@@ -1,0 +1,21 @@
+[
+  {"name": "latest.json"},
+  {"name": "Speedwave_0.8.1_macOS_Apple_Silicon.app.tar.gz"},
+  {"name": "Speedwave_0.8.1_macOS_Apple_Silicon.dmg"},
+  {"name": "Speedwave_0.8.1_macOS_Intel.app.tar.gz"},
+  {"name": "Speedwave_0.8.1_macOS_Intel.app.tar.gz.sig"},
+  {"name": "Speedwave_0.8.1_macOS_Intel.dmg"},
+  {"name": "Speedwave_0.8.1_amd64.deb"},
+  {"name": "Speedwave_0.8.1_x64-setup.exe"},
+  {"name": "Speedwave_0.8.1_x64-setup.exe.sig"},
+  {"name": "Speedwave_0.8.1_x64-setup.nsis.zip"},
+  {"name": "Speedwave_0.8.1_x64-setup.nsis.zip.sig"},
+  {"name": "Speedwave_0.8.1_x64_en-US.msi"},
+  {"name": "Speedwave_0.8.1_x64_en-US.msi.sig"},
+  {"name": "Speedwave_0.8.1_x64_en-US.msi.zip"},
+  {"name": "Speedwave_0.8.1_x64_en-US.msi.zip.sig"},
+  {"name": "speedwave-v0.8.1-aarch64-apple-darwin.tar.gz"},
+  {"name": "speedwave-v0.8.1-x86_64-apple-darwin.tar.gz"},
+  {"name": "speedwave-v0.8.1-x86_64-unknown-linux-gnu.tar.gz"},
+  {"name": "speedwave-v0.8.1-x86_64-pc-windows-msvc.zip"}
+]

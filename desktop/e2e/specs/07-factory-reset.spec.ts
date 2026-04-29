@@ -51,13 +51,17 @@ describe('Factory Reset', function () {
     });
     await nav.click();
 
-    const project = await $('[data-testid="settings-active-project"]');
-    await project.waitForExist({
+    // The legacy active-project info card was removed. Settings is "ready"
+    // when the page heading is rendered; the active project itself is read
+    // from `activeProjectSlug()` (backend ground truth).
+    const title = await $('[data-testid="settings-title"]');
+    await title.waitForExist({
       timeout: 10_000,
-      timeoutMsg: 'Active project element not found on settings page',
+      timeoutMsg: 'Settings page heading not found',
     });
-    expect(await project.isDisplayed()).toBe(true);
-    expect((await project.getText()).trim()).toContain('e2e-test');
+    expect(await title.isDisplayed()).toBe(true);
+    const { activeProjectSlug } = await import('../helpers/projects');
+    expect(await activeProjectSlug()).toBe('e2e-test');
   });
 
   it('should wipe state and restart the app', async function () {

@@ -30,12 +30,31 @@ pub(crate) struct BundleReconcileStatus {
     pub(crate) applied_bundle_id: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+/// Frontend-facing snapshot of `claude.llm` for the active project plus the
+/// computed `default_base_url`. We flatten the underlying `LlmConfig` so
+/// every new field added to the SSOT struct (`speedwave_runtime::config::LlmConfig`)
+/// surfaces here automatically — without this, `provider`/`model`/`base_url`/
+/// `context_tokens` had to be hand-copied at three layers (LlmConfig → this
+/// response → frontend interface) and a missed step would silently drop the
+/// field.
+///
+/// Write-only direction (backend → frontend). The struct does not derive
+/// `Deserialize` so the type-system makes that explicit.
+///
+/// Footgun warning: when adding a new field to `LlmConfig`, mark optional
+/// fields with `#[serde(default, skip_serializing_if = "Option::is_none")]`
+/// — `#[serde(flatten)]` here propagates the field but does not omit
+/// `null`s, so a bare `Option` would surface as `field: null` in the JSON
+/// payload and the frontend's exact-shape assertions would diverge.
+#[derive(Serialize)]
 pub(crate) struct LlmConfigResponse {
-    pub(crate) provider: Option<String>,
-    pub(crate) model: Option<String>,
-    pub(crate) base_url: Option<String>,
-    pub(crate) api_key_env: Option<String>,
+    #[serde(flatten)]
+    pub(crate) llm: speedwave_runtime::config::LlmConfig,
+    /// Backend-authoritative default for the selected provider — exposed so
+    /// the UI can render it as a placeholder without duplicating provider URL
+    /// strings on the frontend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) default_base_url: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -64,6 +83,7 @@ pub(crate) struct IntegrationStatusEntry {
     pub(crate) auth_fields: Vec<AuthField>,
     pub(crate) current_values: std::collections::HashMap<String, String>,
     pub(crate) mappings: Option<std::collections::HashMap<String, serde_json::Value>>,
+    pub(crate) badge: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -300,11 +320,73 @@ mod tests {
     fn toggleable_services_have_auth_fields() {
         for svc in speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES {
             let fields = get_auth_fields(svc.config_key);
+            // Credential-less services (e.g. Playwright) declare `auth_fields: &[]`
+            // in their descriptor; `get_auth_fields` faithfully returns an empty vec.
+            // Only fail if the descriptor says the service has auth fields but the
+            // getter returns nothing — a real bug.
+            if svc.auth_fields.is_empty() {
+                assert!(
+                    fields.is_empty(),
+                    "service '{}' has no descriptor auth_fields but get_auth_fields returned {}",
+                    svc.config_key,
+                    fields.len()
+                );
+                continue;
+            }
             assert!(
                 !fields.is_empty(),
                 "TOGGLEABLE service '{}' has no auth_fields defined",
                 svc.config_key
             );
         }
+    }
+
+    /// Wire-format guard: flattening `LlmConfig` into `LlmConfigResponse`
+    /// must keep `provider`/`model`/`base_url`/`context_tokens` at the top
+    /// level of the JSON payload — the frontend reads them from there
+    /// (mirror declared in `desktop/src/src/app/settings/llm-provider/`).
+    /// If a future serde change buries them under an `llm:` key the
+    /// frontend silently breaks.
+    #[test]
+    fn llm_config_response_flattens_inner_llm_at_top_level() {
+        let resp = LlmConfigResponse {
+            llm: speedwave_runtime::config::LlmConfig {
+                provider: Some("ollama".to_string()),
+                model: Some("qwen3:35b".to_string()),
+                base_url: Some("http://localhost:11434".to_string()),
+                context_tokens: Some(32_768),
+            },
+            default_base_url: Some("http://host.docker.internal:11434".to_string()),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["provider"], "ollama");
+        assert_eq!(json["model"], "qwen3:35b");
+        assert_eq!(json["base_url"], "http://localhost:11434");
+        assert_eq!(json["context_tokens"], 32_768);
+        assert_eq!(
+            json["default_base_url"],
+            "http://host.docker.internal:11434"
+        );
+        // No `llm:` wrapper — flatten makes the inner fields top-level.
+        assert!(
+            json.get("llm").is_none(),
+            "llm wrapper must not appear: {json}"
+        );
+    }
+
+    #[test]
+    fn llm_config_response_omits_context_tokens_when_unset() {
+        // Backend returns `LlmConfig::default()` when no project is active —
+        // the response must skip the `context_tokens` key entirely so the
+        // frontend's `?? null` fallback kicks in cleanly.
+        let resp = LlmConfigResponse {
+            llm: speedwave_runtime::config::LlmConfig::default(),
+            default_base_url: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(
+            !json.contains("context_tokens"),
+            "context_tokens must be skipped when None, got: {json}"
+        );
     }
 }

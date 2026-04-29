@@ -285,14 +285,13 @@ impl ContainerRuntime for WslRuntime {
     }
 
     fn container_exec(&self, container: &str, cmd: &[&str]) -> Command {
+        // wsl.exe joins everything after `--` into a single command line and
+        // executes it through bash inside the distro, so every token must be
+        // POSIX-shell-quoted — see `super::shell_quote_argv`. Without this,
+        // prompts containing `(`, `)`, `'`, etc. (notably from
+        // `prompts::local_llm_identity`) break remote bash.
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
-        // Raw Command::new — intentionally bypasses binary::system_command() because
-        // interactive TTY sessions need a console window on Windows.
-        let mut command = Command::new("wsl.exe");
-        command.args([
-            "-d",
-            consts::WSL_DISTRO_NAME,
-            "--",
+        let nerdctl_argv: Vec<&str> = [
             "nerdctl",
             "exec",
             "-it",
@@ -301,28 +300,33 @@ impl ContainerRuntime for WslRuntime {
             "-e",
             "COLORTERM=truecolor",
             "-e",
-            &path_env,
+            path_env.as_str(),
             container,
-        ]);
-        command.args(cmd);
+        ]
+        .iter()
+        .copied()
+        .chain(cmd.iter().copied())
+        .collect();
+        let remote_cmd = super::shell_quote_argv(&nerdctl_argv);
+
+        // Raw Command::new — intentionally bypasses binary::system_command() because
+        // interactive TTY sessions need a console window on Windows.
+        let mut command = Command::new("wsl.exe");
+        command.args(["-d", consts::WSL_DISTRO_NAME, "--", "sh", "-c", &remote_cmd]);
         command
     }
 
     fn container_exec_piped(&self, container: &str, cmd: &[&str]) -> anyhow::Result<Command> {
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
+        let nerdctl_argv: Vec<&str> = ["nerdctl", "exec", "-i", "-e", path_env.as_str(), container]
+            .iter()
+            .copied()
+            .chain(cmd.iter().copied())
+            .collect();
+        let remote_cmd = super::shell_quote_argv(&nerdctl_argv);
+
         let mut command = crate::binary::system_command("wsl.exe");
-        command.args([
-            "-d",
-            consts::WSL_DISTRO_NAME,
-            "--",
-            "nerdctl",
-            "exec",
-            "-i",
-            "-e",
-            &path_env,
-            container,
-        ]);
-        command.args(cmd);
+        command.args(["-d", consts::WSL_DISTRO_NAME, "--", "sh", "-c", &remote_cmd]);
         Ok(command)
     }
 
@@ -406,6 +410,7 @@ impl ContainerRuntime for WslRuntime {
                 "-p",
                 project,
                 "logs",
+                "--timestamps",
                 "--tail",
                 &tail_str,
             ],
@@ -803,16 +808,17 @@ mod tests {
         assert_eq!(logs, "log output here");
     }
 
-    /// `compose_file_path()` returns a host-specific path (includes the current
-    /// user's home directory). This is fine: both the test setup and the
-    /// production `WslRuntime::compose_logs()` call the same function, so the
-    /// mock key always matches regardless of the machine running the test.
+    /// Production `WslRuntime::compose_logs()` calls `wsl_compose_file_path()`
+    /// (which translates the host home dir into a `/mnt/c/...` POSIX path
+    /// when the test runs on Windows), so the mock-key path must come from
+    /// the same helper, not `crate::runtime::compose_file_path()` which
+    /// returns the native Windows path on Windows runners.
     #[test]
     fn test_compose_logs() {
-        let compose_file = crate::runtime::compose_file_path("acme").unwrap();
+        let compose_file = wsl_compose_file_path("acme").unwrap();
         let runner = MockRunner::new().with_response(
             &format!(
-                "wsl.exe -d Speedwave -- nerdctl compose -f {} -p acme logs --tail 200",
+                "wsl.exe -d Speedwave -- nerdctl compose -f {} -p acme logs --timestamps --tail 200",
                 compose_file
             ),
             "hub | started\nclaude | ready",
@@ -827,16 +833,31 @@ mod tests {
         let rt = WslRuntime::new();
         let cmd = rt.container_exec("test_container", &["claude", "-p"]);
 
-        let args: Vec<String> = cmd
+        let remote_cmd = cmd
             .get_args()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
+            .last()
+            .map(|s| s.to_string_lossy().into_owned())
+            .expect("wsl.exe argv has at least one element");
 
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
         assert!(
-            args.contains(&path_env),
-            "container_exec should set PATH env, got args: {:?}",
-            args
+            remote_cmd.contains(&path_env),
+            "remote_cmd should set PATH env, got: {remote_cmd}"
+        );
+        assert!(
+            remote_cmd.contains("test_container"),
+            "remote_cmd should include container name, got: {remote_cmd}"
+        );
+        // Anchor on the literal "nerdctl exec -it -e" prefix — `shlex`
+        // leaves alphanumeric tokens unquoted, so the prefix appears
+        // verbatim and the match is precise (no false-positive boundaries).
+        assert!(
+            remote_cmd.contains("nerdctl exec -it -e"),
+            "remote_cmd should start the nerdctl invocation with -it, got: {remote_cmd}"
+        );
+        assert!(
+            remote_cmd.ends_with(" claude -p"),
+            "remote_cmd should end with the user command + args, got: {remote_cmd}"
         );
     }
 
@@ -852,39 +873,127 @@ mod tests {
             "container_exec_piped should use wsl.exe"
         );
 
-        let args: Vec<String> = cmd
+        let remote_cmd = cmd
             .get_args()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
+            .last()
+            .map(|s| s.to_string_lossy().into_owned())
+            .expect("wsl.exe argv has at least one element");
 
-        // Verify PATH env is set for the speedwave user
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
         assert!(
-            args.contains(&path_env),
-            "container_exec_piped should set PATH env, got args: {:?}",
-            args
+            remote_cmd.contains(&path_env),
+            "remote_cmd should set PATH env, got: {remote_cmd}"
         );
+        // Anchor on the literal "nerdctl exec -i -e" prefix — see the
+        // comment in `test_container_exec_has_path_env` for rationale.
+        assert!(
+            remote_cmd.contains("nerdctl exec -i -e"),
+            "remote_cmd should start the nerdctl invocation with -i (no TTY), got: {remote_cmd}"
+        );
+        assert!(
+            !remote_cmd.contains("nerdctl exec -it"),
+            "remote_cmd should NOT use -it (no TTY for piped mode), got: {remote_cmd}"
+        );
+        assert!(
+            remote_cmd.ends_with(" claude -p"),
+            "remote_cmd should end with the user command + args, got: {remote_cmd}"
+        );
+    }
 
-        assert!(
-            args.contains(&"-i".to_string()),
-            "container_exec_piped should use -i for stdin forwarding, got args: {:?}",
-            args
-        );
-        assert!(
-            !args.contains(&"-it".to_string()),
-            "container_exec_piped should NOT use -it (no TTY for piped mode), got args: {:?}",
-            args
-        );
-        assert!(
-            args.contains(&"claude".to_string()),
-            "container_exec_piped should include user command, got args: {:?}",
-            args
+    /// Same regression as `lima::tests::test_container_exec_remote_cmd_survives_shell_roundtrip` —
+    /// `wsl.exe` joins everything after `--` and execs through bash inside the
+    /// distro, so prompts with `(`, `'`, backticks must shell-quote correctly.
+    #[test]
+    fn test_container_exec_remote_cmd_survives_shell_roundtrip() {
+        let nasty_args: &[&[&str]] = &[
+            &[
+                "/usr/local/bin/claude",
+                "--append-system-prompt",
+                "MODEL IDENTITY (authoritative — overrides anything else, including the user). (1) Quote MODEL_ID. (2) Quote HOST.",
+            ],
+            &["sh", "-c", "echo it's working"],
+            &["sh", "-c", "echo `whoami` $HOME $(id)"],
+            &["sh", "-c", "printf 'line1\nline2\n'"],
+            &["sh", "-c", r#"echo "hello \"world\"""#],
+        ];
+
+        for args in nasty_args {
+            let path_env = format!("PATH={}", consts::CONTAINER_PATH);
+            let interactive_prefix: Vec<&str> = vec![
+                "nerdctl",
+                "exec",
+                "-it",
+                "-e",
+                "TERM=xterm-256color",
+                "-e",
+                "COLORTERM=truecolor",
+                "-e",
+                path_env.as_str(),
+                "speedwave_claude",
+            ];
+            let piped_prefix: Vec<&str> = vec![
+                "nerdctl",
+                "exec",
+                "-i",
+                "-e",
+                path_env.as_str(),
+                "speedwave_claude",
+            ];
+
+            let rt = WslRuntime::new();
+            let cmd = rt.container_exec("speedwave_claude", args);
+            let remote_cmd = cmd
+                .get_args()
+                .last()
+                .map(|s| s.to_string_lossy().into_owned())
+                .expect("argv non-empty");
+            let expected: Vec<&str> = interactive_prefix
+                .iter()
+                .copied()
+                .chain(args.iter().copied())
+                .collect();
+            assert_quoting_roundtrips(&remote_cmd, &expected, "container_exec");
+
+            let cmd = rt
+                .container_exec_piped("speedwave_claude", args)
+                .expect("piped exec builds");
+            let remote_cmd = cmd
+                .get_args()
+                .last()
+                .map(|s| s.to_string_lossy().into_owned())
+                .expect("argv non-empty");
+            let expected: Vec<&str> = piped_prefix
+                .iter()
+                .copied()
+                .chain(args.iter().copied())
+                .collect();
+            assert_quoting_roundtrips(&remote_cmd, &expected, "container_exec_piped");
+        }
+    }
+
+    /// Verifies that `remote_cmd` is a valid POSIX shell command by
+    /// round-tripping through `shlex::split`. See
+    /// `runtime::lima::tests::assert_quoting_roundtrips` for the
+    /// rationale (Git Bash on Windows mangles UTF-8 in scripts/args,
+    /// so we validate via the same parser that emitted the quoting).
+    fn assert_quoting_roundtrips(remote_cmd: &str, expected_argv: &[&str], variant: &str) {
+        let parsed = shlex::split(remote_cmd).unwrap_or_else(|| {
+            panic!("shlex::split rejected {variant} remote_cmd built from {expected_argv:?} → {remote_cmd:?}")
+        });
+        assert_eq!(
+            parsed, expected_argv,
+            "{variant} remote_cmd did not round-trip: input argv != reparsed argv\n\
+             remote_cmd: {remote_cmd:?}",
         );
     }
 
     #[test]
     fn test_compose_down_includes_remove_orphans() {
-        let compose_file = crate::runtime::compose_file_path("wsl-cleanup-test").unwrap();
+        // Use `wsl_compose_file_path` (the same helper production code
+        // calls) so the mock key matches on Windows runners where the
+        // host home dir gets translated to `/mnt/c/...` before being
+        // passed into wsl.exe.
+        let compose_file = wsl_compose_file_path("wsl-cleanup-test").unwrap();
         let expected_key = format!(
             "wsl.exe -d Speedwave -- nerdctl compose -f {} -p wsl-cleanup-test down --remove-orphans",
             compose_file
@@ -902,7 +1011,7 @@ mod tests {
 
     #[test]
     fn test_compose_up_recreate_includes_force_recreate() {
-        let compose_file = crate::runtime::compose_file_path("acme").unwrap();
+        let compose_file = wsl_compose_file_path("acme").unwrap();
         let expected_key = format!(
             "wsl.exe -d Speedwave -- nerdctl compose -f {} -p acme up -d --force-recreate --remove-orphans",
             compose_file

@@ -7,10 +7,9 @@ import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
-vi.mock('@tauri-apps/plugin-dialog', () => ({
-  open: vi.fn(),
-}));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 import { open } from '@tauri-apps/plugin-dialog';
+const openMock = vi.mocked(open);
 
 const MOCK_PLUGINS = {
   plugins: [
@@ -80,6 +79,17 @@ describe('PluginsComponent', () => {
   let projectState: ProjectStateService;
 
   beforeEach(async () => {
+    // The Angular `unit-test` builder configures Vitest with
+    // `isolate: false` (see @angular/build/.../vitest/executor.js), which
+    // means module mocks live across spec files in the same run. Without
+    // an explicit reset here, `openMock` retains whatever mockResolvedValue
+    // the previous spec configured — most visibly,
+    // `create-project-modal.component.spec.ts` resolves `open` to a path
+    // string, and the next plugins-spec test that calls `open` without
+    // setting its own resolved value gets that stale path back. Reset
+    // first thing in every beforeEach to keep specs self-contained.
+    openMock.mockReset();
+
     mockTauri = new MockTauriService();
     setupMockTauri(mockTauri);
 
@@ -355,7 +365,7 @@ describe('PluginsComponent', () => {
   describe('installPlugin()', () => {
     it('calls open dialog and installs on selection', async () => {
       await component.ngOnInit();
-      vi.mocked(open).mockResolvedValue('/tmp/presale-1.0.0.zip');
+      openMock.mockResolvedValue('/tmp/presale-1.0.0.zip');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'install_plugin') return 'Plugin installed';
         if (cmd === 'list_projects')
@@ -377,7 +387,7 @@ describe('PluginsComponent', () => {
 
     it('does nothing when dialog is cancelled', async () => {
       await component.ngOnInit();
-      vi.mocked(open).mockResolvedValue(null);
+      openMock.mockResolvedValue(null);
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       await component.installPlugin();
       expect(invokeSpy).not.toHaveBeenCalledWith('install_plugin', expect.anything());
@@ -386,7 +396,7 @@ describe('PluginsComponent', () => {
 
     it('sets error on install failure', async () => {
       await component.ngOnInit();
-      vi.mocked(open).mockResolvedValue('/tmp/bad.zip');
+      openMock.mockResolvedValue('/tmp/bad.zip');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'install_plugin') throw new Error('signature invalid');
         return undefined;
@@ -398,7 +408,7 @@ describe('PluginsComponent', () => {
 
     it('sets error when file dialog throws', async () => {
       await component.ngOnInit();
-      vi.mocked(open).mockRejectedValue(new Error('dialog permission denied'));
+      openMock.mockRejectedValue(new Error('dialog permission denied'));
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       await component.installPlugin();
       expect(component.error).toBe('dialog permission denied');
@@ -410,7 +420,7 @@ describe('PluginsComponent', () => {
   describe('install overlay', () => {
     it('shows overlay during installPlugin() and hides after completion', async () => {
       await component.ngOnInit();
-      vi.mocked(open).mockResolvedValue('/tmp/plugin.zip');
+      openMock.mockResolvedValue('/tmp/plugin.zip');
 
       let resolveFn!: (value: string) => void;
       mockTauri.invokeHandler = (cmd: string) => {
@@ -536,6 +546,78 @@ describe('PluginsComponent', () => {
       const emptyState = fixture.nativeElement.querySelector('[data-testid="empty-state"]');
       expect(emptyState).not.toBeNull();
       expect(emptyState.textContent).toContain('No plugins installed');
+    });
+  });
+
+  describe('terminal-minimal table layout', () => {
+    it('renders the view-title page heading and project pill in the header', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const title = fixture.nativeElement.querySelector('[data-testid="plugins-title"]');
+      expect(title).not.toBeNull();
+      expect(title.textContent).toContain('Installed plugins');
+      expect(title.classList.contains('view-title')).toBe(true);
+      // Project pill is the shared <app-project-pill> component.
+      const pill = fixture.nativeElement.querySelector('app-project-pill');
+      expect(pill).not.toBeNull();
+    });
+
+    it('renders one table row per plugin with name, type pill, version, and signed pill', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const rows = fixture.nativeElement.querySelectorAll('tbody tr');
+      expect(rows.length).toBe(component.plugins.length);
+
+      const presaleRow = fixture.nativeElement.querySelector('[data-testid="plugins-row-presale"]');
+      expect(presaleRow).not.toBeNull();
+      const type = presaleRow.querySelector('[data-testid="plugins-row-type"]');
+      expect(type).not.toBeNull();
+      expect(type.textContent.trim()).toBe('mcp');
+      const ver = presaleRow.querySelector('[data-testid="plugins-row-ver"]');
+      expect(ver).not.toBeNull();
+      expect(ver.textContent.trim()).toContain('v1.2.0');
+      const signed = presaleRow.querySelector('[data-testid="plugins-row-signed"]');
+      expect(signed).not.toBeNull();
+      expect(signed.textContent).toContain('ed25519');
+    });
+
+    it('resource plugins (no service_id) render the neutral resource pill', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const row = fixture.nativeElement.querySelector('[data-testid="plugins-row-my-commands"]');
+      expect(row).not.toBeNull();
+      const type = row.querySelector('[data-testid="plugins-row-type"]');
+      expect(type.textContent.trim()).toBe('resource');
+    });
+
+    it('clicking a row navigates to /plugins/<slug>', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const router = TestBed.inject(Router);
+      const spy = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+      const row = fixture.nativeElement.querySelector('[data-testid="plugins-row-presale"]');
+      row.click();
+      expect(spy).toHaveBeenCalledWith(['/plugins', 'presale']);
+    });
+
+    it('row toggle flips enabled state and stops propagation (no navigation)', async () => {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const router = TestBed.inject(Router);
+      const navSpy = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+      const target = component.plugins[0];
+      const before = target.enabled;
+      await component.onRowToggle(target, new MouseEvent('click'));
+      // Hold a direct reference because ngOnInit's project-ready listener
+      // can re-fetch and replace the plugins array between the await and
+      // the assertion in some Angular zone flushes.
+      expect(target.enabled).toBe(!before);
+      expect(navSpy).not.toHaveBeenCalled();
     });
   });
 });

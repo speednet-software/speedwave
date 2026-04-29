@@ -17,7 +17,7 @@ describe('UpdateNotificationComponent', () => {
         case 'get_platform':
           return 'macos';
         case 'check_for_update':
-          return null;
+          return { kind: 'up_to_date' };
         case 'list_projects':
           return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
         case 'check_containers_running':
@@ -39,6 +39,34 @@ describe('UpdateNotificationComponent', () => {
 
   it('creates the component', () => {
     expect(component).toBeTruthy();
+  });
+
+  it('does not show update banner when install is managed externally', async () => {
+    const externalMock = new MockTauriService();
+    externalMock.invokeHandler = async (cmd: string) => {
+      switch (cmd) {
+        case 'get_platform':
+          return 'linux';
+        case 'check_for_update':
+          return { kind: 'managed_externally', manager: 'apt' };
+        case 'list_projects':
+          return { projects: [], active_project: null };
+        default:
+          return undefined;
+      }
+    };
+
+    await TestBed.resetTestingModule();
+    await TestBed.configureTestingModule({
+      imports: [UpdateNotificationComponent],
+      providers: [{ provide: TauriService, useValue: externalMock }],
+    }).compileComponents();
+
+    const f = TestBed.createComponent(UpdateNotificationComponent);
+    const c = f.componentInstance;
+    await f.whenStable();
+    expect(c.updateInfo).toBeNull();
+    expect(c.showUpdateBanner).toBe(false);
   });
 
   describe('dismiss()', () => {
@@ -127,7 +155,7 @@ describe('UpdateNotificationComponent', () => {
           case 'get_platform':
             return 'linux';
           case 'check_for_update':
-            return null;
+            return { kind: 'up_to_date' };
           case 'list_projects':
             return { projects: [], active_project: null };
           case 'check_containers_running':

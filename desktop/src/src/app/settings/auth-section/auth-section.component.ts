@@ -2,15 +2,12 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
-  EventEmitter,
-  Input,
-  OnChanges,
-  Output,
-  SimpleChanges,
+  effect,
   inject,
+  input,
+  output,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService, AuthStatusResponse } from '../../services/project-state.service';
 import { AuthTerminalComponent } from '../auth-terminal.component';
@@ -18,118 +15,133 @@ import { AuthTerminalComponent } from '../auth-terminal.component';
 /** Displays authentication status and controls for API key / OAuth login. */
 @Component({
   selector: 'app-auth-section',
-  standalone: true,
-  imports: [CommonModule, FormsModule, AuthTerminalComponent],
+  imports: [CommonModule, AuthTerminalComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block' },
   template: `
-    @if (llmProvider === 'anthropic') {
-      <section class="mb-6">
-        <h2 class="text-[15px] text-sw-text m-0 mb-3">Authentication</h2>
-        <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-4">
-          <div class="flex justify-between items-center py-2">
-            <span class="text-[13px] text-sw-text-muted">Status</span>
-            <span
-              class="text-[13px]"
-              data-testid="auth-status-value"
-              [class]="apiKeyConfigured || oauthAuthenticated ? 'text-sw-success' : 'text-sw-text'"
-            >
-              {{
-                apiKeyConfigured
-                  ? 'API Key configured'
-                  : oauthAuthenticated
-                    ? 'OAuth authenticated'
-                    : 'Not authenticated'
-              }}
-            </span>
-          </div>
-          <div class="flex justify-between items-center py-2 border-t border-sw-border">
-            <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="auth-method"
-              >Method</label
-            >
-            <select
-              id="auth-method"
-              [(ngModel)]="authMethod"
-              class="flex-1 max-w-[340px] px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
-              data-testid="settings-auth-method"
-            >
-              <option value="api_key">API Key</option>
-              <option value="oauth">Login via claude.ai</option>
-            </select>
-          </div>
-          @if (authMethod === 'api_key') {
-            <div class="flex justify-between items-center py-2 border-t border-sw-border">
-              <label class="text-[13px] text-sw-text-muted min-w-[120px]" for="api-key-input"
-                >API Key</label
-              >
-              <input
-                id="api-key-input"
-                type="password"
-                [(ngModel)]="apiKeyInput"
-                placeholder="sk-ant-..."
-                class="flex-1 max-w-[340px] px-2.5 py-1.5 bg-sw-bg-abyss border border-sw-border rounded text-sw-text text-[13px] font-mono outline-none focus:border-sw-accent"
-                data-testid="settings-api-key"
-              />
-            </div>
-            <div class="flex items-center gap-3 pt-3 pb-1">
-              <button
-                class="px-5 py-1.5 bg-transparent text-sw-accent border border-sw-accent rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:bg-sw-accent hover:enabled:text-sw-bg-abyss disabled:opacity-40 disabled:cursor-not-allowed"
-                data-testid="settings-api-key-save"
-                (click)="saveApiKey()"
-                [disabled]="apiKeySaving || !apiKeyInput"
-              >
-                {{ apiKeySaving ? 'Saving...' : 'Save Key' }}
-              </button>
-              <button
-                class="px-4 py-1.5 bg-transparent text-sw-text-muted border border-sw-text-faint rounded text-[13px] font-mono cursor-pointer transition-all duration-200 hover:enabled:text-sw-text hover:enabled:border-sw-text-muted disabled:opacity-40 disabled:cursor-not-allowed"
-                data-testid="settings-api-key-remove"
-                (click)="deleteApiKey()"
-                [disabled]="!apiKeyConfigured"
-              >
-                Remove Key
-              </button>
-              @if (apiKeySaved) {
-                <span class="text-sw-success text-[13px]">Saved!</span>
-              }
-            </div>
-            <p class="text-[11px] text-sw-text-faint mt-2 mb-0" data-testid="auth-note">
-              Restart containers after saving for changes to take effect.
-            </p>
-          }
-          @if (authMethod === 'oauth' && activeProject) {
-            <app-auth-terminal [project]="activeProject" (done)="onOAuthDone($event)" />
+    @if (llmProvider() === 'anthropic') {
+      <section id="section-authentication" class="border-t border-[var(--line)] pt-6">
+        <h2 class="view-title view-title-section text-[var(--ink)]">Authentication</h2>
+
+        <!-- Status row: when authenticated, render two pills side by side —
+             a green connected indicator plus the auth-method type pill so
+             both pieces of information are visible at a glance (mockup
+             alignment). When nothing is configured we fall back to a single
+             amber pill that signals action is needed. -->
+        <div class="mt-3 flex flex-wrap items-center gap-2" data-testid="auth-status-row">
+          @if (apiKeyConfigured || oauthAuthenticated) {
+            <span class="pill green" data-testid="auth-status-value">● connected</span>
+            <span class="pill green" data-testid="auth-status-method">{{
+              apiKeyConfigured ? 'api key' : 'oauth'
+            }}</span>
+          } @else {
+            <span class="pill amber" data-testid="auth-status-value">not configured</span>
           }
         </div>
+
+        <div
+          class="mt-3 flex overflow-hidden rounded border border-[var(--line)]"
+          role="radiogroup"
+          aria-label="Authentication method"
+        >
+          <button
+            type="button"
+            role="radio"
+            [attr.aria-checked]="authMethod === 'oauth'"
+            class="mono flex-1 border-r border-[var(--line)] px-3 py-2 text-[11px] transition-colors"
+            [class]="
+              authMethod === 'oauth'
+                ? 'bg-[var(--bg-2)] text-[var(--ink)]'
+                : 'text-[var(--ink-mute)] hover:text-[var(--ink)]'
+            "
+            data-testid="settings-auth-method-oauth"
+            (click)="authMethod = 'oauth'"
+          >
+            oauth (claude.ai)
+          </button>
+          <button
+            type="button"
+            role="radio"
+            [attr.aria-checked]="authMethod === 'api_key'"
+            class="mono flex-1 px-3 py-2 text-[11px] transition-colors"
+            [class]="
+              authMethod === 'api_key'
+                ? 'bg-[var(--bg-2)] text-[var(--ink)]'
+                : 'text-[var(--ink-mute)] hover:text-[var(--ink)]'
+            "
+            data-testid="settings-auth-method-api-key"
+            (click)="authMethod = 'api_key'"
+          >
+            api key
+          </button>
+        </div>
+
+        @if (authMethod === 'api_key') {
+          <div class="mt-3">
+            <label
+              class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+              for="api-key-input"
+              >anthropic_api_key</label
+            >
+            <input
+              id="api-key-input"
+              type="password"
+              [value]="apiKeyInput"
+              (input)="apiKeyInput = $any($event.target).value"
+              placeholder="sk-ant-..."
+              class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+              data-testid="settings-api-key"
+            />
+          </div>
+          <div class="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+              data-testid="settings-api-key-save"
+              (click)="saveApiKey()"
+              [disabled]="apiKeySaving || !apiKeyInput"
+            >
+              {{ apiKeySaving ? 'saving...' : 'save key' }}
+            </button>
+            <button
+              type="button"
+              class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
+              data-testid="settings-api-key-remove"
+              (click)="deleteApiKey()"
+              [disabled]="!apiKeyConfigured"
+            >
+              remove key
+            </button>
+            @if (apiKeySaved) {
+              <span class="mono text-[11px] text-[var(--green)]">saved!</span>
+            }
+          </div>
+        }
+        @if (authMethod === 'oauth' && activeProject(); as project) {
+          <app-auth-terminal [project]="project" (done)="onOAuthDone($event)" />
+        }
       </section>
     }
-    @if (llmProvider === 'ollama') {
-      <section class="mb-6">
-        <h2 class="text-[15px] text-sw-text m-0 mb-3">Authentication</h2>
-        <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-4">
-          <p class="text-[11px] text-sw-text-faint mt-2 mb-0" data-testid="auth-note">
-            No authentication needed for Ollama.
-          </p>
-        </div>
-      </section>
-    }
-    @if (llmProvider === 'external') {
-      <section class="mb-6">
-        <h2 class="text-[15px] text-sw-text m-0 mb-3">Authentication</h2>
-        <div class="bg-sw-bg-dark border border-sw-border rounded-lg p-4">
-          <p class="text-[11px] text-sw-text-faint mt-2 mb-0" data-testid="auth-note">
-            Uses API key env var from LLM Provider settings above.
-          </p>
-        </div>
+    @if (isLocalProvider()) {
+      <section id="section-authentication" class="border-t border-[var(--line)] pt-6">
+        <h2 class="view-title view-title-section text-[var(--ink)]">Authentication</h2>
+        <p class="mono mt-3 text-[11px] text-[var(--ink-mute)]" data-testid="auth-note">
+          No authentication needed for local model providers.
+        </p>
       </section>
     }
   `,
 })
-export class AuthSectionComponent implements OnChanges {
-  @Input() activeProject: string | null = null;
-  @Input() llmProvider = 'anthropic';
+export class AuthSectionComponent {
+  readonly activeProject = input<string | null>(null);
+  readonly llmProvider = input('anthropic');
 
-  @Output() errorOccurred = new EventEmitter<string>();
+  readonly errorOccurred = output<string>();
 
-  authMethod = 'api_key';
+  // OAuth via claude.ai is the recommended path — pre-select it so users
+  // who land on Authentication for the first time see the friendlier flow.
+  // The api-key tab is one click away when an explicit key is preferred.
+  authMethod = 'oauth';
   apiKeyInput = '';
   apiKeySaving = false;
   apiKeySaved = false;
@@ -141,21 +153,29 @@ export class AuthSectionComponent implements OnChanges {
   private projectState = inject(ProjectStateService);
 
   /**
-   * Reloads auth status when the active project changes.
-   * @param changes - the changed input properties
+   * Reloads auth status whenever the active project input changes.
    */
-  ngOnChanges(changes: SimpleChanges): void {
-    if (changes['activeProject'] && this.activeProject) {
-      this.loadAuthStatus();
-    }
+  constructor() {
+    // Reload auth status when the active project changes.
+    effect(() => {
+      if (this.activeProject()) {
+        this.loadAuthStatus();
+      }
+    });
+  }
+
+  /** Returns true if the selected provider is a local model (no Anthropic auth needed). */
+  isLocalProvider(): boolean {
+    return ['ollama', 'lmstudio', 'llamacpp', 'custom'].includes(this.llmProvider());
   }
 
   /** Loads the current authentication status from the backend. */
   async loadAuthStatus(): Promise<void> {
-    if (!this.activeProject) return;
+    const project = this.activeProject();
+    if (!project) return;
     try {
       const status = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
-        project: this.activeProject,
+        project,
       });
       this.apiKeyConfigured = status.api_key_configured;
       this.oauthAuthenticated = status.oauth_authenticated;
@@ -168,13 +188,14 @@ export class AuthSectionComponent implements OnChanges {
 
   /** Saves the Anthropic API key to the project's secrets directory. */
   async saveApiKey(): Promise<void> {
-    if (!this.activeProject || !this.apiKeyInput) return;
+    const project = this.activeProject();
+    if (!project || !this.apiKeyInput) return;
     this.apiKeySaving = true;
     this.apiKeySaved = false;
     this.errorOccurred.emit('');
     try {
       await this.tauri.invoke('save_api_key', {
-        project: this.activeProject,
+        project,
         apiKey: this.apiKeyInput,
       });
       this.apiKeySaved = true;
@@ -193,10 +214,11 @@ export class AuthSectionComponent implements OnChanges {
 
   /** Removes the stored API key for the active project. */
   async deleteApiKey(): Promise<void> {
-    if (!this.activeProject) return;
+    const project = this.activeProject();
+    if (!project) return;
     this.errorOccurred.emit('');
     try {
-      await this.tauri.invoke('delete_api_key', { project: this.activeProject });
+      await this.tauri.invoke('delete_api_key', { project });
       await this.loadAuthStatus();
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
@@ -205,11 +227,12 @@ export class AuthSectionComponent implements OnChanges {
   }
 
   /**
-   * Handles the completion of the OAuth terminal session.
+   * Handles the completion of the OAuth terminal session. Stays on the OAuth
+   * tab so the success pill + freshly authenticated state stay visible — the
+   * user picked OAuth, no need to bounce them back to the api-key form.
    * @param _success - whether the auth was successful
    */
   async onOAuthDone(_success: boolean): Promise<void> {
-    this.authMethod = 'api_key';
     await this.loadAuthStatus();
     this.cdr.markForCheck();
   }

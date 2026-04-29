@@ -1209,7 +1209,33 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
 // Check Claude auth status inside the container
 // ---------------------------------------------------------------------------
 
+/// Pure lookup for the project's LLM provider name from the user config.
+/// Returns `None` when the project is missing or `claude.llm.provider` is
+/// unset. Separated out so the local-provider branch in `check_claude_auth`
+/// can be covered without mocking the container runtime.
+pub(crate) fn lookup_project_provider<'a>(
+    user_config: &'a speedwave_runtime::config::SpeedwaveUserConfig,
+    project: &str,
+) -> Option<&'a str> {
+    user_config
+        .find_project(project)
+        .and_then(|p| p.claude.as_ref())
+        .and_then(|c| c.llm.as_ref())
+        .and_then(|l| l.provider.as_deref())
+}
+
 pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
+    let user_config = speedwave_runtime::config::load_user_config().unwrap_or_else(|e| {
+        log::warn!(
+            "check_claude_auth: failed to load user config, defaulting to anthropic path: {e}"
+        );
+        speedwave_runtime::config::SpeedwaveUserConfig::default()
+    });
+    let provider = lookup_project_provider(&user_config, project);
+    if speedwave_runtime::config::is_local_provider(provider) {
+        log::info!("check_claude_auth: local provider — skipping Anthropic OAuth check");
+        return Ok(true);
+    }
     let rt = runtime::detect_runtime();
     let container_name = format!("{}_{}_claude", consts::compose_prefix(), project);
     log::info!("check_claude_auth: container={container_name}");
@@ -1871,7 +1897,123 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
 #[cfg(test)]
 mod tests {
     use super::*;
+    use speedwave_runtime::config::{
+        ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig,
+    };
     use std::collections::HashMap;
+
+    fn project_with_provider(name: &str, provider: Option<&str>) -> ProjectUserEntry {
+        ProjectUserEntry {
+            name: name.to_string(),
+            dir: String::new(),
+            claude: Some(ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(LlmConfig {
+                    provider: provider.map(str::to_string),
+                    model: None,
+                    base_url: None,
+                    context_tokens: None,
+                }),
+            }),
+            integrations: None,
+            plugin_settings: None,
+        }
+    }
+
+    #[test]
+    fn lookup_provider_returns_ollama() {
+        let cfg = SpeedwaveUserConfig {
+            projects: vec![project_with_provider("proj", Some("ollama"))],
+            ..Default::default()
+        };
+        assert_eq!(lookup_project_provider(&cfg, "proj"), Some("ollama"));
+    }
+
+    #[test]
+    fn lookup_provider_returns_lmstudio() {
+        let cfg = SpeedwaveUserConfig {
+            projects: vec![project_with_provider("proj", Some("lmstudio"))],
+            ..Default::default()
+        };
+        assert_eq!(lookup_project_provider(&cfg, "proj"), Some("lmstudio"));
+    }
+
+    #[test]
+    fn lookup_provider_returns_llamacpp() {
+        let cfg = SpeedwaveUserConfig {
+            projects: vec![project_with_provider("proj", Some("llamacpp"))],
+            ..Default::default()
+        };
+        assert_eq!(lookup_project_provider(&cfg, "proj"), Some("llamacpp"));
+    }
+
+    #[test]
+    fn lookup_provider_returns_anthropic() {
+        let cfg = SpeedwaveUserConfig {
+            projects: vec![project_with_provider("proj", Some("anthropic"))],
+            ..Default::default()
+        };
+        assert_eq!(lookup_project_provider(&cfg, "proj"), Some("anthropic"));
+    }
+
+    #[test]
+    fn lookup_provider_returns_none_when_project_missing() {
+        let cfg = SpeedwaveUserConfig::default();
+        assert_eq!(lookup_project_provider(&cfg, "missing"), None);
+    }
+
+    #[test]
+    fn lookup_provider_returns_none_when_claude_section_missing() {
+        let cfg = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: String::new(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(lookup_project_provider(&cfg, "proj"), None);
+    }
+
+    #[test]
+    fn lookup_provider_returns_none_when_llm_section_missing() {
+        let cfg = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: String::new(),
+                claude: Some(ClaudeOverrides::default()),
+                integrations: None,
+                plugin_settings: None,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(lookup_project_provider(&cfg, "proj"), None);
+    }
+
+    #[test]
+    fn lookup_provider_returns_none_when_provider_field_missing() {
+        let cfg = SpeedwaveUserConfig {
+            projects: vec![project_with_provider("proj", None)],
+            ..Default::default()
+        };
+        assert_eq!(lookup_project_provider(&cfg, "proj"), None);
+    }
+
+    #[test]
+    fn local_provider_branch_covers_ollama_lmstudio_llamacpp() {
+        // Guard: `check_claude_auth` skips Anthropic OAuth exactly for the three
+        // local providers. If `is_local_provider` expands or contracts, this
+        // test documents which set the auth-skip branch fires on.
+        use speedwave_runtime::config::is_local_provider;
+        assert!(is_local_provider(Some("ollama")));
+        assert!(is_local_provider(Some("lmstudio")));
+        assert!(is_local_provider(Some("llamacpp")));
+        assert!(!is_local_provider(Some("anthropic")));
+        assert!(!is_local_provider(None));
+    }
 
     /// Validates that a path component does not contain traversal or unsafe characters.
     fn validate_path_component(name: &str, label: &str) -> anyhow::Result<()> {

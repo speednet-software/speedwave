@@ -6,6 +6,22 @@ export interface UpdateInfo {
   is_critical: boolean;
 }
 
+/**
+ * Tagged result of `check_for_update`. Mirrors the Rust enum
+ * `updater::UpdateCheckOutcome` (serde tag = "kind", snake_case).
+ *
+ * - `up_to_date` — feed reachable, no newer version.
+ * - `update_available` — newer version published; payload merges the
+ *   `UpdateInfo` fields inline.
+ * - `managed_externally` — install is owned by a system package manager
+ *   (`apt` / `dnf` / `pacman`); no network call was made. The UI must NOT
+ *   render the auto-update banner for this case.
+ */
+export type UpdateCheckOutcome =
+  | { kind: 'up_to_date' }
+  | ({ kind: 'update_available' } & UpdateInfo)
+  | { kind: 'managed_externally'; manager: string };
+
 /** User-configurable auto-update check preferences. */
 export interface UpdateSettings {
   auto_check: boolean;

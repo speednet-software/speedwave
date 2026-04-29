@@ -7,12 +7,11 @@ import {
 } from '@angular/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
 import { TauriService } from '../services/tauri.service';
-import { ProjectList, UpdateInfo } from '../models/update';
+import { ProjectList, UpdateCheckOutcome, UpdateInfo } from '../models/update';
 
 /** Shows a banner when a new Speedwave version is available for install. */
 @Component({
   selector: 'app-update-notification',
-  standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (showUpdateBanner) {
@@ -118,9 +117,13 @@ export class UpdateNotificationComponent implements OnDestroy {
         this.cdr.markForCheck();
       });
 
-      // Proactive check in case event fired before listener registration
-      const info = await this.tauri.invoke<UpdateInfo | null>('check_for_update');
-      if (info) {
+      // Proactive check in case the event fired before the listener was
+      // registered. The backend returns a tagged outcome — only the
+      // `update_available` variant should surface the banner.
+      const outcome = await this.tauri.invoke<UpdateCheckOutcome>('check_for_update');
+      if (outcome.kind === 'update_available') {
+        const { kind: _kind, ...info } = outcome;
+        void _kind;
         this.updateInfo = info;
         this.checkContainers();
         this.cdr.markForCheck();

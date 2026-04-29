@@ -32,6 +32,84 @@ pub(crate) fn is_private_or_reserved(ip: std::net::IpAddr) -> bool {
     }
 }
 
+/// Policy for classifying a URL host as "private on-premise" vs. public.
+///
+/// Different Desktop features have different tolerance for loopback:
+/// - Redmine integration (`validate_redmine_host_url`) uses `BlockLoopback`: a
+///   self-hosted Redmine on 127.0.0.1 is unusual and most likely a misconfiguration.
+/// - LLM model discovery (`validate_llm_base_url`) uses `AllowLoopback`: local
+///   Ollama / LM Studio / llama.cpp servers commonly bind to loopback, and
+///   Speedwave's `default_base_url` points there via `host.*.internal` aliases
+///   rewritten to `127.0.0.1` on the host side.
+///
+/// Both policies always accept RFC 1918 IPv4 and IPv6 ULA (fc00::/7) and always
+/// reject link-local, metadata, and reserved ranges — those are not valid
+/// "on-premise" destinations under any policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrivatePolicy {
+    /// Loopback (127.0.0.0/8, ::1, IPv6-mapped loopback) is NOT on-premise.
+    /// Redmine policy.
+    BlockLoopback,
+    /// Loopback addresses ARE on-premise. LLM discovery policy.
+    AllowLoopback,
+}
+
+/// Returns `true` when the URL's host is a private on-premise address under
+/// the given policy: RFC 1918 IPv4 (10/8, 172.16/12, 192.168/16), CGNAT shared
+/// space (100.64.0.0/10, RFC 6598 — used by Tailscale, carrier NAT, etc.),
+/// IPv6 ULA (fc00::/7, RFC 4193), and — if `policy == AllowLoopback` —
+/// loopback (127.0.0.0/8, ::1, IPv6-mapped loopback).
+///
+/// Returns `false` for every other host (public IP, public domain, localhost
+/// string, link-local, metadata, multicast, documentation prefix, etc.) — those
+/// are either untrusted (require a different validation path) or actively
+/// blocked (link-local / metadata).
+pub(crate) fn is_private_on_premise(url: &url::Url, policy: PrivatePolicy) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ipv4)) => {
+            if ipv4.is_private() && !ipv4.is_link_local() && !ipv4.is_unspecified() {
+                return true;
+            }
+            // RFC 6598 — 100.64.0.0/10 shared address space (CGNAT). Non-routable
+            // on the public internet; in practice used by Tailscale and similar
+            // mesh VPNs. Functionally equivalent to RFC 1918 for SSRF purposes.
+            let oct = ipv4.octets();
+            if oct[0] == 100 && (oct[1] & 0xc0) == 64 {
+                return true;
+            }
+            let allow_loopback = match policy {
+                PrivatePolicy::BlockLoopback => false,
+                PrivatePolicy::AllowLoopback => true,
+            };
+            allow_loopback && ipv4.is_loopback()
+        }
+        Some(url::Host::Ipv6(ipv6)) => {
+            // fc00::/7 — IPv6 Unique Local Address (RFC 4193)
+            if (ipv6.segments()[0] & 0xfe00) == 0xfc00 {
+                return true;
+            }
+            let allow_loopback = match policy {
+                PrivatePolicy::BlockLoopback => false,
+                PrivatePolicy::AllowLoopback => true,
+            };
+            if allow_loopback {
+                if ipv6.is_loopback() {
+                    return true;
+                }
+                // IPv6-mapped IPv4 loopback (::ffff:127.0.0.1) — under AllowLoopback
+                // policy, the mapped form should follow the same rule as native IPv4.
+                if let Some(mapped_v4) = ipv6.to_ipv4_mapped() {
+                    if mapped_v4.is_loopback() {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 /// Validates a URL string: only http/https schemes allowed, no localhost or private IPs.
 /// Uses parsed IP types (not string matching) to prevent IPv6-mapped IPv4 bypasses.
 pub(crate) fn validate_url(url: &str) -> Result<url::Url, String> {
@@ -522,5 +600,169 @@ mod tests {
             ["macos", "linux", "windows"].contains(&platform.as_str()),
             "get_platform() returned unexpected value: {platform}"
         );
+    }
+
+    // ── is_private_on_premise: RFC 1918 (both policies accept) ──────────
+
+    #[test]
+    fn is_private_on_premise_identifies_rfc1918_10_block_loopback() {
+        let url: url::Url = "http://10.0.0.1/".parse().unwrap();
+        assert!(is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
+    }
+
+    #[test]
+    fn is_private_on_premise_identifies_rfc1918_10_allow_loopback() {
+        let url: url::Url = "http://10.0.0.1/".parse().unwrap();
+        assert!(is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
+    }
+
+    #[test]
+    fn is_private_on_premise_identifies_rfc1918_172_16_block_loopback() {
+        let url: url::Url = "http://172.16.0.1/".parse().unwrap();
+        assert!(is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
+    }
+
+    #[test]
+    fn is_private_on_premise_identifies_rfc1918_192_168_block_loopback() {
+        let url: url::Url = "http://192.168.1.1/".parse().unwrap();
+        assert!(is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
+    }
+
+    // ── Loopback: policy delta (block vs allow) ─────────────────────────
+
+    #[test]
+    fn is_private_on_premise_rejects_ipv4_loopback_block_policy() {
+        let url: url::Url = "http://127.0.0.1/".parse().unwrap();
+        assert!(!is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
+    }
+
+    #[test]
+    fn is_private_on_premise_accepts_ipv4_loopback_allow_policy() {
+        let url: url::Url = "http://127.0.0.1/".parse().unwrap();
+        assert!(is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
+    }
+
+    #[test]
+    fn is_private_on_premise_rejects_ipv6_loopback_block_policy() {
+        let url: url::Url = "http://[::1]/".parse().unwrap();
+        assert!(!is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
+    }
+
+    #[test]
+    fn is_private_on_premise_accepts_ipv6_loopback_allow_policy() {
+        let url: url::Url = "http://[::1]/".parse().unwrap();
+        assert!(is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
+    }
+
+    #[test]
+    fn is_private_on_premise_accepts_ipv6_mapped_loopback_allow_policy() {
+        // ::ffff:127.0.0.1 — IPv6-mapped IPv4 loopback. Under AllowLoopback
+        // the mapped form should follow the same rule as native IPv4.
+        let url: url::Url = "http://[::ffff:127.0.0.1]/".parse().unwrap();
+        assert!(is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
+    }
+
+    #[test]
+    fn is_private_on_premise_rejects_ipv6_mapped_loopback_block_policy() {
+        let url: url::Url = "http://[::ffff:127.0.0.1]/".parse().unwrap();
+        assert!(!is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
+    }
+
+    // ── Link-local: rejected under both policies ────────────────────────
+
+    #[test]
+    fn is_private_on_premise_rejects_ipv4_link_local_both_policies() {
+        let url: url::Url = "http://169.254.1.1/".parse().unwrap();
+        assert!(!is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
+        assert!(!is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
+    }
+
+    #[test]
+    fn is_private_on_premise_rejects_ipv6_link_local_both_policies() {
+        let url: url::Url = "http://[fe80::1]/".parse().unwrap();
+        assert!(!is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
+        assert!(!is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
+    }
+
+    // ── Domain / public IP: rejected (delegated to validate_url) ────────
+
+    #[test]
+    fn is_private_on_premise_rejects_domain_both_policies() {
+        let url: url::Url = "http://example.com/".parse().unwrap();
+        assert!(!is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
+        assert!(!is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
+    }
+
+    // ── IPv6 ULA: identified under both policies ────────────────────────
+
+    #[test]
+    fn is_private_on_premise_identifies_ipv6_ula_fd_both_policies() {
+        let url: url::Url = "http://[fd12:3456:789a::1]/".parse().unwrap();
+        assert!(is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
+        assert!(is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
+    }
+
+    #[test]
+    fn is_private_on_premise_identifies_ipv6_ula_fc_both_policies() {
+        let url: url::Url = "http://[fc00::1]/".parse().unwrap();
+        assert!(is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
+        assert!(is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
+    }
+
+    // ── IPv6 edge cases ─────────────────────────────────────────────────
+
+    #[test]
+    fn is_private_on_premise_rejects_ipv6_global_both_policies() {
+        // 2001:db8:: is in the documentation prefix (RFC 3849) — not private on-premise.
+        let url: url::Url = "http://[2001:db8::1]/".parse().unwrap();
+        assert!(!is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
+        assert!(!is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
+    }
+
+    #[test]
+    fn is_private_on_premise_rejects_ipv6_just_outside_ula_both_policies() {
+        // fe00:: — 0xfe00 & 0xfe00 = 0xfe00 ≠ 0xfc00, so NOT ULA
+        let url: url::Url = "http://[fe00::1]/".parse().unwrap();
+        assert!(!is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
+        assert!(!is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
+    }
+
+    #[test]
+    fn is_private_on_premise_rejects_ipv6_mapped_rfc1918_both_policies() {
+        // ::ffff:10.0.0.1 — IPv6-mapped IPv4 RFC1918. The url crate represents
+        // this as Host::Ipv6 with a specific shape that does NOT satisfy our
+        // fc00::/7 check. Under both policies we do NOT treat a mapped RFC1918
+        // address as "on-premise private" via the IPv6 arm — callers that
+        // need to block such addresses (mapped metadata IPs etc.) delegate
+        // to `validate_url` which has dedicated to_ipv4_mapped handling.
+        let url: url::Url = "http://[::ffff:10.0.0.1]/".parse().unwrap();
+        assert!(!is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
+        assert!(!is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
+    }
+
+    // ── CGNAT (RFC 6598, 100.64.0.0/10): both policies accept ──────────
+
+    #[test]
+    fn is_private_on_premise_identifies_cgnat_block_policy() {
+        // 100.64.0.1 is within the 100.64.0.0/10 CGNAT range (RFC 6598).
+        // Used by Tailscale and carrier NAT — treated as on-premise under
+        // both policies.
+        let url: url::Url = "http://100.64.0.1:8080/".parse().unwrap();
+        assert!(is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
+    }
+
+    #[test]
+    fn is_private_on_premise_identifies_cgnat_allow_policy() {
+        let url: url::Url = "http://100.64.0.1:8080/".parse().unwrap();
+        assert!(is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
+    }
+
+    #[test]
+    fn is_private_on_premise_rejects_just_outside_cgnat() {
+        // 100.128.0.1 has oct[1] = 128, which fails the (128 & 0xc0) == 64
+        // check (128 & 0xc0 == 128 ≠ 64), so it is NOT in the CGNAT block.
+        let url: url::Url = "http://100.128.0.1:8080/".parse().unwrap();
+        assert!(!is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
+        assert!(!is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
     }
 }

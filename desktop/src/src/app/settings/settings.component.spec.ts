@@ -4,6 +4,7 @@ import { RouterModule } from '@angular/router';
 import { SettingsComponent } from './settings.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { ThemeService, THEME_IDS } from '../services/theme.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
 function setupMockTauri(mockTauri: MockTauriService): void {
@@ -15,7 +16,7 @@ function setupMockTauri(mockTauri: MockTauriService): void {
           active_project: 'test-project',
         };
       case 'get_llm_config':
-        return { provider: 'anthropic', model: null, base_url: null, api_key_env: null };
+        return { provider: 'anthropic', model: null, base_url: null, default_base_url: null };
       case 'get_update_settings':
         return { auto_check: true, check_interval_hours: 24 };
       case 'get_log_level':
@@ -66,19 +67,34 @@ describe('SettingsComponent', () => {
     expect(component.activeProject).toBe('test-project');
   });
 
-  it('does not render SystemHealthComponent when activeProject is null', () => {
+  it('renders the system-health link in the header (mockup-aligned)', async () => {
+    component.ngOnInit();
+    await fixture.whenStable();
+    fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
-    const healthEl = fixture.nativeElement.querySelector('app-system-health');
-    expect(healthEl).toBeNull();
+    const link = fixture.nativeElement.querySelector('[data-testid="settings-system-health-link"]');
+    expect(link).not.toBeNull();
+    expect(link.getAttribute('href')).toBe('/logs');
+    // Mockup uses an arrow glyph — keep the contract so future visual tweaks don't drop it.
+    expect(link.textContent).toContain('system health');
   });
 
-  it('renders SystemHealthComponent after activeProject is set', async () => {
+  it('does not embed a system-health view inline (moved to /logs)', async () => {
     component.ngOnInit();
     await fixture.whenStable();
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
     const healthEl = fixture.nativeElement.querySelector('app-system-health');
-    expect(healthEl).not.toBeNull();
+    expect(healthEl).toBeNull();
+  });
+
+  it('renders LlmProviderComponent', async () => {
+    component.ngOnInit();
+    await fixture.whenStable();
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
+    const llmEl = fixture.nativeElement.querySelector('app-llm-provider');
+    expect(llmEl).not.toBeNull();
   });
 
   it('renders AuthSectionComponent', async () => {
@@ -121,6 +137,10 @@ describe('SettingsComponent', () => {
     };
 
     mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other-project' });
+    // dispatchEvent kicks off an async loadProjectInfo() via the onProjectReady
+    // callback; whenStable alone resolves before that nested promise settles,
+    // so we yield a macrotask first to let the chained await fall through.
+    await new Promise<void>((r) => setTimeout(r, 0));
     await fixture.whenStable();
     expect(component.activeProject).toBe('other-project');
   });
@@ -142,5 +162,102 @@ describe('SettingsComponent', () => {
     expect(
       (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
     ).toBeNull();
+  });
+
+  describe('terminal-minimal restyle', () => {
+    it('renders the title in the 44px header band as a view-title', () => {
+      fixture.detectChanges();
+      const title = fixture.nativeElement.querySelector('[data-testid="settings-title"]');
+      expect(title).not.toBeNull();
+      expect(title.textContent).toContain('Settings');
+      // Mockup uses .view-title (IBM Plex Sans, 14px) for view headers.
+      expect(title.classList.contains('view-title')).toBe(true);
+    });
+
+    it('renders the shared project pill in the header right slot', () => {
+      fixture.detectChanges();
+      const pill = fixture.nativeElement.querySelector('app-project-pill');
+      expect(pill).not.toBeNull();
+    });
+
+    it('does not render the legacy Project info section (project info now lives in the project-pill tooltip)', () => {
+      fixture.detectChanges();
+      const section = fixture.nativeElement.querySelector(
+        '[data-testid="settings-section-project"]'
+      );
+      expect(section).toBeNull();
+    });
+  });
+
+  describe('Appearance section', () => {
+    beforeEach(() => {
+      // Reset accent before each test so active-state assertions start clean.
+      const theme = TestBed.inject(ThemeService);
+      theme.setTheme('crimson');
+    });
+
+    it('renders one .theme-card button per registered ThemeService theme', () => {
+      fixture.detectChanges();
+      const section = fixture.nativeElement.querySelector(
+        '[data-testid="settings-section-appearance"]'
+      );
+      expect(section).not.toBeNull();
+      const cards = section.querySelectorAll('button[data-theme-btn]');
+      expect(cards.length).toBe(THEME_IDS.length);
+      const ids = Array.from(cards).map((b) => (b as HTMLElement).getAttribute('data-theme-btn'));
+      expect(ids).toEqual([...THEME_IDS]);
+    });
+
+    it('marks the card whose id matches ThemeService.theme() as active', () => {
+      const theme = TestBed.inject(ThemeService);
+      theme.setTheme('iris');
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const active = fixture.nativeElement.querySelector(
+        'button[data-theme-btn="iris"]'
+      ) as HTMLButtonElement;
+      const inactive = fixture.nativeElement.querySelector(
+        'button[data-theme-btn="mint"]'
+      ) as HTMLButtonElement;
+      expect(active.classList.contains('active')).toBe(true);
+      expect(inactive.classList.contains('active')).toBe(false);
+      expect(active.getAttribute('aria-pressed')).toBe('true');
+      expect(inactive.getAttribute('aria-pressed')).toBe('false');
+    });
+
+    it('clicking a card calls ThemeService.setTheme(id)', () => {
+      const theme = TestBed.inject(ThemeService);
+      fixture.detectChanges();
+      const cyanBtn = fixture.nativeElement.querySelector(
+        'button[data-theme-btn="cyan"]'
+      ) as HTMLButtonElement;
+      cyanBtn.click();
+      expect(theme.theme()).toBe('cyan');
+    });
+
+    it('renders the heading, accent-color label, and ⌘T shortcut hint', () => {
+      fixture.detectChanges();
+      const section = fixture.nativeElement.querySelector(
+        '[data-testid="settings-section-appearance"]'
+      );
+      expect(section.textContent).toContain('Appearance');
+      expect(section.textContent).toContain('accent color');
+      // Mockup shortcut copy: "shortcut: ⌘T cycles themes"
+      expect(section.textContent).toContain('cycles themes');
+      const kbd = section.querySelector('.kbd');
+      expect(kbd).not.toBeNull();
+      expect(kbd.textContent).toContain('⌘T');
+    });
+
+    it('does not toggle theme when the same card is clicked twice (no-op)', () => {
+      const theme = TestBed.inject(ThemeService);
+      theme.setTheme('amber');
+      fixture.detectChanges();
+      const amberBtn = fixture.nativeElement.querySelector(
+        'button[data-theme-btn="amber"]'
+      ) as HTMLButtonElement;
+      amberBtn.click();
+      expect(theme.theme()).toBe('amber');
+    });
   });
 });

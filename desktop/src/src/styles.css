@@ -1,112 +1,514 @@
 @import "tailwindcss";
 
-/* ── Speedwave custom theme ── */
+/* ── Bundled fonts (woff2 via /public/fonts) ──
+   Tauri's strict CSP blocks Google Fonts at runtime, so we self-host the
+   subset the mockup pulls from googleapis.com. Files live in
+   /public/fonts/*.woff2 and are copied to /fonts/ at build via angular.json. */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/inter-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/inter-500.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/inter-600.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/fonts/inter-700.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-500.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-600.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-sans-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-sans-500.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-sans-600.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-sans-700.woff2') format('woff2');
+}
+
+/* ── Speedwave terminal-minimal palette ──
+   Source of truth: design-proposals/06-terminal-minimal.html (lines 13–69).
+   Defined as plain CSS custom properties on :root so Tailwind arbitrary-value
+   syntax (`bg-[var(--bg-1)]`, `border-[var(--line)]/40`) resolves correctly.
+   The `--color-*` block below mirrors a subset into Tailwind's @theme so
+   short class names (`bg-bg-1`, `text-ink-mute`) keep working alongside. */
+:root {
+  color-scheme: dark;
+
+  /* Background */
+  --bg:        #07090f;
+  --bg-1:      #0b0e18;
+  --bg-2:      #10141f;
+  --bg-3:      #161b2a;
+
+  /* Lines / borders */
+  --line:        #1a2030;
+  --line-strong: #252c42;
+
+  /* Ink (foreground text) */
+  --ink:      #e8edf7;
+  --ink-dim:  #9aa3ba;
+  --ink-mute: #707a96;
+
+  /* Accent (rotates per theme) */
+  --accent:      #ff4d6d;
+  --accent-dim:  #c9304e;
+  --accent-soft: rgba(255, 77, 109, 0.10);
+  --on-accent:   #07090f;
+
+  /* Semantic palette */
+  --teal:   #22d3b7;
+  --amber:  #f5b942;
+  --green:  #34d399;
+  --violet: #a78bfa;
+  --red:    #ef4444;
+
+  /* Font stacks */
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-view-title: 'IBM Plex Sans', 'Inter', sans-serif;
+}
+
+/* ── Theme variants — only --accent + family rotate; backgrounds stay dark ── */
+[data-theme='mint'] {
+  --accent:      #5eead4;
+  --accent-dim:  #2dd4bf;
+  --accent-soft: rgba(94, 234, 212, 0.10);
+}
+[data-theme='amber'] {
+  --accent:      #f5b942;
+  --accent-dim:  #d99a24;
+  --accent-soft: rgba(245, 185, 66, 0.10);
+}
+[data-theme='iris'] {
+  --accent:      #a78bfa;
+  --accent-dim:  #8b5cf6;
+  --accent-soft: rgba(167, 139, 250, 0.12);
+}
+[data-theme='cyan'] {
+  --accent:      #38bdf8;
+  --accent-dim:  #0ea5e9;
+  --accent-soft: rgba(56, 189, 248, 0.10);
+}
+[data-theme='sand'] {
+  --accent:      #d4a574;
+  --accent-dim:  #a97f4e;
+  --accent-soft: rgba(212, 165, 116, 0.10);
+}
+
+/* ── Tailwind theme bridge ──
+   Short token names (`bg-bg-1`, `text-ink-mute`, `border-line`, `text-accent`,
+   `text-teal`, etc.) are exposed via Tailwind's @theme so existing components
+   compile without churn. Long-form `sw-*` tokens stay for legacy markdown / CLI
+   chrome that hasn't been re-skinned yet. */
 @theme {
-  /* Background palette */
-  --color-sw-bg-darkest: #1a1a2e;
-  --color-sw-bg-darker: #12122a;
-  --color-sw-bg-dark: #16213e;
-  --color-sw-bg-navy: #0f3460;
-  --color-sw-bg-deep: #0a0a1a;
-  --color-sw-bg-abyss: #0d1b2a;
-  --color-sw-bg-panel: #0a1628;
-  --color-sw-bg-input: #0d0d0d;
+  /* Terminal-minimal short names — back the Tailwind classes used across
+     the chat / shell / view code (bg-bg-1, border-line, text-ink-mute, etc.). */
+  --color-bg:          var(--bg);
+  --color-bg-1:        var(--bg-1);
+  --color-bg-2:        var(--bg-2);
+  --color-bg-3:        var(--bg-3);
+  --color-line:        var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink:         var(--ink);
+  --color-ink-dim:     var(--ink-dim);
+  --color-ink-mute:    var(--ink-mute);
+  --color-accent:      var(--accent);
+  --color-accent-dim:  var(--accent-dim);
+  --color-on-accent:   var(--on-accent);
+  --color-teal:        var(--teal);
+  --color-amber:       var(--amber);
+  --color-green:       var(--green);
+  --color-violet:      var(--violet);
+  --color-red:         var(--red);
 
-  /* Accent & brand */
-  --color-sw-accent: #e94560;
-  --color-sw-accent-hover: #c23152;
-  --color-sw-accent-dark: #d13550;
-  --color-sw-teal: #4ecdc4;
-
-  /* Text */
-  --color-sw-text: #e0e0e0;
-  --color-sw-text-muted: #888888;
-  --color-sw-text-dim: #aaaaaa;
-  --color-sw-text-faint: #999999;
-  --color-sw-text-ghost: #666666;
-  --color-sw-text-silver: #c0c0c0;
-  --color-sw-text-lavender: #a0a0c0;
-  --color-sw-text-code: #aaaacc;
-  --color-sw-text-subtle: #cccccc;
-
-  /* UI chrome */
-  --color-sw-border: #0f3460;
-  --color-sw-border-dark: #333333;
-  --color-sw-slider: #555555;
-
-  /* Success */
-  --color-sw-success: #2ecc71;
-  --color-sw-success-dark: #1b4332;
-  --color-sw-success-text: #95d5b2;
+  /* Legacy `sw-*` names — preserved so older components / markdown chrome
+     keep rendering during the visual rewrite. New code MUST use the short
+     names or `var(--…)` arbitrary syntax. */
+  --color-sw-bg-darkest:     var(--bg);
+  --color-sw-bg-darker:      var(--bg-1);
+  --color-sw-bg-dark:        var(--bg-1);
+  --color-sw-bg-navy:        var(--bg-2);
+  --color-sw-bg-deep:        var(--bg);
+  --color-sw-bg-abyss:       var(--bg);
+  --color-sw-bg-panel:       var(--bg-1);
+  --color-sw-bg-input:       var(--bg-1);
+  --color-sw-accent:         var(--accent);
+  --color-sw-accent-hover:   var(--accent-dim);
+  --color-sw-accent-dark:    var(--accent-dim);
+  --color-sw-teal:           var(--teal);
+  --color-sw-text:           var(--ink);
+  --color-sw-text-muted:     var(--ink-mute);
+  --color-sw-text-dim:       var(--ink-dim);
+  --color-sw-text-faint:     var(--ink-mute);
+  --color-sw-text-ghost:     var(--ink-mute);
+  --color-sw-text-silver:    var(--ink-dim);
+  --color-sw-text-lavender:  var(--violet);
+  --color-sw-text-code:      var(--teal);
+  --color-sw-text-subtle:    var(--ink-dim);
+  --color-sw-border:         var(--line);
+  --color-sw-border-dark:    var(--line-strong);
+  --color-sw-slider:         var(--line-strong);
+  --color-sw-success:        var(--green);
+  --color-sw-success-dark:   #1b4332;
+  --color-sw-success-text:   #95d5b2;
   --color-sw-success-border: #2d6a4f;
-  --color-sw-success-light: #34d399;
+  --color-sw-success-light:  var(--green);
+  --color-sw-destructive:        #b91c1c;
+  --color-sw-destructive-hover:  #991b1b;
+  --color-sw-error:        var(--red);
+  --color-sw-error-bg:     #3d0000;
+  --color-sw-error-deep:   #5a0000;
+  --color-sw-error-text:   #e09090;
+  --color-sw-error-light:  #f87171;
+  --color-sw-error-badge:  #3d2c2c;
+  --color-sw-error-event:  var(--bg-2);
+  --color-sw-warning:      var(--amber);
+  --color-sw-purple:       var(--violet);
+  --color-sw-purple-light: var(--violet);
+  --color-sw-purple-dark:  #6d28d9;
+  --color-sw-purple-bg:    var(--bg-2);
+  --color-sw-code-lime:    #a3e635;
+  --color-sw-code-blue:    #93c5fd;
+  --color-sw-code-green:   var(--green);
+  --color-sw-code-red:     #fca5a5;
+  --color-sw-code-gray:    var(--ink-mute);
+  --color-sw-btn-hover:    var(--bg-3);
+  --color-sw-btn-active:   var(--bg-3);
+  --color-sw-btn-ask:      var(--bg-2);
+  --color-sw-btn-ask-border: var(--violet);
+  --color-sw-thinking-bg:  var(--bg-2);
+  --color-sw-event-bg:     var(--bg-2);
 
-  /* Error */
-  --color-sw-error: #e94560;
-  --color-sw-error-bg: #3d0000;
-  --color-sw-error-deep: #5a0000;
-  --color-sw-error-text: #e09090;
-  --color-sw-error-light: #f87171;
-  --color-sw-error-badge: #3d2c2c;
-  --color-sw-error-event: #222244;
-
-  /* Warning */
-  --color-sw-warning: #fbbf24;
-
-  /* Purple (thinking/ask blocks) */
-  --color-sw-purple: #7c3aed;
-  --color-sw-purple-light: #a78bfa;
-  --color-sw-purple-dark: #6d28d9;
-  --color-sw-purple-bg: #1a1a3e;
-
-  /* Code syntax / terminal */
-  --color-sw-code-lime: #a3e635;
-  --color-sw-code-blue: #93c5fd;
-  --color-sw-code-green: #86efac;
-  --color-sw-code-red: #fca5a5;
-  --color-sw-code-gray: #6b7280;
-
-  /* Interactive states */
-  --color-sw-btn-hover: #1a4a7a;
-  --color-sw-btn-active: #1a5c3a;
-  --color-sw-btn-ask: #163d70;
-  --color-sw-btn-ask-border: #1e3a6e;
-  --color-sw-thinking-bg: #1e1e3a;
-  --color-sw-event-bg: #1a2840;
-
-  /* Font stack */
-  --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', monospace;
+  /* Font stack — inherits short forms above. */
+  --font-mono: var(--font-mono);
+  --font-sans: var(--font-sans);
 
   /* Animations */
-  --animate-sw-spin: sw-spin 0.8s linear infinite;
   --animate-blink: blink 1s step-end infinite;
 
-  @keyframes sw-spin {
-    to { transform: rotate(360deg); }
+  @keyframes blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
+
+  /* Material-style two-layer spinner used by `<app-spin-icon>` (the SSOT).
+     The svg rotates at one period and the circle's dash grows/shrinks at
+     a coprime period; the seam where either layer wraps never lines up,
+     so the eye sees continuous motion instead of the once-per-loop
+     "jump" of a single-rotation spinner. `pathLength="100"` on the
+     circle lets the dasharray be a clean percentage of the circumference
+     regardless of `r`. */
+  @keyframes spin-svg { to { transform: rotate(360deg); } }
+  @keyframes spin-circle {
+    0%   { stroke-dasharray: 1 99;  stroke-dashoffset: 0;   }
+    50%  { stroke-dasharray: 70 30; stroke-dashoffset: -25; }
+    100% { stroke-dasharray: 1 99;  stroke-dashoffset: -100;}
   }
-  @keyframes blink {
-    50% { opacity: 0; }
+}
+
+/* ── Utility helpers from the mockup ── */
+@layer utilities {
+  /* Monospaced text — used everywhere status/labels/code surfaces appear. */
+  .mono { font-family: var(--font-mono); font-variant-ligatures: none; }
+
+  /* View titles — slightly wider letter-spacing, IBM Plex when available.
+     Base class carries shared typography only; consumers always pair it
+     with one of the size modifiers below so font-size lives in the design
+     system, not in arbitrary Tailwind classes. */
+  .view-title {
+    font-family: var(--font-view-title);
+    font-weight: 500;
+    letter-spacing: -0.005em;
   }
+
+  /* Page header (top-of-view <h1> band, 44px header strip). */
+  .view-title-page {
+    font-size: 14px;
+    line-height: 1.2;
+  }
+
+  /* Section header (<h2>/<h3> inside settings cards, modals, etc.). */
+  .view-title-section {
+    font-size: 16px;
+    line-height: 1.35;
+  }
+
+  /* Display headline (setup wizard headline only). */
+  .view-title-display {
+    font-size: 22px;
+    line-height: 1.3;
+  }
+
+  /* Two-layer Material spinner (see `@keyframes spin-svg` / `spin-circle`). */
+  .spin-svg {
+    animation: spin-svg 2s linear infinite;
+    transform-origin: 50% 50%;
+    transform-box: fill-box;
+  }
+  .spin-circle {
+    animation: spin-circle 1.4s ease-in-out infinite both;
+    transform-origin: 50% 50%;
+    transform-box: fill-box;
+  }
+
+  /* Streaming caret block. */
+  .caret {
+    display: inline-block;
+    width: 0.5em;
+    height: 1em;
+    background: var(--accent);
+    vertical-align: -0.1em;
+    animation: blink 1s step-end infinite;
+  }
+
+  /* Background hover for nav rows that stay flat by default. */
+  .hover-bg:hover { background: var(--bg-2); }
+}
+
+/* ── Component helpers from the mockup ── */
+@layer components {
+  /* Pill — small mono badge used across nav, tables, status. */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 6px;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--ink-dim);
+  }
+  .pill.green  { color: var(--green);  border-color: rgba(52, 211, 153, 0.25); }
+  .pill.amber  { color: var(--amber);  border-color: rgba(245, 185, 66, 0.25); }
+  .pill.accent { color: var(--accent); border-color: var(--accent-dim); }
+  .pill.teal   { color: var(--teal);   border-color: rgba(34, 211, 183, 0.25); }
+  .pill.violet { color: var(--violet); border-color: rgba(167, 139, 250, 0.25); }
+
+  /* Status dot. */
+  .dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+  }
+
+  /* Keyboard chip. */
+  .kbd {
+    display: inline-flex;
+    align-items: center;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--ink-dim);
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+  }
+
+  /* Toggle (used for service / plugin enabled state). */
+  .toggle {
+    position: relative;
+    width: 28px;
+    height: 16px;
+    background: var(--bg-3);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+    flex-shrink: 0;
+  }
+  .toggle::after {
+    content: '';
+    position: absolute;
+    top: 1px;
+    left: 1px;
+    width: 12px;
+    height: 12px;
+    background: var(--ink-dim);
+    border-radius: 50%;
+    transition: left 0.12s, background 0.12s;
+  }
+  .toggle.on               { background: var(--accent); border-color: var(--accent-dim); }
+  .toggle.on::after        { left: 13px; background: #fff; }
+
+  /* Left rail nav button (icon-only with hover background and active accent bar). */
+  .rail-btn {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 36px;
+    width: 36px;
+    border-radius: 6px;
+    color: var(--ink-mute);
+    transition: color 0.1s, background 0.1s;
+  }
+  .rail-btn:hover  { color: var(--ink); background: var(--bg-2); }
+  .rail-btn.active { color: var(--ink); }
+  /* Active accent bar — placed against the rail's left edge exactly like
+     the mockup. The negative offset only works when no ancestor clips on
+     the X axis, so the rail (`<app-nav-rail>` host) keeps `overflow-visible`
+     and the indicator falls inside the rail viewport at x=0..2px. */
+  .rail-btn.active::before {
+    content: '';
+    position: absolute;
+    /* Measured live: rail-btn sits at x=6 inside the rail (items-center
+       leaves 6px gutters, not 10 the mockup assumed). At -10px the bar
+       would land at x=-4 — outside the viewport. -5px lands at x=1,
+       a 2px stripe pinned to the rail's left edge. */
+    left: -5px;
+    top: 6px;
+    bottom: 6px;
+    width: 2px;
+    background: var(--accent);
+    border-radius: 1px;
+  }
+
+  /* Theme card — used in Settings → Appearance. */
+  .theme-card .check { opacity: 0; }
+  .theme-card.active {
+    border-color: var(--accent) !important;
+    background: var(--accent-soft);
+  }
+  .theme-card.active .mono   { color: var(--ink); }
+  .theme-card.active .check  { opacity: 1; }
+}
+
+/* ── Drawer mechanics (left conversations sidebar + left memory panel) ──
+   Both drawers live as siblings in the chat layout, anchored to the left
+   edge. They are absolutely positioned overlays that slide in via a
+   transform. The body class toggles visibility and adds the dimmed backdrop
+   pseudo-element. */
+
+.collapsible-sidebar {
+  position: absolute;
+  z-index: 40;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 16rem;
+  box-shadow: 8px 0 24px rgba(0, 0, 0, 0.4);
+  transition: transform 0.18s ease;
+  transform: translateX(-100%);
+  will-change: transform;
+}
+body.sidebar-drawer-open .collapsible-sidebar { transform: translateX(0); }
+
+.memory-drawer {
+  position: absolute;
+  z-index: 40;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(22rem, 90vw);
+  box-shadow: 8px 0 24px rgba(0, 0, 0, 0.4);
+  transition: transform 0.18s ease;
+  transform: translateX(-100%);
+  will-change: transform;
+  display: flex;
+}
+body.memory-open .memory-drawer { transform: translateX(0); }
+
+/* ── Custom tooltip (driven by `appTooltip` directive via CDK Overlay) ──
+   The CDK Overlay handles positioning via `cdk-overlay-pane` — we just style
+   the tooltip body. Mirrors the terminal-minimal mockup `.tooltip` rule. */
+
+.app-tooltip {
+  display: inline-block;
+  background: var(--bg-3);
+  border: 1px solid var(--line-strong);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ink);
+  max-width: min(40rem, calc(100vw - 32px));
+  overflow-wrap: anywhere;
+  white-space: normal;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s ease;
+}
+
+.app-tooltip[data-state='open'] {
+  opacity: 1;
 }
 
 /* ── Base styles ── */
 @layer base {
   html, body {
     height: 100%;
-    font-family: var(--font-mono);
+    overflow: hidden;
+    font-family: var(--font-sans);
     font-size: 14px;
-    background: var(--color-sw-bg-darkest);
-    color: var(--color-sw-text);
+    background: var(--bg);
+    color: var(--ink);
     -webkit-font-smoothing: antialiased;
   }
 
   a {
-    color: var(--color-sw-accent);
+    color: var(--accent);
     text-decoration: none;
   }
-  a:hover {
-    text-decoration: underline;
-  }
+  a:hover { text-decoration: underline; }
 
   button {
     font-family: inherit;
@@ -120,104 +522,141 @@
   code, pre {
     font-family: var(--font-mono);
   }
+
+  /* Native <details> chevron — we draw our own. */
+  summary { list-style: none; }
+  summary::-webkit-details-marker { display: none; }
+  summary::marker { display: none; }
+
+  /* Native select chevron → terminal arrow. */
+  select {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10' fill='none' stroke='%23596177' stroke-width='1.5'><path d='M2 4l3 3 3-3'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    padding-right: 24px;
+  }
+  select::-ms-expand { display: none; }
+
+  /* Form-element focus border (composer wrapper, settings inputs). */
+  input:focus,
+  textarea:focus,
+  select:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+
+  /* Global focus ring (WCAG 2.4.7). */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
 }
 
-/* ── Prose layer for rendered markdown (innerHTML) ── */
+/* ── Prose layer for rendered markdown (innerHTML inside text-block). ──
+   Tokens reference the new short palette so the markdown body matches the
+   surrounding terminal-minimal chrome. */
 @layer components {
-  /* Collapse margins at container edges */
   .prose-sw :first-child { margin-top: 0; }
   .prose-sw :last-child  { margin-bottom: 0; }
 
-  /* Headings */
-  .prose-sw h1 { font-size: 1.75em; font-weight: 700; color: var(--color-sw-text); margin: 24px 0 12px; }
-  .prose-sw h2 { font-size: 1.5em;  font-weight: 700; color: var(--color-sw-text); margin: 20px 0 10px; }
-  .prose-sw h3 { font-size: 1.25em; font-weight: 600; color: var(--color-sw-text); margin: 16px 0 8px; }
-  .prose-sw h4 { font-size: 1.1em;  font-weight: 600; color: var(--color-sw-text); margin: 14px 0 6px; }
-  .prose-sw h5 { font-size: 1em;    font-weight: 600; color: var(--color-sw-text); margin: 12px 0 4px; }
-  .prose-sw h6 { font-size: 0.9em;  font-weight: 600; color: var(--color-sw-text-dim); margin: 12px 0 4px; }
+  /* Tight heading scale for in-chat markdown — the terminal-minimal layout
+     keeps body text at 14px, so headings step up by tiny increments instead
+     of the chunky web-prose 1.75em / 1.5em ladder that drowns out the body. */
+  .prose-sw h1 { font-size: 1.15em; font-weight: 600; color: var(--ink);     margin: 16px 0 8px; }
+  .prose-sw h2 { font-size: 1.05em; font-weight: 600; color: var(--ink);     margin: 14px 0 6px; }
+  .prose-sw h3 { font-size: 1em;    font-weight: 600; color: var(--ink);     margin: 12px 0 4px; }
+  .prose-sw h4 { font-size: 1em;    font-weight: 600; color: var(--ink-dim); margin: 12px 0 4px; }
+  .prose-sw h5 { font-size: 0.95em; font-weight: 600; color: var(--ink-dim); margin: 10px 0 4px; }
+  .prose-sw h6 { font-size: 0.9em;  font-weight: 600; color: var(--ink-mute); margin: 10px 0 4px; }
 
-  /* Paragraphs */
-  .prose-sw p { color: var(--color-sw-text); line-height: 1.6; margin: 8px 0; }
+  .prose-sw p  { color: var(--ink); line-height: 1.7; margin: 8px 0; }
 
-  /* Lists */
-  .prose-sw ul,
-  .prose-sw ol { margin: 8px 0; padding-left: 24px; color: var(--color-sw-text); }
+  .prose-sw ul, .prose-sw ol { margin: 8px 0; padding-left: 24px; color: var(--ink); }
   .prose-sw ul { list-style-type: disc; }
   .prose-sw ol { list-style-type: decimal; }
-  .prose-sw li { margin: 4px 0; line-height: 1.6; }
-  .prose-sw li::marker { color: var(--color-sw-text-muted); }
+  .prose-sw li { margin: 4px 0; line-height: 1.7; }
+  .prose-sw li::marker { color: var(--ink-mute); }
 
-  /* Code blocks */
   .prose-sw pre {
-    background: var(--color-sw-bg-abyss);
-    border: 1px solid var(--color-sw-border);
+    background: var(--bg-1);
+    border: 1px solid var(--line);
     border-radius: 6px;
     padding: 12px 16px;
     overflow-x: auto;
     margin: 12px 0;
     line-height: 1.5;
+    font-family: var(--font-mono);
   }
 
-  /* Inline code */
   .prose-sw code {
-    background: var(--color-sw-bg-abyss);
-    color: var(--color-sw-code-lime);
+    background: var(--bg-1);
+    color: var(--teal);
     padding: 2px 6px;
     border-radius: 3px;
     font-size: 0.9em;
+    border: 1px solid var(--line);
+    font-family: var(--font-mono);
   }
-
-  /* Reset inline styles inside code blocks */
   .prose-sw pre code {
     background: none;
     color: inherit;
     padding: 0;
     border-radius: 0;
+    border: none;
     font-size: inherit;
   }
 
-  /* Blockquotes */
   .prose-sw blockquote {
-    border-left: 3px solid var(--color-sw-accent);
+    border-left: 3px solid var(--accent);
     padding-left: 16px;
     margin: 12px 0;
     font-style: italic;
-    color: var(--color-sw-text-muted);
+    color: var(--ink-mute);
   }
 
-  /* Links */
-  .prose-sw a { color: var(--color-sw-accent); text-decoration: none; }
+  .prose-sw a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
   .prose-sw a:hover { text-decoration: underline; }
 
-  /* Tables */
-  .prose-sw table { border-collapse: collapse; width: 100%; margin: 12px 0; }
-  .prose-sw th,
-  .prose-sw td { border: 1px solid var(--color-sw-border); padding: 8px 12px; text-align: left; }
-  .prose-sw th { background: var(--color-sw-bg-abyss); color: var(--color-sw-text); font-weight: 600; }
-  .prose-sw td { color: var(--color-sw-text-dim); }
+  .prose-sw table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 12px 0;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--line);
+  }
+  .prose-sw thead { background: var(--bg-1); }
+  .prose-sw th    {
+    color: var(--ink-mute);
+    font-weight: 500;
+    padding: 8px 12px;
+    text-align: left;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 10px;
+  }
+  .prose-sw td    {
+    color: var(--ink-dim);
+    padding: 8px 12px;
+    border-top: 1px solid var(--line);
+  }
 
-  /* Horizontal rule */
-  .prose-sw hr { border: none; border-top: 1px solid var(--color-sw-border); margin: 16px 0; }
+  .prose-sw hr { border: none; border-top: 1px solid var(--line); margin: 16px 0; }
 
-  /* Emphasis */
-  .prose-sw strong { color: var(--color-sw-text); font-weight: 700; }
-  .prose-sw em { font-style: italic; }
+  .prose-sw strong { color: var(--ink); font-weight: 700; }
+  .prose-sw em     { font-style: italic; }
 
-  /* Images */
   .prose-sw img { max-width: 100%; border-radius: 6px; margin: 12px 0; }
 }
 
-/* ── Scrollbar (not supported by Tailwind) ── */
-::-webkit-scrollbar {
-  width: 8px;
-}
-::-webkit-scrollbar-track {
-  background: var(--color-sw-bg-dark);
-}
-::-webkit-scrollbar-thumb {
-  background: var(--color-sw-border);
-  border-radius: 4px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: var(--color-sw-accent);
-}
+/* ── Scrollbars (WebKit) ── */
+::-webkit-scrollbar       { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--ink-mute); }

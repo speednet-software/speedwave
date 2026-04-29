@@ -28,7 +28,8 @@ mkdir -p "$DEST/build-context/mcp-servers"
 cp "$REPO_ROOT/mcp-servers/tsconfig.base.json" "$DEST/build-context/mcp-servers/"
 
 # os is intentionally excluded — it runs on the host and is bundled separately as mcp-os/
-MCP_SERVICES="shared hub slack sharepoint redmine gitlab"
+# playwright has no own src/ — the image installs @playwright/mcp from npm at build time.
+MCP_SERVICES="shared hub slack sharepoint redmine gitlab playwright"
 
 for svc in $MCP_SERVICES; do
   svc_src="$REPO_ROOT/mcp-servers/$svc"
@@ -36,7 +37,8 @@ for svc in $MCP_SERVICES; do
   mkdir -p "$svc_dest"
   cp "$svc_src/package.json" "$svc_dest/"
   [ -f "$svc_src/package-lock.json" ] && cp "$svc_src/package-lock.json" "$svc_dest/"
-  cp -r "$svc_src/src" "$svc_dest/"
+  # Some services (e.g. playwright) have no own src/ — they wrap an upstream npm package.
+  [ -d "$svc_src/src" ] && cp -r "$svc_src/src" "$svc_dest/"
   [ -f "$svc_src/tsconfig.json" ] && cp "$svc_src/tsconfig.json" "$svc_dest/"
   for f in Dockerfile Containerfile; do
     [ -f "$svc_src/$f" ] && cp "$svc_src/$f" "$svc_dest/"

@@ -63,7 +63,7 @@ describe('PluginCardComponent', () => {
 
     fixture = TestBed.createComponent(PluginCardComponent);
     component = fixture.componentInstance;
-    component.plugin = makeMcpPlugin();
+    fixture.componentRef.setInput('plugin', makeMcpPlugin());
   });
 
   it('should create', () => {
@@ -89,7 +89,7 @@ describe('PluginCardComponent', () => {
   });
 
   it('should show not-configured badge for MCP plugin when not configured', () => {
-    component.plugin = { ...makeMcpPlugin(), configured: false };
+    fixture.componentRef.setInput('plugin', { ...makeMcpPlugin(), configured: false });
     fixture.detectChanges();
     const badge = fixture.nativeElement.querySelector('[data-testid="badge"]');
     expect(badge.textContent.trim()).toBe('Not Configured');
@@ -97,19 +97,19 @@ describe('PluginCardComponent', () => {
   });
 
   it('should not show badge for plugin without auth_fields', () => {
-    component.plugin = makeResourcePlugin();
+    fixture.componentRef.setInput('plugin', makeResourcePlugin());
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="badge"]')).toBeNull();
   });
 
   it('should show toggle for all plugins regardless of service_id', () => {
-    component.plugin = makeResourcePlugin();
+    fixture.componentRef.setInput('plugin', makeResourcePlugin());
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="toggle"]')).not.toBeNull();
   });
 
   it('should NOT disable toggle when not configured', () => {
-    component.plugin = { ...makeMcpPlugin(), configured: false };
+    fixture.componentRef.setInput('plugin', { ...makeMcpPlugin(), configured: false });
     fixture.detectChanges();
     const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
     expect(checkbox.disabled).toBe(false);
@@ -122,7 +122,7 @@ describe('PluginCardComponent', () => {
   });
 
   it('should emit toggleExpand (not togglePlugin) when toggle clicked on unconfigured plugin', () => {
-    component.plugin = { ...makeMcpPlugin(), configured: false };
+    fixture.componentRef.setInput('plugin', { ...makeMcpPlugin(), configured: false });
     fixture.detectChanges();
     const expandSpy = vi.spyOn(component.toggleExpand, 'emit');
     const toggleSpy = vi.spyOn(component.togglePlugin, 'emit');
@@ -133,7 +133,7 @@ describe('PluginCardComponent', () => {
   });
 
   it('should reset checkbox to false when toggle clicked on unconfigured plugin', () => {
-    component.plugin = { ...makeMcpPlugin(), configured: false };
+    fixture.componentRef.setInput('plugin', { ...makeMcpPlugin(), configured: false });
     fixture.detectChanges();
     const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
     checkbox.checked = true;
@@ -142,19 +142,19 @@ describe('PluginCardComponent', () => {
   });
 
   it('should not show card-body when not expanded', () => {
-    component.expanded = false;
+    fixture.componentRef.setInput('expanded', false);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="card-body"]')).toBeNull();
   });
 
   it('should show card-body when expanded', () => {
-    component.expanded = true;
+    fixture.componentRef.setInput('expanded', true);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="card-body"]')).not.toBeNull();
   });
 
   it('should render auth field inputs with data-testid when expanded', () => {
-    component.expanded = true;
+    fixture.componentRef.setInput('expanded', true);
     fixture.detectChanges();
     const inputs = fixture.nativeElement.querySelectorAll('[data-testid="auth-field-input"]');
     expect(inputs.length).toBe(2);
@@ -182,7 +182,10 @@ describe('PluginCardComponent', () => {
     const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
     checkbox.dispatchEvent(new Event('change'));
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy.mock.calls[0][0].plugin).toBe(component.plugin);
+    const emitted = spy.mock.calls[0]?.[0];
+    expect(emitted).toBeDefined();
+    if (!emitted) throw new Error('expected togglePlugin to emit');
+    expect(emitted.plugin).toBe(component.plugin());
   });
 
   describe('getFieldValue()', () => {
@@ -196,7 +199,7 @@ describe('PluginCardComponent', () => {
     });
 
     it('returns empty string when no value anywhere', () => {
-      component.plugin = { ...makeMcpPlugin(), current_values: {} };
+      fixture.componentRef.setInput('plugin', { ...makeMcpPlugin(), current_values: {} });
       expect(component.getFieldValue('host_url')).toBe('');
     });
   });
@@ -217,7 +220,7 @@ describe('PluginCardComponent', () => {
       component.onSave(event);
       expect(event.preventDefault).toHaveBeenCalled();
       expect(spy).toHaveBeenCalledWith({
-        plugin: component.plugin,
+        plugin: component.plugin(),
         credentials: { api_key: 'secret-123' },
       });
     });
@@ -239,7 +242,7 @@ describe('PluginCardComponent', () => {
 
   describe('uninstall confirmation', () => {
     it('shows confirmation prompt on first click', () => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       const spy = vi.spyOn(component.removePlugin, 'emit');
       const removeBtn = fixture.nativeElement.querySelector(
@@ -254,7 +257,7 @@ describe('PluginCardComponent', () => {
     });
 
     it('emits removePlugin on confirm', () => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       component.confirmingRemove = true;
       fixture.detectChanges();
       const spy = vi.spyOn(component.removePlugin, 'emit');
@@ -262,12 +265,12 @@ describe('PluginCardComponent', () => {
         '[data-testid="plugin-remove-confirm-presale"]'
       );
       confirmBtn.click();
-      expect(spy).toHaveBeenCalledWith(component.plugin);
+      expect(spy).toHaveBeenCalledWith(component.plugin());
       expect(component.confirmingRemove).toBe(false);
     });
 
     it('cancels removal on cancel click', () => {
-      component.expanded = true;
+      fixture.componentRef.setInput('expanded', true);
       component.confirmingRemove = true;
       fixture.detectChanges();
       const spy = vi.spyOn(component.removePlugin, 'emit');
@@ -283,8 +286,8 @@ describe('PluginCardComponent', () => {
 
   describe('setup-hint', () => {
     it('shows setup-hint for unconfigured MCP plugin when not expanded', () => {
-      component.plugin = { ...makeMcpPlugin(), configured: false };
-      component.expanded = false;
+      fixture.componentRef.setInput('plugin', { ...makeMcpPlugin(), configured: false });
+      fixture.componentRef.setInput('expanded', false);
       fixture.detectChanges();
       const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
       expect(hint).not.toBeNull();
@@ -292,8 +295,8 @@ describe('PluginCardComponent', () => {
     });
 
     it('hides setup-hint for resource-only plugin (no auth_fields)', () => {
-      component.plugin = makeResourcePlugin();
-      component.expanded = false;
+      fixture.componentRef.setInput('plugin', makeResourcePlugin());
+      fixture.componentRef.setInput('expanded', false);
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="setup-hint"]')).toBeNull();
     });
@@ -304,15 +307,15 @@ describe('PluginCardComponent', () => {
     });
 
     it('hides setup-hint when expanded (even if unconfigured)', () => {
-      component.plugin = { ...makeMcpPlugin(), configured: false };
-      component.expanded = true;
+      fixture.componentRef.setInput('plugin', { ...makeMcpPlugin(), configured: false });
+      fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="setup-hint"]')).toBeNull();
     });
 
     it('emits toggleExpand with slug when setup-hint is clicked', () => {
-      component.plugin = { ...makeMcpPlugin(), configured: false };
-      component.expanded = false;
+      fixture.componentRef.setInput('plugin', { ...makeMcpPlugin(), configured: false });
+      fixture.componentRef.setInput('expanded', false);
       fixture.detectChanges();
       const spy = vi.spyOn(component.toggleExpand, 'emit');
       const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
@@ -321,8 +324,8 @@ describe('PluginCardComponent', () => {
     });
 
     it('emits toggleExpand on Enter key', () => {
-      component.plugin = { ...makeMcpPlugin(), configured: false };
-      component.expanded = false;
+      fixture.componentRef.setInput('plugin', { ...makeMcpPlugin(), configured: false });
+      fixture.componentRef.setInput('expanded', false);
       fixture.detectChanges();
       const spy = vi.spyOn(component.toggleExpand, 'emit');
       const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
@@ -331,8 +334,8 @@ describe('PluginCardComponent', () => {
     });
 
     it('emits toggleExpand on Space key and prevents default', () => {
-      component.plugin = { ...makeMcpPlugin(), configured: false };
-      component.expanded = false;
+      fixture.componentRef.setInput('plugin', { ...makeMcpPlugin(), configured: false });
+      fixture.componentRef.setInput('expanded', false);
       fixture.detectChanges();
       const spy = vi.spyOn(component.toggleExpand, 'emit');
       const hint = fixture.nativeElement.querySelector('[data-testid="setup-hint"]');
@@ -344,14 +347,14 @@ describe('PluginCardComponent', () => {
   });
 
   it('should emit deleteCredentials when remove credentials button is clicked', () => {
-    component.expanded = true;
+    fixture.componentRef.setInput('expanded', true);
     fixture.detectChanges();
     const spy = vi.spyOn(component.deleteCredentials, 'emit');
     const removeBtn = fixture.nativeElement.querySelector(
       '[data-testid="plugin-delete-creds-presale"]'
     );
     removeBtn.click();
-    expect(spy).toHaveBeenCalledWith(component.plugin);
+    expect(spy).toHaveBeenCalledWith(component.plugin());
   });
 
   it('should set correct data-testid attribute', () => {

@@ -4,13 +4,14 @@ Speedwave connects Claude Code with external services through MCP (Model Context
 
 ## Available Integrations
 
-| Integration | Service        | Container                            | Token Path                                  |
-| ----------- | -------------- | ------------------------------------ | ------------------------------------------- |
-| Slack       | Messaging      | `speedwave_<project>_mcp_slack`      | `~/.speedwave/tokens/<project>/slack/`      |
-| SharePoint  | Documents      | `speedwave_<project>_mcp_sharepoint` | `~/.speedwave/tokens/<project>/sharepoint/` |
-| GitLab      | Code hosting   | `speedwave_<project>_mcp_gitlab`     | `~/.speedwave/tokens/<project>/gitlab/`     |
-| Redmine     | Issue tracking | `speedwave_<project>_mcp_redmine`    | `~/.speedwave/tokens/<project>/redmine/`    |
-| OS          | Host services  | mcp-os (host process)                | N/A (runs on host)                          |
+| Integration | Service            | Container                            | Token Path                                  |
+| ----------- | ------------------ | ------------------------------------ | ------------------------------------------- |
+| Slack       | Messaging          | `speedwave_<project>_mcp_slack`      | `~/.speedwave/tokens/<project>/slack/`      |
+| SharePoint  | Documents          | `speedwave_<project>_mcp_sharepoint` | `~/.speedwave/tokens/<project>/sharepoint/` |
+| GitLab      | Code hosting       | `speedwave_<project>_mcp_gitlab`     | `~/.speedwave/tokens/<project>/gitlab/`     |
+| Redmine     | Issue tracking     | `speedwave_<project>_mcp_redmine`    | `~/.speedwave/tokens/<project>/redmine/`    |
+| Playwright  | Browser automation | `speedwave_<project>_mcp_playwright` | N/A (no credentials)                        |
+| OS          | Host services      | mcp-os (host process)                | N/A (runs on host)                          |
 
 OS sub-integrations (Reminders, Calendar, Mail, Notes) run via mcp-os on the host — they access native APIs directly (EventKit on macOS, CalDAV/zbus on Linux, WinRT/MAPI on Windows).
 
@@ -84,6 +85,7 @@ Each MCP integration requires specific credentials to function. Fields marked as
 | SharePoint  | `client_id`, `tenant_id`, `site_id`, `base_path` + OAuth tokens | —                                                    |
 | GitLab      | `token`, `host_url`                                             | —                                                    |
 | Redmine     | `api_key`, `host_url`                                           | `project_id` (scope operations to a default project) |
+| Playwright  | _(none — no credentials required)_                              | —                                                    |
 
 ### Redmine Configuration Wizard
 
@@ -98,6 +100,39 @@ The wizard shows up to 100 projects. For Redmine instances with more projects, f
 Existing configurations with `project_name` in `config.json` continue to work — the MCP server reads it if present and auto-fetches it from the API when absent. Manual `config.json` editing remains supported for power users.
 
 **Troubleshooting:** Corporate environments with custom certificate authorities or HTTP proxies may see TLS or connection errors during credential validation. This is a known limitation shared with SharePoint OAuth — the Desktop app uses bundled CA roots (`rustls-tls`), not the OS certificate store, and does not auto-detect system proxy settings.
+
+### Playwright — Browser Automation
+
+Playwright runs a headless Chromium inside a hardened container and exposes it through Microsoft's official [`@playwright/mcp`](https://github.com/microsoft/playwright-mcp) server. It is a **shared service**: both Claude directly and any plugin can use the same browser — Chromium is not duplicated per plugin.
+
+#### When to use Playwright vs `WebFetch`
+
+- `WebFetch` is built into Claude and suits **static HTML** — a GET + HTML-to-markdown conversion. Use it for docs, READMEs, blog posts, anything server-rendered.
+- Playwright runs a real browser and suits **dynamic pages** — JavaScript-rendered SPAs, pages behind a login flow, pages that require waiting for XHR-driven content, or any task that needs screenshots, accessibility snapshots, DOM interaction, or computed styles.
+
+Prefer `WebFetch` when it works; drop to Playwright only when it does not. A Chromium context is an order of magnitude more expensive than a `WebFetch` call.
+
+#### Security profile
+
+Playwright is unique among the built-in integrations in three ways:
+
+- **No credentials.** It accesses only public URLs; there is no `/tokens` mount and no credential file. Enabling the integration requires no configuration.
+- **No `/workspace` mount.** Screenshots, PDFs, and page dumps are returned to Claude as base64 payloads rather than written to the project. This keeps a compromised Chromium from exfiltrating repo contents.
+- **Higher resource limits.** `shm_size: 2g` (Chromium IPC needs it), `tmpfs /tmp: 1g` (Chromium caches heavily), `cpus: 2.0`, `memory: 2048m` — noticeably larger than the 128 MiB budget given to HTTP-only workers.
+
+Container hardening is otherwise identical to every other MCP worker: `cap_drop: ALL`, `no-new-privileges:true`, `read_only: true` root filesystem, `noexec,nosuid` on `/tmp`. Chromium runs with `--no-sandbox` because the Lima/WSL2 VM + container capability-drop layer replaces its in-process sandbox (see [ADR-004](../adr/ADR-004-wsl2-and-nerdctl-on-windows.md)). Each container restart wipes `/tmp` (tmpfs-backed), giving the same ephemeral-profile guarantee as `--isolated` — no cookies, no storage state persist between invocations.
+
+#### Tool surface
+
+`@playwright/mcp` exposes roughly 70 tools grouped into:
+
+- **Navigation** — `browser_navigate`, `browser_navigate_back`, `browser_tabs`.
+- **Extraction** — `browser_snapshot` (accessibility tree, token-efficient), `browser_take_screenshot`, `browser_pdf_save`, `browser_evaluate`, `browser_network_requests`, `browser_console_messages`.
+- **Interaction** — `browser_click`, `browser_type`, `browser_fill_form`, `browser_select_option`, `browser_press_key`, `browser_hover`, `browser_drag`.
+- **Assertions and codegen** — `browser_verify_element_visible`, `browser_verify_text_visible`, `browser_generate_locator`, `browser_pick_locator`.
+- **Tracing** — `browser_start_tracing`, `browser_start_video`, `browser_stop_tracing` (gated behind `--caps devtools` when explicitly enabled).
+
+Refer to the [upstream README](https://github.com/microsoft/playwright-mcp) for the full list and parameter schemas.
 
 ## MCP Hub Architecture
 
@@ -158,9 +193,50 @@ When a bundle update triggers image rebuilds, container restart operations (incl
 
 Plugins that declare `requires_integrations` (e.g. `["sharepoint"]`) display the required integration status on the plugin dashboard. The Desktop UI indicates whether required integrations are configured, linking to the Integrations tab when they are not.
 
+Plugin authors should set `speedwave_compat` in `plugin.json` to declare which Speedwave versions the plugin supports — for example, `"speedwave_compat": ">=0.8, <1"` for plugins targeting the 0.8 series. If the field is present and the running Speedwave version does not satisfy the declared range, installation is rejected with a clear error. Omit the field to disable the check. See [ADR-015](../adr/ADR-015-plugin-system.md) for details on the enforcement model and version-requirement syntax.
+
+## Local LLM Setup
+
+You can run Claude Code inside Speedwave against a local LLM server instead of Anthropic's cloud API. Go to **Settings → LLM Provider** to select a provider.
+
+### Ollama (requires 0.14.0+)
+
+1. Install Ollama and pull a model:
+
+   ```bash
+   OLLAMA_HOST=0.0.0.0 ollama serve   # must bind to 0.0.0.0, not 127.0.0.1
+   ollama pull llama3.3
+   ```
+
+   > **Important:** Ollama binds to `127.0.0.1` by default. The `claude` container cannot reach the loopback interface — set `OLLAMA_HOST=0.0.0.0` before starting `ollama serve`.
+
+2. In Speedwave Settings → LLM Provider → select **Ollama**
+3. The Settings UI fetches the model list from Ollama's `/api/tags` endpoint and pre-selects one automatically. You only need to type the model name manually if the Ollama server is offline when you open Settings.
+4. Leave **Base URL** empty to use the default (`http://host.docker.internal:11434`)
+5. Restart containers
+
+### LM Studio (requires 0.4.1+)
+
+1. In LM Studio, load a model and enable the **Local Server**
+2. In Speedwave Settings → LLM Provider → select **LM Studio**
+3. Leave Base URL empty for the default port (`http://host.docker.internal:1234`)
+4. Restart containers
+
+### llama.cpp (requires January 2026 build or later)
+
+1. Start `llama-server` with the Anthropic API server enabled
+2. Select **llama.cpp** in Settings → LLM Provider
+3. Default port: `http://host.docker.internal:8080`
+
+### Non-standard addresses
+
+The `custom` provider no longer exists. If your LLM server is at a non-standard address (e.g. another machine on your LAN at `http://192.168.1.100:11434`), pick the closest matching provider (Ollama, LM Studio, or llama.cpp) and override the **Base URL** field to point at your server. The URL must use `http://` or `https://` and must not include a path.
+
 ## See Also
 
 - [ADR-010: mcp-os as Host Process Per Platform](../adr/ADR-010-mcp-os-as-host-process-per-platform.md)
 - [ADR-013: mcp-os as Host Process — Implementation Details](../adr/ADR-013-mcp-os-as-host-process-implementation.md)
 - [ADR-015: Plugin System](../adr/ADR-015-plugin-system.md)
 - [ADR-036: Self-Declaring Worker Policy](../adr/ADR-036-self-declaring-worker-policy.md)
+- [ADR-040: Remove LiteLLM — Direct Local Provider Injection](../adr/ADR-040-remove-litellm-direct-provider-injection.md)
+- [ADR-041: Local LLM Model Discovery and SSRF Policy](../adr/ADR-041-local-llm-model-discovery.md)

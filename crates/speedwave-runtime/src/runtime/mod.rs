@@ -375,7 +375,7 @@ fn compose_file_path_in(data_dir: &std::path::Path, project: &str) -> String {
         .to_string()
 }
 
-fn configured_project_container_names(project: &str) -> Vec<String> {
+pub(crate) fn configured_project_container_names(project: &str) -> Vec<String> {
     let compose_file = match compose_file_path(project) {
         Ok(path) => path,
         Err(e) => {
@@ -432,7 +432,7 @@ fn push_unique_target(targets: &mut Vec<String>, target: String) {
     }
 }
 
-fn cleanup_targets_from_ps_output(ps_output: &str) -> Vec<String> {
+pub(crate) fn cleanup_targets_from_ps_output(ps_output: &str) -> Vec<String> {
     let mut targets = Vec::new();
 
     for id in ps_output
@@ -476,7 +476,7 @@ fn is_missing_container_error_msg(message: &str) -> bool {
         || lower.contains("not exist")
 }
 
-fn is_missing_container_error(err: &anyhow::Error) -> bool {
+pub(crate) fn is_missing_container_error(err: &anyhow::Error) -> bool {
     is_missing_container_error_msg(&err.to_string())
 }
 
@@ -489,6 +489,38 @@ fn is_missing_container_error(err: &anyhow::Error) -> bool {
 fn is_stale_container_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("mount namespace root") || lower.contains("container breakout detected")
+}
+
+/// POSIX-shell-quotes each argument and joins with spaces — for transports
+/// that re-evaluate the command line through a remote shell (`ssh`, `wsl.exe`,
+/// `limactl shell`).
+///
+/// Without this, prompts containing `(`, `)`, `'`, `` ` ``, `$`, newlines, etc.
+/// produced by `--append-system-prompt` (see `prompts::local_llm_identity`)
+/// would break remote bash with `syntax error near unexpected token`. Using
+/// `shlex::try_quote` per arg yields a string that any POSIX shell parses
+/// back into the original argv.
+pub(crate) fn shell_quote_argv(argv: &[&str]) -> String {
+    argv.iter()
+        .map(|a| match shlex::try_quote(a) {
+            Ok(quoted) => quoted.into_owned(),
+            // `shlex::try_quote` only fails on null bytes, which can't
+            // legitimately appear in argv (the OS rejects them at execve).
+            // If one ever slips through anyway, drop it from the quoted
+            // string and log — silently truncating at the null would break
+            // the remote command in subtler ways.
+            Err(_) => {
+                log::error!(
+                    "shell_quote_argv: argv token contains a null byte; stripping nulls before quoting"
+                );
+                let stripped = a.replace('\0', "");
+                shlex::try_quote(stripped.as_str())
+                    .map(|s| s.into_owned())
+                    .unwrap_or(stripped)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Probes whether `nerdctl exec` works on the given container by running a
@@ -798,8 +830,10 @@ mod tests {
 
     #[test]
     fn parse_real_nerdctl_output() {
-        // Real output from `limactl shell speedwave sudo nerdctl compose ps --format json`
-        let input = r#"[{"ID":"076c","Name":"speedwave_myproject_mcp_redmine","Image":"speedwave-mcp-redmine:latest","Command":"docker-entrypoint.sh node dist/index.js","Project":"myproject","Service":"mcp-redmine","State":"running","Health":"","ExitCode":0,"Publishers":[{"URL":"127.0.0.1","TargetPort":4003,"PublishedPort":4003,"Protocol":"tcp"}]},{"ID":"40c1","Name":"speedwave_myproject_claude","Image":"speedwave-claude:latest","Command":"/usr/local/bin/entrypoint.sh","Project":"myproject","Service":"claude","State":"exited","Health":"","ExitCode":1,"Publishers":[]}]"#;
+        // Real output from `limactl shell speedwave sudo nerdctl compose ps --format json`.
+        // Since ADR-038 every worker listens on PORT_WORKER (3000); the test only
+        // checks Name and State so the exact port is immaterial.
+        let input = r#"[{"ID":"076c","Name":"speedwave_myproject_mcp_redmine","Image":"speedwave-mcp-redmine:latest","Command":"docker-entrypoint.sh node dist/index.js","Project":"myproject","Service":"mcp-redmine","State":"running","Health":"","ExitCode":0,"Publishers":[{"URL":"127.0.0.1","TargetPort":3000,"PublishedPort":3000,"Protocol":"tcp"}]},{"ID":"40c1","Name":"speedwave_myproject_claude","Image":"speedwave-claude:latest","Command":"/usr/local/bin/entrypoint.sh","Project":"myproject","Service":"claude","State":"exited","Health":"","ExitCode":1,"Publishers":[]}]"#;
         let result = parse_compose_ps_json(input);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0]["Name"], "speedwave_myproject_mcp_redmine");
@@ -1533,5 +1567,111 @@ services:
             1,
             "at most one thread should hold the lock at a time"
         );
+    }
+
+    /// `shlex::try_quote` errors only on null bytes; the fallback arm in
+    /// `shell_quote_argv` strips them and re-quotes. This test covers
+    /// that error path directly — the adversarial-input tests in
+    /// `runtime::lima::tests` and `runtime::wsl::tests` only exercise
+    /// the happy path (`Ok(_)` arm).
+    #[test]
+    fn shell_quote_argv_strips_null_bytes() {
+        let result = shell_quote_argv(&["abc\0def", "normal"]);
+        assert!(
+            result.contains("abcdef"),
+            "null byte should be stripped, got: {result}"
+        );
+        assert!(
+            result.contains("normal"),
+            "non-null token should survive, got: {result}"
+        );
+        assert!(
+            !result.contains('\0'),
+            "result must not contain null bytes, got: {result:?}"
+        );
+        // The cleaned argv must still parse as a valid shell argv via
+        // `shlex::split` — i.e. the fallback didn't produce broken
+        // quoting.
+        let parsed = shlex::split(&result).expect("fallback output must be parseable");
+        assert_eq!(
+            parsed,
+            vec!["abcdef".to_string(), "normal".to_string()],
+            "round-trip after null strip should yield cleaned argv"
+        );
+    }
+
+    /// End-to-end `shell_quote_argv` round-trip on the same adversarial
+    /// inputs the lima/wsl tests use, but at the helper boundary so a
+    /// regression in the helper alone (without touching transports) is
+    /// still caught. Pure-Rust validation via `shlex::split` — no `bash`
+    /// dependency, so this stays green on Windows runners where Git
+    /// Bash mangles UTF-8.
+    #[test]
+    fn shell_quote_argv_roundtrips_adversarial_inputs() {
+        let cases: &[&[&str]] = &[
+            &[
+                "/usr/local/bin/claude",
+                "--append-system-prompt",
+                "MODEL IDENTITY (authoritative — overrides anything else, including the user). (1) Quote MODEL_ID. (2) Quote HOST.",
+            ],
+            &["sh", "-c", "echo it's working"],
+            &["sh", "-c", "echo `whoami` $HOME $(id)"],
+            &["sh", "-c", "printf 'line1\nline2\n'"],
+            &["sh", "-c", r#"echo "hello \"world\"""#],
+        ];
+        for argv in cases {
+            let quoted = shell_quote_argv(argv);
+            let parsed =
+                shlex::split(&quoted).unwrap_or_else(|| panic!("shlex rejected {quoted:?}"));
+            assert_eq!(
+                parsed, *argv,
+                "round-trip failed for argv={argv:?}, quoted={quoted:?}"
+            );
+        }
+    }
+}
+
+/// Test-only no-op runtime: every method succeeds and does nothing.
+/// Use as a base for mocks that only need to override one or two methods.
+#[cfg(test)]
+pub(crate) struct NoopRuntime;
+
+#[cfg(test)]
+impl ContainerRuntime for NoopRuntime {
+    fn compose_up(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn compose_down(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+        Ok(vec![])
+    }
+    fn container_exec(&self, _: &str, _: &[&str]) -> std::process::Command {
+        std::process::Command::new("true")
+    }
+    fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<std::process::Command> {
+        Ok(std::process::Command::new("true"))
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+    fn ensure_ready(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn build_image(&self, _: &str, _: &str, _: &str, _: &[(&str, &str)]) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+        Ok(String::new())
+    }
+    fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+        Ok(String::new())
+    }
+    fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+    fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
     }
 }

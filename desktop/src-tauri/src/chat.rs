@@ -6,7 +6,7 @@ use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Events emitted to the Angular frontend via Tauri's event system.
 /// The frontend listens for `"chat_stream"` events with this payload.
@@ -41,6 +41,26 @@ pub enum StreamChunk {
         result_text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         context_window_size: Option<u64>,
+        /// UUID of the assistant message that just completed (ADR-046). Stays
+        /// `None` for error turns and for local-LLM paths that omit `message.id`
+        /// — the frontend degrades to "no retry target" for those entries.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        assistant_uuid: Option<String>,
+        /// Per-turn usage delta since the previous turn. When the stream carries
+        /// cumulative `usage`, `turn_usage = current - previous`. When the CLI
+        /// emits per-step `usage` (current behaviour), it equals `usage` with
+        /// cache fields normalized to 0.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_usage: Option<TurnUsage>,
+        /// Per-turn cost in USD. Computed as the delta of `total_cost_usd`
+        /// between this and the previous turn when authoritative; the
+        /// frontend falls back to `calculateCost()` if this is `None`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_cost: Option<f64>,
+        /// Model name for the turn when known. Populated from `modelUsage`
+        /// in the `result` message or from the most recent `SystemInit`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// Interactive question from Claude (AskUserQuestion tool).
     /// The frontend must display the question and send the answer back via `answer_question`.
@@ -61,6 +81,14 @@ pub enum StreamChunk {
         utilization: Option<f64>,
         resets_at: Option<u64>,
     },
+    /// Commits a UUID onto the most recent user entry (ADR-046). Emitted when
+    /// the parser first sees `{"type":"user","message":{"id":"...",...}}` with
+    /// a text-bearing user prompt (not a tool_result wrapper).
+    UserMessageCommit { uuid: String },
+    /// One-slot queued message (ADR-045) was drained server-side when the
+    /// previous turn ended. Frontend clears `state.pending_queue` on receipt
+    /// — the message is already in flight via stdin.
+    QueueDrained { session_id: String, text: String },
 }
 
 /// A single option in an AskUserQuestion prompt.
@@ -83,8 +111,53 @@ pub struct UsageInfo {
     pub cache_write_tokens: Option<u64>,
 }
 
+/// Per-turn token usage. All cache fields are required (missing values are
+/// normalized to 0), so the frontend can render without `??` guards.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TurnUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+}
+
+impl TurnUsage {
+    /// Create a `TurnUsage` from a `UsageInfo`, normalizing missing cache
+    /// fields to 0.
+    pub fn from_usage_info(usage: &UsageInfo) -> Self {
+        Self {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_tokens: usage.cache_read_tokens.unwrap_or(0),
+            cache_write_tokens: usage.cache_write_tokens.unwrap_or(0),
+        }
+    }
+
+    /// Per-turn delta between a cumulative snapshot and a previous snapshot.
+    /// Saturating subtraction protects against reset/resume events where the
+    /// current snapshot could momentarily be smaller than the previous one;
+    /// in that case the turn is reported as zero tokens rather than negative.
+    pub fn delta(current: &Self, previous: &Self) -> Self {
+        Self {
+            input_tokens: current.input_tokens.saturating_sub(previous.input_tokens),
+            output_tokens: current.output_tokens.saturating_sub(previous.output_tokens),
+            cache_read_tokens: current
+                .cache_read_tokens
+                .saturating_sub(previous.cache_read_tokens),
+            cache_write_tokens: current
+                .cache_write_tokens
+                .saturating_sub(previous.cache_write_tokens),
+        }
+    }
+}
+
 /// Tool name constant for the AskUserQuestion tool.
 const ASK_USER_TOOL_NAME: &str = "AskUserQuestion";
+
+// Stream-json protocol literals — see claude-agent-sdk-python types.py
+// (SDKControlRequest / SDKControlInterruptRequest).
+const MSG_TYPE_CONTROL_REQUEST: &str = "control_request";
+const CTRL_SUBTYPE_INTERRUPT: &str = "interrupt";
 
 /// Parsed control_request from Claude stdout.
 /// Also used as the pending request storage — keyed by `tool_use_id` in the HashMap.
@@ -104,6 +177,14 @@ pub struct LogEntry {
     pub message: String,
 }
 
+/// Adapts a legacy `(Option<StreamChunk>, Option<LogEntry>)` tuple into the
+/// `(Vec<StreamChunk>, Option<LogEntry>)` shape returned by `parse_line`.
+fn option_to_vec(
+    (chunk, log): (Option<StreamChunk>, Option<LogEntry>),
+) -> (Vec<StreamChunk>, Option<LogEntry>) {
+    (chunk.map(|c| vec![c]).unwrap_or_default(), log)
+}
+
 /// Stateful parser that tracks active content blocks across stream events.
 /// Maintains index→(tool_id, tool_name) map built from content_block_start events.
 pub struct StreamParser {
@@ -111,6 +192,25 @@ pub struct StreamParser {
     active_blocks: HashMap<u64, (String, String)>,
     /// Accumulated input_json per tool_id (built from ToolInputDelta chunks).
     tool_input: HashMap<String, String>,
+    /// Provisional assistant UUID tracked between `assistant` and `result`
+    /// events (ADR-046). Committed onto the `Result` chunk; `take`n when the
+    /// result arrives so a subsequent error turn cannot reuse a stale id.
+    pending_assistant_uuid: Option<String>,
+    /// UUIDs already emitted via `UserMessageCommit`, to guard against
+    /// duplicate commits when Claude Code re-emits a user message inside the
+    /// same turn (observed on retry/resume paths — the first user message
+    /// echoes back). A user prompt's UUID is committed exactly once.
+    committed_user_uuids: std::collections::HashSet<String>,
+    /// Snapshot of cumulative session usage taken at the start of the
+    /// current turn. Per-turn usage = current - previous. Kept here so
+    /// that `MessageDelta` (hypothetical cumulative event) and `Result`
+    /// both read the same baseline and compute a consistent delta.
+    previous_session_usage: TurnUsage,
+    /// Cumulative session cost in USD from the previous `Result`. Per-turn
+    /// cost = current total - previous total, when both are authoritative.
+    previous_session_cost: Option<f64>,
+    /// Last model seen (from `SystemInit` or `modelUsage` in a result).
+    last_model: Option<String>,
 }
 
 impl StreamParser {
@@ -119,32 +219,98 @@ impl StreamParser {
         Self {
             active_blocks: HashMap::new(),
             tool_input: HashMap::new(),
+            pending_assistant_uuid: None,
+            committed_user_uuids: std::collections::HashSet::new(),
+            previous_session_usage: TurnUsage::default(),
+            previous_session_cost: None,
+            last_model: None,
         }
+    }
+
+    /// Seeds the cumulative usage snapshot so the next `Result` subtracts
+    /// against the supplied baseline. Called on resume with the snapshot
+    /// computed from the existing transcript, so the first turn after a
+    /// resume reports a correct delta instead of `cumulative - 0`.
+    pub fn restore_session_snapshot(
+        &mut self,
+        usage: TurnUsage,
+        total_cost: Option<f64>,
+        model: Option<String>,
+    ) {
+        self.previous_session_usage = usage;
+        self.previous_session_cost = total_cost;
+        self.last_model = model;
+    }
+
+    /// Current cumulative usage snapshot. Tests use this to assert that the
+    /// snapshot advances after each turn.
+    #[cfg(test)]
+    pub fn previous_session_usage(&self) -> TurnUsage {
+        self.previous_session_usage
     }
 
     /// Parse a pre-parsed JSON value. Mutates internal state for block tracking.
-    /// Returns (chunk for frontend, optional log entry for session log).
+    /// Returns (chunks for frontend in emission order, optional log entry).
+    ///
+    /// The Vec lets a single stream-json line produce multiple UI chunks — for
+    /// example a `user` line with a text-bearing prompt AND a tool_result
+    /// wrapper (rare but possible) emits both `UserMessageCommit` and
+    /// `ToolResult`. Callers iterate and emit each chunk in order.
     pub fn parse_line(
         &mut self,
         parsed: &serde_json::Value,
-    ) -> (Option<StreamChunk>, Option<LogEntry>) {
+    ) -> (Vec<StreamChunk>, Option<LogEntry>) {
         let msg_type = parsed["type"].as_str().unwrap_or("");
 
         match msg_type {
-            "stream_event" => self.parse_stream_event(&parsed["event"]),
+            "stream_event" => option_to_vec(self.parse_stream_event(&parsed["event"])),
             "user" => self.parse_user_message(parsed),
-            "result" => self.parse_result(parsed),
-            // assistant — ignored (ADR-006: we stream via stream_event, finalize on result)
-            "system" => self.parse_system_message(parsed),
-            "rate_limit_event" => Self::parse_rate_limit_event(parsed),
-            _ => (None, None),
+            "result" => option_to_vec(self.parse_result(parsed)),
+            "assistant" => {
+                self.capture_assistant_uuid(parsed);
+                (Vec::new(), None)
+            }
+            "system" => option_to_vec(self.parse_system_message(parsed)),
+            "rate_limit_event" => option_to_vec(Self::parse_rate_limit_event(parsed)),
+            _ => (Vec::new(), None),
         }
     }
 
-    /// Reset state (e.g. on new conversation turn).
+    /// Capture the assistant message UUID (`message.id`) into
+    /// `pending_assistant_uuid`. The UUID is committed onto the next
+    /// `Result` chunk — see `parse_result`. Silently ignores missing/empty
+    /// ids (local LLMs without API-style ids still produce valid turns).
+    fn capture_assistant_uuid(&mut self, parsed: &serde_json::Value) {
+        if let Some(id) = parsed["message"]["id"].as_str() {
+            if !id.is_empty() {
+                self.pending_assistant_uuid = Some(id.to_string());
+            }
+        }
+    }
+
+    /// Reset per-message block state (e.g. on `message_stop`).
+    /// Does NOT reset the cumulative usage snapshot — that spans the whole
+    /// session and is only reset by `new_session()`.
     pub fn reset(&mut self) {
         self.active_blocks.clear();
         self.tool_input.clear();
+        self.pending_assistant_uuid = None;
+        // committed_user_uuids is NOT reset: it persists across turns for the
+        // lifetime of the session so a retry on an already-committed user
+        // UUID doesn't re-emit a duplicate commit chunk.
+    }
+
+    /// Reset all state for a fresh session (no snapshot restore). Used
+    /// when starting a brand-new conversation rather than resuming one.
+    ///
+    /// Currently used only by unit tests; a freshly constructed parser is
+    /// already in this state.
+    #[cfg(test)]
+    pub fn new_session(&mut self) {
+        self.reset();
+        self.previous_session_usage = TurnUsage::default();
+        self.previous_session_cost = None;
+        self.last_model = None;
     }
 
     /// Check if a parsed JSON value is a control_request. Returns parsed data if so.
@@ -361,15 +527,46 @@ impl StreamParser {
     }
 
     fn parse_user_message(
-        &self,
+        &mut self,
         parsed: &serde_json::Value,
-    ) -> (Option<StreamChunk>, Option<LogEntry>) {
+    ) -> (Vec<StreamChunk>, Option<LogEntry>) {
         let message = &parsed["message"];
         let content = &message["content"];
         let blocks = match content.as_array() {
             Some(b) => b,
-            None => return (None, None),
+            None => return (Vec::new(), None),
         };
+
+        let mut has_text = false;
+        let mut has_tool_result = false;
+        for block in blocks {
+            match block["type"].as_str().unwrap_or("") {
+                "text" => has_text = true,
+                "tool_result" => has_tool_result = true,
+                _ => {}
+            }
+        }
+
+        // A user message carrying text (a user prompt, not a tool_result
+        // wrapper) commits its UUID once per session. Tool-result wrappers
+        // reuse the prompt's UUID or carry different ids — we only want to
+        // retry-point against actual prompts.
+        if has_text && !has_tool_result {
+            if let Some(id) = message["id"].as_str() {
+                if !id.is_empty() && !self.committed_user_uuids.contains(id) {
+                    self.committed_user_uuids.insert(id.to_string());
+                    return (
+                        vec![StreamChunk::UserMessageCommit {
+                            uuid: id.to_string(),
+                        }],
+                        Some(LogEntry {
+                            prefix: "USER",
+                            message: format!("commit uuid={id}"),
+                        }),
+                    );
+                }
+            }
+        }
 
         for block in blocks {
             let block_type = block["type"].as_str().unwrap_or("");
@@ -378,7 +575,7 @@ impl StreamParser {
                     Some(s) if !s.is_empty() => s.to_string(),
                     _ => {
                         log::warn!("parse_user_message: tool_result block missing 'tool_use_id'");
-                        return (None, None);
+                        return (Vec::new(), None);
                     }
                 };
                 let is_error = block["is_error"].as_bool().unwrap_or(false);
@@ -407,26 +604,49 @@ impl StreamParser {
                 });
 
                 return (
-                    Some(StreamChunk::ToolResult {
+                    vec![StreamChunk::ToolResult {
                         tool_id: tool_use_id,
                         content: result_content,
                         is_error,
-                    }),
+                    }],
                     log_entry,
                 );
             }
         }
-        (None, None)
+        (Vec::new(), None)
     }
 
-    fn parse_result(&self, parsed: &serde_json::Value) -> (Option<StreamChunk>, Option<LogEntry>) {
+    fn parse_result(
+        &mut self,
+        parsed: &serde_json::Value,
+    ) -> (Option<StreamChunk>, Option<LogEntry>) {
         let is_error = parsed["is_error"].as_bool().unwrap_or(false);
 
         if is_error {
             let result_text = parsed["result"].as_str().unwrap_or("");
             if result_text.trim().is_empty() {
-                log::warn!("parse_result: is_error=true but result text is empty");
-                return (None, None);
+                // An `is_error=true` message with no `result` text is a protocol
+                // anomaly observed in the wild when a local LLM provider (e.g.
+                // llama.cpp/Qwen) returns a bare error response. Previously the
+                // chunk was dropped silently, leaving the user with an empty
+                // message bubble and no indication that anything went wrong.
+                //
+                // Surface a placeholder so the user sees *something*, and log
+                // the full response at DEBUG so a later troubleshooting session
+                // has the server payload to dig into.
+                log::warn!(
+                    "parse_result: is_error=true but result text is empty; \
+                     returning placeholder error chunk"
+                );
+                log::debug!("parse_result: empty-error payload: {parsed}");
+                return (
+                    Some(StreamChunk::Error {
+                        content: "The LLM returned an error without details. \
+                             Check the provider server logs or try a different model."
+                            .to_string(),
+                    }),
+                    None,
+                );
             }
             return (
                 Some(StreamChunk::Error {
@@ -446,16 +666,24 @@ impl StreamParser {
             .as_f64()
             .or_else(|| parsed["total_cost"].as_f64());
 
-        // contextWindow is constant for a given model — safe to take first entry.
-        // If Claude Code ever switches models mid-session, we'd need to reconcile.
-        let context_window_size = parsed["modelUsage"]
-            .as_object()
+        // modelUsage: cumulative per-model stats from the CLI. Used for
+        // contextWindow (constant per model) and for model identification.
+        let model_usage = parsed["modelUsage"].as_object();
+        let context_window_size = model_usage
             .and_then(|mu| mu.values().next())
             .and_then(|stats| stats["contextWindow"].as_u64());
 
-        // Usage: prefer flat "usage" (per-step, matches statusline's context_window data).
-        // modelUsage is cumulative across the session — NOT suitable for CTX %.
-        // Fall back to modelUsage only when flat usage is absent (shouldn't happen in practice).
+        // Pick the first model key from modelUsage if present; otherwise fall
+        // back to the most recent SystemInit model captured in state.
+        let model = model_usage
+            .and_then(|mu| mu.keys().next().cloned())
+            .or_else(|| self.last_model.clone());
+        // Keep parser state in sync so future turns without modelUsage still
+        // know the model.
+        if let Some(m) = model.as_deref() {
+            self.last_model = Some(m.to_string());
+        }
+
         let usage = if parsed["usage"].is_object() {
             let u = &parsed["usage"];
             Some(UsageInfo {
@@ -472,6 +700,28 @@ impl StreamParser {
             None
         };
 
+        // Per-turn usage: see `compute_turn_usage_from_result`.
+        let turn_usage = compute_turn_usage_from_result(
+            parsed,
+            usage.as_ref(),
+            &mut self.previous_session_usage,
+        );
+
+        // Per-turn cost. Use the authoritative delta of `total_cost_usd`
+        // when available (CLI aggregates across the session; our previous
+        // snapshot is the previous turn's cumulative total). For the first
+        // turn in a session without a prior snapshot, `total_cost` itself
+        // IS the first turn's cost.
+        let turn_cost = match (total_cost, self.previous_session_cost) {
+            (Some(current), Some(prev)) if current >= prev => Some(current - prev),
+            (Some(current), None) => Some(current),
+            _ => None,
+        };
+        // Update the cumulative cost snapshot for the next turn.
+        if let Some(t) = total_cost {
+            self.previous_session_cost = Some(t);
+        }
+
         let result_text = parsed["result"]
             .as_str()
             .filter(|s| !s.trim().is_empty())
@@ -482,6 +732,8 @@ impl StreamParser {
             message: "turn complete".to_string(),
         });
 
+        let assistant_uuid = self.pending_assistant_uuid.take();
+
         (
             Some(StreamChunk::Result {
                 session_id,
@@ -489,6 +741,10 @@ impl StreamParser {
                 usage,
                 result_text,
                 context_window_size,
+                assistant_uuid,
+                turn_usage,
+                turn_cost,
+                model,
             }),
             log_entry,
         )
@@ -539,7 +795,7 @@ impl StreamParser {
     /// Surfaces rate-limit and other actionable system messages as errors
     /// so the frontend can display them.
     fn parse_system_message(
-        &self,
+        &mut self,
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
         // ── Extract model from system init message ──
@@ -548,6 +804,9 @@ impl StreamParser {
         if parsed["subtype"].as_str() == Some("init") {
             if let Some(model) = parsed["model"].as_str() {
                 if !model.is_empty() {
+                    // Cache the model so subsequent result chunks can label
+                    // their meta line even when `modelUsage` is absent.
+                    self.last_model = Some(model.to_string());
                     let log_entry = Some(LogEntry {
                         prefix: "SYSTEM",
                         message: format!("init: model={model}"),
@@ -595,6 +854,76 @@ impl StreamParser {
             // Log but don't surface non-actionable system messages
             (None, log_entry)
         }
+    }
+}
+
+/// Extract per-turn usage from a parsed `result` message, updating the
+/// cumulative snapshot in place.
+///
+/// Two sources are possible:
+///
+///  * Flat `usage` (Claude Code CLI today) — already per-step, so the value
+///    is emitted as the turn and the snapshot accumulates it.
+///  * `modelUsage` only (cumulative per-model, no flat `usage`) — compute
+///    `turn = cumulative - snapshot` and advance the snapshot.
+///
+/// The flat-path snapshot value is kept in sync so that future switches
+/// between the two payload shapes remain consistent. Returns `None` when
+/// the result carries no usage information at all.
+fn compute_turn_usage_from_result(
+    parsed: &serde_json::Value,
+    flat: Option<&UsageInfo>,
+    snapshot: &mut TurnUsage,
+) -> Option<TurnUsage> {
+    if let Some(u) = flat {
+        let delta = TurnUsage::from_usage_info(u);
+        snapshot.input_tokens = snapshot.input_tokens.saturating_add(delta.input_tokens);
+        snapshot.output_tokens = snapshot.output_tokens.saturating_add(delta.output_tokens);
+        snapshot.cache_read_tokens = snapshot
+            .cache_read_tokens
+            .saturating_add(delta.cache_read_tokens);
+        snapshot.cache_write_tokens = snapshot
+            .cache_write_tokens
+            .saturating_add(delta.cache_write_tokens);
+        return Some(delta);
+    }
+    // Fallback path: only `modelUsage` is present. Compute the delta against
+    // the cumulative snapshot. After a resume, callers should restore the
+    // snapshot via `restore_session_snapshot` before the first Result; if
+    // not, the first delta equals the full cumulative total (best-effort).
+    let cumulative = extract_cumulative_usage(parsed)?;
+    let delta = TurnUsage::delta(&cumulative, snapshot);
+    *snapshot = cumulative;
+    Some(delta)
+}
+
+/// Sum `modelUsage` across all models to a single cumulative snapshot.
+/// Returns `None` when the payload has no `modelUsage` object or its
+/// values are missing usage fields.
+fn extract_cumulative_usage(parsed: &serde_json::Value) -> Option<TurnUsage> {
+    let model_usage = parsed["modelUsage"].as_object()?;
+    if model_usage.is_empty() {
+        return None;
+    }
+    let mut total = TurnUsage::default();
+    let mut any_field = false;
+    for stats in model_usage.values() {
+        for (key, target) in [
+            ("inputTokens", &mut total.input_tokens),
+            ("outputTokens", &mut total.output_tokens),
+            ("cacheReadInputTokens", &mut total.cache_read_tokens),
+            ("cacheCreationInputTokens", &mut total.cache_write_tokens),
+        ] {
+            if let Some(n) = stats[key].as_u64() {
+                *target = target.saturating_add(n);
+                any_field = true;
+            }
+        }
+    }
+    if any_field {
+        Some(total)
+    } else {
+        None
     }
 }
 
@@ -665,11 +994,42 @@ fn build_ask_user_response(request: &ControlRequest, selected_label: &str) -> se
     })
 }
 
+/// Validate a message UUID passed to `--resume-session-at`.
+///
+/// Claude Code's message ids take two shapes in the wild: Anthropic-API
+/// `msg_...` ids (alphanumeric with underscores) and UUID v4 strings.  Rather
+/// than enumerate both, we accept any bounded string whose characters are
+/// safe to pass as a CLI argument — no shell metacharacters, no whitespace,
+/// no path traversal. Empty strings are rejected so the caller can treat
+/// "no known retry target" as a distinct error condition.
+pub fn validate_retry_uuid(uuid: &str) -> anyhow::Result<()> {
+    if uuid.is_empty() {
+        anyhow::bail!("retry uuid must not be empty");
+    }
+    if uuid.len() > 128 {
+        anyhow::bail!("retry uuid too long (max 128 chars)");
+    }
+    // Allow [A-Za-z0-9_-] only — the two observed formats (API `msg_...`
+    // and UUID v4) fit within this set and it disallows shell injection.
+    for ch in uuid.chars() {
+        if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
+            anyhow::bail!("retry uuid contains invalid character: {ch:?}");
+        }
+    }
+    Ok(())
+}
+
 /// Build the argument list for Claude Code's stream-json mode.
 ///
 /// When `resume_session_id` is `Some`, adds `--resume <id>` to resume an
-/// existing conversation.
-pub fn build_claude_args(resume_session_id: Option<&str>, flags: &[&str]) -> Vec<String> {
+/// existing conversation. When `resume_at_uuid` is `Some`, additionally
+/// rewinds the conversation to that user-message UUID (ADR-046) — Claude
+/// Code's native retry flag.
+pub fn build_claude_args(
+    resume_session_id: Option<&str>,
+    resume_at_uuid: Option<&str>,
+    flags: &[String],
+) -> Vec<String> {
     let mut args = vec![
         consts::CLAUDE_BINARY.to_string(),
         "-p".to_string(),
@@ -688,8 +1048,13 @@ pub fn build_claude_args(resume_session_id: Option<&str>, flags: &[&str]) -> Vec
         args.push(id.to_string());
     }
 
+    if let Some(uuid) = resume_at_uuid {
+        args.push("--resume-session-at".to_string());
+        args.push(uuid.to_string());
+    }
+
     for flag in flags {
-        args.push(flag.to_string());
+        args.push(flag.clone());
     }
 
     args
@@ -698,6 +1063,31 @@ pub fn build_claude_args(resume_session_id: Option<&str>, flags: &[&str]) -> Vec
 /// Build the container name for a project's Claude container.
 pub fn claude_container_name(project: &str) -> String {
     format!("{}_{}_claude", consts::compose_prefix(), project)
+}
+
+/// Build the stream-json `control_request` payload for an interrupt.
+fn build_interrupt_payload(request_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": MSG_TYPE_CONTROL_REQUEST,
+        "request_id": request_id,
+        "request": { "subtype": CTRL_SUBTYPE_INTERRUPT },
+    })
+}
+
+/// Monotonic interrupt request_id (Claude requires uniqueness; we never
+/// correlate the response, so a counter is enough — no UUID dependency).
+fn next_interrupt_request_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    format!("req_interrupt_{}", COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Write a control_request payload + flush. Extracted so tests can assert
+/// the exact bytes against an in-memory writer.
+fn write_interrupt<W: Write>(w: &mut W, payload: &serde_json::Value) -> anyhow::Result<()> {
+    writeln!(w, "{}", payload)?;
+    w.flush()?;
+    Ok(())
 }
 
 /// Manages a Claude Code subprocess running inside the container.
@@ -728,22 +1118,37 @@ impl ChatSession {
         }
     }
 
-    /// Validate inputs and resolve config needed before spawning Claude.
-    /// Extracted from `start()` so validation logic is independently testable.
-    pub fn prepare_start(
+    /// Read-only accessor for the owning project name — required by the
+    /// retry command so it can re-construct an empty `ChatSession` after
+    /// stopping the old one.
+    pub fn project_name(&self) -> &str {
+        &self.project_name
+    }
+
+    /// Build the argv + container name for a Claude Code spawn.
+    ///
+    /// - `resume_session_id` adds `--resume <id>` (required for retry).
+    /// - `resume_at_uuid` adds `--resume-session-at <uuid>` (ADR-046 retry
+    ///   anchor). When both are `Some`, the spawn rewinds the session to the
+    ///   given user-message UUID and regenerates the assistant turn natively.
+    pub fn prepare_args(
         project_name: &str,
         user_config: &config::SpeedwaveUserConfig,
         resume_session_id: Option<&str>,
+        resume_at_uuid: Option<&str>,
     ) -> anyhow::Result<(Vec<String>, String)> {
         if let Some(id) = resume_session_id {
             history::validate_session_id(id)?;
+        }
+        if let Some(uuid) = resume_at_uuid {
+            validate_retry_uuid(uuid)?;
         }
 
         let project_dir = std::path::PathBuf::from(&user_config.require_project(project_name)?.dir);
 
         let resolved = config::resolve_claude_config(&project_dir, user_config, project_name);
 
-        let args = build_claude_args(resume_session_id, &resolved.flags);
+        let args = build_claude_args(resume_session_id, resume_at_uuid, &resolved.flags);
         let container = claude_container_name(project_name);
 
         Ok((args, container))
@@ -764,11 +1169,30 @@ impl ChatSession {
         app_handle: AppHandle,
         resume_session_id: Option<&str>,
     ) -> anyhow::Result<()> {
+        self.start_with_retry(app_handle, resume_session_id, None)
+    }
+
+    /// Start (or resume+retry) a Claude Code session.
+    ///
+    /// When `resume_at_uuid` is `Some`, Claude Code rewinds the session to
+    /// the given user-message UUID and regenerates the assistant turn
+    /// natively (ADR-046). The caller MUST also pass `resume_session_id`;
+    /// retry without a session is nonsensical.
+    pub fn start_with_retry(
+        &mut self,
+        app_handle: AppHandle,
+        resume_session_id: Option<&str>,
+        resume_at_uuid: Option<&str>,
+    ) -> anyhow::Result<()> {
         let rt = runtime::detect_runtime();
         let user_config = config::load_user_config()?;
 
-        let (args, container) =
-            Self::prepare_start(&self.project_name, &user_config, resume_session_id)?;
+        let (args, container) = Self::prepare_args(
+            &self.project_name,
+            &user_config,
+            resume_session_id,
+            resume_at_uuid,
+        )?;
 
         let mut cmd = rt.container_exec_piped(
             &container,
@@ -837,9 +1261,43 @@ impl ChatSession {
         let stdin_for_reader = shared_stdin;
         let stdout_log_path = session_log_path;
 
+        // On resume: recover the cumulative session state from the existing
+        // transcript so the first turn after resume reports a real per-turn
+        // delta. Without this seed the parser would compare the next
+        // cumulative snapshot against zero and emit the entire session
+        // total as a single turn. Failures here are non-fatal — we log and
+        // proceed with a zero baseline (matches pre-resume-seed behaviour).
+        let resume_seed = resume_session_id.and_then(|id| {
+            match history::compute_resume_snapshot(&self.project_name, id) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    log::warn!("resume snapshot for session {id} unavailable: {e}");
+                    None
+                }
+            }
+        });
+
         // Background thread: parse Claude's stream-json and emit Tauri events
         let h = std::thread::spawn(move || {
             let mut parser = StreamParser::new();
+            // ADR-042/043/044 — mirror every emitted chunk into the
+            // per-session JSON-Patch stream so the frontend's state-tree
+            // signal stays in lockstep with the legacy `chat_stream`
+            // bindings. The emitter buffers patches until the first
+            // `Result` event reveals the session_id, then flushes.
+            let mut patch_emitter = crate::patch_emitter::PatchEmitter::new();
+            if let Some(seed) = resume_seed {
+                parser.restore_session_snapshot(
+                    TurnUsage {
+                        input_tokens: seed.input_tokens,
+                        output_tokens: seed.output_tokens,
+                        cache_read_tokens: seed.cache_read_tokens,
+                        cache_write_tokens: seed.cache_write_tokens,
+                    },
+                    seed.total_cost,
+                    seed.model,
+                );
+            }
             let mut log_file = stdout_log_path
                 .as_deref()
                 .and_then(crate::log_file::open_log_file);
@@ -952,7 +1410,7 @@ impl ChatSession {
                 }
 
                 // 2. Normal stream events
-                let (chunk, log_entry) = parser.parse_line(&parsed);
+                let (chunks, log_entry) = parser.parse_line(&parsed);
                 if let Some(entry) = log_entry {
                     crate::log_file::write_log_line(&mut log_file, entry.prefix, &entry.message);
                 }
@@ -961,17 +1419,44 @@ impl ChatSession {
                 // - StreamChunk::Result / Error from normal turns
                 // - system messages (including non-actionable ones that
                 //   return no chunk but still indicate normal lifecycle)
-                if matches!(
-                    chunk,
-                    Some(StreamChunk::Result { .. }) | Some(StreamChunk::Error { .. })
-                ) || msg_type == "system"
-                {
+                let is_terminal = chunks
+                    .iter()
+                    .any(|c| matches!(c, StreamChunk::Result { .. } | StreamChunk::Error { .. }));
+                // Capture the session_id from a Result chunk before the
+                // chunks vector is consumed by the emit loop. ADR-045 drain
+                // happens here: when a turn ends, take any queued message
+                // for this session and write it to stdin as the next turn.
+                let result_session_id = chunks.iter().find_map(|c| match c {
+                    StreamChunk::Result { session_id, .. } => Some(session_id.clone()),
+                    _ => None,
+                });
+                if is_terminal || msg_type == "system" {
                     got_result = true;
+                    // Clear StreamParser per-turn state. message_stop also
+                    // triggers reset inside parse_line, but an interrupted
+                    // turn may emit Result without a preceding message_stop,
+                    // leaving active_blocks entries that could misroute
+                    // ToolInputDelta events in the next turn.
+                    parser.reset();
                 }
-                if let Some(chunk) = chunk {
+                let registry = app_handle.state::<crate::subscribe_cmd::MsgStoreRegistry>();
+                for chunk in chunks {
+                    patch_emitter.handle_chunk(&chunk, &registry);
                     if let Err(e) = app_handle.emit("chat_stream", chunk) {
                         log::warn!("failed to emit chat_stream event: {e}");
                     }
+                }
+                // ADR-042/043 lifecycle patches are emitted automatically
+                // by `patch_emitter.handle_chunk` when it sees `Result` —
+                // no separate hook needed.
+                // ADR-045 drain: after Result chunks have been emitted (so
+                // the frontend already saw `is_streaming=false`), take any
+                // queued message for this session and write it back to
+                // Claude's stdin as the next turn. The composer ALSO clears
+                // its local `state.pending_queue` via the `QueueDrained`
+                // event below — both sides converge on the same state.
+                if let Some(session_id) = result_session_id {
+                    drain_queued_message(&app_handle, &session_id, &stdin_for_reader);
                 }
             }
 
@@ -979,14 +1464,14 @@ impl ChatSession {
             // emit an error so the frontend doesn't hang with isStreaming=true.
             if !got_result {
                 log::warn!("stdout reader: stream ended without result");
-                let _ = app_handle.emit(
-                    "chat_stream",
-                    StreamChunk::Error {
-                        content:
-                            "Claude session ended unexpectedly. Check the session log for details."
-                                .to_string(),
-                    },
-                );
+                let chunk = StreamChunk::Error {
+                    content:
+                        "Claude session ended unexpectedly. Check the session log for details."
+                            .to_string(),
+                };
+                let registry = app_handle.state::<crate::subscribe_cmd::MsgStoreRegistry>();
+                patch_emitter.handle_chunk(&chunk, &registry);
+                let _ = app_handle.emit("chat_stream", chunk);
             }
         });
         self.drain_handles.push(h);
@@ -1018,7 +1503,7 @@ impl ChatSession {
         let shared = self
             .shared_stdin
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("stdin not available"))?;
+            .ok_or_else(|| anyhow::anyhow!("no active session"))?;
         let input = build_user_message(message);
         let mut stdin = shared
             .lock()
@@ -1059,7 +1544,7 @@ impl ChatSession {
         let shared = self
             .shared_stdin
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("stdin not available"))?;
+            .ok_or_else(|| anyhow::anyhow!("no active session"))?;
         let mut stdin = shared
             .lock()
             .map_err(|e| anyhow::anyhow!("stdin lock poisoned: {e}"))?;
@@ -1084,7 +1569,48 @@ impl ChatSession {
         Ok(())
     }
 
-    /// Stop the Claude subprocess.
+    /// Cancel the current turn without killing the session.
+    ///
+    /// Writes a stream-json `control_request` with `subtype: "interrupt"` to
+    /// Claude's stdin (protocol: `SDKControlInterruptRequest` in
+    /// https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/types.py).
+    /// Claude aborts the in-flight turn, emits a `result` with
+    /// `subtype: "error_during_execution"`, and stays ready for the next user
+    /// message on the same stdin — session, context, MCP hub, and history
+    /// preserved.
+    pub fn interrupt(&mut self) -> anyhow::Result<()> {
+        // Mirror send_message/answer_question: detect a child that has already
+        // exited so we surface a clean "session exited" (or OOM) error instead
+        // of a confusing broken-pipe write failure.
+        if let Some(child) = self.child.as_mut() {
+            if let Some(status) = child.try_wait()? {
+                self.child = None;
+                if speedwave_runtime::resources::is_oom_exit(&status) {
+                    anyhow::bail!("{}", speedwave_runtime::resources::OOM_MESSAGE);
+                }
+                anyhow::bail!("session exited ({status})");
+            }
+        }
+        let shared = self
+            .shared_stdin
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no active session"))?;
+        let request_id = next_interrupt_request_id();
+        let payload = build_interrupt_payload(&request_id);
+        let mut stdin = shared
+            .lock()
+            .map_err(|e| anyhow::anyhow!("stdin lock poisoned: {e}"))?;
+        if let Err(e) = write_interrupt(&mut *stdin, &payload) {
+            log::error!(
+                "interrupt: failed to write control_request (request_id={request_id}): {e}"
+            );
+            return Err(e);
+        }
+        log::info!("interrupt: control_request sent (request_id={request_id})");
+        Ok(())
+    }
+
+    /// Stop the Claude subprocess entirely (session end, not turn cancel).
     pub fn stop(&mut self) -> anyhow::Result<()> {
         // Drop stdin first to signal EOF to the child
         self.shared_stdin = None;
@@ -1112,12 +1638,41 @@ impl ChatSession {
         }
         // Join already-finished reader threads; detach any still running.
         // Pipes may still be open if the child didn't exit in time.
+        //
+        // When the child exits cleanly (the common case, including the
+        // 5 s wait above), the kernel closes its pipe ends immediately,
+        // which unblocks the reader's `read_line` with EOF — but the Rust
+        // thread still needs a short moment to propagate that through
+        // `BufReader::lines()` -> loop exit -> the `is_finished` flag. A
+        // naive `is_finished()` check right after `kill()` therefore
+        // produces noisy "still running, detaching" warnings even on the
+        // happy path. Give the readers a brief grace window (polled at
+        // 10 ms) so the flag has time to flip before we classify them.
+        //
+        // The deadline is shared across ALL reader handles, not per-handle —
+        // stdout and stderr from the same child both receive EOF at the same
+        // instant (when the child exits), so one shared window covers them.
+        // If the first handle is genuinely stuck and burns the full window,
+        // the second handle still gets at least one poll before classification.
+        // The window only adds latency when a reader is actually stuck (then
+        // we wait up to READER_GRACE_MS total and give up); in the common
+        // case each handle is finished on the very first poll.
+        const READER_GRACE_MS: u64 = 200;
+        const READER_POLL_MS: u64 = 10;
+        let reader_grace_deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(READER_GRACE_MS);
         for handle in self.drain_handles.drain(..) {
+            while !handle.is_finished() && std::time::Instant::now() < reader_grace_deadline {
+                std::thread::sleep(std::time::Duration::from_millis(READER_POLL_MS));
+            }
             let name = format!("{:?}", handle.thread().id());
-            // Detach — thread will exit on its own when pipes close.
-            // We can't block here because the child may not have exited.
             if !handle.is_finished() {
-                log::warn!("stop: reader thread {name} still running, detaching");
+                // Pipe is genuinely wedged — typically because an upstream
+                // in the SSH -> nerdctl chain didn't close its end. Detach
+                // so `stop()` still returns to the caller in a bounded time.
+                log::warn!(
+                    "stop: reader thread {name} still running after {READER_GRACE_MS}ms grace, detaching"
+                );
                 continue;
             }
             if let Err(e) = handle.join() {
@@ -1146,28 +1701,254 @@ impl Drop for ChatSession {
 /// Thread-safe wrapper for ChatSession, to be used from Tauri commands.
 pub type SharedChatSession = Arc<Mutex<ChatSession>>;
 
+/// Drain any queued message for `session_id` (ADR-045) and write it to
+/// `stdin` as the next turn. Called from the stream reader thread when a
+/// `Result` chunk is observed — i.e. the turn just ended and a new one
+/// can start. Best-effort: failures are logged, never fatal.
+fn drain_queued_message(
+    app_handle: &AppHandle,
+    session_id: &str,
+    stdin: &Arc<Mutex<std::process::ChildStdin>>,
+) {
+    let queue = app_handle.state::<speedwave_runtime::session::QueuedMessageService>();
+    let drained = match queue.take(session_id) {
+        Some(m) => m,
+        None => return,
+    };
+    let payload = build_user_message(&drained.text);
+    match stdin.lock() {
+        Ok(mut handle) => {
+            if let Err(e) = writeln!(handle, "{}", payload) {
+                log::warn!("queued-message write failed: {e}");
+                return;
+            }
+            if let Err(e) = handle.flush() {
+                log::warn!("queued-message flush failed: {e}");
+                return;
+            }
+        }
+        Err(e) => {
+            log::warn!("queued-message stdin lock poisoned: {e}");
+            return;
+        }
+    }
+    let drained_text = drained.text.clone();
+    if let Err(e) = app_handle.emit(
+        "chat_stream",
+        StreamChunk::QueueDrained {
+            session_id: session_id.to_string(),
+            text: drained.text,
+        },
+    ) {
+        log::warn!("failed to emit QueueDrained event: {e}");
+    }
+    // ADR-042/045 mirror: clear the state-tree's pending_queue slot.
+    use speedwave_runtime::stream::msg_store::LogMsg;
+    use speedwave_runtime::stream::ConversationPatch;
+    let registry = app_handle.state::<crate::subscribe_cmd::MsgStoreRegistry>();
+    let store = registry.store_for(session_id);
+    store.push(LogMsg::JsonPatch(ConversationPatch::set_pending_queue(
+        None,
+    )));
+    // The drained message is already in flight; record it as a state-tree
+    // event so subscribers can observe the queue lifecycle without listening
+    // to the legacy `chat_stream` channel.
+    log::debug!("queue drained: {} bytes for session", drained_text.len());
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
+    // -- interrupt protocol tests (behavioural via free helpers) --
+
+    #[test]
+    fn interrupt_without_active_session_errors() {
+        let mut s = ChatSession::new("test-project");
+        let err = s
+            .interrupt()
+            .expect_err("expected 'no active session' when stdin not set");
+        assert!(
+            err.to_string().contains("no active session"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn build_interrupt_payload_matches_sdk_protocol() {
+        // Wire format per SDKControlInterruptRequest in claude-agent-sdk-python.
+        let v = build_interrupt_payload("req_interrupt_42");
+        assert_eq!(v["type"], "control_request");
+        assert_eq!(v["request_id"], "req_interrupt_42");
+        assert_eq!(v["request"]["subtype"], "interrupt");
+        // Defensive: no extra top-level keys leak in.
+        let obj = v.as_object().expect("object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["request", "request_id", "type"]);
+    }
+
+    #[test]
+    fn next_interrupt_request_id_is_unique_and_prefixed() {
+        let a = next_interrupt_request_id();
+        let b = next_interrupt_request_id();
+        assert_ne!(a, b);
+        assert!(a.starts_with("req_interrupt_"));
+        assert!(b.starts_with("req_interrupt_"));
+    }
+
+    #[test]
+    fn write_interrupt_emits_single_ndjson_line() {
+        let payload = build_interrupt_payload("req_interrupt_test");
+        let mut buf: Vec<u8> = Vec::new();
+        write_interrupt(&mut buf, &payload).expect("write");
+        let s = String::from_utf8(buf).expect("utf8");
+        // Exactly one trailing newline (NDJSON framing) and one parse-able value.
+        assert!(s.ends_with('\n'), "must end with newline, got: {s:?}");
+        let line = s.trim_end_matches('\n');
+        assert!(!line.contains('\n'), "must be single line, got: {s:?}");
+        let parsed: serde_json::Value = serde_json::from_str(line).expect("valid json");
+        assert_eq!(parsed["request"]["subtype"], "interrupt");
+    }
+
+    #[test]
+    fn write_interrupt_propagates_io_errors() {
+        // Writer that always fails on first write — verifies the error path
+        // (the production code logs and returns this error to the caller).
+        struct FailWriter;
+        impl Write for FailWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "boom"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let payload = build_interrupt_payload("req_interrupt_err");
+        let err = write_interrupt(&mut FailWriter, &payload).expect_err("expected error");
+        assert!(err.to_string().contains("boom"), "got: {err}");
+    }
+
+    // -- ChatSession::stop() tests --
+
+    #[test]
+    fn stop_is_idempotent_when_no_session_running() {
+        let mut s = ChatSession::new("test-project");
+        assert!(s.stop().is_ok());
+        assert!(s.stop().is_ok());
+        assert!(s.child.is_none());
+        assert!(s.shared_stdin.is_none());
+        assert!(s.drain_handles.is_empty());
+        assert!(s.session_log_path.is_none());
+    }
+
+    #[test]
+    fn stop_grace_period_joins_reader_that_finishes_late() {
+        // Regression: `stop()` used to check `handle.is_finished()` the
+        // instant after `child.kill()` + `wait`, which races the reader
+        // thread's EOF propagation through BufReader::lines(). The flag
+        // would often read `false` for a reader that was about to exit
+        // cleanly anyway, producing noisy "still running, detaching"
+        // warnings even on the happy path.
+        //
+        // Simulate a reader that finishes after ~50ms (well below the
+        // 200ms grace window). `stop()` must join it instead of
+        // classifying it as "still running".
+        let mut s = ChatSession::new("test-project");
+        s.drain_handles.push(std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }));
+        let start = std::time::Instant::now();
+        assert!(s.stop().is_ok());
+        let elapsed = start.elapsed();
+        assert!(s.drain_handles.is_empty(), "handle must be drained");
+        // Upper bound: grace window is 200ms; joining a 50ms thread must
+        // finish well inside it. The generous ceiling absorbs CI jitter.
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "stop() took {elapsed:?} — grace window should have joined the reader well under 500ms"
+        );
+    }
+
+    #[test]
+    fn stop_grace_period_gives_up_on_genuinely_stuck_reader() {
+        // When a reader is truly wedged (pipe upstream didn't close), the
+        // grace window must still be bounded so `stop()` returns to the
+        // caller in a predictable time. We simulate a stuck reader by
+        // spawning a thread that sleeps longer than the grace window.
+        let mut s = ChatSession::new("test-project");
+        s.drain_handles.push(std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+        }));
+        let start = std::time::Instant::now();
+        assert!(s.stop().is_ok());
+        let elapsed = start.elapsed();
+        assert!(s.drain_handles.is_empty(), "handle must be drained");
+        // Upper bound: the grace window is 200ms total (shared across all
+        // handles, not per-handle) — stop() must detach the stuck reader
+        // within that window and return. 1000ms leaves plenty of room for
+        // CI jitter while still catching a regression to an unbounded join.
+        assert!(
+            elapsed < std::time::Duration::from_millis(1000),
+            "stop() took {elapsed:?} — a stuck reader must be detached within the grace window, not joined"
+        );
+    }
+
+    #[test]
+    fn stop_clears_pending_requests() {
+        let mut s = ChatSession::new("test-project");
+        s.pending_requests.lock().unwrap().insert(
+            "tool-1".to_string(),
+            ControlRequest {
+                request_id: "r1".to_string(),
+                tool_name: ASK_USER_TOOL_NAME.to_string(),
+                input: serde_json::json!({}),
+                tool_use_id: "tool-1".to_string(),
+            },
+        );
+        assert!(s.stop().is_ok());
+        assert!(s.pending_requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn second_session_can_be_created_after_stop() {
+        let mut s1 = ChatSession::new("test-project");
+        assert!(s1.stop().is_ok());
+        drop(s1);
+        let mut s2 = ChatSession::new("test-project");
+        assert!(s2.stop().is_ok());
+    }
+
     /// Convenience: parse a JSON string and call `parser.parse_line`.
-    /// Returns only the StreamChunk (for backward-compatible test assertions).
+    /// Returns the first StreamChunk (for backward-compatible test assertions
+    /// against single-chunk emissions).
     fn parse_line_str(parser: &mut StreamParser, line: &str) -> Option<StreamChunk> {
         let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
+        parser.parse_line(&parsed).0.into_iter().next()
+    }
+
+    /// Convenience: parse a JSON string and return all emitted chunks.
+    fn parse_line_all_str(parser: &mut StreamParser, line: &str) -> Vec<StreamChunk> {
+        let parsed: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
         parser.parse_line(&parsed).0
     }
 
     /// Convenience: parse a JSON string and call `parser.parse_line`.
-    /// Returns the full tuple (chunk, log_entry) for log entry assertions.
+    /// Returns the full tuple (first chunk, log_entry) for log entry assertions.
     fn parse_line_full(
         parser: &mut StreamParser,
         line: &str,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
-        match serde_json::from_str::<serde_json::Value>(line) {
-            Ok(parsed) => parser.parse_line(&parsed),
-            Err(_) => (None, None),
-        }
+        let parsed = match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(v) => v,
+            Err(_) => return (None, None),
+        };
+        let (chunks, log) = parser.parse_line(&parsed);
+        (chunks.into_iter().next(), log)
     }
 
     /// Convenience: parse a JSON string and call `StreamParser::try_parse_control_request`.
@@ -1231,6 +2012,10 @@ mod tests {
             }),
             result_text: None,
             context_window_size: None,
+            assistant_uuid: Some("msg_test".to_string()),
+            turn_usage: None,
+            turn_cost: None,
+            model: None,
         };
         let serialized = serde_json::to_string(&original).unwrap();
         let deserialized: StreamChunk = serde_json::from_str(&serialized).unwrap();
@@ -1388,6 +2173,44 @@ mod tests {
         assert!(parser.active_blocks.is_empty());
     }
 
+    /// Regression test for the interrupt path: an interrupted turn can emit
+    /// `result` without a preceding `message_stop`, so the stdout-reader
+    /// calls `parser.reset()` after every terminal chunk. Without that
+    /// reset, stale `active_blocks` entries would misroute
+    /// `ToolInputDelta` events in the next turn when Claude reuses the
+    /// same content-block index for a different tool.
+    #[test]
+    fn reset_after_result_prevents_stale_tool_contamination() {
+        let mut parser = StreamParser::new();
+
+        // Turn 1: a tool starts at index 0 and receives a partial input delta.
+        let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_OLD","name":"Read","input":{}}}}"#;
+        parse_line_str(&mut parser, start);
+        assert!(parser.active_blocks.contains_key(&0));
+
+        // Interrupt emits a `result` directly — no preceding `message_stop`.
+        // The stdout-reader loop calls `parser.reset()` after this chunk, so
+        // simulate that here (parse_line alone does not reset on `result`).
+        let result = r#"{"type":"result","subtype":"error_during_execution","session_id":"s","total_cost_usd":0.0,"usage":{}}"#;
+        parse_line_str(&mut parser, result);
+        parser.reset();
+
+        assert!(parser.active_blocks.is_empty());
+        assert!(parser.tool_input.is_empty());
+
+        // Turn 2: Claude reuses index 0 for a different tool. Without the
+        // reset above, an input delta at index 0 would still route to the
+        // OLD tool_id; after reset the new tool_id takes over cleanly.
+        let start2 = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_NEW","name":"Edit","input":{}}}}"#;
+        parse_line_str(&mut parser, start2);
+        let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file\":\"x\"}"}}}"#;
+        let chunk = parse_line_str(&mut parser, delta).expect("expected ToolInputDelta");
+        match chunk {
+            StreamChunk::ToolInputDelta { tool_id, .. } => assert_eq!(tool_id, "toolu_NEW"),
+            other => panic!("expected ToolInputDelta for toolu_NEW, got {other:?}"),
+        }
+    }
+
     // ── StreamParser: user tool_result ────────────────────────────────
 
     #[test]
@@ -1445,6 +2268,8 @@ mod tests {
                 usage,
                 result_text,
                 context_window_size,
+                assistant_uuid,
+                ..
             } => {
                 assert_eq!(session_id, "550e8400-e29b-41d4-a716-446655440000");
                 assert_eq!(total_cost, Some(0.015));
@@ -1455,6 +2280,10 @@ mod tests {
                 assert!(u.cache_write_tokens.is_none());
                 assert!(result_text.is_none(), "empty result should produce None");
                 assert!(context_window_size.is_none());
+                assert!(
+                    assistant_uuid.is_none(),
+                    "no preceding 'assistant' event should leave assistant_uuid empty"
+                );
             }
             other => panic!("expected Result, got {other:?}"),
         }
@@ -1538,19 +2367,34 @@ mod tests {
     }
 
     #[test]
-    fn parse_result_error_with_empty_result_returns_none() {
+    fn parse_result_error_with_empty_result_returns_placeholder_error() {
+        // Regression guard: an `is_error=true` message with empty/missing
+        // `result` text used to be swallowed silently, leaving the user
+        // with a blank bubble and no indication of failure. Local LLM
+        // providers (e.g. llama.cpp + Qwen) hit this path frequently, so
+        // the parser now surfaces a placeholder Error chunk so the UI
+        // always shows *something*.
         let mut parser = StreamParser::new();
-        let line = r#"{"type":"result","is_error":true,"result":""}"#;
-        assert!(
-            parse_line_str(&mut parser, line).is_none(),
-            "empty error result should be skipped"
-        );
-
-        let line_no_key = r#"{"type":"result","is_error":true}"#;
-        assert!(
-            parse_line_str(&mut parser, line_no_key).is_none(),
-            "missing result key with is_error should be skipped"
-        );
+        for line in [
+            r#"{"type":"result","is_error":true,"result":""}"#,
+            // Missing `result` key entirely — same semantics as empty.
+            r#"{"type":"result","is_error":true}"#,
+        ] {
+            let chunk = parse_line_str(&mut parser, line).unwrap_or_else(|| {
+                panic!(
+                    "empty/missing error result must now produce a chunk, not be dropped: {line}"
+                )
+            });
+            match chunk {
+                StreamChunk::Error { content } => {
+                    assert!(
+                        !content.trim().is_empty(),
+                        "placeholder content must be non-empty so the UI has something to render"
+                    );
+                }
+                other => panic!("expected Error chunk, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -1572,10 +2416,162 @@ mod tests {
     // ── StreamParser: ignored types ──────────────────────────────────
 
     #[test]
-    fn parse_assistant_type_is_ignored() {
+    fn parse_assistant_type_emits_no_chunk() {
+        // Assistant messages don't emit chunks — content streams via
+        // `stream_event` deltas, and the final `Result` carries the UUID.
+        // An assistant line WITHOUT a `message.id` (local LLM) is silently
+        // ignored just like before.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#;
         assert!(parse_line_str(&mut parser, line).is_none());
+        assert!(
+            parser.pending_assistant_uuid.is_none(),
+            "missing message.id must leave pending_assistant_uuid empty"
+        );
+    }
+
+    #[test]
+    fn parse_assistant_with_id_captures_pending_uuid() {
+        // Regression: the parser must stash `message.id` when seeing an
+        // `assistant` event so the next `Result` commits it.
+        let mut parser = StreamParser::new();
+        let line =
+            r#"{"type":"assistant","message":{"id":"msg_abc123","role":"assistant","content":[]}}"#;
+        let chunks = parse_line_all_str(&mut parser, line);
+        assert!(chunks.is_empty(), "assistant event must not emit chunks");
+        assert_eq!(parser.pending_assistant_uuid.as_deref(), Some("msg_abc123"));
+    }
+
+    #[test]
+    fn result_commits_pending_assistant_uuid_and_clears_it() {
+        // The assistant UUID seen before a Result commits ONTO that Result
+        // (ADR-046: atomic commit on turn completion) and is cleared so the
+        // next turn doesn't recycle a stale id.
+        let mut parser = StreamParser::new();
+        let assistant =
+            r#"{"type":"assistant","message":{"id":"msg_turn1","role":"assistant","content":[]}}"#;
+        let result = r#"{"type":"result","session_id":"550e8400-e29b-41d4-a716-446655440000","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1},"is_error":false,"result":""}"#;
+
+        parse_line_str(&mut parser, assistant);
+        let chunk = parse_line_str(&mut parser, result).unwrap();
+        match chunk {
+            StreamChunk::Result { assistant_uuid, .. } => {
+                assert_eq!(assistant_uuid.as_deref(), Some("msg_turn1"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+
+        // Fresh turn: Result with no preceding assistant must have None.
+        parser.reset();
+        let result2 = r#"{"type":"result","session_id":"550e8400-e29b-41d4-a716-446655440000","total_cost_usd":0.01,"is_error":false,"result":""}"#;
+        let chunk = parse_line_str(&mut parser, result2).unwrap();
+        match chunk {
+            StreamChunk::Result { assistant_uuid, .. } => {
+                assert!(
+                    assistant_uuid.is_none(),
+                    "stale uuid must not survive reset"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assistant_uuid_does_not_leak_into_error_result() {
+        // An error turn also `take`s the pending UUID so a subsequent
+        // successful turn that arrives without its own `assistant` event
+        // (an edge protocol) cannot be mislabeled with the errored turn's
+        // identity.
+        let mut parser = StreamParser::new();
+        let assistant =
+            r#"{"type":"assistant","message":{"id":"msg_err","role":"assistant","content":[]}}"#;
+        let error_result = r#"{"type":"result","is_error":true,"result":"something broke"}"#;
+        parse_line_str(&mut parser, assistant);
+        let chunk = parse_line_str(&mut parser, error_result).unwrap();
+        assert!(matches!(chunk, StreamChunk::Error { .. }));
+        // pending_assistant_uuid stays set here because `parse_result`
+        // short-circuits on `is_error=true`; the stdout-reader loop calls
+        // `parser.reset()` after every terminal chunk which clears it. The
+        // reset() is exercised explicitly to prove the clear happens.
+        parser.reset();
+        assert!(parser.pending_assistant_uuid.is_none());
+    }
+
+    #[test]
+    fn user_message_with_text_and_id_emits_user_message_commit() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"id":"u_hello","role":"user","content":[{"type":"text","text":"hello"}]}}"#;
+        let chunks = parse_line_all_str(&mut parser, line);
+        assert_eq!(chunks.len(), 1);
+        match &chunks[0] {
+            StreamChunk::UserMessageCommit { uuid } => assert_eq!(uuid, "u_hello"),
+            other => panic!("expected UserMessageCommit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_message_tool_result_does_not_emit_commit() {
+        // Tool-result wrappers carry a user role but must NOT commit a
+        // retry-point UUID — they're not real user prompts.
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"id":"u_tr","role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#;
+        let chunks = parse_line_all_str(&mut parser, line);
+        assert_eq!(chunks.len(), 1);
+        assert!(matches!(&chunks[0], StreamChunk::ToolResult { .. }));
+    }
+
+    #[test]
+    fn user_message_mixed_text_and_tool_result_emits_tool_result_only() {
+        // Mixed content (Claude Code occasionally interleaves a narrative
+        // text block alongside a tool_result wrapper in the same user
+        // event). The text presence MUST NOT trigger a UserMessageCommit:
+        // the message is still a tool-result wrapper, not a real prompt.
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"id":"u_mix","role":"user","content":[{"type":"text","text":"here is the result"},{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#;
+        let chunks = parse_line_all_str(&mut parser, line);
+        assert_eq!(chunks.len(), 1);
+        assert!(
+            matches!(&chunks[0], StreamChunk::ToolResult { .. }),
+            "expected ToolResult, not UserMessageCommit, for mixed message"
+        );
+    }
+
+    #[test]
+    fn user_message_commit_is_emitted_exactly_once() {
+        // Duplicate user messages (observed on retry/resume) must not
+        // emit the commit twice — only the first occurrence wins.
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"id":"u_once","role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        assert_eq!(parse_line_all_str(&mut parser, line).len(), 1);
+        assert_eq!(
+            parse_line_all_str(&mut parser, line).len(),
+            0,
+            "second occurrence of same user UUID must not re-emit"
+        );
+    }
+
+    #[test]
+    fn user_message_without_id_is_silent() {
+        let mut parser = StreamParser::new();
+        let line =
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        assert!(parse_line_all_str(&mut parser, line).is_empty());
+    }
+
+    #[test]
+    fn user_message_commit_survives_reset() {
+        // Across a turn boundary (reset), a previously-committed user UUID
+        // must stay in the dedup set — otherwise the re-echoed prompt on a
+        // resume would commit a second time.
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"user","message":{"id":"u_persist","role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        assert_eq!(parse_line_all_str(&mut parser, line).len(), 1);
+        parser.reset();
+        assert_eq!(
+            parse_line_all_str(&mut parser, line).len(),
+            0,
+            "reset must not clear committed_user_uuids"
+        );
     }
 
     #[test]
@@ -1737,7 +2733,8 @@ mod tests {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","utilization":73.5,"resets_at":1738425600}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
-        let (chunk, log_entry) = parser.parse_line(&parsed);
+        let (chunks, log_entry) = parser.parse_line(&parsed);
+        let chunk = chunks.into_iter().next();
         match chunk {
             Some(StreamChunk::RateLimit {
                 status,
@@ -1760,7 +2757,8 @@ mod tests {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
-        let (chunk, _) = parser.parse_line(&parsed);
+        let (chunks, _) = parser.parse_line(&parsed);
+        let chunk = chunks.into_iter().next();
         match chunk {
             Some(StreamChunk::RateLimit {
                 status,
@@ -1780,7 +2778,8 @@ mod tests {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","utilization":100.0,"resets_at":1738430000}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
-        let (chunk, _) = parser.parse_line(&parsed);
+        let (chunks, _) = parser.parse_line(&parsed);
+        let chunk = chunks.into_iter().next();
         match chunk {
             Some(StreamChunk::RateLimit {
                 status,
@@ -1872,24 +2871,41 @@ mod tests {
 
     #[test]
     fn build_claude_args_without_resume() {
-        let args = build_claude_args(None, &[]);
+        let args = build_claude_args(None, None, &[]);
         assert!(args.contains(&consts::CLAUDE_BINARY.to_string()));
         assert!(args.contains(&"-p".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
+        assert!(!args.contains(&"--resume-session-at".to_string()));
         assert!(args.contains(&"--permission-prompt-tool".to_string()));
     }
 
     #[test]
     fn build_claude_args_with_resume() {
         let id = "550e8400-e29b-41d4-a716-446655440000";
-        let args = build_claude_args(Some(id), &[]);
+        let args = build_claude_args(Some(id), None, &[]);
         let resume_pos = args.iter().position(|a| a == "--resume").unwrap();
         assert_eq!(args[resume_pos + 1], id);
+        assert!(!args.contains(&"--resume-session-at".to_string()));
+    }
+
+    #[test]
+    fn build_claude_args_with_resume_and_uuid() {
+        // ADR-046: retry uses `--resume <session>` + `--resume-session-at <uuid>`.
+        let session = "550e8400-e29b-41d4-a716-446655440000";
+        let uuid = "msg_retry_anchor";
+        let args = build_claude_args(Some(session), Some(uuid), &[]);
+        let resume_pos = args.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(args[resume_pos + 1], session);
+        let at_pos = args
+            .iter()
+            .position(|a| a == "--resume-session-at")
+            .expect("--resume-session-at must be present");
+        assert_eq!(args[at_pos + 1], uuid);
     }
 
     #[test]
     fn build_claude_args_includes_flags() {
-        let args = build_claude_args(None, &["--dangerously-skip-permissions"]);
+        let args = build_claude_args(None, None, &["--dangerously-skip-permissions".to_string()]);
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
     }
 
@@ -2322,7 +3338,7 @@ mod tests {
 
     #[test]
     fn build_claude_args_includes_permission_prompt_tool() {
-        let args = build_claude_args(None, &[]);
+        let args = build_claude_args(None, None, &[]);
         let pos = args
             .iter()
             .position(|a| a == "--permission-prompt-tool")
@@ -2332,17 +3348,17 @@ mod tests {
 
     // ── Control request fixture test ────────────────────────────────
 
-    // ── prepare_start tests ─────────────────────────────────────────
+    // ── prepare_args tests ──────────────────────────────────────────
 
     #[test]
-    fn prepare_start_fails_when_project_not_in_config() {
+    fn prepare_args_fails_when_project_not_in_config() {
         let user_config = config::SpeedwaveUserConfig {
             projects: vec![],
             active_project: None,
             selected_ide: None,
             log_level: None,
         };
-        let result = ChatSession::prepare_start("nonexistent", &user_config, None);
+        let result = ChatSession::prepare_args("nonexistent", &user_config, None, None);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -2352,7 +3368,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_start_fails_with_invalid_resume_session_id() {
+    fn prepare_args_fails_with_invalid_resume_session_id() {
         let user_config = config::SpeedwaveUserConfig {
             projects: vec![config::ProjectUserEntry {
                 name: "test".to_string(),
@@ -2365,12 +3381,36 @@ mod tests {
             selected_ide: None,
             log_level: None,
         };
-        let result = ChatSession::prepare_start("test", &user_config, Some("../../../etc/passwd"));
+        let result =
+            ChatSession::prepare_args("test", &user_config, Some("../../../etc/passwd"), None);
         assert!(result.is_err());
     }
 
     #[test]
-    fn prepare_start_succeeds_with_valid_project() {
+    fn prepare_args_fails_with_malformed_retry_uuid() {
+        let user_config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "test".to_string(),
+                dir: "/tmp/test".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        };
+        let result = ChatSession::prepare_args(
+            "test",
+            &user_config,
+            Some("550e8400-e29b-41d4-a716-446655440000"),
+            Some("$(rm -rf /)"),
+        );
+        assert!(result.is_err(), "shell-injection uuid must be rejected");
+    }
+
+    #[test]
+    fn prepare_args_succeeds_with_valid_project() {
         let user_config = config::SpeedwaveUserConfig {
             projects: vec![config::ProjectUserEntry {
                 name: "myproject".to_string(),
@@ -2383,7 +3423,7 @@ mod tests {
             selected_ide: None,
             log_level: None,
         };
-        let result = ChatSession::prepare_start("myproject", &user_config, None);
+        let result = ChatSession::prepare_args("myproject", &user_config, None, None);
         assert!(result.is_ok());
         let (args, container) = result.unwrap();
         assert!(args.contains(&"-p".to_string()));
@@ -2391,7 +3431,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_start_with_resume_includes_resume_flag() {
+    fn prepare_args_with_resume_includes_resume_flag() {
         let user_config = config::SpeedwaveUserConfig {
             projects: vec![config::ProjectUserEntry {
                 name: "proj".to_string(),
@@ -2405,11 +3445,78 @@ mod tests {
             log_level: None,
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
-        let result = ChatSession::prepare_start("proj", &user_config, Some(session_id));
+        let result = ChatSession::prepare_args("proj", &user_config, Some(session_id), None);
         assert!(result.is_ok());
         let (args, _container) = result.unwrap();
         assert!(args.contains(&"--resume".to_string()));
         assert!(args.contains(&session_id.to_string()));
+        assert!(!args.contains(&"--resume-session-at".to_string()));
+    }
+
+    #[test]
+    fn prepare_args_with_retry_uuid_includes_resume_session_at_flag() {
+        let user_config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            log_level: None,
+        };
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        let uuid = "msg_retry_me";
+        let result = ChatSession::prepare_args("proj", &user_config, Some(session_id), Some(uuid));
+        assert!(result.is_ok());
+        let (args, _) = result.unwrap();
+        assert!(args.contains(&"--resume-session-at".to_string()));
+        assert!(args.contains(&uuid.to_string()));
+    }
+
+    // ── validate_retry_uuid ──────────────────────────────────────────
+
+    #[test]
+    fn validate_retry_uuid_accepts_api_msg_ids() {
+        assert!(validate_retry_uuid("msg_01ABCdef_123").is_ok());
+    }
+
+    #[test]
+    fn validate_retry_uuid_accepts_uuid_v4() {
+        assert!(validate_retry_uuid("550e8400-e29b-41d4-a716-446655440000").is_ok());
+    }
+
+    #[test]
+    fn validate_retry_uuid_rejects_empty() {
+        assert!(validate_retry_uuid("").is_err());
+    }
+
+    #[test]
+    fn validate_retry_uuid_rejects_shell_metachars() {
+        for bad in ["a;b", "a b", "a|b", "`id`", "a$b", "a&b", "a'b", "a\"b"] {
+            assert!(
+                validate_retry_uuid(bad).is_err(),
+                "must reject shell-injection uuid: {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_retry_uuid_rejects_path_traversal() {
+        for bad in ["../x", "a/b", "a\\b"] {
+            assert!(
+                validate_retry_uuid(bad).is_err(),
+                "must reject path-traversal uuid: {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_retry_uuid_rejects_overlong() {
+        let too_long = "a".repeat(129);
+        assert!(validate_retry_uuid(&too_long).is_err());
     }
 
     // ── Silent failure prevention tests ──────────────────────────────
@@ -2593,6 +3700,10 @@ mod tests {
             usage: None,
             result_text: None,
             context_window_size: None,
+            assistant_uuid: None,
+            turn_usage: None,
+            turn_cost: None,
+            model: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(
@@ -2603,6 +3714,13 @@ mod tests {
             !json.contains("context_window_size"),
             "context_window_size should be absent when None, got: {json}"
         );
+        assert!(
+            !json.contains("assistant_uuid"),
+            "assistant_uuid should be absent when None, got: {json}"
+        );
+        assert!(!json.contains("turn_usage"));
+        assert!(!json.contains("turn_cost"));
+        assert!(!json.contains("\"model\""));
     }
 
     #[test]
@@ -2613,6 +3731,10 @@ mod tests {
             usage: None,
             result_text: None,
             context_window_size: Some(1_000_000),
+            assistant_uuid: None,
+            turn_usage: None,
+            turn_cost: None,
+            model: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(
@@ -2764,5 +3886,441 @@ mod tests {
             !log_path.exists(),
             "stop() on fresh session should not create log file"
         );
+    }
+
+    // ── TurnUsage + per-turn meta tests ─────────────────────────────
+
+    #[test]
+    fn turn_usage_from_usage_info_defaults_missing_cache_fields_to_zero() {
+        let info = UsageInfo {
+            input_tokens: 5,
+            output_tokens: 7,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+        };
+        let turn = TurnUsage::from_usage_info(&info);
+        assert_eq!(turn.input_tokens, 5);
+        assert_eq!(turn.output_tokens, 7);
+        assert_eq!(turn.cache_read_tokens, 0);
+        assert_eq!(turn.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn turn_usage_from_usage_info_preserves_present_cache_fields() {
+        let info = UsageInfo {
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: Some(10),
+            cache_write_tokens: Some(20),
+        };
+        let turn = TurnUsage::from_usage_info(&info);
+        assert_eq!(turn.cache_read_tokens, 10);
+        assert_eq!(turn.cache_write_tokens, 20);
+    }
+
+    #[test]
+    fn turn_usage_delta_subtracts_field_by_field() {
+        let prev = TurnUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 200,
+            cache_write_tokens: 10,
+        };
+        let curr = TurnUsage {
+            input_tokens: 150,
+            output_tokens: 75,
+            cache_read_tokens: 500,
+            cache_write_tokens: 12,
+        };
+        let delta = TurnUsage::delta(&curr, &prev);
+        assert_eq!(delta.input_tokens, 50);
+        assert_eq!(delta.output_tokens, 25);
+        assert_eq!(delta.cache_read_tokens, 300);
+        assert_eq!(delta.cache_write_tokens, 2);
+    }
+
+    #[test]
+    fn turn_usage_delta_saturates_on_reset() {
+        // After a resume or reset, `current` may momentarily be less than
+        // `previous`. The helper should report zero, not underflow.
+        let prev = TurnUsage {
+            input_tokens: 500,
+            output_tokens: 500,
+            cache_read_tokens: 500,
+            cache_write_tokens: 500,
+        };
+        let curr = TurnUsage {
+            input_tokens: 100,
+            output_tokens: 100,
+            cache_read_tokens: 100,
+            cache_write_tokens: 100,
+        };
+        let delta = TurnUsage::delta(&curr, &prev);
+        assert_eq!(delta.input_tokens, 0);
+        assert_eq!(delta.output_tokens, 0);
+        assert_eq!(delta.cache_read_tokens, 0);
+        assert_eq!(delta.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn parse_result_emits_turn_usage_from_flat_per_step_usage() {
+        let mut parser = StreamParser::new();
+        // First turn: flat usage with all four fields. With no modelUsage,
+        // the parser treats this as per-step and emits it directly.
+        let line = r#"{"type":"result","session_id":"s1","is_error":false,"result":"","total_cost_usd":0.003,"usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":30,"cache_creation_input_tokens":40}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                turn_usage,
+                turn_cost,
+                ..
+            } => {
+                let t = turn_usage.expect("turn_usage should be populated");
+                assert_eq!(t.input_tokens, 10);
+                assert_eq!(t.output_tokens, 20);
+                assert_eq!(t.cache_read_tokens, 30);
+                assert_eq!(t.cache_write_tokens, 40);
+                assert_eq!(turn_cost, Some(0.003));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_three_turn_cumulative_modelusage_produces_correct_deltas() {
+        let mut parser = StreamParser::new();
+        // Turn 1: cumulative = {in:5, out:3, cR:0, cW:10}. Delta = that.
+        let t1 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.01,"modelUsage":{"claude-opus-4-7":{"inputTokens":5,"outputTokens":3,"cacheReadInputTokens":0,"cacheCreationInputTokens":10}}}"#;
+        let c1 = parse_line_str(&mut parser, t1).unwrap();
+        match c1 {
+            StreamChunk::Result {
+                turn_usage,
+                turn_cost,
+                ..
+            } => {
+                let t = turn_usage.unwrap();
+                assert_eq!(t.input_tokens, 5);
+                assert_eq!(t.output_tokens, 3);
+                assert_eq!(t.cache_read_tokens, 0);
+                assert_eq!(t.cache_write_tokens, 10);
+                assert_eq!(turn_cost, Some(0.01));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+
+        // Turn 2: cumulative = {in:12, out:8, cR:100, cW:10}. Delta = {7,5,100,0}.
+        let t2 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.025,"modelUsage":{"claude-opus-4-7":{"inputTokens":12,"outputTokens":8,"cacheReadInputTokens":100,"cacheCreationInputTokens":10}}}"#;
+        let c2 = parse_line_str(&mut parser, t2).unwrap();
+        match c2 {
+            StreamChunk::Result {
+                turn_usage,
+                turn_cost,
+                ..
+            } => {
+                let t = turn_usage.unwrap();
+                assert_eq!(t.input_tokens, 7);
+                assert_eq!(t.output_tokens, 5);
+                assert_eq!(t.cache_read_tokens, 100);
+                assert_eq!(t.cache_write_tokens, 0);
+                assert!((turn_cost.unwrap() - 0.015).abs() < 1e-9);
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+
+        // Turn 3: cumulative = {in:20, out:13, cR:200, cW:10}. Delta = {8,5,100,0}.
+        let t3 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.040,"modelUsage":{"claude-opus-4-7":{"inputTokens":20,"outputTokens":13,"cacheReadInputTokens":200,"cacheCreationInputTokens":10}}}"#;
+        let c3 = parse_line_str(&mut parser, t3).unwrap();
+        match c3 {
+            StreamChunk::Result {
+                turn_usage,
+                turn_cost,
+                ..
+            } => {
+                let t = turn_usage.unwrap();
+                assert_eq!(t.input_tokens, 8);
+                assert_eq!(t.output_tokens, 5);
+                assert_eq!(t.cache_read_tokens, 100);
+                assert_eq!(t.cache_write_tokens, 0);
+                assert!((turn_cost.unwrap() - 0.015).abs() < 1e-9);
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_resume_session_restores_snapshot_correctly() {
+        // Simulate resuming mid-session: restore the cumulative snapshot
+        // from history, then verify the next Result's delta is computed
+        // against the restored baseline, not against zero.
+        let mut parser = StreamParser::new();
+        parser.restore_session_snapshot(
+            TurnUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_tokens: 200,
+                cache_write_tokens: 30,
+            },
+            Some(0.25),
+            Some("claude-sonnet-4-6".to_string()),
+        );
+
+        // First Result after resume: cumulative = {in:110, out:55, cR:200, cW:30}.
+        // Expected delta: {10, 5, 0, 0}. turn_cost = 0.30 - 0.25 = 0.05.
+        let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.30,"modelUsage":{"claude-sonnet-4-6":{"inputTokens":110,"outputTokens":55,"cacheReadInputTokens":200,"cacheCreationInputTokens":30}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                turn_usage,
+                turn_cost,
+                model,
+                ..
+            } => {
+                let t = turn_usage.unwrap();
+                assert_eq!(t.input_tokens, 10);
+                assert_eq!(t.output_tokens, 5);
+                assert_eq!(t.cache_read_tokens, 0);
+                assert_eq!(t.cache_write_tokens, 0);
+                assert!((turn_cost.unwrap() - 0.05).abs() < 1e-9);
+                assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+
+        // Snapshot advanced to the current cumulative total after the turn.
+        let snap = parser.previous_session_usage();
+        assert_eq!(snap.input_tokens, 110);
+        assert_eq!(snap.output_tokens, 55);
+    }
+
+    #[test]
+    fn parse_result_uses_systeminit_model_when_modelusage_absent() {
+        let mut parser = StreamParser::new();
+        // SystemInit captures the model
+        let init = r#"{"type":"system","subtype":"init","model":"claude-haiku-4-5"}"#;
+        parse_line_str(&mut parser, init);
+
+        // Result without modelUsage should fall back to the captured model
+        let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.001,"usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { model, .. } => {
+                assert_eq!(model.as_deref(), Some("claude-haiku-4-5"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_without_any_usage_emits_no_turn_usage() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","session_id":"s","is_error":false,"result":""}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                turn_usage,
+                turn_cost,
+                model,
+                ..
+            } => {
+                assert!(turn_usage.is_none());
+                assert!(turn_cost.is_none());
+                assert!(model.is_none());
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_treats_missing_cache_fields_as_zero() {
+        // Neither cache_read_input_tokens nor cache_creation_input_tokens —
+        // both must flatten to 0 in the emitted TurnUsage.
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.001,"usage":{"input_tokens":3,"output_tokens":4}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { turn_usage, .. } => {
+                let t = turn_usage.unwrap();
+                assert_eq!(t.input_tokens, 3);
+                assert_eq!(t.output_tokens, 4);
+                assert_eq!(t.cache_read_tokens, 0);
+                assert_eq!(t.cache_write_tokens, 0);
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_first_turn_cost_uses_total_cost_when_no_prior_snapshot() {
+        let mut parser = StreamParser::new();
+        // First Result: no previous cost snapshot — turn_cost == total_cost.
+        let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.123,"usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { turn_cost, .. } => {
+                assert_eq!(turn_cost, Some(0.123));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_turn_cost_is_none_when_total_cost_absent() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { turn_cost, .. } => {
+                assert!(turn_cost.is_none());
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_session_resets_cumulative_snapshot_and_model() {
+        let mut parser = StreamParser::new();
+        parser.restore_session_snapshot(
+            TurnUsage {
+                input_tokens: 10,
+                output_tokens: 10,
+                cache_read_tokens: 10,
+                cache_write_tokens: 10,
+            },
+            Some(0.5),
+            Some("claude-opus-4-7".to_string()),
+        );
+        parser.new_session();
+        assert_eq!(parser.previous_session_usage(), TurnUsage::default());
+        // Next Result with no prior history should emit the turn at face value.
+        let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.001,"usage":{"input_tokens":2,"output_tokens":3}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                turn_usage,
+                turn_cost,
+                ..
+            } => {
+                assert_eq!(turn_usage.unwrap().input_tokens, 2);
+                assert_eq!(turn_cost, Some(0.001));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_with_negative_cost_delta_drops_turn_cost() {
+        // Defensive: if the CLI ever reports a cumulative cost lower than
+        // the previous snapshot (resume edge case), we drop `turn_cost`
+        // rather than report a nonsense negative value.
+        let mut parser = StreamParser::new();
+        let t1 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.50}"#;
+        parse_line_str(&mut parser, t1);
+        let t2 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.30}"#;
+        let chunk = parse_line_str(&mut parser, t2).unwrap();
+        match chunk {
+            StreamChunk::Result { turn_cost, .. } => {
+                assert!(
+                    turn_cost.is_none(),
+                    "negative delta should drop turn_cost, got {turn_cost:?}"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_cumulative_usage_sums_multiple_models() {
+        // Rare but defined case: modelUsage has entries for two models
+        // (e.g., mid-session model switch). The cumulative is the sum.
+        let parsed: serde_json::Value = serde_json::from_str(
+            r#"{
+                "modelUsage": {
+                    "claude-opus-4-7": {"inputTokens":5,"outputTokens":3,"cacheReadInputTokens":0,"cacheCreationInputTokens":0},
+                    "claude-sonnet-4-6": {"inputTokens":2,"outputTokens":1,"cacheReadInputTokens":10,"cacheCreationInputTokens":0}
+                }
+            }"#,
+        )
+        .unwrap();
+        let cumulative = extract_cumulative_usage(&parsed).unwrap();
+        assert_eq!(cumulative.input_tokens, 7);
+        assert_eq!(cumulative.output_tokens, 4);
+        assert_eq!(cumulative.cache_read_tokens, 10);
+        assert_eq!(cumulative.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn extract_cumulative_usage_returns_none_for_absent_model_usage() {
+        let parsed: serde_json::Value = serde_json::from_str(r#"{"modelUsage": {}}"#).unwrap();
+        assert!(extract_cumulative_usage(&parsed).is_none());
+        let parsed2: serde_json::Value = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(extract_cumulative_usage(&parsed2).is_none());
+    }
+
+    #[test]
+    fn turn_usage_serializes_with_required_cache_fields() {
+        // No optional fields: cache_read/write are always present in the
+        // wire format so the TS frontend can render without `??` guards.
+        let t = TurnUsage {
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: 3,
+            cache_write_tokens: 4,
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains("\"input_tokens\":1"));
+        assert!(json.contains("\"output_tokens\":2"));
+        assert!(json.contains("\"cache_read_tokens\":3"));
+        assert!(json.contains("\"cache_write_tokens\":4"));
+    }
+
+    #[test]
+    fn first_turn_after_resume_seed_emits_delta_not_cumulative() {
+        // End-to-end-ish coverage of the resume path: feed the parser a
+        // seed that mirrors what `compute_resume_snapshot` would return for
+        // a real prior transcript, then assert the first new `result` line
+        // produces the per-turn delta — not the entire cumulative total.
+        // Without `restore_session_snapshot` being invoked on the live
+        // resume path, this test would fail with delta == cumulative.
+        let mut parser = StreamParser::new();
+        parser.restore_session_snapshot(
+            TurnUsage {
+                input_tokens: 90,
+                output_tokens: 40,
+                cache_read_tokens: 150,
+                cache_write_tokens: 20,
+            },
+            Some(0.20),
+            Some("claude-opus-4-7".to_string()),
+        );
+
+        // First post-resume Result: cumulative jumps by {5 in, 3 out}.
+        // Without the seed the parser would report all 95/43 as the turn.
+        let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.27,"modelUsage":{"claude-opus-4-7":{"inputTokens":95,"outputTokens":43,"cacheReadInputTokens":150,"cacheCreationInputTokens":20}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                turn_usage,
+                turn_cost,
+                ..
+            } => {
+                let t = turn_usage.expect("turn_usage must be present");
+                assert_eq!(
+                    t.input_tokens, 5,
+                    "input delta must be 95-90, not full cumulative"
+                );
+                assert_eq!(
+                    t.output_tokens, 3,
+                    "output delta must be 43-40, not full cumulative"
+                );
+                assert_eq!(t.cache_read_tokens, 0);
+                assert_eq!(t.cache_write_tokens, 0);
+                let cost = turn_cost.expect("turn_cost must be present");
+                assert!(
+                    (cost - 0.07).abs() < 1e-9,
+                    "cost delta must be 0.27-0.20, got {cost}"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
     }
 }

@@ -1,6 +1,6 @@
 import { Injectable, inject } from '@angular/core';
 import { TauriService } from './tauri.service';
-import type { BundleReconcileStatus, ProjectList } from '../models/update';
+import type { BundleReconcileStatus, ProjectEntry, ProjectList } from '../models/update';
 
 /** Lifecycle status of the project + container lifecycle. */
 export type ProjectStatus =
@@ -31,6 +31,12 @@ export interface AuthStatusResponse {
 export class ProjectStateService {
   activeProject: string | null = null;
   targetProject: string | null = null;
+  /**
+   * All configured projects from `~/.speedwave/config.json`. Exposed so views
+   * can resolve the directory of the active project (e.g. for the
+   * project-pill tooltip) without re-invoking `list_projects` themselves.
+   */
+  projects: ProjectEntry[] = [];
   status: ProjectStatus = 'loading';
   error = '';
   needsRestart = false;
@@ -96,6 +102,7 @@ export class ProjectStateService {
     try {
       const result = await this.tauri.invoke<ProjectList>('list_projects');
       this.activeProject = result.active_project;
+      this.projects = result.projects;
 
       // Check reconcile state before checking containers
       const bundleStatus = await this.tauri.invoke<BundleReconcileStatus>(
@@ -109,6 +116,22 @@ export class ProjectStateService {
       }
     } catch {
       // Outside Tauri — stay 'loading', listeners still ready
+    }
+  }
+
+  /**
+   * Re-fetch the configured project list so cached metadata
+   * (e.g. directories used by the project-pill tooltip) stays in sync after
+   * the user adds, renames, or switches projects. Fire-and-forget; failures
+   * leave the previous snapshot in place.
+   */
+  private async refreshProjectList(): Promise<void> {
+    try {
+      const refreshed = await this.tauri.invoke<ProjectList>('list_projects');
+      this.projects = refreshed.projects;
+      this.notifyChange();
+    } catch {
+      // Non-fatal — keep the stale list.
     }
   }
 
@@ -314,6 +337,11 @@ export class ProjectStateService {
         this.notifyChange();
         this.notifyReady();
         this.notifySettled();
+        // Fire-and-forget refresh of the project list so consumers
+        // (project-pill tooltip, switcher dropdown) eventually see
+        // freshly added/renamed entries. Notifications above don't wait
+        // for the round-trip — a stale list for one tick is acceptable.
+        void this.refreshProjectList();
       });
 
       await this.tauri.listen<{ project: string | null; error: string }>(

@@ -81,11 +81,10 @@ All 6 built-in services use `user: "${CONTAINER_USER}"` instead of `user: "1000:
 
 ### Substitution sites
 
-The `${CONTAINER_USER}` variable is resolved in three locations:
+The `${CONTAINER_USER}` variable is resolved in two locations:
 
 1. **`render_compose()`** — main compose template rendering, where all `${CONTAINER_USER}` placeholders in `compose.template.yml` are replaced.
-2. **`apply_llm_config()`** — dynamically created `llm-proxy` service, which injects `user: "{container_user}"` directly into the inline YAML.
-3. **`apply_plugins()`** — plugin compose generation, where `${CONTAINER_USER}` is resolved when generating plugin service containers.
+2. **`apply_plugins()`** — plugin compose generation, where `${CONTAINER_USER}` is resolved when generating plugin service containers.
 
 ### SecurityCheck: `check_container_user`
 
@@ -138,11 +137,11 @@ nerdctl supports `--uidmap` and `--gidmap` flags for per-container UID mapping o
 
 [^1]: [rootlesscontaine.rs — Getting Started with containerd](https://rootlesscontaine.rs/getting-started/containerd/)
 
-[^2]: [rootlesscontaine.rs — User Namespaces](https://rootlesscontaine.rs/getting-started/common/userns/)
+[^2]: [rootlesscontaine.rs — User Namespaces](https://rootlesscontaine.rs/how-it-works/userns/)
 
 [^3]: [Linux man-pages — user_namespaces(7)](https://man7.org/linux/man-pages/man7/user_namespaces.7.html)
 
-[^4]: [Lima default template — containerd runs as root inside the VM](https://github.com/lima-vm/lima/blob/master/examples/default.yaml)
+[^4]: [Lima default template — containerd runs as root inside the VM](https://github.com/lima-vm/lima/blob/master/templates/default.yaml)
 
 [^5]: [Microsoft — WSL2 architecture overview](https://learn.microsoft.com/en-us/windows/wsl/about#what-is-wsl-2)
 

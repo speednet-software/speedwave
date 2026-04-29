@@ -2,18 +2,17 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
-  EventEmitter,
-  Input,
-  OnChanges,
   OnDestroy,
-  Output,
+  effect,
   inject,
+  input,
+  output,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { IntegrationStatusEntry } from '../../models/integration';
 import { SaveCredentialsEvent } from '../service-card/service-card.component';
 import { TauriService } from '../../services/tauri.service';
+import { SpinIconComponent } from '../../shared/spin-icon.component';
 
 /** A single Redmine enumeration entry (project, status, tracker, etc.). */
 export interface RedmineEnumEntry {
@@ -128,13 +127,12 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
 /** Wizard-based configuration component for the Redmine integration. */
 @Component({
   selector: 'app-redmine-config',
-  standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, SpinIconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
       class="bg-sw-bg-dark border border-sw-border rounded-lg mb-3 overflow-hidden"
-      [attr.data-testid]="'integrations-service-' + svc.service"
+      [attr.data-testid]="'integrations-service-' + svc().service"
     >
       <!-- Card header -->
       <div class="flex justify-between items-center px-5 py-4">
@@ -142,40 +140,40 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
           class="flex items-center gap-3 flex-1 cursor-pointer bg-transparent border-none text-inherit font-inherit text-left p-0"
           type="button"
           data-testid="card-header-btn"
-          (click)="toggleExpand.emit(svc.service)"
+          (click)="toggleExpand.emit(svc().service)"
         >
           <span class="font-semibold text-base" data-testid="service-name">{{
-            svc.display_name
+            svc().display_name
           }}</span>
           <span
             class="text-[11px] px-2 py-0.5 rounded font-medium"
             data-testid="badge"
-            [attr.data-status]="svc.configured ? 'configured' : 'not-configured'"
-            [ngClass]="
-              svc.configured
-                ? 'bg-sw-success-dark text-sw-success-text'
-                : 'bg-sw-error-badge text-sw-error-text'
-            "
+            [attr.data-status]="svc().configured ? 'configured' : 'not-configured'"
+            [class.bg-sw-success-dark]="svc().configured"
+            [class.text-sw-success-text]="svc().configured"
+            [class.bg-sw-error-badge]="!svc().configured"
+            [class.text-sw-error-text]="!svc().configured"
           >
-            {{ svc.configured ? 'Configured' : 'Not Configured' }}
+            {{ svc().configured ? 'Configured' : 'Not Configured' }}
           </span>
         </button>
         <div class="flex items-center gap-3">
           <label
             class="relative inline-block w-[44px] h-[24px]"
             data-testid="toggle"
-            [attr.data-disabled]="!svc.configured"
-            [ngClass]="!svc.configured ? 'opacity-40 cursor-not-allowed' : ''"
-            [title]="svc.configured ? '' : 'Configure credentials to enable'"
+            [attr.data-disabled]="!svc().configured"
+            [class.opacity-40]="!svc().configured"
+            [class.cursor-not-allowed]="!svc().configured"
+            [title]="svc().configured ? '' : 'Configure credentials to enable'"
           >
             <input
               type="checkbox"
               class="peer sr-only"
-              [checked]="svc.enabled"
-              [disabled]="!svc.configured"
+              [checked]="svc().enabled"
+              [disabled]="!svc().configured"
               (change)="onToggle($event)"
-              [attr.data-testid]="'integrations-toggle-' + svc.service"
-              [ngClass]="!svc.configured ? 'cursor-not-allowed' : ''"
+              [attr.data-testid]="'integrations-toggle-' + svc().service"
+              [class.cursor-not-allowed]="!svc().configured"
             />
             <span
               class="absolute inset-0 bg-sw-slider rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-sw-accent before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
@@ -184,10 +182,10 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
         </div>
       </div>
       <p class="px-5 pb-3 text-sw-text-faint text-[13px] m-0" data-testid="card-description">
-        {{ svc.description }}
+        {{ svc().description }}
       </p>
 
-      @if (expanded) {
+      @if (expanded()) {
         <div class="px-5 pb-5 border-t border-sw-border" data-testid="card-body">
           <!-- State 1: Credentials entry -->
           @if (wizardState === 'credentials') {
@@ -240,10 +238,7 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
                 (click)="onValidate()"
               >
                 @if (validating) {
-                  <span
-                    class="inline-block w-3 h-3 border-2 border-sw-accent/30 border-t-sw-accent rounded-full animate-sw-spin"
-                    data-testid="redmine-validate-spinner"
-                  ></span>
+                  <app-spin-icon class="text-sw-accent" testId="redmine-validate-spinner" />
                   Validating...
                 } @else {
                   Validate
@@ -257,10 +252,7 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
             <div data-testid="redmine-state-mappings">
               @if (loadingEnumerations) {
                 <div class="flex items-center gap-2 my-4 text-sw-text-dim text-[13px]">
-                  <span
-                    class="inline-block w-4 h-4 border-2 border-sw-accent/30 border-t-sw-accent rounded-full animate-sw-spin"
-                    data-testid="redmine-enum-spinner"
-                  ></span>
+                  <app-spin-icon class="h-4 w-4 text-sw-accent" testId="redmine-enum-spinner" />
                   Loading Redmine configuration...
                 </div>
               } @else {
@@ -275,12 +267,12 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
                     id="redmine-project-select"
                     data-testid="redmine-project-dropdown"
                     class="w-full px-3 py-2.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-sm font-mono box-border focus:border-sw-accent focus:outline-none"
-                    [ngModel]="selectedProjectId"
-                    (ngModelChange)="selectedProjectId = $event"
+                    [value]="selectedProjectId ?? ''"
+                    (change)="onProjectSelectChange($event)"
                   >
-                    <option [ngValue]="null">All projects</option>
+                    <option value="">All projects</option>
                     @for (proj of enumerations?.projects ?? []; track proj.id) {
-                      <option [ngValue]="proj.id">{{ proj.name }}</option>
+                      <option [value]="proj.id">{{ proj.name }}</option>
                     }
                   </select>
                   @if (enumerations?.projects_truncated) {
@@ -310,12 +302,12 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
                         <select
                           class="flex-[2] px-2 py-1.5 bg-sw-bg-darkest border border-sw-border rounded text-sw-text text-[13px] font-mono"
                           [attr.data-testid]="'redmine-mapping-' + key"
-                          [ngModel]="getMappingValue(key)"
-                          (ngModelChange)="setMappingValue(key, $event)"
+                          [value]="getMappingValue(key) ?? ''"
+                          (change)="onMappingChange(key, $event)"
                         >
-                          <option [ngValue]="null">Not mapped</option>
+                          <option value="">Not mapped</option>
                           @for (entry of getEntriesForCategory(category); track entry.id) {
-                            <option [ngValue]="entry.id">{{ entry.name }} (#{{ entry.id }})</option>
+                            <option [value]="entry.id">{{ entry.name }} (#{{ entry.id }})</option>
                           }
                         </select>
                       </div>
@@ -351,14 +343,14 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
                 <div class="flex gap-2">
                   <span class="text-sw-text-dim">Host:</span>
                   <span class="text-sw-text font-mono" data-testid="redmine-configured-host">{{
-                    svc.current_values['host_url'] || hostUrl
+                    svc().current_values['host_url'] || hostUrl
                   }}</span>
                 </div>
-                @if (getConfiguredProjectName() || svc.current_values['project_id']) {
+                @if (getConfiguredProjectName() || svc().current_values['project_id']) {
                   <div class="flex gap-2">
                     <span class="text-sw-text-dim">Project:</span>
                     <span class="text-sw-text font-mono" data-testid="redmine-configured-project">{{
-                      getConfiguredProjectName() ?? svc.current_values['project_id']
+                      getConfiguredProjectName() ?? svc().current_values['project_id']
                     }}</span>
                   </div>
                 }
@@ -381,9 +373,9 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
                 </button>
                 <button
                   type="button"
-                  [attr.data-testid]="'integrations-remove-' + svc.service"
+                  [attr.data-testid]="'integrations-remove-' + svc().service"
                   class="px-5 py-1.5 bg-transparent text-sw-error-text border border-sw-error-text rounded text-[13px] font-mono cursor-pointer"
-                  (click)="deleteCredentials.emit(svc)"
+                  (click)="deleteCredentials.emit(svc())"
                 >
                   Remove Credentials
                 </button>
@@ -395,14 +387,14 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
     </div>
   `,
 })
-export class RedmineConfigComponent implements OnChanges, OnDestroy {
-  @Input({ required: true }) svc!: IntegrationStatusEntry;
-  @Input() expanded = false;
+export class RedmineConfigComponent implements OnDestroy {
+  readonly svc = input.required<IntegrationStatusEntry>();
+  readonly expanded = input(false);
 
-  @Output() saveCredentials = new EventEmitter<SaveCredentialsEvent>();
-  @Output() deleteCredentials = new EventEmitter<IntegrationStatusEntry>();
-  @Output() toggleExpand = new EventEmitter<string>();
-  @Output() toggleService = new EventEmitter<{ svc: IntegrationStatusEntry; event: Event }>();
+  readonly saveCredentials = output<SaveCredentialsEvent>();
+  readonly deleteCredentials = output<IntegrationStatusEntry>();
+  readonly toggleExpand = output<string>();
+  readonly toggleService = output<{ svc: IntegrationStatusEntry; event: Event }>();
 
   wizardState: WizardState = 'credentials';
   hostUrl = '';
@@ -410,7 +402,21 @@ export class RedmineConfigComponent implements OnChanges, OnDestroy {
   validating = false;
   validationError = '';
   loadingEnumerations = false;
-  enumerations: RedmineEnumerations | null = null;
+  /**
+   * Backing field for the {@link enumerations} accessor. Direct mutation goes
+   * through the setter so the OnPush template always re-renders without each
+   * caller having to remember `markForCheck`.
+   */
+  private _enumerations: RedmineEnumerations | null = null;
+  /** Currently loaded enumerations (projects, statuses, trackers, etc.). */
+  get enumerations(): RedmineEnumerations | null {
+    return this._enumerations;
+  }
+  /** Updates enumerations and notifies the OnPush template of the change. */
+  set enumerations(value: RedmineEnumerations | null) {
+    this._enumerations = value;
+    this.cdr.markForCheck();
+  }
   selectedProjectId: number | null = null;
   editedMappings: Record<string, number | null> = {};
 
@@ -421,26 +427,36 @@ export class RedmineConfigComponent implements OnChanges, OnDestroy {
   private tauri = inject(TauriService);
   private cdr = inject(ChangeDetectorRef);
 
-  /** Pre-populates fields and determines initial wizard state from inputs. */
-  ngOnChanges(): void {
-    if (this.svc) {
-      if (!this.hostUrl && this.svc.current_values['host_url']) {
-        this.hostUrl = this.svc.current_values['host_url'];
-      }
-      if (!this.apiKey && this.svc.current_values['api_key']) {
-        this.apiKey = this.svc.current_values['api_key'];
-      }
-      if (this.svc.configured && this.wizardState === 'credentials') {
-        this.wizardState = 'configured';
-      }
-      if (this.svc.mappings) {
-        this.restoreMappingsFromService();
-      }
-      if (this.svc.current_values['project_id']) {
-        const parsed = parseInt(this.svc.current_values['project_id'], 10);
-        if (!isNaN(parsed) && this.selectedProjectId === null) {
-          this.selectedProjectId = parsed;
-        }
+  /** Wires a reactive effect that re-applies service state whenever the `svc` input changes. */
+  constructor() {
+    effect(() => {
+      this.applyServiceState(this.svc());
+    });
+  }
+
+  /**
+   * Pre-populates form fields from the service's stored values and wizard state.
+   * Extracted from `ngOnChanges` so it can be triggered by the input effect.
+   * @param svc - the integration entry to apply
+   */
+  private applyServiceState(svc: IntegrationStatusEntry | undefined): void {
+    if (!svc) return;
+    if (!this.hostUrl && svc.current_values['host_url']) {
+      this.hostUrl = svc.current_values['host_url'];
+    }
+    if (!this.apiKey && svc.current_values['api_key']) {
+      this.apiKey = svc.current_values['api_key'];
+    }
+    if (svc.configured && this.wizardState === 'credentials') {
+      this.wizardState = 'configured';
+    }
+    if (svc.mappings) {
+      this.restoreMappingsFromService();
+    }
+    if (svc.current_values['project_id']) {
+      const parsed = parseInt(svc.current_values['project_id'], 10);
+      if (!isNaN(parsed) && this.selectedProjectId === null) {
+        this.selectedProjectId = parsed;
       }
     }
   }
@@ -464,7 +480,7 @@ export class RedmineConfigComponent implements OnChanges, OnDestroy {
    * @param event - the checkbox change event
    */
   onToggle(event: Event): void {
-    this.toggleService.emit({ svc: this.svc, event });
+    this.toggleService.emit({ svc: this.svc(), event });
   }
 
   /** Validates credentials against the Redmine API. */
@@ -523,6 +539,29 @@ export class RedmineConfigComponent implements OnChanges, OnDestroy {
   }
 
   /**
+   * Native `<select>` handler for the project picker. Empty string maps to
+   * `null` ("All projects"); anything else is parsed as the numeric Redmine
+   * project id.
+   * @param event - The native `change` event from the project `<select>`.
+   */
+  onProjectSelectChange(event: Event): void {
+    const raw = (event.target as HTMLSelectElement).value;
+    this.selectedProjectId = raw === '' ? null : Number(raw);
+  }
+
+  /**
+   * Native `<select>` handler for a mapping picker. Mirrors
+   * `onProjectSelectChange` but writes through `setMappingValue` so the
+   * edited-mappings dictionary stays the SSOT.
+   * @param key - The mapping key being edited.
+   * @param event - The native `change` event from the mapping `<select>`.
+   */
+  onMappingChange(key: string, event: Event): void {
+    const raw = (event.target as HTMLSelectElement).value;
+    this.setMappingValue(key, raw === '' ? null : Number(raw));
+  }
+
+  /**
    * Returns the enum entries for a given category.
    * @param category - the mapping category name
    */
@@ -573,7 +612,7 @@ export class RedmineConfigComponent implements OnChanges, OnDestroy {
     }
 
     this.saveCredentials.emit({
-      svc: this.svc,
+      svc: this.svc(),
       credentials,
       mappings: Object.keys(mappings).length > 0 ? mappings : null,
     });
@@ -604,8 +643,9 @@ export class RedmineConfigComponent implements OnChanges, OnDestroy {
     for (const value of Object.values(this.editedMappings)) {
       if (value !== null) count++;
     }
-    if (count === 0 && this.svc.mappings) {
-      return Object.keys(this.svc.mappings).length;
+    const mappings = this.svc().mappings;
+    if (count === 0 && mappings) {
+      return Object.keys(mappings).length;
     }
     return count;
   }
@@ -639,7 +679,7 @@ export class RedmineConfigComponent implements OnChanges, OnDestroy {
   private applyAutoMatching(): void {
     if (!this.enumerations) return;
 
-    const existingMappings = (this.svc.mappings as Record<string, number>) ?? {};
+    const existingMappings = (this.svc().mappings as Record<string, number>) ?? {};
     const hasExisting = Object.keys(existingMappings).length > 0;
 
     for (const category of this.mappingCategoryNames) {
@@ -659,7 +699,7 @@ export class RedmineConfigComponent implements OnChanges, OnDestroy {
 
   /** Restores mapping values from service data. */
   private restoreMappingsFromService(): void {
-    const mappings = this.svc.mappings as Record<string, number> | undefined;
+    const mappings = this.svc().mappings as Record<string, number> | undefined;
     if (!mappings) return;
     for (const [key, value] of Object.entries(mappings)) {
       if (!(key in this.editedMappings)) {

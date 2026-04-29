@@ -20,7 +20,8 @@ New-Item -ItemType Directory -Path "$dest\build-context\mcp-servers" -Force | Ou
 Copy-Item mcp-servers\tsconfig.base.json "$dest\build-context\mcp-servers\"
 
 # os is intentionally excluded — it runs on the host and is bundled separately as mcp-os/
-$services = @('shared','hub','slack','sharepoint','redmine','gitlab')
+# playwright has no own src/ — the image installs @playwright/mcp from npm at build time.
+$services = @('shared','hub','slack','sharepoint','redmine','gitlab','playwright')
 
 foreach ($svc in $services) {
     $svcDest = "$dest\build-context\mcp-servers\$svc"
@@ -29,7 +30,10 @@ foreach ($svc in $services) {
     if (Test-Path "mcp-servers\$svc\package-lock.json") {
         Copy-Item "mcp-servers\$svc\package-lock.json" "$svcDest\"
     }
-    Copy-Item -Recurse "mcp-servers\$svc\src" "$svcDest\src"
+    # Some services (e.g. playwright) wrap an upstream npm package and have no src/.
+    if (Test-Path "mcp-servers\$svc\src") {
+        Copy-Item -Recurse "mcp-servers\$svc\src" "$svcDest\src"
+    }
     if (Test-Path "mcp-servers\$svc\tsconfig.json") {
         Copy-Item "mcp-servers\$svc\tsconfig.json" "$svcDest\"
     }

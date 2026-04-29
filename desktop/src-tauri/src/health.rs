@@ -35,6 +35,19 @@ pub struct IdeBridgeHealth {
     pub port: Option<u16>,
     pub ws_url: Option<String>,
     pub detected_ides: Vec<DetectedIde>,
+    /// SSOT for "is an IDE actively connected to the bridge".
+    /// `None` in three distinct cases that callers should treat the same way
+    /// (UI shows "not connected"):
+    /// 1. No IDE has been selected via `select_ide` yet.
+    /// 2. The previously selected IDE is no longer detected (process exited
+    ///    between health polls).
+    /// 3. `load_user_config` failed (corrupt or unreadable config — see the
+    ///    `log::warn!` in `build_bridge_health`).
+    ///
+    /// Note that `port` / `ws_url` above describe the first detected IDE,
+    /// which may differ from `selected_ide`. Frontends should prefer
+    /// `selected_ide.{port, ws_url}` when both are present.
+    pub selected_ide: Option<DetectedIde>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -265,17 +278,49 @@ impl HealthMonitor {
 
     pub fn check_ide_bridge() -> IdeBridgeHealth {
         let detected_ides = list_available_ides();
-        let running = !detected_ides.is_empty();
-        // Expose first entry with a port in top-level fields for backwards compat
-        let first_with_port = detected_ides.iter().find(|i| i.port.is_some());
-        let port = first_with_port.and_then(|i| i.port);
-        let ws_url = first_with_port.and_then(|i| i.ws_url.clone());
-        IdeBridgeHealth {
-            running,
-            port,
-            ws_url,
-            detected_ides,
-        }
+        // Polled every 5 s — without a log entry an intermittent
+        // permission/IO error would silently degrade the bridge status to
+        // "disconnected" with no diagnostic trail.
+        let selected = match speedwave_runtime::config::load_user_config() {
+            Ok(cfg) => cfg.selected_ide,
+            Err(e) => {
+                log::warn!("ide_bridge health: load_user_config failed: {e}");
+                None
+            }
+        };
+        build_ide_bridge_health(detected_ides, selected.as_ref())
+    }
+}
+
+/// Pure helper: pair the live detected-IDE list with the user's selected IDE
+/// (read from config) and assemble the `IdeBridgeHealth` payload. Extracted
+/// from `check_ide_bridge` so the resolution logic is testable without
+/// touching the global config file.
+///
+/// `selected_ide` is `Some(d)` only when the user-selected entry is also
+/// currently detected — a stale config pointing at a dead IDE process
+/// resolves to `None` (UI renders "disconnected" rather than a stale port).
+pub(crate) fn build_ide_bridge_health(
+    detected_ides: Vec<DetectedIde>,
+    selected: Option<&speedwave_runtime::config::SelectedIde>,
+) -> IdeBridgeHealth {
+    let running = !detected_ides.is_empty();
+    // Expose first entry with a port in top-level fields for backwards compat
+    let first_with_port = detected_ides.iter().find(|i| i.port.is_some());
+    let port = first_with_port.and_then(|i| i.port);
+    let ws_url = first_with_port.and_then(|i| i.ws_url.clone());
+    let selected_ide = selected.and_then(|sel| {
+        detected_ides
+            .iter()
+            .find(|d| d.ide_name == sel.ide_name && d.port == Some(sel.port))
+            .cloned()
+    });
+    IdeBridgeHealth {
+        running,
+        port,
+        ws_url,
+        detected_ides,
+        selected_ide,
     }
 }
 
@@ -459,6 +504,7 @@ mod tests {
             port: None,
             ws_url: None,
             detected_ides: vec![],
+            selected_ide: None,
         };
         let overall = HealthReport::compute_overall_healthy(&vm, &mcp_os, &containers, true);
         let report = HealthReport {
@@ -491,6 +537,7 @@ mod tests {
             port: None,
             ws_url: None,
             detected_ides: vec![],
+            selected_ide: None,
         };
         let overall = HealthReport::compute_overall_healthy(&vm, &mcp_os, &containers, true);
         let report = HealthReport {
@@ -523,6 +570,7 @@ mod tests {
             port: None,
             ws_url: None,
             detected_ides: vec![],
+            selected_ide: None,
         };
         let overall = HealthReport::compute_overall_healthy(&vm, &mcp_os, &containers, true);
         let report = HealthReport {
@@ -555,6 +603,7 @@ mod tests {
             port: None,
             ws_url: None,
             detected_ides: vec![],
+            selected_ide: None,
         };
         let overall = HealthReport::compute_overall_healthy(&vm, &mcp_os, &containers, true);
         let report = HealthReport {
@@ -653,6 +702,7 @@ mod tests {
                 port: Some(12345),
                 ws_url: Some("ws://127.0.0.1:12345".to_string()),
             }],
+            selected_ide: None,
         };
         assert!(health.running);
         assert_eq!(health.port, Some(12345));
@@ -667,6 +717,7 @@ mod tests {
             port: None,
             ws_url: None,
             detected_ides: vec![],
+            selected_ide: None,
         };
         assert!(!health.running);
         assert!(health.port.is_none());
@@ -680,6 +731,7 @@ mod tests {
             port: Some(9999),
             ws_url: Some("ws://127.0.0.1:9999".to_string()),
             detected_ides: vec![],
+            selected_ide: None,
         };
         let json = serde_json::to_string(&health).unwrap();
         assert!(json.contains("\"running\":true"));
@@ -705,6 +757,7 @@ mod tests {
             port: None,
             ws_url: None,
             detected_ides: vec![],
+            selected_ide: None,
         };
         let overall = HealthReport::compute_overall_healthy(&vm, &mcp_os, &containers, true);
         let report = HealthReport {
@@ -1208,6 +1261,82 @@ mod tests {
         assert!(
             !super::check_mcp_os_alive_in(data_dir),
             "missing port file should return false"
+        );
+    }
+
+    // ─── build_ide_bridge_health: selected_ide resolution ───────────────
+
+    fn detected(name: &str, port: u16) -> DetectedIde {
+        DetectedIde {
+            ide_name: name.to_string(),
+            port: Some(port),
+            ws_url: Some(format!("ws://127.0.0.1:{port}")),
+        }
+    }
+
+    fn selected(name: &str, port: u16) -> speedwave_runtime::config::SelectedIde {
+        speedwave_runtime::config::SelectedIde {
+            ide_name: name.to_string(),
+            port,
+        }
+    }
+
+    #[test]
+    fn build_ide_bridge_health_resolves_selected_ide_when_detected() {
+        let detected_ides = vec![detected("VSCode", 6_900), detected("IntelliJ", 6_901)];
+        let sel = selected("VSCode", 6_900);
+        let report = super::build_ide_bridge_health(detected_ides.clone(), Some(&sel));
+        assert_eq!(
+            report.selected_ide.as_ref().map(|i| i.ide_name.as_str()),
+            Some("VSCode"),
+            "selected IDE matching a detected entry must surface in selected_ide"
+        );
+        assert!(
+            report.running,
+            "running must be true when ides are detected"
+        );
+        assert_eq!(report.detected_ides.len(), 2);
+    }
+
+    #[test]
+    fn build_ide_bridge_health_drops_selected_ide_when_no_longer_detected() {
+        // The user previously selected an IDE that has since exited. The
+        // resolver must return None so the UI renders "disconnected" rather
+        // than a stale port.
+        let detected_ides = vec![detected("IntelliJ", 6_901)];
+        let stale = selected("VSCode", 6_900);
+        let report = super::build_ide_bridge_health(detected_ides, Some(&stale));
+        assert!(
+            report.selected_ide.is_none(),
+            "selected_ide must drop to None when the selected IDE is no longer detected"
+        );
+    }
+
+    #[test]
+    fn build_ide_bridge_health_returns_none_when_no_selection() {
+        let detected_ides = vec![detected("VSCode", 6_900)];
+        let report = super::build_ide_bridge_health(detected_ides, None);
+        assert!(
+            report.selected_ide.is_none(),
+            "selected_ide must be None when the user has not selected any IDE"
+        );
+        assert!(
+            report.running,
+            "running stays true even without a selected IDE — daemon is scanning"
+        );
+    }
+
+    #[test]
+    fn build_ide_bridge_health_distinguishes_by_port_not_just_name() {
+        // Two IDE instances of the same family on different ports — the
+        // selection key includes port specifically so users can target a
+        // specific window.
+        let detected_ides = vec![detected("VSCode", 6_900), detected("VSCode", 6_902)];
+        let sel = selected("VSCode", 6_902);
+        let report = super::build_ide_bridge_health(detected_ides, Some(&sel));
+        assert_eq!(
+            report.selected_ide.as_ref().and_then(|i| i.port),
+            Some(6_902)
         );
     }
 }

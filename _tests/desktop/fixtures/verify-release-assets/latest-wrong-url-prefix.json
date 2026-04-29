@@ -1,0 +1,35 @@
+{
+  "version": "0.8.1",
+  "notes": "Release notes for 0.8.1",
+  "pub_date": "2026-04-16T00:00:00Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "canned-sig",
+      "url": "https://example.com/Speedwave_0.8.1_macOS_Apple_Silicon.app.tar.gz"
+    },
+    "darwin-aarch64-app": {
+      "signature": "canned-sig",
+      "url": "https://github.com/test/repo/releases/download/v0.8.1/Speedwave_0.8.1_macOS_Apple_Silicon.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "canned-sig",
+      "url": "https://github.com/test/repo/releases/download/v0.8.1/Speedwave_0.8.1_macOS_Intel.app.tar.gz"
+    },
+    "darwin-x86_64-app": {
+      "signature": "canned-sig",
+      "url": "https://github.com/test/repo/releases/download/v0.8.1/Speedwave_0.8.1_macOS_Intel.app.tar.gz"
+    },
+    "windows-x86_64": {
+      "signature": "canned-sig",
+      "url": "https://github.com/test/repo/releases/download/v0.8.1/Speedwave_0.8.1_x64-setup.nsis.zip"
+    },
+    "windows-x86_64-msi": {
+      "signature": "canned-sig",
+      "url": "https://github.com/test/repo/releases/download/v0.8.1/Speedwave_0.8.1_x64_en-US.msi.zip"
+    },
+    "windows-x86_64-nsis": {
+      "signature": "canned-sig",
+      "url": "https://github.com/test/repo/releases/download/v0.8.1/Speedwave_0.8.1_x64-setup.nsis.zip"
+    }
+  }
+}

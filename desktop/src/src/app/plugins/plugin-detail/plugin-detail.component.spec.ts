@@ -401,4 +401,66 @@ describe('PluginDetailComponent', () => {
       (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
     ).toBeNull();
   });
+
+  describe('terminal-minimal tabs + master toggle', () => {
+    it('renders four tabs: dashboard / settings / tools · N / logs', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      const tabBar = fixture.nativeElement.querySelector('[data-testid="tab-bar"]');
+      expect(tabBar).not.toBeNull();
+      expect(fixture.nativeElement.querySelector('[data-testid="tab-dashboard"]')).not.toBeNull();
+      expect(fixture.nativeElement.querySelector('[data-testid="tab-settings"]')).not.toBeNull();
+      const tools = fixture.nativeElement.querySelector('[data-testid="tab-tools"]');
+      expect(tools).not.toBeNull();
+      expect(tools.textContent).toContain('tools');
+      expect(fixture.nativeElement.querySelector('[data-testid="tab-logs"]')).not.toBeNull();
+    });
+
+    it('selecting the settings tab swaps the active panel', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      component.selectTab('settings');
+      fixture.detectChanges();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="settings-content"]')
+      ).not.toBeNull();
+      expect(fixture.nativeElement.querySelector('[data-testid="dashboard-content"]')).toBeNull();
+    });
+
+    it('logs tab routes to the global Logs view', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      component.selectTab('logs');
+      fixture.detectChanges();
+      const link = fixture.nativeElement.querySelector('[data-testid="logs-link"]');
+      expect(link).not.toBeNull();
+      link.click();
+      expect(mockRouter.navigate).toHaveBeenCalledWith(['/logs']);
+    });
+
+    it('renders the dashboard status + invocations cards', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      expect(fixture.nativeElement.querySelector('[data-testid="status-card"]')).not.toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="invocations-card"]')
+      ).not.toBeNull();
+      expect(fixture.nativeElement.querySelector('[data-testid="status-detail"]')).not.toBeNull();
+    });
+
+    it('header master toggle calls set_plugin_enabled and flips state', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      const target = component.plugin!;
+      const before = target.enabled;
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      await component.onMasterToggle();
+      expect(invokeSpy).toHaveBeenCalledWith(
+        'set_plugin_enabled',
+        expect.objectContaining({ enabled: !before })
+      );
+      // Hold a direct reference; project-ready listener can replace this.plugin.
+      expect(target.enabled).toBe(!before);
+    });
+  });
 });
