@@ -1,6 +1,17 @@
 # Changelog
 
 
+## [0.9.0](https://github.com/speednet-software/speedwave/compare/v0.8.0...v0.9.0) (2026-04-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* **desktop:** plugin.json api_key_env field is no longer honored; LiteLLM proxy container removed. Users on external (non-local) providers must migrate to Anthropic or a local provider.
+
+### Features
+
+* **desktop:** CDK migration, terminal redesign, LLM auto-discover, brand icons + runtime hardening ([#576](https://github.com/speednet-software/speedwave/issues/576)) ([26cfb67](https://github.com/speednet-software/speedwave/commit/26cfb67abd3b7ea7e3173ccb5ef221bd5fd83c25))
+
 ## [0.8.0](https://github.com/speednet-software/speedwave/compare/v0.7.5...v0.8.0) (2026-04-16)
 
 
