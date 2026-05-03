@@ -3022,6 +3022,13 @@ services:
         for entry in get_hub_env_seq(&serde_yaml_ng::from_str(&yaml).unwrap()) {
             if let Some((key, value)) = entry.split_once('=') {
                 if key.starts_with("WORKER_") && key.ends_with("_URL") {
+                    // WORKER_OS_URL is a host-side gateway (host.lima.internal
+                    // / host.docker.internal) with a dynamically assigned
+                    // mcp-os port — not a containerized worker. ADR-038
+                    // applies only to in-cluster workers.
+                    if key == "WORKER_OS_URL" {
+                        continue;
+                    }
                     assert!(
                         value.ends_with(&expected_suffix),
                         "{key} must point at :{} (ADR-038), got: {value}",
