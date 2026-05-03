@@ -794,11 +794,15 @@ fn apply_mcp_os_config_with_path(
     token_path: &std::path::Path,
     port_path: &std::path::Path,
 ) -> anyhow::Result<String> {
-    if !token_path.is_file() {
-        return Ok(yaml.to_string());
-    }
-
-    let token = std::fs::read_to_string(token_path)?.trim().to_string();
+    // Single read attempt: don't pre-check `is_file()` before `read_to_string`.
+    // The desktop process respawns mcp-os and rewrites these files at runtime,
+    // so a TOCTOU between exists-check and read can bubble up `os error 2`
+    // and abort `render_compose`. Treat any read failure the same as the
+    // file being absent — mcp-os is simply not configured for this run.
+    let token = match std::fs::read_to_string(token_path) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => return Ok(yaml.to_string()),
+    };
     if token.is_empty() {
         return Ok(yaml.to_string());
     }
@@ -4308,6 +4312,23 @@ services:
         assert_eq!(
             result, VALID_COMPOSE,
             "yaml should be unchanged when token path is a directory"
+        );
+    }
+
+    #[test]
+    fn test_mcp_os_config_skipped_when_token_path_does_not_exist() {
+        // The desktop process can delete and recreate ~/.speedwave/mcp-os-*
+        // files at any moment (mcp-os respawn). Treat a missing token file
+        // the same as an empty/absent config — never bubble up `os error 2`
+        // and abort `render_compose`.
+        let tmp = tempfile::tempdir().unwrap();
+        let token_path = tmp.path().join("does-not-exist");
+        let port_path = tmp.path().join("does-not-exist-port");
+
+        let result = apply_mcp_os_config_with_path(VALID_COMPOSE, &token_path, &port_path).unwrap();
+        assert_eq!(
+            result, VALID_COMPOSE,
+            "yaml should be unchanged when token file is absent"
         );
     }
 
