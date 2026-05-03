@@ -272,7 +272,12 @@ build-angular:
 # ── Rust tests ───────────────────────────────────────────────────────────────
 
 test-rust:
-	SPEEDWAVE_DATA_DIR= cargo test -p speedwave-runtime -p speedwave-cli
+	@# Tests share `consts::data_dir()` (~/.speedwave/) and several of them
+	@# write into `~/.speedwave/secrets/<project>/` or rely on mcp-os state
+	@# files. Parallel cargo-test threads race on those paths and surface
+	@# `os error 2` from `render_compose`. Force serial execution to keep
+	@# the suite deterministic until per-test data_dir isolation lands.
+	SPEEDWAVE_DATA_DIR= cargo test -p speedwave-runtime -p speedwave-cli -- --test-threads=1
 	@echo "✅ Rust tests passed"
 
 test-cli:
