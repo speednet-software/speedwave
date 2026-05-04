@@ -798,10 +798,17 @@ fn apply_mcp_os_config_with_path(
     // The desktop process respawns mcp-os and rewrites these files at runtime,
     // so a TOCTOU between exists-check and read can bubble up `os error 2`
     // and abort `render_compose`. Treat any read failure the same as the
-    // file being absent — mcp-os is simply not configured for this run.
+    // file being absent — mcp-os is simply not configured for this run —
+    // but log non-NotFound errors so permission/disk problems remain visible.
     let token = match std::fs::read_to_string(token_path) {
         Ok(s) => s.trim().to_string(),
-        Err(_) => return Ok(yaml.to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(yaml.to_string());
+        }
+        Err(e) => {
+            log::debug!("mcp-os token read failed ({e}); treating as not configured");
+            return Ok(yaml.to_string());
+        }
     };
     if token.is_empty() {
         return Ok(yaml.to_string());
