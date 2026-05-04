@@ -91,28 +91,32 @@ tauri-action's macOS signing logic was designed assuming the Tauri app has no bu
 
 #### Entitlements inventory
 
-Hardened Runtime disables several platform capabilities by default[^11]. Bundled binaries that use restricted APIs must carry entitlements plists to opt back in. The complete inventory:
+Hardened Runtime disables several platform capabilities by default[^11]. Bundled binaries that use restricted APIs must carry entitlements plists to opt back in. Each personal-information category — calendars, reminders, addressbook (contacts), photos-library, etc. — is a separate Resource Access entitlement under `com.apple.security.personal-information.*`; binaries that access multiple categories must declare each one independently, and each requires its own corresponding `NS*UsageDescription` key in `Info.plist`. The complete inventory:
 
-| Binary             | Entitlements plist     | Keys                                                | Reason                                                             |
-| ------------------ | ---------------------- | --------------------------------------------------- | ------------------------------------------------------------------ |
-| `nodejs/bin/node`  | `node.plist`           | `allow-jit`, `allow-unsigned-executable-memory`     | V8 JIT engine                                                      |
-| `lima/bin/limactl` | `virtualization.plist` | `com.apple.security.virtualization`                 | Apple Virtualization Framework[^16]                                |
-| `mail-cli`         | `apple-events.plist`   | `com.apple.security.automation.apple-events`        | Sends Apple Events to Mail.app/Outlook via osascript               |
-| `notes-cli`        | `apple-events.plist`   | `com.apple.security.automation.apple-events`        | Sends Apple Events to Notes.app via osascript                      |
-| `cli/speedwave`    | none                   | —                                                   | AOT Rust, no restricted APIs                                       |
-| `calendar-cli`     | `calendars.plist`      | `com.apple.security.personal-information.calendars` | EventKit read-write access (Hardened Runtime Resource Access)[^17] |
-| `reminders-cli`    | `calendars.plist`      | `com.apple.security.personal-information.calendars` | EventKit read-write access (Hardened Runtime Resource Access)[^17] |
+| Binary             | Entitlements plist     | Keys                                                | Reason                                                                       |
+| ------------------ | ---------------------- | --------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `nodejs/bin/node`  | `node.plist`           | `allow-jit`, `allow-unsigned-executable-memory`     | V8 JIT engine                                                                |
+| `lima/bin/limactl` | `virtualization.plist` | `com.apple.security.virtualization`                 | Apple Virtualization Framework[^16]                                          |
+| `mail-cli`         | `apple-events.plist`   | `com.apple.security.automation.apple-events`        | Sends Apple Events to Mail.app/Outlook via osascript                         |
+| `notes-cli`        | `apple-events.plist`   | `com.apple.security.automation.apple-events`        | Sends Apple Events to Notes.app via osascript                                |
+| `cli/speedwave`    | none                   | —                                                   | AOT Rust, no restricted APIs                                                 |
+| `calendar-cli`     | `calendars.plist`      | `com.apple.security.personal-information.calendars` | EventKit Calendar read-write access (Hardened Runtime Resource Access)[^17]  |
+| `reminders-cli`    | `reminders.plist`      | `com.apple.security.personal-information.reminders` | EventKit Reminders read-write access (Hardened Runtime Resource Access)[^17] |
 
 If a future bundled binary requires JIT (e.g. a Python runtime with PyPy), virtualization APIs, Apple Events automation, or access to personal information (calendars, contacts, photos), add its entitlements plist under `desktop/src-tauri/entitlements/` and reference it from the `SIGN_TARGETS` table in the script.
 
 **1b. Info.plist TCC usage descriptions.** Entitlements grant _capability_ at codesign time; TCC (Transparency, Consent, and Control) still requires a user-facing `NS*UsageDescription` key in `Info.plist` before macOS will display the consent prompt for protected resources. The two surfaces are parallel but distinct — missing either one silently breaks the feature. The required keys track the restricted APIs actually used by bundled binaries:
 
-- `NSRemindersUsageDescription`, `NSCalendarsUsageDescription` — EventKit, required by `reminders-cli` and `calendar-cli`
+- `NSRemindersUsageDescription`, `NSCalendarsUsageDescription` — EventKit legacy keys, macOS 13 fallback, required by `reminders-cli` and `calendar-cli`
+- `NSRemindersFullAccessUsageDescription` — pairs with `requestFullAccessToReminders` (macOS 14+), required by `reminders-cli`; per Apple TN3153[^18]
+- `NSCalendarsFullAccessUsageDescription` — pairs with `requestFullAccessToEvents` (macOS 14+), required by `calendar-cli`; per Apple TN3153[^18]
 - `NSContactsUsageDescription` — reserved for future Contacts access
 - `NSAppleEventsUsageDescription` — osascript → Apple Events, required by `mail-cli` and `notes-cli`
 - `NSFileProviderDomainUsageDescription` — FileProvider domains (OneDrive, iCloud Drive, Dropbox, Google Drive), required when the user's workspace directory lives under `~/Library/CloudStorage/`. Lima's virtiofs mount inherits the host app's TCC attribution, so without this key macOS silently blocks reads from CloudStorage paths inside the VM (see anthropics/claude-code#26981 for the same pattern in Claude Code)
 
-[^17]: Apple's Hardened Runtime documentation lists Calendars under Resource Access — `com.apple.security.personal-information.calendars` is required for EventKit read-write access. There is no separate Reminders entitlement; the calendars entitlement covers both Calendar and Reminders since both use EventKit. See https://developer.apple.com/documentation/security/hardened_runtime
+[^17]: Apple's Hardened Runtime documentation defines `com.apple.security.personal-information.calendars` and `com.apple.security.personal-information.reminders` as separate Resource Access entitlements; both are required by binaries that call the corresponding EventKit APIs. On macOS 14+, the corresponding Info.plist keys split similarly — `NSCalendarsFullAccessUsageDescription` pairs with `requestFullAccessToEvents`, and `NSRemindersFullAccessUsageDescription` pairs with `requestFullAccessToReminders`, per Apple TN3153. See https://developer.apple.com/documentation/security/hardened_runtime and https://developer.apple.com/documentation/technotes/tn3153-adopting-api-changes-for-eventkit-in-ios-macos-and-watchos.
+
+[^18]: [Apple TN3153 — "Adopting new APIs for EventKit in iOS, macOS, and watchOS"](https://developer.apple.com/documentation/technotes/tn3153-adopting-api-changes-for-eventkit-in-ios-macos-and-watchos) — documents `requestFullAccessToEvents` and `requestFullAccessToReminders` (macOS 14+) and the corresponding `NSCalendarsFullAccessUsageDescription` / `NSRemindersFullAccessUsageDescription` usage description keys.
 
 [^16]: Lima uses Apple's Virtualization.framework (`vmType: vz`) for VM management. The upstream Lima project carries a similar entitlements file at [`vz.entitlements`](https://github.com/lima-vm/lima/blob/master/vz.entitlements).
 

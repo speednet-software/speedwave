@@ -63,6 +63,7 @@ populate_targets() {
     cp "$ent_src/node.plist" "$SRC_TAURI/entitlements/node.plist"
     cp "$ent_src/virtualization.plist" "$SRC_TAURI/entitlements/virtualization.plist"
     cp "$ent_src/calendars.plist" "$SRC_TAURI/entitlements/calendars.plist"
+    cp "$ent_src/reminders.plist" "$SRC_TAURI/entitlements/reminders.plist"
     cp "$ent_src/apple-events.plist" "$SRC_TAURI/entitlements/apple-events.plist"
 }
 
@@ -181,9 +182,9 @@ for key in conf.get('bundle', {}).get('resources', {}):
     grep -qF 'calendar-cli:$SRC_TAURI/entitlements/calendars.plist' "$SCRIPT"
 }
 
-@test "reminders-cli has calendars entitlement in SIGN_TARGETS" {
-    grep -qF 'reminders-cli:$CALENDARS_ENTITLEMENTS' "$SCRIPT" || \
-    grep -qF 'reminders-cli:$SRC_TAURI/entitlements/calendars.plist' "$SCRIPT"
+@test "reminders-cli has reminders entitlement in SIGN_TARGETS" {
+    grep -qF 'reminders-cli:$REMINDERS_ENTITLEMENTS' "$SCRIPT" || \
+    grep -qF 'reminders-cli:$SRC_TAURI/entitlements/reminders.plist' "$SCRIPT"
 }
 
 @test "speedwave CLI has no entitlements in SIGN_TARGETS" {
@@ -225,7 +226,7 @@ for key in conf.get('bundle', {}).get('resources', {}):
 @test "all entitlements plists exist" {
     local ent_dir="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements"
     local plist
-    for plist in node.plist virtualization.plist calendars.plist apple-events.plist; do
+    for plist in node.plist virtualization.plist calendars.plist reminders.plist apple-events.plist; do
         [ -f "$ent_dir/$plist" ] || {
             echo "Missing entitlements plist: $ent_dir/$plist" >&2
             return 1
@@ -255,7 +256,7 @@ for path in glob.glob('$ent_dir/*.plist'):
     # structurally inseparable.
     local ent_dir="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements"
     local plist keys
-    for plist in virtualization.plist calendars.plist apple-events.plist; do
+    for plist in virtualization.plist calendars.plist reminders.plist apple-events.plist; do
         keys="$(grep -c '<key>' "$ent_dir/$plist")"
         [ "$keys" = "1" ] || {
             echo "Expected 1 <key> in $plist, got $keys" >&2
@@ -267,6 +268,11 @@ for path in glob.glob('$ent_dir/*.plist'):
 @test "calendars.plist contains calendars entitlement" {
     local plist="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements/calendars.plist"
     grep -qF 'com.apple.security.personal-information.calendars' "$plist"
+}
+
+@test "reminders.plist contains reminders entitlement" {
+    local plist="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements/reminders.plist"
+    grep -qF 'com.apple.security.personal-information.reminders' "$plist"
 }
 
 @test "virtualization.plist contains virtualization entitlement" {

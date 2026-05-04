@@ -335,6 +335,59 @@ describe('IntegrationsComponent', () => {
     });
   });
 
+  describe('onOsToggleClick()', () => {
+    it('displays_multi_line_error_with_preserved_newlines', async () => {
+      await component.ngOnInit();
+      const multiLineError =
+        'Calendar access was previously denied. Open Terminal and run:\ntccutil reset Calendar pl.speedwave.desktop\nThen click the toggle again.';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'set_os_integration_enabled') throw new Error(multiLineError);
+        return undefined;
+      };
+      const os = component.osIntegrations[0];
+      const event = { stopPropagation: vi.fn() } as unknown as Event;
+      await component.onOsToggleClick(os, event);
+
+      expect(component.error).toBe(multiLineError);
+
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+
+      const errorDiv = fixture.nativeElement.querySelector('[data-testid="integrations-error"]');
+      expect(errorDiv).not.toBeNull();
+      expect(errorDiv.classList.contains('whitespace-pre-line')).toBe(true);
+    });
+
+    it('displays_silent_reject_recovery_text', async () => {
+      await component.ngOnInit();
+      const silentRejectError =
+        'Calendar permission was silently rejected by macOS. This usually means a signing or entitlement problem — please reinstall Speedwave from a fresh download.';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'set_os_integration_enabled') throw new Error(silentRejectError);
+        return undefined;
+      };
+      const os = component.osIntegrations[0];
+      const event = { stopPropagation: vi.fn() } as unknown as Event;
+      await component.onOsToggleClick(os, event);
+
+      expect(component.error).toContain('reinstall Speedwave from a fresh download');
+    });
+
+    it('reverts_toggle_state_on_permission_failure', async () => {
+      await component.ngOnInit();
+      const os = component.osIntegrations[0];
+      const previous = os.enabled;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'set_os_integration_enabled') throw new Error('Permission denied');
+        return undefined;
+      };
+      const event = { stopPropagation: vi.fn() } as unknown as Event;
+      await component.onOsToggleClick(os, event);
+
+      expect(os.enabled).toBe(previous);
+    });
+  });
+
   describe('handleSaveCredentials()', () => {
     it('invokes save_integration_credentials and reloads', async () => {
       await component.ngOnInit();
