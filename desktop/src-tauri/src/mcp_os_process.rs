@@ -100,7 +100,7 @@ impl McpOsProcess {
         //    binaries from the flat Resources/ layout instead of the dev-mode
         //    source tree.
         let mut cmd = speedwave_runtime::binary::command("node");
-        cmd.arg(script_path).env_clear();
+        cmd.arg(script_path);
         apply_child_env(&mut cmd, &CurrentProcessEnv);
 
         let mut child = cmd
@@ -286,11 +286,15 @@ impl EnvSource for CurrentProcessEnv {
 
 /// Apply the child-process environment policy to `cmd` from the given source.
 ///
-/// `cmd.env_clear()` must be called by the caller. The function only adds
-/// the variables the child needs (PATH, HOME/USERPROFILE, optional Windows
-/// CSPRNG vars, and SPEEDWAVE_RESOURCES_DIR/SPEEDWAVE_PROD when running as a
-/// bundled .app). It never reads `std::env` directly.
+/// Starts by clearing the inherited environment so secrets in the parent
+/// (API keys, tokens, credentials) cannot leak to mcp-os, then adds back
+/// only the variables the child needs (PATH, HOME/USERPROFILE, optional
+/// Windows CSPRNG vars, and SPEEDWAVE_RESOURCES_DIR/SPEEDWAVE_PROD when
+/// running as a bundled .app). Never reads `std::env` directly — every
+/// value comes from `env`, so callers in tests can supply a `FakeEnv`.
 fn apply_child_env(cmd: &mut Command, env: &dyn EnvSource) {
+    cmd.env_clear();
+
     // On Windows, Node.js (OpenSSL) needs certain system environment variables
     // to initialize BCryptGenRandom for its CSPRNG. Without these, node.exe
     // aborts with "Assertion failed: ncrypto::CSPRNG(nullptr, 0)".
@@ -1578,7 +1582,6 @@ srv.listen(0, '127.0.0.1', () => {
     #[test]
     fn apply_child_env_forwards_resources_dir_and_sets_prod_flag() {
         let mut cmd = Command::new("/bin/true");
-        cmd.env_clear();
         let env = FakeEnv(&[
             ("PATH", "/usr/bin:/bin"),
             ("HOME", "/home/test"),
@@ -1612,7 +1615,6 @@ srv.listen(0, '127.0.0.1', () => {
     #[test]
     fn apply_child_env_omits_prod_flag_when_resources_unset() {
         let mut cmd = Command::new("/bin/true");
-        cmd.env_clear();
         let env = FakeEnv(&[("PATH", "/usr/bin:/bin"), ("HOME", "/home/test")]);
 
         apply_child_env(&mut cmd, &env);
@@ -1632,7 +1634,6 @@ srv.listen(0, '127.0.0.1', () => {
     #[test]
     fn apply_child_env_treats_empty_resources_as_unset() {
         let mut cmd = Command::new("/bin/true");
-        cmd.env_clear();
         let env = FakeEnv(&[
             ("PATH", "/usr/bin:/bin"),
             (consts::BUNDLE_RESOURCES_ENV, ""),
@@ -1654,7 +1655,6 @@ srv.listen(0, '127.0.0.1', () => {
     #[test]
     fn apply_child_env_defaults_path_and_home_to_empty_when_missing() {
         let mut cmd = Command::new("/bin/true");
-        cmd.env_clear();
         let env = FakeEnv(&[]);
 
         apply_child_env(&mut cmd, &env);
@@ -1670,6 +1670,29 @@ srv.listen(0, '127.0.0.1', () => {
             captured.get("HOME").map(String::as_str),
             Some(""),
             "HOME must always be set on Unix children, even if empty"
+        );
+    }
+
+    #[test]
+    fn apply_child_env_drops_inherited_vars_not_in_policy() {
+        // The function must clear inherited environment before adding back
+        // only policy-approved variables, otherwise a parent secret
+        // (API keys, tokens) would silently leak to the mcp-os child.
+        let mut cmd = Command::new("/bin/true");
+        cmd.env("SUPER_SECRET_TOKEN", "do-not-leak");
+        cmd.env("ANTHROPIC_API_KEY", "sk-leak");
+
+        let env = FakeEnv(&[("PATH", "/usr/bin")]);
+        apply_child_env(&mut cmd, &env);
+
+        let captured = captured_env(&cmd);
+        assert!(
+            !captured.contains_key("SUPER_SECRET_TOKEN"),
+            "inherited SUPER_SECRET_TOKEN must be wiped by apply_child_env"
+        );
+        assert!(
+            !captured.contains_key("ANTHROPIC_API_KEY"),
+            "inherited ANTHROPIC_API_KEY must be wiped by apply_child_env"
         );
     }
 }
