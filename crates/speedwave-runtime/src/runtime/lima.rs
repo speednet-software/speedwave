@@ -443,9 +443,9 @@ impl ContainerRuntime for LimaRuntime {
         // Both transports below (direct SSH, `limactl shell`) round-trip the
         // remote command through a POSIX shell on the VM side, so every
         // argument must be `shlex`-quoted before we hand it off — see
-        // `super::shell_quote_argv`. Without this, prompts containing `(`,
-        // `)`, `'`, backticks, etc. (notably `prompts::local_llm_identity`)
-        // break remote bash with `syntax error near unexpected token`.
+        // `super::shell_quote_argv`. Without this, arguments containing `(`,
+        // `)`, `'`, backticks, etc. break remote bash with `syntax error
+        // near unexpected token`.
         let nerdctl_argv: Vec<&str> = [
             "sudo",
             "nerdctl",
@@ -1309,13 +1309,11 @@ mod tests {
         );
     }
 
-    /// Regression: prompts containing `(`, `)`, `'`, backticks, `$`, and
-    /// newlines (notably `prompts::local_llm_identity`, which expands to
-    /// `MODEL IDENTITY (authoritative — overrides …) … (1) … (2) …`) used
-    /// to break remote bash with `syntax error near unexpected token`,
-    /// because we passed `cmd` as separate argv tokens to `ssh`/`limactl`
-    /// which then re-joined them through a remote `sh -c`. The fix is
-    /// `shell_quote_argv`; this test pipes the constructed `remote_cmd`
+    /// Regression: arguments containing `(`, `)`, `'`, backticks, `$`, and
+    /// newlines used to break remote bash with `syntax error near unexpected
+    /// token`, because we passed `cmd` as separate argv tokens to `ssh`/
+    /// `limactl` which then re-joined them through a remote `sh -c`. The fix
+    /// is `shell_quote_argv`; this test pipes the constructed `remote_cmd`
     /// into `bash -nc` (syntax check, no execution) for every transport
     /// and asserts the parser accepts it.
     #[test]
@@ -1414,10 +1412,9 @@ mod tests {
     ///
     /// We deliberately do NOT spawn `bash -n` here even though it would
     /// be the canonical syntax check: Git Bash on `windows-latest`
-    /// corrupts multi-byte UTF-8 in command-line args/scripts (em-dash
-    /// in `prompts::local_llm_identity` triggers this), see Git for
-    /// Windows / claude-code#31295. A pure-Rust roundtrip via the same
-    /// `shlex` crate that produced the quoting is the lossless,
+    /// corrupts multi-byte UTF-8 in command-line args/scripts, see Git
+    /// for Windows / claude-code#31295. A pure-Rust roundtrip via the
+    /// same `shlex` crate that produced the quoting is the lossless,
     /// platform-independent equivalent.
     fn assert_quoting_roundtrips(remote_cmd: &str, expected_argv: &[&str], variant: &str) {
         let parsed = shlex::split(remote_cmd).unwrap_or_else(|| {

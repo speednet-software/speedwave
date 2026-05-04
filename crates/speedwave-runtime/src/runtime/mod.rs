@@ -518,11 +518,10 @@ fn is_stopped_container_error(message: &str) -> bool {
 /// that re-evaluate the command line through a remote shell (`ssh`, `wsl.exe`,
 /// `limactl shell`).
 ///
-/// Without this, prompts containing `(`, `)`, `'`, `` ` ``, `$`, newlines, etc.
-/// produced by `--append-system-prompt` (see `prompts::local_llm_identity`)
-/// would break remote bash with `syntax error near unexpected token`. Using
-/// `shlex::try_quote` per arg yields a string that any POSIX shell parses
-/// back into the original argv.
+/// Without this, arguments containing `(`, `)`, `'`, `` ` ``, `$`, newlines,
+/// etc. would break remote bash with `syntax error near unexpected token`.
+/// Using `shlex::try_quote` per arg yields a string that any POSIX shell
+/// parses back into the original argv.
 pub(crate) fn shell_quote_argv(argv: &[&str]) -> String {
     argv.iter()
         .map(|a| match shlex::try_quote(a) {

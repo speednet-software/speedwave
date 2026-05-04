@@ -1151,6 +1151,14 @@ function appendOrCreateTextBlock(blocks: MessageBlock[], content: string): Messa
 }
 
 function appendOrCreateThinkingBlock(blocks: MessageBlock[], content: string): MessageBlock[] {
+  // Anthropic returns redacted thinking blocks by default for Opus 4.7
+  // (and others when summaries are not requested) — the model still does
+  // the reasoning, but the streamed `thinking` text is empty and only the
+  // signature (encrypted thinking, used for multi-turn continuity) is sent.
+  // Skip empty deltas so we don't render an empty collapsible. If the API
+  // ever sends a non-empty delta later in the same turn, we still attach
+  // it to a fresh thinking block.
+  if (!content) return blocks;
   const last = blocks[blocks.length - 1];
   if (last && last.type === 'thinking') {
     return [

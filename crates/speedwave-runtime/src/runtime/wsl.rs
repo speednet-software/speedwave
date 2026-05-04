@@ -288,8 +288,7 @@ impl ContainerRuntime for WslRuntime {
         // wsl.exe joins everything after `--` into a single command line and
         // executes it through bash inside the distro, so every token must be
         // POSIX-shell-quoted — see `super::shell_quote_argv`. Without this,
-        // prompts containing `(`, `)`, `'`, etc. (notably from
-        // `prompts::local_llm_identity`) break remote bash.
+        // arguments containing `(`, `)`, `'`, etc. break remote bash.
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
         let nerdctl_argv: Vec<&str> = [
             "nerdctl",
