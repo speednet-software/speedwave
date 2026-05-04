@@ -303,27 +303,27 @@ On macOS the CLI is symlinked from inside `Speedwave.app` — updating the Deskt
 
 ## GitHub Secrets Required
 
-| Secret / Variable                    | Purpose                                                                                 |
-| ------------------------------------ | --------------------------------------------------------------------------------------- |
-| `RELEASE_TOKEN`                      | PAT or GitHub App token — used by release-please and to push to branch-protected `main` |
-| `TAURI_SIGNING_PRIVATE_KEY`          | Sign update bundles (minisign private key)                                              |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the private key                                                            |
-| `GITHUB_TOKEN`                       | Auto-provided by GitHub Actions for releases                                            |
-| `APPLE_CERTIFICATE`                  | macOS code signing (.p12, base64)                                                       |
-| `APPLE_CERTIFICATE_PASSWORD`         | Passphrase for macOS certificate                                                        |
-| `APPLE_SIGNING_IDENTITY`             | Developer ID Application identity                                                       |
-| `APPLE_ID`                           | Apple ID for notarization                                                               |
-| `APPLE_PASSWORD`                     | App-specific password for notarization                                                  |
-| `APPLE_TEAM_ID`                      | Apple Developer Team ID                                                                 |
-| `WINDOWS_CERTIFICATE`                | Windows code signing (.pfx, base64)                                                     |
-| `WINDOWS_CERTIFICATE_PASSWORD`       | Passphrase for Windows certificate                                                      |
+| Secret / Variable                    | Purpose                                                                                                                                                                           |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RELEASE_TOKEN`                      | PAT or GitHub App token — used by release-please and to push to branch-protected `main`                                                                                           |
+| `TAURI_SIGNING_PRIVATE_KEY`          | Sign update bundles (minisign private key)                                                                                                                                        |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the private key                                                                                                                                                      |
+| `GITHUB_TOKEN`                       | Auto-provided by GitHub Actions — used by build/publish jobs; NOT a substitute for `RELEASE_TOKEN` in `desktop-release.yml` (the resolve job requires `RELEASE_TOKEN` explicitly) |
+| `APPLE_CERTIFICATE`                  | macOS code signing (.p12, base64)                                                                                                                                                 |
+| `APPLE_CERTIFICATE_PASSWORD`         | Passphrase for macOS certificate                                                                                                                                                  |
+| `APPLE_SIGNING_IDENTITY`             | Developer ID Application identity                                                                                                                                                 |
+| `APPLE_ID`                           | Apple ID for notarization                                                                                                                                                         |
+| `APPLE_PASSWORD`                     | App-specific password for notarization                                                                                                                                            |
+| `APPLE_TEAM_ID`                      | Apple Developer Team ID                                                                                                                                                           |
+| `WINDOWS_CERTIFICATE`                | Windows code signing (.pfx, base64)                                                                                                                                               |
+| `WINDOWS_CERTIFICATE_PASSWORD`       | Passphrase for Windows certificate                                                                                                                                                |
 
 ## CI/CD Security Hardening
 
 All workflow `run:` blocks follow these security practices:
 
 - **No `${{ }}` interpolation in `run:` blocks** — all GitHub context values (`inputs.*`, `github.event.*`) are passed via `env:` to prevent shell injection[^57]
-- **Version format validation** — `desktop-release.yml` validates version strings against `^[0-9]+\.[0-9]+\.[0-9]+$` before use
+- **Input format validation** — `desktop-release.yml` validates `VERSION` against `^[0-9]+\.[0-9]+\.[0-9]+$` before use; `scripts/verify-release-assets.sh` validates all four inputs: `VERSION` (`^[0-9]+\.[0-9]+\.[0-9]+$`), `REPO` (`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`), `TAG_NAME` (`^v[0-9]+\.[0-9]+\.[0-9]+$`), and `RID` (`^[0-9]+$`) — structured `::error::` annotations are emitted on failure
 - **`set -e` in all multi-command steps where early exit is appropriate** — ensures early exit on command failure
 - **Least-privilege `permissions:`** — `desktop-build.yml` uses `contents: read` (CI-only, no write needed)
 - **Pinned action SHAs** — all actions are pinned to full commit SHAs, not mutable tags

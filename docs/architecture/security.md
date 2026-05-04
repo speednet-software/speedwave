@@ -173,7 +173,7 @@ Sensitive directories must be `0o700` (owner rwx only):
 
 Sensitive files must be `0o600` (owner rw only):
 
-- `~/.speedwave/secrets/<project>/*` — service auth tokens
+- `~/.speedwave/secrets/<project>/*` — service auth tokens. Reads of these files reject symbolic links — `is_symlink()` is checked before `is_file()` to defeat host-write attackers planting a symlink to a substitute UUID.
 - `~/.speedwave/tokens/<project>/<service>/*` — plugin credentials
 - `~/.speedwave/snapshots/<project>/*.json` — compose snapshots
 - `~/.speedwave/ide-bridge/*.lock` — IDE bridge auth tokens

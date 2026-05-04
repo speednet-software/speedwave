@@ -9,6 +9,7 @@ use speedwave_runtime::plugin;
 use speedwave_runtime::runtime::{detect_runtime, ensure_exec_healthy};
 use speedwave_runtime::update;
 use speedwave_runtime::validation;
+use strum::IntoEnumIterator;
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -623,7 +624,7 @@ fn main() -> anyhow::Result<()> {
         if prereq_violations.is_empty() && security_violations.is_empty() {
             println!("speedwave check OK -- all system checks passed");
             eprintln!();
-            for rule in SecurityRule::ALL_RULES {
+            for rule in SecurityRule::iter() {
                 eprintln!("  {green}OK{reset}    {}  {}", rule, rule.description());
             }
             std::process::exit(0);
@@ -631,8 +632,8 @@ fn main() -> anyhow::Result<()> {
             eprintln!("speedwave check FAILED -- containers NOT started\n");
             let failed_rules: std::collections::HashSet<SecurityRule> =
                 security_violations.iter().map(|v| v.rule).collect();
-            for rule in SecurityRule::ALL_RULES {
-                if failed_rules.contains(rule) {
+            for rule in SecurityRule::iter() {
+                if failed_rules.contains(&rule) {
                     eprintln!("  {red}FAIL{reset}  {}  {}", rule, rule.description());
                 } else {
                     eprintln!("  {green}OK{reset}    {}  {}", rule, rule.description());
