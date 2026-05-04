@@ -207,9 +207,6 @@ export function parseSections(
     const start = matches[i].start;
     const end = i + 1 < matches.length ? matches[i + 1].start : markdown.length;
     const block = markdown.slice(start, end);
-    // Drop the heading line; trim trailing whitespace; strip pointer-style
-    // markdown links so entries like `- [name](file.md) — desc` collapse to
-    // `- desc` (the file is a link to the per-memory file, not user content).
     const body = stripPointerLinks(block.replace(/^##\s+\S.*\r?\n?/, '')).trim();
     if (body) {
       sections.push({ id: matches[i].id, label: matches[i].label, body });
@@ -219,13 +216,8 @@ export function parseSections(
 }
 
 /**
- * Removes pointer-style markdown links from MEMORY.md lines.
- *
- * MEMORY.md entries follow the shape `- [title](file.md) — description`, where
- * the bracketed link is just a pointer to the per-memory file on disk (not
- * something the user types). The drawer is a read-only summary, so we collapse
- * each entry to its description: `- description`. Any leftover bare links are
- * replaced with their visible text. Lines without links pass through untouched.
+ * Collapses `- [title](file.md) — desc` to `- desc` so the drawer never renders
+ * a clickable pointer link (would navigate the webview off-route and white-screen).
  * @param text - Raw markdown source.
  */
 export function stripPointerLinks(text: string): string {

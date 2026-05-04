@@ -188,7 +188,6 @@ describe('MemoryPanelComponent', () => {
       fixture.detectChanges();
 
       expect(q('[data-testid="memory-panel-error"]')).toBeNull();
-      // Fallback branch now renders plain text, not <app-text-block>.
       expect(q('app-text-block')).toBeNull();
       expect(q('[data-testid="memory-panel-fallback"]')).not.toBeNull();
       expect(q('[data-testid="memory-panel-fallback"]')!.textContent).toContain('# Recovered');
@@ -214,8 +213,6 @@ describe('MemoryPanelComponent', () => {
       const body = q('[data-testid="memory-panel-body"]');
       expect(body).not.toBeNull();
       expect(body!.querySelector('a')).toBeNull();
-      // Pointer-style links are stripped: only the description survives so the
-      // panel shows what the user wrote, not the implementation file name.
       expect(body!.textContent).not.toContain('feedback_no_hardcoded_paths.md');
       expect(body!.textContent).toContain('Never put absolute user paths');
     });
@@ -227,17 +224,12 @@ describe('MemoryPanelComponent', () => {
       const body = q('[data-testid="memory-panel-body"]');
       expect(body).not.toBeNull();
       expect(body!.querySelector('a')).toBeNull();
-      // Inline link collapses to its visible text; URL is dropped.
       expect(body!.textContent).toContain('See docs for more.');
       expect(body!.textContent).not.toContain('https://example.com');
     });
 
     it('strips pointer-style links in the unstructured fallback (no canonical headers)', () => {
-      // Regression for MEMORY.md files that are just a bullet list of
-      // pointer entries (no `## ...` headers), which land in the fallback
-      // branch rather than parsed sections. Each entry must collapse to its
-      // description so neither the bracketed title nor the file name leak
-      // into the rendered drawer.
+      // No `## ...` headers — entries land in the fallback branch.
       host.open = true;
       host.markdown = [
         '- [foo entry](foo.md) — first description',
@@ -262,9 +254,6 @@ describe('MemoryPanelComponent', () => {
       const body = q('[data-testid="memory-panel-body"]');
       expect(body).not.toBeNull();
       expect(body!.querySelector('a')).toBeNull();
-      // Pointer-style links collapse to their description (the file name is
-      // dropped). The test verifies both that no anchor is rendered AND that
-      // the user-visible text survives the strip.
       expect(body!.textContent).not.toContain('[a.md](a.md)');
       expect(body!.textContent).not.toContain('[b.md](b.md)');
       expect(body!.textContent).toContain('one');
