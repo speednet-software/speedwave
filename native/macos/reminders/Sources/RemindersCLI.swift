@@ -37,7 +37,7 @@ struct RemindersCLI {
         if command == "check_permission" {
             let store = EKEventStore()
             let gate = EventStoreGate(store: store)
-            print(performCheckPermission(gate: gate, entity: .reminders, timeout: 65))
+            print(performCheckPermission(gate: gate, entity: .reminders))
             return
         }
 

@@ -37,7 +37,7 @@ struct CalendarCLI {
         if command == "check_permission" {
             let store = EKEventStore()
             let gate = EventStoreGate(store: store)
-            print(performCheckPermission(gate: gate, entity: .calendar, timeout: 65))
+            print(performCheckPermission(gate: gate, entity: .calendar))
             return
         }
 

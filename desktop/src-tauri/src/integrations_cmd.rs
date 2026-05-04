@@ -1219,7 +1219,7 @@ mod tests {
 
     #[test]
     fn parse_permission_output_status_field_does_not_affect_message() {
-        // (L3) The status field must not affect the returned Err message — only the error field matters.
+        // The status field must not affect the returned Err message — only the error field matters.
         // Example: status="completely_made_up" with error="real error" → Err("real error")
         let result = parse_permission_output(
             r#"{"granted": false, "status": "completely_made_up", "error": "real error"}"#,
