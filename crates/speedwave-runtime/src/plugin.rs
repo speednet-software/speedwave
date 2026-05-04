@@ -712,7 +712,7 @@ fn remove_plugin_with_base(
             // the next compose recreate. Without --force, rmi would refuse
             // and the layer cache would survive — defeating the next
             // reinstall (a fresh ZIP would receive the stale cached image).
-            if let Err(e) = rt.remove_images(&[tag.clone()], true) {
+            if let Err(e) = rt.remove_images(std::slice::from_ref(&tag), true) {
                 log::warn!("Failed to remove container image '{tag}' for plugin '{slug}': {e}");
             } else {
                 log::info!("Removed container image '{tag}' for plugin '{slug}'");
