@@ -16,7 +16,6 @@ import {
 } from '@angular/core';
 import { filter } from 'rxjs/operators';
 import { IconComponent } from '../../shared/icon.component';
-import { TextBlockComponent } from '../blocks/text-block.component';
 
 /**
  * Left overlay drawer that surfaces the active project's CLAUDE.md.
@@ -29,15 +28,17 @@ import { TextBlockComponent } from '../blocks/text-block.component';
  *
  * - Header: mono "memory" + neutral pill with section count + close ×.
  * - Body: when the source markdown contains the canonical section markers
- *   (## User Preferences / ## Feedback / ## Project / ## Reference) we render
- *   each as a mono kicker + dimmed text block — matching the mockup. Otherwise
- *   we fall back to the existing markdown pipeline via `<app-text-block>` so
- *   no project memory is ever silently dropped.
+ *   (## User / ## Project / ## Feedback / ## Reference) we render each as a
+ *   mono kicker + dimmed text block — matching the mockup. Otherwise we render
+ *   the raw source as preformatted plain text inside a <pre>. We deliberately
+ *   do not run the markdown pipeline here: MEMORY.md often contains relative
+ *   markdown links to per-memory files, and rendering them as <a> would let a
+ *   click navigate the embedded webview off the SPA route (white screen).
  */
 @Component({
   selector: 'app-memory-panel',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [TextBlockComponent, A11yModule, IconComponent],
+  imports: [A11yModule, IconComponent],
   template: `
     <ng-template #content>
       <div
@@ -89,7 +90,11 @@ import { TextBlockComponent } from '../blocks/text-block.component';
               }
             </div>
           } @else if (markdown()) {
-            <app-text-block [content]="markdown()" />
+            <pre
+              class="mono whitespace-pre-wrap break-words text-[11.5px] text-[var(--ink-dim)]"
+              data-testid="memory-panel-fallback"
+              >{{ fallbackText() }}</pre
+            >
           } @else {
             <p class="mono text-[11.5px] text-[var(--ink-mute)]" data-testid="memory-panel-empty">
               no memory yet
@@ -112,6 +117,8 @@ export class MemoryPanelComponent {
 
   /** Parsed sections (kicker + body) when markdown follows the canonical layout. */
   protected readonly sections = computed(() => parseSections(this.markdown()));
+  /** Same link-stripping rule as parseSections, applied to the unstructured fallback. */
+  protected readonly fallbackText = computed(() => stripPointerLinks(this.markdown()).trim());
   protected readonly sectionCount = computed(() => this.sections().length);
   protected readonly sectionLabel = computed(() => {
     const n = this.sectionCount();
@@ -200,11 +207,37 @@ export function parseSections(
     const start = matches[i].start;
     const end = i + 1 < matches.length ? matches[i + 1].start : markdown.length;
     const block = markdown.slice(start, end);
-    // Drop the heading line; trim trailing whitespace.
-    const body = block.replace(/^##\s+\S.*\r?\n?/, '').trim();
+    // Drop the heading line; trim trailing whitespace; strip pointer-style
+    // markdown links so entries like `- [name](file.md) — desc` collapse to
+    // `- desc` (the file is a link to the per-memory file, not user content).
+    const body = stripPointerLinks(block.replace(/^##\s+\S.*\r?\n?/, '')).trim();
     if (body) {
       sections.push({ id: matches[i].id, label: matches[i].label, body });
     }
   }
   return sections;
+}
+
+/**
+ * Removes pointer-style markdown links from MEMORY.md lines.
+ *
+ * MEMORY.md entries follow the shape `- [title](file.md) — description`, where
+ * the bracketed link is just a pointer to the per-memory file on disk (not
+ * something the user types). The drawer is a read-only summary, so we collapse
+ * each entry to its description: `- description`. Any leftover bare links are
+ * replaced with their visible text. Lines without links pass through untouched.
+ * @param text - Raw markdown source.
+ */
+export function stripPointerLinks(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      const pointer = line.match(/^(\s*[-*]\s+)\[[^\]]+\]\([^)]+\)\s*[—–-]?\s*(.*)$/);
+      if (pointer) {
+        const [, bullet, rest] = pointer;
+        return rest ? `${bullet}${rest}` : bullet.trimEnd();
+      }
+      return line.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+    })
+    .join('\n');
 }

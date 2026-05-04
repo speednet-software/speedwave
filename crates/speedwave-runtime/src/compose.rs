@@ -612,8 +612,11 @@ fn ensure_worker_auth_token(
         uuid::Uuid::new_v4().to_string()
     };
 
-    // Atomic write with 0o600 permissions (pattern from update.rs)
-    let tmp_path = token_path.with_extension("tmp");
+    // Atomic write with 0o600 permissions (pattern from update.rs).
+    // Use a unique suffix to avoid collisions when multiple callers write
+    // the same token file concurrently (e.g., parallel tests or processes).
+    let tmp_name = format!("{}.{}.tmp", token_file_name, uuid::Uuid::new_v4());
+    let tmp_path = secrets_dir.join(&tmp_name);
     std::fs::write(&tmp_path, &token)?;
     #[cfg(unix)]
     {
@@ -3011,8 +3014,9 @@ services:
         }
     }
 
-    /// ADR-038: every WORKER_*_URL entry in mcp-hub environment must point at
-    /// `:{PORT_WORKER}`.
+    /// ADR-038: every container-to-container WORKER_*_URL in mcp-hub must point
+    /// at `:{PORT_WORKER}`. `WORKER_OS_URL` is exempt: mcp-os runs on the host
+    /// and uses a dynamic port allocated by the OS, not PORT_WORKER.
     #[test]
     fn test_hub_worker_urls_use_port_worker() {
         let config = ResolvedClaudeConfig {
