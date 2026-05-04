@@ -6,7 +6,7 @@ import type {
   ProjectList,
   ProjectSwitchFailedPayload,
 } from '../models/update';
-import { CLOUDSTORAGE_TCC_PREFIX } from './cloudstorage-prefix';
+import { CLOUDSTORAGE_TCC_PREFIX, cloudstorageProviderDisplayName } from './cloudstorage-prefix';
 
 /** Lifecycle status of the project + container lifecycle. */
 export type ProjectStatus =
@@ -219,6 +219,7 @@ export class ProjectStateService {
         const body = msg.slice(CLOUDSTORAGE_TCC_PREFIX.length);
         const pipeIdx = body.indexOf('|');
         if (pipeIdx >= 0) {
+          this.failureProvider = cloudstorageProviderDisplayName(body.slice(0, pipeIdx));
           this.failureProjectDir = body.slice(pipeIdx + 1);
         }
       } else {

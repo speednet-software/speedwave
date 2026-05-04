@@ -76,22 +76,68 @@ impl CloudStorageProvider {
 /// Returns `Some(provider)` if the path is under a recognized CloudStorage
 /// root, `None` otherwise. macOS-only detection; other platforms always
 /// return `None`.
+///
+/// Provider tokens are matched only at component boundaries — i.e. either
+/// directly under `~/Library/CloudStorage/<Token>...` or as a top-level
+/// subdirectory of the user's home (`/Users/<u>/<Token>...`). A path like
+/// `/Users/alice/Projects/NotOneDriveBackup` is **not** matched.
 #[cfg(target_os = "macos")]
 pub fn detect_cloudstorage_provider(path: &Path) -> Option<CloudStorageProvider> {
+    /// Returns true if `haystack` contains `needle` followed by a path
+    /// component boundary — the next byte is `/`, `-`, or end-of-string.
+    fn contains_at_boundary(haystack: &str, needle: &str) -> bool {
+        let mut search_from = 0;
+        while let Some(rel) = haystack[search_from..].find(needle) {
+            let abs = search_from + rel;
+            let after = abs + needle.len();
+            match haystack.as_bytes().get(after) {
+                None | Some(b'/') | Some(b'-') => return true,
+                _ => search_from = abs + 1,
+            }
+        }
+        false
+    }
+
+    /// Returns true if `path` is `/Users/<user>/<token>...` — i.e. `token`
+    /// appears as a top-level component directly under the user's home.
+    fn is_top_level_under_users(path: &str, token: &str) -> bool {
+        let after_users = match path.strip_prefix("/Users/") {
+            Some(rest) => rest,
+            None => return false,
+        };
+        // Skip the username component
+        let username_end = match after_users.find('/') {
+            Some(i) => i,
+            None => return false,
+        };
+        let after_user = &after_users[username_end + 1..];
+        // The remaining path must start with `<token>` and the next byte
+        // must be a component boundary.
+        if let Some(tail) = after_user.strip_prefix(token) {
+            return tail.is_empty() || tail.starts_with('/') || tail.starts_with('-');
+        }
+        false
+    }
+
     let path_str = path.to_string_lossy();
 
-    // OneDrive: ~/Library/CloudStorage/OneDrive-* or ~/OneDrive*
-    if path_str.contains("/Library/CloudStorage/OneDrive") || path_str.contains("/OneDrive") {
+    // OneDrive: ~/Library/CloudStorage/OneDrive(-…)? or ~/OneDrive(-…)?
+    if contains_at_boundary(&path_str, "/Library/CloudStorage/OneDrive")
+        || is_top_level_under_users(&path_str, "OneDrive")
+    {
         return Some(CloudStorageProvider::OneDrive);
     }
 
-    // Dropbox: ~/Dropbox or ~/Library/CloudStorage/Dropbox
-    if path_str.contains("/Library/CloudStorage/Dropbox") || path_str.contains("/Dropbox") {
+    // Dropbox: ~/Library/CloudStorage/Dropbox… or ~/Dropbox…
+    if contains_at_boundary(&path_str, "/Library/CloudStorage/Dropbox")
+        || is_top_level_under_users(&path_str, "Dropbox")
+    {
         return Some(CloudStorageProvider::Dropbox);
     }
 
-    // Google Drive: ~/Library/CloudStorage/GoogleDrive-*
-    if path_str.contains("/Library/CloudStorage/GoogleDrive") || path_str.contains("/Google Drive")
+    // Google Drive: ~/Library/CloudStorage/GoogleDrive(-…)? or ~/Google Drive…
+    if contains_at_boundary(&path_str, "/Library/CloudStorage/GoogleDrive")
+        || is_top_level_under_users(&path_str, "Google Drive")
     {
         return Some(CloudStorageProvider::GoogleDrive);
     }
@@ -128,34 +174,6 @@ pub fn check_path_readable_with_timeout(path: &Path) -> Result<(), std::io::Erro
         Ok(result) => result.map(|_| ()),
         Err(_timeout) => Ok(()), // timeout — treat as non-blocking, let normal path handle it
     }
-}
-
-/// Classifies a runtime error string as a CloudStorage TCC failure.
-///
-/// Returns `Some(provider)` if the error message suggests a CloudStorage
-/// EPERM condition for a known provider path, `None` otherwise.
-pub fn classify_runtime_error(error: &str) -> Option<CloudStorageProvider> {
-    if !error.to_lowercase().contains("permission denied")
-        && !error.contains("os error 13")
-        && !error.to_lowercase().contains("eperm")
-    {
-        return None;
-    }
-
-    // Check for CloudStorage path fragments in the error
-    for (fragment, provider) in [
-        ("OneDrive", CloudStorageProvider::OneDrive),
-        ("Dropbox", CloudStorageProvider::Dropbox),
-        ("GoogleDrive", CloudStorageProvider::GoogleDrive),
-        ("Google Drive", CloudStorageProvider::GoogleDrive),
-        ("CloudStorage", CloudStorageProvider::OneDrive), // generic fallback
-    ] {
-        if error.contains(fragment) {
-            return Some(provider);
-        }
-    }
-
-    None
 }
 
 /// Checks whether a path under a detected CloudStorage provider is readable.
@@ -287,7 +305,7 @@ mod tests {
     // -- detect_cloudstorage_provider tests --
 
     #[test]
-    fn detect_onedrive_library_cloudstorgage() {
+    fn detect_onedrive_library_cloudstorage() {
         let path = Path::new("/Users/alice/Library/CloudStorage/OneDrive-Personal/Projects/foo");
         let result = detect_cloudstorage_provider(path);
         #[cfg(target_os = "macos")]
@@ -330,6 +348,28 @@ mod tests {
         assert!(detect_cloudstorage_provider(path).is_none());
     }
 
+    #[test]
+    fn detect_substring_false_positive_is_none() {
+        // Regression: a directory whose name contains "OneDrive" mid-token
+        // (e.g. "NotOneDriveBackup") must NOT be misclassified as OneDrive.
+        let path = Path::new("/Users/alice/Projects/NotOneDriveBackup");
+        assert!(detect_cloudstorage_provider(path).is_none());
+    }
+
+    #[test]
+    fn detect_dropbox_substring_false_positive_is_none() {
+        let path = Path::new("/Users/alice/Projects/MyDropboxClone");
+        assert!(detect_cloudstorage_provider(path).is_none());
+    }
+
+    #[test]
+    fn detect_onedrive_outside_users_is_none() {
+        // Token at component boundary but not under /Users/ — not a real
+        // CloudStorage mount. Avoids matching test fixtures and tmp paths.
+        let path = Path::new("/tmp/OneDrive/foo");
+        assert!(detect_cloudstorage_provider(path).is_none());
+    }
+
     // -- is_permission_error tests --
 
     #[test]
@@ -348,35 +388,6 @@ mod tests {
     fn is_permission_error_does_not_match_connection_refused() {
         let err = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
         assert!(!is_permission_error(&err));
-    }
-
-    // -- classify_runtime_error tests --
-
-    #[test]
-    fn classify_runtime_error_detects_onedrive_permission_denied() {
-        let err = "os error 13: Permission denied accessing /Users/alice/Library/CloudStorage/OneDrive-Personal/foo";
-        let result = classify_runtime_error(err);
-        assert!(result.is_some(), "should detect CloudStorage provider");
-    }
-
-    #[test]
-    fn classify_runtime_error_ignores_unrelated_permission_error() {
-        let err = "Permission denied accessing /etc/shadow";
-        let result = classify_runtime_error(err);
-        assert!(
-            result.is_none(),
-            "non-CloudStorage permission error must not be classified"
-        );
-    }
-
-    #[test]
-    fn classify_runtime_error_ignores_non_permission_error() {
-        let err = "network unreachable for /Users/alice/Library/CloudStorage/OneDrive-Personal/foo";
-        let result = classify_runtime_error(err);
-        assert!(
-            result.is_none(),
-            "non-permission error must not be classified"
-        );
     }
 
     // -- check_project_readable_or_err tests --
