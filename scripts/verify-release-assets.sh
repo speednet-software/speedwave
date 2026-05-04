@@ -18,6 +18,13 @@ set -euo pipefail
 : "${RID:?RID required}"
 : "${TAG_NAME:?TAG_NAME required}"
 
+# Defense-in-depth: VERSION regex also enforced in desktop-release.yml resolve job.
+# Both must stay in sync if the format contract ever changes.
+[[ "$VERSION"  =~ ^[0-9]+\.[0-9]+\.[0-9]+$           ]] || { echo "::error::Invalid VERSION format: '$VERSION' (expected X.Y.Z)" >&2; exit 1; }
+[[ "$REPO"     =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$  ]] || { echo "::error::Invalid REPO format: '$REPO' (expected owner/name)" >&2; exit 1; }
+[[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$          ]] || { echo "::error::Invalid TAG_NAME format: '$TAG_NAME' (expected vX.Y.Z)" >&2; exit 1; }
+[[ "$RID"      =~ ^[0-9]+$                           ]] || { echo "::error::Invalid RID format: '$RID' (expected numeric ID)" >&2; exit 1; }
+
 V="$VERSION"
 
 SIGNED_ASSETS=(
