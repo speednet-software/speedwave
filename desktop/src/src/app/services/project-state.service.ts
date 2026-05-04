@@ -278,19 +278,32 @@ export class ProjectStateService {
   /** Restarts integration containers to apply pending changes. */
   async restartContainers(): Promise<void> {
     if (!this.activeProject || this.restarting) return;
+    const project = this.activeProject;
     this.restarting = true;
     this.restartError = '';
     this.notifyChange();
+    let restartedOk = false;
     try {
-      await this.tauri.invoke('restart_integration_containers', {
-        project: this.activeProject,
-      });
+      await this.tauri.invoke('restart_integration_containers', { project });
       this.needsRestart = false;
+      restartedOk = true;
+      // Slash discovery is cached host-side for 10 min; compose recreate
+      // does not invalidate it. Without this nudge, the next slash-menu
+      // open returns the pre-restart list. Cache miss is non-fatal.
+      try {
+        await this.tauri.invoke('invalidate_slash_cache', { projectId: project });
+      } catch (err: unknown) {
+        console.warn('[ProjectStateService] invalidate_slash_cache failed:', err);
+      }
     } catch (e: unknown) {
       this.restartError = e instanceof Error ? e.message : String(e);
     }
     this.restarting = false;
     this.notifyChange();
+    if (restartedOk) {
+      this.notifyReady();
+      this.notifySettled();
+    }
   }
 
   /** Dismisses the restart overlay without restarting. */
