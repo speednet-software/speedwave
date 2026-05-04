@@ -28,29 +28,27 @@ Do not write a plan based on assumptions. Read the code first, understand the ar
 
 ## Before You Write Anything
 
-You MUST read and internalize the project context. Plans written without this context fail review.
+The orchestrator has already injected `CLAUDE.md` and every file from `.claude/rules/` into your system prompt under the heading "AUTHORITATIVE PROJECT CONTEXT". Treat that block as already read — do not waste tool calls re-reading those files. Your plan MUST honour every invariant from that block; the reviewer will explicitly score plan-vs-rules compliance per file.
 
-1. **Read `CLAUDE.md`** (project root) — architecture, SSOT locations, forbidden patterns, plugin contract table, config merge, all NEVER rules
+The remaining context still requires tool reads:
 
-2. **Read ALL files in `.claude/rules/`** — `git-workflow.md`, `engineering-principles.md`, `security.md`, `logging.md`, `rust-style.md`, `mcp-servers.md`, `documentation.md`
+1. **Read `docs/architecture/security.md`** — non-negotiable security model, threat model questions, executor sandbox, SSRF protection
 
-3. **Read `docs/architecture/security.md`** — non-negotiable security model, threat model questions, executor sandbox, SSRF protection
+2. **Read `docs/architecture/containers.md`** — container topology, compose template, resource limits
 
-4. **Read `docs/architecture/containers.md`** — container topology, compose template, resource limits
+3. **Read `docs/architecture/platform-matrix.md`** — macOS/Linux/Windows differences
 
-5. **Read `docs/architecture/platform-matrix.md`** — macOS/Linux/Windows differences
+4. **Read `docs/contributing/testing.md`** — test strategy, coverage thresholds, test patterns
 
-6. **Read `docs/contributing/testing.md`** — test strategy, coverage thresholds, test patterns
+5. **Read `RELEASING.md`** — release flow, squash merge rules
 
-7. **Read `RELEASING.md`** — release flow, squash merge rules
+6. **Read relevant ADRs** from `docs/adr/` — check ADR `README.md` index for overlapping topics. Pay special attention to ADR-030 (bundle reconcile), ADR-031 (data dir isolation), ADR-040 / ADR-041 (local LLM providers + SSRF policy), and any ADRs related to updates or migration.
 
-8. **Read relevant ADRs** from `docs/adr/` — check ADR `README.md` index for overlapping topics. Pay special attention to ADR-030 (bundle reconcile), ADR-031 (data dir isolation), and any ADRs related to updates or migration.
+7. **Read the actual source code** you plan to modify — the files themselves, their callers, their tests, adjacent modules. Map the dependency graph BEFORE planning changes.
 
-9. **Read the actual source code** you plan to modify — the files themselves, their callers, their tests, adjacent modules. Map the dependency graph BEFORE planning changes.
+8. **Read the update/reconcile flow** — `updater.rs`, `update_commands.rs`, `bundle-manifest.json` handling, `bundle-state.json` phases, snapshot/rollback logic. Understand what happens when a user updates from version N to version N+1.
 
-10. **Read the update/reconcile flow** — `updater.rs`, `update_commands.rs`, `bundle-manifest.json` handling, `bundle-state.json` phases, snapshot/rollback logic. Understand what happens when a user updates from version N to version N+1.
-
-11. **Perform external verification NOW, not later.** If the task requires checking sibling repos (e.g. `speedwave-plugins` at `../speedwave-plugins`), existing files, CLI outputs, or any state outside the current code — run the check (`grep`, `gh search code`, `Read`) during planning and record the concrete result in the plan. Do NOT add a step like "verify that X is true" to Implementation Steps — a plan step must be an action the implementer takes, not a fact-check the planner skipped.
+9. **Perform external verification NOW, not later.** If the task requires checking sibling repos (e.g. the `speedwave-plugins` sibling repository), existing files, CLI outputs, or any state outside the current code — run the check (`grep`, `gh search code`, `Read`) during planning and record the concrete result in the plan. Do NOT add a step like "verify that X is true" to Implementation Steps — a plan step must be an action the implementer takes, not a fact-check the planner skipped.
 
 ## The Task
 

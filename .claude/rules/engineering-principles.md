@@ -21,10 +21,12 @@ Build only what's on the implementation plan. Do not add features "for future ex
 
 ## DRY — Don't Repeat Yourself
 
-- `crates/speedwave-runtime/` is the SSOT for all container logic — CLI and Desktop both import it, zero duplication
-- `mcp-servers/shared/` is the SSOT for MCP protocol utilities — all servers use it
-- `compose.template.yml` is the SSOT for container definitions — `render_compose()` generates per-project files from it, never hand-edit generated files
-- If the same logic appears in two places — extract it to `speedwave-runtime`
+CLAUDE.md lists every SSOT and SSOT-alignment pair — read it for the full surface. The principles here:
+
+- If the same logic appears in two places — extract it to `speedwave-runtime` (or `mcp-servers/shared/` for MCP code).
+- Generated files (e.g. per-project compose) are never hand-edited — change the template + renderer.
+- For Anthropic model strings, network/SSRF policy, and any other catalogue/policy with an SSOT in CLAUDE.md: edit the SSOT, do not hard-code the value at the call site.
+- SSOT-alignment pairs from CLAUDE.md (e.g. `bundle-build-context.sh` ↔ `build.rs::IMAGES`, `sign-bundled-binaries.sh` ↔ `tauri.macos.conf.json`) must be updated together in the same commit. Asymmetric edits silently break bundling/signing.
 
 ## SOLID (applied to this codebase)
 
