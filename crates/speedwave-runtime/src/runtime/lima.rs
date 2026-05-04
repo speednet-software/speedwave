@@ -2238,6 +2238,23 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_images_force_passes_force_flag() {
+        let tags = vec!["speedwave-mcp-example:1.0.0".to_string()];
+        let runner = mock_runner_with_vm_running().with_response(
+            &format!(
+                "limactl shell {} -- sudo nerdctl rmi --force speedwave-mcp-example:1.0.0",
+                consts::LIMA_VM_NAME
+            ),
+            "",
+        );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        // force=true must add --force to the rmi args so nerdctl removes
+        // images that are still referenced by a running container (the
+        // explicit-uninstall path).
+        assert!(rt.remove_images(&tags, true).is_ok());
+    }
+
+    #[test]
     fn test_remove_images_fails_when_vm_stopped() {
         let runner = MockRunner::new()
             .with_response("limactl --version", "limactl version 1.0.0")

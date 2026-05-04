@@ -1194,6 +1194,20 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_images_force_passes_force_flag() {
+        let tags = vec!["speedwave-mcp-example:1.0.0".to_string()];
+        let runner = MockRunner::new().with_response(
+            "wsl.exe -d Speedwave -- nerdctl rmi --force speedwave-mcp-example:1.0.0",
+            "",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        // force=true must add --force to the rmi args so nerdctl removes
+        // images that are still referenced by a running container (the
+        // explicit-uninstall path).
+        assert!(rt.remove_images(&tags, true).is_ok());
+    }
+
+    #[test]
     fn test_build_image_passes_build_args() {
         let version = crate::defaults::CLAUDE_VERSION;
         let expected_key = format!(

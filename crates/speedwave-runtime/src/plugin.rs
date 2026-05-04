@@ -2561,8 +2561,15 @@ mod tests {
         let result = remove_plugin_with_base("rmi-fails", &plugins_dir, Some(&rt));
         assert!(result.is_ok(), "remove_plugin must not fail on rmi error");
         assert!(!plugins_dir.join("rmi-fails").exists());
-        // remove_images was attempted.
-        assert_eq!(rt.calls.into_inner().unwrap().len(), 1);
+        // remove_images was attempted with force=true even on the error path
+        // — the uninstall caller never silently downgrades to non-force rmi.
+        let calls = rt.calls.into_inner().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].1,
+            "rmi error path should still pass force=true, got force={}",
+            calls[0].1
+        );
     }
 
     // --- Task 2: duplicate service_id detection test ---
