@@ -287,12 +287,9 @@ export class ProjectStateService {
       await this.tauri.invoke('restart_integration_containers', { project });
       this.needsRestart = false;
       restartedOk = true;
-      // Skills/commands/agents are discovered from inside the claude
-      // container; toggling a plugin (or installing/removing one) and
-      // restarting changes the in-container resource set. The discovery
-      // result is cached per-project for 10 min, so without this nudge
-      // the next slash-menu open returns the pre-restart list. Failure
-      // to invalidate is non-fatal — the cache will eventually expire.
+      // Slash discovery is cached host-side for 10 min; compose recreate
+      // does not invalidate it. Without this nudge, the next slash-menu
+      // open returns the pre-restart list. Cache miss is non-fatal.
       try {
         await this.tauri.invoke('invalidate_slash_cache', { projectId: project });
       } catch (err: unknown) {
@@ -303,11 +300,10 @@ export class ProjectStateService {
     }
     this.restarting = false;
     this.notifyChange();
-    // Fire onProjectReady so consumers (composer, chat, plugins view)
-    // refetch their per-project state — same listener path as the
-    // initial project boot, since the container set has just been
-    // recreated. Skip on failure: state has not actually advanced.
-    if (restartedOk) this.notifyReady();
+    if (restartedOk) {
+      this.notifyReady();
+      this.notifySettled();
+    }
   }
 
   /** Dismisses the restart overlay without restarting. */
