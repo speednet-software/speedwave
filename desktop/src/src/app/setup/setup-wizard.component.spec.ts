@@ -302,16 +302,13 @@ describe('SetupWizardComponent', () => {
       expect(summary.textContent).toMatch(/step \d+ of \d+/);
     });
 
-    it('totalSteps signal returns the number of pipeline entries', () => {
-      expect(component.totalSteps()).toBe(component.steps.length);
-    });
-
-    it('etaSeconds signal recomputes when a step transitions to done', async () => {
-      const before = component.etaSeconds();
+    it('etaTotalSeconds recomputes when a step transitions to done', async () => {
+      const before = component.etaTotalSeconds();
       await component.startSetup();
       await fixture.whenStable();
-      const after = component.etaSeconds();
-      expect(after).toBeLessThanOrEqual(before);
+      const after = component.etaTotalSeconds();
+      // ETA is monotonically non-increasing as steps complete.
+      expect(after !== null && before !== null && after <= before).toBe(true);
     });
   });
 });

@@ -302,6 +302,55 @@ interface ExposedTool {
                   Plugin dashboard content will appear here.
                 </p>
               }
+
+              <div
+                class="mt-8 rounded border border-red-500/30 bg-red-500/[0.04] p-4"
+                data-testid="danger-zone"
+              >
+                <h3 class="mono mb-2 text-[12px] font-semibold text-red-300">danger zone</h3>
+                <p class="mb-3 text-[12px] leading-relaxed text-[var(--ink-dim)]">
+                  Uninstalling removes the plugin from
+                  <code class="mono">~/.speedwave/plugins/{{ plugin.slug }}/</code>, deletes its
+                  per-project credentials, and disables it in your config. Containers will be
+                  recreated on the next project restart.
+                </p>
+                @if (confirmingRemove) {
+                  <div class="flex items-center gap-3">
+                    <span
+                      class="mono text-[12px] text-red-300"
+                      data-testid="uninstall-confirm-prompt"
+                      >Are you sure?</span
+                    >
+                    <button
+                      type="button"
+                      class="mono rounded border border-red-500/40 bg-red-500/[0.08] px-3 py-1 text-[11px] font-medium text-red-300 hover:bg-red-500/[0.12] disabled:opacity-50"
+                      data-testid="uninstall-confirm-btn"
+                      [disabled]="removing"
+                      (click)="onConfirmUninstall()"
+                    >
+                      $ yes, uninstall
+                    </button>
+                    <button
+                      type="button"
+                      class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)] disabled:opacity-50"
+                      data-testid="uninstall-cancel-btn"
+                      [disabled]="removing"
+                      (click)="confirmingRemove = false"
+                    >
+                      cancel
+                    </button>
+                  </div>
+                } @else {
+                  <button
+                    type="button"
+                    class="mono rounded border border-red-500/40 bg-transparent px-3 py-1 text-[11px] font-medium text-red-300 hover:bg-red-500/[0.08]"
+                    data-testid="uninstall-btn"
+                    (click)="confirmingRemove = true"
+                  >
+                    $ uninstall plugin
+                  </button>
+                }
+              </div>
             </div>
           }
 
@@ -375,6 +424,11 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   /** Exposed tools — currently always empty until the backend reports them. */
   exposedTools: ExposedTool[] = [];
 
+  /** True when the user clicked "uninstall" and we're showing the confirm prompt. */
+  confirmingRemove = false;
+  /** True while `remove_plugin` is in flight; disables the confirm/cancel buttons. */
+  removing = false;
+
   private route = inject(ActivatedRoute);
   private router = inject(Router);
   private cdr = inject(ChangeDetectorRef);
@@ -446,6 +500,31 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   selectTab(tab: PluginDetailTab): void {
     this.activeTab = tab;
     this.cdr.markForCheck();
+  }
+
+  /**
+   * Confirms the uninstall and invokes `remove_plugin`. On success, signals
+   * the project banner to restart and navigates back to the plugins list —
+   * the current page would be a 404 since the plugin no longer exists.
+   */
+  async onConfirmUninstall(): Promise<void> {
+    if (!this.plugin || this.removing) return;
+    this.removing = true;
+    this.error = '';
+    this.success = '';
+    this.cdr.markForCheck();
+    try {
+      await this.tauri.invoke('remove_plugin', { slug: this.plugin.slug });
+      this.projectState.requestRestart();
+      // Navigate before clearing state so the user sees the plugins list
+      // refreshed without the removed entry.
+      this.router.navigate(['/plugins']);
+    } catch (e: unknown) {
+      this.error = e instanceof Error ? e.message : String(e);
+      this.removing = false;
+      this.confirmingRemove = false;
+      this.cdr.markForCheck();
+    }
   }
 
   /** Click handler for the master toggle in the header. */

@@ -102,8 +102,20 @@ pub trait ContainerRuntime: Send + Sync {
     }
 
     /// Remove container images by their full tags.
-    fn remove_images(&self, tags: &[String]) -> anyhow::Result<()> {
-        let _ = tags;
+    ///
+    /// `force = false` is the safe default: nerdctl `rmi` refuses to remove
+    /// an image that is still referenced by a running container, the error
+    /// is logged at warn level, and cleanup is left to the next prune cycle
+    /// once the container is gone. Used by the bundle-update flow.
+    ///
+    /// `force = true` (`nerdctl rmi --force`) removes the image even when a
+    /// running container still references it. Used by the explicit-uninstall
+    /// path (`speedwave plugin remove …` / Desktop "$ uninstall plugin")
+    /// because the user has already declared their intent to drop the plugin
+    /// and waiting for a future prune leaves stale layer cache that defeats
+    /// the next reinstall.
+    fn remove_images(&self, tags: &[String], force: bool) -> anyhow::Result<()> {
+        let _ = (tags, force);
         log::debug!("remove_images: not implemented for this runtime, skipping");
         Ok(())
     }
@@ -1564,11 +1576,11 @@ services:
         // ProbeTestRuntime uses the trait default (no override).
         let rt = ProbeTestRuntime::healthy();
         assert!(
-            rt.remove_images(&[]).is_ok(),
+            rt.remove_images(&[], false).is_ok(),
             "default remove_images with empty slice should return Ok"
         );
         assert!(
-            rt.remove_images(&["speedwave-claude:old123".to_string()])
+            rt.remove_images(&["speedwave-claude:old123".to_string()], false)
                 .is_ok(),
             "default remove_images with tags should return Ok (no-op)"
         );

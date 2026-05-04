@@ -463,4 +463,156 @@ describe('PluginDetailComponent', () => {
       expect(target.enabled).toBe(!before);
     });
   });
+
+  describe('danger zone / uninstall', () => {
+    it('renders the danger zone on the dashboard tab', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      const dangerZone = fixture.nativeElement.querySelector('[data-testid="danger-zone"]');
+      expect(dangerZone).not.toBeNull();
+      const uninstallBtn = fixture.nativeElement.querySelector('[data-testid="uninstall-btn"]');
+      expect(uninstallBtn).not.toBeNull();
+    });
+
+    it('clicking "uninstall" reveals the confirm prompt', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      const btn = fixture.nativeElement.querySelector(
+        '[data-testid="uninstall-btn"]'
+      ) as HTMLButtonElement;
+      btn.click();
+      fixture.detectChanges();
+
+      expect(component.confirmingRemove).toBe(true);
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="uninstall-confirm-prompt"]')
+      ).not.toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="uninstall-confirm-btn"]')
+      ).not.toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="uninstall-cancel-btn"]')
+      ).not.toBeNull();
+    });
+
+    it('clicking "cancel" hides the confirm prompt without invoking remove_plugin', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+
+      // Open confirm prompt by clicking the uninstall button (UI-driven path
+      // — keeps OnPush change detection consistent with real user interaction).
+      const uninstallBtn = fixture.nativeElement.querySelector(
+        '[data-testid="uninstall-btn"]'
+      ) as HTMLButtonElement;
+      uninstallBtn.click();
+      fixture.detectChanges();
+
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      const cancelBtn = fixture.nativeElement.querySelector(
+        '[data-testid="uninstall-cancel-btn"]'
+      ) as HTMLButtonElement;
+      cancelBtn.click();
+      fixture.detectChanges();
+
+      expect(component.confirmingRemove).toBe(false);
+      expect(invokeSpy).not.toHaveBeenCalledWith('remove_plugin', expect.anything());
+    });
+
+    it('clicking "yes, uninstall" invokes remove_plugin with the slug', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      // Drive through the public API (button → confirm → invoke).
+      component.confirmingRemove = true;
+      await component.onConfirmUninstall();
+
+      expect(invokeSpy).toHaveBeenCalledWith('remove_plugin', { slug: 'presale' });
+    });
+
+    it('on success, signals restart and navigates back to /plugins', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      const projectState = TestBed.inject(ProjectStateService);
+      projectState.needsRestart = false;
+
+      await component.onConfirmUninstall();
+
+      expect(projectState.needsRestart).toBe(true);
+      expect(mockRouter.navigate).toHaveBeenCalledWith(['/plugins']);
+    });
+
+    it('on error, surfaces the message and resets state', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      mockTauri.invokeHandler = (cmd: string) => {
+        if (cmd === 'remove_plugin') return Promise.reject(new Error('remove failed'));
+        return defaultInvokeHandler(cmd);
+      };
+      component.confirmingRemove = true;
+
+      await component.onConfirmUninstall();
+
+      expect(component.error).toBe('remove failed');
+      expect(component.removing).toBe(false);
+      expect(component.confirmingRemove).toBe(false);
+      expect(mockRouter.navigate).not.toHaveBeenCalledWith(['/plugins']);
+    });
+
+    it('in-flight guard: a second onConfirmUninstall while removing is a no-op', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      component.removing = true;
+
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      await component.onConfirmUninstall();
+
+      expect(invokeSpy).not.toHaveBeenCalledWith('remove_plugin', expect.anything());
+    });
+
+    it('disables both buttons via [disabled] while removing is true', async () => {
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+
+      // Hold remove_plugin pending so we observe the buttons in their
+      // mid-flight (`removing = true`) state before the invoke resolves.
+      let resolveFn!: () => void;
+      mockTauri.invokeHandler = (cmd: string) => {
+        if (cmd === 'remove_plugin') {
+          return new Promise<void>((resolve) => {
+            resolveFn = resolve;
+          });
+        }
+        return defaultInvokeHandler(cmd);
+      };
+
+      // Open the confirm prompt via UI.
+      const uninstallBtn = fixture.nativeElement.querySelector(
+        '[data-testid="uninstall-btn"]'
+      ) as HTMLButtonElement;
+      uninstallBtn.click();
+      fixture.detectChanges();
+
+      // Kick off uninstall but do not await — we want to observe the UI
+      // while the invoke is still pending.
+      const promise = component.onConfirmUninstall();
+      // Yield once so onConfirmUninstall sets `removing = true` and calls
+      // markForCheck before we re-render.
+      await new Promise((r) => setTimeout(r, 0));
+      fixture.detectChanges();
+
+      const confirmBtn = fixture.nativeElement.querySelector(
+        '[data-testid="uninstall-confirm-btn"]'
+      ) as HTMLButtonElement;
+      const cancelBtn = fixture.nativeElement.querySelector(
+        '[data-testid="uninstall-cancel-btn"]'
+      ) as HTMLButtonElement;
+      expect(confirmBtn.disabled).toBe(true);
+      expect(cancelBtn.disabled).toBe(true);
+
+      // Resolve so the test does not leak a pending Promise.
+      resolveFn();
+      await promise;
+    });
+  });
 });

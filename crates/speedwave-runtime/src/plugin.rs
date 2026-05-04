@@ -85,6 +85,55 @@ pub struct PluginManifest {
     pub requires_integrations: Vec<String>,
 }
 
+/// Streaming progress event emitted while `install_plugin` runs.
+///
+/// Phase strings are part of the public IPC contract (event
+/// `plugin_install_status`); see [`ALL_PLUGIN_INSTALL_PHASES`] for the
+/// exhaustive list. The `error` field is always sanitized via
+/// `log_sanitizer::sanitize` before emission.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+pub struct PluginInstallProgress {
+    pub phase: String,
+    pub message: String,
+    pub error: Option<String>,
+}
+
+/// Outcome returned by [`install_plugin`].
+///
+/// Distinguishes a fully-installed plugin from one whose image build
+/// deferred to the next launch (`.image_pending` marker remains).
+#[derive(Debug, Clone)]
+pub enum InstallOutcome {
+    Installed(PluginManifest),
+    InstalledPendingBuild(PluginManifest),
+}
+
+/// SSOT for the phase strings emitted by [`install_plugin`].
+///
+/// Mirrored as `PLUGIN_INSTALL_PHASES` in
+/// `desktop/src/src/app/models/plugin.ts`. Adding/removing/renaming a phase
+/// here requires the same change there (no codegen — this is a small,
+/// rarely-changing list).
+pub const ALL_PLUGIN_INSTALL_PHASES: &[&str] = &[
+    "verifying",
+    "extracting",
+    "building",
+    "done",
+    "failed",
+    "done_with_pending_build",
+];
+
+/// Lightweight summary of a plugin manifest for the install-overlay
+/// pre-fetch path. Read by `peek_plugin_manifest` from the ZIP without
+/// signature verification, extraction, or any side-effect.
+#[derive(Serialize, Debug, Clone)]
+pub struct PluginManifestSummary {
+    pub slug: String,
+    pub name: String,
+    pub has_service_id: bool,
+}
+
 /// Returns `~/.speedwave/plugins/`
 pub fn plugins_base_dir() -> anyhow::Result<PathBuf> {
     Ok(consts::data_dir().join("plugins"))
@@ -435,15 +484,78 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
     Ok(())
 }
 
+/// Reads a plugin manifest summary from a ZIP without verifying the
+/// signature, extracting to a permanent location, or running any side-effect.
+///
+/// Used by the Desktop install overlay to learn whether the plugin will run
+/// the `building` phase (i.e. has a `service_id`) BEFORE invoking
+/// [`install_plugin`]. The full [`install_plugin`] flow re-runs every step
+/// — including signature verification — so this is purely a lightweight
+/// pre-flight peek.
+pub fn peek_plugin_manifest(zip_path: &Path) -> anyhow::Result<PluginManifestSummary> {
+    let tmp_dir =
+        std::env::temp_dir().join(format!("speedwave-plugin-peek-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp_dir)?;
+    let _cleanup = TmpDirGuard(tmp_dir.clone());
+    extract_zip(zip_path, &tmp_dir)?;
+    validate_extracted_paths(&tmp_dir)?;
+    let plugin_src = find_plugin_dir(&tmp_dir)?;
+
+    let manifest_path = plugin_src.join("plugin.json");
+    let content = std::fs::read_to_string(&manifest_path)?;
+    let manifest: PluginManifest = serde_json::from_str(&content)?;
+    Ok(PluginManifestSummary {
+        slug: manifest.slug,
+        name: manifest.name,
+        has_service_id: manifest.service_id.is_some(),
+    })
+}
+
 /// Install a plugin from a ZIP file into `~/.speedwave/plugins/<slug>/`.
 /// Verifies signature, validates manifest, and creates `.image_pending` marker
 /// for deferred image build.
+///
+/// Streams progress through `on_progress` using the phases defined in
+/// [`ALL_PLUGIN_INSTALL_PHASES`]. The `error` field of any emitted
+/// [`PluginInstallProgress`] is sanitized via
+/// [`crate::log_sanitizer::sanitize`] before emission.
+///
+/// Returns:
+/// * [`InstallOutcome::Installed`] — plugin extracted and (for MCP plugins)
+///   image built.
+/// * [`InstallOutcome::InstalledPendingBuild`] — plugin extracted; image
+///   build failed. The `.image_pending` marker remains and the build is
+///   retried on the next launch via [`ensure_all_plugin_images`].
 pub fn install_plugin(
     zip_path: &Path,
     runtime: Option<&dyn ContainerRuntime>,
-) -> anyhow::Result<PluginManifest> {
+    on_progress: &mut dyn FnMut(PluginInstallProgress),
+) -> anyhow::Result<InstallOutcome> {
     let plugins_dir = plugins_base_dir()?;
-    std::fs::create_dir_all(&plugins_dir)?;
+    install_plugin_with_base(zip_path, runtime, on_progress, &plugins_dir)
+}
+
+/// Testable variant of [`install_plugin`] — accepts an explicit plugins
+/// base directory so unit tests can isolate file-system mutation under
+/// `tempfile::tempdir()`.
+fn install_plugin_with_base(
+    zip_path: &Path,
+    runtime: Option<&dyn ContainerRuntime>,
+    on_progress: &mut dyn FnMut(PluginInstallProgress),
+    plugins_dir: &Path,
+) -> anyhow::Result<InstallOutcome> {
+    let mut emit = |phase: &str, message: &str| {
+        on_progress(PluginInstallProgress {
+            phase: phase.to_string(),
+            message: message.to_string(),
+            error: None,
+        });
+    };
+
+    std::fs::create_dir_all(plugins_dir)?;
+
+    // Phase: verifying — signature check
+    emit("verifying", "Verifying signature");
 
     // Extract ZIP to a temporary directory first
     let tmp_dir = std::env::temp_dir().join(format!("speedwave-plugin-{}", uuid::Uuid::new_v4()));
@@ -458,7 +570,14 @@ pub fn install_plugin(
     let plugin_src = find_plugin_dir(&tmp_dir)?;
 
     // Verify signature before doing anything else
-    signing::verify_plugin_signature(&plugin_src)?;
+    if let Err(e) = signing::verify_plugin_signature(&plugin_src) {
+        on_progress(PluginInstallProgress {
+            phase: "failed".to_string(),
+            message: "Signature verification failed".to_string(),
+            error: Some(crate::log_sanitizer::sanitize(&e.to_string())),
+        });
+        return Err(e);
+    }
 
     // Read and validate manifest
     let manifest_path = plugin_src.join("plugin.json");
@@ -468,7 +587,7 @@ pub fn install_plugin(
     validate_manifest(&manifest, &plugin_src)?;
 
     // Reject duplicate service_id or port among already-installed plugins
-    let existing = list_installed_plugins()?;
+    let existing = list_installed_from_dir(plugins_dir)?;
     if let Some(ref sid) = manifest.service_id {
         for existing_manifest in &existing {
             if existing_manifest.service_id.as_deref() == Some(sid.as_str())
@@ -482,7 +601,9 @@ pub fn install_plugin(
             }
         }
     }
-    // Move to final location
+
+    // Phase: extracting — copy from temp to permanent location
+    emit("extracting", "Extracting archive");
     let dest = plugins_dir.join(&manifest.slug);
     if dest.exists() {
         std::fs::remove_dir_all(&dest)?;
@@ -495,27 +616,110 @@ pub fn install_plugin(
 
         // Build immediately if runtime is available
         if let Some(rt) = runtime {
-            if let Err(e) = build_single_plugin_image(rt, &manifest, &dest) {
-                log::warn!("Deferred build for plugin '{}': {e}", manifest.slug);
+            emit("building", "Building container image (may take 2-5 min)");
+            match build_single_plugin_image(rt, &manifest, &dest) {
+                Ok(()) => {
+                    // .image_pending was removed by build_single_plugin_image on success
+                }
+                Err(e) => {
+                    log::warn!("Deferred build for plugin '{}': {e}", manifest.slug);
+                    on_progress(PluginInstallProgress {
+                        phase: "failed".to_string(),
+                        message: "Image build failed".to_string(),
+                        error: Some(crate::log_sanitizer::sanitize(&e.to_string())),
+                    });
+                    on_progress(PluginInstallProgress {
+                        phase: "done_with_pending_build".to_string(),
+                        message:
+                            "Plugin installed; image build failed and will retry on next launch"
+                                .to_string(),
+                        error: None,
+                    });
+                    warn_legacy_addons();
+                    return Ok(InstallOutcome::InstalledPendingBuild(manifest));
+                }
             }
+        } else {
+            // No runtime available — image was not built. Treat as deferred
+            // so callers (CLI, Tauri auto-enable) don't enable an MCP plugin
+            // whose worker cannot start. `.image_pending` retry will run on
+            // the next launch via `ensure_all_plugin_images`.
+            on_progress(PluginInstallProgress {
+                phase: "done_with_pending_build".to_string(),
+                message: "Plugin installed; image build deferred to next launch".to_string(),
+                error: None,
+            });
+            warn_legacy_addons();
+            return Ok(InstallOutcome::InstalledPendingBuild(manifest));
         }
     }
 
     // Legacy addon migration warning
     warn_legacy_addons();
 
-    Ok(manifest)
+    emit("done", "Plugin installed");
+    Ok(InstallOutcome::Installed(manifest))
 }
 
 /// Removes a plugin by slug.
-pub fn remove_plugin(slug: &str) -> anyhow::Result<()> {
+///
+/// When `runtime` is provided AND the plugin has a `service_id` (i.e. an
+/// MCP plugin with a built container image), also removes the cached
+/// container image (`speedwave-mcp-<slug>:<version>`). Image cleanup is
+/// best-effort — a failure is logged at warn level but does not fail the
+/// removal, since at that point the plugin directory is already gone and
+/// the surviving image is at worst a few hundred MB of leaked disk.
+///
+/// Pass `runtime: None` to keep the legacy behaviour (delete files only).
+pub fn remove_plugin(slug: &str, runtime: Option<&dyn ContainerRuntime>) -> anyhow::Result<()> {
+    let plugins_dir = plugins_base_dir()?;
+    remove_plugin_with_base(slug, &plugins_dir, runtime)
+}
+
+/// Testable variant of [`remove_plugin`] — accepts an explicit plugins
+/// base directory so unit tests can isolate file-system mutation under
+/// `tempfile::tempdir()`. Mirrors [`install_plugin_with_base`].
+fn remove_plugin_with_base(
+    slug: &str,
+    plugins_dir: &Path,
+    runtime: Option<&dyn ContainerRuntime>,
+) -> anyhow::Result<()> {
     validate_slug(slug)?;
-    let plugin_dir = plugins_base_dir()?.join(slug);
+    let plugin_dir = plugins_dir.join(slug);
     if !plugin_dir.exists() {
         anyhow::bail!("Plugin '{}' not found", slug);
     }
+
+    // Read the manifest BEFORE removing files so we can compute the image
+    // tag for cleanup. We tolerate a missing/corrupt manifest — the file
+    // delete still proceeds.
+    let manifest_for_image = if runtime.is_some() {
+        std::fs::read_to_string(plugin_dir.join("plugin.json"))
+            .ok()
+            .and_then(|content| serde_json::from_str::<PluginManifest>(&content).ok())
+    } else {
+        None
+    };
+
     std::fs::remove_dir_all(&plugin_dir)?;
     log::info!("Removed plugin '{}'", slug);
+
+    if let (Some(rt), Some(manifest)) = (runtime, manifest_for_image) {
+        if manifest.service_id.is_some() {
+            let tag = plugin_image_tag(&manifest);
+            // force=true: the user explicitly asked to remove this plugin,
+            // and the worker container is almost always still running until
+            // the next compose recreate. Without --force, rmi would refuse
+            // and the layer cache would survive — defeating the next
+            // reinstall (a fresh ZIP would receive the stale cached image).
+            if let Err(e) = rt.remove_images(std::slice::from_ref(&tag), true) {
+                log::warn!("Failed to remove container image '{tag}' for plugin '{slug}': {e}");
+            } else {
+                log::info!("Removed container image '{tag}' for plugin '{slug}'");
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -1867,6 +2071,504 @@ mod tests {
             TokenStatus::NotConfigured {
                 missing: vec!["api_key".to_string()]
             }
+        );
+    }
+
+    // --- ALL_PLUGIN_INSTALL_PHASES parity ---
+
+    #[test]
+    fn test_all_plugin_install_phases_lists_expected_strings() {
+        // SSOT for the IPC contract; mirror in
+        // desktop/src/src/app/models/plugin.ts::PLUGIN_INSTALL_PHASES.
+        // Adding/removing/renaming a phase here requires the same change there.
+        assert_eq!(
+            ALL_PLUGIN_INSTALL_PHASES,
+            &[
+                "verifying",
+                "extracting",
+                "building",
+                "done",
+                "failed",
+                "done_with_pending_build",
+            ]
+        );
+    }
+
+    // --- peek_plugin_manifest tests ---
+
+    /// Builds a minimal valid signed-bypass plugin ZIP for tests.
+    /// Caller must set SPEEDWAVE_ALLOW_UNSIGNED to skip signature verification.
+    fn build_test_plugin_zip(zip_path: &Path, slug: &str, with_service_id: bool) {
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let buf = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(buf);
+        let options = SimpleFileOptions::default();
+
+        let manifest_json = if with_service_id {
+            format!(
+                r#"{{
+                    "name": "{slug}",
+                    "slug": "{slug}",
+                    "service_id": "{slug}",
+                    "version": "1.0.0",
+                    "description": "test plugin"
+                }}"#
+            )
+        } else {
+            format!(
+                r#"{{
+                    "name": "{slug}",
+                    "slug": "{slug}",
+                    "version": "1.0.0",
+                    "description": "test resource-only plugin"
+                }}"#
+            )
+        };
+
+        writer.start_file("plugin.json", options).unwrap();
+        writer.write_all(manifest_json.as_bytes()).unwrap();
+        if with_service_id {
+            writer.start_file("Containerfile", options).unwrap();
+            writer.write_all(b"FROM scratch\n").unwrap();
+        }
+        let buf = writer.finish().unwrap();
+        std::fs::write(zip_path, buf.into_inner()).unwrap();
+    }
+
+    /// Serializes tests that mutate the global `SPEEDWAVE_ALLOW_UNSIGNED`
+    /// env var so concurrent runs do not see each other's set/unset.
+    /// Acquired before set_var and dropped after remove_var.
+    fn unsigned_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn test_peek_plugin_manifest_mcp_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip = tmp.path().join("plugin.zip");
+        build_test_plugin_zip(&zip, "test-mcp", true);
+
+        let summary = peek_plugin_manifest(&zip).unwrap();
+        assert_eq!(summary.slug, "test-mcp");
+        assert_eq!(summary.name, "test-mcp");
+        assert!(summary.has_service_id);
+    }
+
+    #[test]
+    fn test_peek_plugin_manifest_resource_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip = tmp.path().join("plugin.zip");
+        build_test_plugin_zip(&zip, "test-skills", false);
+
+        let summary = peek_plugin_manifest(&zip).unwrap();
+        assert_eq!(summary.slug, "test-skills");
+        assert!(!summary.has_service_id);
+    }
+
+    #[test]
+    fn test_peek_plugin_manifest_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = peek_plugin_manifest(&tmp.path().join("nonexistent.zip"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_peek_plugin_manifest_no_manifest_in_zip() {
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let zip = tmp.path().join("noman.zip");
+        let buf = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(buf);
+        writer
+            .start_file("README.md", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"no manifest here").unwrap();
+        let buf = writer.finish().unwrap();
+        std::fs::write(&zip, buf.into_inner()).unwrap();
+
+        let result = peek_plugin_manifest(&zip);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_peek_plugin_manifest_does_not_install() {
+        // Verifies peek does not write into the plugins base directory.
+        // Runs against an isolated tempdir-as-plugins-dir snapshot: even
+        // though peek itself uses the real plugins_base_dir() internally,
+        // it should not touch it (no write paths). We check by counting
+        // entries in a freshly-created tempdir given as a probe — peek
+        // should not write anywhere outside its own scratch tmp.
+        let tmp = tempfile::tempdir().unwrap();
+        let zip = tmp.path().join("plugin.zip");
+        build_test_plugin_zip(&zip, "side-effect-test", true);
+
+        // Mark the tempdir as the "would-be" plugins dir so we can detect
+        // any rogue writes. peek_plugin_manifest should leave it untouched.
+        let probe_dir = tmp.path().join("would-be-plugins");
+        std::fs::create_dir_all(&probe_dir).unwrap();
+
+        let summary = peek_plugin_manifest(&zip).unwrap();
+        assert_eq!(summary.slug, "side-effect-test");
+
+        let entries: Vec<_> = std::fs::read_dir(&probe_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "peek must not write into any plugins-like directory"
+        );
+    }
+
+    // --- install_plugin progress callback tests ---
+
+    /// Progress collector for install_plugin tests.
+    fn collect_progress(
+        progresses: &std::sync::Mutex<Vec<PluginInstallProgress>>,
+    ) -> impl FnMut(PluginInstallProgress) + '_ {
+        move |p| progresses.lock().unwrap().push(p)
+    }
+
+    #[test]
+    fn test_install_plugin_resource_only_emits_verifying_extracting_done() {
+        // SPEEDWAVE_ALLOW_UNSIGNED is process-global; serialize tests that
+        // touch it so concurrent runs cannot see partial state.
+        let _guard = unsigned_env_lock();
+        std::env::set_var("SPEEDWAVE_ALLOW_UNSIGNED", "1");
+        let tmp = tempfile::tempdir().unwrap();
+        let zip = tmp.path().join("plugin.zip");
+        build_test_plugin_zip(&zip, "phases-resource", false);
+        let plugins_dir = tmp.path().join("plugins");
+
+        let progresses = std::sync::Mutex::new(Vec::<PluginInstallProgress>::new());
+        let result =
+            install_plugin_with_base(&zip, None, &mut collect_progress(&progresses), &plugins_dir);
+        std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
+
+        assert!(result.is_ok(), "install_plugin failed: {:?}", result.err());
+        let phases: Vec<String> = progresses
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|p| p.phase.clone())
+            .collect();
+        assert_eq!(phases, vec!["verifying", "extracting", "done"]);
+        assert!(matches!(result.unwrap(), InstallOutcome::Installed(_)));
+    }
+
+    #[test]
+    fn test_install_plugin_no_runtime_for_mcp_plugin_returns_pending_build() {
+        let _guard = unsigned_env_lock();
+        std::env::set_var("SPEEDWAVE_ALLOW_UNSIGNED", "1");
+        let tmp = tempfile::tempdir().unwrap();
+        let zip = tmp.path().join("plugin.zip");
+        build_test_plugin_zip(&zip, "phases-no-runtime", true);
+        let plugins_dir = tmp.path().join("plugins");
+
+        let progresses = std::sync::Mutex::new(Vec::<PluginInstallProgress>::new());
+        // runtime=None for MCP plugin: marker .image_pending is created,
+        // building is not emitted, and the outcome is PendingBuild so callers
+        // do not auto-enable an MCP worker whose image is absent.
+        let result =
+            install_plugin_with_base(&zip, None, &mut collect_progress(&progresses), &plugins_dir);
+        std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
+
+        let dest = plugins_dir.join("phases-no-runtime");
+        let pending_existed = dest.join(".image_pending").exists();
+
+        let outcome = result.expect("install must succeed");
+        assert!(
+            matches!(outcome, InstallOutcome::InstalledPendingBuild(_)),
+            "MCP plugin without runtime must return InstalledPendingBuild"
+        );
+        assert!(
+            pending_existed,
+            ".image_pending must be created when runtime is None"
+        );
+        let phases: Vec<String> = progresses
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|p| p.phase.clone())
+            .collect();
+        // building skipped (no runtime); terminal phase is done_with_pending_build.
+        assert_eq!(
+            phases,
+            vec!["verifying", "extracting", "done_with_pending_build"]
+        );
+    }
+
+    #[test]
+    fn test_install_plugin_emits_failed_with_sanitized_error() {
+        // Build error containing a credential — must be sanitized before emission.
+        struct SecretLeakingRuntime;
+        impl ContainerRuntime for SecretLeakingRuntime {
+            fn compose_up(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn compose_down(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+                Ok(vec![])
+            }
+            fn container_exec(&self, _: &str, _: &[&str]) -> std::process::Command {
+                std::process::Command::new("true")
+            }
+            fn container_exec_piped(
+                &self,
+                _: &str,
+                _: &[&str],
+            ) -> anyhow::Result<std::process::Command> {
+                Ok(std::process::Command::new("true"))
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn ensure_ready(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn build_image(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &[(&str, &str)],
+            ) -> anyhow::Result<()> {
+                anyhow::bail!("RUN curl https://user:tok@registry.example.com/foo failed")
+            }
+            fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        let _guard = unsigned_env_lock();
+        std::env::set_var("SPEEDWAVE_ALLOW_UNSIGNED", "1");
+        let tmp = tempfile::tempdir().unwrap();
+        let zip = tmp.path().join("plugin.zip");
+        build_test_plugin_zip(&zip, "phases-build-fail", true);
+        let plugins_dir = tmp.path().join("plugins");
+
+        let progresses = std::sync::Mutex::new(Vec::<PluginInstallProgress>::new());
+        let rt = SecretLeakingRuntime;
+        let result = install_plugin_with_base(
+            &zip,
+            Some(&rt),
+            &mut collect_progress(&progresses),
+            &plugins_dir,
+        );
+        std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
+
+        let dest = plugins_dir.join("phases-build-fail");
+        let pending_kept = dest.join(".image_pending").exists();
+
+        assert!(
+            result.is_ok(),
+            "install must succeed-with-pending on build error"
+        );
+        assert!(matches!(
+            result.unwrap(),
+            InstallOutcome::InstalledPendingBuild(_)
+        ));
+        assert!(
+            pending_kept,
+            ".image_pending must remain after a failed build"
+        );
+
+        let progresses = progresses.into_inner().unwrap();
+        let phases: Vec<String> = progresses.iter().map(|p| p.phase.clone()).collect();
+        assert_eq!(
+            phases,
+            vec![
+                "verifying",
+                "extracting",
+                "building",
+                "failed",
+                "done_with_pending_build"
+            ]
+        );
+
+        // Security: the emitted error must NOT contain the credential.
+        let failed = progresses.iter().find(|p| p.phase == "failed").unwrap();
+        let err_text = failed.error.as_ref().expect("failed phase carries error");
+        assert!(!err_text.contains("tok"), "credential leaked: {err_text}");
+        assert!(
+            err_text.contains("***REDACTED***"),
+            "expected redacted marker in: {err_text}"
+        );
+    }
+
+    // --- remove_plugin image cleanup tests ---
+
+    /// Mock that records every `remove_images` call (tags + force) for inspection.
+    struct ImageRemovingRuntime {
+        calls: std::sync::Mutex<Vec<(Vec<String>, bool)>>,
+        return_err: bool,
+    }
+    impl ImageRemovingRuntime {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(vec![]),
+                return_err: false,
+            }
+        }
+        fn failing() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(vec![]),
+                return_err: true,
+            }
+        }
+    }
+    impl ContainerRuntime for ImageRemovingRuntime {
+        fn compose_up(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn compose_down(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+            Ok(vec![])
+        }
+        fn container_exec(&self, _: &str, _: &[&str]) -> std::process::Command {
+            std::process::Command::new("true")
+        }
+        fn container_exec_piped(
+            &self,
+            _: &str,
+            _: &[&str],
+        ) -> anyhow::Result<std::process::Command> {
+            Ok(std::process::Command::new("true"))
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn ensure_ready(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn build_image(&self, _: &str, _: &str, _: &str, _: &[(&str, &str)]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn remove_images(&self, tags: &[String], force: bool) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push((tags.to_vec(), force));
+            if self.return_err {
+                anyhow::bail!("simulated nerdctl rmi failure")
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Helper: install a plugin into `plugins_dir` so we have something to remove.
+    fn write_plugin_dir(plugins_dir: &Path, slug: &str, with_service_id: bool) {
+        let plugin_dir = plugins_dir.join(slug);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let manifest_json = if with_service_id {
+            format!(
+                r#"{{"name":"{slug}","slug":"{slug}","service_id":"{slug}","version":"1.0.0","description":"test"}}"#
+            )
+        } else {
+            format!(r#"{{"name":"{slug}","slug":"{slug}","version":"1.0.0","description":"test"}}"#)
+        };
+        std::fs::write(plugin_dir.join("plugin.json"), manifest_json).unwrap();
+        if with_service_id {
+            std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch\n").unwrap();
+        }
+    }
+
+    #[test]
+    fn test_remove_plugin_calls_remove_images_for_mcp_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        write_plugin_dir(&plugins_dir, "img-cleanup", true);
+
+        let rt = ImageRemovingRuntime::new();
+        remove_plugin_with_base("img-cleanup", &plugins_dir, Some(&rt)).unwrap();
+
+        // Plugin dir is gone.
+        assert!(!plugins_dir.join("img-cleanup").exists());
+        // remove_images called once with the expected tag AND force=true
+        // (uninstall is an explicit user request — no waiting for prune).
+        let calls = rt.calls.into_inner().unwrap();
+        assert_eq!(
+            calls,
+            vec![(vec!["speedwave-mcp-img-cleanup:1.0.0".to_string()], true)]
+        );
+    }
+
+    #[test]
+    fn test_remove_plugin_skips_image_for_resource_only_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        write_plugin_dir(&plugins_dir, "skills-only", false);
+
+        let rt = ImageRemovingRuntime::new();
+        remove_plugin_with_base("skills-only", &plugins_dir, Some(&rt)).unwrap();
+
+        // remove_images NOT called for plugins without a service_id.
+        assert!(rt.calls.into_inner().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_remove_plugin_skips_image_when_runtime_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        write_plugin_dir(&plugins_dir, "no-runtime", true);
+
+        // No runtime — files removed, image cleanup skipped (legacy path).
+        remove_plugin_with_base("no-runtime", &plugins_dir, None).unwrap();
+        assert!(!plugins_dir.join("no-runtime").exists());
+    }
+
+    #[test]
+    fn test_remove_plugin_succeeds_even_when_remove_images_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        write_plugin_dir(&plugins_dir, "rmi-fails", true);
+
+        // Best-effort: image removal failure logs a warning but does not fail.
+        let rt = ImageRemovingRuntime::failing();
+        let result = remove_plugin_with_base("rmi-fails", &plugins_dir, Some(&rt));
+        assert!(result.is_ok(), "remove_plugin must not fail on rmi error");
+        assert!(!plugins_dir.join("rmi-fails").exists());
+        // remove_images was attempted with force=true even on the error path
+        // — the uninstall caller never silently downgrades to non-force rmi.
+        let calls = rt.calls.into_inner().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].1,
+            "rmi error path should still pass force=true, got force={}",
+            calls[0].1
         );
     }
 

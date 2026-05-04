@@ -166,6 +166,17 @@ Speedwave supports extending integrations via the plugin system:
 - Plugin services get injected `WORKER_<PLUGIN>_URL` in the hub environment
 - Plugin images are automatically rebuilt if missing (e.g. after a VM reset or `nerdctl system prune`) — you do not need to reinstall the plugin
 
+### Install progress overlay (Desktop)
+
+The Desktop install dialog reports progress through the `plugin_install_status` Tauri event. The flow has up to four phases:
+
+1. `verifying` — Ed25519 signature check
+2. `extracting` — unpack the ZIP into `~/.speedwave/plugins/<slug>/`
+3. `building` — `nerdctl build` for plugins with a `service_id` (skipped for resource-only plugins; can take 2–5 minutes for heavy dependencies)
+4. `done` — terminal success
+
+If the image build fails, the overlay shows the failure inline and emits a final `done_with_pending_build` event. The plugin is left on disk with an `.image_pending` marker; `ensure_all_plugin_images` retries the build automatically on the next launch. See [ADR-047](../adr/ADR-047-plugin-install-progress-events.md) for the event payload and per-platform cleanup behaviour.
+
 See [ADR-015](../adr/ADR-015-plugin-system.md) for the plugin system design and [ADR-036](../adr/ADR-036-self-declaring-worker-policy.md) for the tool policy model.
 
 ### Tool Policy via `_meta`

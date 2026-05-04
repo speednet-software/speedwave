@@ -50,7 +50,14 @@ speedwave --help | -h | help   # print usage and exit (no runtime required)
 
   > **Note:** If the rebuild fails (e.g., when run from a non-project directory or without Desktop running), run `speedwave update` from your project directory. For multiple projects, run `speedwave update` from each project directory or restart the Desktop app.
 
-- **`speedwave plugin install <path.zip>`** — verifies the Ed25519 signature, extracts the plugin to `~/.speedwave/plugins/<slug>/`, and registers it
+- **`speedwave plugin install <path.zip>`** — verifies the Ed25519 signature, extracts the plugin to `~/.speedwave/plugins/<slug>/`, and registers it.
+
+  Two outcomes are possible:
+
+  - **Installed:** the plugin is on disk and (for MCP plugins) the container image was built. Stdout: `"Plugin '<name>' (<slug>) installed successfully"`.
+  - **Installed with deferred build:** the plugin is on disk but the container image build failed (network outage, broken Containerfile). Stderr: `"Plugin '<name>' (<slug>) installed; image build failed and will retry on next launch"`. The `~/.speedwave/plugins/<slug>/.image_pending` marker remains and the build is retried automatically on the next Speedwave start (`ensure_all_plugin_images`).
+
+  **Both cases exit 0** so existing `speedwave plugin install foo.zip && echo OK` scripts continue to work. To detect a deferred build, read stderr or check for `.image_pending`. See [ADR-047](../adr/ADR-047-plugin-install-progress-events.md) for the rationale.
 - **`speedwave plugin list`** — lists all installed plugins, showing name, version, and enabled/configured status per project
 - **`speedwave plugin remove <slug>`** — removes the plugin directory from `~/.speedwave/plugins/<slug>/`. Note: credential files at `~/.speedwave/tokens/<project>/<slug>/` and config entries are **not** cleaned by the CLI — use the Desktop UI for full cleanup, or remove token directories manually
 - **`speedwave plugin enable <slug> --project <name>`** — enables a plugin for a specific project in user config
