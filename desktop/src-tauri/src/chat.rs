@@ -669,14 +669,31 @@ impl StreamParser {
         // modelUsage: cumulative per-model stats from the CLI. Used for
         // contextWindow (constant per model) and for model identification.
         let model_usage = parsed["modelUsage"].as_object();
+        // Pick the contextWindow from the same dominant model whose id we
+        // surface below (highest outputTokens). Using `values().next()` was
+        // non-deterministic and could surface Haiku's 200k context window
+        // in turns where Opus was the actual responder, leaving the chat
+        // footer misreporting the cap as 200k for 1M-context sessions.
         let context_window_size = model_usage
-            .and_then(|mu| mu.values().next())
+            .and_then(|mu| {
+                mu.values()
+                    .max_by_key(|stats| stats["outputTokens"].as_u64().unwrap_or(0))
+            })
             .and_then(|stats| stats["contextWindow"].as_u64());
 
-        // Pick the first model key from modelUsage if present; otherwise fall
-        // back to the most recent SystemInit model captured in state.
+        // Pick the model that produced the most output tokens — that's the
+        // main response model. A single turn can mix models (Opus for the
+        // user-facing answer + Haiku for background tasks like title
+        // generation), so picking `keys().next()` was non-deterministic and
+        // tended to surface Haiku (alphabetically before Opus) even when
+        // Opus did the real work. Falls back to the most recent SystemInit
+        // model captured in state when no modelUsage data is present.
         let model = model_usage
-            .and_then(|mu| mu.keys().next().cloned())
+            .and_then(|mu| {
+                mu.iter()
+                    .max_by_key(|(_, stats)| stats["outputTokens"].as_u64().unwrap_or(0))
+                    .map(|(k, _)| k.clone())
+            })
             .or_else(|| self.last_model.clone());
         // Keep parser state in sync so future turns without modelUsage still
         // know the model.
@@ -2350,6 +2367,39 @@ mod tests {
                 assert_eq!(context_window_size, Some(1_000_000));
                 // cost from total_cost_usd
                 assert_eq!(total_cost, Some(0.078));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_picks_dominant_model_when_modelusage_has_multiple_keys() {
+        // Regression: a single turn can mix a main-response model with
+        // background calls (Haiku for title generation, summarization, hook
+        // self-review, etc.). Picking `keys().next()` was non-deterministic
+        // and tended to surface Haiku (alphabetically before Opus) even when
+        // Opus did the real user-facing work, so the chat footer showed the
+        // wrong model. The fix selects the model with the highest
+        // outputTokens.
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":10,"outputTokens":50,"contextWindow":200000},"claude-opus-4-7":{"inputTokens":100,"outputTokens":500,"contextWindow":1000000}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                model,
+                context_window_size,
+                ..
+            } => {
+                assert_eq!(
+                    model.as_deref(),
+                    Some("claude-opus-4-7"),
+                    "must pick the model with the highest outputTokens, not the alphabetically first key"
+                );
+                assert_eq!(
+                    context_window_size,
+                    Some(1_000_000),
+                    "context_window_size must come from the same dominant model — picking Haiku's 200k here would misreport the cap for 1M sessions"
+                );
             }
             other => panic!("expected Result, got {other:?}"),
         }

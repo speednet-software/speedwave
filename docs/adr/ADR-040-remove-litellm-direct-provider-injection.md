@@ -40,7 +40,8 @@ When a local provider is selected, the following env vars are set on the `claude
 | ------------------------------------------- | ---------------------------------------------------- |
 | `ANTHROPIC_BASE_URL`                        | Provider URL (no `/v1` suffix)                       |
 | `ANTHROPIC_AUTH_TOKEN`                      | `sk-no-key-required` (dummy)[^8]                     |
-| `ANTHROPIC_CUSTOM_MODEL_OPTION`             | User-configured model name[^9]                       |
+| `ANTHROPIC_MODEL`                           | User-configured model name (active model)[^9]        |
+| `ANTHROPIC_CUSTOM_MODEL_OPTION`             | User-configured model name (picker entry)[^9]        |
 | `ANTHROPIC_CUSTOM_MODEL_OPTION_NAME`        | `<model> (<Provider Label>)` for the `/model` picker |
 | `ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION` | `Local model served by <Provider Label>`             |
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`  | `1` (disables model validation)[^5]                  |
@@ -48,7 +49,11 @@ When a local provider is selected, the following env vars are set on the `claude
 
 For `anthropic` provider, no injection occurs — Claude Code connects directly to `api.anthropic.com`.
 
-`ANTHROPIC_CUSTOM_MODEL_OPTION` is preferred over `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL`: the latter silently remaps the built-in Sonnet/Opus/Haiku aliases to the same local model, leaving the `/model` picker showing three misleading Anthropic names. The former adds a single explicit, validation-skipped entry (e.g. `llama3.3 (Ollama)`) so the user sees exactly what is running.[^9]
+`ANTHROPIC_MODEL` is the **primary mechanism** Claude Code uses to identify the active model — it drives `/status`, the statusline display, and the `/model` picker selection at startup.[^9] Without it, Claude Code falls back to the account-tier default (Haiku/Sonnet) regardless of where `ANTHROPIC_BASE_URL` points; the local model is reachable but the UI claims a different name.
+
+`ANTHROPIC_CUSTOM_MODEL_OPTION` is **supplementary**: it adds a single validation-skipped entry to the `/model` picker (e.g. `llama3.3 (Ollama)`) so the user sees a friendly label even when the local server's `/v1/models` discovery doesn't return a usable name. The `_NAME` and `_DESCRIPTION` companions only take effect when `ANTHROPIC_BASE_URL` points to an LLM-gateway-like endpoint, which is exactly our local-provider case.[^9]
+
+`ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL` is **not** used: those silently remap the built-in Sonnet/Opus/Haiku aliases to the same local model, leaving the `/model` picker showing three misleading Anthropic names.
 
 ## Architecture
 
@@ -87,22 +92,9 @@ A malicious `.speedwave.json` in a cloned repository could previously set `provi
 
 ## CLI Flag Injection for Local Providers
 
-When a local provider is active, `resolve_project_config` appends three flags to the Claude Code command:
+`resolve_project_config` does **not** inject any provider-specific CLI flags. Model selection, routing, and auth are configured entirely through env vars (see the table above) injected by `compose::apply_llm_config`. `ANTHROPIC_MODEL` supersedes a CLI `--model` flag for the active-model role and persists across the session without being attached to the launch command. See ADR-041[^10] for the model discovery flow that populates the user's model choice.
 
-- `--system-prompt-file /speedwave/resources/system-prompts/local-llm.md` — replaces Claude Code's default system prompt with a compact, local-LLM-optimised variant. The default prompt is Anthropic-centric and verbose; small-context local models benefit from a shorter, model-agnostic prompt.
-- `--model <user_model>` — pins the user-configured model name as the default in Claude Code's `/model` picker, so the session starts with the correct local model selected rather than the Anthropic default.
-- `--append-system-prompt <identity>` — runtime-built identity payload from `prompts::local_llm_identity(model, provider)` (`crates/speedwave-runtime/src/prompts.rs`). The base `local-llm.md` cannot bake in a runtime-resolved model id; this append closes the loop so an "what model are you?" question gets a concrete answer (`"I am \`qwen3:35b\` hosted by Ollama"`) instead of the generic disclaimer baked into the file. The wording is hard-coded with explicit anti-suffix and anti-followup rules because small local models otherwise fold under follow-up pressure ("are you sure?", "really?") or hallucinate `-AWQ`/`-instruct` suffixes that aren't in the actual model id.
-
-None of these flags is injected for the `anthropic` provider — the system prompt and identity stay at Claude Code's defaults. See ADR-041[^10] for the model discovery flow that populates `<user_model>`.
-
-### Identity prompt injection — security
-
-Both `claude.llm.model` and `claude.llm.provider` reach `local_llm_identity` from layered config (defaults → repo `.speedwave.json` → user `~/.speedwave/config.json`). A malicious `.speedwave.json` committed by an untrusted collaborator could otherwise inject newlines / quotes into the identity payload to override Claude Code's system rules. Two-layer mitigation:
-
-1. `local_llm_identity` returns `Option<String>` — `None` for any model name containing characters outside `[A-Za-z0-9._:/+-]`, leading dashes, empty strings, or values longer than 128 chars. The resolver skips `--append-system-prompt` entirely in that case.
-2. `containers_cmd::update_llm_config` rejects model names starting with `-` (CLI flag collision guard) at save time so the broken value never persists.
-
-The Anthropic provider is exempt at the outer-layer — the `is_local_provider(...)` guard in `resolve_project_config` skips the entire local-flag block for it.
+The default Claude Code system prompt is preserved for local providers. Modern local LLM servers ship with 32K–128K context windows[^11] that absorb the baseline prompt + tool definitions without hurting tool-use quality, and preserving the default lets `outputStyle` from `settings.json` reach local LLMs the same way it reaches Anthropic-hosted models.
 
 ## Authentication Bypass for Local Providers
 
@@ -140,3 +132,5 @@ Note: the stale llm-proxy container (if any) is automatically removed by `--remo
 [^9]: `ANTHROPIC_CUSTOM_MODEL_OPTION` (with `_NAME`, `_DESCRIPTION`, `_SUPPORTED_CAPABILITIES` suffixes) adds a single entry to the `/model` picker and skips validation of the model ID: https://code.claude.com/docs/en/model-config
 
 [^10]: ADR-041: Local LLM Model Discovery and SSRF Policy — `docs/adr/ADR-041-local-llm-model-discovery.md`
+
+[^11]: Representative 1M context: Llama 3.1 (128K) — https://ai.meta.com/blog/meta-llama-3-1/ ; Qwen2.5 family default 32K with 128K via YaRN — https://qwenlm.github.io/blog/qwen2.5/ ; DeepSeek-V3 128K — https://github.com/deepseek-ai/DeepSeek-V3

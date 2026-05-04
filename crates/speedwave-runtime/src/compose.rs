@@ -262,19 +262,22 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
     let provider = llm.provider.as_deref().unwrap_or("anthropic");
     match provider {
         "anthropic" => {
+            // ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL pin each alias to the
+            // SSOT-latest model id with a `[1m]` suffix where the model
+            // supports a 1M-token context window. Without this, Max/Team
+            // subscribers see their 1M models capped at the 200k base spec
+            // (anthropics/claude-code#34083). Generated dynamically so a SSOT
+            // bump (Opus 4.8 etc.) propagates without touching this branch.
+            let mut extra_env = crate::defaults::anthropic_default_models_env();
             // When the user picks an explicit model in Settings, propagate it
             // through ANTHROPIC_MODEL so Claude Code respects the choice.
-            // Leaving the field blank keeps base_env() free of the variable
-            // (see defaults.rs::base_env_does_not_set_model) — Claude Code
-            // then falls back to its built-in default model.
+            // Leaving the field blank means the active model resolves through
+            // an alias (`opus`/`sonnet`/`haiku`) which the DEFAULT_*_MODEL
+            // entries above already steer toward the latest 1M variant.
             let model = llm.model.as_deref().map(str::trim).unwrap_or("");
-            if model.is_empty() {
-                return Ok(yaml.to_string());
+            if !model.is_empty() {
+                extra_env.insert("ANTHROPIC_MODEL".to_string(), model.to_string());
             }
-            let extra_env = std::collections::HashMap::from([(
-                "ANTHROPIC_MODEL".to_string(),
-                model.to_string(),
-            )]);
             Ok(inject_claude_env(yaml, &extra_env))
         }
         "ollama" | "lmstudio" | "llamacpp" => {
@@ -298,6 +301,14 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
                     "ANTHROPIC_AUTH_TOKEN".to_string(),
                     "sk-no-key-required".to_string(),
                 ),
+                // ANTHROPIC_MODEL is Claude Code's primary mechanism for setting
+                // the active model (and what statusline / `/status` display).
+                // Without it Claude Code falls back to its account-tier default
+                // (Haiku/Sonnet) regardless of where ANTHROPIC_BASE_URL points.
+                ("ANTHROPIC_MODEL".to_string(), model.to_string()),
+                // CUSTOM_MODEL_OPTION* adds a friendly entry to the `/model`
+                // picker. Documented as supplementary — useful when the gateway
+                // doesn't auto-populate the picker via /v1/models discovery.
                 (
                     "ANTHROPIC_CUSTOM_MODEL_OPTION".to_string(),
                     model.to_string(),
@@ -3547,6 +3558,12 @@ services:
             "Ollama must set dummy auth token"
         );
         assert!(
+            env.iter().any(|e| e == "ANTHROPIC_MODEL=llama3.3"),
+            "Ollama must set ANTHROPIC_MODEL — Claude Code's primary mechanism for the active \
+             model, displayed in /status and statusline. Without it Claude Code falls back to \
+             its account-tier default. Got: {env:?}"
+        );
+        assert!(
             env.iter()
                 .any(|e| e == "ANTHROPIC_CUSTOM_MODEL_OPTION=llama3.3"),
             "Ollama must set ANTHROPIC_CUSTOM_MODEL_OPTION to the user model, got: {env:?}"
@@ -3887,6 +3904,37 @@ services:
             !env_blank.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
             "Anthropic + whitespace-only model must not set ANTHROPIC_MODEL, got: {env_blank:?}"
         );
+    }
+
+    #[test]
+    fn test_anthropic_injects_default_alias_env_vars() {
+        // Workaround for anthropics/claude-code#34083 — without
+        // ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL pointing to the
+        // `[1m]` variant, Max/Team subscribers see their 1M models capped
+        // at 200k. compose must inject these regardless of whether the
+        // user pinned an explicit model, because the alias resolution is
+        // what unlocks the upgraded window.
+        let llm = LlmConfig {
+            provider: Some("anthropic".to_string()),
+            model: None,
+            base_url: None,
+            context_tokens: None,
+        };
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm).unwrap();
+        let env = get_claude_env(&rendered);
+
+        let expected = crate::defaults::anthropic_default_models_env();
+        assert!(
+            !expected.is_empty(),
+            "anthropic_default_models_env returned empty — SSOT lost its `latest: true` entries"
+        );
+        for (var, value) in &expected {
+            let line = format!("{var}={value}");
+            assert!(
+                env.iter().any(|e| e == &line),
+                "Anthropic provider must inject `{line}`, got: {env:?}"
+            );
+        }
     }
 
     #[test]

@@ -141,12 +141,6 @@ pub const NESTED_VIRT_WARNING_MSG: &str = "\
     - Enable nested virtualization in VM settings (VT-x/EPT or AMD-V/RVI)\n\
     - Close other memory-intensive applications";
 
-/// Path inside the container to the system prompt file used when running a
-/// local LLM (Ollama, LM Studio, llama.cpp). The slim prompt replaces
-/// Claude Code's built-in ~16k-token prompt which exceeds local model context
-/// windows. See ADR-040.
-pub const LOCAL_LLM_SYSTEM_PROMPT_PATH: &str = "/speedwave/resources/system-prompts/local-llm.md";
-
 /// Error prefix used by backend when SecurityCheck or OS prereqs fail.
 /// Frontend matches on this string to distinguish blocking (check_failed)
 /// from dismissable (error) failures.
