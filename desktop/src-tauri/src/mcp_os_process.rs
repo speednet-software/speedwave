@@ -551,11 +551,7 @@ impl McpOsProcess {
 mod tests {
     use super::*;
 
-    /// Shared lock for all tests that mutate process-global environment variables
-    /// via `std::env::set_var` / `std::env::remove_var`. Every such test must
-    /// acquire this lock to prevent data races (env vars are per-process, not
-    /// per-thread).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use serial_test::serial;
 
     #[test]
     fn test_spawn_dynamic_port() {
@@ -937,9 +933,8 @@ srv.listen(0, '127.0.0.1', () => {
     }
 
     #[test]
+    #[serial(env)]
     fn test_env_clear_prevents_secret_leakage() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
         let tmp = tempfile::tempdir().unwrap();
         let script = tmp.path().join("check_env.js");
         std::fs::write(
@@ -1057,9 +1052,8 @@ srv.listen(0, '127.0.0.1', () => {
     /// can initialize BCryptGenRandom. This test verifies those vars are present.
     #[cfg(target_os = "windows")]
     #[test]
+    #[serial(env)]
     fn test_windows_system_env_vars_passed_through() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
         let tmp = tempfile::tempdir().unwrap();
         let script = tmp.path().join("check_win_env.js");
 
@@ -1126,9 +1120,8 @@ srv.listen(0, '127.0.0.1', () => {
     /// selective re-injection — and confirms that arbitrary env vars from the
     /// parent do not reach the child.
     #[test]
+    #[serial(env)]
     fn test_env_clear_with_windows_passthrough_still_blocks_secrets() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
         let tmp = tempfile::tempdir().unwrap();
         let script = tmp.path().join("check_secrets.js");
 
@@ -1532,8 +1525,8 @@ srv.listen(0, '127.0.0.1', () => {
     }
 
     #[test]
+    #[serial(env)]
     fn test_spawn_forwards_resources_env_in_prod_mode() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let env_out = tmp.path().join("env.json");
         let env_out_escaped = env_out.to_string_lossy().replace('\\', "/");
@@ -1576,8 +1569,8 @@ srv.listen(0, '127.0.0.1', () => {{
     }
 
     #[test]
+    #[serial(env)]
     fn test_spawn_omits_resources_env_in_dev_mode() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let env_out = tmp.path().join("env.json");
         let env_out_escaped = env_out.to_string_lossy().replace('\\', "/");
