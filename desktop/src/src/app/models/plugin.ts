@@ -41,3 +41,40 @@ export interface JsonSchema {
 export interface PluginsResponse {
   plugins: PluginStatusEntry[];
 }
+
+/**
+ * Phase strings emitted by the `plugin_install_status` event.
+ *
+ * Mirror of `ALL_PLUGIN_INSTALL_PHASES` in
+ * `crates/speedwave-runtime/src/plugin.rs`. Adding/removing/renaming a phase
+ * here requires the same change there (no codegen — small, rarely-changing
+ * list).
+ */
+export const PLUGIN_INSTALL_PHASES = [
+  'verifying',
+  'extracting',
+  'building',
+  'done',
+  'failed',
+  'done_with_pending_build',
+] as const;
+
+export type PluginInstallPhase = (typeof PLUGIN_INSTALL_PHASES)[number];
+
+/** Streaming progress event for the `plugin_install_status` Tauri event. */
+export interface PluginInstallProgress {
+  phase: PluginInstallPhase;
+  message: string;
+  /** Sanitized error message; populated only when `phase === 'failed'`. */
+  error?: string;
+}
+
+/**
+ * Lightweight manifest summary returned by `peek_plugin_manifest`.
+ * Used by the install overlay to know whether the `building` step will run.
+ */
+export interface PluginManifestSummary {
+  slug: string;
+  name: string;
+  has_service_id: boolean;
+}

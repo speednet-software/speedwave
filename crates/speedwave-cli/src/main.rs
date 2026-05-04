@@ -454,11 +454,21 @@ fn main() -> anyhow::Result<()> {
             let rt = detect_runtime();
             let rt_ref: Option<&dyn speedwave_runtime::runtime::ContainerRuntime> =
                 if rt.is_available() { Some(&*rt) } else { None };
-            let manifest = plugin::install_plugin(std::path::Path::new(path), rt_ref)?;
-            println!(
-                "Plugin '{}' ({}) installed successfully",
-                manifest.name, manifest.slug
-            );
+            let outcome = plugin::install_plugin(std::path::Path::new(path), rt_ref, &mut |_| {})?;
+            match outcome {
+                plugin::InstallOutcome::Installed(manifest) => {
+                    println!(
+                        "Plugin '{}' ({}) installed successfully",
+                        manifest.name, manifest.slug
+                    );
+                }
+                plugin::InstallOutcome::InstalledPendingBuild(manifest) => {
+                    eprintln!(
+                        "Plugin '{}' ({}) installed; image build failed and will retry on next launch",
+                        manifest.name, manifest.slug
+                    );
+                }
+            }
             std::process::exit(0);
         }
         CliAction::PluginList => {

@@ -7,6 +7,7 @@ use crate::types::check_project;
 use speedwave_runtime::config;
 use speedwave_runtime::plugin;
 use std::collections::HashMap;
+use tauri::Emitter;
 
 // ---------------------------------------------------------------------------
 // DTOs
@@ -164,28 +165,65 @@ fn is_plugin_configured(
     true
 }
 
+/// Reads `plugin.json` from a ZIP without extracting, verifying signature,
+/// or building. Returns a lightweight summary so the install overlay knows
+/// which steps to render BEFORE invoking [`install_plugin`].
 #[tauri::command]
-pub fn install_plugin(zip_path: String) -> Result<String, String> {
-    log::info!("install_plugin: zip_path={zip_path}");
-    let path = std::path::Path::new(&zip_path);
+pub async fn peek_plugin_manifest(
+    zip_path: String,
+) -> Result<plugin::PluginManifestSummary, String> {
+    log::info!("peek_plugin_manifest: zip_path={zip_path}");
+    let path = std::path::PathBuf::from(&zip_path);
     if !path.exists() {
         return Err(format!("File not found: {}", zip_path));
     }
+    tokio::task::spawn_blocking(move || plugin::peek_plugin_manifest(&path))
+        .await
+        .map_err(|e| format!("peek task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
 
-    let rt = speedwave_runtime::runtime::detect_runtime();
-    let manifest = plugin::install_plugin(path, Some(&*rt)).map_err(|e| e.to_string())?;
+#[tauri::command]
+pub async fn install_plugin(
+    zip_path: String,
+    app_handle: tauri::AppHandle,
+) -> Result<String, String> {
+    log::info!("install_plugin: zip_path={zip_path}");
+    let path = std::path::PathBuf::from(&zip_path);
+    if !path.exists() {
+        return Err(format!("File not found: {}", zip_path));
+    }
+    let app = app_handle.clone();
 
-    // Auto-enable plugins that need no credentials (resource-only or no auth_fields).
-    // MCP plugins with auth_fields are auto-enabled after credential save in the UI.
-    let needs_credentials = manifest.auth_fields.iter().any(|f| f.is_secret);
-    if !needs_credentials {
+    let outcome = tokio::task::spawn_blocking(move || {
+        let rt = speedwave_runtime::runtime::detect_runtime();
+        plugin::install_plugin(&path, Some(&*rt), &mut |progress| {
+            let _ = app.emit("plugin_install_status", progress);
+        })
+    })
+    .await
+    .map_err(|e| format!("install task panicked: {e}"))?
+    .map_err(|e| e.to_string())?;
+
+    let manifest = match &outcome {
+        plugin::InstallOutcome::Installed(m) => m,
+        plugin::InstallOutcome::InstalledPendingBuild(m) => m,
+    };
+
+    // Auto-enable only when image is ready. MCP plugins with auth_fields are
+    // auto-enabled after credential save in the UI.
+    let should_auto_enable =
+        matches!(outcome, plugin::InstallOutcome::Installed(_))
+            && !manifest.auth_fields.iter().any(|f| f.is_secret);
+    if should_auto_enable {
         let plugin_key = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
+        let plugin_key = plugin_key.to_string();
         config::with_config_lock(|| {
             let mut cfg = config::load_user_config()?;
             if let Some(active) = cfg.active_project.clone() {
                 if let Some(entry) = cfg.projects.iter_mut().find(|p| p.name == active) {
                     let integrations = entry.integrations.get_or_insert_with(Default::default);
-                    integrations.set_plugin_enabled(plugin_key, true);
+                    integrations.set_plugin_enabled(&plugin_key, true);
                     config::save_user_config(&cfg)?;
                 }
             }
@@ -194,10 +232,16 @@ pub fn install_plugin(zip_path: String) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     }
 
-    Ok(format!(
-        "Plugin '{}' v{} installed successfully",
-        manifest.name, manifest.version
-    ))
+    Ok(match outcome {
+        plugin::InstallOutcome::Installed(m) => format!(
+            "Plugin '{}' v{} installed successfully",
+            m.name, m.version
+        ),
+        plugin::InstallOutcome::InstalledPendingBuild(m) => format!(
+            "Plugin '{}' v{} installed; image build failed and will retry on next launch",
+            m.name, m.version
+        ),
+    })
 }
 
 #[tauri::command]

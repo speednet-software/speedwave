@@ -1440,6 +1440,7 @@ fn main() {
             redmine_api_cmd::fetch_redmine_enumerations,
             // Plugins
             plugin_cmd::get_plugins,
+            plugin_cmd::peek_plugin_manifest,
             plugin_cmd::install_plugin,
             plugin_cmd::remove_plugin,
             plugin_cmd::set_plugin_enabled,

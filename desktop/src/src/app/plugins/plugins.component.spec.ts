@@ -363,10 +363,15 @@ describe('PluginsComponent', () => {
   });
 
   describe('installPlugin()', () => {
-    it('calls open dialog and installs on selection', async () => {
-      await component.ngOnInit();
-      openMock.mockResolvedValue('/tmp/presale-1.0.0.zip');
-      mockTauri.invokeHandler = async (cmd: string) => {
+    /**
+     * Default install handler used by these tests: peeks an MCP plugin
+     * (with `service_id`) and installs successfully. Override per-test for
+     * other scenarios.
+     */
+    function defaultInstallHandler(): (cmd: string) => Promise<unknown> {
+      return async (cmd: string) => {
+        if (cmd === 'peek_plugin_manifest')
+          return { slug: 'presale', name: 'presale', has_service_id: true };
         if (cmd === 'install_plugin') return 'Plugin installed';
         if (cmd === 'list_projects')
           return {
@@ -376,8 +381,17 @@ describe('PluginsComponent', () => {
         if (cmd === 'get_plugins') return cloneMockPlugins();
         return undefined;
       };
+    }
+
+    it('peeks the manifest then invokes install_plugin', async () => {
+      await component.ngOnInit();
+      openMock.mockResolvedValue('/tmp/presale-1.0.0.zip');
+      mockTauri.invokeHandler = defaultInstallHandler();
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       await component.installPlugin();
+      expect(invokeSpy).toHaveBeenCalledWith('peek_plugin_manifest', {
+        zipPath: '/tmp/presale-1.0.0.zip',
+      });
       expect(invokeSpy).toHaveBeenCalledWith('install_plugin', {
         zipPath: '/tmp/presale-1.0.0.zip',
       });
@@ -398,6 +412,8 @@ describe('PluginsComponent', () => {
       await component.ngOnInit();
       openMock.mockResolvedValue('/tmp/bad.zip');
       mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'peek_plugin_manifest')
+          return { slug: 'bad', name: 'bad', has_service_id: true };
         if (cmd === 'install_plugin') throw new Error('signature invalid');
         return undefined;
       };
@@ -406,14 +422,130 @@ describe('PluginsComponent', () => {
       expect(component.installing).toBe(false);
     });
 
-    it('sets error when file dialog throws', async () => {
+    it('sets error when peek_plugin_manifest fails (e.g. corrupt ZIP)', async () => {
       await component.ngOnInit();
-      openMock.mockRejectedValue(new Error('dialog permission denied'));
+      openMock.mockResolvedValue('/tmp/bad.zip');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'peek_plugin_manifest') throw new Error('not a zip');
+        return undefined;
+      };
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       await component.installPlugin();
-      expect(component.error).toBe('dialog permission denied');
+      expect(component.error).toBe('not a zip');
       expect(invokeSpy).not.toHaveBeenCalledWith('install_plugin', expect.anything());
       expect(component.installing).toBe(false);
+    });
+
+    it('renders 2 steps for a resource-only plugin', async () => {
+      await component.ngOnInit();
+      openMock.mockResolvedValue('/tmp/skills.zip');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'peek_plugin_manifest')
+          return { slug: 'skills', name: 'skills', has_service_id: false };
+        if (cmd === 'install_plugin') return 'Plugin installed';
+        if (cmd === 'list_projects')
+          return {
+            projects: [{ name: 'test-project', dir: '/tmp/test' }],
+            active_project: 'test-project',
+          };
+        if (cmd === 'get_plugins') return cloneMockPlugins();
+        return undefined;
+      };
+      await component.installPlugin();
+      // After install completes, the steps signal still holds the last list
+      // used during the run — we can assert resource-only plugins never get
+      // a `building` step.
+      const steps = component.installSteps();
+      expect(steps.map((s) => s.id)).toEqual(['verifying', 'extracting']);
+    });
+
+    it('maps phase events to step status transitions', async () => {
+      await component.ngOnInit();
+      openMock.mockResolvedValue('/tmp/presale.zip');
+      let resolveFn!: (value: string) => void;
+      mockTauri.invokeHandler = (cmd: string) => {
+        if (cmd === 'peek_plugin_manifest')
+          return Promise.resolve({
+            slug: 'presale',
+            name: 'presale',
+            has_service_id: true,
+          });
+        if (cmd === 'install_plugin')
+          return new Promise<string>((r) => {
+            resolveFn = r;
+          });
+        if (cmd === 'get_plugins') return Promise.resolve(cloneMockPlugins());
+        return Promise.resolve(undefined);
+      };
+
+      const promise = component.installPlugin();
+      // Let peek + listener registration run.
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+
+      mockTauri.dispatchEvent('plugin_install_status', {
+        phase: 'verifying',
+        message: 'Verifying signature',
+      });
+      expect(component.installSteps().find((s) => s.id === 'verifying')?.status).toBe(
+        'active',
+      );
+      mockTauri.dispatchEvent('plugin_install_status', {
+        phase: 'extracting',
+        message: 'Extracting archive',
+      });
+      expect(component.installSteps().find((s) => s.id === 'verifying')?.status).toBe(
+        'done',
+      );
+      expect(component.installSteps().find((s) => s.id === 'extracting')?.status).toBe(
+        'active',
+      );
+
+      resolveFn('Plugin installed');
+      await promise;
+    });
+
+    it('marks the active step as error and sets installError on phase=failed', async () => {
+      await component.ngOnInit();
+      openMock.mockResolvedValue('/tmp/bad.zip');
+      // Hold install_plugin pending so the dispatched phase events are
+      // delivered while the listener is still registered.
+      let rejectFn!: (e: Error) => void;
+      mockTauri.invokeHandler = (cmd: string) => {
+        if (cmd === 'peek_plugin_manifest')
+          return Promise.resolve({
+            slug: 'bad',
+            name: 'bad',
+            has_service_id: true,
+          });
+        if (cmd === 'install_plugin')
+          return new Promise<string>((_, reject) => {
+            rejectFn = reject;
+          });
+        return Promise.resolve(undefined);
+      };
+
+      const promise = component.installPlugin();
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+
+      mockTauri.dispatchEvent('plugin_install_status', {
+        phase: 'verifying',
+        message: 'Verifying signature',
+      });
+      mockTauri.dispatchEvent('plugin_install_status', {
+        phase: 'failed',
+        message: 'Signature verification failed',
+        error: 'bad signature: invalid format',
+      });
+
+      expect(component.installSteps().find((s) => s.id === 'verifying')?.status).toBe(
+        'error',
+      );
+      expect(component.installError()).toBe('bad signature: invalid format');
+
+      rejectFn(new Error('signature invalid'));
+      await promise;
     });
   });
 
@@ -424,6 +556,13 @@ describe('PluginsComponent', () => {
 
       let resolveFn!: (value: string) => void;
       mockTauri.invokeHandler = (cmd: string) => {
+        if (cmd === 'peek_plugin_manifest') {
+          return Promise.resolve({
+            slug: 'plugin',
+            name: 'plugin',
+            has_service_id: true,
+          });
+        }
         if (cmd === 'install_plugin') {
           return new Promise<string>((resolve) => {
             resolveFn = resolve;
@@ -439,7 +578,8 @@ describe('PluginsComponent', () => {
       };
 
       const promise = component.installPlugin();
-      // Flush microtask for open() to resolve, which sets installing=true
+      // Flush microtasks for open() + peek_plugin_manifest + listen()
+      await new Promise((r) => setTimeout(r, 0));
       await new Promise((r) => setTimeout(r, 0));
       fixture.detectChanges();
 
