@@ -11,6 +11,12 @@ Platform-specific installation instructions for Speedwave.
 
 Speedwave warns at startup if the host has less than 8 GiB RAM.
 
+> **Upgrading from ≤ 0.6.0 on a 16 GiB host?** The new adaptive formula
+> (`host_ram / 2`) reduces the Lima VM from 12 GiB to 8 GiB, which lowers
+> Claude's working memory from 8 g to 4 g. This trade-off frees host RAM
+> for the browser and other apps. There is currently no persistent override
+> — the migration runs automatically on each launch.
+
 ## macOS
 
 Speedwave ships as a signed and notarized `.dmg` (Apple Silicon and Intel).
@@ -80,7 +86,7 @@ Expected output on a healthy system:
 speedwave check OK -- all system checks passed
 ```
 
-`speedwave check` runs OS prerequisite checks (Linux: `newuidmap`; Windows: `wsl.exe --status`), validates the rendered compose file against the security policy (`cap_drop: ALL`, `no-new-privileges`, `read_only`, `tmpfs: /tmp:noexec,nosuid`), and verifies file permissions on `~/.speedwave/`. It is diagnostic-only — it does not start containers and does not auto-fix anything. Container start paths (`speedwave` and `speedwave update`) auto-fix permissions before running the same checks.
+`speedwave check` runs OS prerequisite checks (Linux: `newuidmap`; Windows: `wsl.exe --status`) and validates the rendered compose file against the security policy: `cap_drop: ALL` and `no-new-privileges` on every container, `read_only: true` on `claude` and `mcp-hub`, and `tmpfs: /tmp:noexec,nosuid` where applicable. It is diagnostic-only — it does not start containers, does not modify file permissions, and does not auto-fix anything. Container start paths (`speedwave` and `speedwave update`) call `ensure_data_dir_permissions` before running the same security checks.
 
 If a check fails, the command prints the failing rule and a remediation hint, then exits non-zero. Re-run after applying the fix.
 
