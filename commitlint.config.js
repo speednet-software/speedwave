@@ -18,6 +18,7 @@ export default {
         'cli',
         'desktop',
         'tauri',
+        'plugins',
         'mcp',
         'mcp-hub',
         'mcp-shared',

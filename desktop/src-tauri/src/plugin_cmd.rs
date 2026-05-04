@@ -212,9 +212,8 @@ pub async fn install_plugin(
 
     // Auto-enable only when image is ready. MCP plugins with auth_fields are
     // auto-enabled after credential save in the UI.
-    let should_auto_enable =
-        matches!(outcome, plugin::InstallOutcome::Installed(_))
-            && !manifest.auth_fields.iter().any(|f| f.is_secret);
+    let should_auto_enable = matches!(outcome, plugin::InstallOutcome::Installed(_))
+        && !manifest.auth_fields.iter().any(|f| f.is_secret);
     if should_auto_enable {
         let plugin_key = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
         let plugin_key = plugin_key.to_string();
@@ -233,10 +232,9 @@ pub async fn install_plugin(
     }
 
     Ok(match outcome {
-        plugin::InstallOutcome::Installed(m) => format!(
-            "Plugin '{}' v{} installed successfully",
-            m.name, m.version
-        ),
+        plugin::InstallOutcome::Installed(m) => {
+            format!("Plugin '{}' v{} installed successfully", m.name, m.version)
+        }
         plugin::InstallOutcome::InstalledPendingBuild(m) => format!(
             "Plugin '{}' v{} installed; image build failed and will retry on next launch",
             m.name, m.version
@@ -259,8 +257,14 @@ pub fn remove_plugin(slug: String) -> Result<(), String> {
         .map(|m| m.auth_fields.iter().map(|f| f.key.clone()).collect())
         .unwrap_or_default();
 
-    // Delete plugin files from ~/.speedwave/plugins/<slug>/
-    plugin::remove_plugin(&slug).map_err(|e| e.to_string())?;
+    // Delete plugin files from ~/.speedwave/plugins/<slug>/ and clean up
+    // the cached container image. Runtime is best-effort: when the
+    // detected runtime is unavailable we skip image cleanup, mirroring
+    // the install_plugin code path.
+    let rt = speedwave_runtime::runtime::detect_runtime();
+    let rt_ref: Option<&dyn speedwave_runtime::runtime::ContainerRuntime> =
+        if rt.is_available() { Some(&*rt) } else { None };
+    plugin::remove_plugin(&slug, rt_ref).map_err(|e| e.to_string())?;
 
     // Collect project names for token cleanup (before config lock)
     let project_names: Vec<String> = {

@@ -662,14 +662,59 @@ fn install_plugin_with_base(
 }
 
 /// Removes a plugin by slug.
-pub fn remove_plugin(slug: &str) -> anyhow::Result<()> {
+///
+/// When `runtime` is provided AND the plugin has a `service_id` (i.e. an
+/// MCP plugin with a built container image), also removes the cached
+/// container image (`speedwave-mcp-<slug>:<version>`). Image cleanup is
+/// best-effort — a failure is logged at warn level but does not fail the
+/// removal, since at that point the plugin directory is already gone and
+/// the surviving image is at worst a few hundred MB of leaked disk.
+///
+/// Pass `runtime: None` to keep the legacy behaviour (delete files only).
+pub fn remove_plugin(slug: &str, runtime: Option<&dyn ContainerRuntime>) -> anyhow::Result<()> {
+    let plugins_dir = plugins_base_dir()?;
+    remove_plugin_with_base(slug, &plugins_dir, runtime)
+}
+
+/// Testable variant of [`remove_plugin`] — accepts an explicit plugins
+/// base directory so unit tests can isolate file-system mutation under
+/// `tempfile::tempdir()`. Mirrors [`install_plugin_with_base`].
+fn remove_plugin_with_base(
+    slug: &str,
+    plugins_dir: &Path,
+    runtime: Option<&dyn ContainerRuntime>,
+) -> anyhow::Result<()> {
     validate_slug(slug)?;
-    let plugin_dir = plugins_base_dir()?.join(slug);
+    let plugin_dir = plugins_dir.join(slug);
     if !plugin_dir.exists() {
         anyhow::bail!("Plugin '{}' not found", slug);
     }
+
+    // Read the manifest BEFORE removing files so we can compute the image
+    // tag for cleanup. We tolerate a missing/corrupt manifest — the file
+    // delete still proceeds.
+    let manifest_for_image = if runtime.is_some() {
+        std::fs::read_to_string(plugin_dir.join("plugin.json"))
+            .ok()
+            .and_then(|content| serde_json::from_str::<PluginManifest>(&content).ok())
+    } else {
+        None
+    };
+
     std::fs::remove_dir_all(&plugin_dir)?;
     log::info!("Removed plugin '{}'", slug);
+
+    if let (Some(rt), Some(manifest)) = (runtime, manifest_for_image) {
+        if manifest.service_id.is_some() {
+            let tag = plugin_image_tag(&manifest);
+            if let Err(e) = rt.remove_images(&[tag.clone()]) {
+                log::warn!("Failed to remove container image '{tag}' for plugin '{slug}': {e}");
+            } else {
+                log::info!("Removed container image '{tag}' for plugin '{slug}'");
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -2365,6 +2410,153 @@ mod tests {
             err_text.contains("***REDACTED***"),
             "expected redacted marker in: {err_text}"
         );
+    }
+
+    // --- remove_plugin image cleanup tests ---
+
+    /// Mock that records every `remove_images` call for inspection.
+    struct ImageRemovingRuntime {
+        calls: std::sync::Mutex<Vec<Vec<String>>>,
+        return_err: bool,
+    }
+    impl ImageRemovingRuntime {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(vec![]),
+                return_err: false,
+            }
+        }
+        fn failing() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(vec![]),
+                return_err: true,
+            }
+        }
+    }
+    impl ContainerRuntime for ImageRemovingRuntime {
+        fn compose_up(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn compose_down(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+            Ok(vec![])
+        }
+        fn container_exec(&self, _: &str, _: &[&str]) -> std::process::Command {
+            std::process::Command::new("true")
+        }
+        fn container_exec_piped(
+            &self,
+            _: &str,
+            _: &[&str],
+        ) -> anyhow::Result<std::process::Command> {
+            Ok(std::process::Command::new("true"))
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn ensure_ready(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn build_image(&self, _: &str, _: &str, _: &str, _: &[(&str, &str)]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn remove_images(&self, tags: &[String]) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push(tags.to_vec());
+            if self.return_err {
+                anyhow::bail!("simulated nerdctl rmi failure")
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Helper: install a plugin into `plugins_dir` so we have something to remove.
+    fn write_plugin_dir(plugins_dir: &Path, slug: &str, with_service_id: bool) {
+        let plugin_dir = plugins_dir.join(slug);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let manifest_json = if with_service_id {
+            format!(
+                r#"{{"name":"{slug}","slug":"{slug}","service_id":"{slug}","version":"1.0.0","description":"test"}}"#
+            )
+        } else {
+            format!(r#"{{"name":"{slug}","slug":"{slug}","version":"1.0.0","description":"test"}}"#)
+        };
+        std::fs::write(plugin_dir.join("plugin.json"), manifest_json).unwrap();
+        if with_service_id {
+            std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch\n").unwrap();
+        }
+    }
+
+    #[test]
+    fn test_remove_plugin_calls_remove_images_for_mcp_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        write_plugin_dir(&plugins_dir, "img-cleanup", true);
+
+        let rt = ImageRemovingRuntime::new();
+        remove_plugin_with_base("img-cleanup", &plugins_dir, Some(&rt)).unwrap();
+
+        // Plugin dir is gone.
+        assert!(!plugins_dir.join("img-cleanup").exists());
+        // remove_images called once with the expected tag.
+        let calls = rt.calls.into_inner().unwrap();
+        assert_eq!(
+            calls,
+            vec![vec!["speedwave-mcp-img-cleanup:1.0.0".to_string()]]
+        );
+    }
+
+    #[test]
+    fn test_remove_plugin_skips_image_for_resource_only_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        write_plugin_dir(&plugins_dir, "skills-only", false);
+
+        let rt = ImageRemovingRuntime::new();
+        remove_plugin_with_base("skills-only", &plugins_dir, Some(&rt)).unwrap();
+
+        // remove_images NOT called for plugins without a service_id.
+        assert!(rt.calls.into_inner().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_remove_plugin_skips_image_when_runtime_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        write_plugin_dir(&plugins_dir, "no-runtime", true);
+
+        // No runtime — files removed, image cleanup skipped (legacy path).
+        remove_plugin_with_base("no-runtime", &plugins_dir, None).unwrap();
+        assert!(!plugins_dir.join("no-runtime").exists());
+    }
+
+    #[test]
+    fn test_remove_plugin_succeeds_even_when_remove_images_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        write_plugin_dir(&plugins_dir, "rmi-fails", true);
+
+        // Best-effort: image removal failure logs a warning but does not fail.
+        let rt = ImageRemovingRuntime::failing();
+        let result = remove_plugin_with_base("rmi-fails", &plugins_dir, Some(&rt));
+        assert!(result.is_ok(), "remove_plugin must not fail on rmi error");
+        assert!(!plugins_dir.join("rmi-fails").exists());
+        // remove_images was attempted.
+        assert_eq!(rt.calls.into_inner().unwrap().len(), 1);
     }
 
     // --- Task 2: duplicate service_id detection test ---

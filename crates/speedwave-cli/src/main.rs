@@ -483,7 +483,10 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(0);
         }
         CliAction::PluginRemove(slug) => {
-            plugin::remove_plugin(slug)?;
+            let rt = detect_runtime();
+            let rt_ref: Option<&dyn speedwave_runtime::runtime::ContainerRuntime> =
+                if rt.is_available() { Some(&*rt) } else { None };
+            plugin::remove_plugin(slug, rt_ref)?;
             println!("Plugin '{}' removed", slug);
             std::process::exit(0);
         }
