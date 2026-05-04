@@ -715,3 +715,78 @@ EOF
 
     rm -rf "$plugins_dir" "$patched"
 }
+
+# ---------------------------------------------------------------------------
+# Migration: ~/.claude/<resource_type> mode flips between runs.
+# claude-home is a persistent volume, so a stale layout from a previous
+# start can poison the current one if the entrypoint doesn't normalize it.
+# ---------------------------------------------------------------------------
+
+@test "plugin mode replaces stale whole-directory symlink left from no-plugins run" {
+    # Reproduce the scenario from the bug: project was started without plugins
+    # (skills became a symlink to read-only resources), then a plugin was
+    # installed and the project restarted. Without normalization the per-entry
+    # ln below would resolve through the symlink and try to write into the
+    # read-only resources mount, killing the container with `set -e`.
+    mkdir -p "$RESOURCES_DIR/skills/code-review-basic"
+    echo "# Core skill" > "$RESOURCES_DIR/skills/code-review-basic/SKILL.md"
+
+    # Simulate the stale symlink left by an earlier no-plugins run, pointing
+    # at a read-only directory (chmod 555 is sufficient on the host).
+    chmod 555 "$RESOURCES_DIR/skills"
+    ln -sfn "$RESOURCES_DIR/skills" "$HOME/.claude/skills"
+
+    local plugins_dir
+    plugins_dir="$(mktemp -d)"
+    mkdir -p "${plugins_dir}/my-plugin/skills/extra-skill"
+    echo "# Plugin skill" > "${plugins_dir}/my-plugin/skills/extra-skill/SKILL.md"
+
+    local patched
+    patched="$(mktemp)"
+    sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+
+    # Restore writability so teardown can clean up the tempdir
+    chmod 755 "$RESOURCES_DIR/skills"
+
+    [ "$status" -eq 0 ]
+
+    # ~/.claude/skills must now be a real directory, not a symlink
+    [ ! -L "$HOME/.claude/skills" ]
+    [ -d "$HOME/.claude/skills" ]
+
+    # Both core and plugin entries are present as per-entry symlinks
+    [ -L "$HOME/.claude/skills/code-review-basic" ]
+    [ "$(readlink "$HOME/.claude/skills/code-review-basic")" = "$RESOURCES_DIR/skills/code-review-basic" ]
+    [ -L "$HOME/.claude/skills/extra-skill" ]
+    [ "$(readlink "$HOME/.claude/skills/extra-skill")" = "${plugins_dir}/my-plugin/skills/extra-skill" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "no-plugins mode replaces real directory left from previous plugin run" {
+    # Reverse migration: project was started with a plugin (skills became a
+    # real directory of per-entry symlinks), then the plugin was disabled.
+    # Without normalization `ln -sfn TARGET DIR` creates the link *inside*
+    # the directory, leaving stale entries and a useless skills/skills link.
+    mkdir -p "$RESOURCES_DIR/skills/core-skill"
+    echo "# Core" > "$RESOURCES_DIR/skills/core-skill/SKILL.md"
+
+    # Simulate the layout left by a previous plugin run
+    mkdir -p "$HOME/.claude/skills"
+    ln -sfn "/some/old/plugin/path/leftover" "$HOME/.claude/skills/leftover"
+
+    unset SPEEDWAVE_PLUGINS
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+
+    # ~/.claude/skills must now be a whole-directory symlink to resources
+    [ -L "$HOME/.claude/skills" ]
+    [ "$(readlink "$HOME/.claude/skills")" = "$RESOURCES_DIR/skills" ]
+
+    # No leftover entries inside (they would require a real dir, which is gone)
+    [ ! -e "$HOME/.claude/skills/leftover" ]
+    # Core entry visible through the symlink
+    [ -d "$HOME/.claude/skills/core-skill" ]
+}

@@ -53,11 +53,26 @@ fi
 for resource_type in skills commands agents hooks; do
     if [ -d "${SPEEDWAVE_RESOURCES}/${resource_type}" ]; then
         if [ "${HAS_PLUGINS}" = true ]; then
+            # Migration: a previous run without plugins may have symlinked the
+            # whole directory to the read-only resources mount. Per-entry mode
+            # needs a writable real directory; otherwise `ln` below resolves
+            # through the symlink and tries to write into the read-only mount,
+            # killing the container with `set -e`.
+            if [ -L "${HOME}/.claude/${resource_type}" ]; then
+                rm -f "${HOME}/.claude/${resource_type}"
+            fi
             mkdir -p "${HOME}/.claude/${resource_type}"
             for entry in "${SPEEDWAVE_RESOURCES}/${resource_type}"/*; do
                 [ -e "${entry}" ] && ln -sfn "${entry}" "${HOME}/.claude/${resource_type}/$(basename "${entry}")"
             done
         else
+            # Reverse migration: a previous run with plugins may have created
+            # a real directory of per-entry symlinks. `ln -sfn` on a real dir
+            # creates a link *inside* it instead of replacing it, so wipe it
+            # before re-establishing the whole-directory symlink.
+            if [ -d "${HOME}/.claude/${resource_type}" ] && [ ! -L "${HOME}/.claude/${resource_type}" ]; then
+                rm -rf "${HOME}/.claude/${resource_type}"
+            fi
             ln -sfn "${SPEEDWAVE_RESOURCES}/${resource_type}" "${HOME}/.claude/${resource_type}"
         fi
     fi

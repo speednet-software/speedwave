@@ -491,6 +491,17 @@ fn is_stale_container_error(message: &str) -> bool {
     lower.contains("mount namespace root") || lower.contains("container breakout detected")
 }
 
+/// Returns `true` if the error indicates the container exists but is not
+/// running (Exited/Created state).  containerd/nerdctl emits this when
+/// `nerdctl exec` is invoked against a container that has stopped after
+/// `compose up` (e.g. its entrypoint exited non-zero, or a previous
+/// interactive session ended and `compose up` left it in place without
+/// restarting it).  Recreate restores the container to a running state.
+fn is_stopped_container_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("cannot exec in a stopped state")
+}
+
 /// POSIX-shell-quotes each argument and joins with spaces — for transports
 /// that re-evaluate the command line through a remote shell (`ssh`, `wsl.exe`,
 /// `limactl shell`).
@@ -537,13 +548,15 @@ fn probe_container_exec(runtime: &dyn ContainerRuntime, container: &str) -> anyh
     }
 }
 
-/// Verifies container exec is functional.  Recovers from two failure modes:
+/// Verifies container exec is functional.  Recovers from three failure modes:
 ///
 /// 1. **Stale containers** — mount namespaces broken after macOS sleep/resume.
 /// 2. **Missing containers** — containers lost after containerd restart, VM
 ///    recreation, or image loss.
+/// 3. **Stopped containers** — container exists but is in Exited/Created
+///    state; `compose up` left it in place because its config did not change.
 ///
-/// In both cases, calls `compose_up_recreate` and re-probes once.
+/// In all cases, calls `compose_up_recreate` and re-probes once.
 ///
 /// Call this between `compose_up()` and the real `container_exec()` to
 /// transparently recover from container failures.
@@ -570,6 +583,11 @@ pub fn ensure_exec_healthy(
                 log::warn!(
                     "Container '{container}' not found. \
                      Recreating containers..."
+                );
+            } else if is_stopped_container_error(&msg) {
+                log::warn!(
+                    "Container '{container}' is stopped (previous run \
+                     exited). Recreating containers..."
                 );
             } else {
                 return Err(e);
@@ -1208,6 +1226,27 @@ services:
         assert!(!is_stale_container_error(""));
     }
 
+    #[test]
+    fn test_is_stopped_container_error_matches_nerdctl_message() {
+        assert!(is_stopped_container_error(
+            "time=\"2026-05-03T21:37:58+02:00\" level=fatal \
+             msg=\"cannot exec in a stopped state\""
+        ));
+    }
+
+    #[test]
+    fn test_is_stopped_container_error_case_insensitive() {
+        assert!(is_stopped_container_error("Cannot Exec In A Stopped State"));
+    }
+
+    #[test]
+    fn test_is_stopped_container_error_rejects_unrelated_errors() {
+        assert!(!is_stopped_container_error("no such container"));
+        assert!(!is_stopped_container_error("mount namespace root"));
+        assert!(!is_stopped_container_error("connection refused"));
+        assert!(!is_stopped_container_error(""));
+    }
+
     /// Mock runtime for testing `ensure_exec_healthy()`.
     ///
     /// `exec_healthy` controls whether `container_exec_piped` returns a
@@ -1414,6 +1453,19 @@ services:
         assert!(
             rt.was_recreated(),
             "compose_up_recreate should be called for 'not found' container"
+        );
+    }
+
+    #[test]
+    fn test_ensure_exec_healthy_recovers_stopped_container() {
+        let rt = ProbeTestRuntime::stale().with_custom_error(
+            "time=\"2026-05-03T21:37:58+02:00\" level=fatal \
+             msg=\"cannot exec in a stopped state\"",
+        );
+        ensure_exec_healthy(&rt, "proj", "container").unwrap();
+        assert!(
+            rt.was_recreated(),
+            "compose_up_recreate should be called for stopped container"
         );
     }
 

@@ -100,38 +100,8 @@ impl McpOsProcess {
         //    binaries from the flat Resources/ layout instead of the dev-mode
         //    source tree.
         let mut cmd = speedwave_runtime::binary::command("node");
-        cmd.arg(script_path).env_clear();
-
-        // On Windows, Node.js (OpenSSL) needs certain system environment variables
-        // to initialize BCryptGenRandom for its CSPRNG. Without these, node.exe
-        // aborts with "Assertion failed: ncrypto::CSPRNG(nullptr, 0)".
-        #[cfg(target_os = "windows")]
-        {
-            for key in WINDOWS_SYSTEM_ENV_VARS {
-                if let Ok(val) = std::env::var(key) {
-                    cmd.env(key, val);
-                }
-            }
-        }
-
-        cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
-
-        // HOME is set on Unix (macOS/Linux) but typically not on Windows, where
-        // USERPROFILE is the equivalent. Setting HOME to an empty string on
-        // Windows would break Node.js path resolution (e.g. os.homedir()).
-        // USERPROFILE is already forwarded via WINDOWS_SYSTEM_ENV_VARS above.
-        #[cfg(not(target_os = "windows"))]
-        cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
-
-        // Production mode: forward resource directory so mcp-os resolves native
-        // CLI binaries from the bundled .app/Contents/Resources/ layout instead
-        // of the dev-mode source tree.
-        if let Ok(res) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
-            if !res.is_empty() {
-                cmd.env(consts::BUNDLE_RESOURCES_ENV, &res);
-                cmd.env("SPEEDWAVE_PROD", "1");
-            }
-        }
+        cmd.arg(script_path);
+        apply_child_env(&mut cmd, &CurrentProcessEnv);
 
         let mut child = cmd
             .env("PORT", "0")
@@ -294,6 +264,66 @@ impl Drop for McpOsProcess {
     fn drop(&mut self) {
         self.stop().ok();
         self.cleanup_files();
+    }
+}
+
+/// Reads environment variables from a source (process env, or a fake source
+/// in tests). Pulled out of `spawn_in` so the env-construction logic is
+/// testable without mutating the process-global environment, which races with
+/// other tests and any Speedwave instance running concurrently on the host.
+trait EnvSource {
+    fn var(&self, key: &str) -> Option<String>;
+}
+
+/// Real implementation reading from `std::env`.
+struct CurrentProcessEnv;
+
+impl EnvSource for CurrentProcessEnv {
+    fn var(&self, key: &str) -> Option<String> {
+        std::env::var(key).ok()
+    }
+}
+
+/// Apply the child-process environment policy to `cmd` from the given source.
+///
+/// Starts by clearing the inherited environment so secrets in the parent
+/// (API keys, tokens, credentials) cannot leak to mcp-os, then adds back
+/// only the variables the child needs (PATH, HOME/USERPROFILE, optional
+/// Windows CSPRNG vars, and SPEEDWAVE_RESOURCES_DIR/SPEEDWAVE_PROD when
+/// running as a bundled .app). Never reads `std::env` directly — every
+/// value comes from `env`, so callers in tests can supply a `FakeEnv`.
+fn apply_child_env(cmd: &mut Command, env: &dyn EnvSource) {
+    cmd.env_clear();
+
+    // On Windows, Node.js (OpenSSL) needs certain system environment variables
+    // to initialize BCryptGenRandom for its CSPRNG. Without these, node.exe
+    // aborts with "Assertion failed: ncrypto::CSPRNG(nullptr, 0)".
+    #[cfg(target_os = "windows")]
+    {
+        for key in WINDOWS_SYSTEM_ENV_VARS {
+            if let Some(val) = env.var(key) {
+                cmd.env(key, val);
+            }
+        }
+    }
+
+    cmd.env("PATH", env.var("PATH").unwrap_or_default());
+
+    // HOME is set on Unix (macOS/Linux) but typically not on Windows, where
+    // USERPROFILE is the equivalent. Setting HOME to an empty string on
+    // Windows would break Node.js path resolution (e.g. os.homedir()).
+    // USERPROFILE is already forwarded via WINDOWS_SYSTEM_ENV_VARS above.
+    #[cfg(not(target_os = "windows"))]
+    cmd.env("HOME", env.var("HOME").unwrap_or_default());
+
+    // Production mode: forward resource directory so mcp-os resolves native
+    // CLI binaries from the bundled .app/Contents/Resources/ layout instead
+    // of the dev-mode source tree.
+    if let Some(res) = env.var(consts::BUNDLE_RESOURCES_ENV) {
+        if !res.is_empty() {
+            cmd.env(consts::BUNDLE_RESOURCES_ENV, &res);
+            cmd.env("SPEEDWAVE_PROD", "1");
+        }
     }
 }
 
@@ -551,11 +581,7 @@ impl McpOsProcess {
 mod tests {
     use super::*;
 
-    /// Shared lock for all tests that mutate process-global environment variables
-    /// via `std::env::set_var` / `std::env::remove_var`. Every such test must
-    /// acquire this lock to prevent data races (env vars are per-process, not
-    /// per-thread).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use serial_test::serial;
 
     #[test]
     fn test_spawn_dynamic_port() {
@@ -937,9 +963,8 @@ srv.listen(0, '127.0.0.1', () => {
     }
 
     #[test]
+    #[serial(env)]
     fn test_env_clear_prevents_secret_leakage() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
         let tmp = tempfile::tempdir().unwrap();
         let script = tmp.path().join("check_env.js");
         std::fs::write(
@@ -1057,9 +1082,8 @@ srv.listen(0, '127.0.0.1', () => {
     /// can initialize BCryptGenRandom. This test verifies those vars are present.
     #[cfg(target_os = "windows")]
     #[test]
+    #[serial(env)]
     fn test_windows_system_env_vars_passed_through() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
         let tmp = tempfile::tempdir().unwrap();
         let script = tmp.path().join("check_win_env.js");
 
@@ -1126,9 +1150,8 @@ srv.listen(0, '127.0.0.1', () => {
     /// selective re-injection — and confirms that arbitrary env vars from the
     /// parent do not reach the child.
     #[test]
+    #[serial(env)]
     fn test_env_clear_with_windows_passthrough_still_blocks_secrets() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
         let tmp = tempfile::tempdir().unwrap();
         let script = tmp.path().join("check_secrets.js");
 
@@ -1531,90 +1554,145 @@ srv.listen(0, '127.0.0.1', () => {
         // node not available — skip
     }
 
-    #[test]
-    fn test_spawn_forwards_resources_env_in_prod_mode() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let env_out = tmp.path().join("env.json");
-        let env_out_escaped = env_out.to_string_lossy().replace('\\', "/");
-        let script = tmp.path().join("test_env_forward.js");
-        std::fs::write(
-            &script,
-            format!(
-                r#"
-const fs = require('fs');
-const http = require('http');
-fs.writeFileSync({env_path}, JSON.stringify({{
-    SPEEDWAVE_PROD: process.env.SPEEDWAVE_PROD || null,
-    SPEEDWAVE_RESOURCES_DIR: process.env.SPEEDWAVE_RESOURCES_DIR || null,
-}}));
-const srv = http.createServer((_,r) => {{ r.end('ok'); }});
-srv.listen(0, '127.0.0.1', () => {{
-    process.stdout.write(JSON.stringify({{ port: srv.address().port }}) + '\n');
-}});
-"#,
-                env_path = serde_json::to_string(&env_out_escaped).unwrap(),
-            ),
-        )
-        .unwrap();
+    /// Fake env source backed by a static map — lets `apply_child_env` tests
+    /// run against arbitrary parent-environment scenarios without mutating
+    /// `std::env`, which races with parallel tests and any Speedwave instance
+    /// running concurrently on the host.
+    struct FakeEnv<'a>(&'a [(&'a str, &'a str)]);
 
-        // Simulate production: set SPEEDWAVE_RESOURCES_DIR in parent
-        std::env::set_var(consts::BUNDLE_RESOURCES_ENV, "/fake/Resources");
-        let data_dir = tmp.path().join("data");
-        let result = McpOsProcess::spawn_in_dir(&script.to_string_lossy(), &data_dir);
-        std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
-
-        if let Ok(mut proc) = result {
-            assert!(proc.port() > 0);
-            let env_json: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&env_out).unwrap()).unwrap();
-            assert_eq!(env_json["SPEEDWAVE_PROD"], "1");
-            assert_eq!(env_json["SPEEDWAVE_RESOURCES_DIR"], "/fake/Resources");
-            proc.stop().unwrap();
+    impl EnvSource for FakeEnv<'_> {
+        fn var(&self, key: &str) -> Option<String> {
+            self.0
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| (*v).to_string())
         }
-        // node not available — skip gracefully
+    }
+
+    /// Read the env vars `apply_child_env` set on a freshly created Command.
+    fn captured_env(cmd: &Command) -> std::collections::HashMap<String, String> {
+        cmd.get_envs()
+            .filter_map(|(k, v)| {
+                let v = v?.to_str()?.to_string();
+                Some((k.to_str()?.to_string(), v))
+            })
+            .collect()
     }
 
     #[test]
-    fn test_spawn_omits_resources_env_in_dev_mode() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let env_out = tmp.path().join("env.json");
-        let env_out_escaped = env_out.to_string_lossy().replace('\\', "/");
-        let script = tmp.path().join("test_env_dev.js");
-        std::fs::write(
-            &script,
-            format!(
-                r#"
-const fs = require('fs');
-const http = require('http');
-fs.writeFileSync({env_path}, JSON.stringify({{
-    SPEEDWAVE_PROD: process.env.SPEEDWAVE_PROD || null,
-    SPEEDWAVE_RESOURCES_DIR: process.env.SPEEDWAVE_RESOURCES_DIR || null,
-}}));
-const srv = http.createServer((_,r) => {{ r.end('ok'); }});
-srv.listen(0, '127.0.0.1', () => {{
-    process.stdout.write(JSON.stringify({{ port: srv.address().port }}) + '\n');
-}});
-"#,
-                env_path = serde_json::to_string(&env_out_escaped).unwrap(),
-            ),
-        )
-        .unwrap();
+    fn apply_child_env_forwards_resources_dir_and_sets_prod_flag() {
+        let mut cmd = Command::new("/bin/true");
+        let env = FakeEnv(&[
+            ("PATH", "/usr/bin:/bin"),
+            ("HOME", "/home/test"),
+            (consts::BUNDLE_RESOURCES_ENV, "/fake/Resources"),
+        ]);
 
-        // Ensure SPEEDWAVE_RESOURCES_DIR is NOT set (dev mode)
-        std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
-        let data_dir = tmp.path().join("data");
-        let result = McpOsProcess::spawn_in_dir(&script.to_string_lossy(), &data_dir);
+        apply_child_env(&mut cmd, &env);
 
-        if let Ok(mut proc) = result {
-            assert!(proc.port() > 0);
-            let env_json: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&env_out).unwrap()).unwrap();
-            assert_eq!(env_json["SPEEDWAVE_PROD"], serde_json::Value::Null);
-            assert_eq!(env_json["SPEEDWAVE_RESOURCES_DIR"], serde_json::Value::Null);
-            proc.stop().unwrap();
-        }
-        // node not available — skip gracefully
+        let captured = captured_env(&cmd);
+        assert_eq!(
+            captured
+                .get(consts::BUNDLE_RESOURCES_ENV)
+                .map(String::as_str),
+            Some("/fake/Resources"),
+            "BUNDLE_RESOURCES_ENV must be forwarded verbatim to the child"
+        );
+        assert_eq!(
+            captured.get("SPEEDWAVE_PROD").map(String::as_str),
+            Some("1"),
+            "SPEEDWAVE_PROD=1 must be set when the parent has a non-empty \
+             BUNDLE_RESOURCES_ENV (production .app launch)"
+        );
+        assert_eq!(
+            captured.get("PATH").map(String::as_str),
+            Some("/usr/bin:/bin")
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(captured.get("HOME").map(String::as_str), Some("/home/test"));
+    }
+
+    #[test]
+    fn apply_child_env_omits_prod_flag_when_resources_unset() {
+        let mut cmd = Command::new("/bin/true");
+        let env = FakeEnv(&[("PATH", "/usr/bin:/bin"), ("HOME", "/home/test")]);
+
+        apply_child_env(&mut cmd, &env);
+
+        let captured = captured_env(&cmd);
+        assert!(
+            !captured.contains_key(consts::BUNDLE_RESOURCES_ENV),
+            "BUNDLE_RESOURCES_ENV must not be set on child when parent does \
+             not have it (dev mode)"
+        );
+        assert!(
+            !captured.contains_key("SPEEDWAVE_PROD"),
+            "SPEEDWAVE_PROD must not be set in dev mode"
+        );
+    }
+
+    #[test]
+    fn apply_child_env_treats_empty_resources_as_unset() {
+        let mut cmd = Command::new("/bin/true");
+        let env = FakeEnv(&[
+            ("PATH", "/usr/bin:/bin"),
+            (consts::BUNDLE_RESOURCES_ENV, ""),
+        ]);
+
+        apply_child_env(&mut cmd, &env);
+
+        let captured = captured_env(&cmd);
+        assert!(
+            !captured.contains_key(consts::BUNDLE_RESOURCES_ENV),
+            "empty BUNDLE_RESOURCES_ENV must be treated as unset"
+        );
+        assert!(
+            !captured.contains_key("SPEEDWAVE_PROD"),
+            "empty BUNDLE_RESOURCES_ENV must not trigger SPEEDWAVE_PROD"
+        );
+    }
+
+    #[test]
+    fn apply_child_env_defaults_path_and_home_to_empty_when_missing() {
+        let mut cmd = Command::new("/bin/true");
+        let env = FakeEnv(&[]);
+
+        apply_child_env(&mut cmd, &env);
+
+        let captured = captured_env(&cmd);
+        assert_eq!(
+            captured.get("PATH").map(String::as_str),
+            Some(""),
+            "PATH must always be set on the child, even if empty"
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(
+            captured.get("HOME").map(String::as_str),
+            Some(""),
+            "HOME must always be set on Unix children, even if empty"
+        );
+    }
+
+    #[test]
+    fn apply_child_env_drops_inherited_vars_not_in_policy() {
+        // The function must clear inherited environment before adding back
+        // only policy-approved variables, otherwise a parent secret
+        // (API keys, tokens) would silently leak to the mcp-os child.
+        let mut cmd = Command::new("/bin/true");
+        cmd.env("SUPER_SECRET_TOKEN", "do-not-leak");
+        cmd.env("ANTHROPIC_API_KEY", "sk-leak");
+
+        let env = FakeEnv(&[("PATH", "/usr/bin")]);
+        apply_child_env(&mut cmd, &env);
+
+        let captured = captured_env(&cmd);
+        assert!(
+            !captured.contains_key("SUPER_SECRET_TOKEN"),
+            "inherited SUPER_SECRET_TOKEN must be wiped by apply_child_env"
+        );
+        assert!(
+            !captured.contains_key("ANTHROPIC_API_KEY"),
+            "inherited ANTHROPIC_API_KEY must be wiped by apply_child_env"
+        );
     }
 }
