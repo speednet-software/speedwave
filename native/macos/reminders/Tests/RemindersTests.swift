@@ -1,4 +1,5 @@
 import EventKit
+import SharedCLI
 import XCTest
 @testable import reminders_cli
 
@@ -138,6 +139,17 @@ final class RemindersTests: XCTestCase {
         let result: (granted: Bool, error: Error?) = requestReminderAccess(store: store, timeout: 0.001)
         // With a near-zero timeout, we just verify the return type
         XCTAssertNotNil(result)
+    }
+
+    // MARK: - EventStoreGate (H2) — file-scope struct reachable via @testable import
+
+    func testRemindersEventStoreGateConformsToPermissionGate() {
+        // Compile-time + smoke: EventStoreGate is file-scope and reachable from tests.
+        // Calling authorizationStatus() on a real EKEventStore is a pure read.
+        let store = EKEventStore()
+        let gate: PermissionGate = EventStoreGate(store: store)
+        let status = gate.authorizationStatus()
+        XCTAssertNotNil(status)
     }
 
     // MARK: - reminderToDict Output Keys

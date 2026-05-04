@@ -15,6 +15,10 @@ Welcome to the Speedwave documentation. Speedwave is an AI platform that connect
 - [Integrations](guides/integrations.md) — Slack, SharePoint, GitLab, Redmine, Mail, Calendar
 - [IDE Bridge](guides/ide-bridge.md) — VS Code / JetBrains integration
 
+## Troubleshooting
+
+- [Troubleshooting](troubleshooting.md) — Calendar/Reminders TCC prompt issues, denied permissions, legacy workarounds
+
 ## Architecture
 
 - [Overview](architecture/README.md) — system diagram and component map

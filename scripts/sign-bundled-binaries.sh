@@ -34,6 +34,7 @@ SRC_TAURI="${SRC_TAURI:-$REPO_ROOT/desktop/src-tauri}"
 NODE_ENTITLEMENTS="$SRC_TAURI/entitlements/node.plist"
 VIRTUALIZATION_ENTITLEMENTS="$SRC_TAURI/entitlements/virtualization.plist"
 CALENDARS_ENTITLEMENTS="$SRC_TAURI/entitlements/calendars.plist"
+REMINDERS_ENTITLEMENTS="$SRC_TAURI/entitlements/reminders.plist"
 APPLE_EVENTS_ENTITLEMENTS="$SRC_TAURI/entitlements/apple-events.plist"
 
 # Paths that tauri.macos.conf.json copies into .app/Contents/Resources/.
@@ -45,10 +46,10 @@ APPLE_EVENTS_ENTITLEMENTS="$SRC_TAURI/entitlements/apple-events.plist"
 # Binaries using restricted platform APIs under Hardened Runtime must carry
 # entitlements plists to opt back in. See ADR-037 for the full inventory
 # (virtualization for limactl, Apple Events for mail/notes CLIs, calendars
-# for calendar/reminders CLIs, JIT for Node.js).
+# for calendar-cli and reminders for reminders-cli, JIT for Node.js).
 SIGN_TARGETS=(
   "$SRC_TAURI/cli/speedwave:"
-  "$SRC_TAURI/reminders-cli:$CALENDARS_ENTITLEMENTS"
+  "$SRC_TAURI/reminders-cli:$REMINDERS_ENTITLEMENTS"
   "$SRC_TAURI/calendar-cli:$CALENDARS_ENTITLEMENTS"
   "$SRC_TAURI/mail-cli:$APPLE_EVENTS_ENTITLEMENTS"
   "$SRC_TAURI/notes-cli:$APPLE_EVENTS_ENTITLEMENTS"

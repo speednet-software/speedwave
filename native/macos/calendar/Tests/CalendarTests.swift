@@ -71,6 +71,17 @@ final class CalendarTests: XCTestCase {
         XCTAssertNotNil(result)
     }
 
+    // MARK: - EventStoreGate (H2) — file-scope struct reachable via @testable import
+
+    func testCalendarEventStoreGateConformsToPermissionGate() {
+        // Compile-time + smoke: EventStoreGate is file-scope and reachable from tests.
+        // Calling authorizationStatus() on a real EKEventStore is a pure read.
+        let store = EKEventStore()
+        let gate: PermissionGate = EventStoreGate(store: store)
+        let status = gate.authorizationStatus()
+        XCTAssertNotNil(status)
+    }
+
     // MARK: - eventToDict Output Keys
 
     func testEventToDictOutputContainsCalendarIdAndCalendarName() {

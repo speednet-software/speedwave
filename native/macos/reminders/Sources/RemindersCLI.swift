@@ -2,6 +2,21 @@ import EventKit
 import Foundation
 import SharedCLI
 
+// File-scope (H2) so tests can reach it via @testable import reminders_cli.
+struct EventStoreGate: PermissionGate {
+    let store: EKEventStore
+    func authorizationStatus() -> EKAuthorizationStatus {
+        EKEventStore.authorizationStatus(for: .reminder)
+    }
+    func requestAccess(completion: @escaping (Bool, Error?) -> Void) {
+        if #available(macOS 14.0, *) {
+            store.requestFullAccessToReminders(completion: completion)
+        } else {
+            store.requestAccess(to: .reminder, completion: completion)
+        }
+    }
+}
+
 // MARK: - CLI Entry Point
 
 /// reminders-cli <command> [json-args]
@@ -17,18 +32,12 @@ struct RemindersCLI {
         let command = args[1]
 
         // check_permission: verify macOS TCC access without performing any operation.
-        // Returns JSON {"granted": true/false} on stdout, always exits 0.
+        // Returns JSON {"granted": true/false, "status": "..."} on stdout, always exits 0.
         // Pattern: see also calendar/Sources/CalendarCLI.swift check_permission
         if command == "check_permission" {
             let store = EKEventStore()
-            let (granted, error) = requestReminderAccess(store: store, timeout: 65)
-            if granted {
-                print(formatPermissionResult(granted: true, error: nil))
-            } else {
-                let msg = error?.localizedDescription ?? "Unknown error"
-                let detail = "Reminders access denied: \(msg)\nGrant access in System Settings > Privacy & Security > Reminders"
-                print(formatPermissionResult(granted: false, error: detail))
-            }
+            let gate = EventStoreGate(store: store)
+            print(performCheckPermission(gate: gate, entity: .reminders, timeout: 65))
             return
         }
 

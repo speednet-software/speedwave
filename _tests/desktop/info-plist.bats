@@ -13,7 +13,9 @@ INFO_PLIST="$BATS_TEST_DIRNAME/../../desktop/src-tauri/Info.plist"
 # between keys and the APIs/binaries that require them.
 REQUIRED_TCC_KEYS=(
     NSRemindersUsageDescription
+    NSRemindersFullAccessUsageDescription
     NSCalendarsUsageDescription
+    NSCalendarsFullAccessUsageDescription
     NSContactsUsageDescription
     NSAppleEventsUsageDescription
     NSFileProviderDomainUsageDescription
