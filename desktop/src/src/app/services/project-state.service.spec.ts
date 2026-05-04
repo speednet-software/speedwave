@@ -826,6 +826,45 @@ describe('ProjectStateService', () => {
       expect(spy.mock.calls.length).toBe(callsBefore);
     });
 
+    it('restartContainers invalidates the slash cache and fires onProjectReady on success', async () => {
+      service.requestRestart();
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      const readyCallback = vi.fn();
+      service.onProjectReady(readyCallback);
+
+      await service.restartContainers();
+
+      // Slash cache must be invalidated so the next slash-menu open
+      // re-runs discovery — otherwise the chat composer keeps the
+      // pre-restart skill list (10-min cache).
+      expect(spy).toHaveBeenCalledWith('invalidate_slash_cache', { projectId: 'test' });
+      // onProjectReady must fire so the composer (and other view consumers)
+      // re-fetch their per-project state with the new container set.
+      expect(readyCallback).toHaveBeenCalled();
+    });
+
+    it('restartContainers does not invalidate slash cache or fire ready when restart fails', async () => {
+      service.requestRestart();
+      mockTauri.invokeHandler = (cmd: string) => {
+        if (cmd === 'restart_integration_containers') {
+          return Promise.reject(new Error('boom'));
+        }
+        return Promise.resolve(undefined);
+      };
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      const readyCallback = vi.fn();
+      service.onProjectReady(readyCallback);
+
+      await service.restartContainers();
+
+      expect(service.restartError).toBe('boom');
+      // The post-success steps (cache invalidate + ready fanout) MUST NOT run
+      // when the restart itself failed: state has not advanced, and firing
+      // ready could mask the error or trigger consumers to refetch stale data.
+      expect(spy).not.toHaveBeenCalledWith('invalidate_slash_cache', expect.anything());
+      expect(readyCallback).not.toHaveBeenCalled();
+    });
+
     it('dismissRestart does not affect restarting flag', () => {
       service.needsRestart = true;
       service.restarting = true;
