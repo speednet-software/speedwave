@@ -128,15 +128,17 @@ describe('MemoryPanelComponent', () => {
       expect(pill!.textContent!.trim()).toBe('3 entries');
     });
 
-    it('falls back to the markdown renderer when no sections are parsed', () => {
+    it('renders raw markdown as plain text when no canonical sections are parsed', () => {
       host.open = true;
       host.markdown = '# Hello\n\nWorld';
       fixture.detectChanges();
       const body = q('[data-testid="memory-panel-body"]');
       expect(body).not.toBeNull();
-      expect(body!.querySelector('app-text-block')).not.toBeNull();
-      expect(body!.textContent).toContain('Hello');
-      expect(body!.textContent).toContain('World');
+      expect(q('app-text-block')).toBeNull();
+      const fallback = q('[data-testid="memory-panel-fallback"]');
+      expect(fallback).not.toBeNull();
+      expect(fallback!.textContent).toContain('# Hello');
+      expect(fallback!.textContent).toContain('World');
     });
 
     it('shows empty placeholder when markdown is empty string', () => {
@@ -186,7 +188,9 @@ describe('MemoryPanelComponent', () => {
       fixture.detectChanges();
 
       expect(q('[data-testid="memory-panel-error"]')).toBeNull();
-      expect(q('app-text-block')).not.toBeNull();
+      expect(q('app-text-block')).toBeNull();
+      expect(q('[data-testid="memory-panel-fallback"]')).not.toBeNull();
+      expect(q('[data-testid="memory-panel-fallback"]')!.textContent).toContain('# Recovered');
     });
 
     it('renders empty placeholder when both markdown and error are empty', () => {
@@ -197,6 +201,72 @@ describe('MemoryPanelComponent', () => {
 
       expect(q('[data-testid="memory-panel-error"]')).toBeNull();
       expect(q('[data-testid="memory-panel-empty"]')).not.toBeNull();
+    });
+  });
+
+  describe('link safety (no markdown rendering)', () => {
+    it('does not render anchors for relative markdown links (the white-screen regression)', () => {
+      host.open = true;
+      host.markdown =
+        '- [feedback_no_hardcoded_paths.md](feedback_no_hardcoded_paths.md) — Never put absolute user paths in committed files';
+      fixture.detectChanges();
+      const body = q('[data-testid="memory-panel-body"]');
+      expect(body).not.toBeNull();
+      expect(body!.querySelector('a')).toBeNull();
+      expect(body!.textContent).not.toContain('feedback_no_hardcoded_paths.md');
+      expect(body!.textContent).toContain('Never put absolute user paths');
+    });
+
+    it('does not render anchors for absolute http links inside MEMORY.md', () => {
+      host.open = true;
+      host.markdown = 'See [docs](https://example.com/docs) for more.';
+      fixture.detectChanges();
+      const body = q('[data-testid="memory-panel-body"]');
+      expect(body).not.toBeNull();
+      expect(body!.querySelector('a')).toBeNull();
+      expect(body!.textContent).toContain('See docs for more.');
+      expect(body!.textContent).not.toContain('https://example.com');
+    });
+
+    it('strips pointer-style links in the unstructured fallback (no canonical headers)', () => {
+      // No `## ...` headers — entries land in the fallback branch.
+      host.open = true;
+      host.markdown = [
+        '- [foo entry](foo.md) — first description',
+        '- [bar entry](bar.md) — second description',
+      ].join('\n');
+      fixture.detectChanges();
+      const fallback = q('[data-testid="memory-panel-fallback"]');
+      expect(fallback).not.toBeNull();
+      expect(fallback!.querySelector('a')).toBeNull();
+      expect(fallback!.textContent).toContain('first description');
+      expect(fallback!.textContent).toContain('second description');
+      expect(fallback!.textContent).not.toContain('foo.md');
+      expect(fallback!.textContent).not.toContain('bar.md');
+      expect(fallback!.textContent).not.toContain('[foo entry]');
+      expect(fallback!.textContent).not.toContain('[bar entry]');
+    });
+
+    it('does not render anchors when MEMORY.md mixes canonical sections with link entries', () => {
+      host.open = true;
+      host.markdown = '## Feedback\n\n- [a.md](a.md) one\n- [b.md](b.md) two';
+      fixture.detectChanges();
+      const body = q('[data-testid="memory-panel-body"]');
+      expect(body).not.toBeNull();
+      expect(body!.querySelector('a')).toBeNull();
+      expect(body!.textContent).not.toContain('[a.md](a.md)');
+      expect(body!.textContent).not.toContain('[b.md](b.md)');
+      expect(body!.textContent).toContain('one');
+      expect(body!.textContent).toContain('two');
+    });
+
+    it('does not render anchors when MEMORY.md fallback contains a javascript: scheme', () => {
+      host.open = true;
+      host.markdown = '[click](javascript:alert(1))';
+      fixture.detectChanges();
+      const body = q('[data-testid="memory-panel-body"]');
+      expect(body).not.toBeNull();
+      expect(body!.querySelector('a')).toBeNull();
     });
   });
 });
@@ -230,5 +300,50 @@ describe('parseSections', () => {
     expect(out).toHaveLength(1);
     expect(out[0].body).toContain('- bullet one');
     expect(out[0].body).toContain('closing line.');
+  });
+
+  it('strips pointer-style markdown links so only the description remains', () => {
+    const md = [
+      '## User',
+      '',
+      '- [foo entry](foo.md) — first description',
+      '- [bar entry](bar.md) — second description',
+    ].join('\n');
+    const out = parseSections(md);
+    expect(out).toHaveLength(1);
+    expect(out[0].body).toBe(['- first description', '- second description'].join('\n'));
+    expect(out[0].body).not.toContain('[');
+    expect(out[0].body).not.toContain('foo.md');
+    expect(out[0].body).not.toContain('bar.md');
+  });
+
+  it('handles em-dash, en-dash, and hyphen separators between link and description', () => {
+    const md = [
+      '## Feedback',
+      '',
+      '- [a](a.md) — em-dash desc',
+      '- [b](b.md) – en-dash desc',
+      '- [c](c.md) - hyphen desc',
+    ].join('\n');
+    const out = parseSections(md);
+    expect(out[0].body).toBe(['- em-dash desc', '- en-dash desc', '- hyphen desc'].join('\n'));
+  });
+
+  it('keeps the bullet when a pointer entry has no description', () => {
+    const md = '## Project\n\n- [orphan](orphan.md)';
+    const out = parseSections(md);
+    expect(out[0].body).toBe('-');
+  });
+
+  it('inlines bare markdown links inside a sentence with their visible text', () => {
+    const md = '## Reference\n\nSee [the docs](https://example.com) for more.';
+    const out = parseSections(md);
+    expect(out[0].body).toBe('See the docs for more.');
+  });
+
+  it('passes through plain bullet lines unchanged when no links are present', () => {
+    const md = '## User\n\n- plain note one\n- plain note two';
+    const out = parseSections(md);
+    expect(out[0].body).toBe('- plain note one\n- plain note two');
   });
 });
