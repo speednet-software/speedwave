@@ -672,8 +672,20 @@ fn compute_resume_snapshot_impl(
                         if any_field {
                             latest_cumulative = Some(cumulative);
                         }
-                        if let Some(first_key) = model_usage.keys().next() {
-                            latest_modelusage_model = Some(first_key.clone());
+                        // Pick the model that produced the most output tokens —
+                        // that's the main response model. A single turn can mix
+                        // models (Opus for the user-facing answer + Haiku for
+                        // background tasks like title generation), so picking
+                        // `keys().next()` would be non-deterministic and tended
+                        // to surface Haiku (alphabetically before Opus) even when
+                        // Opus did the real work.
+                        if let Some((top_model, _)) = model_usage.iter().max_by_key(|(_, stats)| {
+                            stats
+                                .get("outputTokens")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0)
+                        }) {
+                            latest_modelusage_model = Some(top_model.clone());
                         }
                     }
                 }
@@ -1578,5 +1590,35 @@ mod tests {
 
         let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
         assert_eq!(snap.model.as_deref(), Some("claude-sonnet-4-7"));
+    }
+
+    #[test]
+    fn compute_resume_snapshot_picks_dominant_model_from_modelusage() {
+        // Regression: Claude Code emits a `modelUsage` map that may contain
+        // several entries when one turn mixes a main-response model with
+        // background calls (Haiku for title generation, summarization, etc.).
+        // Using `keys().next()` was non-deterministic and tended to surface
+        // Haiku (alphabetically before Opus) even when Opus produced the
+        // real answer, so the chat footer showed the wrong model.
+        // The fix selects the model with the highest `outputTokens`.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456790";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"system","subtype":"init","model":"claude-opus-4-7"}"#,
+                r#"{"type":"result","session_id":"s","is_error":false,"result":"ok","total_cost_usd":0.10,"modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":10,"outputTokens":50},"claude-opus-4-7":{"inputTokens":100,"outputTokens":500}}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(
+            snap.model.as_deref(),
+            Some("claude-opus-4-7"),
+            "must pick the model with the highest outputTokens, not the alphabetically first key"
+        );
     }
 }

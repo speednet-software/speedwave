@@ -141,16 +141,19 @@ pub const NESTED_VIRT_WARNING_MSG: &str = "\
     - Enable nested virtualization in VM settings (VT-x/EPT or AMD-V/RVI)\n\
     - Close other memory-intensive applications";
 
-/// Path inside the container to the system prompt file used when running a
-/// local LLM (Ollama, LM Studio, llama.cpp). The slim prompt replaces
-/// Claude Code's built-in ~16k-token prompt which exceeds local model context
-/// windows. See ADR-040.
-pub const LOCAL_LLM_SYSTEM_PROMPT_PATH: &str = "/speedwave/resources/system-prompts/local-llm.md";
-
 /// Error prefix used by backend when SecurityCheck or OS prereqs fail.
 /// Frontend matches on this string to distinguish blocking (check_failed)
 /// from dismissable (error) failures.
 pub const SYSTEM_CHECK_FAILED_PREFIX: &str = "System check failed:";
+
+/// Error prefix embedded in `Err(...)` strings when a CloudStorage TCC
+/// permission failure is detected. Format:
+/// `"CloudStorage TCC required: {stable_id}|{dir}"`.
+///
+/// Recognized by `restore_projects` (reconcile.rs) for substitution and by
+/// `compute_project_switch_failure_payload` (main.rs) for UI routing.
+/// TypeScript callers mirror this via `cloudstorage-prefix.ts`.
+pub const CLOUDSTORAGE_TCC_PREFIX: &str = "CloudStorage TCC required: ";
 
 /// Default interval (in hours) between automatic update checks.
 /// Used by both the CLI (converted to seconds) and the Desktop updater
@@ -1292,6 +1295,31 @@ mod tests {
             SYSTEM_CHECK_FAILED_PREFIX, "System check failed:",
             "Changing this prefix silently breaks the Desktop UI — \
              update project-state.service.ts startsWith check to match"
+        );
+    }
+
+    /// Guard: CLOUDSTORAGE_TCC_PREFIX must be non-empty and end with ": ".
+    #[test]
+    fn test_cloudstorage_tcc_prefix_is_non_empty_and_ends_with_colon_space() {
+        assert!(!CLOUDSTORAGE_TCC_PREFIX.is_empty());
+        assert!(
+            CLOUDSTORAGE_TCC_PREFIX.ends_with(": "),
+            "CLOUDSTORAGE_TCC_PREFIX must end with ': ' for consistent parsing, got: {:?}",
+            CLOUDSTORAGE_TCC_PREFIX
+        );
+    }
+
+    /// Guard: the two error prefixes must be disjoint — neither is a prefix of the other.
+    /// This prevents a single `starts_with` check from accidentally matching both.
+    #[test]
+    fn test_cloudstorage_and_system_check_prefixes_are_disjoint() {
+        assert!(
+            !CLOUDSTORAGE_TCC_PREFIX.starts_with(SYSTEM_CHECK_FAILED_PREFIX),
+            "CLOUDSTORAGE_TCC_PREFIX must not start with SYSTEM_CHECK_FAILED_PREFIX"
+        );
+        assert!(
+            !SYSTEM_CHECK_FAILED_PREFIX.starts_with(CLOUDSTORAGE_TCC_PREFIX),
+            "SYSTEM_CHECK_FAILED_PREFIX must not start with CLOUDSTORAGE_TCC_PREFIX"
         );
     }
 

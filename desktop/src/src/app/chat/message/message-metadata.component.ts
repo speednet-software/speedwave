@@ -20,7 +20,7 @@ const TOKEN_FORMATTER = new Intl.NumberFormat('en-US');
     @let label = modelLabel();
     <div
       data-testid="message-metadata"
-      class="mono mt-1 flex flex-wrap items-center gap-x-2 text-[10px] leading-none text-[var(--ink-mute)] opacity-60"
+      class="mono mt-3 flex flex-wrap items-center gap-x-2 text-[10px] leading-none text-[var(--ink-mute)] opacity-60"
     >
       @if (label) {
         <span data-testid="meta-model">{{ label }}</span>
@@ -50,7 +50,13 @@ export class MessageMetadataComponent {
     const raw = this.entry().meta?.model;
     if (!raw) return '';
     const stripped = raw.replace(/^claude-/, '');
-    return stripped.replace(/-(\d+)-(\d+)$/, '-$1.$2');
+    // Collapse repeated `[1m]` suffixes. They appear when Claude Code
+    // resolves the `opus`/`sonnet` alias against `ANTHROPIC_DEFAULT_*_MODEL`
+    // (which already carries `[1m]`) and re-appends the suffix on top —
+    // surfaces as `opus-4-7[1m][1m]` in the chat footer. The functional
+    // 1M-context behaviour is unaffected; this is purely a display fix.
+    const dedup = stripped.replace(/(\[1m\])+$/, '[1m]');
+    return dedup.replace(/-(\d+)-(\d+)(\[1m\])?$/, '-$1.$2$3');
   });
 
   /**

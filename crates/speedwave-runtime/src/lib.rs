@@ -3,6 +3,7 @@
 pub mod binary;
 pub mod build;
 pub mod bundle;
+pub mod cloudstorage;
 pub mod compose;
 pub mod config;
 pub mod consts;
@@ -12,7 +13,6 @@ pub mod log_sanitizer;
 pub mod os_prereqs;
 pub mod plugin;
 pub mod project;
-pub mod prompts;
 pub mod resources;
 pub mod runtime;
 pub mod session;
