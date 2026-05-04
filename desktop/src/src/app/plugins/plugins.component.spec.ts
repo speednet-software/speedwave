@@ -371,7 +371,7 @@ describe('PluginsComponent', () => {
     function defaultInstallHandler(): (cmd: string) => Promise<unknown> {
       return async (cmd: string) => {
         if (cmd === 'peek_plugin_manifest')
-          return { slug: 'presale', name: 'presale', has_service_id: true };
+          return { slug: 'example-plugin', name: 'example-plugin', has_service_id: true };
         if (cmd === 'install_plugin') return 'Plugin installed';
         if (cmd === 'list_projects')
           return {
@@ -385,15 +385,15 @@ describe('PluginsComponent', () => {
 
     it('peeks the manifest then invokes install_plugin', async () => {
       await component.ngOnInit();
-      openMock.mockResolvedValue('/tmp/presale-1.0.0.zip');
+      openMock.mockResolvedValue('/tmp/example-plugin-1.0.0.zip');
       mockTauri.invokeHandler = defaultInstallHandler();
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       await component.installPlugin();
       expect(invokeSpy).toHaveBeenCalledWith('peek_plugin_manifest', {
-        zipPath: '/tmp/presale-1.0.0.zip',
+        zipPath: '/tmp/example-plugin-1.0.0.zip',
       });
       expect(invokeSpy).toHaveBeenCalledWith('install_plugin', {
-        zipPath: '/tmp/presale-1.0.0.zip',
+        zipPath: '/tmp/example-plugin-1.0.0.zip',
       });
       expect(component.success).toBe('Plugin installed');
       expect(projectState.needsRestart).toBe(true);
@@ -461,13 +461,13 @@ describe('PluginsComponent', () => {
 
     it('maps phase events to step status transitions', async () => {
       await component.ngOnInit();
-      openMock.mockResolvedValue('/tmp/presale.zip');
+      openMock.mockResolvedValue('/tmp/example-plugin.zip');
       let resolveFn!: (value: string) => void;
       mockTauri.invokeHandler = (cmd: string) => {
         if (cmd === 'peek_plugin_manifest')
           return Promise.resolve({
-            slug: 'presale',
-            name: 'presale',
+            slug: 'example-plugin',
+            name: 'example-plugin',
             has_service_id: true,
           });
         if (cmd === 'install_plugin')

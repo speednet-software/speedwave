@@ -5,7 +5,7 @@
 
 ## Context
 
-Issue [#400](https://github.com/speednet-software/speedwave/issues/400) reports that plugin installation in the Desktop UI shows no visible feedback during the multi-minute work it performs. The previous implementation registered `install_plugin` as a synchronous Tauri command and ran the entire flow — Ed25519 signature verification, ZIP extraction, manifest validation, container image build via `nerdctl build`, and on-disk side-effects — in one blocking call. On macOS, where Tauri runs on the main thread, the user sees the system spinning beachball for 2-5 minutes when installing a heavy plugin (e.g. `presale` with docling/torch dependencies) and only learns about a build error after the freeze ends.
+Issue [#400](https://github.com/speednet-software/speedwave/issues/400) reports that plugin installation in the Desktop UI shows no visible feedback during the multi-minute work it performs. The previous implementation registered `install_plugin` as a synchronous Tauri command and ran the entire flow — Ed25519 signature verification, ZIP extraction, manifest validation, container image build via `nerdctl build`, and on-disk side-effects — in one blocking call. On macOS, where Tauri runs on the main thread, the user sees the system spinning beachball for 2-5 minutes when installing a heavy plugin with multi-GB build dependencies (e.g. ML libraries) and only learns about a build error after the freeze ends.
 
 The Desktop already had a small overlay rendered via `installing = true`, but it only displayed a static spinner and "Installing plugin…" string. Nothing communicated which step was running, and there was no way to surface a build failure separately from a fatal install failure.
 
@@ -37,14 +37,14 @@ The `phase` field is a free-form string rather than a typed enum. This mirrors t
 
 ### Phase semantics
 
-| Phase                       | When emitted                                                                | Terminal? |
-| --------------------------- | --------------------------------------------------------------------------- | --------- |
-| `verifying`                 | Before signature check                                                       | No        |
-| `extracting`                | After signature OK, before copying into `~/.speedwave/plugins/<slug>/`       | No        |
-| `building`                  | After extract, before `runtime.build_image()` (only for plugins with `service_id`) | No        |
-| `done`                      | All phases completed without errors                                          | Yes       |
-| `failed`                    | A step errored. Includes a sanitized `error` string                          | Yes (when extract/verify fail) |
-| `done_with_pending_build`   | After `failed` from the building phase. The plugin is on disk and will retry on next launch | Yes |
+| Phase                     | When emitted                                                                                | Terminal?                      |
+| ------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------ |
+| `verifying`               | Before signature check                                                                      | No                             |
+| `extracting`              | After signature OK, before copying into `~/.speedwave/plugins/<slug>/`                      | No                             |
+| `building`                | After extract, before `runtime.build_image()` (only for plugins with `service_id`)          | No                             |
+| `done`                    | All phases completed without errors                                                         | Yes                            |
+| `failed`                  | A step errored. Includes a sanitized `error` string                                         | Yes (when extract/verify fail) |
+| `done_with_pending_build` | After `failed` from the building phase. The plugin is on disk and will retry on next launch | Yes                            |
 
 A resource-only plugin (no `service_id`, no `Containerfile`) emits `verifying → extracting → done` and skips `building`. The frontend learns about this **before** invoking `install_plugin` by calling a new lightweight Tauri command `peek_plugin_manifest(zip_path)` that reads `plugin.json` from the ZIP without verifying the signature, extracting to a permanent location, or running any side-effect. The frontend then renders 2 or 3 steps as appropriate. This avoids retroactive UI mutation (e.g. removing a "building" step after the fact) and keeps the manifest as the single source of truth.
 
@@ -71,28 +71,28 @@ The `error` field is always passed through `speedwave_runtime::log_sanitizer::sa
 
 `spawn_blocking` is not cancellable from the host side. If the user closes the Plugins view or quits the app mid-install, behaviour is platform-specific:
 
-* **macOS Lima:** on app quit, `LimaRuntime::stop_vm()` runs `limactl stop --force <vm>` (where `<vm>` is derived from `SPEEDWAVE_DATA_DIR` per [ADR-031](ADR-031-data-dir-env-var-for-instance-isolation.md)[^4]) which poweroffs the VM, killing any in-VM `nerdctl build` immediately. The `.image_pending` marker on the host survives. On the next launch, `ensure_all_plugin_images` retries the build silently.
-* **Linux native nerdctl:** the build process is a child of the desktop process. After the desktop process exits, the child is reparented to `systemd-user`/`init` (Linux has no equivalent of `prctl(PR_SET_PDEATHSIG)`[^3] for the inverse case — and `PR_SET_PDEATHSIG` itself is Linux-only). The container runs as UID 0 in a user namespace per [ADR-026](ADR-026-linux-rootless-container-user.md)[^5], so the host-written `.image_pending` marker is owned by the desktop user and remains writable across the reparent. The build continues in the background; `.image_pending` is removed on success or remains on failure.
-* **Windows WSL2:** `wsl.exe -- nerdctl build` is a child of the desktop process; when the desktop exits, the host pipe breaks, but the in-WSL `nerdctl` may continue. Recovery is the same as Linux: `.image_pending` retry on next launch.
+- **macOS Lima:** on app quit, `LimaRuntime::stop_vm()` runs `limactl stop --force <vm>` (where `<vm>` is derived from `SPEEDWAVE_DATA_DIR` per [ADR-031](ADR-031-data-dir-env-var-for-instance-isolation.md)[^4]) which poweroffs the VM, killing any in-VM `nerdctl build` immediately. The `.image_pending` marker on the host survives. On the next launch, `ensure_all_plugin_images` retries the build silently.
+- **Linux native nerdctl:** the build process is a child of the desktop process. After the desktop process exits, the child is reparented to `systemd-user`/`init` (Linux has no equivalent of `prctl(PR_SET_PDEATHSIG)`[^3] for the inverse case — and `PR_SET_PDEATHSIG` itself is Linux-only). The container runs as UID 0 in a user namespace per [ADR-026](ADR-026-linux-rootless-container-user.md)[^5], so the host-written `.image_pending` marker is owned by the desktop user and remains writable across the reparent. The build continues in the background; `.image_pending` is removed on success or remains on failure.
+- **Windows WSL2:** `wsl.exe -- nerdctl build` is a child of the desktop process; when the desktop exits, the host pipe breaks, but the in-WSL `nerdctl` may continue. Recovery is the same as Linux: `.image_pending` retry on next launch.
 
 Explicit `kill_on_drop` of the in-flight child via a stored `Child` handle is left for follow-up; see "Out of scope".
 
 ## Critical files
 
-* `crates/speedwave-runtime/src/plugin.rs` — `PluginInstallProgress`, `InstallOutcome`, `ALL_PLUGIN_INSTALL_PHASES`, `peek_plugin_manifest`, `install_plugin` signature change.
-* `desktop/src-tauri/src/plugin_cmd.rs` — async `install_plugin` Tauri command, async `peek_plugin_manifest` Tauri command.
-* `desktop/src-tauri/src/main.rs` — registers `peek_plugin_manifest` in `invoke_handler`.
-* `crates/speedwave-cli/src/main.rs` — matches on `InstallOutcome`, exit 0 in both variants.
-* `desktop/src/src/app/shared/progress-steps/progress-steps.component.ts` — new shared component extracted from setup-wizard.
-* `desktop/src/src/app/setup/setup-wizard.component.ts` — refactored to delegate the step list to `<app-progress-steps>`.
-* `desktop/src/src/app/plugins/plugins.component.ts` — overlay rebuilt on `<app-progress-steps>`, `peek_plugin_manifest`-then-listen-then-invoke flow, phase event mapping.
-* `desktop/src/src/app/models/plugin.ts` — `PluginInstallProgress`, `PluginInstallPhase`, `PLUGIN_INSTALL_PHASES`, `PluginManifestSummary`.
+- `crates/speedwave-runtime/src/plugin.rs` — `PluginInstallProgress`, `InstallOutcome`, `ALL_PLUGIN_INSTALL_PHASES`, `peek_plugin_manifest`, `install_plugin` signature change.
+- `desktop/src-tauri/src/plugin_cmd.rs` — async `install_plugin` Tauri command, async `peek_plugin_manifest` Tauri command.
+- `desktop/src-tauri/src/main.rs` — registers `peek_plugin_manifest` in `invoke_handler`.
+- `crates/speedwave-cli/src/main.rs` — matches on `InstallOutcome`, exit 0 in both variants.
+- `desktop/src/src/app/shared/progress-steps/progress-steps.component.ts` — new shared component extracted from setup-wizard.
+- `desktop/src/src/app/setup/setup-wizard.component.ts` — refactored to delegate the step list to `<app-progress-steps>`.
+- `desktop/src/src/app/plugins/plugins.component.ts` — overlay rebuilt on `<app-progress-steps>`, `peek_plugin_manifest`-then-listen-then-invoke flow, phase event mapping.
+- `desktop/src/src/app/models/plugin.ts` — `PluginInstallProgress`, `PluginInstallPhase`, `PLUGIN_INSTALL_PHASES`, `PluginManifestSummary`.
 
 ## Out of scope (future work)
 
-* **Live build-log streaming.** A future PR may add `CommandRunner::run_streaming` (or an equivalent) and stream `nerdctl build` stdout/stderr line-by-line through the same `plugin_install_status` channel. That work needs to address: WSL2 UTF-16LE decoding from `wsl.exe -- nerdctl`, line buffering at chunk boundaries, sanitization per-line vs per-blob, and whether to merge stderr into stdout at the process level.
-* **Cancellable installs.** Storing the spawned child and providing a `cancel_install` Tauri command that signals it to terminate, with a documented per-platform cleanup path.
-* **CLI exit code semantics.** Distinguishing `InstalledPendingBuild` from `Installed` at the exit-code level is useful for scripts that need to detect deferred builds. A follow-up issue should propose exit 2 (or similar) under a `BREAKING CHANGE:` trailer; see [Future work](#future-work).
+- **Live build-log streaming.** A future PR may add `CommandRunner::run_streaming` (or an equivalent) and stream `nerdctl build` stdout/stderr line-by-line through the same `plugin_install_status` channel. That work needs to address: WSL2 UTF-16LE decoding from `wsl.exe -- nerdctl`, line buffering at chunk boundaries, sanitization per-line vs per-blob, and whether to merge stderr into stdout at the process level.
+- **Cancellable installs.** Storing the spawned child and providing a `cancel_install` Tauri command that signals it to terminate, with a documented per-platform cleanup path.
+- **CLI exit code semantics.** Distinguishing `InstalledPendingBuild` from `Installed` at the exit-code level is useful for scripts that need to detect deferred builds. A follow-up issue should propose exit 2 (or similar) under a `BREAKING CHANGE:` trailer; see [Future work](#future-work).
 
 ## Footnotes
 

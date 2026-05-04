@@ -707,7 +707,12 @@ fn remove_plugin_with_base(
     if let (Some(rt), Some(manifest)) = (runtime, manifest_for_image) {
         if manifest.service_id.is_some() {
             let tag = plugin_image_tag(&manifest);
-            if let Err(e) = rt.remove_images(&[tag.clone()]) {
+            // force=true: the user explicitly asked to remove this plugin,
+            // and the worker container is almost always still running until
+            // the next compose recreate. Without --force, rmi would refuse
+            // and the layer cache would survive — defeating the next
+            // reinstall (a fresh ZIP would receive the stale cached image).
+            if let Err(e) = rt.remove_images(&[tag.clone()], true) {
                 log::warn!("Failed to remove container image '{tag}' for plugin '{slug}': {e}");
             } else {
                 log::info!("Removed container image '{tag}' for plugin '{slug}'");
@@ -2414,9 +2419,9 @@ mod tests {
 
     // --- remove_plugin image cleanup tests ---
 
-    /// Mock that records every `remove_images` call for inspection.
+    /// Mock that records every `remove_images` call (tags + force) for inspection.
     struct ImageRemovingRuntime {
-        calls: std::sync::Mutex<Vec<Vec<String>>>,
+        calls: std::sync::Mutex<Vec<(Vec<String>, bool)>>,
         return_err: bool,
     }
     impl ImageRemovingRuntime {
@@ -2474,8 +2479,8 @@ mod tests {
         fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
             Ok(())
         }
-        fn remove_images(&self, tags: &[String]) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push(tags.to_vec());
+        fn remove_images(&self, tags: &[String], force: bool) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push((tags.to_vec(), force));
             if self.return_err {
                 anyhow::bail!("simulated nerdctl rmi failure")
             } else {
@@ -2512,11 +2517,12 @@ mod tests {
 
         // Plugin dir is gone.
         assert!(!plugins_dir.join("img-cleanup").exists());
-        // remove_images called once with the expected tag.
+        // remove_images called once with the expected tag AND force=true
+        // (uninstall is an explicit user request — no waiting for prune).
         let calls = rt.calls.into_inner().unwrap();
         assert_eq!(
             calls,
-            vec![vec!["speedwave-mcp-img-cleanup:1.0.0".to_string()]]
+            vec![(vec!["speedwave-mcp-img-cleanup:1.0.0".to_string()], true)]
         );
     }
 

@@ -415,7 +415,7 @@ pub fn prune_old_bundle_images(
         "Pruning {} images from old bundle {old_bundle_id}",
         tags.len()
     );
-    runtime.remove_images(&tags)?;
+    runtime.remove_images(&tags, false)?;
 
     log::info!("Pruning BuildKit cache");
     if let Err(e) = runtime.prune_buildkit_cache() {
@@ -2100,7 +2100,7 @@ mod tests {
         fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
             Ok(true)
         }
-        fn remove_images(&self, tags: &[String]) -> anyhow::Result<()> {
+        fn remove_images(&self, tags: &[String], _force: bool) -> anyhow::Result<()> {
             self.removed_tags.lock().unwrap().extend_from_slice(tags);
             Ok(())
         }

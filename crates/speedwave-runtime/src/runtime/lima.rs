@@ -711,7 +711,7 @@ impl ContainerRuntime for LimaRuntime {
         Ok(())
     }
 
-    fn remove_images(&self, tags: &[String]) -> anyhow::Result<()> {
+    fn remove_images(&self, tags: &[String], force: bool) -> anyhow::Result<()> {
         self.require_running()?;
         if tags.is_empty() {
             return Ok(());
@@ -724,10 +724,13 @@ impl ContainerRuntime for LimaRuntime {
             "nerdctl",
             "rmi",
         ];
+        if force {
+            args.push("--force");
+        }
         let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
         args.extend(tag_refs);
-        // Intentionally no --force: if an old image is still referenced by a
-        // running container rmi fails, caller logs warn-only and the image
+        // Without `force`, nerdctl rmi refuses if a running container still
+        // references the image — caller logs warn-only and the image
         // gets retried on the next update cycle once the container is gone.
         if let Err(e) = self.runner.run("limactl", &args) {
             log::warn!("lima rmi failed: {e}");
@@ -2194,7 +2197,7 @@ mod tests {
         let runner = mock_runner_with_vm_running();
         let rt = LimaRuntime::with_runner(Box::new(runner));
         assert!(
-            rt.remove_images(&[]).is_ok(),
+            rt.remove_images(&[], false).is_ok(),
             "empty tags should return Ok without calling rmi"
         );
     }
@@ -2213,7 +2216,7 @@ mod tests {
             "",
         );
         let rt = LimaRuntime::with_runner(Box::new(runner));
-        assert!(rt.remove_images(&tags).is_ok());
+        assert!(rt.remove_images(&tags, false).is_ok());
     }
 
     #[test]
@@ -2229,7 +2232,7 @@ mod tests {
         let rt = LimaRuntime::with_runner(Box::new(runner));
         // rmi failure must not propagate — just warn and return Ok
         assert!(
-            rt.remove_images(&tags).is_ok(),
+            rt.remove_images(&tags, false).is_ok(),
             "rmi failure should not propagate"
         );
     }
@@ -2247,7 +2250,7 @@ mod tests {
             );
         let rt = LimaRuntime::with_runner(Box::new(runner));
         let err = rt
-            .remove_images(&["speedwave-claude:abc123".to_string()])
+            .remove_images(&["speedwave-claude:abc123".to_string()], false)
             .unwrap_err();
         assert!(
             err.to_string().contains("not running"),
