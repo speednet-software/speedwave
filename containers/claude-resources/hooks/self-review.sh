@@ -34,6 +34,10 @@ case "$INPUT" in
 esac
 
 # Helper: emit a `block` decision with the supplied reason and exit.
+# CAUTION: reason strings interpolate as-is into JSON. Keep them free of `"`,
+# `\`, and control characters (or escape them at the call site) — otherwise
+# the emitted decision is malformed and Claude Code rejects it. All current
+# reason literals below are plain ASCII text and safe.
 block() {
     local reason="$1"
     printf '{"decision":"block","reason":"%s"}\n' "$reason"
@@ -56,9 +60,11 @@ fi
 
 # 3. Last assistant message line from the JSONL transcript. Claude Code
 #    writes one JSON object per line; we don't need to parse the structure
-#    fully — a substring match on `"role":"assistant"` is enough to find
-#    the candidate line, and the heuristics below run on the raw line.
-LAST_ASSISTANT=$(grep '"role":"assistant"' "$TRANSCRIPT" 2>/dev/null | tail -n1 || true)
+#    fully — a regex match on `"role":"assistant"` (tolerant of optional
+#    whitespace around the colon, in case a future serializer pretty-prints)
+#    is enough to find the candidate line. Heuristics below run on the raw
+#    line.
+LAST_ASSISTANT=$(grep -E '"role"[[:space:]]*:[[:space:]]*"assistant"' "$TRANSCRIPT" 2>/dev/null | tail -n1 || true)
 
 if [[ -z "$LAST_ASSISTANT" ]]; then
     # No assistant message yet — nothing to review.
@@ -82,8 +88,9 @@ warn=false
 # Numbers with units or version/version-like context. Plain digits inside
 # words (e.g. JSON keys, hex hashes) don't trigger; we want quantitative
 # claims — currency, percentages, version strings, byte/time/token counts.
-if [[ "$LAST_ASSISTANT" =~ \\\"\\\$[0-9] ]] \
-    || echo "$LAST_ASSISTANT" | grep -qE '\$[0-9]+|[0-9]+(\.[0-9]+)?%|v[0-9]+\.[0-9]+|[0-9]+[[:space:]]*(ms|s|MB|GB|KB|tokens?|tokenów|users|userów|userzy|requests|users/s|req/s)\b'; then
+# `$` appears as-is inside the JSON-encoded text payload (JSON does not
+# escape it), so the grep below catches `$15` directly.
+if echo "$LAST_ASSISTANT" | grep -qE '\$[0-9]+|[0-9]+(\.[0-9]+)?%|v[0-9]+\.[0-9]+|[0-9]+[[:space:]]*(ms|s|MB|GB|KB|tokens?|tokenów|users|userów|userzy|requests|users/s|req/s)\b'; then
     warn=true
 fi
 

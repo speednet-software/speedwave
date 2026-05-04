@@ -115,6 +115,9 @@ pub fn base_env() -> HashMap<String, String> {
 /// family, with `[1m]` suffixed when the model supports a 1M-token context
 /// window — that suffix is what unlocks the upgraded window for Max/Team
 /// subscribers, fixing the 200k cap reported in anthropics/claude-code#34083.
+/// Remove the `[1m]` suffix logic (and ideally this whole helper) once that
+/// upstream issue ships a fix and the alias resolves to the upgraded window
+/// natively.
 ///
 /// Future model bumps (e.g. Opus 4.8) only require editing `ANTHROPIC_MODELS`
 /// in this file: the env vars track the SSOT automatically. Families with no

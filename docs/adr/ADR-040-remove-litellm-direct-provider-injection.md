@@ -94,7 +94,7 @@ A malicious `.speedwave.json` in a cloned repository could previously set `provi
 
 `resolve_project_config` does **not** inject any provider-specific CLI flags. Model selection, routing, and auth are configured entirely through env vars (see the table above) injected by `compose::apply_llm_config`. `ANTHROPIC_MODEL` supersedes a CLI `--model` flag for the active-model role and persists across the session without being attached to the launch command. See ADR-041[^10] for the model discovery flow that populates the user's model choice.
 
-The default Claude Code system prompt is preserved for local providers. Modern local LLM servers ship with 32K–128K context windows that absorb the baseline prompt + tool definitions without hurting tool-use quality, and preserving the default lets `outputStyle` from `settings.json` reach local LLMs the same way it reaches Anthropic-hosted models.
+The default Claude Code system prompt is preserved for local providers. Modern local LLM servers ship with 32K–128K context windows[^11] that absorb the baseline prompt + tool definitions without hurting tool-use quality, and preserving the default lets `outputStyle` from `settings.json` reach local LLMs the same way it reaches Anthropic-hosted models.
 
 ## Authentication Bypass for Local Providers
 
@@ -132,3 +132,5 @@ Note: the stale llm-proxy container (if any) is automatically removed by `--remo
 [^9]: `ANTHROPIC_CUSTOM_MODEL_OPTION` (with `_NAME`, `_DESCRIPTION`, `_SUPPORTED_CAPABILITIES` suffixes) adds a single entry to the `/model` picker and skips validation of the model ID: https://code.claude.com/docs/en/model-config
 
 [^10]: ADR-041: Local LLM Model Discovery and SSRF Policy — `docs/adr/ADR-041-local-llm-model-discovery.md`
+
+[^11]: Representative 1M context: Llama 3.1 (128K) — https://ai.meta.com/blog/meta-llama-3-1/ ; Qwen2.5 family default 32K with 128K via YaRN — https://qwenlm.github.io/blog/qwen2.5/ ; DeepSeek-V3 128K — https://github.com/deepseek-ai/DeepSeek-V3
