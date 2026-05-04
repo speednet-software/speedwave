@@ -10,6 +10,7 @@
 mod auth;
 mod auth_commands;
 mod chat;
+mod cloudstorage_cmd;
 mod container_logs_cmd;
 mod containers_cmd;
 mod diagnostics;
@@ -34,6 +35,7 @@ mod retry_cmd;
 mod setup_wizard;
 mod slash_cmd;
 mod subscribe_cmd;
+mod system_settings_cmd;
 mod tray;
 mod types;
 mod update_commands;
@@ -1453,6 +1455,9 @@ fn main() {
             slash_cmd::invalidate_slash_cache,
             // Git introspection (chat status strip)
             git_cmd::get_git_branch,
+            // CloudStorage TCC
+            system_settings_cmd::open_files_folders_pane,
+            cloudstorage_cmd::detect_cloudstorage_path,
         ])
         .on_window_event(move |window, event| {
             match event {

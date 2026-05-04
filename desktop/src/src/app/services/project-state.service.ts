@@ -1,6 +1,12 @@
 import { Injectable, inject } from '@angular/core';
 import { TauriService } from './tauri.service';
-import type { BundleReconcileStatus, ProjectEntry, ProjectList } from '../models/update';
+import type {
+  BundleReconcileStatus,
+  ProjectEntry,
+  ProjectList,
+  ProjectSwitchFailedPayload,
+} from '../models/update';
+import { CLOUDSTORAGE_TCC_PREFIX } from './cloudstorage-prefix';
 
 /** Lifecycle status of the project + container lifecycle. */
 export type ProjectStatus =
@@ -42,6 +48,17 @@ export class ProjectStateService {
   needsRestart = false;
   restarting = false;
   restartError = '';
+
+  /**
+   * Structured error kind set when a CloudStorage TCC failure is detected.
+   * `'cloudstorage_tcc_required'` routes the shell to `<app-cloudstorage-modal>`.
+   * Reset to `undefined` at the start of every new project switch attempt.
+   */
+  errorKind?: 'cloudstorage_tcc_required';
+  /** CloudStorage provider display name (e.g. "OneDrive") when errorKind is set. */
+  failureProvider?: string;
+  /** Absolute path to the project directory that triggered the TCC failure. */
+  failureProjectDir?: string;
 
   private initialized = false;
   private tauri = inject(TauriService);
@@ -193,8 +210,20 @@ export class ProjectStateService {
       // SSOT coupling: must match crates/speedwave-runtime/src/consts.rs SYSTEM_CHECK_FAILED_PREFIX
       if (msg.startsWith('System check failed:')) {
         this.status = 'check_failed';
+        this.errorKind = undefined;
+      } else if (msg.startsWith(CLOUDSTORAGE_TCC_PREFIX)) {
+        // CloudStorage TCC denial — parse stable_id and dir from prefix-encoded string.
+        // Format: "CloudStorage TCC required: {stable_id}|{dir}"
+        this.status = 'error';
+        this.errorKind = 'cloudstorage_tcc_required';
+        const body = msg.slice(CLOUDSTORAGE_TCC_PREFIX.length);
+        const pipeIdx = body.indexOf('|');
+        if (pipeIdx >= 0) {
+          this.failureProjectDir = body.slice(pipeIdx + 1);
+        }
       } else {
         this.status = 'error';
+        this.errorKind = undefined;
       }
       this.error = msg;
     }
@@ -248,6 +277,20 @@ export class ProjectStateService {
       this.status = 'auth_required';
       this.notifyChange();
     }
+  }
+
+  /**
+   * Retries container startup after a CloudStorage TCC (or other transient) error.
+   * Resets error state and re-runs `ensureContainersRunning`.
+   */
+  async retry(): Promise<void> {
+    this.errorKind = undefined;
+    this.failureProvider = undefined;
+    this.failureProjectDir = undefined;
+    this.error = '';
+    this.status = 'loading';
+    this.notifyChange();
+    await this.ensureContainersRunning();
   }
 
   /** Dismisses the error banner, checking containers first. */
@@ -336,6 +379,9 @@ export class ProjectStateService {
         this.targetProject = event.payload.project;
         this.status = 'switching';
         this.error = '';
+        this.errorKind = undefined;
+        this.failureProvider = undefined;
+        this.failureProjectDir = undefined;
         this.needsRestart = false;
         this.restarting = false;
         this.restartError = '';
@@ -357,18 +403,18 @@ export class ProjectStateService {
         void this.refreshProjectList();
       });
 
-      await this.tauri.listen<{ project: string | null; error: string }>(
-        'project_switch_failed',
-        (event) => {
-          this.activeProject = event.payload.project;
-          this.targetProject = null;
-          this.status = 'error';
-          this.error = event.payload.error;
-          this.notifyChange();
-          this.notifyFailed(event.payload.error);
-          this.notifySettled();
-        }
-      );
+      await this.tauri.listen<ProjectSwitchFailedPayload>('project_switch_failed', (event) => {
+        this.activeProject = event.payload.project;
+        this.targetProject = null;
+        this.status = 'error';
+        this.error = event.payload.error;
+        this.errorKind = event.payload.error_kind;
+        this.failureProvider = event.payload.provider;
+        this.failureProjectDir = event.payload.project_dir;
+        this.notifyChange();
+        this.notifyFailed(event.payload.error);
+        this.notifySettled();
+      });
 
       await this.tauri.listen<BundleReconcileStatus>('bundle_reconcile_status', (event) => {
         // Ignore reconcile events during active operations — backend

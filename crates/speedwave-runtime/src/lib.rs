@@ -3,6 +3,7 @@
 pub mod binary;
 pub mod build;
 pub mod bundle;
+pub mod cloudstorage;
 pub mod compose;
 pub mod config;
 pub mod consts;
