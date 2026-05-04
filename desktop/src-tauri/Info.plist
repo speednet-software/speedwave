@@ -4,8 +4,12 @@
 <dict>
     <key>NSRemindersUsageDescription</key>
     <string>Speedwave needs access to Reminders to create and manage reminders via Claude Code.</string>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>Speedwave needs full access to Reminders to view, create, and complete reminders via Claude Code.</string>
     <key>NSCalendarsUsageDescription</key>
     <string>Speedwave needs access to Calendar to view and create events via Claude Code.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Speedwave needs full access to Calendar to view, create, and modify events via Claude Code.</string>
     <key>NSContactsUsageDescription</key>
     <string>Speedwave needs access to Contacts to look up email addresses for Claude Code.</string>
     <key>NSAppleEventsUsageDescription</key>

@@ -390,8 +390,10 @@ fn resolve_native_cli_binary(service: &str) -> Result<std::path::PathBuf, String
 
 /// Parses the JSON output from a `check_permission` CLI command.
 ///
-/// Expected format: `{"granted": true}` or `{"granted": false, "error": "..."}`
-/// Returns `Ok(())` if `granted` is boolean `true`.
+/// Expected format: `{"granted": true, "status": "granted"}` or
+/// `{"granted": false, "status": "denied", "error": "..."}`.
+/// The `status` field is parsed but not consumed — `error` is the single source
+/// of user-facing text. Returns `Ok(())` if `granted` is boolean `true`.
 /// Returns `Err(message)` if `granted` is `false`, missing, or non-boolean.
 fn parse_permission_output(stdout: &str) -> Result<(), String> {
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
@@ -403,14 +405,22 @@ fn parse_permission_output(stdout: &str) -> Result<(), String> {
         .unwrap_or(false);
 
     if granted {
-        Ok(())
-    } else {
-        let error_detail = parsed
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Permission denied");
-        Err(error_detail.to_string())
+        return Ok(());
     }
+
+    // Per the Swift contract, granted=false ALWAYS carries a non-empty error string.
+    // The status field is parsed but not consumed — error is the single source of
+    // user-facing text. If the contract is violated (synthetic JSON, future bug),
+    // fall through to a generic message.
+    let raw_error = parsed
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Permission denied");
+
+    // Sanitize before returning to the webview. Defense-in-depth: error strings come
+    // from the Swift side which uses static literals + EventKit localizedDescription,
+    // but localizedDescription could in principle contain user paths in future macOS.
+    Err(speedwave_runtime::log_sanitizer::sanitize(raw_error))
 }
 
 /// Checks macOS TCC/Automation permission for the given OS service.
@@ -422,6 +432,10 @@ fn parse_permission_output(stdout: &str) -> Result<(), String> {
 /// Pipe-buffer deadlock is not a risk: `check_permission` output is <200 bytes,
 /// well within the OS pipe buffer of 64KB. Stdout is read after child exits.
 fn check_os_permission(service: &str) -> Result<(), String> {
+    // Outer 60s budget intentionally outlives the inner Swift timeout (55s in
+    // performCheckPermission) so the child can emit a structured timeout payload
+    // before this guard kills it; otherwise the user only ever sees a generic
+    // "process killed" error.
     check_os_permission_with_timeout(service, std::time::Duration::from_secs(60))
 }
 
@@ -1192,6 +1206,59 @@ mod tests {
     fn parse_permission_output_granted_wrong_type_number() {
         let result = parse_permission_output(r#"{"granted": 1}"#);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_permission_output_granted_with_status() {
+        assert!(parse_permission_output(r#"{"granted": true, "status": "granted"}"#).is_ok());
+    }
+
+    #[test]
+    fn parse_permission_output_denied_with_status_and_error() {
+        let result = parse_permission_output(
+            r#"{"granted": false, "status": "denied", "error": "tccutil reset Calendar pl.speedwave.desktop"}"#,
+        );
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("tccutil reset Calendar"),
+            "error message must contain tccutil reset Calendar"
+        );
+    }
+
+    #[test]
+    fn parse_permission_output_status_field_does_not_affect_message() {
+        // The status field must not affect the returned Err message — only the error field matters.
+        // Example: status="completely_made_up" with error="real error" → Err("real error")
+        let result = parse_permission_output(
+            r#"{"granted": false, "status": "completely_made_up", "error": "real error"}"#,
+        );
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "real error");
+    }
+
+    #[test]
+    fn parse_permission_output_sanitizes_error() {
+        // Error strings must be sanitized before reaching the webview.
+        // Synthesize an error containing a Bearer token pattern.
+        let input =
+            r#"{"granted": false, "error": "failed with Bearer eyJhbGciOiJIUzI1NiJ9.test.sig"}"#;
+        let result = parse_permission_output(input);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            !err.contains("eyJhbGciOiJIUzI1NiJ9.test.sig"),
+            "Bearer token must be redacted, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_permission_output_legacy_old_swift_shape_unchanged() {
+        // Backward compat: old Swift shape without status field must still work
+        let result = parse_permission_output(
+            r#"{"granted": false, "error": "Calendar access denied: foo"}"#,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Calendar access denied: foo"));
     }
 
     // -- resolve_native_cli_binary tests --
