@@ -2,7 +2,7 @@ import EventKit
 import Foundation
 import SharedCLI
 
-// File-scope (H2) so tests can reach it via @testable import calendar_cli.
+// File-scope so tests can reach it via @testable import calendar_cli.
 struct EventStoreGate: PermissionGate {
     let store: EKEventStore
     func authorizationStatus() -> EKAuthorizationStatus {

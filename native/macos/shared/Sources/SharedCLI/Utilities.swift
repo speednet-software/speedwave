@@ -51,7 +51,7 @@ public func formatPermissionResult(granted: Bool, status: PermissionStatus, erro
     }
     guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
           let json = String(data: data, encoding: .utf8) else {
-        return #"{"granted": false, "status": "silentReject", "error": "Failed to serialize permission result"}"#
+        return #"{"error":"Failed to serialize permission result","granted":false,"status":"silentReject"}"#
     }
     return json
 }
@@ -73,24 +73,23 @@ public func composeErrorMessage(
     entity: PermissionEntity,
     bundleId: String = resolvedBundleIdentifier()
 ) -> String {
-    // (M1) Use enum rawValue.capitalized — eliminates ternary, single source.
     let entityName = entity.rawValue.capitalized
     let resetCmd = "tccutil reset \(entityName) \(bundleId)"
     let settingsPath = "System Settings > Privacy & Security > \(entityName)"
     switch status {
     case .granted:
-        return ""  // never composed for granted
+        return ""
     case .denied:
-        // (H3 v1 carryover) explicit recovery: Apple removed the + button on macOS 14+,
-        // so users cannot re-add Speedwave from Settings UI; tccutil reset is the only path.
+        // Apple removed the + button on macOS 14+, so users cannot re-add Speedwave
+        // from Settings UI; tccutil reset is the only recovery path.
         return "\(entityName) access was previously denied. Open Terminal and run:\n\(resetCmd)\nThen click the toggle again."
     case .restricted:
         return "\(entityName) access restricted by your administrator or parental controls."
     case .notDetermined:
-        // (M4) Defensive: unreachable in current performCheckPermission flow (status-before-request
-        // gate plus post-request remap of .notDetermined to .silentReject), but kept for exhaustive
-        // switch coverage and future direct callers. The parametric
-        // testGrantedFalseAlwaysCarriesNonEmptyError test relies on this case returning non-empty.
+        // Unreachable from performCheckPermission (status-before-request gate plus post-request
+        // remap of .notDetermined to .silentReject), but kept for exhaustive switch coverage
+        // and future direct callers; the testGrantedFalseAlwaysCarriesNonEmptyError parametric
+        // invariant requires this case to return a non-empty string.
         return "\(entityName) permission was not requested. Quit Speedwave and reopen, then click the toggle again."
     case .writeOnly:
         return "Speedwave has write-only \(entityName) access. Open \(settingsPath) and grant Full Access for read support."
@@ -104,7 +103,11 @@ public protocol PermissionGate {
     func requestAccess(completion: @escaping (Bool, Error?) -> Void)
 }
 
-public func performCheckPermission(gate: PermissionGate, entity: PermissionEntity, timeout: TimeInterval = 65) -> String {
+/// Inner timeout (default 55s) is intentionally shorter than the outer Rust
+/// `check_os_permission_with_timeout` (60s in `desktop/src-tauri/src/integrations_cmd.rs`)
+/// so the Swift process gets to emit a structured timeout message before the
+/// parent kills it; otherwise the user only ever sees the generic Rust kill message.
+public func performCheckPermission(gate: PermissionGate, entity: PermissionEntity, timeout: TimeInterval = 55) -> String {
     let initial = mapAuthorizationStatus(gate.authorizationStatus())
 
     // Already in a terminal state — don't trigger a request that would return

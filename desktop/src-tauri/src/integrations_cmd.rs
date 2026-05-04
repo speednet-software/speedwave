@@ -432,6 +432,10 @@ fn parse_permission_output(stdout: &str) -> Result<(), String> {
 /// Pipe-buffer deadlock is not a risk: `check_permission` output is <200 bytes,
 /// well within the OS pipe buffer of 64KB. Stdout is read after child exits.
 fn check_os_permission(service: &str) -> Result<(), String> {
+    // Outer 60s budget intentionally outlives the inner Swift timeout (55s in
+    // performCheckPermission) so the child can emit a structured timeout payload
+    // before this guard kills it; otherwise the user only ever sees a generic
+    // "process killed" error.
     check_os_permission_with_timeout(service, std::time::Duration::from_secs(60))
 }
 
@@ -1226,7 +1230,7 @@ mod tests {
 
     #[test]
     fn parse_permission_output_sanitizes_error() {
-        // (H2) Error strings must be sanitized before reaching the webview.
+        // Error strings must be sanitized before reaching the webview.
         // Synthesize an error containing a Bearer token pattern.
         let input =
             r#"{"granted": false, "error": "failed with Bearer eyJhbGciOiJIUzI1NiJ9.test.sig"}"#;

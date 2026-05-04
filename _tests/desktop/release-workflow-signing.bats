@@ -157,7 +157,7 @@ SIGN_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/sign-bundled-binaries.sh"
 }
 
 @test "bundle ID in tauri.conf.json matches fallback literal in Utilities.swift" {
-    # (H3) Cross-check that the bundle identifier SSOT (tauri.conf.json) and the
+    # Cross-check that the bundle identifier SSOT (tauri.conf.json) and the
     # Swift fallback literal stay in sync. The runtime uses Bundle.main.bundleIdentifier
     # which inherits from the parent .app; the literal is only used in standalone runs.
     local tauri_conf="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.conf.json"

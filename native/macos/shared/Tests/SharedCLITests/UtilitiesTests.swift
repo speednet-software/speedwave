@@ -162,7 +162,7 @@ final class SharedCLITests: XCTestCase {
 
     func testFormatSerializationFailureFallback() {
         // The static fallback string itself must be parseable JSON
-        let fallback = #"{"granted": false, "status": "silentReject", "error": "Failed to serialize permission result"}"#
+        let fallback = #"{"error":"Failed to serialize permission result","granted":false,"status":"silentReject"}"#
         let data = fallback.data(using: .utf8)!
         let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         XCTAssertNotNil(parsed)
@@ -212,7 +212,7 @@ final class SharedCLITests: XCTestCase {
         // If 99 is a valid case on this OS, the test is a no-op (acceptable)
     }
 
-    // MARK: - resolvedBundleIdentifier (H3)
+    // MARK: - resolvedBundleIdentifier
 
     func testResolvedBundleIdentifierFallbackWhenNil() {
         // Test seam: passing nil exercises the fallback to the literal SSOT.
@@ -227,10 +227,12 @@ final class SharedCLITests: XCTestCase {
         XCTAssertEqual(resolvedBundleIdentifier(from: "com.example.other"), "com.example.other")
     }
 
-    func testSpeedwaveBundleIdentifierMatchesTauriConf() {
+    func testSpeedwaveBundleIdentifierMatchesTauriConf() throws {
         // Belt-and-braces: read tauri.conf.json from disk and assert literal SSOT matches.
+        // The authoritative drift guard is the bats test in release-workflow-signing.bats;
+        // this test is a developer-experience belt-and-braces when running `swift test`
+        // from the package directory.
         let candidates = [
-            // From swift test runner working dir
             "../../../desktop/src-tauri/tauri.conf.json",
             "../../../../desktop/src-tauri/tauri.conf.json",
         ]
@@ -243,11 +245,11 @@ final class SharedCLITests: XCTestCase {
                 break
             }
         }
-        if let tauriId = tauriId {
-            XCTAssertEqual(speedwaveBundleIdentifier, tauriId,
-                           "Swift literal must match tauri.conf.json::identifier")
+        guard let tauriId = tauriId else {
+            throw XCTSkip("tauri.conf.json not found from test runner cwd; bats test is the authoritative drift guard")
         }
-        // If file not found from test runner cwd, skip silently — CI runs from repo root
+        XCTAssertEqual(speedwaveBundleIdentifier, tauriId,
+                       "Swift literal must match tauri.conf.json::identifier")
     }
 
     // MARK: - composeErrorMessage
@@ -275,7 +277,7 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testGrantedFalseAlwaysCarriesNonEmptyError() {
-        // (H1) parametric invariant: every non-granted status must produce non-empty error
+        // Parametric invariant: every non-granted status must produce a non-empty error string.
         let nonGrantedStatuses: [PermissionStatus] = [.denied, .restricted, .notDetermined, .writeOnly, .silentReject]
         for status in nonGrantedStatuses {
             for entity in [PermissionEntity.calendar, PermissionEntity.reminders] {
@@ -287,7 +289,6 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testEntityNameUsesCapitalizedRawValue() {
-        // (M1) entity name must be capitalized rawValue, not a hardcoded string
         let calMsg = composeErrorMessage(status: .denied, entity: .calendar)
         XCTAssertTrue(calMsg.contains("Calendar"), "Calendar denied must contain 'Calendar'")
         XCTAssertFalse(calMsg.contains("calendar"), "Must use capitalized 'Calendar', not 'calendar'")
@@ -296,7 +297,8 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testComposeNotDeterminedReturnsNonEmpty() {
-        // (M4) Defensive: .notDetermined is unreachable in production flow but must return non-empty
+        // .notDetermined is unreachable from performCheckPermission but must still satisfy
+        // the parametric non-empty invariant for direct callers of composeErrorMessage.
         let msg = composeErrorMessage(status: .notDetermined, entity: .calendar)
         XCTAssertFalse(msg.isEmpty, ".notDetermined must return non-empty for parametric invariant")
     }
@@ -409,7 +411,8 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testPerformGrantedRequestButPostStatusDenied() {
-        // (H5) post-status trumps request-granted invariant
+        // Post-status is the source of truth: a stale TCC.db can leave the request callback
+        // returning granted=true while the actual authorization is .denied.
         let gate = MockGate()
         gate.initialStatus = .notDetermined
         gate.requestGranted = true
@@ -425,8 +428,8 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testPerformTimeout() {
-        // (M2) timeout raised to 0.1s to avoid scheduler flake
-        // MockGate.requestAccess deliberately never invokes completion when deferRequest=true
+        // 0.1s is large enough to avoid scheduler flake yet keeps the test fast.
+        // MockGate.requestAccess deliberately never invokes completion when deferRequest=true.
         let gate = MockGate()
         gate.initialStatus = .notDetermined
         gate.deferRequest = true

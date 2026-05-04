@@ -71,7 +71,7 @@ final class CalendarTests: XCTestCase {
         XCTAssertNotNil(result)
     }
 
-    // MARK: - EventStoreGate (H2) — file-scope struct reachable via @testable import
+    // MARK: - EventStoreGate — file-scope struct reachable via @testable import
 
     func testCalendarEventStoreGateConformsToPermissionGate() {
         // Compile-time + smoke: EventStoreGate is file-scope and reachable from tests.
