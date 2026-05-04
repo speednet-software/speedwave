@@ -5,7 +5,7 @@
 
 ## Context
 
-Issue [#400](https://github.com/speednet/speedwave/issues/400) reports that plugin installation in the Desktop UI shows no visible feedback during the multi-minute work it performs. The previous implementation registered `install_plugin` as a synchronous Tauri command and ran the entire flow — Ed25519 signature verification, ZIP extraction, manifest validation, container image build via `nerdctl build`, and on-disk side-effects — in one blocking call. On macOS, where Tauri runs on the main thread, the user sees the system spinning beachball for 2-5 minutes when installing a heavy plugin (e.g. `presale` with docling/torch dependencies) and only learns about a build error after the freeze ends.
+Issue [#400](https://github.com/speednet-software/speedwave/issues/400) reports that plugin installation in the Desktop UI shows no visible feedback during the multi-minute work it performs. The previous implementation registered `install_plugin` as a synchronous Tauri command and ran the entire flow — Ed25519 signature verification, ZIP extraction, manifest validation, container image build via `nerdctl build`, and on-disk side-effects — in one blocking call. On macOS, where Tauri runs on the main thread, the user sees the system spinning beachball for 2-5 minutes when installing a heavy plugin (e.g. `presale` with docling/torch dependencies) and only learns about a build error after the freeze ends.
 
 The Desktop already had a small overlay rendered via `installing = true`, but it only displayed a static spinner and "Installing plugin…" string. Nothing communicated which step was running, and there was no way to surface a build failure separately from a fatal install failure.
 

@@ -388,7 +388,12 @@ export class PluginsComponent implements OnInit, OnDestroy {
    * button inside the overlay's error banner.
    */
   async retryInstall(): Promise<void> {
-    if (!this.currentZipPath) return;
+    // Guard against concurrent runs: a `failed` phase event arrives while
+    // the original `invoke('install_plugin')` Promise is still pending,
+    // and the overlay's retry button is reachable in that window. Without
+    // this check, clicking retry would spawn a second runInstall whose
+    // `finally` collides with the first.
+    if (this.installing || !this.currentZipPath) return;
     await this.runInstall(this.currentZipPath);
   }
 
@@ -465,7 +470,8 @@ export class PluginsComponent implements OnInit, OnDestroy {
         this.setStepStatus(STEP_EXTRACTING, 'active', p.message);
         break;
       case 'building':
-        this.setStepStatus(STEP_VERIFYING, 'done');
+        // STEP_VERIFYING is already 'done' from the prior 'extracting' event;
+        // we only need to advance the immediately preceding step here.
         this.setStepStatus(STEP_EXTRACTING, 'done');
         this.setStepStatus(STEP_BUILDING, 'active', p.message);
         break;
@@ -483,11 +489,9 @@ export class PluginsComponent implements OnInit, OnDestroy {
         break;
       }
       case 'done_with_pending_build':
-        // Terminal informational state after a failed build. We keep the
-        // error visible in the overlay and let the caller's finally close it.
-        this.installSteps.update((list) =>
-          list.map((s) => (s.status === 'pending' ? { ...s, status: 'done' as const } : s))
-        );
+        // Terminal informational state. After `failed` no steps remain
+        // pending, so there is nothing to mutate here — the overlay closes
+        // through the caller's `finally` block which clears `installing`.
         break;
     }
   }

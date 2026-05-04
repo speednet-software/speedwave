@@ -639,6 +639,18 @@ fn install_plugin_with_base(
                     return Ok(InstallOutcome::InstalledPendingBuild(manifest));
                 }
             }
+        } else {
+            // No runtime available — image was not built. Treat as deferred
+            // so callers (CLI, Tauri auto-enable) don't enable an MCP plugin
+            // whose worker cannot start. `.image_pending` retry will run on
+            // the next launch via `ensure_all_plugin_images`.
+            on_progress(PluginInstallProgress {
+                phase: "done_with_pending_build".to_string(),
+                message: "Plugin installed; image build deferred to next launch".to_string(),
+                error: None,
+            });
+            warn_legacy_addons();
+            return Ok(InstallOutcome::InstalledPendingBuild(manifest));
         }
     }
 
@@ -2076,6 +2088,17 @@ mod tests {
         std::fs::write(zip_path, buf.into_inner()).unwrap();
     }
 
+    /// Serializes tests that mutate the global `SPEEDWAVE_ALLOW_UNSIGNED`
+    /// env var so concurrent runs do not see each other's set/unset.
+    /// Acquired before set_var and dropped after remove_var.
+    fn unsigned_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn test_peek_plugin_manifest_mcp_plugin() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2168,10 +2191,9 @@ mod tests {
 
     #[test]
     fn test_install_plugin_resource_only_emits_verifying_extracting_done() {
-        // Note: SPEEDWAVE_ALLOW_UNSIGNED is process-global and follows the
-        // existing pattern from signing::tests; we accept the same residual
-        // concurrency risk and keep file-system mutation isolated under a
-        // tempdir via install_plugin_with_base.
+        // SPEEDWAVE_ALLOW_UNSIGNED is process-global; serialize tests that
+        // touch it so concurrent runs cannot see partial state.
+        let _guard = unsigned_env_lock();
         std::env::set_var("SPEEDWAVE_ALLOW_UNSIGNED", "1");
         let tmp = tempfile::tempdir().unwrap();
         let zip = tmp.path().join("plugin.zip");
@@ -2195,7 +2217,8 @@ mod tests {
     }
 
     #[test]
-    fn test_install_plugin_no_runtime_skips_building() {
+    fn test_install_plugin_no_runtime_for_mcp_plugin_returns_pending_build() {
+        let _guard = unsigned_env_lock();
         std::env::set_var("SPEEDWAVE_ALLOW_UNSIGNED", "1");
         let tmp = tempfile::tempdir().unwrap();
         let zip = tmp.path().join("plugin.zip");
@@ -2203,7 +2226,9 @@ mod tests {
         let plugins_dir = tmp.path().join("plugins");
 
         let progresses = std::sync::Mutex::new(Vec::<PluginInstallProgress>::new());
-        // runtime=None: marker .image_pending is created, building is not emitted.
+        // runtime=None for MCP plugin: marker .image_pending is created,
+        // building is not emitted, and the outcome is PendingBuild so callers
+        // do not auto-enable an MCP worker whose image is absent.
         let result =
             install_plugin_with_base(&zip, None, &mut collect_progress(&progresses), &plugins_dir);
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
@@ -2211,7 +2236,11 @@ mod tests {
         let dest = plugins_dir.join("phases-no-runtime");
         let pending_existed = dest.join(".image_pending").exists();
 
-        assert!(result.is_ok());
+        let outcome = result.expect("install must succeed");
+        assert!(
+            matches!(outcome, InstallOutcome::InstalledPendingBuild(_)),
+            "MCP plugin without runtime must return InstalledPendingBuild"
+        );
         assert!(
             pending_existed,
             ".image_pending must be created when runtime is None"
@@ -2222,8 +2251,11 @@ mod tests {
             .iter()
             .map(|p| p.phase.clone())
             .collect();
-        // building skipped (no runtime), but installation still completes.
-        assert_eq!(phases, vec!["verifying", "extracting", "done"]);
+        // building skipped (no runtime); terminal phase is done_with_pending_build.
+        assert_eq!(
+            phases,
+            vec!["verifying", "extracting", "done_with_pending_build"]
+        );
     }
 
     #[test]
@@ -2279,6 +2311,7 @@ mod tests {
             }
         }
 
+        let _guard = unsigned_env_lock();
         std::env::set_var("SPEEDWAVE_ALLOW_UNSIGNED", "1");
         let tmp = tempfile::tempdir().unwrap();
         let zip = tmp.path().join("plugin.zip");
