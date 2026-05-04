@@ -1,10 +1,4 @@
-import {
-  ChangeDetectionStrategy,
-  Component,
-  computed,
-  input,
-  output,
-} from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { SpinIconComponent } from '../spin-icon.component';
 
@@ -35,10 +29,7 @@ export interface SetupStep {
   imports: [CommonModule, SpinIconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div
-      class="rounded border border-[var(--line)] bg-[var(--bg-1)]"
-      data-testid="setup-steps"
-    >
+    <div class="rounded border border-[var(--line)] bg-[var(--bg-1)]" data-testid="setup-steps">
       @for (step of steps(); track step.id; let i = $index) {
         <div
           class="flex items-start gap-4 px-5 py-4"
@@ -89,18 +80,12 @@ export interface SetupStep {
                 >
               }
             </div>
-            <div
-              class="mono mt-0.5 text-[11px] text-[var(--ink-mute)]"
-              data-testid="step-detail"
-            >
+            <div class="mono mt-0.5 text-[11px] text-[var(--ink-mute)]" data-testid="step-detail">
               {{ step.detail || step.description }}
             </div>
             @if (step.status === 'active' && step.progress !== undefined) {
               <div class="mono mt-2 h-1 w-full overflow-hidden rounded bg-[var(--bg-2)]">
-                <div
-                  class="h-full bg-[var(--accent)]"
-                  [style.width.%]="step.progress"
-                ></div>
+                <div class="h-full bg-[var(--accent)]" [style.width.%]="step.progress"></div>
               </div>
             }
           </div>
@@ -141,7 +126,8 @@ export interface SetupStep {
     @if (showFooter()) {
       <div class="mono mt-4 text-[11px] text-[var(--ink-mute)]" data-testid="setup-footer">
         <span data-testid="setup-progress-summary">
-          step {{ currentStepNumber() }} of {{ totalSteps() }}@if (etaSeconds() !== null) {
+          step {{ currentStepNumber() }} of {{ totalSteps() }}
+          @if (etaSeconds() !== null) {
             <span> · ~{{ etaSeconds() }}s remaining</span>
           }
         </span>

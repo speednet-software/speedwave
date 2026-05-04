@@ -59,6 +59,7 @@ export const PLUGIN_INSTALL_PHASES = [
   'done_with_pending_build',
 ] as const;
 
+/** Discriminated union of phase strings emitted by `plugin_install_status`. */
 export type PluginInstallPhase = (typeof PLUGIN_INSTALL_PHASES)[number];
 
 /** Streaming progress event for the `plugin_install_status` Tauri event. */

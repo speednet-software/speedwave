@@ -99,10 +99,7 @@ const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
         data-testid="plugins-install-overlay"
       >
         <div class="w-full max-w-xl px-6">
-          <h2
-            class="mono mb-4 text-[14px] text-[var(--ink)]"
-            data-testid="plugins-install-title"
-          >
+          <h2 class="mono mb-4 text-[14px] text-[var(--ink)]" data-testid="plugins-install-title">
             Installing plugin
           </h2>
           <app-progress-steps
@@ -408,10 +405,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
 
     let summary: PluginManifestSummary;
     try {
-      summary = await this.tauri.invoke<PluginManifestSummary>(
-        'peek_plugin_manifest',
-        { zipPath },
-      );
+      summary = await this.tauri.invoke<PluginManifestSummary>('peek_plugin_manifest', { zipPath });
     } catch (e: unknown) {
       this.installing = false;
       this.error = e instanceof Error ? e.message : String(e);
@@ -427,7 +421,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
       (e) => {
         this.onInstallProgress(e.payload);
         this.cdr.markForCheck();
-      },
+      }
     );
 
     try {
@@ -447,15 +441,20 @@ export class PluginsComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Returns a fresh mutable copy of the appropriate template. */
+  /**
+   * Returns a fresh mutable copy of the appropriate step template.
+   * @param summary - Manifest summary from `peek_plugin_manifest`; selects
+   *   the MCP (3-step) vs resource-only (2-step) template.
+   */
   private cloneSteps(summary: PluginManifestSummary): SetupStep[] {
-    const template = summary.has_service_id
-      ? MCP_INSTALL_STEPS
-      : RESOURCE_ONLY_INSTALL_STEPS;
+    const template = summary.has_service_id ? MCP_INSTALL_STEPS : RESOURCE_ONLY_INSTALL_STEPS;
     return template.map((s) => ({ ...s }));
   }
 
-  /** Maps a backend `plugin_install_status` event onto step status updates. */
+  /**
+   * Maps a backend `plugin_install_status` event onto step status updates.
+   * @param p - Progress event payload received from the Tauri event bus.
+   */
   private onInstallProgress(p: PluginInstallProgress): void {
     switch (p.phase) {
       case 'verifying':
@@ -473,17 +472,13 @@ export class PluginsComponent implements OnInit, OnDestroy {
       case 'done':
         // Mark every step in the current list as done. The overlay closes
         // after `install_plugin` resolves (in the finally block).
-        this.installSteps.update((list) =>
-          list.map((s) => ({ ...s, status: 'done' as const })),
-        );
+        this.installSteps.update((list) => list.map((s) => ({ ...s, status: 'done' as const })));
         break;
       case 'failed': {
         const message = p.error ?? p.message;
         this.installError.set(message);
         this.installSteps.update((list) =>
-          list.map((s) =>
-            s.status === 'active' ? { ...s, status: 'error' as const } : s,
-          ),
+          list.map((s) => (s.status === 'active' ? { ...s, status: 'error' as const } : s))
         );
         break;
       }
@@ -491,9 +486,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
         // Terminal informational state after a failed build. We keep the
         // error visible in the overlay and let the caller's finally close it.
         this.installSteps.update((list) =>
-          list.map((s) =>
-            s.status === 'pending' ? { ...s, status: 'done' as const } : s,
-          ),
+          list.map((s) => (s.status === 'pending' ? { ...s, status: 'done' as const } : s))
         );
         break;
     }
@@ -501,9 +494,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
 
   private setStepStatus(id: string, status: SetupStep['status'], detail?: string): void {
     this.installSteps.update((list) =>
-      list.map((s) =>
-        s.id === id ? { ...s, status, detail: detail ?? s.detail } : s,
-      ),
+      list.map((s) => (s.id === id ? { ...s, status, detail: detail ?? s.detail } : s))
     );
   }
 

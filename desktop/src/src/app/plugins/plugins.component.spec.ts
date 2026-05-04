@@ -487,19 +487,13 @@ describe('PluginsComponent', () => {
         phase: 'verifying',
         message: 'Verifying signature',
       });
-      expect(component.installSteps().find((s) => s.id === 'verifying')?.status).toBe(
-        'active',
-      );
+      expect(component.installSteps().find((s) => s.id === 'verifying')?.status).toBe('active');
       mockTauri.dispatchEvent('plugin_install_status', {
         phase: 'extracting',
         message: 'Extracting archive',
       });
-      expect(component.installSteps().find((s) => s.id === 'verifying')?.status).toBe(
-        'done',
-      );
-      expect(component.installSteps().find((s) => s.id === 'extracting')?.status).toBe(
-        'active',
-      );
+      expect(component.installSteps().find((s) => s.id === 'verifying')?.status).toBe('done');
+      expect(component.installSteps().find((s) => s.id === 'extracting')?.status).toBe('active');
 
       resolveFn('Plugin installed');
       await promise;
@@ -539,9 +533,7 @@ describe('PluginsComponent', () => {
         error: 'bad signature: invalid format',
       });
 
-      expect(component.installSteps().find((s) => s.id === 'verifying')?.status).toBe(
-        'error',
-      );
+      expect(component.installSteps().find((s) => s.id === 'verifying')?.status).toBe('error');
       expect(component.installError()).toBe('bad signature: invalid format');
 
       rejectFn(new Error('signature invalid'));

@@ -1,14 +1,12 @@
-import { Component, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, signal } from '@angular/core';
 import { TestBed, ComponentFixture } from '@angular/core/testing';
 import { describe, beforeEach, it, expect } from 'vitest';
-import {
-  ProgressStepsComponent,
-  type SetupStep,
-} from './progress-steps.component';
+import { ProgressStepsComponent, type SetupStep } from './progress-steps.component';
 
 @Component({
   selector: 'app-host',
   imports: [ProgressStepsComponent],
+  changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <app-progress-steps
       [steps]="steps()"
@@ -34,7 +32,7 @@ class HostComponent {
 function makeStep(
   id: string,
   status: SetupStep['status'],
-  extra: Partial<SetupStep> = {},
+  extra: Partial<SetupStep> = {}
 ): SetupStep {
   return {
     id,
@@ -87,7 +85,7 @@ describe('ProgressStepsComponent', () => {
     fixture.detectChanges();
     const all = fixture.nativeElement.querySelectorAll('[style]');
     const widthBars = Array.from(all).filter((el) =>
-      /width:\s*42%/.test((el as HTMLElement).style.cssText),
+      /width:\s*42%/.test((el as HTMLElement).style.cssText)
     );
     expect(widthBars.length).toBe(1);
   });
@@ -145,7 +143,7 @@ describe('ProgressStepsComponent', () => {
     host.error.set('broke');
     fixture.detectChanges();
     const retryBtn = fixture.nativeElement.querySelector(
-      '[data-testid="setup-retry-btn"]',
+      '[data-testid="setup-retry-btn"]'
     ) as HTMLButtonElement;
     retryBtn.click();
     expect(host.retryCount).toBe(1);
@@ -156,7 +154,7 @@ describe('ProgressStepsComponent', () => {
     host.error.set('broke');
     fixture.detectChanges();
     const backBtn = fixture.nativeElement.querySelector(
-      '[data-testid="setup-back-btn"]',
+      '[data-testid="setup-back-btn"]'
     ) as HTMLButtonElement;
     backBtn.click();
     expect(host.backCount).toBe(1);
@@ -174,13 +172,9 @@ describe('ProgressStepsComponent', () => {
   it('reactively re-renders when the steps signal updates', () => {
     host.steps.set([makeStep('a', 'pending')]);
     fixture.detectChanges();
-    expect(
-      fixture.nativeElement.querySelectorAll('[data-testid="setup-step"]').length,
-    ).toBe(1);
+    expect(fixture.nativeElement.querySelectorAll('[data-testid="setup-step"]').length).toBe(1);
     host.steps.set([makeStep('a', 'pending'), makeStep('b', 'active')]);
     fixture.detectChanges();
-    expect(
-      fixture.nativeElement.querySelectorAll('[data-testid="setup-step"]').length,
-    ).toBe(2);
+    expect(fixture.nativeElement.querySelectorAll('[data-testid="setup-step"]').length).toBe(2);
   });
 });
