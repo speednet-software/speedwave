@@ -10,6 +10,7 @@
 mod auth;
 mod auth_commands;
 mod chat;
+mod cloudstorage_cmd;
 mod container_logs_cmd;
 mod containers_cmd;
 mod diagnostics;
@@ -34,6 +35,7 @@ mod retry_cmd;
 mod setup_wizard;
 mod slash_cmd;
 mod subscribe_cmd;
+mod system_settings_cmd;
 mod tray;
 mod types;
 mod update_commands;
@@ -518,6 +520,54 @@ fn rebind_chat(
     session.start(app.clone(), None).map_err(|e| e.to_string())
 }
 
+/// Parses a prefix-encoded CloudStorage TCC error into the `(stable_id, dir)`
+/// pair if present, otherwise returns `None`.
+///
+/// Format produced by `cloudstorage::check_project_readable_or_err`:
+/// `"CloudStorage TCC required: {stable_id}|{dir}"`. Tolerates extra suffix
+/// text that downstream wrappers may have appended after the dir.
+fn parse_cloudstorage_tcc_error(error: &str) -> Option<(&str, &str)> {
+    let body = error.strip_prefix(speedwave_runtime::cloudstorage::CLOUDSTORAGE_TCC_PREFIX)?;
+    let pipe_idx = body.find('|')?;
+    let (stable_id, rest) = body.split_at(pipe_idx);
+    // rest starts with '|'
+    let dir = rest[1..]
+        .split_once(". ")
+        .map(|(d, _)| d)
+        .unwrap_or(&rest[1..]);
+    Some((stable_id, dir))
+}
+
+/// Builds the JSON payload for the `project_switch_failed` Tauri event.
+///
+/// Pure function (no IO) so it can be unit-tested independently of Tauri.
+/// When the error string is prefix-encoded with `CLOUDSTORAGE_TCC_PREFIX`,
+/// emits structured `error_kind`/`provider`/`project_dir` fields so the
+/// frontend can route to the CloudStorage remediation modal. Otherwise
+/// emits only `project` + `error`.
+pub(crate) fn compute_project_switch_failure_payload(
+    previous: Option<&str>,
+    full_error: &str,
+) -> serde_json::Value {
+    use speedwave_runtime::cloudstorage::CloudStorageProvider;
+
+    if let Some((stable_id, dir)) = parse_cloudstorage_tcc_error(full_error) {
+        let provider = CloudStorageProvider::from_stable_id(stable_id);
+        return serde_json::json!({
+            "project": previous,
+            "error": full_error,
+            "error_kind": "cloudstorage_tcc_required",
+            "provider": provider.as_ref().map(|p| p.display_name()),
+            "project_dir": dir,
+        });
+    }
+
+    serde_json::json!({
+        "project": previous,
+        "error": full_error,
+    })
+}
+
 pub(crate) fn rollback_and_emit_failed(
     app: &tauri::AppHandle,
     previous: Option<String>,
@@ -541,14 +591,10 @@ pub(crate) fn rollback_and_emit_failed(
     }
     let full_error = parts.join(". ");
 
+    let payload = compute_project_switch_failure_payload(previous.as_deref(), &full_error);
+
     use tauri::Emitter;
-    let _ = app.emit(
-        "project_switch_failed",
-        serde_json::json!({
-            "project": previous,
-            "error": full_error,
-        }),
-    );
+    let _ = app.emit("project_switch_failed", payload);
 
     full_error
 }
@@ -1453,6 +1499,9 @@ fn main() {
             slash_cmd::invalidate_slash_cache,
             // Git introspection (chat status strip)
             git_cmd::get_git_branch,
+            // CloudStorage TCC
+            system_settings_cmd::open_files_folders_pane,
+            cloudstorage_cmd::detect_cloudstorage_path,
         ])
         .on_window_event(move |window, event| {
             match event {
@@ -2131,5 +2180,65 @@ mod tests {
             body.contains("spawn_blocking"),
             "stop_chat must use spawn_blocking to avoid blocking the main thread"
         );
+    }
+
+    // -- compute_project_switch_failure_payload tests --
+
+    #[test]
+    fn payload_for_generic_error_omits_cloudstorage_fields() {
+        let payload =
+            compute_project_switch_failure_payload(Some("acme"), "Container restore failed");
+        assert_eq!(payload["project"], "acme");
+        assert_eq!(payload["error"], "Container restore failed");
+        assert!(payload.get("error_kind").is_none());
+        assert!(payload.get("provider").is_none());
+        assert!(payload.get("project_dir").is_none());
+    }
+
+    #[test]
+    fn payload_for_cloudstorage_error_includes_structured_fields() {
+        let err = "CloudStorage TCC required: one_drive|/Users/alice/Library/CloudStorage/OneDrive-Personal/p";
+        let payload = compute_project_switch_failure_payload(Some("acme"), err);
+        assert_eq!(payload["error_kind"], "cloudstorage_tcc_required");
+        assert_eq!(payload["provider"], "OneDrive");
+        assert_eq!(
+            payload["project_dir"],
+            "/Users/alice/Library/CloudStorage/OneDrive-Personal/p"
+        );
+        assert_eq!(payload["error"], err);
+        assert_eq!(payload["project"], "acme");
+    }
+
+    #[test]
+    fn payload_for_cloudstorage_error_with_appended_suffix_extracts_dir_only() {
+        let err = "CloudStorage TCC required: dropbox|/Users/alice/Dropbox/p. Config rollback failed: nope";
+        let payload = compute_project_switch_failure_payload(None, err);
+        assert_eq!(payload["error_kind"], "cloudstorage_tcc_required");
+        assert_eq!(payload["provider"], "Dropbox");
+        assert_eq!(payload["project_dir"], "/Users/alice/Dropbox/p");
+    }
+
+    #[test]
+    fn payload_for_cloudstorage_error_unknown_stable_id_emits_null_provider() {
+        let err = "CloudStorage TCC required: future_provider|/some/path";
+        let payload = compute_project_switch_failure_payload(None, err);
+        assert_eq!(payload["error_kind"], "cloudstorage_tcc_required");
+        assert!(payload["provider"].is_null());
+        assert_eq!(payload["project_dir"], "/some/path");
+    }
+
+    #[test]
+    fn payload_with_null_previous_serializes_as_null() {
+        let payload = compute_project_switch_failure_payload(None, "boom");
+        assert!(payload["project"].is_null());
+    }
+
+    #[test]
+    fn payload_for_malformed_prefix_without_pipe_falls_back_to_generic() {
+        let err = "CloudStorage TCC required: just_a_stable_id_without_pipe";
+        let payload = compute_project_switch_failure_payload(None, err);
+        assert!(payload.get("error_kind").is_none());
+        assert!(payload.get("provider").is_none());
+        assert!(payload.get("project_dir").is_none());
     }
 }

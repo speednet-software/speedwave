@@ -111,6 +111,16 @@ export interface CreatedProject {
             class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 py-1 text-[12px] text-[var(--ink)]"
           />
 
+          @if (cloudstorageWarning()) {
+            <div
+              class="mono mt-3 rounded border border-amber-500/30 bg-amber-500/5 p-2 text-[11.5px] text-amber-300"
+              data-testid="create-project-cloudstorage-warning"
+              role="alert"
+            >
+              {{ cloudstorageWarning() }}
+            </div>
+          }
+
           @if (error()) {
             <div
               class="mono mt-3 rounded border border-red-500/30 bg-red-500/5 p-2 text-[11.5px] text-red-300"
@@ -201,6 +211,8 @@ export class CreateProjectModalComponent {
   protected readonly busy = signal<boolean>(false);
   /** Inline error from the OS picker or `create_project`. */
   protected readonly error = signal<string | null>(null);
+  /** Non-null when the selected directory is inside a CloudStorage provider folder. */
+  protected readonly cloudstorageWarning = signal<string | null>(null);
 
   /** Submit button is enabled iff a directory and a non-empty name are present. */
   protected readonly canSubmit = computed(
@@ -237,7 +249,29 @@ export class CreateProjectModalComponent {
       dir: selected as string,
       name: nameDirty ? m.name : slugify(basename(selected as string)),
     }));
+    this.cloudstorageWarning.set(null);
+    // Non-blocking: fire-and-forget CloudStorage detection; ignore errors so a
+    // missing Tauri context (tests, browser preview) doesn't break the picker.
+    void this.detectCloudstorage(selected as string);
     this.cdr.markForCheck();
+  }
+
+  private async detectCloudstorage(dir: string): Promise<void> {
+    try {
+      const result = await this.tauri.invoke<{ is_cloudstorage: boolean; provider?: string }>(
+        'detect_cloudstorage_path',
+        { dir }
+      );
+      if (result?.is_cloudstorage) {
+        const provider = result.provider ? `${result.provider} ` : '';
+        this.cloudstorageWarning.set(
+          `This folder is inside a ${provider}sync directory. macOS may block Speedwave's access — you may be prompted to grant permission.`
+        );
+        this.cdr.markForCheck();
+      }
+    } catch {
+      // Outside Tauri or command unavailable — no warning shown.
+    }
   }
 
   /**
@@ -301,6 +335,7 @@ export class CreateProjectModalComponent {
     // as a fresh selection rather than a continuation of the previous edit.
     this.projectForm().reset();
     this.error.set(null);
+    this.cloudstorageWarning.set(null);
   }
 }
 

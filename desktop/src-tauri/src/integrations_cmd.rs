@@ -664,6 +664,14 @@ pub fn delete_integration_credentials(project: String, service: String) -> Resul
 pub async fn restart_integration_containers(project: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
+        // Pre-flight: detect CloudStorage TCC denial before restarting containers.
+        if let Ok(cfg) = speedwave_runtime::config::load_user_config() {
+            if let Some(p) = cfg.find_project(&project) {
+                speedwave_runtime::cloudstorage::check_project_readable_or_err(
+                    std::path::Path::new(&p.dir),
+                )?;
+            }
+        }
         log::info!("restart_integration_containers: project={project}");
         let rt = speedwave_runtime::runtime::detect_runtime();
 

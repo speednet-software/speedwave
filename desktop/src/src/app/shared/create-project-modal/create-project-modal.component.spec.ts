@@ -179,6 +179,81 @@ describe('CreateProjectModalComponent', () => {
     });
   });
 
+  describe('CloudStorage warning (Step 10)', () => {
+    it('shows a warning when detect_cloudstorage_path returns is_cloudstorage=true', async () => {
+      vi.spyOn(mockTauri, 'invoke').mockImplementation((cmd: string) => {
+        if (cmd === 'detect_cloudstorage_path') {
+          return Promise.resolve({ is_cloudstorage: true, provider: 'OneDrive' });
+        }
+        return Promise.resolve(undefined);
+      });
+      openMock.mockResolvedValue('/Users/me/OneDrive/project');
+      await component.browse();
+      // Wait for the async detectCloudstorage microtask
+      await Promise.resolve();
+      fixture.detectChanges();
+      const warning = fixture.nativeElement.querySelector(
+        '[data-testid="create-project-cloudstorage-warning"]'
+      );
+      expect(warning).not.toBeNull();
+      expect(warning?.textContent).toContain('OneDrive');
+    });
+
+    it('does not show a warning when detect_cloudstorage_path returns is_cloudstorage=false', async () => {
+      vi.spyOn(mockTauri, 'invoke').mockImplementation((cmd: string) => {
+        if (cmd === 'detect_cloudstorage_path') {
+          return Promise.resolve({ is_cloudstorage: false });
+        }
+        return Promise.resolve(undefined);
+      });
+      openMock.mockResolvedValue('/Users/me/projects/normal');
+      await component.browse();
+      await Promise.resolve();
+      fixture.detectChanges();
+      const warning = fixture.nativeElement.querySelector(
+        '[data-testid="create-project-cloudstorage-warning"]'
+      );
+      expect(warning).toBeNull();
+    });
+
+    it('silently ignores detect_cloudstorage_path errors (outside Tauri)', async () => {
+      vi.spyOn(mockTauri, 'invoke').mockImplementation((cmd: string) => {
+        if (cmd === 'detect_cloudstorage_path') {
+          return Promise.reject(new Error('command not found'));
+        }
+        return Promise.resolve(undefined);
+      });
+      openMock.mockResolvedValue('/Users/me/projects/demo');
+      await component.browse();
+      await Promise.resolve();
+      fixture.detectChanges();
+      const warning = fixture.nativeElement.querySelector(
+        '[data-testid="create-project-cloudstorage-warning"]'
+      );
+      expect(warning).toBeNull();
+    });
+
+    it('clears the warning when the user cancels after a warning is shown', async () => {
+      vi.spyOn(mockTauri, 'invoke').mockImplementation((cmd: string) => {
+        if (cmd === 'detect_cloudstorage_path') {
+          return Promise.resolve({ is_cloudstorage: true, provider: 'Dropbox' });
+        }
+        return Promise.resolve(undefined);
+      });
+      openMock.mockResolvedValue('/Users/me/Dropbox/project');
+      await component.browse();
+      await Promise.resolve();
+      fixture.detectChanges();
+
+      component.cancel();
+      fixture.detectChanges();
+      const warning = fixture.nativeElement.querySelector(
+        '[data-testid="create-project-cloudstorage-warning"]'
+      );
+      expect(warning).toBeNull();
+    });
+  });
+
   describe('cancel() — dismissibility contract', () => {
     it('emits `closed` when dismissible (default)', () => {
       const closed = vi.fn();

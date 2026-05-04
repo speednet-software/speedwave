@@ -20,6 +20,7 @@ import { CommandPaletteComponent } from './command-palette/command-palette.compo
 import { ModalOverlayComponent } from './modal-overlay/modal-overlay.component';
 import { NavRailComponent, type NavRailEntry } from './nav-rail/nav-rail.component';
 import { SpinIconComponent } from '../shared/spin-icon.component';
+import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudstorage-modal.component';
 
 /**
  * Application shell — hosts the left icon rail, the routed main content, and
@@ -39,6 +40,7 @@ import { SpinIconComponent } from '../shared/spin-icon.component';
     ModalOverlayComponent,
     CommandPaletteComponent,
     SpinIconComponent,
+    CloudStorageModalComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '(document:keydown)': 'onKeydown($event)' },
@@ -141,6 +143,12 @@ import { SpinIconComponent } from '../shared/spin-icon.component';
         }
       }
       <app-update-notification />
+
+      <!-- CloudStorage TCC modal — shown when project dir is in OneDrive/Dropbox/etc. and TCC is denied -->
+      <app-cloudstorage-modal
+        [visible]="projectState.errorKind === 'cloudstorage_tcc_required'"
+        [provider]="projectState.failureProvider"
+      />
 
       <div class="flex flex-1 overflow-hidden">
         <app-nav-rail

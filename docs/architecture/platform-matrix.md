@@ -15,6 +15,7 @@ Speedwave supports macOS, Linux, and Windows with platform-specific VM, containe
 - Lima manages the VM using Apple Virtualization Framework (same hypervisor as Docker Desktop 4.15+)
 - Lima is bundled inside `.app/Contents/Resources/lima/` with `LIMA_HOME=~/.speedwave/lima` for isolation (see [ADR-021](../adr/ADR-021-bundled-dependencies-and-zero-install-strategy.md))
 - IDE lock file: `~/.claude/ide/<port>.lock`
+- **CloudStorage TCC:** Project directories under `~/Library/CloudStorage/` (OneDrive, Dropbox, Google Drive) and top-level home folders like `~/OneDrive…` are gated by the macOS Files-and-Folders Transparency Consent and Control (TCC) permission. When permission is missing, `read_dir` returns EPERM and Speedwave surfaces a dedicated `CloudStorageModal` (with a deep-link to System Settings → Privacy & Security → Files and Folders, plus a one-click Retry). Detection runs at all four project-mutation entry points (`add_project`, `start_containers`, `recreate_project_containers`, `restart_integration_containers`) plus defense-in-depth in `render_and_save_compose`. SSOT: `crates/speedwave-runtime/src/cloudstorage.rs`.
 
 ## Linux
 
