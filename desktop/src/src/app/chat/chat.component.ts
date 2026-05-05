@@ -277,6 +277,9 @@ export class ChatComponent implements OnInit, OnDestroy {
    * Forwards an answered AskUserQuestion slot to the chat-state service.
    * @param event - tool id, slot index, and the chosen value (single string;
    *   multi-select labels are joined with `", "` upstream).
+   * @param event.toolId Identifier of the AskUserQuestion tool call being answered.
+   * @param event.questionIdx Zero-based index of the answered slot within the questions array.
+   * @param event.value Final answer string forwarded to the agent SDK.
    */
   async onQuestionAnswered(event: {
     toolId: string;

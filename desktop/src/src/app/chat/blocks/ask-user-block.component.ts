@@ -163,6 +163,10 @@ export class AskUserBlockComponent {
     return q.questions[idx];
   });
 
+  /**
+   * Wires the per-input reset effect that clears `selected` and `freeformText`
+   * whenever the parent reducer hands us a new `question()` block.
+   */
   constructor() {
     // Reset transient input state whenever the parent reducer hands us a
     // new question() input. Lives in an effect (not a computed) because
@@ -179,7 +183,10 @@ export class AskUserBlockComponent {
     });
   }
 
-  /** Shared "question N of M · " prefix for legends; empty for 1-question blocks. */
+  /**
+   * Shared "question N of M · " prefix for legends; empty for 1-question blocks.
+   * @param idx Zero-based index of the question whose legend is being rendered.
+   */
   private progressPrefix(idx: number): string {
     const total = this.question().questions.length;
     return total > 1 ? `question ${idx + 1} of ${total} · ` : '';
@@ -243,7 +250,11 @@ export class AskUserBlockComponent {
     return !q.header && q.options.length === 0 && !q.multi_select;
   });
 
-  /** Legend rendered for previously-answered (locked) slots. */
+  /**
+   * Legend rendered for previously-answered (locked) slots.
+   * @param q The already-answered question item.
+   * @param i Zero-based index of the locked slot in the questions array.
+   */
   legendForLocked(q: AskUserQuestionItem, i: number): string {
     return `${this.progressPrefix(i)}✓ answered${q.header ? ` · ${q.header}` : ''}`;
   }
@@ -251,6 +262,7 @@ export class AskUserBlockComponent {
   /**
    * Checks whether a given option value is currently selected for the
    * active question.
+   * @param value Option value to test against the active selection set.
    */
   isSelected(value: string): boolean {
     return this.selected().has(value);
@@ -259,6 +271,7 @@ export class AskUserBlockComponent {
   /**
    * Toggles selection of an option value (single or multi-select) for the
    * active question.
+   * @param value Option value to add or remove from the active selection set.
    */
   toggleOption(value: string): void {
     const q = this.activeQuestion();
@@ -303,13 +316,19 @@ export class AskUserBlockComponent {
     }
   }
 
-  /** Stores the input value on each input event for the active question. */
+  /**
+   * Stores the input value on each input event for the active question.
+   * @param event DOM input event whose target carries the latest text value.
+   */
   onFreeformInput(event: Event): void {
     const target = event.target as HTMLInputElement | null;
     this.freeformText.set(target?.value ?? '');
   }
 
-  /** Submits on Enter (without Shift) for a keyboard-friendly workflow. */
+  /**
+   * Submits on Enter (without Shift) for a keyboard-friendly workflow.
+   * @param event Keyboard event triggered by the Enter keypress on the freeform input.
+   */
   onFreeformEnter(event: Event): void {
     const ke = event as KeyboardEvent;
     if (ke.shiftKey) return;

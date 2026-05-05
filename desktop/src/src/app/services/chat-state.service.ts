@@ -454,7 +454,6 @@ export class ChatStateService {
    * Optimistically advances the block's `current_index` to the
    * next unanswered slot, then forwards to the host. On error, reverts the
    * slot and appends an error block.
-   *
    * @param toolUseId   tool_use_id of the AskUserQuestion control_request.
    * @param questionIdx slot index being answered (0-based).
    * @param value       chosen value (single string; multi-select labels are
@@ -1480,6 +1479,11 @@ function cloneQuestionItem(q: AskUserQuestionItem): AskUserQuestionItem {
   };
 }
 
+/**
+ * Converts SDK message blocks into the serializable shape persisted to the
+ * chat state store (drops live-only fields and normalizes tool payloads).
+ * @param blocks Live message blocks emitted by the agent SDK for one turn.
+ */
 export function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBlockState[] {
   const out: MessageBlockState[] = [];
   for (const b of blocks) {
