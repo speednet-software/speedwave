@@ -25,7 +25,7 @@ Copy-Item -Recurse containers "$dest\build-context\containers"
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 Get-ChildItem -Path "$dest\build-context\containers" -Recurse -Include '*.sh' -File |
     ForEach-Object {
-        $content = [System.IO.File]::ReadAllText($_.FullName)
+        $content = [System.IO.File]::ReadAllText($_.FullName, $utf8NoBom)
         if ($content.Contains("`r")) {
             [System.IO.File]::WriteAllText($_.FullName, $content.Replace("`r", ""), $utf8NoBom)
         }

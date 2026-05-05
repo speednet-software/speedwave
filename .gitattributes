@@ -10,6 +10,13 @@
 *.icns       binary
 *.ico        binary
 *.woff2      binary
+*.zip        binary
+*.wasm       binary
+*.db         binary
+*.exe        binary
+*.dll        binary
+*.so         binary
+*.dylib      binary
 *.pem        binary
 *.p12        binary
 *.pfx        binary
