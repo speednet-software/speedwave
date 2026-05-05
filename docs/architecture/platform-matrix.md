@@ -35,6 +35,10 @@ Speedwave supports macOS, Linux, and Windows with platform-specific VM, containe
 - IDE lock file: `%USERPROFILE%\.claude\ide\<port>.lock`
 - **Nested virtualization:** WSL2 uses Hyper-V, which requires hardware virtualization. Running WSL2 inside a VM (VMware, VirtualBox, QEMU/KVM) is nested virtualization and may degrade I/O performance during container image builds. Speedwave applies a four-layer resilience strategy (see [ADR-032](../adr/ADR-032-nested-virtualization-resilience.md)): (1) `Containerfile.claude` uses `--force-unsafe-io` and `Acquire::Retries=3` to harden apt installs; (2) transient I/O errors trigger an automatic retry without a prune; (3) Speedwave detects the VM environment via `Get-CimInstance Win32_ComputerSystem` and shows a non-blocking warning in `speedwave check` and Desktop logs; (4) a bounded parallel worker pool limits I/O amplification during concurrent image builds.
 
+## Cross-platform Rust gating
+
+`speedwave-desktop` compiles for all three platforms above. The local `make check-desktop-clippy` only exercises the host target, so Windows-only compile errors (typically `cfg(unix)`-gated imports referenced by cross-platform function signatures) must be caught by the `desktop-windows-check` job in `.github/workflows/test.yml`. See [contributing/development-setup.md → Cross-platform Rust gating](../contributing/development-setup.md#cross-platform-rust-gating) for the rules every PR touching gated code must follow.
+
 ## See Also
 
 - [ADR-002: Lima as VM Manager on macOS](../adr/ADR-002-lima-as-vm-manager-on-macos.md)

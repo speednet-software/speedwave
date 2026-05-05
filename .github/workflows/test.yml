@@ -330,3 +330,40 @@ jobs:
 
       - name: cargo test runtime::wsl
         run: cargo test -p speedwave-runtime --lib "runtime::wsl::"
+
+  desktop-windows-check:
+    # `desktop` job above only runs on ubuntu — it never catches Windows-only
+    # compile errors in speedwave-desktop (e.g. cfg-gated imports of types
+    # used in cross-platform fn signatures). This job runs `cargo check` on
+    # windows-latest with stubbed bundle resources to exercise the Windows
+    # codepaths without paying for a full Tauri bundle.
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+
+      - name: Cache Cargo
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            desktop/src-tauri/target/
+          key: ${{ runner.os }}-cargo-desktop-check-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-desktop-check-
+
+      - name: Create resource stubs for Tauri build script
+        run: scripts/create-desktop-stubs.sh
+
+      - name: cargo check speedwave-desktop
+        working-directory: desktop/src-tauri
+        env:
+          SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
+        run: cargo check --all-targets

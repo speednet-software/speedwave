@@ -51,6 +51,16 @@ The `desktop/src-tauri/cli/` directory is in `.gitignore` — it is populated at
 
 `make dev` automatically builds the CLI first and copies it to `desktop/src-tauri/cli/` before starting Tauri dev mode. This ensures the "Open Terminal" feature works during development.
 
+## Cross-platform Rust gating
+
+`speedwave-desktop` compiles for macOS, Linux, and Windows. `make check-desktop-clippy` only exercises the host target — Windows-specific compile errors are caught later by the `desktop-windows-check` job in `.github/workflows/test.yml` and the `desktop-build` workflow on push. To stay green:
+
+- **Imports of types used in cross-platform function signatures must be unconditional.** A `#[cfg(any(unix, test))] use std::process::Command;` paired with a public `fn apply_child_env(cmd: &mut Command, …)` will compile on macOS/Linux/in tests and silently break the Windows build. If a type appears in any non-gated `fn`/`impl`/`struct`/`type` declaration, import it without a `cfg`.
+- **Symmetric platform branches.** When a function has a `#[cfg(unix)]` arm, ensure the `#[cfg(windows)]` arm exists too — or fail the build with `compile_error!` on unsupported targets, rather than letting the call site fall through to a missing symbol.
+- **Local Windows pre-flight.** If you are touching gated code (`grep -nR "cfg(unix\|cfg(windows\|cfg(target_os" desktop/src-tauri/src/`), run `cargo check -p speedwave-desktop --target x86_64-pc-windows-msvc` (requires `rustup target add x86_64-pc-windows-msvc` and a Windows-capable linker) before opening the PR. Otherwise rely on the `desktop-windows-check` CI job.
+
+See [`docs/architecture/platform-matrix.md`](../architecture/platform-matrix.md) for the platform-specific runtime/feature breakdown.
+
 ## See Also
 
 - [Contributing](../../CONTRIBUTING.md)

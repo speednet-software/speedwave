@@ -1,8 +1,6 @@
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::process::Child;
-#[cfg(any(unix, test))]
-use std::process::Command;
+use std::process::{Child, Command};
 use std::thread::JoinHandle;
 
 use speedwave_runtime::consts;
