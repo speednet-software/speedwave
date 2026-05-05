@@ -24,6 +24,12 @@ rm -rf "$DEST/build-context" "$DEST/mcp-os"
 mkdir -p "$DEST/build-context"
 cp -r "$REPO_ROOT/containers" "$DEST/build-context/"
 
+# Linux kernel rejects #!/bin/bash\r with exit 127 (issue #603).
+# `sed -i.bak` preserves perms in place; `.bak` suffix is the portable form across BSD and GNU.
+find "$DEST/build-context/containers" -type f -name '*.sh' -print0 |
+    xargs -0 sed -i.bak 's/\r//g'
+find "$DEST/build-context/containers" -type f -name '*.sh.bak' -delete
+
 mkdir -p "$DEST/build-context/mcp-servers"
 cp "$REPO_ROOT/mcp-servers/tsconfig.base.json" "$DEST/build-context/mcp-servers/"
 

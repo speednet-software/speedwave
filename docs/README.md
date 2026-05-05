@@ -15,6 +15,10 @@ Welcome to the Speedwave documentation. Speedwave is an AI platform that connect
 - [Integrations](guides/integrations.md) — Slack, SharePoint, GitLab, Redmine, Mail, Calendar
 - [IDE Bridge](guides/ide-bridge.md) — VS Code / JetBrains integration
 
+## Troubleshooting
+
+- [Troubleshooting](troubleshooting.md) — Calendar/Reminders TCC prompt issues, denied permissions, legacy workarounds
+
 ## Architecture
 
 - [Overview](architecture/README.md) — system diagram and component map
@@ -28,10 +32,6 @@ Welcome to the Speedwave documentation. Speedwave is an AI platform that connect
 - [Development Setup](contributing/development-setup.md) — prerequisites, build, test
 - [Testing](contributing/testing.md) — test strategy, coverage, CI
 - [Release Signing](contributing/release-signing.md) — macOS code signing, notarization, certificate rotation
-
-## Accessibility
-
-- [Contrast Report](accessibility/contrast-report.md) — WCAG AA ratios for every design token pair
 
 ## Architecture Decision Records
 

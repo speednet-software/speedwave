@@ -64,3 +64,25 @@ export interface BundleReconcileStatus {
   pending_running_projects: string[];
   applied_bundle_id: string | null;
 }
+
+/**
+ * Payload emitted with the `project_switch_failed` Tauri event.
+ * Extends the basic error with optional CloudStorage failure context
+ * so the frontend can route to the CloudStorage remediation modal.
+ */
+export interface ProjectSwitchFailedPayload {
+  /** The project name that was active before the failed switch (may be null). */
+  project: string | null;
+  /** Full error message (may be user-readable or prefix-encoded). */
+  error: string;
+  /**
+   * Structured error kind for frontend routing.
+   * - `'cloudstorage_tcc_required'`: project directory is in CloudStorage with no TCC
+   * - `undefined`: generic error, show normal error banner
+   */
+  error_kind?: 'cloudstorage_tcc_required';
+  /** CloudStorage provider display name (e.g. "OneDrive") when error_kind is set. */
+  provider?: string;
+  /** Absolute path to the project directory that triggered the TCC failure. */
+  project_dir?: string;
+}

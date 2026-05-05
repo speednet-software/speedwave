@@ -415,7 +415,7 @@ pub fn prune_old_bundle_images(
         "Pruning {} images from old bundle {old_bundle_id}",
         tags.len()
     );
-    runtime.remove_images(&tags)?;
+    runtime.remove_images(&tags, false)?;
 
     log::info!("Pruning BuildKit cache");
     if let Err(e) = runtime.prune_buildkit_cache() {
@@ -790,6 +790,36 @@ mod tests {
                         src
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn test_all_bundled_shell_scripts_use_lf_line_endings() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+        let root = resolve_build_root_with_home(None).unwrap();
+        let containers = root.join("containers");
+        assert!(containers.is_dir(), "containers/ not found");
+
+        let mut stack: Vec<std::path::PathBuf> = vec![containers];
+
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read_dir") {
+                let entry = entry.expect("read_dir entry");
+                let path = entry.path();
+                let file_type = entry.file_type().expect("file_type");
+
+                if file_type.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !file_type.is_file() || path.extension().and_then(|s| s.to_str()) != Some("sh") {
+                    continue;
+                }
+
+                let bytes = std::fs::read(&path).expect("read file");
+                assert!(!bytes.contains(&b'\r'), "{} contains CR", path.display());
             }
         }
     }
@@ -2100,7 +2130,7 @@ mod tests {
         fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
             Ok(true)
         }
-        fn remove_images(&self, tags: &[String]) -> anyhow::Result<()> {
+        fn remove_images(&self, tags: &[String], _force: bool) -> anyhow::Result<()> {
             self.removed_tags.lock().unwrap().extend_from_slice(tags);
             Ok(())
         }

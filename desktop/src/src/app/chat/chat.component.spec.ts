@@ -254,23 +254,32 @@ describe('ChatComponent', () => {
   // ── onQuestionAnswered ──────────────────────────────────────────────────
 
   describe('onQuestionAnswered', () => {
-    it('calls answerQuestion with the correct tool ID and values', async () => {
+    it('calls submitAnswer with the correct tool ID, slot index, and value', async () => {
       chatState.handleStreamChunk({
         chunk_type: 'AskUserQuestion',
         data: {
           tool_id: 'test-tool',
-          question: 'Pick one',
-          options: [{ label: 'A', value: 'a' }],
-          header: '',
-          multi_select: false,
+          questions: [
+            {
+              question: 'Pick one',
+              header: '',
+              options: [{ label: 'A', value: 'a' }],
+              multi_select: false,
+            },
+          ],
+          current_index: 0,
         },
       });
 
-      const answerSpy = vi.spyOn(chatState, 'answerQuestion').mockResolvedValue();
+      const answerSpy = vi.spyOn(chatState, 'submitAnswer').mockResolvedValue();
 
-      await component.onQuestionAnswered({ toolId: 'test-tool', values: ['answer1'] });
+      await component.onQuestionAnswered({
+        toolId: 'test-tool',
+        questionIdx: 0,
+        value: 'answer1',
+      });
 
-      expect(answerSpy).toHaveBeenCalledWith('test-tool', ['answer1']);
+      expect(answerSpy).toHaveBeenCalledWith('test-tool', 0, 'answer1');
     });
   });
 
@@ -792,12 +801,9 @@ describe('ChatComponent', () => {
             type: 'ask_user',
             question: {
               tool_id: 't1',
-              question: 'q?',
-              options: [],
-              header: '',
-              multi_select: false,
-              answered: false,
-              selected_values: [],
+              questions: [{ question: 'q?', header: '', options: [], multi_select: false }],
+              current_index: 0,
+              answers: [null],
             },
           },
         ],
@@ -816,12 +822,9 @@ describe('ChatComponent', () => {
             type: 'ask_user',
             question: {
               tool_id: 't1',
-              question: 'q?',
-              options: [],
-              header: '',
-              multi_select: false,
-              answered: false,
-              selected_values: [],
+              questions: [{ question: 'q?', header: '', options: [], multi_select: false }],
+              current_index: 0,
+              answers: [null],
             },
           },
         ],

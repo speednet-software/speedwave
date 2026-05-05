@@ -5,14 +5,23 @@ import {
   OnDestroy,
   OnInit,
   inject,
+  signal,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
-import { PluginStatusEntry, PluginsResponse } from '../models/plugin';
+import {
+  PluginInstallProgress,
+  PluginManifestSummary,
+  PluginStatusEntry,
+  PluginsResponse,
+} from '../models/plugin';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
-import { SpinIconComponent } from '../shared/spin-icon.component';
+import {
+  ProgressStepsComponent,
+  type SetupStep,
+} from '../shared/progress-steps/progress-steps.component';
 import { open } from '@tauri-apps/plugin-dialog';
 
 /** Per-row plugin dot colour cycle. */
@@ -32,10 +41,53 @@ function dotColourFor(index: number): string {
   return PLUGIN_DOT_COLOURS[index % PLUGIN_DOT_COLOURS.length];
 }
 
+/** Step IDs for the install overlay; aligned with backend phase strings. */
+const STEP_VERIFYING = 'verifying';
+const STEP_EXTRACTING = 'extracting';
+const STEP_BUILDING = 'building';
+
+/** Steps shown for an MCP plugin (with `service_id` → image build). */
+const MCP_INSTALL_STEPS: readonly SetupStep[] = [
+  {
+    id: STEP_VERIFYING,
+    title: 'verify signature',
+    description: 'Ed25519 signature check',
+    status: 'pending',
+  },
+  {
+    id: STEP_EXTRACTING,
+    title: 'extract archive',
+    description: 'Unpack plugin ZIP',
+    status: 'pending',
+  },
+  {
+    id: STEP_BUILDING,
+    title: 'build container image',
+    description: 'nerdctl build (may take 2-5 min)',
+    status: 'pending',
+  },
+];
+
+/** Steps shown for a resource-only plugin (no `service_id`, no image build). */
+const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
+  {
+    id: STEP_VERIFYING,
+    title: 'verify signature',
+    description: 'Ed25519 signature check',
+    status: 'pending',
+  },
+  {
+    id: STEP_EXTRACTING,
+    title: 'extract archive',
+    description: 'Unpack plugin ZIP',
+    status: 'pending',
+  },
+];
+
 /** Manages installed plugins: list, install, remove, enable/disable, credentials. */
 @Component({
   selector: 'app-plugins',
-  imports: [CommonModule, ProjectPillComponent, SpinIconComponent],
+  imports: [CommonModule, ProjectPillComponent, ProgressStepsComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (installing) {
@@ -46,8 +98,18 @@ function dotColourFor(index: number): string {
         aria-label="Installing plugin"
         data-testid="plugins-install-overlay"
       >
-        <app-spin-icon class="block h-8 w-8 text-[var(--accent)]" />
-        <p class="mono mt-4 text-[12px] text-[var(--ink)]">Installing plugin…</p>
+        <div class="w-full max-w-xl px-6">
+          <h2 class="mono mb-4 text-[14px] text-[var(--ink)]" data-testid="plugins-install-title">
+            Installing plugin
+          </h2>
+          <app-progress-steps
+            [steps]="installSteps()"
+            [error]="installError()"
+            [showFooter]="false"
+            [showBackButton]="false"
+            (retry)="retryInstall()"
+          />
+        </div>
       </div>
     }
 
@@ -209,6 +271,15 @@ export class PluginsComponent implements OnInit, OnDestroy {
   success = '';
   activeProject: string | null = null;
 
+  /** Steps rendered inside the install overlay; populated after peek. */
+  readonly installSteps = signal<SetupStep[]>([]);
+  /** Sanitized error message shown under the steps when install fails. */
+  readonly installError = signal<string | null>(null);
+  /** Path of the ZIP currently being installed, used for retry. */
+  private currentZipPath: string | null = null;
+  /** Tauri event listener cleanup; null when no install is in flight. */
+  private unlistenInstall: (() => void) | null = null;
+
   private cdr = inject(ChangeDetectorRef);
   private router = inject(Router);
   private tauri = inject(TauriService);
@@ -225,12 +296,14 @@ export class PluginsComponent implements OnInit, OnDestroy {
     });
   }
 
-  /** Cleans up project ready listener. */
+  /** Cleans up project ready listener and install event listener. */
   ngOnDestroy(): void {
     if (this.unsubProjectReady) {
       this.unsubProjectReady();
       this.unsubProjectReady = null;
     }
+    this.unlistenInstall?.();
+    this.unlistenInstall = null;
   }
 
   /** Syncs the active project from ProjectStateService. */
@@ -290,6 +363,8 @@ export class PluginsComponent implements OnInit, OnDestroy {
 
   /**
    * Opens a native file dialog to select a plugin ZIP, then installs it.
+   * The flow is: peek manifest → render the right step list → register the
+   * progress listener → invoke install. Progress phases drive the overlay.
    */
   async installPlugin(): Promise<void> {
     let selected: string | null;
@@ -305,24 +380,126 @@ export class PluginsComponent implements OnInit, OnDestroy {
     }
     if (!selected) return;
 
-    this.installing = true;
+    await this.runInstall(selected);
+  }
+
+  /**
+   * Re-invokes the install for the most recent ZIP — bound to the retry
+   * button inside the overlay's error banner.
+   */
+  async retryInstall(): Promise<void> {
+    // Guard against concurrent runs: a `failed` phase event arrives while
+    // the original `invoke('install_plugin')` Promise is still pending,
+    // and the overlay's retry button is reachable in that window. Without
+    // this check, clicking retry would spawn a second runInstall whose
+    // `finally` collides with the first.
+    if (this.installing || !this.currentZipPath) return;
+    await this.runInstall(this.currentZipPath);
+  }
+
+  private async runInstall(zipPath: string): Promise<void> {
+    this.currentZipPath = zipPath;
     this.error = '';
     this.success = '';
+    this.installError.set(null);
+    this.installing = true;
+    // Render an empty list while the peek is in flight; we'll populate it
+    // before the first progress event arrives.
+    this.installSteps.set([]);
     this.cdr.markForCheck();
+
+    let summary: PluginManifestSummary;
+    try {
+      summary = await this.tauri.invoke<PluginManifestSummary>('peek_plugin_manifest', { zipPath });
+    } catch (e: unknown) {
+      this.installing = false;
+      this.error = e instanceof Error ? e.message : String(e);
+      this.cdr.markForCheck();
+      return;
+    }
+    this.installSteps.set(this.cloneSteps(summary));
+
+    // Register listener BEFORE invoke so no progress events are missed.
+    this.unlistenInstall?.();
+    this.unlistenInstall = await this.tauri.listen<PluginInstallProgress>(
+      'plugin_install_status',
+      (e) => {
+        this.onInstallProgress(e.payload);
+        this.cdr.markForCheck();
+      }
+    );
 
     try {
       const msg = await this.tauri.invoke<string>('install_plugin', {
-        zipPath: selected,
+        zipPath,
       });
       this.success = msg;
       this.projectState.requestRestart();
       await this.loadPlugins();
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
+    } finally {
+      this.unlistenInstall?.();
+      this.unlistenInstall = null;
+      this.installing = false;
+      this.cdr.markForCheck();
     }
+  }
 
-    this.installing = false;
-    this.cdr.markForCheck();
+  /**
+   * Returns a fresh mutable copy of the appropriate step template.
+   * @param summary - Manifest summary from `peek_plugin_manifest`; selects
+   *   the MCP (3-step) vs resource-only (2-step) template.
+   */
+  private cloneSteps(summary: PluginManifestSummary): SetupStep[] {
+    const template = summary.has_service_id ? MCP_INSTALL_STEPS : RESOURCE_ONLY_INSTALL_STEPS;
+    return template.map((s) => ({ ...s }));
+  }
+
+  /**
+   * Maps a backend `plugin_install_status` event onto step status updates.
+   * @param p - Progress event payload received from the Tauri event bus.
+   */
+  private onInstallProgress(p: PluginInstallProgress): void {
+    switch (p.phase) {
+      case 'verifying':
+        this.setStepStatus(STEP_VERIFYING, 'active', p.message);
+        break;
+      case 'extracting':
+        this.setStepStatus(STEP_VERIFYING, 'done');
+        this.setStepStatus(STEP_EXTRACTING, 'active', p.message);
+        break;
+      case 'building':
+        // STEP_VERIFYING is already 'done' from the prior 'extracting' event;
+        // we only need to advance the immediately preceding step here.
+        this.setStepStatus(STEP_EXTRACTING, 'done');
+        this.setStepStatus(STEP_BUILDING, 'active', p.message);
+        break;
+      case 'done':
+        // Mark every step in the current list as done. The overlay closes
+        // after `install_plugin` resolves (in the finally block).
+        this.installSteps.update((list) => list.map((s) => ({ ...s, status: 'done' as const })));
+        break;
+      case 'failed': {
+        const message = p.error ?? p.message;
+        this.installError.set(message);
+        this.installSteps.update((list) =>
+          list.map((s) => (s.status === 'active' ? { ...s, status: 'error' as const } : s))
+        );
+        break;
+      }
+      case 'done_with_pending_build':
+        // Terminal informational state. After `failed` no steps remain
+        // pending, so there is nothing to mutate here — the overlay closes
+        // through the caller's `finally` block which clears `installing`.
+        break;
+    }
+  }
+
+  private setStepStatus(id: string, status: SetupStep['status'], detail?: string): void {
+    this.installSteps.update((list) =>
+      list.map((s) => (s.id === id ? { ...s, status, detail: detail ?? s.detail } : s))
+    );
   }
 
   /**

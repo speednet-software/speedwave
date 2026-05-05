@@ -59,7 +59,7 @@ describe('ToolNormalizerService', () => {
   });
 
   it('normalizes TodoWrite tool', () => {
-    const todos = [{ id: '1', title: 'Fix bug', status: 'pending' }];
+    const todos = [{ content: 'Fix bug', status: 'pending', activeForm: 'Fixing bug' }];
     const result = service.normalize('TodoWrite', JSON.stringify({ todos }));
     expect(result).toEqual({ kind: 'todo_write', todos });
   });

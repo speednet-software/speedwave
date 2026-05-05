@@ -135,3 +135,39 @@ VERIFY_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/verify-release-assets.sh"
     # assets incorrectly. The semantic intent string is stable across refactors.
     grep -qF "Linux is excluded: updater.rs disables auto-update" "$VERIFY_SCRIPT"
 }
+
+SIGN_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/sign-bundled-binaries.sh"
+
+@test "SIGN_TARGETS uses REMINDERS_ENTITLEMENTS for reminders-cli (not CALENDARS)" {
+    # Verifies the step-3 fix: reminders-cli must use the separate reminders.plist,
+    # not the calendars.plist. Wrong plist = Hardened Runtime rejects Reminders access.
+    grep -qF 'reminders-cli:$REMINDERS_ENTITLEMENTS' "$SIGN_SCRIPT"
+}
+
+@test "SIGN_TARGETS does NOT use CALENDARS_ENTITLEMENTS for reminders-cli" {
+    # Ensures the old wrong wiring is gone.
+    if grep -qF '"$SRC_TAURI/reminders-cli:$CALENDARS_ENTITLEMENTS"' "$SIGN_SCRIPT"; then
+        echo "ERROR: reminders-cli must use REMINDERS_ENTITLEMENTS, not CALENDARS_ENTITLEMENTS" >&2
+        return 1
+    fi
+}
+
+@test "REMINDERS_ENTITLEMENTS variable is defined in signing script" {
+    grep -qF 'REMINDERS_ENTITLEMENTS=' "$SIGN_SCRIPT"
+}
+
+@test "bundle ID in tauri.conf.json matches fallback literal in Utilities.swift" {
+    # Cross-check that the bundle identifier SSOT (tauri.conf.json) and the
+    # Swift fallback literal stay in sync. The runtime uses Bundle.main.bundleIdentifier
+    # which inherits from the parent .app; the literal is only used in standalone runs.
+    local tauri_conf="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.conf.json"
+    local utilities_swift="$BATS_TEST_DIRNAME/../../native/macos/shared/Sources/SharedCLI/Utilities.swift"
+    [ -f "$tauri_conf" ]
+    [ -f "$utilities_swift" ]
+
+    local tauri_id
+    tauri_id=$(python3 -c "import json,sys; print(json.load(open('$tauri_conf'))['identifier'])")
+    [ -n "$tauri_id" ]
+
+    grep -qF "\"$tauri_id\"" "$utilities_swift"
+}

@@ -27,27 +27,25 @@ Do not praise what works. Only report what's wrong, missing, or dangerous. If so
 
 ## Setup
 
-Before analyzing the plan, you MUST read and internalize the project context. Do not skip any of these — each one contains rules that plans routinely violate:
+The orchestrator has injected `CLAUDE.md` and every file from `.claude/rules/` into your system prompt under "AUTHORITATIVE PROJECT CONTEXT". Treat that block as already read — every rule there is binding on the plan, and you must populate the `rules_compliance` array of your JSON output with one entry per file in that block (including `CLAUDE.md`). Plans that ignore an in-scope rule are NEEDS_REVISION.
 
-1. **Read `CLAUDE.md`** (project root) — architecture overview, key gotchas, SSOT locations, forbidden patterns, plugin contract table, config merge hierarchy, all NEVER rules
+Beyond that block, complete these reads before analysis:
 
-2. **Read ALL files in `.claude/rules/`** — `git-workflow.md`, `engineering-principles.md`, `security.md`, `logging.md`, `rust-style.md`, `mcp-servers.md`, `documentation.md`
+1. **Read `docs/architecture/security.md`** — non-negotiable security model, threat model questions, executor sandbox, SSRF protection, SecurityCheck validation
 
-3. **Read `docs/architecture/security.md`** — non-negotiable security model, threat model questions, executor sandbox, SSRF protection, SecurityCheck validation
+2. **Read `docs/architecture/containers.md`** — container topology, compose template, resource limits, stale container recovery
 
-4. **Read `docs/architecture/containers.md`** — container topology, compose template, resource limits, stale container recovery
+3. **Read `docs/architecture/platform-matrix.md`** — macOS/Linux/Windows differences that plans forget
 
-5. **Read `docs/architecture/platform-matrix.md`** — macOS/Linux/Windows differences that plans forget
+4. **Read `docs/contributing/testing.md`** — test strategy, coverage thresholds, E2E structure, test patterns
 
-6. **Read `docs/contributing/testing.md`** — test strategy, coverage thresholds, E2E structure, test patterns
+5. **Read `RELEASING.md`** — release flow, squash merge rules, backmerge implications
 
-7. **Read `RELEASING.md`** — release flow, squash merge rules, backmerge implications
+6. **Read relevant ADRs** from `docs/adr/` — any ADR whose topic overlaps with the plan's scope. Read the ADR `README.md` index first to identify which ones apply. Pay special attention to ADR-030 (bundle reconcile), ADR-031 (data dir isolation), ADR-040 / ADR-041 (local LLM providers + SSRF policy), and any ADRs related to updates or migration.
 
-8. **Read relevant ADRs** from `docs/adr/` — any ADR whose topic overlaps with the plan's scope. Read the ADR `README.md` index first to identify which ones apply. Pay special attention to ADR-030 (bundle reconcile), ADR-031 (data dir isolation), and any ADRs related to updates or migration.
+7. **Read the actual source code** touched by the plan — not just the files listed, but their callers, their tests, and adjacent modules. Understand the dependency graph before judging the plan.
 
-9. **Read the actual source code** touched by the plan — not just the files listed, but their callers, their tests, and adjacent modules. Understand the dependency graph before judging the plan.
-
-10. **Read the update/reconcile flow** — `updater.rs`, `update_commands.rs`, `bundle-manifest.json` handling, `bundle-state.json` phases, snapshot/rollback logic. Understand what happens when a user updates from version N to version N+1, and what can break during that transition.
+8. **Read the update/reconcile flow** — `updater.rs`, `update_commands.rs`, `bundle-manifest.json` handling, `bundle-state.json` phases, snapshot/rollback logic. Understand what happens when a user updates from version N to version N+1, and what can break during that transition.
 
 Only after completing ALL reads above, begin analysis.
 

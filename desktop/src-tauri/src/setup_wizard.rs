@@ -2752,6 +2752,7 @@ mod tests {
     #[cfg(unix)]
     mod init_vm_linux_tests {
         use super::super::{start_rootless_containerd, wait_for_containerd};
+        use serial_test::serial;
         use std::os::unix::fs::PermissionsExt;
 
         /// Creates an executable script in `dir` with given name and content.
@@ -2810,9 +2811,9 @@ mod tests {
         }
 
         #[test]
+        #[serial(env)]
         fn has_stale_containerd_unit_detects_existing_file() {
             use super::super::has_stale_containerd_unit;
-            let _guard = super::CLI_ENV_LOCK.lock().unwrap();
 
             let tmp = tempfile::tempdir().expect("tempdir");
             let unit_dir = tmp.path().join(".config/systemd/user");
@@ -2833,9 +2834,9 @@ mod tests {
         }
 
         #[test]
+        #[serial(env)]
         fn has_stale_containerd_unit_returns_false_when_missing() {
             use super::super::has_stale_containerd_unit;
-            let _guard = super::CLI_ENV_LOCK.lock().unwrap();
 
             let tmp = tempfile::tempdir().expect("tempdir");
             let orig_home = std::env::var("HOME").ok();
@@ -3124,8 +3125,8 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    #[serial(env)]
     fn resolve_cli_source_finds_macos_bundle_path() {
-        let _guard = CLI_ENV_LOCK.lock().unwrap();
         std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
 
         // Simulate: .app/Contents/MacOS/<exe> with Resources/cli/speedwave
@@ -3151,8 +3152,8 @@ mod tests {
 
     #[cfg(not(target_os = "macos"))]
     #[test]
+    #[serial(env)]
     fn resolve_cli_source_finds_resources_path() {
-        let _guard = CLI_ENV_LOCK.lock().unwrap();
         std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
 
         // Simulate: <exe_dir>/resources/cli/speedwave
@@ -3190,8 +3191,8 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn resolve_cli_source_finds_dev_fallback() {
-        let _guard = CLI_ENV_LOCK.lock().unwrap();
         std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
 
         // Simulate: <exe_dir>/speedwave (dev mode)
@@ -3211,8 +3212,8 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn resolve_cli_source_finds_dev_cli_dir() {
-        let _guard = CLI_ENV_LOCK.lock().unwrap();
         std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
 
         // Simulate: desktop/src-tauri/target/debug/ as exe_dir,
@@ -3241,12 +3242,11 @@ mod tests {
         );
     }
 
-    /// Serialises env-var mutations across parallel test threads.
-    static CLI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use serial_test::serial;
 
     #[test]
+    #[serial(env)]
     fn resolve_cli_source_returns_none_when_not_found() {
-        let _guard = CLI_ENV_LOCK.lock().unwrap();
         std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
 
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -3258,9 +3258,8 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn resolve_cli_source_finds_via_resources_env() {
-        let _guard = CLI_ENV_LOCK.lock().unwrap();
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let resources_dir = tmp.path().join("resources");
         let cli_dir = resources_dir.join("cli");
@@ -3298,8 +3297,8 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    #[serial(env)]
     fn resolve_cli_source_prefers_bundle_over_dev() {
-        let _guard = CLI_ENV_LOCK.lock().unwrap();
         std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
 
         // Both Resources/cli/speedwave and <exe_dir>/speedwave exist;
@@ -3324,9 +3323,8 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn resolve_cli_source_env_var_takes_priority_over_filesystem() {
-        let _guard = CLI_ENV_LOCK.lock().unwrap();
-
         let tmp = tempfile::tempdir().expect("tempdir");
 
         // Set up a SPEEDWAVE_RESOURCES_DIR with its own CLI binary

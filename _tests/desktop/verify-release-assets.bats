@@ -304,3 +304,93 @@ setup() {
   [ "$status" -ne 0 ]
   [[ "$output" =~ "latest.json platforms.darwin-aarch64.url is empty" ]]
 }
+
+# ── Case 16: unset VERSION fails ──────────────────────────────────────────────
+
+@test "unset VERSION fails with required-message" {
+  unset VERSION
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "VERSION required" ]]
+}
+
+# ── Case 17: empty VERSION fails ──────────────────────────────────────────────
+
+@test "empty VERSION fails with required-message" {
+  export VERSION=""
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "VERSION required" ]]
+}
+
+# ── Case 18: invalid VERSION format fails ─────────────────────────────────────
+
+@test "invalid VERSION format fails" {
+  export VERSION="0.8"
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Invalid VERSION format" ]]
+}
+
+# ── Case 19: invalid REPO format fails ───────────────────────────────────────
+
+@test "invalid REPO format fails" {
+  export REPO="badrepo"
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Invalid REPO format" ]]
+}
+
+# ── Case 20: invalid TAG_NAME format fails ────────────────────────────────────
+
+@test "invalid TAG_NAME format fails" {
+  export TAG_NAME="0.8.1"
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Invalid TAG_NAME format" ]]
+}
+
+# ── Case 21: unset RID fails ──────────────────────────────────────────────────
+
+@test "unset RID fails with required-message" {
+  unset RID
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "RID required" ]]
+}
+
+# ── Case 22: empty RID fails ──────────────────────────────────────────────────
+
+@test "empty RID fails with required-message" {
+  export RID=""
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "RID required" ]]
+}
+
+# ── Case 23: invalid RID format fails ────────────────────────────────────────
+
+@test "invalid RID format fails" {
+  export RID="abc"
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Invalid RID format" ]]
+}
+
+# ── Case 24: unset REPO fails ────────────────────────────────────────────────
+
+@test "unset REPO fails with required-message" {
+  unset REPO
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "REPO required" ]]
+}
+
+# ── Case 25: empty REPO fails ────────────────────────────────────────────────
+
+@test "empty REPO fails with required-message" {
+  export REPO=""
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "REPO required" ]]
+}

@@ -272,7 +272,11 @@ build-angular:
 # ── Rust tests ───────────────────────────────────────────────────────────────
 
 test-rust:
-	SPEEDWAVE_DATA_DIR= cargo test -p speedwave-runtime -p speedwave-cli
+	@# Tests share `consts::data_dir()` (~/.speedwave/); several of them write
+	@# into `~/.speedwave/secrets/<project>/` or read mcp-os state files.
+	@# Parallel cargo-test threads race on those paths and surface `os error 2`
+	@# from `render_compose`. Run serially to keep the suite deterministic.
+	SPEEDWAVE_DATA_DIR= cargo test -p speedwave-runtime -p speedwave-cli -- --test-threads=1
 	@echo "✅ Rust tests passed"
 
 test-cli:
@@ -359,6 +363,7 @@ test-entrypoint:
 test-ci:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
 	bats _tests/ci/validate-pr-title-main.bats
+	bats _tests/ci/plan-loop-context.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
@@ -369,6 +374,7 @@ test-desktop-build: build-angular build-mcp
 	bats _tests/desktop/sign-bundled-binaries.bats
 	bats _tests/desktop/release-workflow-signing.bats
 	bats _tests/desktop/info-plist.bats
+	bats _tests/desktop/entitlements-reminders.bats
 	@echo "✅ Desktop build tests passed"
 
 # Fast config validation — stable, runs in `make test`.

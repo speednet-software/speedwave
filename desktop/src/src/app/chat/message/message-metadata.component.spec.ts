@@ -304,4 +304,28 @@ describe('MessageMetadataComponent', () => {
     const el = fixture.nativeElement as HTMLElement;
     expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe('opus-4.7');
   });
+
+  it('keeps a single [1m] suffix when the raw id ends with one', () => {
+    // Claude Code surfaces 1M-context model variants with a `[1m]` suffix —
+    // the chat footer should preserve it on the prettified id.
+    setEntry(baseAssistant({ meta: { model: 'claude-opus-4-7[1m]' } }));
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe(
+      'opus-4.7[1m]'
+    );
+  });
+
+  it('collapses repeated [1m] suffixes (regression: opus-4-7[1m][1m])', () => {
+    // Workaround: when `ANTHROPIC_DEFAULT_OPUS_MODEL` already carries `[1m]`
+    // and Claude Code re-appends the suffix while resolving the alias, the
+    // model id arrives doubled. The chat footer must dedupe so the user
+    // sees a single `[1m]`.
+    setEntry(baseAssistant({ meta: { model: 'claude-opus-4-7[1m][1m]' } }));
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe(
+      'opus-4.7[1m]'
+    );
+  });
 });

@@ -11,25 +11,15 @@ import {
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
-import { SpinIconComponent } from '../shared/spin-icon.component';
+import {
+  ProgressStepsComponent,
+  type SetupStep,
+  type StepState,
+} from '../shared/progress-steps/progress-steps.component';
 import {
   CreateProjectModalComponent,
   type CreatedProject,
 } from '../shared/create-project-modal/create-project-modal.component';
-
-/** Lifecycle status of a single setup step. */
-export type StepState = 'pending' | 'active' | 'done' | 'error';
-
-/** Internal SetupStep — used by the routed wizard's pipeline. */
-export interface SetupStep {
-  id: string;
-  title: string;
-  description: string;
-  status: StepState;
-  detail?: string;
-  /** 0-100 progress for an `active` step that exposes one. */
-  progress?: number;
-}
 
 /** Maximum number of pipeline steps. */
 const TOTAL_STEPS = 6;
@@ -40,7 +30,7 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
 /** Guides the user through initial environment setup and project creation. */
 @Component({
   selector: 'app-setup-wizard',
-  imports: [CommonModule, SpinIconComponent, CreateProjectModalComponent],
+  imports: [CommonModule, ProgressStepsComponent, CreateProjectModalComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -89,112 +79,14 @@ const ETA_PER_STEP_S: readonly number[] = [3, 30, 90, 5, 30, 5];
               $ start setup
             </button>
           } @else if (phase() === 'progress' || phase() === 'project') {
-            <div
-              class="mt-8 rounded border border-[var(--line)] bg-[var(--bg-1)]"
-              data-testid="setup-steps"
-            >
-              @for (step of steps; track step.id; let i = $index) {
-                <div
-                  class="flex items-start gap-4 px-5 py-4"
-                  [style.borderBottom]="i < steps.length - 1 ? '1px solid var(--line)' : 'none'"
-                  [class.opacity-50]="step.status === 'pending'"
-                  data-testid="setup-step"
-                  [attr.data-status]="step.status"
-                >
-                  <div
-                    class="mono flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full border text-[11px]"
-                    [style.borderColor]="circleBorder(step)"
-                    [style.background]="circleBg(step)"
-                    [style.color]="circleColor(step)"
-                  >
-                    @switch (step.status) {
-                      @case ('done') {
-                        <span aria-hidden="true">✓</span>
-                      }
-                      @case ('active') {
-                        <app-spin-icon />
-                      }
-                      @case ('error') {
-                        <span aria-hidden="true">!</span>
-                      }
-                      @default {
-                        <span>{{ i + 1 }}</span>
-                      }
-                    }
-                  </div>
-                  <div class="flex-1">
-                    <div
-                      class="mono flex items-center gap-2 text-[13px]"
-                      [style.color]="step.status === 'pending' ? 'var(--ink-dim)' : 'var(--ink)'"
-                    >
-                      <span data-testid="step-title">{{ step.title }}</span>
-                      @if (step.status === 'done') {
-                        <span class="pill green" data-testid="step-pill">done</span>
-                      }
-                      @if (step.status === 'active') {
-                        <span class="pill amber" data-testid="step-pill">running</span>
-                      }
-                      @if (step.status === 'error') {
-                        <span
-                          class="pill"
-                          style="color: #f87171; border-color: rgba(239, 68, 68, 0.4);"
-                          data-testid="step-pill"
-                          >error</span
-                        >
-                      }
-                    </div>
-                    <div
-                      class="mono mt-0.5 text-[11px] text-[var(--ink-mute)]"
-                      data-testid="step-detail"
-                    >
-                      {{ step.detail || step.description }}
-                    </div>
-                    @if (step.status === 'active' && step.progress !== undefined) {
-                      <div class="mono mt-2 h-1 w-full overflow-hidden rounded bg-[var(--bg-2)]">
-                        <div
-                          class="h-full bg-[var(--accent)]"
-                          [style.width.%]="step.progress"
-                        ></div>
-                      </div>
-                    }
-                  </div>
-                </div>
-              }
-            </div>
-
-            @if (error()) {
-              <div
-                class="mt-4 rounded ring-1 ring-red-500/40 bg-red-500/[0.06] px-3 py-2 text-[12px] text-red-300 mono"
-                data-testid="setup-error"
-                role="alert"
-              >
-                {{ error() }}
-              </div>
-              <div class="mt-3 flex flex-wrap gap-3">
-                <button
-                  type="button"
-                  class="mono rounded border border-[var(--accent-dim)] bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90"
-                  data-testid="setup-retry-btn"
-                  (click)="retryCurrentStep()"
-                >
-                  $ retry
-                </button>
-                <button
-                  type="button"
-                  class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
-                  data-testid="setup-back-btn"
-                  (click)="backToWelcome()"
-                >
-                  ← back
-                </button>
-              </div>
-            }
-
-            <div class="mono mt-4 text-[11px] text-[var(--ink-mute)]" data-testid="setup-footer">
-              <span data-testid="setup-progress-summary">
-                step {{ currentStepNumber() }} of {{ totalSteps() }} · ~{{ etaSeconds() }}s
-                remaining
-              </span>
+            <div class="mt-8">
+              <app-progress-steps
+                [steps]="steps"
+                [error]="error()"
+                [etaSeconds]="etaTotalSeconds()"
+                (retry)="retryCurrentStep()"
+                (back)="backToWelcome()"
+              />
             </div>
           } @else if (phase() === 'complete') {
             <div
@@ -284,21 +176,8 @@ export class SetupWizardComponent {
     this.stepsSig.set(next);
   }
 
-  /** Total number of steps in the pipeline (used by mockup footer). */
-  readonly totalSteps = computed<number>(() => this.stepsSig().length);
-
-  /** Step number (1-based) currently in progress — used by mockup footer. */
-  readonly currentStepNumber = computed<number>(() => {
-    const list = this.stepsSig();
-    const idx = list.findIndex((s) => s.status === 'active');
-    if (idx >= 0) return idx + 1;
-    const errIdx = list.findIndex((s) => s.status === 'error');
-    if (errIdx >= 0) return errIdx + 1;
-    return Math.min(this.currentStepIndexSig() + 1, list.length);
-  });
-
-  /** Estimated seconds remaining for the current pipeline. */
-  readonly etaSeconds = computed<number>(() => {
+  /** Total ETA in seconds — sum of pending+active step ETAs. */
+  readonly etaTotalSeconds = computed<number | null>(() => {
     const list = this.stepsSig();
     let total = 0;
     for (let i = 0; i < list.length; i++) {
@@ -391,39 +270,6 @@ export class SetupWizardComponent {
     this.phase.set('progress');
     this.cdr.markForCheck();
     await this.runFromStep(4);
-  }
-
-  /**
-   * Step status circle — border colour.
-   * @param step Setup step whose status drives the colour.
-   */
-  protected circleBorder(step: SetupStep): string {
-    if (step.status === 'done') return 'rgba(52, 211, 153, 0.3)';
-    if (step.status === 'active') return 'var(--accent-dim)';
-    if (step.status === 'error') return 'rgba(239, 68, 68, 0.5)';
-    return 'var(--line)';
-  }
-
-  /**
-   * Step status circle — background fill.
-   * @param step Setup step whose status drives the fill colour.
-   */
-  protected circleBg(step: SetupStep): string {
-    if (step.status === 'done') return 'rgba(52, 211, 153, 0.1)';
-    if (step.status === 'active') return 'var(--accent-soft)';
-    if (step.status === 'error') return 'rgba(239, 68, 68, 0.1)';
-    return 'transparent';
-  }
-
-  /**
-   * Step status circle — text/icon colour.
-   * @param step Setup step whose status drives the foreground colour.
-   */
-  protected circleColor(step: SetupStep): string {
-    if (step.status === 'done') return 'var(--green)';
-    if (step.status === 'active') return 'var(--accent)';
-    if (step.status === 'error') return '#f87171';
-    return 'var(--ink-mute)';
   }
 
   // ---- Private helpers ----

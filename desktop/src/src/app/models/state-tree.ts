@@ -60,6 +60,17 @@ export interface EntryMetaState {
   cost?: number;
 }
 
+import type { AskUserQuestionItem } from './chat';
+
+/**
+ * One question inside an `ask_user` block — mirrors
+ * `speedwave_runtime::stream::AskUserQuestionItem`. Same shape as
+ * {@link AskUserQuestionItem}; this alias exposes a `Readonly` view for
+ * persistence-layer consumers, but the underlying type lives in
+ * `models/chat.ts` (single source of truth).
+ */
+export type AskUserQuestionStateItem = Readonly<AskUserQuestionItem>;
+
 /**
  * One block inside a conversation entry. Tagged enum: serde serializes as
  * `{"kind":"text","content":"..."}` — preserving that shape lets a JSON
@@ -79,11 +90,9 @@ export type MessageBlockState =
   | {
       kind: 'ask_user';
       tool_id: string;
-      header: string;
-      question: string;
-      options: ReadonlyArray<{ label: string; value: string }>;
-      multi_select: boolean;
-      answer: ReadonlyArray<string> | null;
+      questions: ReadonlyArray<AskUserQuestionStateItem>;
+      current_index: number;
+      answers: ReadonlyArray<string | null>;
     }
   | { kind: 'error'; content: string };
 

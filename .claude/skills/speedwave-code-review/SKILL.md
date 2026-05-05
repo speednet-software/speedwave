@@ -40,6 +40,10 @@ Use this prompt template for each (replace `SKILL_NAME` and `DIFF_CMD`):
 
 ```
 Use the Skill tool to invoke 'SKILL_NAME'. Review changes from: DIFF_CMD
+
+Speedwave-specific evaluation context (apply alongside the generic SKILL_NAME criteria):
+
+The full project rule set lives in CLAUDE.md and .claude/rules/*.md in this worktree. Read those files BEFORE forming your verdict — they define every NEVER rule, SSOT, security invariant, plugin contract element, and local-LLM rule that a generic reviewer would miss. The generic SKILL_NAME criteria still apply, but a finding is escalated one severity level (Suggestion -> Important, Important -> Critical) when it violates a rule from CLAUDE.md or .claude/rules/. New cloud LLM providers, hardcoded Anthropic model strings, repo-config overriding provider/base_url, plugin-contract changes without a backward-compat path, or a new outbound HTTP callsite not using the shared SSRF validator are Critical regardless of the SKILL_NAME's normal threshold.
 ```
 
 The 13 skills to launch (ALL in one message, no exceptions):

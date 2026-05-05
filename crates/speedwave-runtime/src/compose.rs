@@ -5,6 +5,7 @@ use crate::plugin::{self, PluginManifest};
 use crate::runtime::ContainerRuntime;
 use crate::{build, bundle};
 use std::path::PathBuf;
+use strum::EnumProperty;
 
 /// Converts a host path to the path seen by the container engine.
 ///
@@ -115,7 +116,7 @@ pub fn render_compose(
     yaml = yaml.replace("${CLAUDE_MEMORY}", &format!("{}g", claude_mem));
 
     // Inject Claude environment variables from resolved config
-    yaml = inject_claude_env(&yaml, &resolved_config.env);
+    yaml = inject_claude_env(&yaml, &resolved_config.env)?;
 
     // Handle LLM provider switching
     yaml = apply_llm_config(&yaml, &resolved_config.llm)?;
@@ -225,11 +226,12 @@ pub fn save_compose(project: &str, yaml: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn inject_claude_env(yaml: &str, env: &std::collections::HashMap<String, String>) -> String {
-    let mut doc: serde_yaml_ng::Value = match serde_yaml_ng::from_str(yaml) {
-        Ok(v) => v,
-        Err(_) => return yaml.to_string(),
-    };
+fn inject_claude_env(
+    yaml: &str,
+    env: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<String> {
+    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)
+        .map_err(|e| anyhow::anyhow!("inject_claude_env: failed to parse compose YAML: {e}"))?;
 
     if let Some(services) = doc.get_mut("services") {
         if let Some(claude) = services.get_mut("claude") {
@@ -250,32 +252,42 @@ fn inject_claude_env(yaml: &str, env: &std::collections::HashMap<String, String>
                             }
                         }
                     }
+                } else {
+                    log::warn!(
+                        "inject_claude_env: claude service 'environment' field is not a sequence \
+                         (got {:?}) — env vars not injected",
+                        environment
+                    );
                 }
             }
         }
     }
 
-    serde_yaml_ng::to_string(&doc).unwrap_or_else(|_| yaml.to_string())
+    serde_yaml_ng::to_string(&doc)
+        .map_err(|e| anyhow::anyhow!("inject_claude_env: failed to serialize compose YAML: {e}"))
 }
 
 fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
     let provider = llm.provider.as_deref().unwrap_or("anthropic");
     match provider {
         "anthropic" => {
+            // ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL pin each alias to the
+            // SSOT-latest model id with a `[1m]` suffix where the model
+            // supports a 1M-token context window. Without this, Max/Team
+            // subscribers see their 1M models capped at the 200k base spec
+            // (anthropics/claude-code#34083). Generated dynamically so a SSOT
+            // bump (Opus 4.8 etc.) propagates without touching this branch.
+            let mut extra_env = crate::defaults::anthropic_default_models_env();
             // When the user picks an explicit model in Settings, propagate it
             // through ANTHROPIC_MODEL so Claude Code respects the choice.
-            // Leaving the field blank keeps base_env() free of the variable
-            // (see defaults.rs::base_env_does_not_set_model) — Claude Code
-            // then falls back to its built-in default model.
+            // Leaving the field blank means the active model resolves through
+            // an alias (`opus`/`sonnet`/`haiku`) which the DEFAULT_*_MODEL
+            // entries above already steer toward the latest 1M variant.
             let model = llm.model.as_deref().map(str::trim).unwrap_or("");
-            if model.is_empty() {
-                return Ok(yaml.to_string());
+            if !model.is_empty() {
+                extra_env.insert("ANTHROPIC_MODEL".to_string(), model.to_string());
             }
-            let extra_env = std::collections::HashMap::from([(
-                "ANTHROPIC_MODEL".to_string(),
-                model.to_string(),
-            )]);
-            Ok(inject_claude_env(yaml, &extra_env))
+            inject_claude_env(yaml, &extra_env)
         }
         "ollama" | "lmstudio" | "llamacpp" => {
             let base_url = llm
@@ -298,6 +310,14 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
                     "ANTHROPIC_AUTH_TOKEN".to_string(),
                     "sk-no-key-required".to_string(),
                 ),
+                // ANTHROPIC_MODEL is Claude Code's primary mechanism for setting
+                // the active model (and what statusline / `/status` display).
+                // Without it Claude Code falls back to its account-tier default
+                // (Haiku/Sonnet) regardless of where ANTHROPIC_BASE_URL points.
+                ("ANTHROPIC_MODEL".to_string(), model.to_string()),
+                // CUSTOM_MODEL_OPTION* adds a friendly entry to the `/model`
+                // picker. Documented as supplementary — useful when the gateway
+                // doesn't auto-populate the picker via /v1/models discovery.
                 (
                     "ANTHROPIC_CUSTOM_MODEL_OPTION".to_string(),
                     model.to_string(),
@@ -319,7 +339,7 @@ fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
                     "0".to_string(),
                 ),
             ]);
-            Ok(inject_claude_env(yaml, &extra_env))
+            inject_claude_env(yaml, &extra_env)
         }
         other => anyhow::bail!(
             "Unsupported LLM provider '{other}'. \
@@ -585,17 +605,23 @@ fn ensure_worker_auth_token(
     let token_file_name = format!("{token_key}-auth-token");
     let token_path = secrets_dir.join(&token_file_name);
 
-    // Read existing token or generate a new one.
-    // is_file() rejects directories, symlinks, and missing paths.
-    let token = if token_path.is_file() {
+    // Reject symlinks before is_file() — is_file() follows symlinks and would
+    // return true for a symlink pointing at a regular file, letting an
+    // attacker with write access to the secrets dir substitute the auth
+    // token. Falls through to the cleanup branch which logs and removes the
+    // planted symlink.
+    let token = if !token_path.is_symlink() && token_path.is_file() {
         let content = std::fs::read_to_string(&token_path)?.trim().to_string();
         if content.is_empty() {
+            log::warn!(
+                "Token file at {} is empty — generating new auth token; MCP workers will require restart",
+                token_path.display()
+            );
             uuid::Uuid::new_v4().to_string()
         } else {
             content
         }
     } else {
-        // Remove stale directory/symlink at token path if present
         if token_path.is_symlink() {
             log::warn!(
                 "Stale symlink at token location, removing: {}",
@@ -604,7 +630,7 @@ fn ensure_worker_auth_token(
             std::fs::remove_file(&token_path)?;
         } else if token_path.exists() {
             log::warn!(
-                "Stale path at token location, removing: {}",
+                "Unexpected directory at token location {}, removing recursively",
                 token_path.display()
             );
             std::fs::remove_dir_all(&token_path)?;
@@ -612,8 +638,11 @@ fn ensure_worker_auth_token(
         uuid::Uuid::new_v4().to_string()
     };
 
-    // Atomic write with 0o600 permissions (pattern from update.rs)
-    let tmp_path = token_path.with_extension("tmp");
+    // Atomic write with 0o600 permissions (pattern from update.rs).
+    // Use a unique suffix to avoid collisions when multiple callers write
+    // the same token file concurrently (e.g., parallel tests or processes).
+    let tmp_name = format!("{}.{}.tmp", token_file_name, uuid::Uuid::new_v4());
+    let tmp_path = secrets_dir.join(&tmp_name);
     std::fs::write(&tmp_path, &token)?;
     #[cfg(unix)]
     {
@@ -794,11 +823,22 @@ fn apply_mcp_os_config_with_path(
     token_path: &std::path::Path,
     port_path: &std::path::Path,
 ) -> anyhow::Result<String> {
-    if !token_path.is_file() {
-        return Ok(yaml.to_string());
-    }
-
-    let token = std::fs::read_to_string(token_path)?.trim().to_string();
+    // Single read attempt: don't pre-check `is_file()` before `read_to_string`.
+    // The desktop process respawns mcp-os and rewrites these files at runtime,
+    // so a TOCTOU between exists-check and read can bubble up `os error 2`
+    // and abort `render_compose`. Treat any read failure the same as the
+    // file being absent — mcp-os is simply not configured for this run —
+    // but log non-NotFound errors so permission/disk problems remain visible.
+    let token = match std::fs::read_to_string(token_path) {
+        Ok(s) => s.trim().to_string(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(yaml.to_string());
+        }
+        Err(e) => {
+            log::debug!("mcp-os token read failed ({e}); treating as not configured");
+            return Ok(yaml.to_string());
+        }
+    };
     if token.is_empty() {
         return Ok(yaml.to_string());
     }
@@ -1041,39 +1081,128 @@ pub struct SecurityCheck;
 /// Using an enum instead of `&'static str` guarantees that rule identifiers are
 /// unique and typo-free — a misspelled variant is a compile error, whereas a
 /// misspelled string literal would silently pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    strum_macros::Display,
+    strum_macros::EnumIter,
+    strum_macros::EnumProperty,
+)]
 pub enum SecurityRule {
+    // 1. YAML parse
+    #[strum(to_string = "YAML_PARSE_ERROR")]
+    #[strum(props(description = "Compose YAML is parseable"))]
     YamlParseError,
+
+    // 2-5. Container hardening
+    #[strum(to_string = "CAP_DROP_ALL")]
+    #[strum(props(description = "All containers have cap_drop: [ALL]"))]
     CapDropAll,
+    #[strum(to_string = "NO_NEW_PRIVS")]
+    #[strum(props(description = "All containers have no-new-privileges"))]
     NoNewPrivs,
+    #[strum(to_string = "READ_ONLY_FS")]
+    #[strum(props(description = "Core containers have read-only filesystem"))]
     ReadOnlyFs,
+    #[strum(to_string = "TMPFS_NOEXEC")]
+    #[strum(props(description = "Core containers have /tmp as tmpfs with noexec"))]
     TmpfsNoexec,
+
+    // 6-7. Token / secret isolation
+    #[strum(to_string = "NO_TOKENS_CLAUDE")]
+    #[strum(props(description = "Claude container has no token/key/secret env vars"))]
     NoTokensClaude,
+    #[strum(to_string = "NO_TOKENS_HUB")]
+    #[strum(props(description = "Hub has no token env vars (only WORKER_*_URL)"))]
     NoTokensHub,
+
+    // 8-11. Network security
+    #[strum(to_string = "PORTS_LOCALHOST")]
+    #[strum(props(description = "All exposed ports bind to 127.0.0.1"))]
     PortsLocalhost,
+    #[strum(to_string = "NO_SOCKET_CLAUDE")]
+    #[strum(props(description = "Claude container has no docker/nerdctl socket"))]
     NoSocketClaude,
+    #[strum(to_string = "NO_EXTERNAL_LLM_KEYS_CLAUDE")]
+    #[strum(props(description = "Claude container has no external LLM API keys"))]
     NoExternalLlmKeysClaude,
+    #[strum(to_string = "NO_PORTS_WORKERS")]
+    #[strum(props(description = "Built-in workers do not expose ports"))]
     NoPortsWorkers,
-    PluginNoPrivileged,
-    PluginNoHostNetwork,
-    PluginManifestMissing,
-    PluginVolumeLongForm,
-    PluginTokenPathMismatch,
-    PluginTokenMountMode,
-    PluginWorkspacePathMismatch,
-    PluginWorkspaceMountMode,
-    PluginNoExtraVolumes,
-    PluginMissingTokensMount,
-    PluginMissingWorkspaceMount,
-    SharepointVolumeLongForm,
-    SharepointTokenPathMismatch,
-    SharepointTokenMountMode,
-    SharepointWorkspacePathMismatch,
-    SharepointWorkspaceMountMode,
-    SharepointNoExtraVolumes,
-    SharepointMissingTokensMount,
-    SharepointMissingWorkspaceMount,
+
+    // 12. Container user (moved here from old position 31)
+    #[strum(to_string = "CONTAINER_USER")]
+    #[strum(props(description = "All containers use correct platform user"))]
     ContainerUser,
+
+    // 13-22. Plugin rules
+    #[strum(to_string = "PLUGIN_NO_PRIVILEGED")]
+    #[strum(props(description = "Plugin containers are not privileged"))]
+    PluginNoPrivileged,
+    #[strum(to_string = "PLUGIN_NO_HOST_NETWORK")]
+    #[strum(props(description = "Plugin containers do not use host network"))]
+    PluginNoHostNetwork,
+    #[strum(to_string = "PLUGIN_MANIFEST_MISSING")]
+    #[strum(props(description = "All plugin services have signed manifests"))]
+    PluginManifestMissing,
+    #[strum(to_string = "PLUGIN_VOLUME_LONG_FORM")]
+    #[strum(props(description = "Plugin volumes use short-form only"))]
+    PluginVolumeLongForm,
+    #[strum(to_string = "PLUGIN_TOKEN_PATH_MISMATCH")]
+    #[strum(props(description = "Plugin token mount paths match expected"))]
+    PluginTokenPathMismatch,
+    #[strum(to_string = "PLUGIN_TOKEN_MOUNT_MODE")]
+    #[strum(props(description = "Plugin token mount modes match manifest"))]
+    PluginTokenMountMode,
+    #[strum(to_string = "PLUGIN_WORKSPACE_PATH_MISMATCH")]
+    #[strum(props(description = "Plugin workspace paths match expected"))]
+    PluginWorkspacePathMismatch,
+    #[strum(to_string = "PLUGIN_WORKSPACE_MOUNT_MODE")]
+    #[strum(props(description = "Plugin workspace mount mode is :rw"))]
+    PluginWorkspaceMountMode,
+    #[strum(to_string = "PLUGIN_NO_EXTRA_VOLUMES")]
+    #[strum(props(description = "Plugin containers have no extra volumes"))]
+    PluginNoExtraVolumes,
+    #[strum(to_string = "PLUGIN_MISSING_TOKENS_MOUNT")]
+    #[strum(props(description = "Plugin containers have /tokens mount"))]
+    PluginMissingTokensMount,
+    #[strum(to_string = "PLUGIN_MISSING_WORKSPACE_MOUNT")]
+    #[strum(props(description = "Plugin containers have /workspace mount"))]
+    PluginMissingWorkspaceMount,
+
+    // 23-30. SharePoint rules
+    #[strum(to_string = "SHAREPOINT_VOLUME_LONG_FORM")]
+    #[strum(props(description = "SharePoint volumes use short-form only"))]
+    SharepointVolumeLongForm,
+    #[strum(to_string = "SHAREPOINT_TOKEN_PATH_MISMATCH")]
+    #[strum(props(description = "SharePoint token path matches expected"))]
+    SharepointTokenPathMismatch,
+    #[strum(to_string = "SHAREPOINT_TOKEN_MOUNT_MODE")]
+    #[strum(props(description = "SharePoint token mount mode is :rw"))]
+    SharepointTokenMountMode,
+    #[strum(to_string = "SHAREPOINT_WORKSPACE_PATH_MISMATCH")]
+    #[strum(props(description = "SharePoint workspace path matches expected"))]
+    SharepointWorkspacePathMismatch,
+    #[strum(to_string = "SHAREPOINT_WORKSPACE_MOUNT_MODE")]
+    #[strum(props(description = "SharePoint workspace mount mode is :rw"))]
+    SharepointWorkspaceMountMode,
+    #[strum(to_string = "SHAREPOINT_NO_EXTRA_VOLUMES")]
+    #[strum(props(description = "SharePoint has no extra volumes"))]
+    SharepointNoExtraVolumes,
+    #[strum(to_string = "SHAREPOINT_MISSING_TOKENS_MOUNT")]
+    #[strum(props(description = "SharePoint has /tokens mount"))]
+    SharepointMissingTokensMount,
+    #[strum(to_string = "SHAREPOINT_MISSING_WORKSPACE_MOUNT")]
+    #[strum(props(description = "SharePoint has /workspace mount"))]
+    SharepointMissingWorkspaceMount,
+
+    // 31. Host file security
+    #[strum(to_string = "FILE_SECURITY_VIOLATION")]
+    #[strum(props(description = "Host file permissions and ownership are correct"))]
     /// Host file or directory has wrong permissions or ownership.
     /// Covers both mode bits (e.g. 0o644 instead of 0o600) and UID mismatch.
     /// Unix-only — skipped on Windows.
@@ -1098,116 +1227,8 @@ impl SecurityRule {
 
     /// Human-readable description for verbose check output.
     pub fn description(self) -> &'static str {
-        match self {
-            Self::YamlParseError => "Compose YAML is parseable",
-            Self::CapDropAll => "All containers have cap_drop: [ALL]",
-            Self::NoNewPrivs => "All containers have no-new-privileges",
-            Self::ReadOnlyFs => "Core containers have read-only filesystem",
-            Self::TmpfsNoexec => "Core containers have /tmp as tmpfs with noexec",
-            Self::NoTokensClaude => "Claude container has no token/key/secret env vars",
-            Self::NoTokensHub => "Hub has no token env vars (only WORKER_*_URL)",
-            Self::PortsLocalhost => "All exposed ports bind to 127.0.0.1",
-            Self::NoSocketClaude => "Claude container has no docker/nerdctl socket",
-            Self::NoExternalLlmKeysClaude => "Claude container has no external LLM API keys",
-            Self::NoPortsWorkers => "Built-in workers do not expose ports",
-            Self::ContainerUser => "All containers use correct platform user",
-            Self::PluginNoPrivileged => "Plugin containers are not privileged",
-            Self::PluginNoHostNetwork => "Plugin containers do not use host network",
-            Self::PluginManifestMissing => "All plugin services have signed manifests",
-            Self::PluginVolumeLongForm => "Plugin volumes use short-form only",
-            Self::PluginTokenPathMismatch => "Plugin token mount paths match expected",
-            Self::PluginTokenMountMode => "Plugin token mount modes match manifest",
-            Self::PluginWorkspacePathMismatch => "Plugin workspace paths match expected",
-            Self::PluginWorkspaceMountMode => "Plugin workspace mount mode is :rw",
-            Self::PluginNoExtraVolumes => "Plugin containers have no extra volumes",
-            Self::PluginMissingTokensMount => "Plugin containers have /tokens mount",
-            Self::PluginMissingWorkspaceMount => "Plugin containers have /workspace mount",
-            Self::SharepointVolumeLongForm => "SharePoint volumes use short-form only",
-            Self::SharepointTokenPathMismatch => "SharePoint token path matches expected",
-            Self::SharepointTokenMountMode => "SharePoint token mount mode is :rw",
-            Self::SharepointWorkspacePathMismatch => "SharePoint workspace path matches expected",
-            Self::SharepointWorkspaceMountMode => "SharePoint workspace mount mode is :rw",
-            Self::SharepointNoExtraVolumes => "SharePoint has no extra volumes",
-            Self::SharepointMissingTokensMount => "SharePoint has /tokens mount",
-            Self::SharepointMissingWorkspaceMount => "SharePoint has /workspace mount",
-            Self::FileSecurityViolation => "Host file permissions and ownership are correct",
-        }
-    }
-
-    /// All rules in check order — used for verbose `speedwave check` output.
-    pub const ALL_RULES: &[SecurityRule] = &[
-        Self::YamlParseError,
-        Self::CapDropAll,
-        Self::NoNewPrivs,
-        Self::ReadOnlyFs,
-        Self::TmpfsNoexec,
-        Self::NoTokensClaude,
-        Self::NoTokensHub,
-        Self::PortsLocalhost,
-        Self::NoSocketClaude,
-        Self::NoExternalLlmKeysClaude,
-        Self::NoPortsWorkers,
-        Self::ContainerUser,
-        Self::PluginNoPrivileged,
-        Self::PluginNoHostNetwork,
-        Self::PluginManifestMissing,
-        Self::PluginVolumeLongForm,
-        Self::PluginTokenPathMismatch,
-        Self::PluginTokenMountMode,
-        Self::PluginWorkspacePathMismatch,
-        Self::PluginWorkspaceMountMode,
-        Self::PluginNoExtraVolumes,
-        Self::PluginMissingTokensMount,
-        Self::PluginMissingWorkspaceMount,
-        Self::SharepointVolumeLongForm,
-        Self::SharepointTokenPathMismatch,
-        Self::SharepointTokenMountMode,
-        Self::SharepointWorkspacePathMismatch,
-        Self::SharepointWorkspaceMountMode,
-        Self::SharepointNoExtraVolumes,
-        Self::SharepointMissingTokensMount,
-        Self::SharepointMissingWorkspaceMount,
-        Self::FileSecurityViolation,
-    ];
-}
-
-impl std::fmt::Display for SecurityRule {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Self::YamlParseError => "YAML_PARSE_ERROR",
-            Self::CapDropAll => "CAP_DROP_ALL",
-            Self::NoNewPrivs => "NO_NEW_PRIVS",
-            Self::ReadOnlyFs => "READ_ONLY_FS",
-            Self::TmpfsNoexec => "TMPFS_NOEXEC",
-            Self::NoTokensClaude => "NO_TOKENS_CLAUDE",
-            Self::NoTokensHub => "NO_TOKENS_HUB",
-            Self::PortsLocalhost => "PORTS_LOCALHOST",
-            Self::NoSocketClaude => "NO_SOCKET_CLAUDE",
-            Self::NoExternalLlmKeysClaude => "NO_EXTERNAL_LLM_KEYS_CLAUDE",
-            Self::NoPortsWorkers => "NO_PORTS_WORKERS",
-            Self::PluginNoPrivileged => "PLUGIN_NO_PRIVILEGED",
-            Self::PluginNoHostNetwork => "PLUGIN_NO_HOST_NETWORK",
-            Self::PluginManifestMissing => "PLUGIN_MANIFEST_MISSING",
-            Self::PluginVolumeLongForm => "PLUGIN_VOLUME_LONG_FORM",
-            Self::PluginTokenPathMismatch => "PLUGIN_TOKEN_PATH_MISMATCH",
-            Self::PluginTokenMountMode => "PLUGIN_TOKEN_MOUNT_MODE",
-            Self::PluginWorkspacePathMismatch => "PLUGIN_WORKSPACE_PATH_MISMATCH",
-            Self::PluginWorkspaceMountMode => "PLUGIN_WORKSPACE_MOUNT_MODE",
-            Self::PluginNoExtraVolumes => "PLUGIN_NO_EXTRA_VOLUMES",
-            Self::PluginMissingTokensMount => "PLUGIN_MISSING_TOKENS_MOUNT",
-            Self::PluginMissingWorkspaceMount => "PLUGIN_MISSING_WORKSPACE_MOUNT",
-            Self::SharepointVolumeLongForm => "SHAREPOINT_VOLUME_LONG_FORM",
-            Self::SharepointTokenPathMismatch => "SHAREPOINT_TOKEN_PATH_MISMATCH",
-            Self::SharepointTokenMountMode => "SHAREPOINT_TOKEN_MOUNT_MODE",
-            Self::SharepointWorkspacePathMismatch => "SHAREPOINT_WORKSPACE_PATH_MISMATCH",
-            Self::SharepointWorkspaceMountMode => "SHAREPOINT_WORKSPACE_MOUNT_MODE",
-            Self::SharepointNoExtraVolumes => "SHAREPOINT_NO_EXTRA_VOLUMES",
-            Self::SharepointMissingTokensMount => "SHAREPOINT_MISSING_TOKENS_MOUNT",
-            Self::SharepointMissingWorkspaceMount => "SHAREPOINT_MISSING_WORKSPACE_MOUNT",
-            Self::ContainerUser => "CONTAINER_USER",
-            Self::FileSecurityViolation => "FILE_SECURITY_VIOLATION",
-        };
-        f.write_str(s)
+        self.get_str("description")
+            .unwrap_or("(missing description — update SecurityRule props)")
     }
 }
 
@@ -1217,6 +1238,22 @@ pub struct SecurityViolation {
     pub rule: SecurityRule,
     pub message: String,
     pub remediation: &'static str,
+}
+
+impl SecurityViolation {
+    pub fn new(
+        container: impl Into<String>,
+        rule: SecurityRule,
+        message: impl Into<String>,
+        remediation: &'static str,
+    ) -> Self {
+        Self {
+            container: container.into(),
+            rule,
+            message: message.into(),
+            remediation,
+        }
+    }
 }
 
 impl std::fmt::Display for SecurityViolation {
@@ -2230,6 +2267,9 @@ fn get_services(doc: &serde_yaml_ng::Value) -> Option<Vec<(String, &serde_yaml_n
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strum::IntoEnumIterator;
+
+    const SECURITY_RULE_COUNT: usize = 32;
 
     fn default_flags() -> Vec<String> {
         crate::defaults::DEFAULT_FLAGS
@@ -3000,8 +3040,9 @@ services:
         }
     }
 
-    /// ADR-038: every WORKER_*_URL entry in mcp-hub environment must point at
-    /// `:{PORT_WORKER}`.
+    /// ADR-038: every container-to-container WORKER_*_URL in mcp-hub must point
+    /// at `:{PORT_WORKER}`. `WORKER_OS_URL` is exempt: mcp-os runs on the host
+    /// and uses a dynamic port allocated by the OS, not PORT_WORKER.
     #[test]
     fn test_hub_worker_urls_use_port_worker() {
         let config = ResolvedClaudeConfig {
@@ -3022,6 +3063,13 @@ services:
         for entry in get_hub_env_seq(&serde_yaml_ng::from_str(&yaml).unwrap()) {
             if let Some((key, value)) = entry.split_once('=') {
                 if key.starts_with("WORKER_") && key.ends_with("_URL") {
+                    // WORKER_OS_URL is a host-side gateway (host.lima.internal
+                    // / host.docker.internal) with a dynamically assigned
+                    // mcp-os port — not a containerized worker. ADR-038
+                    // applies only to in-cluster workers.
+                    if key == "WORKER_OS_URL" {
+                        continue;
+                    }
                     assert!(
                         value.ends_with(&expected_suffix),
                         "{key} must point at :{} (ADR-038), got: {value}",
@@ -3115,6 +3163,93 @@ services:
         assert!(
             reserialized.contains("MCP_HUB_PORT"),
             "MCP_HUB_PORT lost during serde_yaml_ng roundtrip"
+        );
+    }
+
+    #[test]
+    fn test_inject_claude_env_propagates_parse_error() {
+        let bad_yaml = "this is: not: yaml: : :";
+        let env = std::collections::HashMap::new();
+        let result = inject_claude_env(bad_yaml, &env);
+        assert!(result.is_err(), "should return Err for malformed YAML");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("failed to parse compose YAML"),
+            "error should mention 'failed to parse compose YAML', got: '{}'",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_inject_claude_env_happy_path_preserves_existing_env() {
+        let yaml = "services:\n  claude:\n    environment:\n      - FOO=bar\n";
+        let mut env = std::collections::HashMap::new();
+        env.insert("BAZ".to_string(), "qux".to_string());
+        let result = inject_claude_env(yaml, &env).unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let env_seq = doc["services"]["claude"]["environment"]
+            .as_sequence()
+            .unwrap();
+        let entries: Vec<&str> = env_seq.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            entries.contains(&"FOO=bar"),
+            "should preserve existing FOO=bar"
+        );
+        assert!(entries.contains(&"BAZ=qux"), "should add new BAZ=qux");
+    }
+
+    #[test]
+    fn test_inject_claude_env_overrides_existing_key() {
+        let yaml = "services:\n  claude:\n    environment:\n      - FOO=bar\n";
+        let mut env = std::collections::HashMap::new();
+        env.insert("FOO".to_string(), "updated".to_string());
+        let result = inject_claude_env(yaml, &env).unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let env_seq = doc["services"]["claude"]["environment"]
+            .as_sequence()
+            .unwrap();
+        let entries: Vec<&str> = env_seq.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            entries.contains(&"FOO=updated"),
+            "should override FOO with 'updated', got: {:?}",
+            entries
+        );
+        assert!(
+            !entries.contains(&"FOO=bar"),
+            "old FOO=bar should be gone, got: {:?}",
+            entries
+        );
+    }
+
+    #[test]
+    fn test_inject_claude_env_no_claude_service_returns_yaml() {
+        let yaml = "services:\n  hub:\n    image: hub:latest\n";
+        let mut env = std::collections::HashMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        let result = inject_claude_env(yaml, &env);
+        assert!(
+            result.is_ok(),
+            "should not error when claude service is absent"
+        );
+        let output = result.unwrap();
+        // Output should still be valid YAML and semantically equivalent
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
+        assert!(
+            doc.get("services").and_then(|s| s.get("hub")).is_some(),
+            "hub service should still be present"
+        );
+    }
+
+    #[test]
+    fn test_inject_claude_env_handles_null_environment_field() {
+        let yaml = "services:\n  claude:\n    environment: null\n";
+        let mut env = std::collections::HashMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        let result = inject_claude_env(yaml, &env);
+        assert!(
+            result.is_ok(),
+            "should not panic on null environment field, got: {:?}",
+            result
         );
     }
 
@@ -3525,6 +3660,12 @@ services:
             "Ollama must set dummy auth token"
         );
         assert!(
+            env.iter().any(|e| e == "ANTHROPIC_MODEL=llama3.3"),
+            "Ollama must set ANTHROPIC_MODEL — Claude Code's primary mechanism for the active \
+             model, displayed in /status and statusline. Without it Claude Code falls back to \
+             its account-tier default. Got: {env:?}"
+        );
+        assert!(
             env.iter()
                 .any(|e| e == "ANTHROPIC_CUSTOM_MODEL_OPTION=llama3.3"),
             "Ollama must set ANTHROPIC_CUSTOM_MODEL_OPTION to the user model, got: {env:?}"
@@ -3865,6 +4006,37 @@ services:
             !env_blank.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
             "Anthropic + whitespace-only model must not set ANTHROPIC_MODEL, got: {env_blank:?}"
         );
+    }
+
+    #[test]
+    fn test_anthropic_injects_default_alias_env_vars() {
+        // Workaround for anthropics/claude-code#34083 — without
+        // ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL pointing to the
+        // `[1m]` variant, Max/Team subscribers see their 1M models capped
+        // at 200k. compose must inject these regardless of whether the
+        // user pinned an explicit model, because the alias resolution is
+        // what unlocks the upgraded window.
+        let llm = LlmConfig {
+            provider: Some("anthropic".to_string()),
+            model: None,
+            base_url: None,
+            context_tokens: None,
+        };
+        let rendered = apply_llm_config(COMPOSE_TEMPLATE, &llm).unwrap();
+        let env = get_claude_env(&rendered);
+
+        let expected = crate::defaults::anthropic_default_models_env();
+        assert!(
+            !expected.is_empty(),
+            "anthropic_default_models_env returned empty — SSOT lost its `latest: true` entries"
+        );
+        for (var, value) in &expected {
+            let line = format!("{var}={value}");
+            assert!(
+                env.iter().any(|e| e == &line),
+                "Anthropic provider must inject `{line}`, got: {env:?}"
+            );
+        }
     }
 
     #[test]
@@ -4301,6 +4473,23 @@ services:
         assert_eq!(
             result, VALID_COMPOSE,
             "yaml should be unchanged when token path is a directory"
+        );
+    }
+
+    #[test]
+    fn test_mcp_os_config_skipped_when_token_path_does_not_exist() {
+        // The desktop process can delete and recreate ~/.speedwave/mcp-os-*
+        // files at any moment (mcp-os respawn). Treat a missing token file
+        // the same as an empty/absent config — never bubble up `os error 2`
+        // and abort `render_compose`.
+        let tmp = tempfile::tempdir().unwrap();
+        let token_path = tmp.path().join("does-not-exist");
+        let port_path = tmp.path().join("does-not-exist-port");
+
+        let result = apply_mcp_os_config_with_path(VALID_COMPOSE, &token_path, &port_path).unwrap();
+        assert_eq!(
+            result, VALID_COMPOSE,
+            "yaml should be unchanged when token file is absent"
         );
     }
 
@@ -6534,18 +6723,40 @@ networks:
         );
     }
 
+    /// Finds `MCP_SLACK_AUTH_TOKEN=<value>` in env, asserts it is a valid UUID
+    /// and is not equal to `sentinel`. Returns the token value for further assertions.
+    #[cfg(unix)]
+    fn assert_fresh_uuid_token(env: &[String], sentinel: &str) -> String {
+        let entry = env
+            .iter()
+            .find(|e| e.starts_with("MCP_SLACK_AUTH_TOKEN="))
+            .expect("MCP_SLACK_AUTH_TOKEN must be present in env");
+        let value = entry.strip_prefix("MCP_SLACK_AUTH_TOKEN=").unwrap();
+        assert!(
+            uuid::Uuid::parse_str(value).is_ok(),
+            "token must be a valid UUID, got: '{}'",
+            value
+        );
+        assert_ne!(
+            value, sentinel,
+            "token must not equal the planted sentinel '{}'",
+            sentinel
+        );
+        value.to_string()
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_worker_auth_token_skipped_when_symlink() {
+        const SENTINEL: &str = "PLANTED-NOT-A-UUID";
         let tmp = tempfile::tempdir().unwrap();
         let integrations = ResolvedIntegrationsConfig {
             slack: true,
             ..Default::default()
         };
 
-        // Create a symlink where the token file should be
         let target = tmp.path().join("some-target");
-        std::fs::write(&target, "dummy").unwrap();
+        std::fs::write(&target, SENTINEL).unwrap();
         std::os::unix::fs::symlink(&target, tmp.path().join("slack-auth-token")).unwrap();
 
         let result = apply_worker_auth_tokens_with_dir(
@@ -6556,19 +6767,26 @@ networks:
         )
         .unwrap();
 
-        // Should remove the symlink and generate a new token
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
         let env = get_service_env_seq(&doc, "mcp-slack");
-        assert!(
-            env.iter().any(|e| e.starts_with("MCP_SLACK_AUTH_TOKEN=")),
-            "should generate new token even when existing path is a symlink"
-        );
-        // The token file should now be a regular file, not a symlink
+        assert_fresh_uuid_token(&env, SENTINEL);
+
         let token_path = tmp.path().join("slack-auth-token");
         assert!(token_path.is_file(), "token should be a regular file");
         assert!(
             !token_path.is_symlink(),
             "token should not be a symlink after cleanup"
+        );
+        let disk_token = std::fs::read_to_string(&token_path).unwrap();
+        assert!(
+            uuid::Uuid::parse_str(disk_token.trim()).is_ok(),
+            "on-disk token should be a valid UUID, got: '{}'",
+            disk_token
+        );
+        assert_ne!(
+            disk_token.trim(),
+            SENTINEL,
+            "on-disk token must not equal the planted sentinel"
         );
     }
 
@@ -6600,6 +6818,166 @@ networks:
                 mode & 0o777
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_worker_auth_token_rejects_symlink_with_uuid_target() {
+        const PLANTED_UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = ResolvedIntegrationsConfig {
+            slack: true,
+            ..Default::default()
+        };
+
+        let target = tmp.path().join("uuid-target");
+        std::fs::write(&target, PLANTED_UUID).unwrap();
+        std::os::unix::fs::symlink(&target, tmp.path().join("slack-auth-token")).unwrap();
+
+        let result = apply_worker_auth_tokens_with_dir(
+            VALID_COMPOSE_ALL_WORKERS,
+            tmp.path(),
+            &integrations,
+            &[],
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let env = get_service_env_seq(&doc, "mcp-slack");
+        assert_fresh_uuid_token(&env, PLANTED_UUID);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_worker_auth_token_rejects_symlink_chain() {
+        const SENTINEL: &str = "CHAIN-SENTINEL";
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = ResolvedIntegrationsConfig {
+            slack: true,
+            ..Default::default()
+        };
+
+        let file_c = tmp.path().join("chain-target-file");
+        std::fs::write(&file_c, SENTINEL).unwrap();
+        let link_b = tmp.path().join("chain-link-b");
+        std::os::unix::fs::symlink(&file_c, &link_b).unwrap();
+        std::os::unix::fs::symlink(&link_b, tmp.path().join("slack-auth-token")).unwrap();
+
+        let result = apply_worker_auth_tokens_with_dir(
+            VALID_COMPOSE_ALL_WORKERS,
+            tmp.path(),
+            &integrations,
+            &[],
+        )
+        .unwrap();
+
+        let token_path = tmp.path().join("slack-auth-token");
+        assert!(token_path.is_file(), "token should be a regular file");
+        assert!(
+            !token_path.is_symlink(),
+            "token should not be a symlink after chain cleanup"
+        );
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let env = get_service_env_seq(&doc, "mcp-slack");
+        assert_fresh_uuid_token(&env, SENTINEL);
+    }
+
+    #[test]
+    fn test_worker_auth_token_trims_whitespace_and_preserves_legacy_format() {
+        const KNOWN_UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = ResolvedIntegrationsConfig {
+            slack: true,
+            ..Default::default()
+        };
+
+        // Write a token file with leading/trailing whitespace (hand-edited or older format)
+        let token_path = tmp.path().join("slack-auth-token");
+        let raw_content = "  550e8400-e29b-41d4-a716-446655440000\n  \n";
+        std::fs::write(&token_path, raw_content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let result = apply_worker_auth_tokens_with_dir(
+            VALID_COMPOSE_ALL_WORKERS,
+            tmp.path(),
+            &integrations,
+            &[],
+        )
+        .unwrap();
+
+        // The env-var should contain the trimmed UUID
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let env = get_service_env_seq(&doc, "mcp-slack");
+        let token_entry = env
+            .iter()
+            .find(|e| e.starts_with("MCP_SLACK_AUTH_TOKEN="))
+            .expect("should have MCP_SLACK_AUTH_TOKEN env var");
+        let token_value = token_entry.strip_prefix("MCP_SLACK_AUTH_TOKEN=").unwrap();
+        assert_eq!(
+            token_value, KNOWN_UUID,
+            "token should be trimmed UUID, got: '{}'",
+            token_value
+        );
+
+        // The on-disk file should contain the same (trimmed) UUID, not a fresh one.
+        // The atomic write normalises the content to the trimmed form — this confirms
+        // the existing token was re-used rather than replaced with a new UUID.
+        let disk_content = std::fs::read_to_string(&token_path).unwrap();
+        assert_eq!(
+            disk_content.trim(),
+            KNOWN_UUID,
+            "on-disk file should contain the same UUID as the env-var, got: '{}'",
+            disk_content
+        );
+    }
+
+    #[test]
+    fn test_worker_auth_token_empty_file_generates_fresh_uuid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = ResolvedIntegrationsConfig {
+            slack: true,
+            ..Default::default()
+        };
+
+        let token_path = tmp.path().join("slack-auth-token");
+        std::fs::write(&token_path, "   \n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let result = apply_worker_auth_tokens_with_dir(
+            VALID_COMPOSE_ALL_WORKERS,
+            tmp.path(),
+            &integrations,
+            &[],
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let env = get_service_env_seq(&doc, "mcp-slack");
+        let token_entry = env
+            .iter()
+            .find(|e| e.starts_with("MCP_SLACK_AUTH_TOKEN="))
+            .expect("should have MCP_SLACK_AUTH_TOKEN");
+        let token_value = token_entry.strip_prefix("MCP_SLACK_AUTH_TOKEN=").unwrap();
+        assert!(
+            uuid::Uuid::parse_str(token_value).is_ok(),
+            "empty-file branch should generate a valid UUID, got: '{}'",
+            token_value
+        );
+        let disk = std::fs::read_to_string(&token_path).unwrap();
+        assert!(
+            uuid::Uuid::parse_str(disk.trim()).is_ok(),
+            "on-disk token should be a valid UUID, got: '{}'",
+            disk
+        );
     }
 
     #[test]
@@ -6811,12 +7189,75 @@ services:
 
     #[test]
     fn test_all_rules_covers_every_variant() {
-        // If this fails, a SecurityRule variant was added but not included in ALL_RULES.
-        // Update ALL_RULES in the SecurityRule impl block.
         assert_eq!(
-            SecurityRule::ALL_RULES.len(),
-            32,
-            "ALL_RULES count doesn't match SecurityRule variant count — did you add a new rule?"
+            SecurityRule::iter().count(),
+            SECURITY_RULE_COUNT,
+            "variant count drifted — update SecurityRule and tests"
+        );
+    }
+
+    #[test]
+    fn test_is_sharepoint_covers_all_sharepoint_prefixed_variants() {
+        let by_prefix = SecurityRule::iter()
+            .filter(|r| r.to_string().starts_with("SHAREPOINT"))
+            .count();
+        let by_method = SecurityRule::iter().filter(|r| r.is_sharepoint()).count();
+        assert_eq!(
+            by_prefix, by_method,
+            "is_sharepoint() count ({by_method}) differs from SHAREPOINT-prefixed variant count \
+             ({by_prefix}) — update SecurityRule::is_sharepoint() to include the new variant"
+        );
+    }
+
+    // --- strum attribute spot-checks ---
+
+    #[test]
+    fn test_security_rule_display_spot_check() {
+        assert_eq!(SecurityRule::CapDropAll.to_string(), "CAP_DROP_ALL");
+        assert_eq!(SecurityRule::ContainerUser.to_string(), "CONTAINER_USER");
+        assert_eq!(
+            SecurityRule::FileSecurityViolation.to_string(),
+            "FILE_SECURITY_VIOLATION"
+        );
+    }
+
+    #[test]
+    fn test_security_rule_description_spot_check() {
+        assert_eq!(
+            SecurityRule::CapDropAll.description(),
+            "All containers have cap_drop: [ALL]"
+        );
+        assert_eq!(
+            SecurityRule::FileSecurityViolation.description(),
+            "Host file permissions and ownership are correct"
+        );
+    }
+
+    #[test]
+    fn test_security_rule_description_all_variants_have_prop() {
+        for rule in SecurityRule::iter() {
+            let desc = rule.description();
+            assert!(
+                !desc.is_empty(),
+                "SecurityRule::{:?} has empty description",
+                rule
+            );
+        }
+    }
+
+    #[test]
+    fn test_security_rule_iter_first_and_last() {
+        let rules: Vec<SecurityRule> = SecurityRule::iter().collect();
+        assert_eq!(rules.len(), SECURITY_RULE_COUNT);
+        assert_eq!(rules.first().copied(), Some(SecurityRule::YamlParseError));
+        assert_eq!(
+            rules.last().copied(),
+            Some(SecurityRule::FileSecurityViolation)
+        );
+        assert_eq!(
+            rules[11],
+            SecurityRule::ContainerUser,
+            "ContainerUser must be at index 11 (position 12)"
         );
     }
 

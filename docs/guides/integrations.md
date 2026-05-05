@@ -166,6 +166,17 @@ Speedwave supports extending integrations via the plugin system:
 - Plugin services get injected `WORKER_<PLUGIN>_URL` in the hub environment
 - Plugin images are automatically rebuilt if missing (e.g. after a VM reset or `nerdctl system prune`) — you do not need to reinstall the plugin
 
+### Install progress overlay (Desktop)
+
+The Desktop install dialog reports progress through the `plugin_install_status` Tauri event. The flow has up to four phases:
+
+1. `verifying` — Ed25519 signature check
+2. `extracting` — unpack the ZIP into `~/.speedwave/plugins/<slug>/`
+3. `building` — `nerdctl build` for plugins with a `service_id` (skipped for resource-only plugins; can take 2–5 minutes for heavy dependencies)
+4. `done` — terminal success
+
+If the image build fails, the overlay shows the failure inline and emits a final `done_with_pending_build` event. The plugin is left on disk with an `.image_pending` marker; `ensure_all_plugin_images` retries the build automatically on the next launch. See [ADR-047](../adr/ADR-047-plugin-install-progress-events.md) for the event payload and per-platform cleanup behaviour.
+
 See [ADR-015](../adr/ADR-015-plugin-system.md) for the plugin system design and [ADR-036](../adr/ADR-036-self-declaring-worker-policy.md) for the tool policy model.
 
 ### Tool Policy via `_meta`
@@ -194,6 +205,15 @@ When a bundle update triggers image rebuilds, container restart operations (incl
 Plugins that declare `requires_integrations` (e.g. `["sharepoint"]`) display the required integration status on the plugin dashboard. The Desktop UI indicates whether required integrations are configured, linking to the Integrations tab when they are not.
 
 Plugin authors should set `speedwave_compat` in `plugin.json` to declare which Speedwave versions the plugin supports — for example, `"speedwave_compat": ">=0.8, <1"` for plugins targeting the 0.8 series. If the field is present and the running Speedwave version does not satisfy the declared range, installation is rejected with a clear error. Omit the field to disable the check. See [ADR-015](../adr/ADR-015-plugin-system.md) for details on the enforcement model and version-requirement syntax.
+
+**Line endings (Windows authors).** If you author plugins on Windows, add a `.gitattributes` file at the root of your plugin repo with at minimum:
+
+```
+* text=auto eol=lf
+*.sh text eol=lf
+```
+
+This prevents `core.autocrlf=true` (the default on Windows-hosted Git) from rewriting `*.sh` line endings to CRLF on checkout. A plugin `Containerfile` that runs a CRLF `*.sh` will fail with `exit code: 127` (`/bin/sh: 1: …: not found`) when Buildkit invokes the kernel's shebang resolver — see Speedwave issue #603 for context.
 
 ## Local LLM Setup
 

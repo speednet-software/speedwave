@@ -65,10 +65,14 @@ jobs:
         env:
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_TAG_NAME: ${{ inputs.tag_name }}
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           set -e
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::RELEASE_TOKEN secret is not set — required for gh CLI authentication" >&2
+            exit 1
+          fi
           VERSION="$INPUT_VERSION"
 
           # tag_name from workflow_call (release-please.yml) or derive from version
@@ -78,7 +82,9 @@ jobs:
             TAG="v${VERSION}"
           fi
 
-          # Validate version format (stable only — no pre-release suffixes)
+          # Validate version format (stable only — no pre-release suffixes).
+          # Defense-in-depth: same regex also enforced by verify-release-assets.sh
+          # (line 21). Both must stay in sync if the format contract ever changes.
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "ERROR: Version '$VERSION' has invalid format. Expected: X.Y.Z"
             exit 1

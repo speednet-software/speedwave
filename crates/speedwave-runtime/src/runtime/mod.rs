@@ -102,8 +102,20 @@ pub trait ContainerRuntime: Send + Sync {
     }
 
     /// Remove container images by their full tags.
-    fn remove_images(&self, tags: &[String]) -> anyhow::Result<()> {
-        let _ = tags;
+    ///
+    /// `force = false` is the safe default: nerdctl `rmi` refuses to remove
+    /// an image that is still referenced by a running container, the error
+    /// is logged at warn level, and cleanup is left to the next prune cycle
+    /// once the container is gone. Used by the bundle-update flow.
+    ///
+    /// `force = true` (`nerdctl rmi --force`) removes the image even when a
+    /// running container still references it. Used by the explicit-uninstall
+    /// path (`speedwave plugin remove …` / Desktop "$ uninstall plugin")
+    /// because the user has already declared their intent to drop the plugin
+    /// and waiting for a future prune leaves stale layer cache that defeats
+    /// the next reinstall.
+    fn remove_images(&self, tags: &[String], force: bool) -> anyhow::Result<()> {
+        let _ = (tags, force);
         log::debug!("remove_images: not implemented for this runtime, skipping");
         Ok(())
     }
@@ -491,15 +503,25 @@ fn is_stale_container_error(message: &str) -> bool {
     lower.contains("mount namespace root") || lower.contains("container breakout detected")
 }
 
+/// Returns `true` if the error indicates the container exists but is not
+/// running (Exited/Created state).  containerd/nerdctl emits this when
+/// `nerdctl exec` is invoked against a container that has stopped after
+/// `compose up` (e.g. its entrypoint exited non-zero, or a previous
+/// interactive session ended and `compose up` left it in place without
+/// restarting it).  Recreate restores the container to a running state.
+fn is_stopped_container_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("cannot exec in a stopped state")
+}
+
 /// POSIX-shell-quotes each argument and joins with spaces — for transports
 /// that re-evaluate the command line through a remote shell (`ssh`, `wsl.exe`,
 /// `limactl shell`).
 ///
-/// Without this, prompts containing `(`, `)`, `'`, `` ` ``, `$`, newlines, etc.
-/// produced by `--append-system-prompt` (see `prompts::local_llm_identity`)
-/// would break remote bash with `syntax error near unexpected token`. Using
-/// `shlex::try_quote` per arg yields a string that any POSIX shell parses
-/// back into the original argv.
+/// Without this, arguments containing `(`, `)`, `'`, `` ` ``, `$`, newlines,
+/// etc. would break remote bash with `syntax error near unexpected token`.
+/// Using `shlex::try_quote` per arg yields a string that any POSIX shell
+/// parses back into the original argv.
 pub(crate) fn shell_quote_argv(argv: &[&str]) -> String {
     argv.iter()
         .map(|a| match shlex::try_quote(a) {
@@ -537,13 +559,15 @@ fn probe_container_exec(runtime: &dyn ContainerRuntime, container: &str) -> anyh
     }
 }
 
-/// Verifies container exec is functional.  Recovers from two failure modes:
+/// Verifies container exec is functional.  Recovers from three failure modes:
 ///
 /// 1. **Stale containers** — mount namespaces broken after macOS sleep/resume.
 /// 2. **Missing containers** — containers lost after containerd restart, VM
 ///    recreation, or image loss.
+/// 3. **Stopped containers** — container exists but is in Exited/Created
+///    state; `compose up` left it in place because its config did not change.
 ///
-/// In both cases, calls `compose_up_recreate` and re-probes once.
+/// In all cases, calls `compose_up_recreate` and re-probes once.
 ///
 /// Call this between `compose_up()` and the real `container_exec()` to
 /// transparently recover from container failures.
@@ -570,6 +594,11 @@ pub fn ensure_exec_healthy(
                 log::warn!(
                     "Container '{container}' not found. \
                      Recreating containers..."
+                );
+            } else if is_stopped_container_error(&msg) {
+                log::warn!(
+                    "Container '{container}' is stopped (previous run \
+                     exited). Recreating containers..."
                 );
             } else {
                 return Err(e);
@@ -1208,6 +1237,27 @@ services:
         assert!(!is_stale_container_error(""));
     }
 
+    #[test]
+    fn test_is_stopped_container_error_matches_nerdctl_message() {
+        assert!(is_stopped_container_error(
+            "time=\"2026-05-03T21:37:58+02:00\" level=fatal \
+             msg=\"cannot exec in a stopped state\""
+        ));
+    }
+
+    #[test]
+    fn test_is_stopped_container_error_case_insensitive() {
+        assert!(is_stopped_container_error("Cannot Exec In A Stopped State"));
+    }
+
+    #[test]
+    fn test_is_stopped_container_error_rejects_unrelated_errors() {
+        assert!(!is_stopped_container_error("no such container"));
+        assert!(!is_stopped_container_error("mount namespace root"));
+        assert!(!is_stopped_container_error("connection refused"));
+        assert!(!is_stopped_container_error(""));
+    }
+
     /// Mock runtime for testing `ensure_exec_healthy()`.
     ///
     /// `exec_healthy` controls whether `container_exec_piped` returns a
@@ -1418,6 +1468,19 @@ services:
     }
 
     #[test]
+    fn test_ensure_exec_healthy_recovers_stopped_container() {
+        let rt = ProbeTestRuntime::stale().with_custom_error(
+            "time=\"2026-05-03T21:37:58+02:00\" level=fatal \
+             msg=\"cannot exec in a stopped state\"",
+        );
+        ensure_exec_healthy(&rt, "proj", "container").unwrap();
+        assert!(
+            rt.was_recreated(),
+            "compose_up_recreate should be called for stopped container"
+        );
+    }
+
+    #[test]
     fn test_is_missing_container_error_msg() {
         assert!(is_missing_container_error_msg("No such container: abc"));
         assert!(is_missing_container_error_msg("container not found"));
@@ -1512,11 +1575,11 @@ services:
         // ProbeTestRuntime uses the trait default (no override).
         let rt = ProbeTestRuntime::healthy();
         assert!(
-            rt.remove_images(&[]).is_ok(),
+            rt.remove_images(&[], false).is_ok(),
             "default remove_images with empty slice should return Ok"
         );
         assert!(
-            rt.remove_images(&["speedwave-claude:old123".to_string()])
+            rt.remove_images(&["speedwave-claude:old123".to_string()], false)
                 .is_ok(),
             "default remove_images with tags should return Ok (no-op)"
         );

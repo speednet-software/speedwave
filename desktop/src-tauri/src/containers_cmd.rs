@@ -137,6 +137,8 @@ pub(crate) fn render_and_save_compose(
         .ok_or_else(|| format!("project '{}' not found", project))?;
 
     let project_path = std::path::Path::new(&project_dir);
+    // Defense-in-depth: pre-flight CloudStorage TCC check before any compose render.
+    speedwave_runtime::cloudstorage::check_project_readable_or_err(project_path)?;
     let (resolved, integrations) =
         config::resolve_project_config(project_path, &user_config, project);
 
@@ -324,6 +326,20 @@ pub async fn add_project(
     // Start subsystems on-demand (e.g. after factory reset / fresh install)
     crate::ensure_mcp_os_running(&mcp_os, &app, compose_lock.inner().clone());
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
+
+    // Pre-flight: detect CloudStorage TCC denial before adding project.
+    {
+        let dir_clone = dir.clone();
+        let preflight_result = tokio::task::spawn_blocking(move || {
+            speedwave_runtime::cloudstorage::check_project_readable_or_err(std::path::Path::new(
+                &dir_clone,
+            ))
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        preflight_result?;
+    }
+
     // Capture previous active project BEFORE runtime sets new one
     let previous = config::with_config_lock(|| {
         let cfg = config::load_user_config()?;
@@ -436,6 +452,14 @@ pub async fn start_containers(
     tokio::task::spawn_blocking(move || {
         ensure_images_ready()?;
         check_project(&project)?;
+        // Pre-flight: detect CloudStorage TCC denial before attempting container start.
+        if let Ok(cfg) = speedwave_runtime::config::load_user_config() {
+            if let Some(p) = cfg.find_project(&project) {
+                speedwave_runtime::cloudstorage::check_project_readable_or_err(
+                    std::path::Path::new(&p.dir),
+                )?;
+            }
+        }
         log::info!("start_containers: project={project}");
         setup_wizard::start_containers(&project).map_err(|e| {
             log::error!("start_containers: error: {e}");
@@ -495,6 +519,14 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
     tokio::task::spawn_blocking(move || {
         ensure_images_ready()?;
         check_project(&project)?;
+        // Pre-flight: detect CloudStorage TCC denial before container recreate.
+        if let Ok(cfg) = speedwave_runtime::config::load_user_config() {
+            if let Some(p) = cfg.find_project(&project) {
+                speedwave_runtime::cloudstorage::check_project_readable_or_err(
+                    std::path::Path::new(&p.dir),
+                )?;
+            }
+        }
         log::info!("recreate_project_containers: project={project}");
         let rt = speedwave_runtime::runtime::detect_runtime();
 

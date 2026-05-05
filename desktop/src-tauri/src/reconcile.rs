@@ -180,15 +180,49 @@ pub(crate) fn list_running_projects(
     Ok(running)
 }
 
+/// Restores one project: compose_down, render, compose_up_recreate.
+/// Extracted for testability — `restore_projects` calls this in production.
+fn restore_one_project(
+    project: &str,
+    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+) -> Result<(), String> {
+    let _ = rt.compose_down(project);
+    crate::containers_cmd::render_and_save_compose(project, rt)?;
+    rt.compose_up_recreate(project)
+        .map_err(|e| format!("compose_up_recreate failed for '{}': {}", project, e))
+}
+
+/// Test seam — takes the renderer as a function pointer so tests can inject stubs.
+#[cfg(test)]
+fn restore_one_project_with_renderer(
+    project: &str,
+    rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
+    render: fn(&str, &dyn speedwave_runtime::runtime::ContainerRuntime) -> Result<(), String>,
+) -> Result<(), String> {
+    let _ = rt.compose_down(project);
+    render(project, rt)?;
+    rt.compose_up_recreate(project)
+        .map_err(|e| format!("compose_up_recreate failed for '{}': {}", project, e))
+}
+
 pub(crate) fn restore_projects(
     projects: &[String],
     rt: &dyn speedwave_runtime::runtime::ContainerRuntime,
 ) -> Result<(), String> {
     for project in projects {
-        let _ = rt.compose_down(project);
-        crate::containers_cmd::render_and_save_compose(project, rt)?;
-        rt.compose_up_recreate(project)
-            .map_err(|e| format!("compose_up_recreate failed for '{}': {}", project, e))?;
+        // NB1-v4 (Option C): substitute CloudStorage TCC prefix BEFORE the
+        // error escapes this function, so set_bundle_error and the wrapping
+        // "Project restore failed: {e}" caller receive user-readable text.
+        // The raw prefix is logged at warn level for diagnostics.
+        if let Err(e) = restore_one_project(project, rt) {
+            if e.starts_with(speedwave_runtime::consts::CLOUDSTORAGE_TCC_PREFIX) {
+                log::warn!("restore_projects: CloudStorage TCC required (raw prefix): {e}");
+                return Err(
+                    speedwave_runtime::cloudstorage::TCC_USER_REMEDIATION_MESSAGE.to_string(),
+                );
+            }
+            return Err(e);
+        }
     }
     Ok(())
 }

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub const CLAUDE_VERSION: &str = "2.1.121";
+pub const CLAUDE_VERSION: &str = "2.1.126";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 
@@ -80,6 +80,16 @@ pub const DEFAULT_FLAGS: &[&str] = &[
     MCP_CONFIG_PATH,
     // Only use servers from --mcp-config, ignore any .mcp.json in workspace
     "--strict-mcp-config",
+    // Force thinking content to be returned as `summarized` (the populated text
+    // form) rather than `omitted` (empty thinking blocks with signature only).
+    // Claude Opus 4.7 changed the API default to `omitted`, and the
+    // `showThinkingSummaries: true` settings.json key is NOT wired to this API
+    // parameter in the harness — see anthropics/claude-code#49268. Without this
+    // flag the chat UI never sees the model's reasoning. Safe across models:
+    // 4.6/Sonnet 4.6 already default to `summarized`, so this flag is a no-op
+    // for them and a fix for 4.7+. Remove once #49268 ships in upstream.
+    "--thinking-display",
+    "summarized",
 ];
 
 pub fn base_env() -> HashMap<String, String> {
@@ -97,6 +107,41 @@ pub fn base_env() -> HashMap<String, String> {
     // See issue #451. Users can override via claude.env.CLAUDE_CODE_NO_FLICKER in
     // .speedwave.json if they prefer the legacy renderer.
     env.insert("CLAUDE_CODE_NO_FLICKER".into(), "1".into());
+    env
+}
+
+/// Generates `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` env vars from the
+/// `ANTHROPIC_MODELS` SSOT. Each alias resolves to the latest entry in its
+/// family, with `[1m]` suffixed when the model supports a 1M-token context
+/// window — that suffix is what unlocks the upgraded window for Max/Team
+/// subscribers, fixing the 200k cap reported in anthropics/claude-code#34083.
+/// Remove the `[1m]` suffix logic (and ideally this whole helper) once that
+/// upstream issue ships a fix and the alias resolves to the upgraded window
+/// natively.
+///
+/// Future model bumps (e.g. Opus 4.8) only require editing `ANTHROPIC_MODELS`
+/// in this file: the env vars track the SSOT automatically. Families with no
+/// `latest: true` entry are skipped (no env var emitted) so a partial catalog
+/// never produces a malformed model id.
+pub fn anthropic_default_models_env() -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    for (alias, family_prefix) in [("OPUS", "Opus"), ("SONNET", "Sonnet"), ("HAIKU", "Haiku")] {
+        let Some(latest) = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.family.starts_with(family_prefix) && m.latest)
+        else {
+            continue;
+        };
+        let suffix = if latest.context_tokens >= 1_000_000 {
+            "[1m]"
+        } else {
+            ""
+        };
+        env.insert(
+            format!("ANTHROPIC_DEFAULT_{alias}_MODEL"),
+            format!("{}{suffix}", latest.id),
+        );
+    }
     env
 }
 
@@ -184,6 +229,87 @@ mod tests {
     #[test]
     fn default_flags_include_permission_bypass() {
         assert!(DEFAULT_FLAGS.contains(&"--dangerously-skip-permissions"));
+    }
+
+    #[test]
+    fn default_flags_force_thinking_summarized() {
+        // Workaround for anthropics/claude-code#49268 — `showThinkingSummaries`
+        // settings.json key is not wired to the API `display` parameter, so
+        // Opus 4.7's new `omitted` default wins and the chat UI never sees
+        // thinking content. The hidden `--thinking-display` CLI flag does
+        // pass through; pin it to `summarized` so reasoning stays visible.
+        let pos = DEFAULT_FLAGS
+            .iter()
+            .position(|f| *f == "--thinking-display")
+            .expect("DEFAULT_FLAGS must include --thinking-display");
+        assert_eq!(
+            DEFAULT_FLAGS.get(pos + 1),
+            Some(&"summarized"),
+            "--thinking-display must be followed by 'summarized'"
+        );
+    }
+
+    #[test]
+    fn anthropic_default_models_env_appends_1m_suffix_for_million_token_models() {
+        // Workaround for anthropics/claude-code#34083 — without `[1m]` suffix
+        // on the model id, Max/Team subscribers see their 1M-context models
+        // capped at 200k. The function must derive these env vars from the
+        // SSOT so a future model bump (Opus 4.8 etc.) propagates by editing
+        // `ANTHROPIC_MODELS` alone.
+        let env = anthropic_default_models_env();
+        // Cross-check every emitted var against SSOT — independent of which
+        // exact model id is `latest` today, so this test stays green when
+        // someone bumps the catalog.
+        for (var, value) in &env {
+            let alias = var
+                .strip_prefix("ANTHROPIC_DEFAULT_")
+                .and_then(|s| s.strip_suffix("_MODEL"))
+                .expect("var must follow ANTHROPIC_DEFAULT_<ALIAS>_MODEL");
+            let prefix = match alias {
+                "OPUS" => "Opus",
+                "SONNET" => "Sonnet",
+                "HAIKU" => "Haiku",
+                other => panic!("unexpected alias {other}"),
+            };
+            let model_id = value.trim_end_matches("[1m]");
+            let entry = ANTHROPIC_MODELS
+                .iter()
+                .find(|m| m.id == model_id)
+                .unwrap_or_else(|| panic!("model id {model_id} not in SSOT"));
+            assert!(
+                entry.family.starts_with(prefix),
+                "{var}={value}: id {model_id} (family {}) does not match alias {alias}",
+                entry.family
+            );
+            assert!(entry.latest, "{var} must point at a `latest: true` entry");
+            let has_suffix = value.ends_with("[1m]");
+            let expected_suffix = entry.context_tokens >= 1_000_000;
+            assert_eq!(
+                has_suffix, expected_suffix,
+                "{var}={value}: [1m] suffix must mirror context_tokens >= 1M (was {})",
+                entry.context_tokens
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_default_models_env_covers_every_latest_family() {
+        // Every family that has a `latest: true` entry in SSOT must produce a
+        // matching env var — otherwise the alias falls back to Anthropic's
+        // server default and we lose the [1m] upgrade for that family.
+        let env = anthropic_default_models_env();
+        for prefix in ["Opus", "Sonnet", "Haiku"] {
+            let has_latest = ANTHROPIC_MODELS
+                .iter()
+                .any(|m| m.family.starts_with(prefix) && m.latest);
+            let alias = prefix.to_uppercase();
+            let var = format!("ANTHROPIC_DEFAULT_{alias}_MODEL");
+            assert_eq!(
+                env.contains_key(&var),
+                has_latest,
+                "{var} presence must mirror SSOT having a `latest: true` {prefix} entry"
+            );
+        }
     }
 
     #[test]

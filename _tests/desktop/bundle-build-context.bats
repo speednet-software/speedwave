@@ -177,6 +177,59 @@ teardown() {
     [ "$(ls "$tmpdir/node_modules" | wc -l)" -gt 0 ]
 }
 
+@test "bundle script normalises shell scripts to LF in build-context" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    while IFS= read -r f; do
+        if grep -q $'\r' "$f"; then
+            echo "CRLF detected in $f"
+            return 1
+        fi
+    done < <(find "$DEST/build-context/containers" -type f -name '*.sh')
+}
+
+@test "bundle script strips CR from a CRLF source script (defense-in-depth)" {
+    local src="$BATS_TEST_DIRNAME/../../containers/install-claude.sh"
+    local backup
+    backup="$(mktemp)"
+    cp "$src" "$backup"
+    local src_perms
+    src_perms=$(stat -c '%a' "$src" 2>/dev/null || stat -f '%A' "$src")
+
+    printf '#!/bin/bash\r\necho hi\r\n' > "$src"
+    chmod 0755 "$src"
+
+    run "$SCRIPT"
+    local bundler_status=$status
+
+    cp "$backup" "$src"
+    chmod "$src_perms" "$src"
+    rm -f "$backup"
+
+    [ "$bundler_status" -eq 0 ]
+    if grep -q $'\r' "$DEST/build-context/containers/install-claude.sh"; then
+        echo "Bundler did not strip CR from destination"
+        return 1
+    fi
+}
+
+@test "bundle script preserves source script permissions" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+
+    local src="$BATS_TEST_DIRNAME/../../containers/install-claude.sh"
+    local dst="$DEST/build-context/containers/install-claude.sh"
+
+    # GNU stat (Linux/Git Bash) first; BSD stat (macOS) is the fallback. Order
+    # matters: GNU `stat -f` means `--file-system` (exit 0 with garbage output),
+    # so probing BSD first on Linux yields wrong results without errors.
+    local src_perms
+    local dst_perms
+    src_perms=$(stat -c '%a' "$src" 2>/dev/null || stat -f '%A' "$src")
+    dst_perms=$(stat -c '%a' "$dst" 2>/dev/null || stat -f '%A' "$dst")
+    [ "$src_perms" = "$dst_perms" ]
+}
+
 @test "bundle script --ci works without pre-built dist directories" {
     REPO_ROOT="$BATS_TEST_DIRNAME/../.."
     # Simulate a clean checkout by temporarily renaming dist directories

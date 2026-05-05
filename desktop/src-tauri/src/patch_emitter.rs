@@ -21,9 +21,8 @@ use speedwave_runtime::stream::msg_store::LogMsg;
 #[cfg(test)]
 use speedwave_runtime::stream::QueuedMessage;
 use speedwave_runtime::stream::{
-    AskUserOption as PatchAskOption, ConversationEntry, ConversationPatch, EntryIndexProvider,
-    EntryMeta, EntryRole, MessageBlock as PatchBlock, MsgStore, SessionTotals,
-    TurnUsage as PatchTurnUsage, UuidStatus,
+    ConversationEntry, ConversationPatch, EntryIndexProvider, EntryMeta, EntryRole,
+    MessageBlock as PatchBlock, MsgStore, SessionTotals, TurnUsage as PatchTurnUsage, UuidStatus,
 };
 
 use crate::chat::{StreamChunk, TurnUsage as RuntimeTurnUsage};
@@ -217,26 +216,16 @@ impl PatchEmitter {
             }
             StreamChunk::AskUserQuestion {
                 tool_id,
-                question,
-                options,
-                header,
-                multi_select,
+                questions,
+                current_index,
             } => {
                 let assistant = self.ensure_assistant_entry();
-                let opts: Vec<PatchAskOption> = options
-                    .iter()
-                    .map(|o| PatchAskOption {
-                        label: o.label.clone(),
-                        value: o.value.clone(),
-                    })
-                    .collect();
+                let answers = vec![None; questions.len()];
                 let block = PatchBlock::AskUser {
                     tool_id: tool_id.clone(),
-                    header: header.clone(),
-                    question: question.clone(),
-                    options: opts,
-                    multi_select: *multi_select,
-                    answer: None,
+                    questions: questions.clone(),
+                    current_index: *current_index,
+                    answers,
                 };
                 self.append_block(assistant, block);
                 self.set_streaming(true);
@@ -487,7 +476,8 @@ fn now_ms() -> u64 {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::chat::{AskUserOption as ChatAskOption, StreamChunk, TurnUsage as ChatTurnUsage};
+    use crate::chat::{StreamChunk, TurnUsage as ChatTurnUsage};
+    use speedwave_runtime::stream::{AskUserOption, AskUserQuestionItem};
 
     fn registry() -> MsgStoreRegistry {
         MsgStoreRegistry::new()
@@ -610,26 +600,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ask_user_chunk_appends_block() {
-        let r = registry();
-        let mut e = PatchEmitter::new();
-        e.handle_chunk(
-            &StreamChunk::AskUserQuestion {
-                tool_id: "ask-1".into(),
-                question: "Continue?".into(),
-                options: vec![ChatAskOption {
-                    label: "Yes".into(),
-                    value: "yes".into(),
-                }],
-                header: "Confirm".into(),
-                multi_select: false,
-            },
-            &r,
-        );
+    fn fake_question(text: &str) -> AskUserQuestionItem {
+        AskUserQuestionItem {
+            question: text.to_string(),
+            header: format!("Header for {text}"),
+            options: vec![AskUserOption {
+                label: "Yes".into(),
+                value: "yes".into(),
+            }],
+            multi_select: false,
+        }
+    }
+
+    fn flush_with_result(e: &mut PatchEmitter, r: &MsgStoreRegistry, session_id: &str) {
         e.handle_chunk(
             &StreamChunk::Result {
-                session_id: "s-ask".into(),
+                session_id: session_id.into(),
                 total_cost: None,
                 usage: None,
                 result_text: None,
@@ -639,15 +625,98 @@ mod tests {
                 turn_cost: None,
                 model: None,
             },
+            r,
+        );
+    }
+
+    #[test]
+    fn ask_user_chunk_appends_composite_block() {
+        let r = registry();
+        let mut e = PatchEmitter::new();
+        let questions = vec![
+            fake_question("Q1"),
+            fake_question("Q2"),
+            fake_question("Q3"),
+        ];
+        e.handle_chunk(
+            &StreamChunk::AskUserQuestion {
+                tool_id: "ask-1".into(),
+                questions,
+                current_index: 0,
+            },
             &r,
         );
+        flush_with_result(&mut e, &r, "s-ask");
         let snapshot = r.store_for("s-ask").snapshot_state();
         match &snapshot.entries[0].blocks[0] {
             PatchBlock::AskUser {
-                question, options, ..
+                questions,
+                current_index,
+                answers,
+                ..
             } => {
-                assert_eq!(question, "Continue?");
-                assert_eq!(options.len(), 1);
+                assert_eq!(questions.len(), 3);
+                assert_eq!(*current_index, 0);
+                assert_eq!(answers.len(), 3);
+                assert!(answers.iter().all(|a| a.is_none()));
+                assert_eq!(questions[0].question, "Q1");
+            }
+            other => panic!("expected AskUser, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ask_user_chunk_with_one_question_appends_composite_block() {
+        let r = registry();
+        let mut e = PatchEmitter::new();
+        e.handle_chunk(
+            &StreamChunk::AskUserQuestion {
+                tool_id: "ask-2".into(),
+                questions: vec![fake_question("Solo")],
+                current_index: 0,
+            },
+            &r,
+        );
+        flush_with_result(&mut e, &r, "s-ask-1");
+        let snapshot = r.store_for("s-ask-1").snapshot_state();
+        match &snapshot.entries[0].blocks[0] {
+            PatchBlock::AskUser {
+                questions, answers, ..
+            } => {
+                assert_eq!(questions.len(), 1);
+                assert_eq!(answers, &vec![None]);
+            }
+            other => panic!("expected AskUser, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ask_user_chunk_with_four_questions_appends_composite_block() {
+        let r = registry();
+        let mut e = PatchEmitter::new();
+        let questions = vec![
+            fake_question("A"),
+            fake_question("B"),
+            fake_question("C"),
+            fake_question("D"),
+        ];
+        e.handle_chunk(
+            &StreamChunk::AskUserQuestion {
+                tool_id: "ask-4".into(),
+                questions,
+                current_index: 0,
+            },
+            &r,
+        );
+        flush_with_result(&mut e, &r, "s-ask-4");
+        let snapshot = r.store_for("s-ask-4").snapshot_state();
+        match &snapshot.entries[0].blocks[0] {
+            PatchBlock::AskUser {
+                questions, answers, ..
+            } => {
+                assert_eq!(questions.len(), 4);
+                assert_eq!(answers, &vec![None; 4]);
+                assert_eq!(questions[3].question, "D");
             }
             other => panic!("expected AskUser, got {other:?}"),
         }

@@ -288,8 +288,7 @@ impl ContainerRuntime for WslRuntime {
         // wsl.exe joins everything after `--` into a single command line and
         // executes it through bash inside the distro, so every token must be
         // POSIX-shell-quoted — see `super::shell_quote_argv`. Without this,
-        // prompts containing `(`, `)`, `'`, etc. (notably from
-        // `prompts::local_llm_identity`) break remote bash.
+        // arguments containing `(`, `)`, `'`, etc. break remote bash.
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
         let nerdctl_argv: Vec<&str> = [
             "nerdctl",
@@ -472,15 +471,18 @@ impl ContainerRuntime for WslRuntime {
         Ok(())
     }
 
-    fn remove_images(&self, tags: &[String]) -> anyhow::Result<()> {
+    fn remove_images(&self, tags: &[String], force: bool) -> anyhow::Result<()> {
         if tags.is_empty() {
             return Ok(());
         }
         let mut args = vec!["-d", consts::WSL_DISTRO_NAME, "--", "nerdctl", "rmi"];
+        if force {
+            args.push("--force");
+        }
         let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
         args.extend(tag_refs);
-        // Intentionally no --force: if an old image is still referenced by a
-        // running container rmi fails, caller logs warn-only and the image
+        // Without `force`, nerdctl rmi refuses if a running container still
+        // references the image — caller logs warn-only and the image
         // gets retried on the next update cycle once the container is gone.
         if let Err(e) = self.runner.run("wsl.exe", &args) {
             log::warn!("wsl rmi failed: {e}");
@@ -1156,7 +1158,7 @@ mod tests {
         let runner = MockRunner::new();
         let rt = WslRuntime::with_runner(Box::new(runner));
         assert!(
-            rt.remove_images(&[]).is_ok(),
+            rt.remove_images(&[], false).is_ok(),
             "empty tags should return Ok without calling runner"
         );
     }
@@ -1172,7 +1174,7 @@ mod tests {
             "",
         );
         let rt = WslRuntime::with_runner(Box::new(runner));
-        assert!(rt.remove_images(&tags).is_ok());
+        assert!(rt.remove_images(&tags, false).is_ok());
     }
 
     #[test]
@@ -1185,9 +1187,23 @@ mod tests {
         let rt = WslRuntime::with_runner(Box::new(runner));
         // rmi failure must not propagate — just warn and return Ok
         assert!(
-            rt.remove_images(&tags).is_ok(),
+            rt.remove_images(&tags, false).is_ok(),
             "rmi failure should not propagate"
         );
+    }
+
+    #[test]
+    fn test_remove_images_force_passes_force_flag() {
+        let tags = vec!["speedwave-mcp-example:1.0.0".to_string()];
+        let runner = MockRunner::new().with_response(
+            "wsl.exe -d Speedwave -- nerdctl rmi --force speedwave-mcp-example:1.0.0",
+            "",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        // force=true must add --force to the rmi args so nerdctl removes
+        // images that are still referenced by a running container (the
+        // explicit-uninstall path).
+        assert!(rt.remove_images(&tags, true).is_ok());
     }
 
     #[test]

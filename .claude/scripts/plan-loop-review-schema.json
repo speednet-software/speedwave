@@ -28,6 +28,28 @@
     "new_issue_count": {
       "type": "integer",
       "description": "Number of issues in this review that are NEW (not present in any previous review context). On the first review, equals the total issue count."
+    },
+    "rules_compliance": {
+      "type": "array",
+      "description": "One entry per rule file in the AUTHORITATIVE PROJECT CONTEXT block (CLAUDE.md plus every file in .claude/rules/). For each rule file, decide whether the plan addresses it adequately for the task at hand. A rule that is NOT applicable to this task is still listed with addressed=true and note='not applicable: <reason>'. A rule the plan ignores while the task touches its scope is addressed=false and MUST be reflected in findings_summary. Do not skip files — incompleteness here means BLOCKER on the next review.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "rule_file": {
+            "type": "string",
+            "description": "Filename only, e.g. 'CLAUDE.md', 'security.md', 'local-llm.md'"
+          },
+          "addressed": {
+            "type": "boolean"
+          },
+          "note": {
+            "type": "string",
+            "description": "Short justification — which plan section satisfies this rule, or which invariant the plan violates / ignores."
+          }
+        },
+        "required": ["rule_file", "addressed", "note"],
+        "additionalProperties": false
+      }
     }
   },
   "required": [
@@ -38,7 +60,8 @@
     "low_count",
     "findings_summary",
     "verdict_table",
-    "new_issue_count"
+    "new_issue_count",
+    "rules_compliance"
   ],
   "additionalProperties": false
 }

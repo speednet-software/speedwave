@@ -44,6 +44,10 @@ If a category does not apply (e.g., a pure function has no state transitions), s
 - Small fixes "along the way" prevent accumulation of technical debt
 - If the fix is too large for the current scope — report it to the user, but never ignore it
 
+## PR Titles to `main`
+
+**`chore(...)` is forbidden as a PR title for `dev → main`.** release-please ignores `chore` commits, so a `chore` squash merge collapses every bundled `feat`/`fix` into an invisible release with no version bump. Allowed types for PRs to `main`: `feat, fix, perf, refactor, docs, ci, test, build, style, revert`. `chore` remains valid for PRs targeting `dev`. The full merge-strategy table lives in CLAUDE.md — do not duplicate it here; check it before opening a release PR.
+
 ## Branch Protection & CI
 
 **NEVER bypass branch protection or CI requirements.** This includes ALL of the following — they are ALL equally forbidden:
