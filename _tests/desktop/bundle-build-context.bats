@@ -193,6 +193,8 @@ teardown() {
     local backup
     backup="$(mktemp)"
     cp "$src" "$backup"
+    local src_perms
+    src_perms=$(stat -f '%A' "$src" 2>/dev/null || stat -c '%a' "$src")
 
     printf '#!/bin/bash\r\necho hi\r\n' > "$src"
     chmod 0755 "$src"
@@ -201,6 +203,7 @@ teardown() {
     local bundler_status=$status
 
     cp "$backup" "$src"
+    chmod "$src_perms" "$src"
     rm -f "$backup"
 
     [ "$bundler_status" -eq 0 ]
