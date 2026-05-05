@@ -212,7 +212,7 @@ async fn send_message(
     message: String,
     state: tauri::State<'_, SharedChatSession>,
 ) -> Result<(), String> {
-    if message.len() > 1_000_000 {
+    if message.len() > chat::MAX_MESSAGE_LEN {
         return Err("Message too long".to_string());
     }
     log::info!("send_message: len={}", message.len());
@@ -236,7 +236,7 @@ async fn submit_question_answer(
     answer: String,
     state: tauri::State<'_, SharedChatSession>,
 ) -> Result<(), String> {
-    if answer.len() > chat::MAX_ANSWER_LEN {
+    if answer.len() > chat::MAX_ASK_USER_ANSWER_LEN {
         return Err("Answer too long".to_string());
     }
     let session_arc = state.inner().clone();
@@ -246,7 +246,6 @@ async fn submit_question_answer(
             .map_err(|_| "no active session (session is being started)".to_string())?;
         session
             .submit_question_answer(&tool_use_id, question_idx, &answer)
-            .map(|_| ())
             .map_err(|e| e.to_string())
     })
     .await

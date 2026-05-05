@@ -61,8 +61,9 @@ export interface AskUserOption {
 /**
  * One question inside an AskUserQuestion control_request — mirrors
  * `crate::chat::AskUserQuestionItem` (and ultimately
- * `speedwave_runtime::stream::AskUserQuestionItem`). 1–4 items per
- * `AskUserQuestion` chunk.
+ * `speedwave_runtime::stream::AskUserQuestionItem`). Up to 4 items per
+ * `AskUserQuestion` chunk; an empty array is also tolerated and dropped
+ * by the host at parse time.
  */
 export interface AskUserQuestionItem {
   question: string;
@@ -144,7 +145,7 @@ export type MessageBlock =
 /**
  * State for an interactive AskUserQuestion block within a message.
  *
- * One block carries 1–4 questions; the renderer walks them sequentially,
+ * One block carries up to 4 questions; the renderer walks them sequentially,
  * showing only `questions[current_index]` interactively while previous
  * indices are locked with the answered-label badge in `answers[i]`. When
  * every slot in `answers` is non-null the block is fully answered and
@@ -193,7 +194,10 @@ export type NormalizedToolInput =
   | { kind: 'edit'; file_path: string; old_string: string; new_string: string }
   | { kind: 'glob'; pattern: string; path?: string }
   | { kind: 'grep'; pattern: string; path?: string; include?: string }
-  | { kind: 'todo_write'; todos: Array<{ id: string; title: string; status: string }> }
+  | {
+      kind: 'todo_write';
+      todos: Array<{ content: string; status: string; activeForm?: string }>;
+    }
   | { kind: 'web_search'; query: string }
   | { kind: 'web_fetch'; url: string }
   | { kind: 'agent'; description: string }

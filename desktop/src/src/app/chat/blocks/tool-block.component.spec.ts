@@ -252,9 +252,9 @@ describe('ToolBlockComponent', () => {
           tool_name: 'TodoWrite',
           input_json: JSON.stringify({
             todos: [
-              { id: '1', title: 'first', status: 'completed' },
-              { id: '2', title: 'second', status: 'in_progress' },
-              { id: '3', title: 'third', status: 'pending' },
+              { content: 'first', status: 'completed' },
+              { content: 'second', status: 'in_progress', activeForm: 'second-active' },
+              { content: 'third', status: 'pending' },
             ],
           }),
         })
@@ -269,7 +269,7 @@ describe('ToolBlockComponent', () => {
       const items = list?.querySelectorAll('li') ?? [];
       expect(items.length).toBe(3);
       expect(items[0].textContent).toContain('first');
-      expect(items[1].textContent).toContain('second');
+      expect(items[1].textContent).toContain('second-active');
       expect(items[2].textContent).toContain('third');
     });
 
@@ -584,7 +584,7 @@ describe('ToolBlockComponent', () => {
       setTool(
         makeTool({
           tool_name: 'TodoWrite',
-          input_json: '{"todos":[{"id":"1","title":"a","status":"pending"}]}',
+          input_json: '{"todos":[{"content":"a","status":"pending"}]}',
         })
       );
       expect(component.headerSummary()).toBe('1 task');
@@ -595,7 +595,7 @@ describe('ToolBlockComponent', () => {
         makeTool({
           tool_name: 'TodoWrite',
           input_json:
-            '{"todos":[{"id":"1","title":"a","status":"pending"},{"id":"2","title":"b","status":"pending"}]}',
+            '{"todos":[{"content":"a","status":"pending"},{"content":"b","status":"pending"}]}',
         })
       );
       expect(component.headerSummary()).toBe('2 tasks');

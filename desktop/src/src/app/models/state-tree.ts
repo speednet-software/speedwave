@@ -60,16 +60,16 @@ export interface EntryMetaState {
   cost?: number;
 }
 
+import type { AskUserQuestionItem } from './chat';
+
 /**
  * One question inside an `ask_user` block — mirrors
- * `speedwave_runtime::stream::AskUserQuestionItem`.
+ * `speedwave_runtime::stream::AskUserQuestionItem`. Same shape as
+ * {@link AskUserQuestionItem}; this alias exposes a `Readonly` view for
+ * persistence-layer consumers, but the underlying type lives in
+ * `models/chat.ts` (single source of truth).
  */
-export interface AskUserQuestionStateItem {
-  question: string;
-  header: string;
-  multi_select: boolean;
-  options: ReadonlyArray<{ label: string; value: string }>;
-}
+export type AskUserQuestionStateItem = Readonly<AskUserQuestionItem>;
 
 /**
  * One block inside a conversation entry. Tagged enum: serde serializes as

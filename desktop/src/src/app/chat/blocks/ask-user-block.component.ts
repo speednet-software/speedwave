@@ -164,17 +164,25 @@ export class AskUserBlockComponent {
   });
 
   constructor() {
-    // When the active slot moves (block reduces optimistically after a
-    // successful answer), reset the local input + selection state so the
-    // next question starts from a clean slate. Lives in an effect, not in
-    // a computed, because Angular forbids signal writes inside computed().
+    // Reset transient input state whenever the parent reducer hands us a
+    // new question() input. Lives in an effect (not a computed) because
+    // Angular forbids signal writes inside computed(). Note: the
+    // dependency is the entire `question()` input — any reducer-driven
+    // replacement (which always happens via spread, not in-place mutation)
+    // triggers the reset, not just `current_index` changes. That's
+    // intentional: `selected` and `freeformText` are scoped to the active
+    // slot, so a fresh block reference means a fresh slot to clear.
     effect(() => {
-      // Subscribe to current_index — the read inside the effect is the
-      // dependency, no body needed beyond clearing transient state.
-      this.question().current_index;
+      void this.question();
       this.selected.set(new Set());
       this.freeformText.set('');
     });
+  }
+
+  /** Shared "question N of M · " prefix for legends; empty for 1-question blocks. */
+  private progressPrefix(idx: number): string {
+    const total = this.question().questions.length;
+    return total > 1 ? `question ${idx + 1} of ${total} · ` : '';
   }
 
   /** Variant key used as a data attribute and drives some visual decisions. */
@@ -219,10 +227,7 @@ export class AskUserBlockComponent {
   readonly legendText = computed(() => {
     const q = this.activeQuestion();
     if (!q) return '';
-    const block = this.question();
-    const total = block.questions.length;
-    const idx = block.current_index;
-    const progress = total > 1 ? `question ${idx + 1} of ${total} · ` : '';
+    const progress = this.progressPrefix(this.question().current_index);
     if (q.header) return `${progress}${q.header}`;
     return q.multi_select
       ? `${progress}? question · select any`
@@ -240,9 +245,7 @@ export class AskUserBlockComponent {
 
   /** Legend rendered for previously-answered (locked) slots. */
   legendForLocked(q: AskUserQuestionItem, i: number): string {
-    const total = this.question().questions.length;
-    const progress = total > 1 ? `question ${i + 1} of ${total} · ` : '';
-    return `${progress}✓ answered${q.header ? ` · ${q.header}` : ''}`;
+    return `${this.progressPrefix(i)}✓ answered${q.header ? ` · ${q.header}` : ''}`;
   }
 
   /**

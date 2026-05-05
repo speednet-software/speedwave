@@ -21,6 +21,7 @@ import type {
   StreamChunk,
   ToolUseBlock,
   AskUserQuestionBlock,
+  AskUserQuestionItem,
   ProjectList,
   RateLimitInfo,
   EntryMeta,
@@ -96,7 +97,7 @@ export class ChatStateService {
   /**
    * Monotonically increasing turn id. Bumped by both `sendMessage` (new turn
    * starts) and `stopConversation` (turn cancelled). Used across awaits by
-   * `answerQuestion` to detect whether the turn it was answering has since
+   * `submitAnswer` to detect whether the turn it was answering has since
    * been superseded, so late backend errors from the dying turn can be
    * suppressed.
    */
@@ -462,16 +463,22 @@ export class ChatStateService {
   async submitAnswer(toolUseId: string, questionIdx: number, value: string): Promise<void> {
     const capturedTurn = this._turnId;
 
+    // Snapshot the pre-mutation current_index so the error path can revert
+    // to it precisely — resetting to questionIdx would be wrong if the user
+    // submitted out of order.
+    let prevIndex: number | null = null;
+
     this._currentBlocks = this._currentBlocks.map((b) => {
       if (b.type !== 'ask_user' || b.question.tool_id !== toolUseId) return b;
       const answers = b.question.answers.slice();
       if (questionIdx < 0 || questionIdx >= answers.length) return b;
+      prevIndex = b.question.current_index;
       answers[questionIdx] = value;
       const nextNull = answers.findIndex((a) => a === null);
-      const next_index = nextNull === -1 ? answers.length : nextNull;
+      const nextIndex = nextNull === -1 ? answers.length : nextNull;
       return {
         ...b,
-        question: { ...b.question, answers, current_index: next_index },
+        question: { ...b.question, answers, current_index: nextIndex },
       };
     });
     this.notifyChange();
@@ -492,6 +499,7 @@ export class ChatStateService {
         return;
       }
       this.isStreaming = false;
+      const indexBeforeMutation = prevIndex ?? questionIdx;
       this._currentBlocks = this._currentBlocks.map((b) => {
         if (b.type !== 'ask_user' || b.question.tool_id !== toolUseId) return b;
         const answers = b.question.answers.slice();
@@ -499,7 +507,7 @@ export class ChatStateService {
         answers[questionIdx] = null;
         return {
           ...b,
-          question: { ...b.question, answers, current_index: questionIdx },
+          question: { ...b.question, answers, current_index: indexBeforeMutation },
         };
       });
       this._currentBlocks = [
@@ -1449,12 +1457,7 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
           type: 'ask_user',
           question: {
             tool_id: b.tool_id,
-            questions: b.questions.map((q) => ({
-              question: q.question,
-              header: q.header,
-              multi_select: q.multi_select,
-              options: q.options.map((o) => ({ label: o.label, value: o.value })),
-            })),
+            questions: b.questions.map(cloneQuestionItem),
             current_index: b.current_index,
             answers: [...b.answers],
           },
@@ -1468,7 +1471,16 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
   return out;
 }
 
-function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBlockState[] {
+function cloneQuestionItem(q: AskUserQuestionItem): AskUserQuestionItem {
+  return {
+    question: q.question,
+    header: q.header,
+    multi_select: q.multi_select,
+    options: q.options.map((o) => ({ label: o.label, value: o.value })),
+  };
+}
+
+export function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBlockState[] {
   const out: MessageBlockState[] = [];
   for (const b of blocks) {
     switch (b.type) {
@@ -1494,12 +1506,7 @@ function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBlockStat
         out.push({
           kind: 'ask_user',
           tool_id: b.question.tool_id,
-          questions: b.question.questions.map((q) => ({
-            question: q.question,
-            header: q.header,
-            multi_select: q.multi_select,
-            options: q.options.map((o) => ({ label: o.label, value: o.value })),
-          })),
+          questions: b.question.questions.map(cloneQuestionItem),
           current_index: b.question.current_index,
           answers: [...b.question.answers],
         });

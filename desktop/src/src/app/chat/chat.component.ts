@@ -283,7 +283,11 @@ export class ChatComponent implements OnInit, OnDestroy {
     questionIdx: number;
     value: string;
   }): Promise<void> {
-    await this.chat.submitAnswer(event.toolId, event.questionIdx, event.value);
+    try {
+      await this.chat.submitAnswer(event.toolId, event.questionIdx, event.value);
+    } catch (err) {
+      console.error('[chat] onQuestionAnswered: unexpected error', err);
+    }
   }
 
   /**

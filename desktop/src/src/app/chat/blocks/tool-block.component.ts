@@ -133,9 +133,17 @@ $ {{ asBash(normalized()).command }}</pre
                 data-testid="todo-list"
                 class="mono list-none space-y-0.5 rounded border border-[var(--line)] bg-[var(--bg-1)] p-3 text-[12px]"
               >
-                @for (todo of asTodoWrite(normalized()).todos; track todo.id) {
+                <!-- track $index: TodoWrite items have no stable id field;
+                     positional tracking is fine because the tool always
+                     re-renders the full list on each invocation. -->
+                @for (todo of asTodoWrite(normalized()).todos; track $index) {
                   <li [class]="todoColor(todo.status)">
-                    {{ todoGlyph(todo.status) }} {{ todo.title }}
+                    {{ todoGlyph(todo.status) }}
+                    {{
+                      todo.status === 'in_progress' && todo.activeForm
+                        ? todo.activeForm
+                        : todo.content
+                    }}
                   </li>
                 }
               </ul>

@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
-import { ChatStateService } from './chat-state.service';
+import {
+  ChatStateService,
+  messageBlocksToState,
+  stateBlocksToMessageBlocks,
+} from './chat-state.service';
 import { ProjectStateService } from './project-state.service';
 import { TauriService } from './tauri.service';
 import { AnthropicModelsService } from './anthropic-models.service';
@@ -965,6 +969,76 @@ describe('ChatStateService', () => {
         questionIdx: 0,
         answer: 'A, B',
       });
+    });
+  });
+
+  describe('AskUserQuestion persistence round-trip', () => {
+    function multiQuestionBlock() {
+      return {
+        type: 'ask_user' as const,
+        question: {
+          tool_id: 'toolu_round',
+          questions: [
+            {
+              question: 'Q0',
+              header: 'H0',
+              multi_select: false,
+              options: [
+                { label: 'A', value: 'a' },
+                { label: 'B', value: 'b' },
+              ],
+            },
+            {
+              question: 'Q1',
+              header: '',
+              multi_select: true,
+              options: [],
+            },
+          ],
+          current_index: 1,
+          answers: ['A', null] as (string | null)[],
+        },
+      };
+    }
+
+    it('messageBlocksToState round-trips ask_user composite without losing data', () => {
+      const block = multiQuestionBlock();
+      const state = messageBlocksToState([block]);
+      const recovered = stateBlocksToMessageBlocks(state);
+      expect(recovered).toEqual([block]);
+    });
+
+    it('round-trips an empty single-question block', () => {
+      const block = {
+        type: 'ask_user' as const,
+        question: {
+          tool_id: 't1',
+          questions: [{ question: 'Solo', header: '', multi_select: false, options: [] }],
+          current_index: 0,
+          answers: [null] as (string | null)[],
+        },
+      };
+      const recovered = stateBlocksToMessageBlocks(messageBlocksToState([block]));
+      expect(recovered).toEqual([block]);
+    });
+
+    it('round-trips a fully-answered 4-question block', () => {
+      const block = {
+        type: 'ask_user' as const,
+        question: {
+          tool_id: 't4',
+          questions: ['A', 'B', 'C', 'D'].map((q) => ({
+            question: q,
+            header: '',
+            multi_select: false,
+            options: [],
+          })),
+          current_index: 4,
+          answers: ['a', 'b', 'c', 'd'] as (string | null)[],
+        },
+      };
+      const recovered = stateBlocksToMessageBlocks(messageBlocksToState([block]));
+      expect(recovered).toEqual([block]);
     });
   });
 

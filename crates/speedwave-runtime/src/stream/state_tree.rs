@@ -210,7 +210,7 @@ pub enum MessageBlock {
     },
     /// Interactive question(s) from Claude (the `AskUserQuestion` tool variant).
     ///
-    /// The Claude Agent SDK can deliver 1–4 questions in a single
+    /// The Claude Agent SDK can deliver up to 4 questions in a single
     /// `control_request`. We render them sequentially: only
     /// `current_index` is interactive; earlier indices are locked with their
     /// chosen-label badge stored in `answers`.
@@ -218,11 +218,16 @@ pub enum MessageBlock {
         /// Tool-use id from the stream event.
         tool_id: String,
         /// All questions in this `control_request`, in order. `len() <=
-        /// MAX_ASK_USER_QUESTIONS`; truncated upstream with a warn log if the
-        /// SDK ever sends more.
+        /// MAX_ASK_USER_QUESTIONS`; callers must truncate (see Tauri host
+        /// `StreamParser::parse_ask_user_questions`) and emit a warn log
+        /// when the SDK exceeds the cap.
         questions: Vec<AskUserQuestionItem>,
-        /// Index of the currently-active (interactive) question; equals
-        /// `questions.len()` when every question has been answered.
+        /// Index of the currently-active (interactive) question. The
+        /// frontend reducer advances it to `questions.len()` once every
+        /// `answers` slot is `Some(_)` — the host removes its
+        /// `PartialAnswers` from `pending_requests` at the same moment, so
+        /// this terminal state is only ever observable in the persisted
+        /// state-tree.
         current_index: usize,
         /// Per-question chosen value; `len() == questions.len()`. `None` until
         /// the user answers slot `i`. Populated optimistically by the frontend
@@ -239,8 +244,11 @@ pub enum MessageBlock {
 }
 
 /// Maximum number of questions accepted in a single `AskUserQuestion`
-/// control_request. Matches the Claude Agent SDK contract (1–4 questions).
-/// Anything beyond is truncated with a `log::warn!` (count only).
+/// control_request. Matches the Claude Agent SDK contract (up to 4
+/// questions; the host tolerates 0 by dropping the request). Anything
+/// beyond the cap is truncated with a `log::warn!` (count only). Per-entry
+/// filtering may further drop malformed items — see
+/// `StreamParser::parse_ask_user_question`.
 pub const MAX_ASK_USER_QUESTIONS: usize = 4;
 
 /// Maximum size, in bytes, of the serialized `control_response` written to
@@ -251,9 +259,14 @@ pub const MAX_ASK_USER_WIRE_BYTES: usize = 64 * 1024;
 
 /// One question inside an `AskUser` block.
 ///
-/// The Agent SDK control_request `input.questions[i]` shape: `{ question,
-/// header, multiSelect, options[] }`. We mirror it 1:1 so frontend and
-/// runtime hold the same data without translation.
+/// The Agent SDK control_request `input.questions[i]` ships
+/// `{ question, header, multiSelect, options[] }` (camelCase). The Tauri
+/// host translates the camelCase boundary at parse time
+/// (`StreamParser::parse_ask_user_question`); fields here use snake_case
+/// because that's the convention for everything we persist or send to the
+/// Angular frontend through the patch stream. **If you add a field here,
+/// update the manual extraction in the parser too** — the type does not
+/// auto-deserialize from SDK input.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct AskUserQuestionItem {
     /// Full question text shown to the user. Also doubles as the key in the

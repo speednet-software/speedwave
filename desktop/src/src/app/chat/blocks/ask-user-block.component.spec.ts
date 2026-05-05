@@ -373,4 +373,29 @@ describe('AskUserBlockComponent', () => {
       'single-freeform'
     );
   });
+
+  it('resets selected and freeform input when current_index advances to next slot', () => {
+    setBlock(
+      makeBlock({
+        questions: [makeQuestion({ question: 'Q0' }), makeQuestion({ question: 'Q1' })],
+        current_index: 0,
+        answers: [null, null],
+      })
+    );
+    component.toggleOption('apple');
+    component.freeformText.set('partial draft');
+    expect(component.selected().size).toBe(1);
+
+    // Parent reducer advances current_index after a successful answer —
+    // simulate that by handing in a new block with the slot filled.
+    setBlock(
+      makeBlock({
+        questions: [makeQuestion({ question: 'Q0' }), makeQuestion({ question: 'Q1' })],
+        current_index: 1,
+        answers: ['Apple', null],
+      })
+    );
+    expect(component.selected().size).toBe(0);
+    expect(component.freeformText()).toBe('');
+  });
 });

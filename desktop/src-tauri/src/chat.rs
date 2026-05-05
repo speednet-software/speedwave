@@ -67,7 +67,7 @@ pub enum StreamChunk {
     },
     /// Interactive question(s) from Claude (AskUserQuestion tool).
     ///
-    /// May contain 1–4 questions per the Agent SDK contract. The frontend
+    /// Up to 4 questions per the Agent SDK contract. The frontend
     /// renders them sequentially; once every slot has a value it calls
     /// `submit_question_answer` for the last one and the host writes a single
     /// `control_response` carrying the full `answers` map.
@@ -181,26 +181,32 @@ pub struct PartialAnswers {
     /// Parsed questions list (after truncation to `MAX_ASK_USER_QUESTIONS`).
     pub questions: Vec<AskUserQuestionItem>,
     /// One slot per question. `None` until the user answers slot `i`.
+    /// Length is always equal to `questions.len()` — enforced by the
+    /// `PartialAnswers::new` constructor.
     pub answers: Vec<Option<String>>,
+}
+
+impl PartialAnswers {
+    /// Create a `PartialAnswers` with one `None` slot per question. This
+    /// is the only path that should construct the struct in production —
+    /// it makes the `answers.len() == questions.len()` invariant
+    /// structurally impossible to violate.
+    pub fn new(request: ControlRequest, questions: Vec<AskUserQuestionItem>) -> Self {
+        let answers = vec![None; questions.len()];
+        Self {
+            request,
+            questions,
+            answers,
+        }
+    }
 }
 
 type PendingRequests = Arc<Mutex<HashMap<String, PartialAnswers>>>;
 
-/// Outcome of `ChatSession::submit_question_answer`. `Pending` means the host
-/// recorded the slot but has more questions to wait for; `Completed` means
-/// the host wrote one `control_response` to Claude's stdin and removed the
-/// entry from `pending_requests`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubmitOutcome {
-    /// Slot recorded; more questions still pending answers.
-    Pending,
-    /// All slots filled and the response was written to stdin.
-    Completed,
-}
-
-/// Internal: result of `fill_slot`. Mirrors `SubmitOutcome` but carries the
-/// `PartialAnswers` ownership when every slot is filled, so the caller can
-/// build the wire response without re-locking the map.
+/// Internal: result of `fill_slot`. When all slots are filled, the variant
+/// carries the `PartialAnswers` ownership so the caller can build the wire
+/// response without re-locking the pending-requests map.
+#[derive(Debug)]
 enum FillOutcome {
     Pending,
     Completed(PartialAnswers),
@@ -214,7 +220,12 @@ fn validate_slot(
     if question_idx >= entry.questions.len() {
         anyhow::bail!("invalid question index {question_idx} for tool_use_id: {tool_use_id}");
     }
-    if entry.answers[question_idx].is_some() {
+    let slot = entry.answers.get(question_idx).ok_or_else(|| {
+        anyhow::anyhow!(
+            "answers/questions length mismatch for tool_use_id: {tool_use_id}"
+        )
+    })?;
+    if slot.is_some() {
         anyhow::bail!(
             "question {question_idx} already answered for tool_use_id: {tool_use_id}"
         );
@@ -222,10 +233,14 @@ fn validate_slot(
     Ok(())
 }
 
-/// Maximum size, in bytes, of a single user-supplied answer string. Lifted
-/// from main.rs so the host and the Tauri command layer share one cap (DRY,
-/// per CLAUDE.md "edit the SSOT, do not hard-code the value at the call site").
-pub const MAX_ANSWER_LEN: usize = 1_000_000;
+/// Maximum size, in bytes, of a user-supplied chat message string.
+pub const MAX_MESSAGE_LEN: usize = 1_000_000;
+
+/// Maximum size, in bytes, of a single per-slot answer to an
+/// `AskUserQuestion`. Sized so that 4 maximally-large slots cannot exceed
+/// `MAX_ASK_USER_WIRE_BYTES` after JSON encoding overhead — preventing the
+/// "fill 3 slots cheaply, blow the wire cap on the 4th" foot-gun.
+pub const MAX_ASK_USER_ANSWER_LEN: usize = 12 * 1024;
 
 /// Structured log entry returned by StreamParser for session logging.
 pub struct LogEntry {
@@ -406,9 +421,17 @@ impl StreamParser {
                     .collect()
             })
             .unwrap_or_default();
-        // A question with empty text is dropped — matches the historical
-        // emit-empty-fallback behaviour but at the per-item level.
-        if question.is_empty() && header.is_empty() && options.is_empty() {
+        // Drop entries without question text — they would render as a
+        // blank prompt the user can't act on, and would produce an empty
+        // wire-key in the answers map. Logged at count level only (no
+        // question text — could be customer-supplied PII).
+        if question.trim().is_empty() {
+            log::warn!(
+                "AskUserQuestion: dropping entry with empty question text \
+                 (header_present={}, options={})",
+                !header.is_empty(),
+                options.len()
+            );
             return None;
         }
         Some(AskUserQuestionItem {
@@ -421,9 +444,10 @@ impl StreamParser {
 
     /// Parse the questions list from a control_request input.
     ///
-    /// The Agent SDK shape is `{ "questions": [{...}, ...] }` with 1–4
+    /// The Agent SDK shape is `{ "questions": [{...}, ...] }` with up to 4
     /// entries. Older/flat senders may pass a single question object at the
-    /// top level; we accept that as a one-element array. Truncates with a
+    /// top level; we accept that as a one-element array. An empty array
+    /// returns an empty `Vec` (caller logs and drops). Truncates with a
     /// warn (count only — never question text in logs) if the SDK exceeds
     /// `MAX_ASK_USER_QUESTIONS`. Returns an empty `Vec` when no usable
     /// question entry is found.
@@ -1077,11 +1101,14 @@ pub fn build_auto_approve_response(request: &ControlRequest) -> serde_json::Valu
 /// question slot) per the Agent SDK contract.
 ///
 /// Key = question text; value = the chosen label (or `", "`-joined labels for
-/// multi-select, joined by the frontend before submission). Duplicate
-/// question texts collapse to one map key with last-write-wins; the host
-/// emits a `log::warn!` when it detects this so an operator can spot it.
-/// The original `questions` array is preserved unchanged in `updatedInput`.
-fn build_ask_user_response_multi(partial: &PartialAnswers) -> serde_json::Value {
+/// multi-select, joined by the frontend before submission). The original
+/// `questions` array is preserved unchanged in `updatedInput`.
+///
+/// Fails closed on duplicate question text: the SDK's answers-map keying
+/// would silently drop one slot's answer (last-write-wins on a JSON Map),
+/// which violates the "every answered question is reflected on the wire"
+/// invariant. We refuse to emit a partial-truth payload; the user retries.
+fn build_ask_user_response_multi(partial: &PartialAnswers) -> anyhow::Result<serde_json::Value> {
     let mut updated_input = partial.request.input.clone();
     let mut answers = serde_json::Map::with_capacity(partial.questions.len());
     let mut seen_keys: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -1090,14 +1117,18 @@ fn build_ask_user_response_multi(partial: &PartialAnswers) -> serde_json::Value 
         let key = q.question.as_str();
         if !seen_keys.insert(key) {
             log::warn!(
-                "AskUserQuestion: duplicate question text on wire — last answer wins for one slot"
+                "AskUserQuestion: duplicate question text — refusing to emit lossy answers map"
+            );
+            anyhow::bail!(
+                "AskUserQuestion request contained duplicate question text — \
+                 cannot build a complete answers map (refer to log for count)"
             );
         }
         answers.insert(key.to_string(), serde_json::Value::String(value.to_string()));
     }
     updated_input["answers"] = serde_json::Value::Object(answers);
 
-    serde_json::json!({
+    Ok(serde_json::json!({
         "type": "control_response",
         "response": {
             "subtype": "success",
@@ -1107,7 +1138,7 @@ fn build_ask_user_response_multi(partial: &PartialAnswers) -> serde_json::Value 
                 "updatedInput": updated_input
             }
         }
-    })
+    }))
 }
 
 /// Validate a message UUID passed to `--resume-session-at`.
@@ -1462,11 +1493,7 @@ impl ChatSession {
                             Ok(mut map) => {
                                 map.insert(
                                     ctrl.tool_use_id.clone(),
-                                    PartialAnswers {
-                                        request: ctrl.clone(),
-                                        answers: vec![None; questions.len()],
-                                        questions: questions.clone(),
-                                    },
+                                    PartialAnswers::new(ctrl.clone(), questions.clone()),
                                 );
                             }
                             Err(e) => {
@@ -1648,17 +1675,21 @@ impl ChatSession {
     /// once every slot is filled, write a single `control_response` to
     /// Claude's stdin.
     ///
-    /// Returns `SubmitOutcome::Pending` when more questions still need
-    /// answers, or `SubmitOutcome::Completed` when the response was written.
-    /// Errors restore the partial state so the user can retry.
+    /// On post-fill errors (serialize / oversize / stdin write) the partial
+    /// state is restored with the just-filled slot cleared, so the user can
+    /// retry. Pre-fill errors (oversize answer, no active session) leave the
+    /// pending map untouched.
     pub fn submit_question_answer(
         &mut self,
         tool_use_id: &str,
         question_idx: usize,
         answer: &str,
-    ) -> anyhow::Result<SubmitOutcome> {
-        if answer.len() > MAX_ANSWER_LEN {
-            anyhow::bail!("answer too long (max {} bytes)", MAX_ANSWER_LEN);
+    ) -> anyhow::Result<()> {
+        if answer.len() > MAX_ASK_USER_ANSWER_LEN {
+            anyhow::bail!(
+                "answer too long (max {} bytes)",
+                MAX_ASK_USER_ANSWER_LEN
+            );
         }
 
         let child = self
@@ -1675,17 +1706,23 @@ impl ChatSession {
         }
 
         let partial = match self.fill_slot(tool_use_id, question_idx, answer)? {
-            FillOutcome::Pending => return Ok(SubmitOutcome::Pending),
+            FillOutcome::Pending => return Ok(()),
             FillOutcome::Completed(p) => p,
         };
 
-        let serialized = serde_json::to_string(&build_ask_user_response_multi(&partial))
-            .map_err(|e| {
-                self.restore_partial(tool_use_id, &partial);
-                anyhow::anyhow!("failed to serialize AskUserQuestion response: {e}")
-            })?;
+        let response = match build_ask_user_response_multi(&partial) {
+            Ok(v) => v,
+            Err(e) => {
+                self.restore_partial(tool_use_id, &partial, Some(question_idx));
+                return Err(e);
+            }
+        };
+        let serialized = serde_json::to_string(&response).map_err(|e| {
+            self.restore_partial(tool_use_id, &partial, Some(question_idx));
+            anyhow::anyhow!("failed to serialize AskUserQuestion response: {e}")
+        })?;
         if serialized.len() > MAX_ASK_USER_WIRE_BYTES {
-            self.restore_partial(tool_use_id, &partial);
+            self.restore_partial(tool_use_id, &partial, Some(question_idx));
             anyhow::bail!(
                 "AskUserQuestion response exceeds {} byte cap (got {})",
                 MAX_ASK_USER_WIRE_BYTES,
@@ -1707,11 +1744,11 @@ impl ChatSession {
                 partial.request.tool_name
             );
             drop(stdin);
-            self.restore_partial(tool_use_id, &partial);
+            self.restore_partial(tool_use_id, &partial, Some(question_idx));
             return Err(anyhow::anyhow!("failed to write answer to stdin: {e}"));
         }
 
-        Ok(SubmitOutcome::Completed)
+        Ok(())
     }
 
     /// Apply one answer to the pending entry. Validation errors restore the
@@ -1744,13 +1781,25 @@ impl ChatSession {
 
     /// Best-effort re-insert of a `PartialAnswers` after a downstream
     /// failure (serialize / oversize / stdin write). Logs and continues if
-    /// the mutex is poisoned — the user's slot value is preserved in the
-    /// borrowed `partial`, but at that point the session is already in
-    /// trouble and we don't want to mask the original error.
-    fn restore_partial(&self, tool_use_id: &str, partial: &PartialAnswers) {
+    /// the mutex is poisoned. When `cleared_idx` is set the corresponding
+    /// `answers` slot is reverted to `None` so the user can re-submit it —
+    /// without this, `validate_slot` would reject the retry as
+    /// already-answered and the session would be stuck.
+    fn restore_partial(
+        &self,
+        tool_use_id: &str,
+        partial: &PartialAnswers,
+        cleared_idx: Option<usize>,
+    ) {
         match self.pending_requests.lock() {
             Ok(mut map) => {
-                map.insert(tool_use_id.to_string(), partial.clone());
+                let mut to_insert = partial.clone();
+                if let Some(idx) = cleared_idx {
+                    if let Some(slot) = to_insert.answers.get_mut(idx) {
+                        *slot = None;
+                    }
+                }
+                map.insert(tool_use_id.to_string(), to_insert);
             }
             Err(poison_err) => {
                 log::error!(
@@ -3458,7 +3507,7 @@ mod tests {
             &[("Q1", "H1"), ("Q2", "H2"), ("Q3", "H3")],
             vec![Some("a".into()), Some("b".into()), Some("c".into())],
         );
-        let resp = build_ask_user_response_multi(&partial);
+        let resp = build_ask_user_response_multi(&partial).expect("must succeed");
         assert_eq!(resp["type"], "control_response");
         assert_eq!(resp["response"]["subtype"], "success");
         assert_eq!(resp["response"]["request_id"], "req_full");
@@ -3481,7 +3530,7 @@ mod tests {
             &[("Pick", "h")],
             vec![Some("A, B".into())],
         );
-        let resp = build_ask_user_response_multi(&partial);
+        let resp = build_ask_user_response_multi(&partial).expect("must succeed");
         assert_eq!(
             resp["response"]["response"]["updatedInput"]["answers"]["Pick"],
             "A, B"
@@ -3489,18 +3538,20 @@ mod tests {
     }
 
     #[test]
-    fn build_ask_user_response_multi_duplicate_question_text_last_write_wins() {
-        // Wire layer collapses duplicate keys, last write wins.
-        // The host emits a warn (not asserted here — log capture is integration-level).
+    fn build_ask_user_response_multi_duplicate_question_text_fails_closed() {
+        // Two slots share question text → wire layer would lose one answer
+        // (JSON Map last-write-wins). The host refuses to emit the lossy
+        // payload and surfaces the error so the caller can retry.
         let partial = make_partial(
             "req_dup",
             &[("Same?", "H1"), ("Same?", "H2")],
             vec![Some("first".into()), Some("second".into())],
         );
-        let resp = build_ask_user_response_multi(&partial);
-        assert_eq!(
-            resp["response"]["response"]["updatedInput"]["answers"]["Same?"],
-            "second"
+        let err = build_ask_user_response_multi(&partial)
+            .expect_err("duplicate question text must fail closed");
+        assert!(
+            err.to_string().contains("duplicate question text"),
+            "unexpected error: {err}"
         );
     }
 
@@ -3511,7 +3562,7 @@ mod tests {
             &[("Pick a fruit", "Fruits")],
             vec![Some("Apple".into())],
         );
-        let resp = build_ask_user_response_multi(&partial);
+        let resp = build_ask_user_response_multi(&partial).expect("must succeed");
         assert_eq!(
             resp["response"]["response"]["updatedInput"]["answers"]["Pick a fruit"],
             "Apple"
@@ -3552,13 +3603,138 @@ mod tests {
             "tool-y".into(),
             make_partial("r2", &[("Q", "")], vec![None]),
         );
-        let huge = "x".repeat(MAX_ANSWER_LEN + 1);
+        let huge = "x".repeat(MAX_ASK_USER_ANSWER_LEN + 1);
         let err = s
             .submit_question_answer("tool-y", 0, &huge)
             .expect_err("oversize answer must fail");
         assert!(
             err.to_string().contains("answer too long"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn fill_slot_invalid_index_errors_and_preserves_entry() {
+        let s = ChatSession::new("test-project");
+        s.pending_requests.lock().unwrap().insert(
+            "tool-bad-idx".into(),
+            make_partial("r1", &[("Q", "h")], vec![None]),
+        );
+        let err = s
+            .fill_slot("tool-bad-idx", 5, "value")
+            .expect_err("out-of-bounds index must fail");
+        assert!(
+            err.to_string().contains("invalid question index"),
+            "unexpected: {err}"
+        );
+        let map = s.pending_requests.lock().unwrap();
+        let entry = map.get("tool-bad-idx").expect("entry must be restored");
+        assert!(entry.answers[0].is_none(), "slot 0 must remain None");
+    }
+
+    #[test]
+    fn fill_slot_already_answered_errors_and_preserves_entry() {
+        let s = ChatSession::new("test-project");
+        s.pending_requests.lock().unwrap().insert(
+            "tool-dup".into(),
+            make_partial("r1", &[("Q", "h")], vec![Some("first".into())]),
+        );
+        let err = s
+            .fill_slot("tool-dup", 0, "second")
+            .expect_err("already-answered slot must fail");
+        assert!(
+            err.to_string().contains("already answered"),
+            "unexpected: {err}"
+        );
+        let map = s.pending_requests.lock().unwrap();
+        let entry = map.get("tool-dup").expect("entry must be restored");
+        assert_eq!(entry.answers[0].as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn fill_slot_pending_after_partial_completion() {
+        let s = ChatSession::new("test-project");
+        s.pending_requests.lock().unwrap().insert(
+            "tool-multi".into(),
+            make_partial("r1", &[("Q0", ""), ("Q1", "")], vec![None, None]),
+        );
+        let outcome = s.fill_slot("tool-multi", 0, "first").expect("must succeed");
+        match outcome {
+            FillOutcome::Pending => {}
+            _ => panic!("expected Pending"),
+        }
+        let map = s.pending_requests.lock().unwrap();
+        let entry = map.get("tool-multi").expect("still pending");
+        assert_eq!(entry.answers[0].as_deref(), Some("first"));
+        assert!(entry.answers[1].is_none());
+    }
+
+    #[test]
+    fn fill_slot_completed_removes_entry_and_returns_partial() {
+        let s = ChatSession::new("test-project");
+        s.pending_requests.lock().unwrap().insert(
+            "tool-fin".into(),
+            make_partial("r1", &[("Q0", "")], vec![None]),
+        );
+        let outcome = s.fill_slot("tool-fin", 0, "only").expect("must succeed");
+        match outcome {
+            FillOutcome::Completed(p) => assert_eq!(p.answers[0].as_deref(), Some("only")),
+            _ => panic!("expected Completed"),
+        }
+        let map = s.pending_requests.lock().unwrap();
+        assert!(
+            !map.contains_key("tool-fin"),
+            "Completed must remove the entry"
+        );
+    }
+
+    #[test]
+    fn restore_partial_clears_specified_slot() {
+        let s = ChatSession::new("test-project");
+        let partial = make_partial(
+            "r1",
+            &[("Q0", ""), ("Q1", "")],
+            vec![Some("a".into()), Some("b".into())],
+        );
+        s.restore_partial("tool-r", &partial, Some(1));
+        let map = s.pending_requests.lock().unwrap();
+        let entry = map.get("tool-r").expect("must be inserted");
+        assert_eq!(entry.answers[0].as_deref(), Some("a"));
+        assert!(
+            entry.answers[1].is_none(),
+            "slot 1 must be cleared so user can retry"
+        );
+    }
+
+    #[test]
+    fn build_ask_user_response_multi_oversize_payload_serializes_to_more_than_64_kib() {
+        // Verify that the cap can in fact be hit: build a 4-question payload
+        // where each label is large enough that the serialised wire response
+        // exceeds 64 KiB. This is the input shape that exercises
+        // submit_question_answer's wire-cap guard at the integration level.
+        let big = "x".repeat(20_000);
+        let partial = make_partial(
+            "req_oversize",
+            &[
+                ("Q0", "h"),
+                ("Q1", "h"),
+                ("Q2", "h"),
+                ("Q3", "h"),
+            ],
+            vec![
+                Some(big.clone()),
+                Some(big.clone()),
+                Some(big.clone()),
+                Some(big),
+            ],
+        );
+        let resp = build_ask_user_response_multi(&partial).expect("must succeed");
+        let serialized = serde_json::to_string(&resp).expect("must serialize");
+        assert!(
+            serialized.len() > MAX_ASK_USER_WIRE_BYTES,
+            "expected serialized > {} bytes, got {}",
+            MAX_ASK_USER_WIRE_BYTES,
+            serialized.len()
         );
     }
 
