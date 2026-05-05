@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.10.0](https://github.com/speednet-software/speedwave/compare/v0.9.0...v0.10.0) (2026-05-05)
+
+
+### Features
+
+* release v0.10.0 — Claude 2.1.126 + 1M context, async plugin install, multi-question AskUser ([#607](https://github.com/speednet-software/speedwave/issues/607)) ([2263af5](https://github.com/speednet-software/speedwave/commit/2263af58ae1b5dcdfd89c363282c14d79a604b75))
+
 ## [0.9.0](https://github.com/speednet-software/speedwave/compare/v0.8.0...v0.9.0) (2026-04-29)
 
 
