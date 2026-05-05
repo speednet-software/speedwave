@@ -194,7 +194,7 @@ teardown() {
     backup="$(mktemp)"
     cp "$src" "$backup"
     local src_perms
-    src_perms=$(stat -f '%A' "$src" 2>/dev/null || stat -c '%a' "$src")
+    src_perms=$(stat -c '%a' "$src" 2>/dev/null || stat -f '%A' "$src")
 
     printf '#!/bin/bash\r\necho hi\r\n' > "$src"
     chmod 0755 "$src"
@@ -220,11 +220,13 @@ teardown() {
     local src="$BATS_TEST_DIRNAME/../../containers/install-claude.sh"
     local dst="$DEST/build-context/containers/install-claude.sh"
 
-    # BSD stat (macOS) vs GNU stat (Linux/Git Bash).
+    # GNU stat (Linux/Git Bash) first; BSD stat (macOS) is the fallback. Order
+    # matters: GNU `stat -f` means `--file-system` (exit 0 with garbage output),
+    # so probing BSD first on Linux yields wrong results without errors.
     local src_perms
     local dst_perms
-    src_perms=$(stat -f '%A' "$src" 2>/dev/null || stat -c '%a' "$src")
-    dst_perms=$(stat -f '%A' "$dst" 2>/dev/null || stat -c '%a' "$dst")
+    src_perms=$(stat -c '%a' "$src" 2>/dev/null || stat -f '%A' "$src")
+    dst_perms=$(stat -c '%a' "$dst" 2>/dev/null || stat -f '%A' "$dst")
     [ "$src_perms" = "$dst_perms" ]
 }
 
