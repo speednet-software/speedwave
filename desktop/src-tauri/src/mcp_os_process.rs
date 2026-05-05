@@ -1,8 +1,6 @@
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::process::Child;
-#[cfg(any(unix, test))]
-use std::process::Command;
+use std::process::{Child, Command};
 use std::thread::JoinHandle;
 
 use speedwave_runtime::consts;
@@ -680,6 +678,7 @@ srv.listen(0, '127.0.0.1', () => {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_read_port_timeout_on_silent_child() {
         let mut child = Command::new("sleep")
@@ -734,6 +733,7 @@ srv.listen(0, '127.0.0.1', () => {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_kill_terminates_child() {
         let child = Command::new("sleep")
@@ -766,6 +766,7 @@ srv.listen(0, '127.0.0.1', () => {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_health_check_running() {
         let child = Command::new("sleep")
@@ -796,6 +797,7 @@ srv.listen(0, '127.0.0.1', () => {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_health_check_dead() {
         let child = Command::new("true")
@@ -826,6 +828,7 @@ srv.listen(0, '127.0.0.1', () => {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_drop_cleans_up_files() {
         let tmp = tempfile::tempdir().unwrap();
@@ -897,6 +900,7 @@ srv.listen(0, '127.0.0.1', () => {
         // node not available — skip
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_kill_stale_by_pid_file_skips_non_node_process() {
         // Spawn a non-node process — kill_stale should NOT kill it
@@ -1005,6 +1009,7 @@ srv.listen(0, '127.0.0.1', () => {
         assert!(token.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stop_is_idempotent() {
         let child = Command::new("sleep")
@@ -1043,6 +1048,7 @@ srv.listen(0, '127.0.0.1', () => {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_is_node_process_returns_false_for_non_node() {
         let child = Command::new("sleep")
@@ -1231,7 +1237,8 @@ process.stdout.write(JSON.stringify({ leaked }));
     // ── drain_and_read_port edge cases ───────────────────────────────────
 
     /// Helper: spawn a child process that writes the given lines to stdout,
-    /// one per line, then exits.
+    /// one per line, then exits. Unix-only: uses `bash` + `printf`.
+    #[cfg(unix)]
     fn spawn_stdout_lines(lines: &[&str]) -> Child {
         // Use printf to write each line with a trailing newline
         Command::new("bash")
@@ -1243,6 +1250,7 @@ process.stdout.write(JSON.stringify({ leaked }));
     }
 
     /// Shell-quote a list of arguments for safe interpolation.
+    #[cfg(unix)]
     fn shell_quote_args(args: &[&str]) -> String {
         args.iter()
             .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
@@ -1251,12 +1259,14 @@ process.stdout.write(JSON.stringify({ leaked }));
     }
 
     /// Helper: create a temp log path for drain tests.
+    #[cfg(unix)]
     fn temp_log_path() -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let log_path = tmp.path().join(consts::MCP_OS_LOG_FILE);
         (tmp, log_path)
     }
 
+    #[cfg(unix)]
     #[test]
     fn drain_and_read_port_skips_non_json_lines_before_port() {
         let (_tmp, log_path) = temp_log_path();
@@ -1277,6 +1287,7 @@ process.stdout.write(JSON.stringify({ leaked }));
         child.wait().ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn drain_and_read_port_rejects_port_zero() {
         let (_tmp, log_path) = temp_log_path();
@@ -1292,6 +1303,7 @@ process.stdout.write(JSON.stringify({ leaked }));
         child.wait().ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn drain_and_read_port_rejects_port_over_65535() {
         let (_tmp, log_path) = temp_log_path();
@@ -1311,6 +1323,7 @@ process.stdout.write(JSON.stringify({ leaked }));
         child.wait().ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn drain_and_read_port_rejects_port_max_u64() {
         let (_tmp, log_path) = temp_log_path();
@@ -1327,6 +1340,7 @@ process.stdout.write(JSON.stringify({ leaked }));
         child.wait().ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn drain_and_read_port_errors_on_exit_without_port() {
         let (_tmp, log_path) = temp_log_path();
@@ -1347,6 +1361,7 @@ process.stdout.write(JSON.stringify({ leaked }));
         child.wait().ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn drain_and_read_port_ignores_json_without_port_key() {
         let (_tmp, log_path) = temp_log_path();
@@ -1364,6 +1379,7 @@ process.stdout.write(JSON.stringify({ leaked }));
         child.wait().ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn drain_and_read_port_writes_to_log_file() {
         let (_tmp, log_path) = temp_log_path();
