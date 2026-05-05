@@ -61,6 +61,17 @@ export interface EntryMetaState {
 }
 
 /**
+ * One question inside an `ask_user` block — mirrors
+ * `speedwave_runtime::stream::AskUserQuestionItem`.
+ */
+export interface AskUserQuestionStateItem {
+  question: string;
+  header: string;
+  multi_select: boolean;
+  options: ReadonlyArray<{ label: string; value: string }>;
+}
+
+/**
  * One block inside a conversation entry. Tagged enum: serde serializes as
  * `{"kind":"text","content":"..."}` — preserving that shape lets a JSON
  * Patch replace a block in-place without a re-typing dance.
@@ -79,11 +90,9 @@ export type MessageBlockState =
   | {
       kind: 'ask_user';
       tool_id: string;
-      header: string;
-      question: string;
-      options: ReadonlyArray<{ label: string; value: string }>;
-      multi_select: boolean;
-      answer: ReadonlyArray<string> | null;
+      questions: ReadonlyArray<AskUserQuestionStateItem>;
+      current_index: number;
+      answers: ReadonlyArray<string | null>;
     }
   | { kind: 'error'; content: string };
 

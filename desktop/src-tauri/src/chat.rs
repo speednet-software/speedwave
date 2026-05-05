@@ -1,4 +1,5 @@
 use crate::history;
+use speedwave_runtime::stream::{MAX_ASK_USER_QUESTIONS, MAX_ASK_USER_WIRE_BYTES};
 use speedwave_runtime::{config, consts, runtime};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -62,14 +63,18 @@ pub enum StreamChunk {
         #[serde(skip_serializing_if = "Option::is_none")]
         model: Option<String>,
     },
-    /// Interactive question from Claude (AskUserQuestion tool).
-    /// The frontend must display the question and send the answer back via `answer_question`.
+    /// Interactive question(s) from Claude (AskUserQuestion tool).
+    ///
+    /// May contain 1–4 questions per the Agent SDK contract. The frontend
+    /// renders them sequentially; once every slot has a value it calls
+    /// `submit_question_answer` for the last one and the host writes a single
+    /// `control_response` carrying the full `answers` map.
     AskUserQuestion {
         tool_id: String,
-        question: String,
-        options: Vec<AskUserOption>,
-        header: String,
-        multi_select: bool,
+        questions: Vec<AskUserQuestionItem>,
+        /// Always `0` on first emit. The frontend reducer advances this as
+        /// answers come in.
+        current_index: usize,
     },
     /// Error from the Claude subprocess.
     Error { content: String },
@@ -96,6 +101,19 @@ pub enum StreamChunk {
 pub struct AskUserOption {
     pub label: String,
     pub value: String,
+}
+
+/// One question inside an AskUserQuestion control_request.
+///
+/// Mirrors `speedwave_runtime::stream::AskUserQuestionItem` 1:1 but uses the
+/// chat-local `AskUserOption` so the Tauri serialization matches the
+/// frontend shape without an extra mapping at the patch_emitter layer.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AskUserQuestionItem {
+    pub question: String,
+    pub header: String,
+    pub options: Vec<AskUserOption>,
+    pub multi_select: bool,
 }
 
 /// Token usage information from the result message.
@@ -169,7 +187,39 @@ pub struct ControlRequest {
     pub tool_use_id: String,
 }
 
-type PendingRequests = Arc<Mutex<HashMap<String, ControlRequest>>>;
+/// Per-`AskUserQuestion` slot state held while the user answers each
+/// question. Created when the host receives the `control_request`, consumed
+/// when every slot in `answers` is `Some` and the host writes a single
+/// `control_response`.
+#[derive(Debug, Clone)]
+pub struct PartialAnswers {
+    /// Original control_request, captured so we can reconstruct the wire
+    /// payload (replaying `request_id` and the full `input`).
+    pub request: ControlRequest,
+    /// Parsed questions list (after truncation to `MAX_ASK_USER_QUESTIONS`).
+    pub questions: Vec<AskUserQuestionItem>,
+    /// One slot per question. `None` until the user answers slot `i`.
+    pub answers: Vec<Option<String>>,
+}
+
+type PendingRequests = Arc<Mutex<HashMap<String, PartialAnswers>>>;
+
+/// Outcome of `ChatSession::submit_question_answer`. `Pending` means the host
+/// recorded the slot but has more questions to wait for; `Completed` means
+/// the host wrote one `control_response` to Claude's stdin and removed the
+/// entry from `pending_requests`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitOutcome {
+    /// Slot recorded; more questions still pending answers.
+    Pending,
+    /// All slots filled and the response was written to stdin.
+    Completed,
+}
+
+/// Maximum size, in bytes, of a single user-supplied answer string. Lifted
+/// from main.rs so the host and the Tauri command layer share one cap (DRY,
+/// per CLAUDE.md "edit the SSOT, do not hard-code the value at the call site").
+pub const MAX_ANSWER_LEN: usize = 1_000_000;
 
 /// Structured log entry returned by StreamParser for session logging.
 pub struct LogEntry {
@@ -331,25 +381,14 @@ impl StreamParser {
         })
     }
 
-    /// Build AskUserQuestion chunk from a control_request's input.
-    pub fn emit_ask_user_from_control_request(req: &ControlRequest) -> Option<StreamChunk> {
-        let parsed = &req.input;
-
-        // Handle wrapped format: {"questions": [{...}]}
-        let q = if let Some(questions) = parsed["questions"].as_array() {
-            questions.first().cloned().unwrap_or_else(|| {
-                log::warn!("AskUserQuestion: 'questions' array is empty, using empty fallback");
-                serde_json::Value::Object(Default::default())
-            })
-        } else {
-            parsed.clone()
-        };
-
-        let question = q["question"].as_str().unwrap_or("").to_string();
-        let header = q["header"].as_str().unwrap_or("").to_string();
-        let multi_select = q["multiSelect"].as_bool().unwrap_or(false);
-
-        let options = q["options"]
+    /// Parse one question entry from a JSON value. Returns `None` if the
+    /// entry is unusable (no `question` text). Defensive — malformed
+    /// `options` entries are filtered out individually.
+    fn parse_ask_user_question(v: &serde_json::Value) -> Option<AskUserQuestionItem> {
+        let question = v["question"].as_str().unwrap_or("").to_string();
+        let header = v["header"].as_str().unwrap_or("").to_string();
+        let multi_select = v["multiSelect"].as_bool().unwrap_or(false);
+        let options: Vec<AskUserOption> = v["options"]
             .as_array()
             .map(|arr| {
                 arr.iter()
@@ -361,13 +400,71 @@ impl StreamParser {
                     .collect()
             })
             .unwrap_or_default();
+        // A question with empty text is dropped — matches the historical
+        // emit-empty-fallback behaviour but at the per-item level.
+        if question.is_empty() && header.is_empty() && options.is_empty() {
+            return None;
+        }
+        Some(AskUserQuestionItem {
+            question,
+            header,
+            options,
+            multi_select,
+        })
+    }
 
+    /// Parse the questions list from a control_request input.
+    ///
+    /// The Agent SDK shape is `{ "questions": [{...}, ...] }` with 1–4
+    /// entries. Older/flat senders may pass a single question object at the
+    /// top level; we accept that as a one-element array. Truncates with a
+    /// warn (count only — never question text in logs) if the SDK exceeds
+    /// `MAX_ASK_USER_QUESTIONS`. Returns an empty `Vec` when no usable
+    /// question entry is found.
+    pub fn parse_ask_user_questions(req: &ControlRequest) -> Vec<AskUserQuestionItem> {
+        let parsed = &req.input;
+
+        let raw_questions: Vec<serde_json::Value> =
+            if let Some(arr) = parsed["questions"].as_array() {
+                arr.clone()
+            } else {
+                vec![parsed.clone()]
+            };
+
+        let total = raw_questions.len();
+        let bounded = if total > MAX_ASK_USER_QUESTIONS {
+            log::warn!(
+                "AskUserQuestion: received {} questions, truncating to {}",
+                total,
+                MAX_ASK_USER_QUESTIONS
+            );
+            &raw_questions[..MAX_ASK_USER_QUESTIONS]
+        } else {
+            &raw_questions[..]
+        };
+
+        bounded
+            .iter()
+            .filter_map(Self::parse_ask_user_question)
+            .collect()
+    }
+
+    /// Build AskUserQuestion chunk from a control_request's input.
+    ///
+    /// Test-only helper — production code calls `parse_ask_user_questions`
+    /// directly inside the chat reader thread and constructs the chunk
+    /// inline so it can also seed `pending_requests` with the parsed list.
+    #[cfg(test)]
+    pub fn emit_ask_user_from_control_request(req: &ControlRequest) -> Option<StreamChunk> {
+        let questions = Self::parse_ask_user_questions(req);
+        if questions.is_empty() {
+            log::warn!("AskUserQuestion: 'questions' array is empty after parsing");
+            return None;
+        }
         Some(StreamChunk::AskUserQuestion {
             tool_id: req.tool_use_id.clone(),
-            question,
-            options,
-            header,
-            multi_select,
+            questions,
+            current_index: 0,
         })
     }
 
@@ -970,39 +1067,35 @@ pub fn build_auto_approve_response(request: &ControlRequest) -> serde_json::Valu
     })
 }
 
-/// AskUserQuestion response with user's answer injected into input.
-fn build_ask_user_response(request: &ControlRequest, selected_label: &str) -> serde_json::Value {
-    let mut updated_input = request.input.clone();
-
-    // Inject answers into the appropriate format
-    if let Some(questions) = updated_input["questions"].as_array() {
-        // Wrapped format: {"questions":[{...}]}
-        let question_text = questions
-            .first()
-            .and_then(|q| q["question"].as_str())
-            .unwrap_or("");
-        let mut answers = serde_json::Map::new();
-        answers.insert(
-            question_text.to_string(),
-            serde_json::Value::String(selected_label.to_string()),
-        );
-        updated_input["answers"] = serde_json::Value::Object(answers);
-    } else {
-        // Flat format: {"question":"...", ...}
-        let question_text = updated_input["question"].as_str().unwrap_or("").to_string();
-        let mut answers = serde_json::Map::new();
-        answers.insert(
-            question_text,
-            serde_json::Value::String(selected_label.to_string()),
-        );
-        updated_input["answers"] = serde_json::Value::Object(answers);
+/// AskUserQuestion response carrying the **full** answers map (one per
+/// question slot) per the Agent SDK contract.
+///
+/// Key = question text; value = the chosen label (or `", "`-joined labels for
+/// multi-select, joined by the frontend before submission). Duplicate
+/// question texts collapse to one map key with last-write-wins; the host
+/// emits a `log::warn!` when it detects this so an operator can spot it.
+/// The original `questions` array is preserved unchanged in `updatedInput`.
+fn build_ask_user_response_multi(partial: &PartialAnswers) -> serde_json::Value {
+    let mut updated_input = partial.request.input.clone();
+    let mut answers = serde_json::Map::with_capacity(partial.questions.len());
+    let mut seen_keys: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (q, slot) in partial.questions.iter().zip(partial.answers.iter()) {
+        let value = slot.clone().unwrap_or_default();
+        let key = q.question.as_str();
+        if !seen_keys.insert(key) {
+            log::warn!(
+                "AskUserQuestion: duplicate question text on wire — last answer wins for one slot"
+            );
+        }
+        answers.insert(key.to_string(), serde_json::Value::String(value));
     }
+    updated_input["answers"] = serde_json::Value::Object(answers);
 
     serde_json::json!({
         "type": "control_response",
         "response": {
             "subtype": "success",
-            "request_id": request.request_id,
+            "request_id": partial.request.request_id,
             "response": {
                 "behavior": "allow",
                 "updatedInput": updated_input
@@ -1352,10 +1445,25 @@ impl ChatSession {
                         &format!("request: {} ({})", ctrl.tool_name, ctrl.tool_use_id),
                     );
                     if ctrl.tool_name == ASK_USER_TOOL_NAME {
-                        // Store pending request and emit to frontend
+                        let questions = StreamParser::parse_ask_user_questions(&ctrl);
+                        if questions.is_empty() {
+                            log::warn!(
+                                "AskUserQuestion control_request had no usable questions; dropping"
+                            );
+                            continue;
+                        }
+                        // Store pending state keyed by tool_use_id; one slot
+                        // per question, populated as the user answers each.
                         match pending_requests.lock() {
                             Ok(mut map) => {
-                                map.insert(ctrl.tool_use_id.clone(), ctrl.clone());
+                                map.insert(
+                                    ctrl.tool_use_id.clone(),
+                                    PartialAnswers {
+                                        request: ctrl.clone(),
+                                        answers: vec![None; questions.len()],
+                                        questions: questions.clone(),
+                                    },
+                                );
                             }
                             Err(e) => {
                                 log::error!(
@@ -1371,11 +1479,13 @@ impl ChatSession {
                                 break;
                             }
                         }
-                        if let Some(chunk) = StreamParser::emit_ask_user_from_control_request(&ctrl)
-                        {
-                            if let Err(e) = app_handle.emit("chat_stream", chunk) {
-                                log::warn!("failed to emit AskUserQuestion event: {e}");
-                            }
+                        let chunk = StreamChunk::AskUserQuestion {
+                            tool_id: ctrl.tool_use_id.clone(),
+                            questions,
+                            current_index: 0,
+                        };
+                        if let Err(e) = app_handle.emit("chat_stream", chunk) {
+                            log::warn!("failed to emit AskUserQuestion event: {e}");
                         }
                     } else {
                         // Auto-approve non-AskUserQuestion tools
@@ -1530,10 +1640,23 @@ impl ChatSession {
         Ok(())
     }
 
-    /// Send a control_response for an AskUserQuestion prompt.
-    /// Looks up the pending request by `tool_use_id`, builds a control_response
-    /// with the user's answer, and writes it to Claude's stdin.
-    pub fn answer_question(&mut self, tool_use_id: &str, answer: &str) -> anyhow::Result<()> {
+    /// Record one slot's answer for a multi-question `AskUserQuestion` and,
+    /// once every slot is filled, write a single `control_response` to
+    /// Claude's stdin.
+    ///
+    /// Returns `SubmitOutcome::Pending` when more questions still need
+    /// answers, or `SubmitOutcome::Completed` when the response was written.
+    /// Errors restore the partial state so the user can retry.
+    pub fn submit_question_answer(
+        &mut self,
+        tool_use_id: &str,
+        question_idx: usize,
+        answer: &str,
+    ) -> anyhow::Result<SubmitOutcome> {
+        if answer.len() > MAX_ANSWER_LEN {
+            anyhow::bail!("answer too long (max {} bytes)", MAX_ANSWER_LEN);
+        }
+
         let child = self
             .child
             .as_mut()
@@ -1547,16 +1670,60 @@ impl ChatSession {
             anyhow::bail!("session exited ({})", status);
         }
 
-        let pending = self
-            .pending_requests
-            .lock()
-            .map_err(|e| anyhow::anyhow!("pending_requests lock poisoned: {e}"))?
-            .remove(tool_use_id)
-            .ok_or_else(|| {
+        // Phase 1: validate & set the slot, then decide whether we have
+        // enough answers to write the response. We hold the lock just for
+        // this critical section so other threads can still read.
+        let mut partial = {
+            let mut map = self
+                .pending_requests
+                .lock()
+                .map_err(|e| anyhow::anyhow!("pending_requests lock poisoned: {e}"))?;
+            let mut entry = map.remove(tool_use_id).ok_or_else(|| {
                 anyhow::anyhow!("no pending control request for tool_use_id: {tool_use_id}")
             })?;
+            if question_idx >= entry.questions.len() {
+                // Restore so a follow-up retry with a valid index still works.
+                map.insert(tool_use_id.to_string(), entry);
+                anyhow::bail!(
+                    "invalid question index {question_idx} for tool_use_id: {tool_use_id}"
+                );
+            }
+            if entry.answers[question_idx].is_some() {
+                map.insert(tool_use_id.to_string(), entry);
+                anyhow::bail!(
+                    "question {question_idx} already answered for tool_use_id: {tool_use_id}"
+                );
+            }
+            entry.answers[question_idx] = Some(answer.to_string());
+            if entry.answers.iter().any(|a| a.is_none()) {
+                // Still pending — put it back and return early.
+                map.insert(tool_use_id.to_string(), entry);
+                return Ok(SubmitOutcome::Pending);
+            }
+            entry
+        };
 
-        let response = build_ask_user_response(&pending, answer);
+        // Phase 2: every slot filled. Build the wire response, enforce the
+        // 64 KiB ceiling, then write to stdin. Any failure restores the
+        // partial state so the user can retry.
+        let response = build_ask_user_response_multi(&partial);
+        let serialized = match serde_json::to_string(&response) {
+            Ok(s) => s,
+            Err(e) => {
+                self.restore_partial(tool_use_id, &mut partial);
+                return Err(anyhow::anyhow!(
+                    "failed to serialize AskUserQuestion response: {e}"
+                ));
+            }
+        };
+        if serialized.len() > MAX_ASK_USER_WIRE_BYTES {
+            self.restore_partial(tool_use_id, &mut partial);
+            anyhow::bail!(
+                "AskUserQuestion response exceeds {} byte cap (got {})",
+                MAX_ASK_USER_WIRE_BYTES,
+                serialized.len()
+            );
+        }
 
         let shared = self
             .shared_stdin
@@ -1566,24 +1733,35 @@ impl ChatSession {
             .lock()
             .map_err(|e| anyhow::anyhow!("stdin lock poisoned: {e}"))?;
 
-        if let Err(e) = writeln!(stdin, "{}", response).and_then(|_| stdin.flush()) {
+        if let Err(e) = writeln!(stdin, "{}", serialized).and_then(|_| stdin.flush()) {
             log::error!(
                 "failed to write answer for {} (tool_use_id={tool_use_id}): {e}",
-                pending.tool_name
+                partial.request.tool_name
             );
-            // Restore the pending request so the user can retry
-            match self.pending_requests.lock() {
-                Ok(mut map) => {
-                    map.insert(tool_use_id.to_string(), pending);
-                }
-                Err(poison_err) => {
-                    log::error!("failed to restore pending request: mutex poisoned: {poison_err}");
-                }
-            }
+            drop(stdin);
+            self.restore_partial(tool_use_id, &mut partial);
             return Err(anyhow::anyhow!("failed to write answer to stdin: {e}"));
         }
 
-        Ok(())
+        Ok(SubmitOutcome::Completed)
+    }
+
+    /// Best-effort re-insert of a `PartialAnswers` after a downstream
+    /// failure (serialize / oversize / stdin write). Logs and continues if
+    /// the mutex is poisoned — the user's slot value is preserved in the
+    /// borrowed `partial`, but at that point the session is already in
+    /// trouble and we don't want to mask the original error.
+    fn restore_partial(&self, tool_use_id: &str, partial: &mut PartialAnswers) {
+        match self.pending_requests.lock() {
+            Ok(mut map) => {
+                map.insert(tool_use_id.to_string(), partial.clone());
+            }
+            Err(poison_err) => {
+                log::error!(
+                    "failed to restore pending request: mutex poisoned: {poison_err}"
+                );
+            }
+        }
     }
 
     /// Cancel the current turn without killing the session.
@@ -1596,7 +1774,7 @@ impl ChatSession {
     /// message on the same stdin — session, context, MCP hub, and history
     /// preserved.
     pub fn interrupt(&mut self) -> anyhow::Result<()> {
-        // Mirror send_message/answer_question: detect a child that has already
+        // Mirror send_message/submit_question_answer: detect a child that has already
         // exited so we surface a clean "session exited" (or OOM) error instead
         // of a confusing broken-pipe write failure.
         if let Some(child) = self.child.as_mut() {
@@ -1917,11 +2095,20 @@ mod tests {
         let mut s = ChatSession::new("test-project");
         s.pending_requests.lock().unwrap().insert(
             "tool-1".to_string(),
-            ControlRequest {
-                request_id: "r1".to_string(),
-                tool_name: ASK_USER_TOOL_NAME.to_string(),
-                input: serde_json::json!({}),
-                tool_use_id: "tool-1".to_string(),
+            PartialAnswers {
+                request: ControlRequest {
+                    request_id: "r1".to_string(),
+                    tool_name: ASK_USER_TOOL_NAME.to_string(),
+                    input: serde_json::json!({}),
+                    tool_use_id: "tool-1".to_string(),
+                },
+                questions: vec![AskUserQuestionItem {
+                    question: "q".to_string(),
+                    header: String::new(),
+                    options: vec![],
+                    multi_select: false,
+                }],
+                answers: vec![None],
             },
         );
         assert!(s.stop().is_ok());
@@ -3133,35 +3320,38 @@ mod tests {
     fn ask_user_question_round_trips_through_json() {
         let original = StreamChunk::AskUserQuestion {
             tool_id: "t1".to_string(),
-            question: "Pick one".to_string(),
-            options: vec![
-                AskUserOption {
-                    label: "A".to_string(),
-                    value: "a".to_string(),
-                },
-                AskUserOption {
-                    label: "B".to_string(),
-                    value: "b".to_string(),
-                },
-            ],
-            header: "Test".to_string(),
-            multi_select: true,
+            questions: vec![AskUserQuestionItem {
+                question: "Pick one".to_string(),
+                header: "Test".to_string(),
+                options: vec![
+                    AskUserOption {
+                        label: "A".to_string(),
+                        value: "a".to_string(),
+                    },
+                    AskUserOption {
+                        label: "B".to_string(),
+                        value: "b".to_string(),
+                    },
+                ],
+                multi_select: true,
+            }],
+            current_index: 0,
         };
         let serialized = serde_json::to_string(&original).unwrap();
         let deserialized: StreamChunk = serde_json::from_str(&serialized).unwrap();
         match deserialized {
             StreamChunk::AskUserQuestion {
                 tool_id,
-                question,
-                options,
-                header,
-                multi_select,
+                questions,
+                current_index,
             } => {
                 assert_eq!(tool_id, "t1");
-                assert_eq!(question, "Pick one");
-                assert_eq!(options.len(), 2);
-                assert_eq!(header, "Test");
-                assert!(multi_select);
+                assert_eq!(current_index, 0);
+                assert_eq!(questions.len(), 1);
+                assert_eq!(questions[0].question, "Pick one");
+                assert_eq!(questions[0].header, "Test");
+                assert!(questions[0].multi_select);
+                assert_eq!(questions[0].options.len(), 2);
             }
             other => panic!("expected AskUserQuestion, got {other:?}"),
         }
@@ -3232,158 +3422,332 @@ mod tests {
         );
     }
 
+    fn make_partial(req_id: &str, qs: &[(&str, &str)], answers: Vec<Option<String>>) -> PartialAnswers {
+        let questions: Vec<AskUserQuestionItem> = qs
+            .iter()
+            .map(|(q, h)| AskUserQuestionItem {
+                question: (*q).into(),
+                header: (*h).into(),
+                options: vec![],
+                multi_select: false,
+            })
+            .collect();
+        let serde_q: Vec<serde_json::Value> = questions
+            .iter()
+            .map(|q| {
+                serde_json::json!({
+                    "question": q.question,
+                    "header": q.header,
+                    "multiSelect": q.multi_select,
+                    "options": q.options.iter().map(|o| serde_json::json!({"label": o.label, "value": o.value})).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        PartialAnswers {
+            request: ControlRequest {
+                request_id: req_id.into(),
+                tool_name: "AskUserQuestion".into(),
+                input: serde_json::json!({ "questions": serde_q }),
+                tool_use_id: "toolu_t".into(),
+            },
+            questions,
+            answers,
+        }
+    }
+
     #[test]
-    fn build_ask_user_response_flat_format() {
-        let pending = ControlRequest {
-            request_id: "req_10".to_string(),
-            tool_name: "AskUserQuestion".to_string(),
-            input: serde_json::json!({
-                "question": "Pick a fruit",
-                "header": "Fruits",
-                "multiSelect": false,
-                "options": [{"label": "Apple", "value": "apple"}, {"label": "Banana", "value": "banana"}]
-            }),
-            tool_use_id: "toolu_flat_test".to_string(),
-        };
-        let resp = build_ask_user_response(&pending, "Apple");
+    fn build_ask_user_response_multi_writes_full_answers_map() {
+        let partial = make_partial(
+            "req_full",
+            &[("Q1", "H1"), ("Q2", "H2"), ("Q3", "H3")],
+            vec![Some("a".into()), Some("b".into()), Some("c".into())],
+        );
+        let resp = build_ask_user_response_multi(&partial);
         assert_eq!(resp["type"], "control_response");
-        assert_eq!(resp["response"]["request_id"], "req_10");
+        assert_eq!(resp["response"]["subtype"], "success");
+        assert_eq!(resp["response"]["request_id"], "req_full");
         assert_eq!(resp["response"]["response"]["behavior"], "allow");
         let updated = &resp["response"]["response"]["updatedInput"];
-        assert_eq!(updated["answers"]["Pick a fruit"], "Apple");
-        assert_eq!(updated["question"], "Pick a fruit");
+        assert_eq!(updated["answers"]["Q1"], "a");
+        assert_eq!(updated["answers"]["Q2"], "b");
+        assert_eq!(updated["answers"]["Q3"], "c");
+        assert_eq!(
+            updated["questions"].as_array().map(|a| a.len()),
+            Some(3),
+            "original questions array must be preserved unchanged"
+        );
     }
 
     #[test]
-    fn build_ask_user_response_wrapped_format() {
-        let pending = ControlRequest {
-            request_id: "req_11".to_string(),
+    fn build_ask_user_response_multi_passes_through_multi_select_value() {
+        let partial = make_partial(
+            "req_multi",
+            &[("Pick", "h")],
+            vec![Some("A, B".into())],
+        );
+        let resp = build_ask_user_response_multi(&partial);
+        assert_eq!(
+            resp["response"]["response"]["updatedInput"]["answers"]["Pick"],
+            "A, B"
+        );
+    }
+
+    #[test]
+    fn build_ask_user_response_multi_duplicate_question_text_last_write_wins() {
+        // Wire layer collapses duplicate keys, last write wins.
+        // The host emits a warn (not asserted here — log capture is integration-level).
+        let partial = make_partial(
+            "req_dup",
+            &[("Same?", "H1"), ("Same?", "H2")],
+            vec![Some("first".into()), Some("second".into())],
+        );
+        let resp = build_ask_user_response_multi(&partial);
+        assert_eq!(
+            resp["response"]["response"]["updatedInput"]["answers"]["Same?"],
+            "second"
+        );
+    }
+
+    #[test]
+    fn build_ask_user_response_multi_one_question_round_trip() {
+        let partial = make_partial(
+            "req_one",
+            &[("Pick a fruit", "Fruits")],
+            vec![Some("Apple".into())],
+        );
+        let resp = build_ask_user_response_multi(&partial);
+        assert_eq!(
+            resp["response"]["response"]["updatedInput"]["answers"]["Pick a fruit"],
+            "Apple"
+        );
+    }
+
+    #[test]
+    fn submit_question_answer_no_session_errors_cleanly() {
+        // Without an active child, submit_question_answer must fail with
+        // "no active session" — exercising the early-return guard before
+        // any state mutation.
+        let mut s = ChatSession::new("test-project");
+        s.pending_requests.lock().unwrap().insert(
+            "tool-x".into(),
+            make_partial(
+                "r1",
+                &[("Q", "")],
+                vec![None],
+            ),
+        );
+        let err = s
+            .submit_question_answer("tool-x", 0, "yes")
+            .expect_err("must fail without an active session");
+        assert!(
+            err.to_string().contains("no active session"),
+            "unexpected error: {err}"
+        );
+        // The pending entry must NOT be mutated by a no-session error.
+        let map = s.pending_requests.lock().unwrap();
+        let entry = map.get("tool-x").expect("entry preserved");
+        assert!(entry.answers[0].is_none(), "answers must not be modified");
+    }
+
+    #[test]
+    fn submit_question_answer_oversize_answer_errors_cleanly() {
+        let mut s = ChatSession::new("test-project");
+        s.pending_requests.lock().unwrap().insert(
+            "tool-y".into(),
+            make_partial("r2", &[("Q", "")], vec![None]),
+        );
+        let huge = "x".repeat(MAX_ANSWER_LEN + 1);
+        let err = s
+            .submit_question_answer("tool-y", 0, &huge)
+            .expect_err("oversize answer must fail");
+        assert!(
+            err.to_string().contains("answer too long"),
+            "unexpected error: {err}"
+        );
+    }
+
+    fn make_question_value(question: &str, header: &str) -> serde_json::Value {
+        serde_json::json!({
+            "question": question,
+            "header": header,
+            "multiSelect": false,
+            "options": [{"label": "Yes", "value": "yes"}, {"label": "No", "value": "no"}],
+        })
+    }
+
+    fn build_ask_user_request(questions: Vec<serde_json::Value>) -> ControlRequest {
+        ControlRequest {
+            request_id: "req".to_string(),
             tool_name: "AskUserQuestion".to_string(),
-            input: serde_json::json!({
-                "questions": [{
-                    "question": "Co wolisz?",
-                    "header": "Owoc",
-                    "multiSelect": false,
-                    "options": [{"label": "Gruszki"}, {"label": "Banany"}]
-                }]
-            }),
-            tool_use_id: "toolu_wrapped_test".to_string(),
-        };
-        let resp = build_ask_user_response(&pending, "Gruszki");
-        assert_eq!(resp["type"], "control_response");
-        let updated = &resp["response"]["response"]["updatedInput"];
-        assert_eq!(updated["answers"]["Co wolisz?"], "Gruszki");
-        // Original questions array should still be present
-        assert!(updated["questions"].as_array().unwrap().len() == 1);
+            input: serde_json::json!({ "questions": questions }),
+            tool_use_id: "toolu_multi".to_string(),
+        }
+    }
+
+    fn unwrap_ask_chunk(
+        chunk: StreamChunk,
+    ) -> (String, Vec<AskUserQuestionItem>, usize) {
+        match chunk {
+            StreamChunk::AskUserQuestion {
+                tool_id,
+                questions,
+                current_index,
+            } => (tool_id, questions, current_index),
+            other => panic!("expected AskUserQuestion, got {other:?}"),
+        }
     }
 
     #[test]
-    fn build_ask_user_response_empty_questions_array_sets_answers() {
-        let pending = ControlRequest {
-            request_id: "req_empty".to_string(),
-            tool_name: "AskUserQuestion".to_string(),
-            input: serde_json::json!({
-                "questions": []
-            }),
-            tool_use_id: "toolu_empty_q".to_string(),
-        };
-        let resp = build_ask_user_response(&pending, "fallback");
-        assert_eq!(resp["type"], "control_response");
-        let updated = &resp["response"]["response"]["updatedInput"];
-        // With empty questions, the answer key is "" (empty question text)
-        assert_eq!(updated["answers"][""], "fallback");
+    fn emit_ask_user_one_question() {
+        let req = build_ask_user_request(vec![make_question_value("Q1", "H1")]);
+        let chunk = StreamParser::emit_ask_user_from_control_request(&req).unwrap();
+        let (tool_id, questions, current_index) = unwrap_ask_chunk(chunk);
+        assert_eq!(tool_id, "toolu_multi");
+        assert_eq!(current_index, 0);
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].question, "Q1");
+        assert_eq!(questions[0].header, "H1");
     }
 
     #[test]
-    fn emit_ask_user_from_control_request_flat() {
+    fn emit_ask_user_two_questions() {
+        let req = build_ask_user_request(vec![
+            make_question_value("Q1", "H1"),
+            make_question_value("Q2", "H2"),
+        ]);
+        let chunk = StreamParser::emit_ask_user_from_control_request(&req).unwrap();
+        let (_, questions, _) = unwrap_ask_chunk(chunk);
+        assert_eq!(questions.len(), 2);
+        assert_eq!(questions[0].question, "Q1");
+        assert_eq!(questions[1].question, "Q2");
+    }
+
+    #[test]
+    fn emit_ask_user_three_questions() {
+        let req = build_ask_user_request(vec![
+            make_question_value("A", ""),
+            make_question_value("B", ""),
+            make_question_value("C", ""),
+        ]);
+        let chunk = StreamParser::emit_ask_user_from_control_request(&req).unwrap();
+        let (_, questions, _) = unwrap_ask_chunk(chunk);
+        assert_eq!(questions.len(), 3);
+        assert_eq!(
+            questions
+                .iter()
+                .map(|q| q.question.clone())
+                .collect::<Vec<_>>(),
+            vec!["A".to_string(), "B".to_string(), "C".to_string()]
+        );
+    }
+
+    #[test]
+    fn emit_ask_user_four_questions() {
+        let req = build_ask_user_request(vec![
+            make_question_value("A", ""),
+            make_question_value("B", ""),
+            make_question_value("C", ""),
+            make_question_value("D", ""),
+        ]);
+        let chunk = StreamParser::emit_ask_user_from_control_request(&req).unwrap();
+        let (_, questions, _) = unwrap_ask_chunk(chunk);
+        assert_eq!(questions.len(), 4);
+        assert_eq!(questions[3].question, "D");
+    }
+
+    #[test]
+    fn emit_ask_user_five_questions_truncates_to_cap() {
+        let req = build_ask_user_request(vec![
+            make_question_value("A", ""),
+            make_question_value("B", ""),
+            make_question_value("C", ""),
+            make_question_value("D", ""),
+            make_question_value("E", ""),
+        ]);
+        let chunk = StreamParser::emit_ask_user_from_control_request(&req).unwrap();
+        let (_, questions, _) = unwrap_ask_chunk(chunk);
+        assert_eq!(questions.len(), MAX_ASK_USER_QUESTIONS);
+        assert_eq!(questions[0].question, "A");
+        assert_eq!(questions[3].question, "D");
+        // E was truncated; we don't assert log capture here (covered by integration).
+    }
+
+    #[test]
+    fn emit_ask_user_duplicate_question_text_kept_distinct() {
+        let req = build_ask_user_request(vec![
+            make_question_value("Same?", "H1"),
+            make_question_value("Same?", "H2"),
+        ]);
+        let chunk = StreamParser::emit_ask_user_from_control_request(&req).unwrap();
+        let (_, questions, _) = unwrap_ask_chunk(chunk);
+        assert_eq!(questions.len(), 2);
+        assert_eq!(questions[0].question, "Same?");
+        assert_eq!(questions[1].question, "Same?");
+        assert_eq!(questions[0].header, "H1");
+        assert_eq!(questions[1].header, "H2");
+    }
+
+    #[test]
+    fn emit_ask_user_empty_questions_array_returns_none() {
+        let req = build_ask_user_request(vec![]);
+        assert!(StreamParser::emit_ask_user_from_control_request(&req).is_none());
+    }
+
+    #[test]
+    fn emit_ask_user_missing_questions_field_treats_input_as_single() {
         let req = ControlRequest {
-            request_id: "req_20".to_string(),
+            request_id: "req_flat".to_string(),
             tool_name: "AskUserQuestion".to_string(),
             input: serde_json::json!({
-                "question": "Yes or no?",
+                "question": "Flat?",
                 "header": "Confirm",
                 "multiSelect": false,
-                "options": [{"label": "Yes", "value": "yes"}, {"label": "No", "value": "no"}]
+                "options": [{"label": "Yes"}, {"label": "No"}]
             }),
-            tool_use_id: "toolu_ask_flat".to_string(),
+            tool_use_id: "toolu_flat".to_string(),
         };
         let chunk = StreamParser::emit_ask_user_from_control_request(&req).unwrap();
-        match chunk {
-            StreamChunk::AskUserQuestion {
-                tool_id,
-                question,
-                options,
-                header,
-                multi_select,
-            } => {
-                assert_eq!(tool_id, "toolu_ask_flat");
-                assert_eq!(question, "Yes or no?");
-                assert_eq!(header, "Confirm");
-                assert!(!multi_select);
-                assert_eq!(options.len(), 2);
-                assert_eq!(options[0].label, "Yes");
-                assert_eq!(options[1].label, "No");
-            }
-            other => panic!("expected AskUserQuestion, got {other:?}"),
-        }
+        let (_, questions, _) = unwrap_ask_chunk(chunk);
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].question, "Flat?");
+        assert_eq!(questions[0].options.len(), 2);
     }
 
     #[test]
-    fn emit_ask_user_from_control_request_wrapped() {
-        let req = ControlRequest {
-            request_id: "req_21".to_string(),
-            tool_name: "AskUserQuestion".to_string(),
-            input: serde_json::json!({
-                "questions": [{
-                    "question": "Wybierz kolor",
-                    "header": "Kolor",
-                    "multiSelect": true,
-                    "options": [{"label": "Czerwony", "value": "red"}, {"label": "Niebieski", "value": "blue"}]
-                }]
-            }),
-            tool_use_id: "toolu_ask_wrapped".to_string(),
-        };
+    fn emit_ask_user_malformed_options_skipped() {
+        let req = build_ask_user_request(vec![serde_json::json!({
+            "question": "Pick",
+            "header": "h",
+            "multiSelect": false,
+            "options": [
+                {"label": "Good", "value": "good"},
+                {"value": "no_label"},
+                {"label": "Also good"}
+            ]
+        })]);
         let chunk = StreamParser::emit_ask_user_from_control_request(&req).unwrap();
-        match chunk {
-            StreamChunk::AskUserQuestion {
-                tool_id,
-                question,
-                header,
-                multi_select,
-                options,
-            } => {
-                assert_eq!(tool_id, "toolu_ask_wrapped");
-                assert_eq!(question, "Wybierz kolor");
-                assert_eq!(header, "Kolor");
-                assert!(multi_select);
-                assert_eq!(options.len(), 2);
-                assert_eq!(options[0].value, "red");
-                assert_eq!(options[1].value, "blue");
-            }
-            other => panic!("expected AskUserQuestion, got {other:?}"),
-        }
+        let (_, questions, _) = unwrap_ask_chunk(chunk);
+        assert_eq!(questions[0].options.len(), 2);
+        assert_eq!(questions[0].options[0].label, "Good");
+        assert_eq!(questions[0].options[1].label, "Also good");
+        // Default value falls back to label when missing.
+        assert_eq!(questions[0].options[1].value, "Also good");
     }
 
     #[test]
-    fn emit_ask_user_from_control_request_empty_questions_array() {
-        let req = ControlRequest {
-            request_id: "req_empty".to_string(),
-            tool_name: "AskUserQuestion".to_string(),
-            input: serde_json::json!({
-                "questions": []
-            }),
-            tool_use_id: "toolu_empty_q".to_string(),
-        };
+    fn emit_ask_user_unicode_polish() {
+        let req = build_ask_user_request(vec![serde_json::json!({
+            "question": "Co wolisz?",
+            "header": "Wybór 🌊",
+            "multiSelect": true,
+            "options": [{"label": "Gruszki"}, {"label": "Banany"}]
+        })]);
         let chunk = StreamParser::emit_ask_user_from_control_request(&req).unwrap();
-        match chunk {
-            StreamChunk::AskUserQuestion {
-                question, options, ..
-            } => {
-                assert_eq!(question, "");
-                assert!(options.is_empty());
-            }
-            other => panic!("expected AskUserQuestion, got {other:?}"),
-        }
+        let (_, questions, _) = unwrap_ask_chunk(chunk);
+        assert_eq!(questions[0].question, "Co wolisz?");
+        assert_eq!(questions[0].header, "Wybór 🌊");
+        assert!(questions[0].multi_select);
+        assert_eq!(questions[0].options[0].label, "Gruszki");
     }
 
     #[test]
@@ -3689,10 +4053,14 @@ mod tests {
         }
         match &chunks[1] {
             StreamChunk::AskUserQuestion {
-                tool_id, question, ..
+                tool_id,
+                questions,
+                current_index,
             } => {
                 assert_eq!(tool_id, "toolu_ask_ctrl1");
-                assert_eq!(question, "Allow file read?");
+                assert_eq!(*current_index, 0);
+                assert_eq!(questions.len(), 1);
+                assert_eq!(questions[0].question, "Allow file read?");
             }
             other => panic!("chunk 1: expected AskUserQuestion, got {other:?}"),
         }

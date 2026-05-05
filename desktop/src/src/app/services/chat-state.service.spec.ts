@@ -822,79 +822,89 @@ describe('ChatStateService', () => {
   });
 
   describe('AskUserQuestion', () => {
-    it('adds ask_user block to currentBlocks', () => {
-      const chunk: StreamChunk = {
+    function askChunk(toolId: string, count: number): StreamChunk {
+      return {
         chunk_type: 'AskUserQuestion',
         data: {
-          tool_id: 'toolu_ask1',
-          question: 'Pick a fruit',
-          options: [
-            { label: 'Apple', value: 'apple' },
-            { label: 'Banana', value: 'banana' },
-          ],
-          header: 'Fruits',
-          multi_select: false,
+          tool_id: toolId,
+          questions: Array.from({ length: count }, (_, i) => ({
+            question: `Q${i}`,
+            header: `H${i}`,
+            options: [
+              { label: 'A', value: 'a' },
+              { label: 'B', value: 'b' },
+            ],
+            multi_select: false,
+          })),
+          current_index: 0,
         },
       };
-      service.handleStreamChunk(chunk);
+    }
+
+    it('chunk handler builds composite block with one question', () => {
+      service.handleStreamChunk(askChunk('toolu_ask1', 1));
 
       expect(service.currentBlocks).toHaveLength(1);
       const block = service.currentBlocks[0];
       expect(block.type).toBe('ask_user');
       if (block.type === 'ask_user') {
         expect(block.question.tool_id).toBe('toolu_ask1');
-        expect(block.question.question).toBe('Pick a fruit');
-        expect(block.question.options).toHaveLength(2);
-        expect(block.question.answered).toBe(false);
+        expect(block.question.questions).toHaveLength(1);
+        expect(block.question.questions[0].question).toBe('Q0');
+        expect(block.question.current_index).toBe(0);
+        expect(block.question.answers).toEqual([null]);
       }
     });
 
-    it('answerQuestion marks block as answered and calls backend', async () => {
-      service.handleStreamChunk({
-        chunk_type: 'AskUserQuestion',
-        data: {
-          tool_id: 'toolu_ask1',
-          question: 'Pick one',
-          options: [{ label: 'A', value: 'a' }],
-          header: '',
-          multi_select: false,
-        },
-      });
+    it('chunk handler builds composite block with four questions', () => {
+      service.handleStreamChunk(askChunk('toolu_ask4', 4));
+      const block = service.currentBlocks[0];
+      if (block.type === 'ask_user') {
+        expect(block.question.questions).toHaveLength(4);
+        expect(block.question.answers).toEqual([null, null, null, null]);
+      }
+    });
+
+    it('submitAnswer optimistically advances current_index to next null slot', async () => {
+      service.handleStreamChunk(askChunk('toolu_ask3', 3));
 
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      await service.answerQuestion('toolu_ask1', ['a']);
+      await service.submitAnswer('toolu_ask3', 0, 'A');
 
       const block = service.currentBlocks[0];
       if (block.type === 'ask_user') {
-        expect(block.question.answered).toBe(true);
-        expect(block.question.selected_values).toEqual(['a']);
+        expect(block.question.answers).toEqual(['A', null, null]);
+        expect(block.question.current_index).toBe(1);
       }
-
-      expect(invokeSpy).toHaveBeenCalledWith('answer_question', {
-        toolUseId: 'toolu_ask1',
-        answer: 'a',
+      expect(invokeSpy).toHaveBeenCalledWith('submit_question_answer', {
+        toolUseId: 'toolu_ask3',
+        questionIdx: 0,
+        answer: 'A',
       });
     });
 
-    it('answerQuestion adds error block, resets isStreaming, and reverts answered state on failure', async () => {
+    it('submitAnswer for final slot fills the last answers slot and points current_index past the end', async () => {
+      service.handleStreamChunk(askChunk('toolu_ask2', 2));
+      await service.submitAnswer('toolu_ask2', 0, 'first');
+      await service.submitAnswer('toolu_ask2', 1, 'second');
+
+      const block = service.currentBlocks[0];
+      if (block.type === 'ask_user') {
+        expect(block.question.answers).toEqual(['first', 'second']);
+        expect(block.question.current_index).toBe(2);
+      }
+    });
+
+    it('submitAnswer reverts the slot and appends an error block on backend failure', async () => {
       service.isStreaming = true;
-      service.handleStreamChunk({
-        chunk_type: 'AskUserQuestion',
-        data: {
-          tool_id: 'toolu_ask1',
-          question: 'Pick one',
-          options: [{ label: 'A', value: 'a' }],
-          header: '',
-          multi_select: false,
-        },
-      });
+      service.handleStreamChunk(askChunk('toolu_ask1', 1));
 
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'answer_question') throw new Error('pipe broken');
+        if (cmd === 'submit_question_answer') throw new Error('pipe broken');
         return undefined;
       };
 
-      await service.answerQuestion('toolu_ask1', ['a']);
+      await service.submitAnswer('toolu_ask1', 0, 'A');
 
       expect(service.isStreaming).toBe(false);
 
@@ -903,8 +913,8 @@ describe('ChatStateService', () => {
       );
       expect(askBlock).toBeDefined();
       if (askBlock && askBlock.type === 'ask_user') {
-        expect(askBlock.question.answered).toBe(false);
-        expect(askBlock.question.selected_values).toEqual([]);
+        expect(askBlock.question.answers).toEqual([null]);
+        expect(askBlock.question.current_index).toBe(0);
       }
 
       const lastBlock = service.currentBlocks[service.currentBlocks.length - 1];
@@ -914,38 +924,46 @@ describe('ChatStateService', () => {
       }
     });
 
-    it('answerQuestion with stale tool_use_id does not throw and calls backend', async () => {
+    it('submitAnswer with stale tool_use_id calls backend (host validates)', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      await service.answerQuestion('toolu_nonexistent', ['yes']);
+      await service.submitAnswer('toolu_nonexistent', 0, 'yes');
 
       expect(service.currentBlocks).toHaveLength(0);
-      expect(invokeSpy).toHaveBeenCalledWith('answer_question', {
+      expect(invokeSpy).toHaveBeenCalledWith('submit_question_answer', {
         toolUseId: 'toolu_nonexistent',
+        questionIdx: 0,
         answer: 'yes',
       });
     });
 
-    it('answerQuestion joins multiple values with comma', async () => {
+    it('submitAnswer forwards multi-select joined value verbatim', async () => {
       service.handleStreamChunk({
         chunk_type: 'AskUserQuestion',
         data: {
           tool_id: 'toolu_ask1',
-          question: 'Pick fruits',
-          options: [
-            { label: 'A', value: 'apple' },
-            { label: 'B', value: 'banana' },
+          questions: [
+            {
+              question: 'Pick fruits',
+              header: '',
+              multi_select: true,
+              options: [
+                { label: 'A', value: 'apple' },
+                { label: 'B', value: 'banana' },
+              ],
+            },
           ],
-          header: '',
-          multi_select: true,
+          current_index: 0,
         },
       });
 
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      await service.answerQuestion('toolu_ask1', ['apple', 'banana']);
+      // The renderer pre-joins labels — service treats `value` as opaque.
+      await service.submitAnswer('toolu_ask1', 0, 'A, B');
 
-      expect(invokeSpy).toHaveBeenCalledWith('answer_question', {
+      expect(invokeSpy).toHaveBeenCalledWith('submit_question_answer', {
         toolUseId: 'toolu_ask1',
-        answer: 'apple, banana',
+        questionIdx: 0,
+        answer: 'A, B',
       });
     });
   });
@@ -1061,12 +1079,9 @@ describe('ChatStateService', () => {
             type: 'ask_user',
             question: {
               tool_id: 't1',
-              question: 'q?',
-              options: [],
-              header: '',
-              multi_select: false,
-              answered: false,
-              selected_values: [],
+              questions: [{ question: 'q?', header: '', options: [], multi_select: false }],
+              current_index: 0,
+              answers: [null],
             },
           },
         ],
@@ -1084,12 +1099,9 @@ describe('ChatStateService', () => {
             type: 'ask_user',
             question: {
               tool_id: 't1',
-              question: 'q?',
-              options: [],
-              header: '',
-              multi_select: false,
-              answered: false,
-              selected_values: [],
+              questions: [{ question: 'q?', header: '', options: [], multi_select: false }],
+              current_index: 0,
+              answers: [null],
             },
           },
         ],
@@ -1280,7 +1292,7 @@ describe('ChatStateService', () => {
       expect(service.isStreaming).toBe(false);
     });
 
-    it('answerQuestion: stopConversation wins the race, no error block is appended', async () => {
+    it('submitAnswer: stopConversation wins the race, no error block is appended', async () => {
       mockTauri.isRunningInTauri = () => true;
       await service.init();
       service.isStreaming = true;
@@ -1290,26 +1302,30 @@ describe('ChatStateService', () => {
             type: 'ask_user',
             question: {
               tool_id: 't1',
-              question: 'q?',
-              options: [{ value: 'a', label: 'A' }],
-              header: '',
-              multi_select: false,
-              answered: false,
-              selected_values: [],
+              questions: [
+                {
+                  question: 'q?',
+                  header: '',
+                  options: [{ value: 'a', label: 'A' }],
+                  multi_select: false,
+                },
+              ],
+              current_index: 0,
+              answers: [null],
             },
           },
         ],
       });
       let rejectAnswer: (err: Error) => void = () => {};
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'answer_question') {
+        if (cmd === 'submit_question_answer') {
           return new Promise<undefined>((_, rej) => {
             rejectAnswer = rej;
           });
         }
         return undefined;
       };
-      const answerPromise = service.answerQuestion('t1', ['a']);
+      const answerPromise = service.submitAnswer('t1', 0, 'A');
       await service.stopConversation();
       rejectAnswer(new Error('Broken pipe'));
       await answerPromise;

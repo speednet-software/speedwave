@@ -208,21 +208,28 @@ pub enum MessageBlock {
         #[serde(default)]
         is_error: bool,
     },
-    /// Interactive question from Claude (the `AskUserQuestion` tool variant).
+    /// Interactive question(s) from Claude (the `AskUserQuestion` tool variant).
+    ///
+    /// The Claude Agent SDK can deliver 1–4 questions in a single
+    /// `control_request`. We render them sequentially: only
+    /// `current_index` is interactive; earlier indices are locked with their
+    /// chosen-label badge stored in `answers`.
     AskUser {
         /// Tool-use id from the stream event.
         tool_id: String,
-        /// Short header shown above the question.
-        header: String,
-        /// Full question text.
-        question: String,
-        /// Available options.
-        options: Vec<AskUserOption>,
-        /// Whether more than one option can be selected.
-        multi_select: bool,
-        /// Selected values once the user answered. `None` while pending.
+        /// All questions in this `control_request`, in order. `len() <=
+        /// MAX_ASK_USER_QUESTIONS`; truncated upstream with a warn log if the
+        /// SDK ever sends more.
+        questions: Vec<AskUserQuestionItem>,
+        /// Index of the currently-active (interactive) question; equals
+        /// `questions.len()` when every question has been answered.
+        current_index: usize,
+        /// Per-question chosen value; `len() == questions.len()`. `None` until
+        /// the user answers slot `i`. Populated optimistically by the frontend
+        /// reducer; the host writes one `control_response` once every slot is
+        /// `Some`.
         #[serde(default)]
-        answer: Option<Vec<String>>,
+        answers: Vec<Option<String>>,
     },
     /// Terminal error surfaced as a block (rate_limit, network, etc.).
     Error {
@@ -231,7 +238,37 @@ pub enum MessageBlock {
     },
 }
 
-/// Single option inside an `AskUser` block.
+/// Maximum number of questions accepted in a single `AskUserQuestion`
+/// control_request. Matches the Claude Agent SDK contract (1–4 questions).
+/// Anything beyond is truncated with a `log::warn!` (count only).
+pub const MAX_ASK_USER_QUESTIONS: usize = 4;
+
+/// Maximum size, in bytes, of the serialized `control_response` written to
+/// Claude's stdin in answer to an `AskUserQuestion`. Defence-in-depth against
+/// adversarial fan-out (4 questions × pathological labels). The host fails
+/// closed if a constructed response exceeds this cap.
+pub const MAX_ASK_USER_WIRE_BYTES: usize = 64 * 1024;
+
+/// One question inside an `AskUser` block.
+///
+/// The Agent SDK control_request `input.questions[i]` shape: `{ question,
+/// header, multiSelect, options[] }`. We mirror it 1:1 so frontend and
+/// runtime hold the same data without translation.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct AskUserQuestionItem {
+    /// Full question text shown to the user. Also doubles as the key in the
+    /// final `answers` map written back to Claude (per the SDK contract).
+    pub question: String,
+    /// Short header shown above the question (UI affordance only).
+    pub header: String,
+    /// Available options for this question.
+    pub options: Vec<AskUserOption>,
+    /// Whether more than one option can be selected. For multi-select, the
+    /// frontend joins chosen labels with `", "` before submitting.
+    pub multi_select: bool,
+}
+
+/// Single option inside an `AskUser` question.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct AskUserOption {
     /// Human-readable label.
@@ -329,14 +366,17 @@ mod tests {
             },
             MessageBlock::AskUser {
                 tool_id: "q1".into(),
-                header: "h".into(),
-                question: "q?".into(),
-                options: vec![AskUserOption {
-                    label: "Yes".into(),
-                    value: "yes".into(),
+                questions: vec![AskUserQuestionItem {
+                    question: "q?".into(),
+                    header: "h".into(),
+                    options: vec![AskUserOption {
+                        label: "Yes".into(),
+                        value: "yes".into(),
+                    }],
+                    multi_select: false,
                 }],
-                multi_select: false,
-                answer: None,
+                current_index: 0,
+                answers: vec![None],
             },
             MessageBlock::Error {
                 content: "boom".into(),
@@ -475,6 +515,139 @@ mod tests {
             !dbg.contains('…'),
             "redaction marker leaked when no session_id present: {dbg}"
         );
+    }
+
+    fn make_question(text: &str) -> AskUserQuestionItem {
+        AskUserQuestionItem {
+            question: text.into(),
+            header: format!("Header for {text}"),
+            options: vec![
+                AskUserOption {
+                    label: "A".into(),
+                    value: "a".into(),
+                },
+                AskUserOption {
+                    label: "B".into(),
+                    value: "b".into(),
+                },
+            ],
+            multi_select: false,
+        }
+    }
+
+    fn make_ask_user_block(n: usize) -> MessageBlock {
+        let questions = (0..n).map(|i| make_question(&format!("Q{i}"))).collect();
+        MessageBlock::AskUser {
+            tool_id: "tool-1".into(),
+            questions,
+            current_index: 0,
+            answers: vec![None; n],
+        }
+    }
+
+    #[test]
+    fn ask_user_block_serializes_with_questions_array() {
+        for n in 1..=MAX_ASK_USER_QUESTIONS {
+            let block = make_ask_user_block(n);
+            let encoded = serde_json::to_value(&block).unwrap();
+            let decoded: MessageBlock = serde_json::from_value(encoded).unwrap();
+            assert_eq!(block, decoded, "round-trip failed for n={n}");
+            match &decoded {
+                MessageBlock::AskUser {
+                    questions, answers, ..
+                } => {
+                    assert_eq!(questions.len(), n);
+                    assert_eq!(answers.len(), n);
+                }
+                other => panic!("unexpected variant: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn ask_user_block_unicode_question_text() {
+        let block = MessageBlock::AskUser {
+            tool_id: "t".into(),
+            questions: vec![AskUserQuestionItem {
+                question: "Co wolisz? 🌊".into(),
+                header: "Pytanie".into(),
+                options: vec![AskUserOption {
+                    label: "Tak".into(),
+                    value: "tak".into(),
+                }],
+                multi_select: false,
+            }],
+            current_index: 0,
+            answers: vec![None],
+        };
+        let encoded = serde_json::to_string(&block).unwrap();
+        let decoded: MessageBlock = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(block, decoded);
+    }
+
+    #[test]
+    fn ask_user_block_empty_options_per_question() {
+        let block = MessageBlock::AskUser {
+            tool_id: "t".into(),
+            questions: vec![AskUserQuestionItem {
+                question: "Free?".into(),
+                header: "h".into(),
+                options: vec![],
+                multi_select: false,
+            }],
+            current_index: 0,
+            answers: vec![None],
+        };
+        let encoded = serde_json::to_value(&block).unwrap();
+        let decoded: MessageBlock = serde_json::from_value(encoded).unwrap();
+        assert_eq!(block, decoded);
+    }
+
+    #[test]
+    fn ask_user_block_partial_answers_preserved() {
+        let block = MessageBlock::AskUser {
+            tool_id: "t".into(),
+            questions: vec![
+                make_question("Q0"),
+                make_question("Q1"),
+                make_question("Q2"),
+            ],
+            current_index: 1,
+            answers: vec![Some("a".into()), None, Some("c".into())],
+        };
+        let encoded = serde_json::to_value(&block).unwrap();
+        let decoded: MessageBlock = serde_json::from_value(encoded).unwrap();
+        assert_eq!(block, decoded);
+    }
+
+    #[test]
+    fn ask_user_block_answers_default_to_empty_when_missing() {
+        let decoded: MessageBlock = serde_json::from_value(json!({
+            "kind": "ask_user",
+            "tool_id": "t",
+            "questions": [{
+                "question": "q",
+                "header": "h",
+                "options": [],
+                "multi_select": false,
+            }],
+            "current_index": 0,
+        }))
+        .unwrap();
+        match decoded {
+            MessageBlock::AskUser { answers, .. } => assert!(answers.is_empty()),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ask_user_max_questions_is_four() {
+        assert_eq!(MAX_ASK_USER_QUESTIONS, 4);
+    }
+
+    #[test]
+    fn ask_user_max_wire_bytes_is_64_kib() {
+        assert_eq!(MAX_ASK_USER_WIRE_BYTES, 65_536);
     }
 
     #[test]

@@ -78,7 +78,7 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
    */
   readonly lastAssistantIndex = input(-1);
 
-  readonly questionAnswered = output<{ toolId: string; values: string[] }>();
+  readonly questionAnswered = output<{ toolId: string; questionIdx: number; value: string }>();
 
   @ViewChild('scrollContainer') scrollContainer!: ElementRef<HTMLDivElement>;
 
