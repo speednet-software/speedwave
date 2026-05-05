@@ -16,6 +16,17 @@ Remove-Item -Recurse -Force "$dest\build-context","$dest\mcp-os" -ErrorAction Si
 New-Item -ItemType Directory -Path "$dest\build-context" -Force | Out-Null
 Copy-Item -Recurse containers "$dest\build-context\containers"
 
+# Strip CR from every .sh. UTF-8 without BOM — a BOM before the shebang
+# breaks Linux exec just like CRLF would.
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+Get-ChildItem -Path "$dest\build-context\containers" -Recurse -Include '*.sh' -File |
+    ForEach-Object {
+        $content = [System.IO.File]::ReadAllText($_.FullName)
+        if ($content.Contains("`r")) {
+            [System.IO.File]::WriteAllText($_.FullName, $content.Replace("`r", ""), $utf8NoBom)
+        }
+    }
+
 New-Item -ItemType Directory -Path "$dest\build-context\mcp-servers" -Force | Out-Null
 Copy-Item mcp-servers\tsconfig.base.json "$dest\build-context\mcp-servers\"
 

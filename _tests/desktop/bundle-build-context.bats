@@ -177,6 +177,54 @@ teardown() {
     [ "$(ls "$tmpdir/node_modules" | wc -l)" -gt 0 ]
 }
 
+@test "bundle script normalises shell scripts to LF in build-context" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    while IFS= read -r f; do
+        if grep -q $'\r' "$f"; then
+            echo "CRLF detected in $f"
+            return 1
+        fi
+    done < <(find "$DEST/build-context/containers" -type f -name '*.sh')
+}
+
+@test "bundle script strips CR from a CRLF source script (defense-in-depth)" {
+    local src="$BATS_TEST_DIRNAME/../../containers/install-claude.sh"
+    local backup
+    backup="$(mktemp)"
+    cp "$src" "$backup"
+
+    printf '#!/bin/bash\r\necho hi\r\n' > "$src"
+    chmod 0755 "$src"
+
+    run "$SCRIPT"
+    local bundler_status=$status
+
+    cp "$backup" "$src"
+    rm -f "$backup"
+
+    [ "$bundler_status" -eq 0 ]
+    if grep -q $'\r' "$DEST/build-context/containers/install-claude.sh"; then
+        echo "Bundler did not strip CR from destination"
+        return 1
+    fi
+}
+
+@test "bundle script preserves source script permissions" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+
+    local src="$BATS_TEST_DIRNAME/../../containers/install-claude.sh"
+    local dst="$DEST/build-context/containers/install-claude.sh"
+
+    # BSD stat (macOS) vs GNU stat (Linux/Git Bash).
+    local src_perms
+    local dst_perms
+    src_perms=$(stat -f '%A' "$src" 2>/dev/null || stat -c '%a' "$src")
+    dst_perms=$(stat -f '%A' "$dst" 2>/dev/null || stat -c '%a' "$dst")
+    [ "$src_perms" = "$dst_perms" ]
+}
+
 @test "bundle script --ci works without pre-built dist directories" {
     REPO_ROOT="$BATS_TEST_DIRNAME/../.."
     # Simulate a clean checkout by temporarily renaming dist directories

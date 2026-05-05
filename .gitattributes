@@ -1,0 +1,19 @@
+# Force LF for all text files. Prevents Windows checkouts with
+# core.autocrlf=true (the default on windows-latest) from rewriting *.sh
+# shebangs to CRLF, which the Linux kernel rejects with exit 127. Issue #603.
+* text=auto eol=lf
+
+*.bat        text eol=crlf
+*.cmd        text eol=crlf
+
+*.png        binary
+*.icns       binary
+*.ico        binary
+*.woff2      binary
+*.pem        binary
+*.p12        binary
+*.pfx        binary
+*.crt        binary
+*.cer        binary
+*.der        binary
+*.gpg        binary

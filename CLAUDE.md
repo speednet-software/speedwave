@@ -91,6 +91,7 @@ Plugins live in a **separate repository** (`speedwave-plugins`, sibling to this 
 | **Container security constraints** | `compose.rs` → `cap_drop: ALL`, `no-new-privileges`, `read_only`, resource limits                      | Plugins must work within these constraints                              |
 | **Tauri commands (Desktop UI)**    | `desktop/src-tauri/src/plugin_cmd.rs` → 8 commands                                                     | Frontend models in `desktop/src/src/app/models/plugin.ts`               |
 | **Frontend models**                | `desktop/src/src/app/models/plugin.ts` → `PluginStatusEntry`                                           | Must match Tauri command return types                                   |
+| **Line-ending policy**             | `.gitattributes` (root) — `* text=auto eol=lf`                                                         | Plugin repos must enforce LF for `*.sh` shipped in `Containerfile`s     |
 
 ### Breaking-change rule
 

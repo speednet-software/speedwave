@@ -313,6 +313,29 @@ jobs:
       - name: cargo test runtime::wsl
         run: cargo test -p speedwave-runtime --lib "runtime::wsl::"
 
+      - name: Run runtime build:: tests on Windows
+        shell: bash
+        run: cargo test -p speedwave-runtime --lib "build::"
+
+      - name: Verify .gitattributes survives core.autocrlf=true checkout
+        shell: bash
+        env:
+          REPO_PATH: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP/recheck"
+          rm -rf "$tmp"
+          git -c core.autocrlf=true clone "$REPO_PATH" "$tmp"
+          cd "$tmp"
+          fail=0
+          while IFS= read -r -d '' f; do
+            if ! tr -d "$(printf '\r')" < "$f" | cmp -s - "$f"; then
+              echo "::error file=$f::CRLF detected after autocrlf=true checkout — .gitattributes regression"
+              fail=1
+            fi
+          done < <(find containers -type f -name '*.sh' -print0)
+          exit "$fail"
+
   desktop-windows-check:
     # `desktop` job above only runs on ubuntu — it never catches Windows-only
     # compile errors in speedwave-desktop (e.g. cfg-gated imports of types
