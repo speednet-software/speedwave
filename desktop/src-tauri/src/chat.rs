@@ -1,5 +1,7 @@
 use crate::history;
-use speedwave_runtime::stream::{MAX_ASK_USER_QUESTIONS, MAX_ASK_USER_WIRE_BYTES};
+use speedwave_runtime::stream::{
+    AskUserOption, AskUserQuestionItem, MAX_ASK_USER_QUESTIONS, MAX_ASK_USER_WIRE_BYTES,
+};
 use speedwave_runtime::{config, consts, runtime};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -94,26 +96,6 @@ pub enum StreamChunk {
     /// previous turn ended. Frontend clears `state.pending_queue` on receipt
     /// — the message is already in flight via stdin.
     QueueDrained { session_id: String, text: String },
-}
-
-/// A single option in an AskUserQuestion prompt.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct AskUserOption {
-    pub label: String,
-    pub value: String,
-}
-
-/// One question inside an AskUserQuestion control_request.
-///
-/// Mirrors `speedwave_runtime::stream::AskUserQuestionItem` 1:1 but uses the
-/// chat-local `AskUserOption` so the Tauri serialization matches the
-/// frontend shape without an extra mapping at the patch_emitter layer.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct AskUserQuestionItem {
-    pub question: String,
-    pub header: String,
-    pub options: Vec<AskUserOption>,
-    pub multi_select: bool,
 }
 
 /// Token usage information from the result message.
@@ -214,6 +196,30 @@ pub enum SubmitOutcome {
     Pending,
     /// All slots filled and the response was written to stdin.
     Completed,
+}
+
+/// Internal: result of `fill_slot`. Mirrors `SubmitOutcome` but carries the
+/// `PartialAnswers` ownership when every slot is filled, so the caller can
+/// build the wire response without re-locking the map.
+enum FillOutcome {
+    Pending,
+    Completed(PartialAnswers),
+}
+
+fn validate_slot(
+    entry: &PartialAnswers,
+    question_idx: usize,
+    tool_use_id: &str,
+) -> anyhow::Result<()> {
+    if question_idx >= entry.questions.len() {
+        anyhow::bail!("invalid question index {question_idx} for tool_use_id: {tool_use_id}");
+    }
+    if entry.answers[question_idx].is_some() {
+        anyhow::bail!(
+            "question {question_idx} already answered for tool_use_id: {tool_use_id}"
+        );
+    }
+    Ok(())
 }
 
 /// Maximum size, in bytes, of a single user-supplied answer string. Lifted
@@ -1080,14 +1086,14 @@ fn build_ask_user_response_multi(partial: &PartialAnswers) -> serde_json::Value 
     let mut answers = serde_json::Map::with_capacity(partial.questions.len());
     let mut seen_keys: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (q, slot) in partial.questions.iter().zip(partial.answers.iter()) {
-        let value = slot.clone().unwrap_or_default();
+        let value = slot.as_deref().unwrap_or("");
         let key = q.question.as_str();
         if !seen_keys.insert(key) {
             log::warn!(
                 "AskUserQuestion: duplicate question text on wire — last answer wins for one slot"
             );
         }
-        answers.insert(key.to_string(), serde_json::Value::String(value));
+        answers.insert(key.to_string(), serde_json::Value::String(value.to_string()));
     }
     updated_input["answers"] = serde_json::Value::Object(answers);
 
@@ -1452,8 +1458,6 @@ impl ChatSession {
                             );
                             continue;
                         }
-                        // Store pending state keyed by tool_use_id; one slot
-                        // per question, populated as the user answers each.
                         match pending_requests.lock() {
                             Ok(mut map) => {
                                 map.insert(
@@ -1670,54 +1674,18 @@ impl ChatSession {
             anyhow::bail!("session exited ({})", status);
         }
 
-        // Phase 1: validate & set the slot, then decide whether we have
-        // enough answers to write the response. We hold the lock just for
-        // this critical section so other threads can still read.
-        let mut partial = {
-            let mut map = self
-                .pending_requests
-                .lock()
-                .map_err(|e| anyhow::anyhow!("pending_requests lock poisoned: {e}"))?;
-            let mut entry = map.remove(tool_use_id).ok_or_else(|| {
-                anyhow::anyhow!("no pending control request for tool_use_id: {tool_use_id}")
-            })?;
-            if question_idx >= entry.questions.len() {
-                // Restore so a follow-up retry with a valid index still works.
-                map.insert(tool_use_id.to_string(), entry);
-                anyhow::bail!(
-                    "invalid question index {question_idx} for tool_use_id: {tool_use_id}"
-                );
-            }
-            if entry.answers[question_idx].is_some() {
-                map.insert(tool_use_id.to_string(), entry);
-                anyhow::bail!(
-                    "question {question_idx} already answered for tool_use_id: {tool_use_id}"
-                );
-            }
-            entry.answers[question_idx] = Some(answer.to_string());
-            if entry.answers.iter().any(|a| a.is_none()) {
-                // Still pending — put it back and return early.
-                map.insert(tool_use_id.to_string(), entry);
-                return Ok(SubmitOutcome::Pending);
-            }
-            entry
+        let partial = match self.fill_slot(tool_use_id, question_idx, answer)? {
+            FillOutcome::Pending => return Ok(SubmitOutcome::Pending),
+            FillOutcome::Completed(p) => p,
         };
 
-        // Phase 2: every slot filled. Build the wire response, enforce the
-        // 64 KiB ceiling, then write to stdin. Any failure restores the
-        // partial state so the user can retry.
-        let response = build_ask_user_response_multi(&partial);
-        let serialized = match serde_json::to_string(&response) {
-            Ok(s) => s,
-            Err(e) => {
-                self.restore_partial(tool_use_id, &mut partial);
-                return Err(anyhow::anyhow!(
-                    "failed to serialize AskUserQuestion response: {e}"
-                ));
-            }
-        };
+        let serialized = serde_json::to_string(&build_ask_user_response_multi(&partial))
+            .map_err(|e| {
+                self.restore_partial(tool_use_id, &partial);
+                anyhow::anyhow!("failed to serialize AskUserQuestion response: {e}")
+            })?;
         if serialized.len() > MAX_ASK_USER_WIRE_BYTES {
-            self.restore_partial(tool_use_id, &mut partial);
+            self.restore_partial(tool_use_id, &partial);
             anyhow::bail!(
                 "AskUserQuestion response exceeds {} byte cap (got {})",
                 MAX_ASK_USER_WIRE_BYTES,
@@ -1739,11 +1707,39 @@ impl ChatSession {
                 partial.request.tool_name
             );
             drop(stdin);
-            self.restore_partial(tool_use_id, &mut partial);
+            self.restore_partial(tool_use_id, &partial);
             return Err(anyhow::anyhow!("failed to write answer to stdin: {e}"));
         }
 
         Ok(SubmitOutcome::Completed)
+    }
+
+    /// Apply one answer to the pending entry. Validation errors restore the
+    /// entry so a later retry with a valid index/value still works.
+    fn fill_slot(
+        &self,
+        tool_use_id: &str,
+        question_idx: usize,
+        answer: &str,
+    ) -> anyhow::Result<FillOutcome> {
+        let mut map = self
+            .pending_requests
+            .lock()
+            .map_err(|e| anyhow::anyhow!("pending_requests lock poisoned: {e}"))?;
+        let mut entry = map.remove(tool_use_id).ok_or_else(|| {
+            anyhow::anyhow!("no pending control request for tool_use_id: {tool_use_id}")
+        })?;
+        let result = validate_slot(&entry, question_idx, tool_use_id);
+        if let Err(e) = result {
+            map.insert(tool_use_id.to_string(), entry);
+            return Err(e);
+        }
+        entry.answers[question_idx] = Some(answer.to_string());
+        if entry.answers.iter().any(|a| a.is_none()) {
+            map.insert(tool_use_id.to_string(), entry);
+            return Ok(FillOutcome::Pending);
+        }
+        Ok(FillOutcome::Completed(entry))
     }
 
     /// Best-effort re-insert of a `PartialAnswers` after a downstream
@@ -1751,7 +1747,7 @@ impl ChatSession {
     /// the mutex is poisoned — the user's slot value is preserved in the
     /// borrowed `partial`, but at that point the session is already in
     /// trouble and we don't want to mask the original error.
-    fn restore_partial(&self, tool_use_id: &str, partial: &mut PartialAnswers) {
+    fn restore_partial(&self, tool_use_id: &str, partial: &PartialAnswers) {
         match self.pending_requests.lock() {
             Ok(mut map) => {
                 map.insert(tool_use_id.to_string(), partial.clone());

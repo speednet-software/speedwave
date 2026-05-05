@@ -21,9 +21,8 @@ use speedwave_runtime::stream::msg_store::LogMsg;
 #[cfg(test)]
 use speedwave_runtime::stream::QueuedMessage;
 use speedwave_runtime::stream::{
-    AskUserOption as PatchAskOption, AskUserQuestionItem as PatchAskQuestion, ConversationEntry,
-    ConversationPatch, EntryIndexProvider, EntryMeta, EntryRole, MessageBlock as PatchBlock,
-    MsgStore, SessionTotals, TurnUsage as PatchTurnUsage, UuidStatus,
+    ConversationEntry, ConversationPatch, EntryIndexProvider, EntryMeta, EntryRole,
+    MessageBlock as PatchBlock, MsgStore, SessionTotals, TurnUsage as PatchTurnUsage, UuidStatus,
 };
 
 use crate::chat::{StreamChunk, TurnUsage as RuntimeTurnUsage};
@@ -221,26 +220,10 @@ impl PatchEmitter {
                 current_index,
             } => {
                 let assistant = self.ensure_assistant_entry();
-                let runtime_questions: Vec<PatchAskQuestion> = questions
-                    .iter()
-                    .map(|q| PatchAskQuestion {
-                        question: q.question.clone(),
-                        header: q.header.clone(),
-                        multi_select: q.multi_select,
-                        options: q
-                            .options
-                            .iter()
-                            .map(|o| PatchAskOption {
-                                label: o.label.clone(),
-                                value: o.value.clone(),
-                            })
-                            .collect(),
-                    })
-                    .collect();
-                let answers = vec![None; runtime_questions.len()];
+                let answers = vec![None; questions.len()];
                 let block = PatchBlock::AskUser {
                     tool_id: tool_id.clone(),
-                    questions: runtime_questions,
+                    questions: questions.clone(),
                     current_index: *current_index,
                     answers,
                 };
@@ -493,10 +476,8 @@ fn now_ms() -> u64 {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::chat::{
-        AskUserOption as ChatAskOption, AskUserQuestionItem as ChatAskQuestion, StreamChunk,
-        TurnUsage as ChatTurnUsage,
-    };
+    use crate::chat::{StreamChunk, TurnUsage as ChatTurnUsage};
+    use speedwave_runtime::stream::{AskUserOption, AskUserQuestionItem};
 
     fn registry() -> MsgStoreRegistry {
         MsgStoreRegistry::new()
@@ -619,11 +600,11 @@ mod tests {
         }
     }
 
-    fn fake_question(text: &str) -> ChatAskQuestion {
-        ChatAskQuestion {
+    fn fake_question(text: &str) -> AskUserQuestionItem {
+        AskUserQuestionItem {
             question: text.to_string(),
             header: format!("Header for {text}"),
-            options: vec![ChatAskOption {
+            options: vec![AskUserOption {
                 label: "Yes".into(),
                 value: "yes".into(),
             }],

@@ -25,112 +25,116 @@ import type { AskUserQuestionBlock, AskUserQuestionItem } from '../../models/cha
   host: { class: 'block my-2' },
   template: `
     @for (q of question().questions; let i = $index; track i) {
-      @if (i < question().current_index) {
+      @let locked = i < question().current_index;
+      @let active = i === question().current_index;
+      @if (locked || active) {
         <fieldset
-          data-testid="ask-user-block-locked"
+          [attr.data-testid]="locked ? 'ask-user-block-locked' : 'ask-user-block'"
+          [attr.data-variant]="locked ? null : variant()"
           [attr.data-slot-index]="i"
-          [disabled]="true"
-          class="m-0 mb-2 rounded border border-[var(--violet)]/20 bg-[var(--bg-1)] p-4 opacity-80"
+          [disabled]="locked"
+          [class]="
+            locked
+              ? 'm-0 mb-2 rounded border border-[var(--violet)]/20 bg-[var(--bg-1)] p-4 opacity-80'
+              : 'm-0 rounded border border-[var(--violet)]/40 bg-[var(--violet)]/[0.06] p-4'
+          "
         >
           <legend
             data-testid="ask-legend"
-            class="mono mb-2 px-0 text-[11px] text-[var(--violet)]/70"
+            [class]="
+              locked
+                ? 'mono mb-2 px-0 text-[11px] text-[var(--violet)]/70'
+                : 'mono mb-2 px-0 text-[11px] text-[var(--violet)]'
+            "
+            [class.sr-only]="!locked && legendHidden()"
           >
-            {{ legendForLocked(q, i) }}
-          </legend>
-          <div data-testid="ask-question" class="mb-3 text-[13px] text-[var(--ink-dim)]">
-            {{ q.question }}
-          </div>
-          <div data-testid="ask-answered" class="flex flex-wrap gap-1.5">
-            <span
-              data-testid="selected-option"
-              [attr.aria-pressed]="true"
-              class="mono inline-block rounded border border-[var(--violet)]/50 bg-[var(--violet)]/15 px-2 py-0.5 text-[11px] text-[var(--ink)]"
-            >
-              {{ question().answers[i] ?? '' }}
-            </span>
-          </div>
-        </fieldset>
-      } @else if (i === question().current_index) {
-        <fieldset
-          data-testid="ask-user-block"
-          [attr.data-variant]="variant()"
-          [attr.data-slot-index]="i"
-          class="m-0 rounded border border-[var(--violet)]/40 bg-[var(--violet)]/[0.06] p-4"
-        >
-          <legend
-            data-testid="ask-legend"
-            class="mono mb-2 px-0 text-[11px] text-[var(--violet)]"
-            [class.sr-only]="legendHidden()"
-          >
-            {{ legendText() }}
+            {{ locked ? legendForLocked(q, i) : legendText() }}
           </legend>
 
-          <div data-testid="ask-question" class="mb-3 text-[14px] text-[var(--ink)]">
+          <div
+            data-testid="ask-question"
+            [class]="
+              locked
+                ? 'mb-3 text-[13px] text-[var(--ink-dim)]'
+                : 'mb-3 text-[14px] text-[var(--ink)]'
+            "
+          >
             {{ q.question }}
           </div>
 
-          @if (q.options.length > 0) {
-            <div
-              class="flex flex-wrap gap-2"
-              role="group"
-              [attr.aria-label]="q.multi_select ? 'Select any options' : 'Select one option'"
-            >
-              @for (option of q.options; track option.value) {
-                <button
-                  type="button"
-                  data-testid="ask-option-btn"
-                  class="mono rounded border px-3 py-1 text-[12px] transition-colors"
-                  [class]="
-                    isSelected(option.value)
-                      ? 'border-[var(--violet)] bg-[var(--violet)]/20 text-[var(--ink)]'
-                      : 'border-[var(--line-strong)] bg-[var(--bg-2)] text-[var(--ink-dim)] hover:border-[var(--violet)]'
-                  "
-                  [attr.aria-pressed]="isSelected(option.value)"
-                  (click)="toggleOption(option.value)"
-                >
-                  {{ option.label }}{{ isSelected(option.value) ? ' ✓' : '' }}
-                </button>
-              }
+          @if (locked) {
+            <div data-testid="ask-answered" class="flex flex-wrap gap-1.5">
+              <span
+                data-testid="selected-option"
+                [attr.aria-pressed]="true"
+                class="mono inline-block rounded border border-[var(--violet)]/50 bg-[var(--violet)]/15 px-2 py-0.5 text-[11px] text-[var(--ink)]"
+              >
+                {{ question().answers[i] ?? '' }}
+              </span>
+            </div>
+          } @else {
+            @if (q.options.length > 0) {
+              <div
+                class="flex flex-wrap gap-2"
+                role="group"
+                [attr.aria-label]="q.multi_select ? 'Select any options' : 'Select one option'"
+              >
+                @for (option of q.options; track option.value) {
+                  <button
+                    type="button"
+                    data-testid="ask-option-btn"
+                    class="mono rounded border px-3 py-1 text-[12px] transition-colors"
+                    [class]="
+                      isSelected(option.value)
+                        ? 'border-[var(--violet)] bg-[var(--violet)]/20 text-[var(--ink)]'
+                        : 'border-[var(--line-strong)] bg-[var(--bg-2)] text-[var(--ink-dim)] hover:border-[var(--violet)]'
+                    "
+                    [attr.aria-pressed]="isSelected(option.value)"
+                    (click)="toggleOption(option.value)"
+                  >
+                    {{ option.label }}{{ isSelected(option.value) ? ' ✓' : '' }}
+                  </button>
+                }
+              </div>
+            }
+
+            @if (allowFreeform()) {
+              <div class="mt-3">
+                <label class="sr-only" [attr.for]="freeformId">Freeform answer</label>
+                <input
+                  data-testid="ask-input"
+                  type="text"
+                  [id]="freeformId"
+                  class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-2)] px-3 py-1 text-[12px] text-[var(--ink)] placeholder-[var(--ink-mute)] focus:outline-none"
+                  [class]="freeformSilenced() ? 'border-[var(--line-strong)] opacity-50' : ''"
+                  placeholder="or type your own answer..."
+                  [value]="freeformText()"
+                  (input)="onFreeformInput($event)"
+                  (keydown.enter)="onFreeformEnter($event)"
+                />
+                @if (freeformSilenced()) {
+                  <span
+                    data-testid="ask-freeform-hint"
+                    class="mono mt-1 block text-[11px] text-[var(--ink-mute)]"
+                  >
+                    freeform input ignored when option selected
+                  </span>
+                }
+              </div>
+            }
+
+            <div class="mt-3 flex gap-2">
+              <button
+                type="button"
+                data-testid="ask-send-btn"
+                class="mono rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                [disabled]="!canSend()"
+                (click)="submit()"
+              >
+                {{ sendLabel() }}
+              </button>
             </div>
           }
-
-          @if (allowFreeform()) {
-            <div class="mt-3">
-              <label class="sr-only" [attr.for]="freeformId">Freeform answer</label>
-              <input
-                data-testid="ask-input"
-                type="text"
-                [id]="freeformId"
-                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-2)] px-3 py-1 text-[12px] text-[var(--ink)] placeholder-[var(--ink-mute)] focus:outline-none"
-                [class]="freeformSilenced() ? 'border-[var(--line-strong)] opacity-50' : ''"
-                placeholder="or type your own answer..."
-                [value]="freeformText()"
-                (input)="onFreeformInput($event)"
-                (keydown.enter)="onFreeformEnter($event)"
-              />
-              @if (freeformSilenced()) {
-                <span
-                  data-testid="ask-freeform-hint"
-                  class="mono mt-1 block text-[11px] text-[var(--ink-mute)]"
-                >
-                  freeform input ignored when option selected
-                </span>
-              }
-            </div>
-          }
-
-          <div class="mt-3 flex gap-2">
-            <button
-              type="button"
-              data-testid="ask-send-btn"
-              class="mono rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-              [disabled]="!canSend()"
-              (click)="submit()"
-            >
-              {{ sendLabel() }}
-            </button>
-          </div>
         </fieldset>
       }
     }
