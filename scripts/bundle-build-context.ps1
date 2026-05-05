@@ -3,6 +3,10 @@
 #
 # Usage: powershell -File scripts/bundle-build-context.ps1
 # Must be run from the repo root.
+#
+# CI reach: this script is for LOCAL Windows developer builds only. GitHub
+# Actions on windows-latest runs bundle-build-context.sh via `shell: bash`
+# (Git Bash), so the .sh path is exercised by CI on every platform.
 
 $ErrorActionPreference = 'Stop'
 
