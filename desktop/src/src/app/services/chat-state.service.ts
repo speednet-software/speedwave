@@ -21,6 +21,7 @@ import type {
   StreamChunk,
   ToolUseBlock,
   AskUserQuestionBlock,
+  AskUserQuestionItem,
   ProjectList,
   RateLimitInfo,
   EntryMeta,
@@ -96,7 +97,7 @@ export class ChatStateService {
   /**
    * Monotonically increasing turn id. Bumped by both `sendMessage` (new turn
    * starts) and `stopConversation` (turn cancelled). Used across awaits by
-   * `answerQuestion` to detect whether the turn it was answering has since
+   * `submitAnswer` to detect whether the turn it was answering has since
    * been superseded, so late backend errors from the dying turn can be
    * suppressed.
    */
@@ -449,38 +450,66 @@ export class ChatStateService {
   }
 
   /**
-   * Sends an answer to an AskUserQuestion prompt back to Claude.
-   * @param toolUseId - The tool_use_id of the AskUserQuestion.
-   * @param selectedValues - The selected option value(s).
+   * Records one slot's answer for a multi-question AskUserQuestion block
+   * Optimistically advances the block's `current_index` to the
+   * next unanswered slot, then forwards to the host. On error, reverts the
+   * slot and appends an error block.
+   *
+   * @param toolUseId   tool_use_id of the AskUserQuestion control_request.
+   * @param questionIdx slot index being answered (0-based).
+   * @param value       chosen value (single string; multi-select labels are
+   *                    pre-joined with `", "` by the renderer).
    */
-  async answerQuestion(toolUseId: string, selectedValues: string[]): Promise<void> {
-    const answer = selectedValues.join(', ');
+  async submitAnswer(toolUseId: string, questionIdx: number, value: string): Promise<void> {
     const capturedTurn = this._turnId;
 
-    // Mark the question as answered in currentBlocks
-    this._currentBlocks = this._currentBlocks.map((b) =>
-      b.type === 'ask_user' && b.question.tool_id === toolUseId
-        ? { ...b, question: { ...b.question, answered: true, selected_values: selectedValues } }
-        : b
-    );
+    // Snapshot the pre-mutation current_index so the error path can revert
+    // to it precisely — resetting to questionIdx would be wrong if the user
+    // submitted out of order.
+    let prevIndex: number | null = null;
+
+    this._currentBlocks = this._currentBlocks.map((b) => {
+      if (b.type !== 'ask_user' || b.question.tool_id !== toolUseId) return b;
+      const answers = b.question.answers.slice();
+      if (questionIdx < 0 || questionIdx >= answers.length) return b;
+      prevIndex = b.question.current_index;
+      answers[questionIdx] = value;
+      const nextNull = answers.findIndex((a) => a === null);
+      const nextIndex = nextNull === -1 ? answers.length : nextNull;
+      return {
+        ...b,
+        question: { ...b.question, answers, current_index: nextIndex },
+      };
+    });
     this.notifyChange();
 
     try {
-      await this.tauri.invoke('answer_question', { toolUseId, answer });
+      await this.tauri.invoke('submit_question_answer', {
+        toolUseId,
+        questionIdx,
+        answer: value,
+      });
     } catch (err) {
-      // If stopConversation ran while answer_question was in flight, _turnId has
-      // moved on. Suppress the error block: the user deliberately cancelled, a
-      // "Broken pipe" / "no active session" surfacing would be confusing noise.
+      // If stopConversation ran while submit_question_answer was in flight,
+      // `_turnId` has moved on. Suppress the error block: the user
+      // deliberately cancelled — a "Broken pipe" / "no active session"
+      // surfacing would be confusing noise.
       if (capturedTurn !== this._turnId) {
-        console.debug('[chat-state] answerQuestion: suppressing error after stop', err);
+        console.debug('[chat-state] submitAnswer: suppressing error after stop', err);
         return;
       }
       this.isStreaming = false;
-      this._currentBlocks = this._currentBlocks.map((b) =>
-        b.type === 'ask_user' && b.question.tool_id === toolUseId
-          ? { ...b, question: { ...b.question, answered: false, selected_values: [] } }
-          : b
-      );
+      const indexBeforeMutation = prevIndex ?? questionIdx;
+      this._currentBlocks = this._currentBlocks.map((b) => {
+        if (b.type !== 'ask_user' || b.question.tool_id !== toolUseId) return b;
+        const answers = b.question.answers.slice();
+        if (questionIdx < 0 || questionIdx >= answers.length) return b;
+        answers[questionIdx] = null;
+        return {
+          ...b,
+          question: { ...b.question, answers, current_index: indexBeforeMutation },
+        };
+      });
       this._currentBlocks = [
         ...this._currentBlocks,
         { type: 'error', content: `Failed to send answer: ${err}` },
@@ -611,12 +640,9 @@ export class ChatStateService {
       case 'AskUserQuestion': {
         const askBlock: AskUserQuestionBlock = {
           tool_id: chunk.data.tool_id,
-          question: chunk.data.question,
-          options: chunk.data.options,
-          header: chunk.data.header,
-          multi_select: chunk.data.multi_select,
-          answered: false,
-          selected_values: [],
+          questions: chunk.data.questions,
+          current_index: chunk.data.current_index,
+          answers: chunk.data.questions.map(() => null),
         };
         this._currentBlocks = [...this._currentBlocks, { type: 'ask_user', question: askBlock }];
         break;
@@ -1431,12 +1457,9 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
           type: 'ask_user',
           question: {
             tool_id: b.tool_id,
-            question: b.question,
-            options: b.options.map((o) => ({ label: o.label, value: o.value })),
-            header: b.header,
-            multi_select: b.multi_select,
-            answered: b.answer !== null,
-            selected_values: b.answer ? [...b.answer] : [],
+            questions: b.questions.map(cloneQuestionItem),
+            current_index: b.current_index,
+            answers: [...b.answers],
           },
         });
         break;
@@ -1448,7 +1471,16 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
   return out;
 }
 
-function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBlockState[] {
+function cloneQuestionItem(q: AskUserQuestionItem): AskUserQuestionItem {
+  return {
+    question: q.question,
+    header: q.header,
+    multi_select: q.multi_select,
+    options: q.options.map((o) => ({ label: o.label, value: o.value })),
+  };
+}
+
+export function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBlockState[] {
   const out: MessageBlockState[] = [];
   for (const b of blocks) {
     switch (b.type) {
@@ -1474,11 +1506,9 @@ function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBlockStat
         out.push({
           kind: 'ask_user',
           tool_id: b.question.tool_id,
-          header: b.question.header,
-          question: b.question.question,
-          options: b.question.options.map((o) => ({ label: o.label, value: o.value })),
-          multi_select: b.question.multi_select,
-          answer: b.question.answered ? b.question.selected_values : null,
+          questions: b.question.questions.map(cloneQuestionItem),
+          current_index: b.question.current_index,
+          answers: [...b.question.answers],
         });
         break;
       case 'error':

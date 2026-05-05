@@ -9,10 +9,8 @@ export type StreamChunk =
       chunk_type: 'AskUserQuestion';
       data: {
         tool_id: string;
-        question: string;
-        options: AskUserOption[];
-        header: string;
-        multi_select: boolean;
+        questions: AskUserQuestionItem[];
+        current_index: number;
       };
     }
   | {
@@ -58,6 +56,20 @@ export type StreamChunk =
 export interface AskUserOption {
   label: string;
   value: string;
+}
+
+/**
+ * One question inside an AskUserQuestion control_request — mirrors
+ * `crate::chat::AskUserQuestionItem` (and ultimately
+ * `speedwave_runtime::stream::AskUserQuestionItem`). Up to 4 items per
+ * `AskUserQuestion` chunk; an empty array is also tolerated and dropped
+ * by the host at parse time.
+ */
+export interface AskUserQuestionItem {
+  question: string;
+  header: string;
+  options: AskUserOption[];
+  multi_select: boolean;
 }
 
 /** Token usage breakdown for a streaming session. */
@@ -130,15 +142,20 @@ export type MessageBlock =
       decided?: 'allow_once' | 'allow_always' | 'deny';
     };
 
-/** State for an interactive AskUserQuestion block within a message. */
+/**
+ * State for an interactive AskUserQuestion block within a message.
+ *
+ * One block carries up to 4 questions; the renderer walks them sequentially,
+ * showing only `questions[current_index]` interactively while previous
+ * indices are locked with the answered-label badge in `answers[i]`. When
+ * every slot in `answers` is non-null the block is fully answered and
+ * `current_index === questions.length`.
+ */
 export interface AskUserQuestionBlock {
   tool_id: string;
-  question: string;
-  options: AskUserOption[];
-  header: string;
-  multi_select: boolean;
-  answered: boolean;
-  selected_values: string[];
+  questions: AskUserQuestionItem[];
+  current_index: number;
+  answers: (string | null)[];
 }
 
 /** State for a tool invocation block within a message (discriminated union on status). */
@@ -177,7 +194,10 @@ export type NormalizedToolInput =
   | { kind: 'edit'; file_path: string; old_string: string; new_string: string }
   | { kind: 'glob'; pattern: string; path?: string }
   | { kind: 'grep'; pattern: string; path?: string; include?: string }
-  | { kind: 'todo_write'; todos: Array<{ id: string; title: string; status: string }> }
+  | {
+      kind: 'todo_write';
+      todos: Array<{ content: string; status: string; activeForm?: string }>;
+    }
   | { kind: 'web_search'; query: string }
   | { kind: 'web_fetch'; url: string }
   | { kind: 'agent'; description: string }

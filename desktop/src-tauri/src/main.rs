@@ -212,7 +212,7 @@ async fn send_message(
     message: String,
     state: tauri::State<'_, SharedChatSession>,
 ) -> Result<(), String> {
-    if message.len() > 1_000_000 {
+    if message.len() > chat::MAX_MESSAGE_LEN {
         return Err("Message too long".to_string());
     }
     log::info!("send_message: len={}", message.len());
@@ -230,12 +230,13 @@ async fn send_message(
 }
 
 #[tauri::command]
-async fn answer_question(
+async fn submit_question_answer(
     tool_use_id: String,
+    question_idx: usize,
     answer: String,
     state: tauri::State<'_, SharedChatSession>,
 ) -> Result<(), String> {
-    if answer.len() > 1_000_000 {
+    if answer.len() > chat::MAX_ASK_USER_ANSWER_LEN {
         return Err("Answer too long".to_string());
     }
     let session_arc = state.inner().clone();
@@ -244,7 +245,7 @@ async fn answer_question(
             .try_lock()
             .map_err(|_| "no active session (session is being started)".to_string())?;
         session
-            .answer_question(&tool_use_id, &answer)
+            .submit_question_answer(&tool_use_id, question_idx, &answer)
             .map_err(|e| e.to_string())
     })
     .await
@@ -1422,7 +1423,7 @@ fn main() {
             // Chat
             start_chat,
             send_message,
-            answer_question,
+            submit_question_answer,
             stop_chat,
             retry_cmd::retry_last_turn,
             // Queued messages (ADR-045)
@@ -1733,12 +1734,12 @@ mod tests {
     }
 
     #[test]
-    fn answer_question_uses_spawn_blocking() {
+    fn submit_question_answer_uses_spawn_blocking() {
         let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn answer_question(");
+        let body = extract_fn_body(source, "async fn submit_question_answer(");
         assert!(
             body.contains("spawn_blocking"),
-            "answer_question must use spawn_blocking to avoid blocking the main thread"
+            "submit_question_answer must use spawn_blocking to avoid blocking the main thread"
         );
     }
 
@@ -1769,15 +1770,15 @@ mod tests {
     }
 
     #[test]
-    fn answer_question_acquires_lock_inside_spawn_blocking() {
+    fn submit_question_answer_acquires_lock_inside_spawn_blocking() {
         let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn answer_question(");
+        let body = extract_fn_body(source, "async fn submit_question_answer(");
         let spawn_pos = body
             .find("spawn_blocking")
-            .expect("answer_question must use spawn_blocking");
+            .expect("submit_question_answer must use spawn_blocking");
         let lock_pos = body
             .find(".try_lock()")
-            .expect("answer_question must acquire the session lock via try_lock");
+            .expect("submit_question_answer must acquire the session lock via try_lock");
         assert!(
             lock_pos > spawn_pos,
             "session lock must be acquired INSIDE spawn_blocking, not before it"
@@ -1823,15 +1824,15 @@ mod tests {
     }
 
     #[test]
-    fn answer_question_validates_length_before_spawn_blocking() {
+    fn submit_question_answer_validates_length_before_spawn_blocking() {
         let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn answer_question(");
+        let body = extract_fn_body(source, "async fn submit_question_answer(");
         let len_pos = body
             .find("answer.len()")
-            .expect("answer_question must check answer length");
+            .expect("submit_question_answer must check answer length");
         let spawn_pos = body
             .find("spawn_blocking")
-            .expect("answer_question must use spawn_blocking");
+            .expect("submit_question_answer must use spawn_blocking");
         assert!(
             len_pos < spawn_pos,
             "answer length check must come BEFORE spawn_blocking for fail-fast validation"
@@ -1867,14 +1868,14 @@ mod tests {
     }
 
     #[test]
-    fn answer_question_handles_join_error() {
+    fn submit_question_answer_handles_join_error() {
         let source = include_str!("main.rs");
-        let body = extract_fn_body(source, "async fn answer_question(");
+        let body = extract_fn_body(source, "async fn submit_question_answer(");
         assert!(
             body.contains(".await")
                 && body.contains("map_err(|e| e.to_string())")
                 && body.matches("map_err").count() >= 2,
-            "answer_question must handle JoinError from spawn_blocking via .await.map_err"
+            "submit_question_answer must handle JoinError from spawn_blocking via .await.map_err"
         );
     }
 

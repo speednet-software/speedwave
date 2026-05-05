@@ -231,15 +231,19 @@ describe('ChatMessageComponent', () => {
         type: 'ask_user',
         question: {
           tool_id: 'toolu_ask1',
-          question: 'Pick a fruit',
-          options: [
-            { label: 'Apple', value: 'apple' },
-            { label: 'Banana', value: 'banana' },
+          questions: [
+            {
+              question: 'Pick a fruit',
+              header: 'Fruits',
+              options: [
+                { label: 'Apple', value: 'apple' },
+                { label: 'Banana', value: 'banana' },
+              ],
+              multi_select: false,
+            },
           ],
-          header: 'Fruits',
-          multi_select: false,
-          answered: false,
-          selected_values: [],
+          current_index: 0,
+          answers: [null],
         },
       },
     ];
@@ -286,12 +290,16 @@ describe('ChatMessageComponent', () => {
         type: 'ask_user',
         question: {
           tool_id: 'toolu_ask1',
-          question: 'Pick one',
-          options: [{ label: 'A', value: 'a' }],
-          header: '',
-          multi_select: false,
-          answered: false,
-          selected_values: [],
+          questions: [
+            {
+              question: 'Pick one',
+              header: '',
+              options: [{ label: 'A', value: 'a' }],
+              multi_select: false,
+            },
+          ],
+          current_index: 0,
+          answers: [null],
         },
       },
     ];
@@ -299,7 +307,7 @@ describe('ChatMessageComponent', () => {
     fixture.componentRef.setInput('role', 'assistant');
     fixture.detectChanges();
 
-    let emitted: { toolId: string; values: string[] } | null = null;
+    let emitted: { toolId: string; questionIdx: number; value: string } | null = null;
     component.questionAnswered.subscribe((e) => (emitted = e));
 
     // Drive the child ask-user-block via its real option + send buttons —
@@ -315,6 +323,6 @@ describe('ChatMessageComponent', () => {
     fixture.detectChanges();
     sendBtn?.click();
 
-    expect(emitted).toEqual({ toolId: 'toolu_ask1', values: ['a'] });
+    expect(emitted).toEqual({ toolId: 'toolu_ask1', questionIdx: 0, value: 'A' });
   });
 });

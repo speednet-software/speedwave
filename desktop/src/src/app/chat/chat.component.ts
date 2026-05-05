@@ -218,9 +218,11 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** True if the current turn is paused on an unanswered AskUserQuestion. */
+  /** True if the current turn is paused on an unanswered AskUserQuestion slot. */
   private hasUnansweredQuestion(): boolean {
-    return this.chat.currentBlocks.some((b) => b.type === 'ask_user' && !b.question.answered);
+    return this.chat.currentBlocks.some(
+      (b) => b.type === 'ask_user' && b.question.answers.some((a) => a === null)
+    );
   }
 
   /**
@@ -272,13 +274,20 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Forwards an answered AskUserQuestion to the chat-state service.
-   * @param event - tool id and the selected values from the question block.
-   * @param event.toolId - id of the tool_use that produced the question.
-   * @param event.values - selected values; one per chosen option.
+   * Forwards an answered AskUserQuestion slot to the chat-state service.
+   * @param event - tool id, slot index, and the chosen value (single string;
+   *   multi-select labels are joined with `", "` upstream).
    */
-  async onQuestionAnswered(event: { toolId: string; values: string[] }): Promise<void> {
-    await this.chat.answerQuestion(event.toolId, event.values);
+  async onQuestionAnswered(event: {
+    toolId: string;
+    questionIdx: number;
+    value: string;
+  }): Promise<void> {
+    try {
+      await this.chat.submitAnswer(event.toolId, event.questionIdx, event.value);
+    } catch (err) {
+      console.error('[chat] onQuestionAnswered: unexpected error', err);
+    }
   }
 
   /**

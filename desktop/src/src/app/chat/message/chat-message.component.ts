@@ -105,7 +105,7 @@ export class ChatMessageComponent {
   readonly isLast = input(false);
   readonly entry = input<ChatMessage | undefined>(undefined);
   readonly precedingEdited = input(false);
-  readonly questionAnswered = output<{ toolId: string; values: string[] }>();
+  readonly questionAnswered = output<{ toolId: string; questionIdx: number; value: string }>();
   readonly permissionDecided = output<{
     blockIndex: number;
     decision: 'allow_once' | 'allow_always' | 'deny';

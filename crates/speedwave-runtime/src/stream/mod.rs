@@ -27,6 +27,7 @@ pub use entry_index::EntryIndexProvider;
 pub use msg_store::{LogMsg, MsgStore, DEFAULT_HISTORY_BYTES};
 pub use patch::{apply, ConversationPatch};
 pub use state_tree::{
-    AskUserOption, ConversationEntry, ConversationState, EntryMeta, EntryRole, MessageBlock,
-    QueuedMessage, SessionTotals, TurnUsage, UuidStatus,
+    AskUserOption, AskUserQuestionItem, ConversationEntry, ConversationState, EntryMeta, EntryRole,
+    MessageBlock, QueuedMessage, SessionTotals, TurnUsage, UuidStatus, MAX_ASK_USER_QUESTIONS,
+    MAX_ASK_USER_WIRE_BYTES,
 };

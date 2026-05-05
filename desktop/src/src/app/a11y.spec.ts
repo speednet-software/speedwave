@@ -172,15 +172,19 @@ const VIEWS: readonly ViewUnderTest[] = [
     prepare: (fixture) => {
       fixture.componentRef.setInput('question', {
         tool_id: 'ask-1',
-        question: 'Choose one',
-        options: [
-          { value: 'yes', label: 'Yes' },
-          { value: 'no', label: 'No' },
+        questions: [
+          {
+            question: 'Choose one',
+            header: '',
+            options: [
+              { value: 'yes', label: 'Yes' },
+              { value: 'no', label: 'No' },
+            ],
+            multi_select: false,
+          },
         ],
-        header: '',
-        multi_select: false,
-        answered: false,
-        selected_values: [],
+        current_index: 0,
+        answers: [null],
       });
     },
   },

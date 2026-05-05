@@ -263,7 +263,7 @@ describe('ChatMessageListComponent', () => {
     fakeOnChanges();
     fixture.detectChanges();
 
-    let captured: { toolId: string; values: string[] } | null = null;
+    let captured: { toolId: string; questionIdx: number; value: string } | null = null;
     component.questionAnswered.subscribe((e) => (captured = e));
 
     const childDbg: DebugElement = fixture.debugElement.query(
@@ -272,9 +272,10 @@ describe('ChatMessageListComponent', () => {
     expect(childDbg).not.toBeNull();
     (childDbg.componentInstance as ChatMessageComponent).questionAnswered.emit({
       toolId: 't1',
-      values: ['a'],
+      questionIdx: 0,
+      value: 'a',
     });
 
-    expect(captured).toEqual({ toolId: 't1', values: ['a'] });
+    expect(captured).toEqual({ toolId: 't1', questionIdx: 0, value: 'a' });
   });
 });
