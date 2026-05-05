@@ -65,8 +65,13 @@ validate_rules_compliance() {
     local expected_files=("$@")
     local issues=""
 
+    # `|| true` shields the assignment under `set -euo pipefail`: jq exits
+    # non-zero on malformed JSON, which under pipefail kills the pipeline,
+    # which under set -e aborts plan-loop.sh in its error-recovery path.
+    # On failure we want the empty-set behavior (treated as missing all
+    # expected files), not a crash.
     local actual_files
-    actual_files=$(jq -r '.structured_output.rules_compliance // [] | .[].rule_file' "$result_file" 2>/dev/null | LC_ALL=C sort -u)
+    actual_files=$(jq -r '.structured_output.rules_compliance // [] | .[].rule_file' "$result_file" 2>/dev/null | LC_ALL=C sort -u || true)
     local expected_sorted
     expected_sorted=$(printf '%s\n' "${expected_files[@]}" | LC_ALL=C sort -u)
 
@@ -81,7 +86,7 @@ validate_rules_compliance() {
         issues+="unexpected rule_file entries (not in .claude/rules/): $(echo "$extra" | tr '\n' ' ')"$'\n'
     fi
     local short_notes
-    short_notes=$(jq -r '.structured_output.rules_compliance // [] | .[] | select((.note // "") | length < 30) | .rule_file' "$result_file" 2>/dev/null)
+    short_notes=$(jq -r '.structured_output.rules_compliance // [] | .[] | select((.note // "") | length < 30) | .rule_file' "$result_file" 2>/dev/null || true)
     if [[ -n "$short_notes" ]]; then
         issues+="rule_file entries with notes shorter than 30 chars: $(echo "$short_notes" | tr '\n' ' ')"$'\n'
     fi

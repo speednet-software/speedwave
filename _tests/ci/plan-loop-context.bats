@@ -257,6 +257,27 @@ EOF
     [[ "$output" == *"missing rule_file entries"* ]]
 }
 
+@test "validate_rules_compliance: malformed JSON does not crash UNDER set -euo pipefail" {
+    # Defensive coverage. plan-loop.sh runs with `set -euo pipefail` and
+    # consumes this function via command substitution: `rc_issues=$(…)`.
+    # In stock bash (no `inherit_errexit`) command substitutions do NOT
+    # propagate `set -e`, so a non-zero exit inside `$(…)` is currently
+    # absorbed. If anyone later adds `shopt -s inherit_errexit` (recommended
+    # by ShellCheck SC2310), the function MUST still be safe — that is
+    # exactly the scenario this test pins.
+    printf 'not json at all' > "$TMP/r.json"
+    run bash -c "
+        set -euo pipefail
+        shopt -s inherit_errexit
+        source '$LIB'
+        rc_issues=\"\$(validate_rules_compliance '$TMP/r.json' CLAUDE.md)\"
+        echo \"OK: \$rc_issues\"
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK:"* ]]
+    [[ "$output" == *"missing rule_file entries"* ]]
+}
+
 @test "validate_rules_compliance: missing note field treated as empty (short)" {
     write_result "$TMP/r.json" '[{"rule_file":"CLAUDE.md","addressed":true}]'
     run validate_rules_compliance "$TMP/r.json" CLAUDE.md
