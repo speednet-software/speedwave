@@ -313,7 +313,7 @@ jobs:
       - name: cargo test runtime::wsl
         run: cargo test -p speedwave-runtime --lib "runtime::wsl::"
 
-      - name: Run runtime build:: tests on Windows
+      - name: cargo test runtime build
         shell: bash
         run: cargo test -p speedwave-runtime --lib "build::"
 
