@@ -3,6 +3,10 @@
 #
 # Usage: powershell -File scripts/bundle-build-context.ps1
 # Must be run from the repo root.
+#
+# CI reach: this script is for LOCAL Windows developer builds only. GitHub
+# Actions on windows-latest runs bundle-build-context.sh via `shell: bash`
+# (Git Bash), so the .sh path is exercised by CI on every platform.
 
 $ErrorActionPreference = 'Stop'
 
@@ -15,6 +19,17 @@ Remove-Item -Recurse -Force "$dest\build-context","$dest\mcp-os" -ErrorAction Si
 
 New-Item -ItemType Directory -Path "$dest\build-context" -Force | Out-Null
 Copy-Item -Recurse containers "$dest\build-context\containers"
+
+# Strip CR from every .sh. UTF-8 without BOM — a BOM before the shebang
+# breaks Linux exec just like CRLF would.
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+Get-ChildItem -Path "$dest\build-context\containers" -Recurse -Include '*.sh' -File |
+    ForEach-Object {
+        $content = [System.IO.File]::ReadAllText($_.FullName, $utf8NoBom)
+        if ($content.Contains("`r")) {
+            [System.IO.File]::WriteAllText($_.FullName, $content.Replace("`r", ""), $utf8NoBom)
+        }
+    }
 
 New-Item -ItemType Directory -Path "$dest\build-context\mcp-servers" -Force | Out-Null
 Copy-Item mcp-servers\tsconfig.base.json "$dest\build-context\mcp-servers\"

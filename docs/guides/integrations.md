@@ -206,6 +206,15 @@ Plugins that declare `requires_integrations` (e.g. `["sharepoint"]`) display the
 
 Plugin authors should set `speedwave_compat` in `plugin.json` to declare which Speedwave versions the plugin supports — for example, `"speedwave_compat": ">=0.8, <1"` for plugins targeting the 0.8 series. If the field is present and the running Speedwave version does not satisfy the declared range, installation is rejected with a clear error. Omit the field to disable the check. See [ADR-015](../adr/ADR-015-plugin-system.md) for details on the enforcement model and version-requirement syntax.
 
+**Line endings (Windows authors).** If you author plugins on Windows, add a `.gitattributes` file at the root of your plugin repo with at minimum:
+
+```
+* text=auto eol=lf
+*.sh text eol=lf
+```
+
+This prevents `core.autocrlf=true` (the default on Windows-hosted Git) from rewriting `*.sh` line endings to CRLF on checkout. A plugin `Containerfile` that runs a CRLF `*.sh` will fail with `exit code: 127` (`/bin/sh: 1: …: not found`) when Buildkit invokes the kernel's shebang resolver — see Speedwave issue #603 for context.
+
 ## Local LLM Setup
 
 You can run Claude Code inside Speedwave against a local LLM server instead of Anthropic's cloud API. Go to **Settings → LLM Provider** to select a provider.
