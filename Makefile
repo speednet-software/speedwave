@@ -363,6 +363,7 @@ test-entrypoint:
 test-ci:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
 	bats _tests/ci/validate-pr-title-main.bats
+	bats _tests/ci/plan-loop-context.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp

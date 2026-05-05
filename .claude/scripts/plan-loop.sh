@@ -437,48 +437,28 @@ fi
 
 # Random delimiter prevents prompt injection: a malicious CLAUDE.md cannot
 # forge an "END" marker because it doesn't know this run's nonce.
-CONTEXT_NONCE="$(openssl rand -hex 16 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 32)"
+# Try openssl first, fall back to xxd, fall back to od (POSIX-mandated).
+# An empty nonce would make markers identical across runs and forgeable, so
+# we hard-fail rather than running with a degraded security argument.
+CONTEXT_NONCE="$(
+    openssl rand -hex 16 2>/dev/null \
+    || head -c 16 /dev/urandom 2>/dev/null | xxd -p -c 32 2>/dev/null \
+    || head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n'
+)"
+if [[ -z "$CONTEXT_NONCE" || ${#CONTEXT_NONCE} -lt 16 ]]; then
+    echo "ERROR: cannot generate a secure nonce (need openssl, xxd, or od + /dev/urandom)" >&2
+    exit 1
+fi
 CONTEXT_BEGIN_MARKER="===BEGIN_PROJECT_CONTEXT_${CONTEXT_NONCE}==="
 CONTEXT_END_MARKER="===END_PROJECT_CONTEXT_${CONTEXT_NONCE}==="
 RULE_FILE_MARKER_PREFIX="--- BEGIN_RULE_FILE_${CONTEXT_NONCE}: "
 RULE_FILE_MARKER_SUFFIX=" ---"
 
-# emit_file_block: cat $1 with trailing newlines preserved.
-# Plain $(cat …) command substitution strips trailing newlines, which would
-# glue the last line of one rule to the next file's marker. We capture the
-# bytes with `od -c | …` style alternatives, but the simplest portable trick
-# is appending a sentinel byte and stripping it afterwards.
-emit_file_block() {
-    local content
-    content="$(cat "$1"; printf 'X')"
-    printf '%s' "${content%X}"
-}
-
-# Lists rule files (basenames) deterministically. Used both inside
-# build_project_context (for emission) and later (for post-validation of
-# reviewer output). Symlinks (-L) are followed so a rule symlinked into the
-# directory still reaches agents.
-list_rule_files() {
-    local root="$1"
-    [[ -d "$root/.claude/rules" ]] || return 0
-    find -L "$root/.claude/rules" -maxdepth 1 \( -type f -o -type l \) -name '*.md' \
-        ! -name '.*' | LC_ALL=C sort
-}
-
-build_project_context() {
-    local root="$1"
-    local out=""
-    if [[ -f "$root/CLAUDE.md" ]]; then
-        out+="${RULE_FILE_MARKER_PREFIX}CLAUDE.md${RULE_FILE_MARKER_SUFFIX}"$'\n\n'
-        out+="$(emit_file_block "$root/CLAUDE.md")"$'\n\n'
-    fi
-    local f
-    while IFS= read -r f; do
-        out+="${RULE_FILE_MARKER_PREFIX}$(basename "$f")${RULE_FILE_MARKER_SUFFIX}"$'\n\n'
-        out+="$(emit_file_block "$f")"$'\n\n'
-    done < <(list_rule_files "$root")
-    printf '%s' "$out"
-}
+# Pure context-building helpers (emit_file_block, list_rule_files,
+# build_project_context, validate_rules_compliance) are sourced from a
+# sibling file so they can be unit-tested in isolation.
+# shellcheck source=plan-loop-context.sh
+source "$SCRIPT_DIR/plan-loop-context.sh"
 
 PROJECT_CONTEXT="$(build_project_context "$PROJECT_ROOT")"
 if [[ -z "$PROJECT_CONTEXT" ]]; then
@@ -767,26 +747,11 @@ Only report NEW issues if they are BLOCKER or HIGH severity."
     fi
 
     # Post-validate rules_compliance against the actual file set we injected.
-    # Reasons this matters: the JSON schema only constrains the shape, so a
-    # reviewer can return a 1-entry array, wrong filenames, or {addressed:true,
-    # note:""} for everything and pass schema validation. Enforce here that
-    # every expected rule file appears with a substantive note.
-    rc_issues=""
-    actual_rule_files=$(jq -r '.structured_output.rules_compliance // [] | .[].rule_file' "$RESULT_FILE" 2>/dev/null | LC_ALL=C sort -u)
-    expected_rule_files=$(printf '%s\n' "${EXPECTED_RULE_FILES[@]}" | LC_ALL=C sort -u)
-    missing_rule_files=$(comm -23 <(printf '%s\n' "$expected_rule_files") <(printf '%s\n' "$actual_rule_files"))
-    extra_rule_files=$(comm -13 <(printf '%s\n' "$expected_rule_files") <(printf '%s\n' "$actual_rule_files"))
-    if [[ -n "$missing_rule_files" ]]; then
-        rc_issues+="missing rule_file entries: $(echo "$missing_rule_files" | tr '\n' ' ')"$'\n'
-    fi
-    if [[ -n "$extra_rule_files" ]]; then
-        rc_issues+="unexpected rule_file entries (not in .claude/rules/): $(echo "$extra_rule_files" | tr '\n' ' ')"$'\n'
-    fi
-    # Reject empty / placeholder notes. 30 chars matches the prompt threshold.
-    short_notes=$(jq -r '.structured_output.rules_compliance // [] | .[] | select((.note // "") | length < 30) | .rule_file' "$RESULT_FILE" 2>/dev/null)
-    if [[ -n "$short_notes" ]]; then
-        rc_issues+="rule_file entries with notes shorter than 30 chars: $(echo "$short_notes" | tr '\n' ' ')"$'\n'
-    fi
+    # The JSON schema only constrains shape: a reviewer can return a 1-entry
+    # array, wrong filenames, or {addressed:true, note:""} for every entry and
+    # still pass schema validation. The shared validator enforces presence of
+    # every expected rule file plus a substantive note (≥ 30 chars).
+    rc_issues="$(validate_rules_compliance "$RESULT_FILE" "${EXPECTED_RULE_FILES[@]}")"
     if [[ -n "$rc_issues" ]]; then
         printf "\n  ${RED}[sanity] rules_compliance post-validation failed:${NC}\n"
         printf "%s" "$rc_issues" | sed 's/^/    /'
@@ -795,10 +760,9 @@ Only report NEW issues if they are BLOCKER or HIGH severity."
             verdict="NEEDS_REVISION"
         fi
         # Surface to the writer so the next iteration fixes it explicitly.
-        REVIEW_FEEDBACK="${REVIEW_FEEDBACK}
-
-ORCHESTRATOR POST-VALIDATION (rules_compliance):
-$rc_issues"
+        # Append to `findings` only — REVIEW_FEEDBACK is rebuilt from `findings`
+        # at the end of the loop body (see end of `while` body), so writing to
+        # it directly here would be overwritten before the next iteration.
         findings="${findings}
 
 ORCHESTRATOR POST-VALIDATION (rules_compliance):
