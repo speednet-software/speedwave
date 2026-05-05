@@ -24,6 +24,7 @@ Rules:
 - Do NOT add features not in the plan. Do NOT refactor code not mentioned in the plan.
 - Do NOT skip any step. If a step seems wrong, implement it anyway — the plan was reviewed and approved.
 - Create files, edit files, run commands — whatever each step requires.
+- The orchestrator has injected `CLAUDE.md` and every file from `.claude/rules/` into your system prompt under "AUTHORITATIVE PROJECT CONTEXT". Every NEVER rule, SSOT, security invariant, plugin-contract element, and local-LLM rule there applies to your code. If a plan step would require violating one of those rules, STOP — do not implement it; report the conflict instead. The plan was reviewed for compliance, but if the implementation requires extending it (e.g. a helper not specified), the new code must still respect the project rules.
 
 ## Step 2 — Verify
 
