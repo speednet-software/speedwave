@@ -151,12 +151,27 @@ pub trait ContainerRuntime: Send + Sync {
 
     /// Stops the underlying VM (e.g. Lima on macOS) to free reserved RAM.
     ///
-    /// Default is a no-op — Linux (native nerdctl) and Windows (WSL2) have no
-    /// VM layer that Speedwave owns. Only `LimaRuntime` overrides this.
+    /// Default is a no-op. Linux (native nerdctl) has no VM layer. Windows
+    /// (WSL2) has a distro managed by Speedwave, but stopping it mid-session
+    /// is not meaningful — use `reset_vm()` for destructive teardown instead.
+    /// Only `LimaRuntime` overrides this method.
     ///
     /// Callers MUST treat errors as non-fatal: log them and continue. Exit
     /// cleanup must never block app termination on a VM stop failure.
     fn stop_vm(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Tears down the underlying VM/distro destructively (e.g.
+    /// `wsl --unregister` on Windows). Default is a no-op; only
+    /// `WslRuntime` overrides — for `LimaRuntime`, factory-reset
+    /// destroys the VM directly via `limactl stop` + `delete --force`,
+    /// not through this method.
+    ///
+    /// Callers MUST treat errors as non-fatal: log and continue, because
+    /// factory-reset's primary remediation (data-dir wipe) must still
+    /// proceed if VM removal fails.
+    fn reset_vm(&self) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -791,6 +806,53 @@ pub(crate) mod test_support {
         ) -> anyhow::Result<()> {
             self.run(cmd, args)?;
             Ok(())
+        }
+    }
+
+    pub struct SequentialMockRunner {
+        pub responses: std::sync::Mutex<std::collections::VecDeque<anyhow::Result<String>>>,
+        pub calls: std::sync::Mutex<Vec<(String, Vec<String>, Option<std::time::Duration>)>>,
+    }
+
+    impl SequentialMockRunner {
+        pub fn new(responses: Vec<anyhow::Result<String>>) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(responses.into_iter().collect()),
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn next_response(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            timeout: Option<std::time::Duration>,
+        ) -> anyhow::Result<String> {
+            self.calls.lock().unwrap().push((
+                cmd.to_string(),
+                args.iter().map(|a| a.to_string()).collect(),
+                timeout,
+            ));
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Err(anyhow::anyhow!("SequentialMockRunner: no more responses")))
+        }
+    }
+
+    impl CommandRunner for SequentialMockRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+            self.next_response(cmd, args, None)
+        }
+
+        fn run_with_timeout(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            timeout: std::time::Duration,
+        ) -> anyhow::Result<()> {
+            self.next_response(cmd, args, Some(timeout)).map(|_| ())
         }
     }
 }

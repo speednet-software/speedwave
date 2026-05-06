@@ -1,4 +1,4 @@
-# ADR-048: TCC sub-identifiers and unified AppleEvents permission gate for native macOS CLIs
+# ADR-049: TCC sub-identifiers and unified AppleEvents permission gate for native macOS CLIs
 
 ## Status
 

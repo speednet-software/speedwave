@@ -1375,4 +1375,50 @@ mod tests {
             "expected exactly 4 container host aliases; update this test if you added a new platform alias to compose.template.yml"
         );
     }
+
+    // SSOT alignment guards (ADR-048, CLAUDE.md "WSL distro name" row).
+    // If WSL_DISTRO_NAME is renamed, at least one of these will fail at compile
+    // time (include_str! produces a compile error if the file is missing) or
+    // at test time. Update all four locations together in the same commit.
+
+    #[test]
+    fn wsl_distro_name_appears_in_installer_hooks() {
+        let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks.nsh");
+        assert!(
+            src.contains(WSL_DISTRO_NAME),
+            "WSL_DISTRO_NAME ({WSL_DISTRO_NAME}) not found in installer-hooks.nsh; \
+             rename it there too (CLAUDE.md SSOT alignment)"
+        );
+    }
+
+    #[test]
+    fn wsl_distro_name_appears_in_e2e_vm_script() {
+        let src = include_str!("../../../scripts/e2e-vm.sh");
+        assert!(
+            src.contains(WSL_DISTRO_NAME),
+            "WSL_DISTRO_NAME ({WSL_DISTRO_NAME}) not found in scripts/e2e-vm.sh; \
+             rename it there too (CLAUDE.md SSOT alignment)"
+        );
+    }
+
+    #[test]
+    fn wsl_distro_name_appears_in_installation_doc() {
+        let src = include_str!("../../../docs/getting-started/installation.md");
+        assert!(
+            src.contains(WSL_DISTRO_NAME),
+            "WSL_DISTRO_NAME ({WSL_DISTRO_NAME}) not found in docs/getting-started/installation.md; \
+             rename it there too (CLAUDE.md SSOT alignment)"
+        );
+    }
+
+    #[test]
+    fn data_dir_appears_in_installer_hooks() {
+        let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks.nsh");
+        // DATA_DIR = ".speedwave"; the NSIS hook hard-codes "$PROFILE\.speedwave"
+        assert!(
+            src.contains(DATA_DIR),
+            "DATA_DIR ({DATA_DIR}) not found in installer-hooks.nsh; \
+             rename it there too (CLAUDE.md SSOT alignment)"
+        );
+    }
 }

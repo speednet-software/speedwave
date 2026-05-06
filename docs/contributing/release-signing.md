@@ -275,7 +275,7 @@ TCC usage description. Without this section, EventKit / AppleEvents APIs
 silently reject permission requests on macOS 14+ and TCC indexes the
 permission row under the wrong identifier (the codesign default
 `<svc>-cli`), preventing recovery via the `tccutil reset` commands in
-`docs/troubleshooting.md`. See [ADR-048](../adr/ADR-048-tcc-sub-identifiers-and-applevents-gate.md)
+`docs/troubleshooting.md`. See [ADR-049](../adr/ADR-049-tcc-sub-identifiers-and-applevents-gate.md)
 for the full rationale.
 
 The build script (`scripts/build-native-macos.sh`) stamps `tauri.conf.json`'s

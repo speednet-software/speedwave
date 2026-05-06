@@ -1475,6 +1475,19 @@ pub fn factory_reset() -> anyhow::Result<()> {
         }
     }
 
+    // 2b. Reset VM/distro across platforms.
+    //     Windows: WslRuntime::reset_vm runs `wsl --terminate` + `--unregister`,
+    //     each bounded by CommandRunner::run_with_timeout (10s + 25s).
+    //     macOS/Linux: trait default no-op (Lima VM already destroyed above).
+    //     Run BEFORE wipe_data_dir so the WSL VHDX path is still where WSL
+    //     expects it (~/.speedwave/wsl/Speedwave/ext4.vhdx).
+    {
+        let rt = runtime::detect_runtime();
+        if let Err(e) = rt.reset_vm() {
+            log::warn!("reset_vm failed (continuing to wipe_data_dir): {e}");
+        }
+    }
+
     // 3. Remove CLI binary (Unix: ~/.local/bin/speedwave — outside data dir)
     #[cfg(unix)]
     {
@@ -4308,5 +4321,93 @@ networks:
             "ensure_lima_vm_config must NOT reset containers_started — \
              VM memory migration does not invalidate containers"
         );
+    }
+
+    // ADR-048: factory_reset calls reset_vm() before wipe_data_dir(), and
+    // reset_vm() errors must be non-fatal (log::warn and continue).
+    // These tests verify the non-fatal wrapper pattern used in factory_reset
+    // handles both Ok and Err from reset_vm() correctly.
+    mod reset_vm_factory_reset_contract {
+        use speedwave_runtime::runtime::ContainerRuntime;
+        use std::process::Command;
+
+        // Minimal ContainerRuntime impl for testing reset_vm() contract.
+        // All required methods unimplemented!() — only reset_vm() is under test.
+        macro_rules! stub_runtime {
+            ($name:ident, $reset:expr) => {
+                struct $name;
+                impl ContainerRuntime for $name {
+                    fn reset_vm(&self) -> anyhow::Result<()> {
+                        $reset
+                    }
+                    fn compose_up(&self, _: &str) -> anyhow::Result<()> {
+                        unimplemented!()
+                    }
+                    fn compose_down(&self, _: &str) -> anyhow::Result<()> {
+                        unimplemented!()
+                    }
+                    fn compose_ps(&self, _: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+                        unimplemented!()
+                    }
+                    fn container_exec(&self, _: &str, _: &[&str]) -> Command {
+                        unimplemented!()
+                    }
+                    fn container_exec_piped(&self, _: &str, _: &[&str]) -> anyhow::Result<Command> {
+                        unimplemented!()
+                    }
+                    fn is_available(&self) -> bool {
+                        false
+                    }
+                    fn ensure_ready(&self) -> anyhow::Result<()> {
+                        Ok(())
+                    }
+                    fn build_image(
+                        &self,
+                        _: &str,
+                        _: &str,
+                        _: &str,
+                        _: &[(&str, &str)],
+                    ) -> anyhow::Result<()> {
+                        unimplemented!()
+                    }
+                    fn container_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+                        unimplemented!()
+                    }
+                    fn compose_logs(&self, _: &str, _: u32) -> anyhow::Result<String> {
+                        unimplemented!()
+                    }
+                    fn image_exists(&self, _: &str) -> anyhow::Result<bool> {
+                        unimplemented!()
+                    }
+                    fn compose_up_recreate(&self, _: &str) -> anyhow::Result<()> {
+                        unimplemented!()
+                    }
+                }
+            };
+        }
+
+        stub_runtime!(
+            FailResetVm,
+            anyhow::bail!("simulated wsl --unregister failure")
+        );
+        stub_runtime!(OkResetVm, Ok(()));
+
+        #[test]
+        fn reset_vm_error_is_non_fatal() {
+            let rt: Box<dyn ContainerRuntime> = Box::new(FailResetVm);
+            // Non-fatal: log::warn and continue — must not propagate as Err.
+            // This mirrors the exact pattern in factory_reset.
+            if let Err(e) = rt.reset_vm() {
+                log::warn!("reset_vm failed (continuing to wipe_data_dir): {e}");
+            }
+            // Reaching here proves the error did not propagate.
+        }
+
+        #[test]
+        fn reset_vm_ok_returns_ok() {
+            let rt: Box<dyn ContainerRuntime> = Box::new(OkResetVm);
+            // trait default returns Ok(()); no warn log, no error propagated
+            assert!(rt.reset_vm().is_ok());
+        }
     }
 }

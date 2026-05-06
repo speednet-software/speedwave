@@ -654,6 +654,18 @@ pub fn list_anthropic_models() -> &'static [speedwave_runtime::defaults::Anthrop
     speedwave_runtime::defaults::ANTHROPIC_MODELS
 }
 
+/// Returns the display label of the Opus model that the dropdown's
+/// `(default)` option resolves to at runtime — used by the Settings UI to
+/// render an honest hint like *"Default — Opus 4.7 (switchable via /model)"*
+/// instead of the previous vague *"let Claude Code choose"* placeholder.
+///
+/// `None` when the SSOT has no `latest = true` Opus family — frontend then
+/// falls back to the generic placeholder.
+#[tauri::command]
+pub fn get_default_anthropic_model_label() -> Option<&'static str> {
+    speedwave_runtime::defaults::default_anthropic_family_label()
+}
+
 /// Applies LLM config to the active project in-memory. Extracted for
 /// testability and reused by `update_llm_config`.
 ///
@@ -702,6 +714,17 @@ fn apply_llm_config(
 
 #[tauri::command]
 pub fn update_llm_config(update: config::LlmConfig) -> Result<(), String> {
+    // Log non-sensitive fields up-front for diagnostics (provider/model never
+    // carry credentials). `base_url` is logged only AFTER the SSRF guard
+    // passes, and even then with userinfo / query / fragment stripped — so a
+    // user submitting `http://user:pass@host?token=...` never has the secret
+    // captured in the log buffer (see `.claude/rules/logging.md`).
+    log::info!(
+        "update_llm_config: provider={:?} model={:?} context_tokens={:?}",
+        update.provider,
+        update.model,
+        update.context_tokens
+    );
     // Local providers (ollama, lmstudio, llamacpp) cannot start a session
     // without a model — `compose::apply_llm_config` rejects the compose
     // render, which only surfaces when the user tries to run Claude.
@@ -742,15 +765,33 @@ pub fn update_llm_config(update: config::LlmConfig) -> Result<(), String> {
         // SSRF guard — same policy as LLM discovery probe. Blocks link-local,
         // metadata, IPv6-mapped bypasses, embedded credentials, query/fragment.
         // See ADR-041.
-        crate::llm_cmd::validate_llm_base_url(&normalized).map_err(|e| e.to_string())?;
+        let parsed =
+            crate::llm_cmd::validate_llm_base_url(&normalized).map_err(|e| e.to_string())?;
         // validate_base_url also rejects path components (http://host/path),
         // which validate_llm_base_url does not check.
         speedwave_runtime::compose::validate_base_url(&normalized).map_err(|e| e.to_string())?;
+        // Log the post-validation URL with userinfo / path / query / fragment
+        // stripped — only scheme+host[:port] survives. validate_llm_base_url
+        // already rejects userinfo, but keeping the log scrubbed independently
+        // satisfies the "log_sanitizer is a safety net, not a license" rule
+        // from .claude/rules/logging.md.
+        let port_str = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+        log::info!(
+            "update_llm_config: base_url={}://{}{port_str}",
+            parsed.scheme(),
+            parsed.host_str().unwrap_or("<no-host>"),
+        );
     }
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
+        let active = user_config.active_project.clone();
         apply_llm_config(&mut user_config, update)?;
-        config::save_user_config(&user_config)
+        config::save_user_config(&user_config)?;
+        log::info!(
+            "update_llm_config: persisted to active_project={:?}",
+            active
+        );
+        Ok(())
     })
     .map_err(|e| e.to_string())
 }
