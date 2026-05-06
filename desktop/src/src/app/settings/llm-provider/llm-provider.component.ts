@@ -147,8 +147,16 @@ const PROVIDER_CARDS: readonly ProviderCard[] = [
                    picks its built-in default via ANTHROPIC_DEFAULT_OPUS_MODEL
                    (set by compose::apply_llm_config). The label resolves the
                    Opus family from the SSOT so the user knows what they
-                   actually get instead of the previous mglista wording. -->
-              @if (defaultAnthropicLabel(); as label) {
+                   actually get. Three-state render: undefined keeps the
+                   option blank-but-valid while the SSOT label is in flight
+                   (so a model=null config still has something selectable
+                   and we do not flash the misleading generic wording);
+                   string renders the dynamic hint; null (resolved without
+                   a label, e.g. older backend) falls back to the generic
+                   wording. -->
+              @if (defaultAnthropicLabel() === undefined) {
+                <option value=""></option>
+              } @else if (defaultAnthropicLabel(); as label) {
                 <option value="">Default — {{ label }} (switchable via /model)</option>
               } @else {
                 <option value="">(default — let Claude Code choose)</option>
@@ -326,10 +334,14 @@ export class LlmProviderComponent implements OnInit {
   /**
    * Family label of the Opus model that the dropdown's `(default)` option
    * resolves to at runtime. Sourced from `get_default_anthropic_model_label`
-   * (backend SSOT). `null` until first fetch resolves; falsy values fall
-   * back to the generic placeholder text in the template.
+   * (backend SSOT). Three-state to avoid the on-init placeholder flash:
+   *   - `undefined` → fetch still in flight; template hides the option
+   *     until we know what to render.
+   *   - `null` → fetch resolved with no label (older backend, dev mode
+   *     without Tauri) — template renders the generic placeholder.
+   *   - `string` → render the dynamic "Default — <family>" hint.
    */
-  protected readonly defaultAnthropicLabel = signal<string | null>(null);
+  protected readonly defaultAnthropicLabel = signal<string | null | undefined>(undefined);
 
   /** Loads the LLM configuration + the SSOT model catalog from the backend on init. */
   ngOnInit(): void {
@@ -424,10 +436,17 @@ export class LlmProviderComponent implements OnInit {
   private async loadDefaultAnthropicLabel(): Promise<void> {
     try {
       const label = await this.tauri.invoke<string | null>('get_default_anthropic_model_label');
-      this.defaultAnthropicLabel.set(label);
+      // Backend may return null when the catalog has no `latest=true` Opus.
+      // Treat both cases (resolved-as-null, resolved-as-string) as "fetched";
+      // collapse `undefined` from older invokeHandlers to `null` so the
+      // template's loading branch only triggers while genuinely in flight.
+      this.defaultAnthropicLabel.set(label ?? null);
       this.cdr.markForCheck();
     } catch {
-      // Stay on the generic placeholder.
+      // Mark as resolved-with-no-label so the template falls back to the
+      // generic placeholder instead of staying invisible.
+      this.defaultAnthropicLabel.set(null);
+      this.cdr.markForCheck();
     }
   }
 

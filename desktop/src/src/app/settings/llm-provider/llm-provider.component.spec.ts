@@ -479,6 +479,8 @@ describe('LlmProviderComponent', () => {
           return DEFAULT_BASE_URLS[(args?.['provider'] as string) ?? ''] ?? null;
         case 'list_anthropic_models':
           return TEST_ANTHROPIC_MODELS;
+        case 'get_default_anthropic_model_label':
+          return 'Opus 4.7';
         default:
           return undefined;
       }

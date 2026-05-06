@@ -72,16 +72,21 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
 /// resolves to at runtime — i.e. what `ANTHROPIC_DEFAULT_OPUS_MODEL` points
 /// at when `model` is left blank. Used by the Settings UI to render an
 /// honest hint like *"Default — Opus 4.7 (switchable via /model)"* instead
-/// of the previous mglista *"let Claude Code choose"* placeholder.
+/// of the previous vague *"let Claude Code choose"* placeholder.
 ///
 /// Reads from `ANTHROPIC_MODELS` (the SSOT) so a future Opus bump (e.g. 4.8)
 /// updates the UI hint without touching this helper. Returns `None` if the
 /// catalog has no `latest = true` Opus entry — frontend falls back to the
 /// generic placeholder in that case.
+///
+/// Identifies the Opus entry by `id.starts_with("claude-opus-")` rather than
+/// `family.starts_with("Opus")` — the API id is a stable contract with
+/// Anthropic, while the display label is mutable (e.g. someone could relabel
+/// "Opus 4.7" to "Claude Opus 4.7" without rebreaking this lookup).
 pub fn default_anthropic_family_label() -> Option<&'static str> {
     ANTHROPIC_MODELS
         .iter()
-        .find(|m| m.family.starts_with("Opus") && m.latest)
+        .find(|m| m.id.starts_with("claude-opus-") && m.latest)
         .map(|m| m.family)
 }
 
