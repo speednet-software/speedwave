@@ -12,10 +12,7 @@ RUN npm run build --if-present
 
 # Stage 2: Runtime
 FROM node:24-alpine
-# tzdata: required so `TZ=Europe/Warsaw` (set per-service in compose) resolves
-# to a named zone instead of UTC. Host timezone is propagated by
-# crates/speedwave-runtime/src/tz.rs::detect_host_timezone() — keep this layer
-# in sync with that SSOT (see CLAUDE.md "SSOT alignment" pairs).
+# tzdata: zoneinfo for TZ env from compose — keep aligned with tz.rs (see CLAUDE.md SSOT).
 RUN apk add --no-cache tzdata
 RUN addgroup -g 1000 speedwave && \
     adduser -u 1000 -G speedwave -s /bin/sh -D speedwave

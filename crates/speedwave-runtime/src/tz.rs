@@ -12,17 +12,17 @@ use std::path::Path;
 
 /// Returns the host's IANA timezone name (e.g. `"Europe/Warsaw"`).
 ///
-/// On failure logs a `warn!` and returns `"UTC"`. Never panics.
+/// On failure logs a `warn!` and returns `"Etc/UTC"`. Never panics.
 pub fn detect_host_timezone() -> String {
     let detected = detect_platform();
     match detected {
         Some(tz) => tz,
         None => {
             log::warn!(
-                "host timezone detection failed; defaulting to UTC. \
+                "host timezone detection failed; defaulting to Etc/UTC. \
                  Container clocks (and Claude Code limit timestamps) will be in UTC."
             );
-            "UTC".to_string()
+            "Etc/UTC".to_string()
         }
     }
 }
@@ -35,17 +35,47 @@ fn detect_platform() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn detect_platform() -> Option<String> {
-    use std::process::Command;
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-Command", "(Get-TimeZone).Id"])
-        .output()
+    // 5 s deadline so a slow PowerShell startup (cold boot, AV scan) cannot
+    // block render_compose indefinitely.
+    let timeout = Duration::from_secs(5);
+    let mut child = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "(Get-TimeZone).Id",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
-    if !output.status.success() {
-        return None;
+
+    let start = Instant::now();
+    loop {
+        match child.try_wait().ok()? {
+            Some(status) if status.success() => break,
+            Some(_) => return None,
+            None => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    log::warn!("Get-TimeZone timed out after {}s", timeout.as_secs());
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
     }
-    let id = std::str::from_utf8(&output.stdout).ok()?.trim();
-    detect_windows(id)
+
+    // Output is `(Get-TimeZone).Id` — a single short line (~30 bytes), no
+    // pipe-buffer deadlock risk.
+    let mut buf = String::new();
+    child.stdout.as_mut()?.read_to_string(&mut buf).ok()?;
+    detect_windows(buf.trim())
 }
 
 /// Reads `localtime_path` (typically `/etc/localtime`), falling back to the
@@ -110,7 +140,7 @@ fn is_valid_iana_name(s: &str) -> bool {
         return false;
     }
     let segments: Vec<&str> = s.split('/').collect();
-    if segments.is_empty() || segments.len() > 3 {
+    if segments.len() > 3 {
         return false;
     }
     segments.iter().all(|seg| {
@@ -165,8 +195,8 @@ const WINDOWS_TO_IANA: &[(&str, &str)] = &[
     ("Tocantins Standard Time", "America/Araguaina"),
     ("E. South America Standard Time", "America/Sao_Paulo"),
     ("SA Eastern Standard Time", "America/Cayenne"),
-    ("Argentina Standard Time", "America/Buenos_Aires"),
-    ("Greenland Standard Time", "America/Godthab"),
+    ("Argentina Standard Time", "America/Argentina/Buenos_Aires"),
+    ("Greenland Standard Time", "America/Nuuk"),
     ("Montevideo Standard Time", "America/Montevideo"),
     ("Magallanes Standard Time", "America/Punta_Arenas"),
     ("Saint Pierre Standard Time", "America/Miquelon"),
@@ -191,7 +221,7 @@ const WINDOWS_TO_IANA: &[(&str, &str)] = &[
     ("Syria Standard Time", "Asia/Damascus"),
     ("West Bank Standard Time", "Asia/Hebron"),
     ("South Africa Standard Time", "Africa/Johannesburg"),
-    ("FLE Standard Time", "Europe/Kiev"),
+    ("FLE Standard Time", "Europe/Kyiv"),
     ("Israel Standard Time", "Asia/Jerusalem"),
     ("South Sudan Standard Time", "Africa/Juba"),
     ("Kaliningrad Standard Time", "Europe/Kaliningrad"),
@@ -220,13 +250,13 @@ const WINDOWS_TO_IANA: &[(&str, &str)] = &[
     ("Qyzylorda Standard Time", "Asia/Qyzylorda"),
     ("Ekaterinburg Standard Time", "Asia/Yekaterinburg"),
     ("Pakistan Standard Time", "Asia/Karachi"),
-    ("India Standard Time", "Asia/Calcutta"),
+    ("India Standard Time", "Asia/Kolkata"),
     ("Sri Lanka Standard Time", "Asia/Colombo"),
-    ("Nepal Standard Time", "Asia/Katmandu"),
+    ("Nepal Standard Time", "Asia/Kathmandu"),
     ("Central Asia Standard Time", "Asia/Bishkek"),
     ("Bangladesh Standard Time", "Asia/Dhaka"),
     ("Omsk Standard Time", "Asia/Omsk"),
-    ("Myanmar Standard Time", "Asia/Rangoon"),
+    ("Myanmar Standard Time", "Asia/Yangon"),
     ("SE Asia Standard Time", "Asia/Bangkok"),
     ("Altai Standard Time", "Asia/Barnaul"),
     ("W. Mongolia Standard Time", "Asia/Hovd"),

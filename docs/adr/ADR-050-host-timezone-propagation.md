@@ -1,4 +1,4 @@
-# ADR-049: Host Timezone Propagation Into Containers
+# ADR-050: Host Timezone Propagation Into Containers
 
 **Status:** Accepted
 
@@ -25,9 +25,9 @@ A new module `crates/speedwave-runtime/src/tz.rs` exposes:
 pub fn detect_host_timezone() -> String
 ```
 
-- **Unix:** read `/etc/localtime` as a symlink; extract the path suffix after the last `zoneinfo/` segment (handles both `/usr/share/zoneinfo/...` on Linux and `/var/db/timezone/zoneinfo/...` on macOS). Fall back to `$TZ` if the symlink is missing or doesn't point into `zoneinfo/`. The fallback validates `$TZ` against an IANA-shape regex to reject glibc-isms like `:Europe/Warsaw` and path-traversal strings.
-- **Windows:** invoke `powershell -NoProfile -Command "(Get-TimeZone).Id"` and map the Windows zone ID to IANA via an inline `WINDOWS_TO_IANA` table sourced from CLDR `windowsZones.xml` (territory `001`).
-- **Fallback:** on any failure, log `warn!` and return `"UTC"`. Never panics, never returns `Err`.
+- **Unix:** read `/etc/localtime` as a symlink; extract the path suffix after the last `zoneinfo/` segment (handles both `/usr/share/zoneinfo/...` on Linux and `/var/db/timezone/zoneinfo/...` on macOS). Fall back to `$TZ` if the symlink is missing or doesn't point into `zoneinfo/`. The fallback validates `$TZ` against an IANA-shape regex to reject glibc-isms like `:Europe/Warsaw` and path-traversal strings.[^1][^2]
+- **Windows:** invoke `powershell -NoProfile -NonInteractive -Command "(Get-TimeZone).Id"` (5 s deadline) and map the Windows zone ID to IANA via an inline `WINDOWS_TO_IANA` table sourced from CLDR `windowsZones.xml` (territory `001`).[^3][^4]
+- **Fallback:** on any failure, log `warn!` and return `"Etc/UTC"`. Never panics, never returns `Err`.
 
 ### Propagation
 
@@ -61,13 +61,20 @@ The plugin contract (per CLAUDE.md plugin-contract table) gains an additive guar
 
 **Negative.**
 
-- Three base images grow by the size of `tzdata` (~3 MB compressed on Debian, ~2 MB on Alpine).
-- Windows zone-ID mapping table must be refreshed when CLDR ships changes; this is bounded (the table changes on the order of once per year).
+- Three base images grow by the size of `tzdata` (~3.5 MB installed on Debian, ~3.5 MB on Alpine).[^5][^6]
+- Windows zone-ID mapping table must be refreshed when CLDR ships changes. CLDR's release schedule is two major releases per year (Spring and Fall), so the table must be revisited on roughly that cadence — though most releases ship no Windows-zone changes.[^7]
 - A user changing their host timezone after starting containers will not see the change reflected until the next compose render (`speedwave start` / project restart). Acceptable — Claude Code reset windows are session-scoped, and the alternative (live-reloading `TZ` into running containers) violates KISS.
 
-## References
+[^1]: IANA tz database — authoritative source of zone names: <https://www.iana.org/time-zones>
 
-- IANA tz database: <https://www.iana.org/time-zones>
-- CLDR `windowsZones.xml`: <https://github.com/unicode-org/cldr/blob/main/common/supplemental/windowsZones.xml>
-- PowerShell `Get-TimeZone`: <https://learn.microsoft.com/powershell/module/microsoft.powershell.management/get-timezone>
-- Related SSOT-alignment row: see CLAUDE.md "Key Architecture" section.
+[^2]: glibc `TZ` env var format (`:Europe/Warsaw` colon-prefix variant rejected to prevent path leaks): <https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html>
+
+[^3]: PowerShell `Get-TimeZone` cmdlet documentation: <https://learn.microsoft.com/powershell/module/microsoft.powershell.management/get-timezone>
+
+[^4]: CLDR `windowsZones.xml` (territory `001` default mapping): <https://github.com/unicode-org/cldr/blob/main/common/supplemental/windowsZones.xml>
+
+[^5]: Debian `tzdata` package — installed size 3,572 kB on bookworm: <https://packages.debian.org/bookworm/tzdata>
+
+[^6]: Alpine `tzdata` package — installed size approximately 3.5 MiB: <https://pkgs.alpinelinux.org/package/edge/main/x86_64/tzdata>
+
+[^7]: CLDR release schedule — major releases every March (`-1`) and October (`-2`): <https://cldr.unicode.org/index/downloads>

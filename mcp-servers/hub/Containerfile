@@ -38,10 +38,7 @@ RUN cd hub && npm prune --omit=dev
 # Production stage
 FROM node:24-alpine
 
-# curl for healthcheck; tzdata so TZ env (set in compose) resolves to a named
-# zone instead of UTC. Host timezone is propagated by
-# crates/speedwave-runtime/src/tz.rs — keep this in sync with the SSOT
-# alignment pair documented in CLAUDE.md.
+# curl for healthcheck; tzdata for TZ env — keep aligned with tz.rs (see CLAUDE.md SSOT).
 RUN apk add --no-cache curl tzdata
 
 WORKDIR /app
