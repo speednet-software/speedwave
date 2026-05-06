@@ -49,3 +49,19 @@ export interface OAuthProgressEvent {
   message: string;
   request_id: string;
 }
+
+/**
+ * Result of validating one OS integration against macOS TCC at startup.
+ * Returned by `validate_os_integrations_on_startup` for each integration that
+ * was previously `enabled=true` in config but whose live TCC state denies the
+ * permission. The frontend renders a notice so users know the toggle was
+ * auto-flipped to OFF and what to do next (re-click to trigger the prompt).
+ *
+ * Mirrors `OsIntegrationValidation` in `desktop/src-tauri/src/integrations_cmd.rs`.
+ */
+export interface OsIntegrationValidation {
+  service: string;
+  previous_enabled: boolean;
+  new_enabled: boolean;
+  reason: string;
+}

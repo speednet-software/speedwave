@@ -126,4 +126,101 @@ final class MailTests: XCTestCase {
         XCTAssertTrue(parsed["error"] is String)
         XCTAssertTrue((parsed["error"] as! String).contains("AppleScript error"))
     }
+
+    // MARK: - AppleEventsGate end-to-end through performCheckPermission
+    //
+    // Each test injects a FakeMailGate (custom RawAuthorizationStatus) into
+    // performCheckPermission to exercise the full pipeline (status check →
+    // optional request → optional verifyDataAccess) without spawning osascript
+    // or hitting real TCC. This is the same pattern as SharedCLITests.MockGate
+    // but parameterised for Mail's entity (.mail) and bundle (com.apple.mail).
+
+    final class FakeMailGate: PermissionGate {
+        var initialStatus: RawAuthorizationStatus = .notDetermined
+        var postRequestStatus: RawAuthorizationStatus = .notDetermined
+        var requestGranted: Bool = false
+        var dataAccessError: String? = nil
+        var queryCount = 0
+        func authorizationStatus() -> RawAuthorizationStatus {
+            queryCount += 1
+            return queryCount == 1 ? initialStatus : postRequestStatus
+        }
+        func requestAccess(completion: @escaping (Bool, Error?) -> Void) {
+            completion(requestGranted, nil)
+        }
+        func verifyDataAccess() -> String? { dataAccessError }
+    }
+
+    func testCheckPermissionGrantedWhenAEReturnsNoErr() {
+        // Initial status .granted (AE returned noErr) and data access succeeds → granted.
+        let gate = FakeMailGate()
+        gate.initialStatus = .granted
+        let result = performCheckPermission(gate: gate, entity: .mail)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["granted"] as? Bool, true)
+        XCTAssertEqual(parsed["status"] as? String, "granted")
+    }
+
+    func testCheckPermissionDeniedReturnsAppleEventsTccutil() {
+        // Initial status .denied → must include `tccutil reset AppleEvents pl.speedwave.desktop.mail`,
+        // NOT `tccutil reset Mail …` (Mail uses kTCCServiceAppleEvents).
+        let gate = FakeMailGate()
+        gate.initialStatus = .denied
+        let result = performCheckPermission(gate: gate, entity: .mail)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["status"] as? String, "denied")
+        let error = parsed["error"] as? String ?? ""
+        XCTAssertTrue(error.contains("tccutil reset AppleEvents pl.speedwave.desktop.mail"),
+                      "Mail denied must use AppleEvents service + sub-identifier, got: \(error)")
+        XCTAssertFalse(error.contains("tccutil reset Mail"),
+                       "Mail must NOT use 'tccutil reset Mail' (no such TCC service), got: \(error)")
+    }
+
+    func testCheckPermissionTargetNotRunningOnProcNotFound() {
+        // procNotFound → .targetNotRunning(bundleId) → must NOT mention tccutil.
+        let gate = FakeMailGate()
+        gate.initialStatus = .targetNotRunning(bundleId: "com.apple.mail")
+        let result = performCheckPermission(gate: gate, entity: .mail)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["status"] as? String, "targetNotRunning")
+        let error = parsed["error"] as? String ?? ""
+        XCTAssertFalse(error.lowercased().contains("tccutil"),
+                       "targetNotRunning must NOT recommend tccutil")
+        XCTAssertTrue(error.contains("Mail.app"),
+                      "Mail targetNotRunning must mention Mail.app")
+    }
+
+    func testCheckPermissionSilentRejectWhenNotDeterminedTwice() {
+        // Initial .notDetermined → request fires but post-status remains .notDetermined →
+        // mapped to .silentReject (signing/entitlement/Info.plist issue).
+        let gate = FakeMailGate()
+        gate.initialStatus = .notDetermined
+        gate.postRequestStatus = .notDetermined
+        gate.requestGranted = false
+        let result = performCheckPermission(gate: gate, entity: .mail)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["status"] as? String, "silentReject")
+        let error = parsed["error"] as? String ?? ""
+        XCTAssertTrue(error.contains("reinstall"),
+                      "silentReject must mention reinstall (signing/entitlement guidance)")
+    }
+
+    func testCheckPermissionGrantedButDataAccessFails() {
+        // TCC reports .granted but the AppleScript probe fails → result downgrades to
+        // silentReject with the data-access error attached. This preserves the v1
+        // invariant that Mail/Notes permission checks accessed real data.
+        let gate = FakeMailGate()
+        gate.initialStatus = .granted
+        gate.dataAccessError = "AppleScript error: cannot read mailboxes"
+        let result = performCheckPermission(gate: gate, entity: .mail)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["granted"] as? Bool, false,
+                       "Data-access failure must downgrade granted=true")
+        XCTAssertEqual(parsed["status"] as? String, "silentReject")
+        let error = parsed["error"] as? String ?? ""
+        XCTAssertTrue(error.contains("data access failed"),
+                      "Error must explain data-access layer failure")
+        XCTAssertTrue(error.contains("cannot read mailboxes"),
+                      "Underlying probe error must be included")
+    }
 }

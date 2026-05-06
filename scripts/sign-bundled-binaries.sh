@@ -147,6 +147,45 @@ verify_macho() {
   echo "  verified: signature valid, $key_count entitlement(s) present"
 }
 
+# Verifies the signed Mach-O carries the expected sub-identifier (from the
+# binary's embedded `__TEXT,__info_plist` section). codesign reads the embedded
+# CFBundleIdentifier and stores it in the signature; this is what TCC.db indexes
+# permission rows by, so a mismatch means recovery commands like `tccutil reset
+# Calendar pl.speedwave.desktop.calendar` won't work for users.
+#
+# This function is invoked only for the four native macOS CLIs (calendar-cli,
+# reminders-cli, mail-cli, notes-cli) — other bundled binaries either have no
+# user-visible TCC binding (speedwave, node) or use a fixed system identifier
+# (limactl).
+verify_identifier() {
+  local path="$1"
+  local expected="$2"
+
+  local actual
+  actual="$(codesign -dvvv "$path" 2>&1 | grep -E '^Identifier=' | head -1 | cut -d'=' -f2)"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "ERROR: $path codesign Identifier='$actual', expected '$expected'" >&2
+    echo "  The embedded CFBundleIdentifier is wrong (or missing). Check that" >&2
+    echo "  native/macos/<svc>/Resources/Info.plist has CFBundleIdentifier=$expected" >&2
+    echo "  and that scripts/build-native-macos.sh ran the linker with" >&2
+    echo "  -sectcreate __TEXT __info_plist Resources/Info.plist." >&2
+    exit 1
+  fi
+  echo "  verified: identifier=$expected"
+}
+
+# Maps SRC_TAURI-relative basename to expected sub-identifier. Empty value
+# means no identifier check (e.g. speedwave, limactl, node).
+get_expected_identifier() {
+  case "$(basename "$1")" in
+    calendar-cli) echo "pl.speedwave.desktop.calendar" ;;
+    reminders-cli) echo "pl.speedwave.desktop.reminders" ;;
+    mail-cli) echo "pl.speedwave.desktop.mail" ;;
+    notes-cli) echo "pl.speedwave.desktop.notes" ;;
+    *) echo "" ;;
+  esac
+}
+
 echo "Signing bundled binaries with $APPLE_SIGNING_IDENTITY"
 
 for entry in "${SIGN_TARGETS[@]}"; do
@@ -154,6 +193,10 @@ for entry in "${SIGN_TARGETS[@]}"; do
   entitlements="${entry#*:}"
   sign_macho "$path" "$entitlements"
   verify_macho "$path" "$entitlements"
+  expected_id="$(get_expected_identifier "$path")"
+  if [[ -n "$expected_id" ]]; then
+    verify_identifier "$path" "$expected_id"
+  fi
 done
 
 echo "Bundled binaries signed successfully"

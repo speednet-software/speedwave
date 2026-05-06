@@ -255,15 +255,47 @@ final class SharedCLITests: XCTestCase {
     // MARK: - composeErrorMessage
 
     func testComposeDeniedCalendarMentionsTccutilReset() {
-        let msg = composeErrorMessage(status: .denied, entity: .calendar, bundleId: speedwaveBundleIdentifier)
-        XCTAssertTrue(msg.contains("tccutil reset Calendar pl.speedwave.desktop"),
-                      "Denied Calendar message must contain tccutil reset command, got: \(msg)")
+        // Default bundleId param resolves to subBundleIdentifier(.calendar).
+        let msg = composeErrorMessage(status: .denied, entity: .calendar)
+        XCTAssertTrue(msg.contains("tccutil reset Calendar pl.speedwave.desktop.calendar"),
+                      "Denied Calendar message must contain tccutil reset with sub-identifier, got: \(msg)")
     }
 
     func testComposeDeniedRemindersMentionsTccutilReset() {
-        let msg = composeErrorMessage(status: .denied, entity: .reminders, bundleId: speedwaveBundleIdentifier)
-        XCTAssertTrue(msg.contains("tccutil reset Reminders pl.speedwave.desktop"),
-                      "Denied Reminders message must contain tccutil reset command, got: \(msg)")
+        let msg = composeErrorMessage(status: .denied, entity: .reminders)
+        XCTAssertTrue(msg.contains("tccutil reset Reminders pl.speedwave.desktop.reminders"),
+                      "Denied Reminders message must contain tccutil reset with sub-identifier, got: \(msg)")
+    }
+
+    func testComposeDeniedMailMentionsAppleEventsService() {
+        // Mail/Notes use the AppleEvents kTCCService, not Mail/Notes — TCC scopes
+        // automation per (sender, target) under that single service name.
+        let msg = composeErrorMessage(status: .denied, entity: .mail)
+        XCTAssertTrue(msg.contains("tccutil reset AppleEvents pl.speedwave.desktop.mail"),
+                      "Denied Mail must use AppleEvents service in tccutil command, got: \(msg)")
+    }
+
+    func testComposeDeniedNotesMentionsAppleEventsService() {
+        let msg = composeErrorMessage(status: .denied, entity: .notes)
+        XCTAssertTrue(msg.contains("tccutil reset AppleEvents pl.speedwave.desktop.notes"),
+                      "Denied Notes must use AppleEvents service in tccutil command, got: \(msg)")
+    }
+
+    func testComposeUsesSubIdentifierByDefault() {
+        // Default bundleId argument must produce sub-identifier per entity, not parent.
+        for entity in [PermissionEntity.calendar, .reminders, .mail, .notes] {
+            let msg = composeErrorMessage(status: .denied, entity: entity)
+            let expected = "pl.speedwave.desktop.\(entity.rawValue)"
+            XCTAssertTrue(msg.contains(expected),
+                          "Default bundleId must be sub-identifier '\(expected)' for \(entity), got: \(msg)")
+        }
+    }
+
+    func testComposeAcceptsExplicitBundleIdOverride() {
+        // Backward-compat: explicit bundleId argument overrides the default sub-identifier.
+        let msg = composeErrorMessage(status: .denied, entity: .calendar, bundleId: "com.example.test")
+        XCTAssertTrue(msg.contains("tccutil reset Calendar com.example.test"),
+                      "Explicit bundleId must override default sub-identifier, got: \(msg)")
     }
 
     func testComposeSilentRejectMentionsReinstall() {
@@ -276,11 +308,29 @@ final class SharedCLITests: XCTestCase {
         XCTAssertFalse(msg.isEmpty, "writeOnly reminders must produce non-empty message")
     }
 
+    func testComposeTargetNotRunningDoesNotMentionTccutil() {
+        // .targetNotRunning is NOT a TCC issue — recovery is "open the app", not reset.
+        for entity in [PermissionEntity.mail, .notes] {
+            let msg = composeErrorMessage(status: .targetNotRunning, entity: entity)
+            XCTAssertFalse(msg.lowercased().contains("tccutil"),
+                           "targetNotRunning for \(entity) must NOT mention tccutil, got: \(msg)")
+            XCTAssertFalse(msg.isEmpty, "targetNotRunning must produce non-empty error")
+        }
+    }
+
+    func testComposeTargetNotRunningNamesEntityApp() {
+        let mailMsg = composeErrorMessage(status: .targetNotRunning, entity: .mail)
+        XCTAssertTrue(mailMsg.contains("Mail.app"), "Mail targetNotRunning must mention Mail.app, got: \(mailMsg)")
+        let notesMsg = composeErrorMessage(status: .targetNotRunning, entity: .notes)
+        XCTAssertTrue(notesMsg.contains("Notes.app"), "Notes targetNotRunning must mention Notes.app, got: \(notesMsg)")
+    }
+
     func testGrantedFalseAlwaysCarriesNonEmptyError() {
-        // Parametric invariant: every non-granted status must produce a non-empty error string.
-        let nonGrantedStatuses: [PermissionStatus] = [.denied, .restricted, .notDetermined, .writeOnly, .silentReject]
+        // Parametric invariant: every non-granted status must produce a non-empty error string,
+        // for every entity (calendar/reminders/mail/notes).
+        let nonGrantedStatuses: [PermissionStatus] = [.denied, .restricted, .notDetermined, .writeOnly, .silentReject, .targetNotRunning]
         for status in nonGrantedStatuses {
-            for entity in [PermissionEntity.calendar, PermissionEntity.reminders] {
+            for entity in [PermissionEntity.calendar, .reminders, .mail, .notes] {
                 let msg = composeErrorMessage(status: status, entity: entity)
                 XCTAssertFalse(msg.isEmpty,
                     "composeErrorMessage(\(status), \(entity)) must return non-empty string")
@@ -291,7 +341,9 @@ final class SharedCLITests: XCTestCase {
     func testEntityNameUsesCapitalizedRawValue() {
         let calMsg = composeErrorMessage(status: .denied, entity: .calendar)
         XCTAssertTrue(calMsg.contains("Calendar"), "Calendar denied must contain 'Calendar'")
-        XCTAssertFalse(calMsg.contains("calendar"), "Must use capitalized 'Calendar', not 'calendar'")
+        // Note: bundleId contains 'pl.speedwave.desktop.calendar' (lowercase by design),
+        // so we cannot assert that 'calendar' is fully absent from the message. We only
+        // check that the user-visible entity name is capitalised.
         let remMsg = composeErrorMessage(status: .denied, entity: .reminders)
         XCTAssertTrue(remMsg.contains("Reminders"), "Reminders denied must contain 'Reminders'")
     }
@@ -303,17 +355,94 @@ final class SharedCLITests: XCTestCase {
         XCTAssertFalse(msg.isEmpty, ".notDetermined must return non-empty for parametric invariant")
     }
 
+    // MARK: - subBundleIdentifier / tccServiceName
+
+    func testSubBundleIdentifierForEachEntity() {
+        XCTAssertEqual(subBundleIdentifier(for: .calendar), "pl.speedwave.desktop.calendar")
+        XCTAssertEqual(subBundleIdentifier(for: .reminders), "pl.speedwave.desktop.reminders")
+        XCTAssertEqual(subBundleIdentifier(for: .mail), "pl.speedwave.desktop.mail")
+        XCTAssertEqual(subBundleIdentifier(for: .notes), "pl.speedwave.desktop.notes")
+    }
+
+    func testTccServiceNameMailAndNotesUseAppleEvents() {
+        XCTAssertEqual(tccServiceName(for: .calendar), "Calendar")
+        XCTAssertEqual(tccServiceName(for: .reminders), "Reminders")
+        XCTAssertEqual(tccServiceName(for: .mail), "AppleEvents",
+                       "Mail uses kTCCServiceAppleEvents, not 'Mail'")
+        XCTAssertEqual(tccServiceName(for: .notes), "AppleEvents",
+                       "Notes uses kTCCServiceAppleEvents, not 'Notes'")
+    }
+
+    // MARK: - mapEventKitStatusToRaw / mapRawToPermissionStatus
+
+    func testMapEventKitStatusToRawCoversAllCases() {
+        XCTAssertEqual(mapEventKitStatusToRaw(.notDetermined), .notDetermined)
+        XCTAssertEqual(mapEventKitStatusToRaw(.denied), .denied)
+        XCTAssertEqual(mapEventKitStatusToRaw(.restricted), .restricted)
+        XCTAssertEqual(mapEventKitStatusToRaw(.authorized), .granted)
+        if #available(macOS 14.0, *) {
+            XCTAssertEqual(mapEventKitStatusToRaw(.fullAccess), .granted)
+            XCTAssertEqual(mapEventKitStatusToRaw(.writeOnly), .writeOnly)
+        }
+        if let synthetic = EKAuthorizationStatus(rawValue: 99) {
+            XCTAssertEqual(mapEventKitStatusToRaw(synthetic), .unknown,
+                           "Unknown synthetic raw value must map to .unknown (not .silentReject)")
+        }
+    }
+
+    func testMapRawToPermissionStatusForAllCases() {
+        XCTAssertEqual(mapRawToPermissionStatus(.granted), .granted)
+        XCTAssertEqual(mapRawToPermissionStatus(.denied), .denied)
+        XCTAssertEqual(mapRawToPermissionStatus(.restricted), .restricted)
+        XCTAssertEqual(mapRawToPermissionStatus(.notDetermined), .notDetermined)
+        XCTAssertEqual(mapRawToPermissionStatus(.writeOnly), .writeOnly)
+        XCTAssertEqual(mapRawToPermissionStatus(.targetNotRunning(bundleId: "com.x")), .targetNotRunning)
+        XCTAssertEqual(mapRawToPermissionStatus(.unknown), .silentReject)
+    }
+
+    // MARK: - mapAEStatusToRaw (AppleEvents OSStatus mapping)
+
+    func testMapAEStatusNoErrIsGranted() {
+        // OSStatus 0 = noErr → granted
+        XCTAssertEqual(mapAEStatusToRaw(0, targetBundleId: "com.x"), .granted)
+    }
+
+    func testMapAEStatusErrAEEventNotPermittedIsDenied() {
+        // -1743 = errAEEventNotPermitted → denied
+        XCTAssertEqual(mapAEStatusToRaw(-1743, targetBundleId: "com.x"), .denied)
+    }
+
+    func testMapAEStatusErrAEEventWouldRequireUserConsentIsNotDetermined() {
+        // -1744 = errAEEventWouldRequireUserConsent → notDetermined (with askUserIfNeeded=false)
+        XCTAssertEqual(mapAEStatusToRaw(-1744, targetBundleId: "com.x"), .notDetermined)
+    }
+
+    func testMapAEStatusProcNotFoundIsTargetNotRunning() {
+        // -600 = procNotFound → targetNotRunning(bundleId)
+        let raw = mapAEStatusToRaw(-600, targetBundleId: "com.apple.mail")
+        guard case let .targetNotRunning(bid) = raw else {
+            XCTFail("Expected .targetNotRunning, got \(raw)"); return
+        }
+        XCTAssertEqual(bid, "com.apple.mail")
+    }
+
+    func testMapAEStatusUnknownOSStatusMapsToUnknown() {
+        // Any other OSStatus → .unknown (which mapRawToPermissionStatus → .silentReject)
+        XCTAssertEqual(mapAEStatusToRaw(-12345, targetBundleId: "com.x"), .unknown)
+    }
+
     // MARK: - performCheckPermission (MockGate)
 
     final class MockGate: PermissionGate {
-        var initialStatus: EKAuthorizationStatus = .notDetermined
-        var postRequestStatus: EKAuthorizationStatus = .notDetermined
+        var initialStatus: RawAuthorizationStatus = .notDetermined
+        var postRequestStatus: RawAuthorizationStatus = .notDetermined
         var requestGranted: Bool = false
         var requestError: Error? = nil
         var requestInvokedCount = 0
         var statusQueryCount = 0
         var deferRequest: Bool = false  // if true, never invoke completion → exercises timeout path
-        func authorizationStatus() -> EKAuthorizationStatus {
+        var dataAccessError: String? = nil  // when set, verifyDataAccess returns this
+        func authorizationStatus() -> RawAuthorizationStatus {
             statusQueryCount += 1
             return statusQueryCount == 1 ? initialStatus : postRequestStatus
         }
@@ -323,15 +452,12 @@ final class SharedCLITests: XCTestCase {
                 completion(requestGranted, requestError)
             }
         }
+        func verifyDataAccess() -> String? { dataAccessError }
     }
 
     func testPerformGrantedShortCircuit() {
         let gate = MockGate()
-        if #available(macOS 14.0, *) {
-            gate.initialStatus = .fullAccess
-        } else {
-            gate.initialStatus = .authorized
-        }
+        gate.initialStatus = .granted
         let result = performCheckPermission(gate: gate, entity: .calendar)
         let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
         XCTAssertEqual(parsed["granted"] as? Bool, true)
@@ -347,7 +473,8 @@ final class SharedCLITests: XCTestCase {
         XCTAssertEqual(parsed["granted"] as? Bool, false)
         XCTAssertEqual(parsed["status"] as? String, "denied")
         let error = parsed["error"] as? String ?? ""
-        XCTAssertTrue(error.contains("tccutil reset Calendar"), "Denied must mention tccutil reset")
+        XCTAssertTrue(error.contains("tccutil reset Calendar pl.speedwave.desktop.calendar"),
+                      "Denied must mention tccutil reset with sub-identifier, got: \(error)")
         XCTAssertEqual(gate.requestInvokedCount, 0)
     }
 
@@ -360,7 +487,6 @@ final class SharedCLITests: XCTestCase {
         XCTAssertEqual(gate.requestInvokedCount, 0)
     }
 
-    @available(macOS 14.0, *)
     func testPerformWriteOnlyShortCircuit() {
         let gate = MockGate()
         gate.initialStatus = .writeOnly
@@ -374,11 +500,7 @@ final class SharedCLITests: XCTestCase {
         let gate = MockGate()
         gate.initialStatus = .notDetermined
         gate.requestGranted = true
-        if #available(macOS 14.0, *) {
-            gate.postRequestStatus = .fullAccess
-        } else {
-            gate.postRequestStatus = .authorized
-        }
+        gate.postRequestStatus = .granted
         let result = performCheckPermission(gate: gate, entity: .calendar)
         let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
         XCTAssertEqual(parsed["granted"] as? Bool, true)
@@ -395,7 +517,8 @@ final class SharedCLITests: XCTestCase {
         XCTAssertEqual(parsed["granted"] as? Bool, false)
         XCTAssertEqual(parsed["status"] as? String, "denied")
         let error = parsed["error"] as? String ?? ""
-        XCTAssertTrue(error.contains("tccutil reset Calendar"), "Denied must mention tccutil reset")
+        XCTAssertTrue(error.contains("tccutil reset Calendar pl.speedwave.desktop.calendar"),
+                      "Denied must mention tccutil reset with sub-identifier")
     }
 
     func testPerformSilentRejectStatusUnchanged() {
@@ -423,8 +546,8 @@ final class SharedCLITests: XCTestCase {
             "Post-status .denied must override requestGranted=true")
         XCTAssertEqual(parsed["status"] as? String, "denied")
         let error = parsed["error"] as? String ?? ""
-        XCTAssertTrue(error.contains("tccutil reset Calendar"),
-            "Post-status .denied must mention tccutil reset")
+        XCTAssertTrue(error.contains("tccutil reset Calendar pl.speedwave.desktop.calendar"),
+            "Post-status .denied must mention tccutil reset with sub-identifier")
     }
 
     func testPerformTimeout() {
@@ -438,6 +561,68 @@ final class SharedCLITests: XCTestCase {
         XCTAssertEqual(parsed["status"] as? String, "silentReject")
         let error = parsed["error"] as? String ?? ""
         XCTAssertTrue(error.contains("timed out"), "Timeout must produce 'timed out' in error")
+    }
+
+    func testPerformTargetNotRunningInvokesRequestForAutoLaunch() {
+        // .targetNotRunning is NOT terminal — orchestrator passes through to
+        // requestAccess so AppleEventsGate can attempt auto-launch. If the
+        // launch attempt also fails (mock keeps post-status = .targetNotRunning),
+        // the result remains targetNotRunning with no tccutil recovery hint.
+        let gate = MockGate()
+        gate.initialStatus = .targetNotRunning(bundleId: "com.apple.mail")
+        gate.postRequestStatus = .targetNotRunning(bundleId: "com.apple.mail")
+        let result = performCheckPermission(gate: gate, entity: .mail)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["status"] as? String, "targetNotRunning")
+        XCTAssertEqual(gate.requestInvokedCount, 1,
+                       "orchestrator must invoke requestAccess so gate can attempt auto-launch")
+        let error = parsed["error"] as? String ?? ""
+        XCTAssertFalse(error.lowercased().contains("tccutil"),
+                       "targetNotRunning must NOT recommend tccutil")
+        XCTAssertTrue(error.contains("Mail.app"),
+                      "targetNotRunning for mail must mention Mail.app")
+    }
+
+    func testPerformTargetNotRunningRecoversWhenAutoLaunchSucceeds() {
+        // Simulates the success path: gate's request returns granted=true and
+        // post-status is .granted (the auto-launch worked, AE got permission).
+        let gate = MockGate()
+        gate.initialStatus = .targetNotRunning(bundleId: "com.apple.mail")
+        gate.requestGranted = true
+        gate.postRequestStatus = .granted
+        let result = performCheckPermission(gate: gate, entity: .mail)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["status"] as? String, "granted")
+        XCTAssertEqual(gate.requestInvokedCount, 1)
+    }
+
+    func testPerformDataAccessFailureOverridesGranted() {
+        // TCC reports granted but verifyDataAccess returns an error string —
+        // result must be silentReject with the data-access error included.
+        let gate = MockGate()
+        gate.initialStatus = .granted
+        gate.dataAccessError = "AppleScript error: probe failed"
+        let result = performCheckPermission(gate: gate, entity: .mail)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["granted"] as? Bool, false,
+                       "verifyDataAccess error must downgrade granted=true to false")
+        XCTAssertEqual(parsed["status"] as? String, "silentReject")
+        let error = parsed["error"] as? String ?? ""
+        XCTAssertTrue(error.contains("data access failed"),
+                      "Error must explain data-access failure, got: \(error)")
+        XCTAssertTrue(error.contains("probe failed"),
+                      "Error must include the underlying data-access error message")
+    }
+
+    func testPerformDataAccessSuccessPreservesGranted() {
+        // TCC granted + verifyDataAccess returns nil → result remains granted.
+        let gate = MockGate()
+        gate.initialStatus = .granted
+        gate.dataAccessError = nil  // success
+        let result = performCheckPermission(gate: gate, entity: .mail)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["granted"] as? Bool, true)
+        XCTAssertEqual(parsed["status"] as? String, "granted")
     }
 
     // exitWithError calls exit(1) and cannot be unit-tested without process spawning.

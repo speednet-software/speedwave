@@ -15,19 +15,23 @@ struct NotesCLI {
 
         let command = args[1]
 
-        // check_permission: verify macOS Automation access without performing any operation.
-        // Returns JSON {"granted": true/false} on stdout, always exits 0.
-        // Uses error.errorDescription for user-friendly messages from ScriptError.
-        // NOTE: "to name" does NOT trigger macOS Automation prompt — must access data (e.g. notes).
+        // check_permission: verify macOS Automation access for Notes through the
+        // unified PermissionGate (AppleEventsGate). The TCC layer is determined by
+        // AEDeterminePermissionToAutomateTarget; the data-access layer is verified
+        // by the AppleScript probe (`permissionCheckScript`) running as
+        // gate.verifyDataAccess(). 30s timeout matches the original probe budget
+        // (Notes can take longer than Mail to enumerate).
         // Pattern: see also mail/Sources/MailCLI.swift check_permission
         if command == "check_permission" {
-            do {
-                _ = try ScriptRunner.run(permissionCheckScript, timeout: 30)
-                print(formatPermissionResult(granted: true, error: nil))
-            } catch {
-                let detail = "Notes access denied: \(error.localizedDescription)\nGrant access in System Settings > Privacy & Security > Automation"
-                print(formatPermissionResult(granted: false, error: detail))
-            }
+            let allowLaunch = args.contains("--launch")
+            let gate = AppleEventsGate(
+                targetBundleId: "com.apple.Notes",
+                dataAccessScript: permissionCheckScript,
+                dataAccessTimeout: 30,
+                pidResolver: NSWorkspacePidResolver(),
+                appLauncher: allowLaunch ? NSWorkspaceAppLauncher() : NeverLaunchAppLauncher()
+            )
+            print(performCheckPermission(gate: gate, entity: .notes))
             return
         }
 

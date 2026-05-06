@@ -1448,6 +1448,7 @@ fn main() {
             container_logs_cmd::get_compose_logs,
             container_logs_cmd::get_mcp_os_logs,
             container_logs_cmd::get_claude_session_logs,
+            container_logs_cmd::get_all_logs,
             // IDE Bridge
             list_available_ides,
             select_ide,
@@ -1474,6 +1475,7 @@ fn main() {
             integrations_cmd::get_integrations,
             integrations_cmd::set_integration_enabled,
             integrations_cmd::set_os_integration_enabled,
+            integrations_cmd::validate_os_integrations_on_startup,
             integrations_cmd::save_integration_credentials,
             integrations_cmd::save_redmine_mappings,
             integrations_cmd::delete_integration_credentials,

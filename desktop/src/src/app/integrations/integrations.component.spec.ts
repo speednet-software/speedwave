@@ -3,7 +3,24 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { IntegrationsComponent } from './integrations.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { LoggerService } from '../services/logger.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+
+/**
+ * Mock LoggerService for tests. Real LoggerService calls `@tauri-apps/plugin-log`
+ * which has no Tauri context in unit tests; it would throw or no-op silently.
+ * The mock lets us assert that the component logged the expected lifecycle
+ * events (toggle clicks, validate outcomes, auto-disabled services) which is
+ * what makes the user-supplied logs ZIP useful for support triage.
+ */
+function makeMockLogger() {
+  return {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  };
+}
 
 const MOCK_INTEGRATIONS = {
   services: [
@@ -132,6 +149,10 @@ function setupMockTauri(mockTauri: MockTauriService): void {
         return [];
       case 'get_selected_ide':
         return null;
+      case 'validate_os_integrations_on_startup':
+        // Default: no auto-disabled integrations. Tests that exercise the
+        // migration banner override the handler explicitly.
+        return [];
       default:
         return undefined;
     }
@@ -143,14 +164,26 @@ describe('IntegrationsComponent', () => {
   let fixture: ComponentFixture<IntegrationsComponent>;
   let mockTauri: MockTauriService;
   let projectState: ProjectStateService;
+  let mockLogger: ReturnType<typeof makeMockLogger>;
 
   beforeEach(async () => {
     mockTauri = new MockTauriService();
     setupMockTauri(mockTauri);
+    mockLogger = makeMockLogger();
+
+    // Reset the static "already validated" map so each test starts clean —
+    // the production guard prevents re-validation when re-entering the route,
+    // but tests need to observe a fresh validate flow.
+    (
+      IntegrationsComponent as unknown as { validationByProject: Map<string, Promise<void>> }
+    ).validationByProject.clear();
 
     await TestBed.configureTestingModule({
       imports: [IntegrationsComponent],
-      providers: [{ provide: TauriService, useValue: mockTauri }],
+      providers: [
+        { provide: TauriService, useValue: mockTauri },
+        { provide: LoggerService, useValue: mockLogger },
+      ],
     }).compileComponents();
 
     projectState = TestBed.inject(ProjectStateService);
@@ -1321,6 +1354,329 @@ describe('IntegrationsComponent', () => {
       expect(component.oauthStatus).toBe('success');
       expect(component.deviceCodeInfo).toBeNull();
       expect(component.activeOAuthRequestId).toBeNull();
+    });
+  });
+
+  describe('validateOsIntegrations() migration banner', () => {
+    it('calls validate_os_integrations_on_startup on init', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      await component.ngOnInit();
+      await component.runInitialOsValidation();
+
+      expect(invokeSpy).toHaveBeenCalledWith(
+        'validate_os_integrations_on_startup',
+        expect.objectContaining({ project: 'test-project' })
+      );
+    });
+
+    it('populates osIntegrationsAutoDisabled from validator response', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'validate_os_integrations_on_startup') {
+          return [
+            {
+              service: 'calendar',
+              previous_enabled: true,
+              new_enabled: false,
+              reason:
+                'Calendar access was previously denied. Open Terminal and run:\ntccutil reset Calendar pl.speedwave.desktop.calendar\nThen click the toggle again.',
+            },
+            {
+              service: 'mail',
+              previous_enabled: true,
+              new_enabled: false,
+              reason:
+                'Mail access was previously denied. Open Terminal and run:\ntccutil reset AppleEvents pl.speedwave.desktop.mail\nThen click the toggle again.',
+            },
+          ];
+        }
+        if (cmd === 'list_projects') {
+          return {
+            projects: [{ name: 'test-project', dir: '/tmp/test' }],
+            active_project: 'test-project',
+          };
+        }
+        if (cmd === 'get_integrations') return cloneMockIntegrations();
+        if (cmd === 'list_available_ides') return [];
+        if (cmd === 'get_selected_ide') return null;
+        return undefined;
+      };
+      await component.ngOnInit();
+      await component.runInitialOsValidation();
+
+      expect(component.osIntegrationsAutoDisabled.length).toBe(2);
+      expect(component.osIntegrationsAutoDisabled[0].service).toBe('calendar');
+      // Calendar reason must contain the calendar sub-identifier and the Calendar
+      // TCC service (not Mail/AppleEvents — that would be a regression).
+      expect(component.osIntegrationsAutoDisabled[0].reason).toContain(
+        'tccutil reset Calendar pl.speedwave.desktop.calendar'
+      );
+      expect(component.osIntegrationsAutoDisabled[1].service).toBe('mail');
+      // Mail reason must use AppleEvents service (kTCCServiceAppleEvents), not 'Mail'.
+      expect(component.osIntegrationsAutoDisabled[1].reason).toContain(
+        'tccutil reset AppleEvents pl.speedwave.desktop.mail'
+      );
+    });
+
+    it('renders banner with one entry per auto-disabled service', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'validate_os_integrations_on_startup') {
+          return [
+            {
+              service: 'calendar',
+              previous_enabled: true,
+              new_enabled: false,
+              reason: 'tccutil reset Calendar pl.speedwave.desktop.calendar',
+            },
+          ];
+        }
+        if (cmd === 'list_projects') {
+          return {
+            projects: [{ name: 'test-project', dir: '/tmp/test' }],
+            active_project: 'test-project',
+          };
+        }
+        if (cmd === 'get_integrations') return cloneMockIntegrations();
+        if (cmd === 'list_available_ides') return [];
+        if (cmd === 'get_selected_ide') return null;
+        return undefined;
+      };
+      await component.ngOnInit();
+      await component.runInitialOsValidation();
+      fixture.detectChanges();
+
+      const bannerEl = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-os-auto-disabled"]'
+      );
+      expect(bannerEl).toBeTruthy();
+      expect(bannerEl.textContent).toContain('calendar');
+      expect(bannerEl.textContent).toContain(
+        'tccutil reset Calendar pl.speedwave.desktop.calendar'
+      );
+    });
+
+    it('does not render banner when no integrations were auto-disabled', async () => {
+      // Default mock returns empty list — banner must not appear.
+      await component.ngOnInit();
+      await component.runInitialOsValidation();
+      fixture.detectChanges();
+
+      const bannerEl = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-os-auto-disabled"]'
+      );
+      expect(bannerEl).toBeFalsy();
+    });
+
+    it('dismissOsIntegrationsAutoDisabled clears the banner', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'validate_os_integrations_on_startup') {
+          return [
+            {
+              service: 'reminders',
+              previous_enabled: true,
+              new_enabled: false,
+              reason: 'tccutil reset Reminders pl.speedwave.desktop.reminders',
+            },
+          ];
+        }
+        if (cmd === 'list_projects') {
+          return {
+            projects: [{ name: 'test-project', dir: '/tmp/test' }],
+            active_project: 'test-project',
+          };
+        }
+        if (cmd === 'get_integrations') return cloneMockIntegrations();
+        if (cmd === 'list_available_ides') return [];
+        if (cmd === 'get_selected_ide') return null;
+        return undefined;
+      };
+      await component.ngOnInit();
+      await component.runInitialOsValidation();
+      expect(component.osIntegrationsAutoDisabled.length).toBe(1);
+
+      component.dismissOsIntegrationsAutoDisabled();
+
+      expect(component.osIntegrationsAutoDisabled.length).toBe(0);
+      fixture.detectChanges();
+      const bannerEl = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-os-auto-disabled"]'
+      );
+      expect(bannerEl).toBeFalsy();
+    });
+
+    it('handles validator errors non-fatally', async () => {
+      // Validator throws → component must continue loading integrations
+      // (UI cannot be blocked by a TCC validation failure).
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'validate_os_integrations_on_startup') {
+          throw new Error('boom');
+        }
+        if (cmd === 'list_projects') {
+          return {
+            projects: [{ name: 'test-project', dir: '/tmp/test' }],
+            active_project: 'test-project',
+          };
+        }
+        if (cmd === 'get_integrations') return cloneMockIntegrations();
+        if (cmd === 'list_available_ides') return [];
+        if (cmd === 'get_selected_ide') return null;
+        return undefined;
+      };
+      await component.ngOnInit();
+      await component.runInitialOsValidation();
+
+      expect(component.osIntegrationsAutoDisabled).toEqual([]);
+      // Integrations loaded normally
+      expect(component.services.length).toBeGreaterThan(0);
+      expect(component.error).toBe('');
+    });
+  });
+
+  describe('LoggerService — TCC validation + toggle observability', () => {
+    // These tests guarantee the logs ZIP a user sends with a support ticket
+    // contains enough breadcrumbs to reconstruct what happened. If a future
+    // PR drops a log line by accident, these tests catch it before merge.
+
+    it('logs info on validateOsIntegrations start', async () => {
+      await component.ngOnInit();
+      await component.runInitialOsValidation();
+
+      expect(mockLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('validateOsIntegrations start project=test-project')
+      );
+    });
+
+    it('logs info "no auto-disabled" when validator returns empty list', async () => {
+      // Default mock returns [] from validate_os_integrations_on_startup.
+      await component.ngOnInit();
+      await component.runInitialOsValidation();
+
+      expect(mockLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('no auto-disabled services')
+      );
+      // No warn/error in the happy path
+      expect(mockLogger.warn).not.toHaveBeenCalled();
+      expect(mockLogger.error).not.toHaveBeenCalled();
+    });
+
+    it('logs warn per auto-disabled service with reason text', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'validate_os_integrations_on_startup') {
+          return [
+            {
+              service: 'calendar',
+              previous_enabled: true,
+              new_enabled: false,
+              reason: 'tccutil reset Calendar pl.speedwave.desktop.calendar',
+            },
+            {
+              service: 'mail',
+              previous_enabled: true,
+              new_enabled: false,
+              reason: 'tccutil reset AppleEvents pl.speedwave.desktop.mail',
+            },
+          ];
+        }
+        if (cmd === 'list_projects') {
+          return {
+            projects: [{ name: 'test-project', dir: '/tmp/test' }],
+            active_project: 'test-project',
+          };
+        }
+        if (cmd === 'get_integrations') return cloneMockIntegrations();
+        if (cmd === 'list_available_ides') return [];
+        if (cmd === 'get_selected_ide') return null;
+        return undefined;
+      };
+      await component.ngOnInit();
+      await component.runInitialOsValidation();
+
+      // One warn line per auto-disabled service, each carrying the recovery text
+      // (this is what makes a logs ZIP self-describing — support reads the warn,
+      // sees the exact tccutil command the user should run).
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('os.calendar'));
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('tccutil reset Calendar pl.speedwave.desktop.calendar')
+      );
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('os.mail'));
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('tccutil reset AppleEvents pl.speedwave.desktop.mail')
+      );
+      // Plus a summary info line
+      expect(mockLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('auto-disabled 2 service(s)')
+      );
+    });
+
+    it('logs error when validator throws (non-fatal path)', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'validate_os_integrations_on_startup') {
+          throw new Error('boom');
+        }
+        if (cmd === 'list_projects') {
+          return {
+            projects: [{ name: 'test-project', dir: '/tmp/test' }],
+            active_project: 'test-project',
+          };
+        }
+        if (cmd === 'get_integrations') return cloneMockIntegrations();
+        if (cmd === 'list_available_ides') return [];
+        if (cmd === 'get_selected_ide') return null;
+        return undefined;
+      };
+      await component.ngOnInit();
+      await component.runInitialOsValidation();
+
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('validateOsIntegrations failed')
+      );
+      expect(mockLogger.error).toHaveBeenCalledWith(expect.stringContaining('boom'));
+    });
+
+    it('logs info on os toggle click and persist', async () => {
+      await component.ngOnInit();
+      await component.runInitialOsValidation();
+      const calendarOs = component.osIntegrations.find((o) => o.service === 'reminders');
+      if (!calendarOs) {
+        throw new Error('test fixture must include an os service');
+      }
+
+      const fakeEvent = new Event('click');
+      vi.spyOn(fakeEvent, 'stopPropagation');
+      mockLogger.info.mockClear(); // ignore validate-time info; assert only toggle-time
+
+      await component.onOsToggleClick(calendarOs, fakeEvent);
+
+      expect(mockLogger.info).toHaveBeenCalledWith(expect.stringContaining('os toggle clicked'));
+      expect(mockLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining(`service=${calendarOs.service}`)
+      );
+    });
+
+    it('logs warn on os toggle failure with reverted state and reason', async () => {
+      await component.ngOnInit();
+      await component.runInitialOsValidation();
+      const osSvc = component.osIntegrations[0];
+
+      // Make set_os_integration_enabled throw a TCC-like error
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'set_os_integration_enabled') {
+          throw new Error(
+            'Calendar access was previously denied. Open Terminal and run:\ntccutil reset Calendar pl.speedwave.desktop.calendar'
+          );
+        }
+        return undefined;
+      };
+      const fakeEvent = new Event('click');
+      vi.spyOn(fakeEvent, 'stopPropagation');
+      mockLogger.warn.mockClear();
+
+      await component.onOsToggleClick(osSvc, fakeEvent);
+
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('os toggle failed'));
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('reason='));
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('tccutil reset Calendar pl.speedwave.desktop.calendar')
+      );
     });
   });
 });

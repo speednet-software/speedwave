@@ -13,16 +13,53 @@ public enum PermissionStatus: String {
     case notDetermined    // .notDetermined — first-run; consent prompt should appear next launch
     case writeOnly        // .writeOnly — partial access (Calendars only, macOS 14+)
     case silentReject     // status remained .notDetermined after request, OR @unknown raw value
+    case targetNotRunning // AE-only: target app (Mail/Notes) not running, not a TCC issue
+}
+
+/// Internal status produced by gates. EventKit gates map EKAuthorizationStatus →
+/// RawAuthorizationStatus; AppleEvents gates map OSStatus → RawAuthorizationStatus.
+/// `mapRawToPermissionStatus` projects this onto the public `PermissionStatus`.
+public enum RawAuthorizationStatus: Equatable {
+    case granted
+    case denied
+    case restricted
+    case notDetermined
+    case writeOnly                            // EventKit-only (Calendar)
+    case targetNotRunning(bundleId: String)   // AppleEvents-only: procNotFound (-600)
+    case unknown                              // @unknown EK / unmapped OSStatus
 }
 
 public enum PermissionEntity: String {
     case calendar
     case reminders
+    case mail
+    case notes
 }
 
-/// SSOT: bundle identifier literal. Must match `desktop/src-tauri/tauri.conf.json::identifier`.
+/// SSOT: parent bundle identifier literal. Must match `desktop/src-tauri/tauri.conf.json::identifier`.
 /// A bats test (`bundle ID in tauri.conf.json matches Swift literal`) guards drift.
+/// Per-CLI binaries embed `pl.speedwave.desktop.<entity>` via `subBundleIdentifier(for:)`.
 public let speedwaveBundleIdentifier: String = "pl.speedwave.desktop"
+
+/// Per-entity sub-identifier used as `CFBundleIdentifier` of each CLI binary's embedded
+/// Info.plist. TCC binds to this identifier (not `<svc>-cli` adhoc identifier from codesign),
+/// so the recovery `tccutil reset <Service> <subId>` command in `composeErrorMessage` actually
+/// targets the correct TCC.db row.
+public func subBundleIdentifier(for entity: PermissionEntity) -> String {
+    "\(speedwaveBundleIdentifier).\(entity.rawValue)"
+}
+
+/// kTCCService name used by the `tccutil reset <service> <bundleId>` command.
+/// Calendar/Reminders have dedicated TCC services; Mail and Notes both use AppleEvents
+/// (the TCC service kTCCServiceAppleEvents — automation permissions are scoped per
+/// (sender, target) pair under that single service name).
+public func tccServiceName(for entity: PermissionEntity) -> String {
+    switch entity {
+    case .calendar: return "Calendar"
+    case .reminders: return "Reminders"
+    case .mail, .notes: return "AppleEvents"
+    }
+}
 
 /// Returns `Bundle.main.bundleIdentifier` when launched from the parent .app,
 /// otherwise falls back to `speedwaveBundleIdentifier`. The internal variant
@@ -36,8 +73,7 @@ public func resolvedBundleIdentifier(from rawBundleId: String?) -> String {
     rawBundleId ?? speedwaveBundleIdentifier
 }
 
-/// Backward-compatible overload for callers that don't have a PermissionStatus
-/// (e.g. mail-cli and notes-cli which use Apple Events, not EventKit).
+/// Backward-compatible overload for callers that don't have a PermissionStatus.
 /// Infers status from granted flag; denied case uses .silentReject as a conservative default.
 public func formatPermissionResult(granted: Bool, error: String?) -> String {
     let status: PermissionStatus = granted ? .granted : .silentReject
@@ -56,6 +92,8 @@ public func formatPermissionResult(granted: Bool, status: PermissionStatus, erro
     return json
 }
 
+/// Public legacy mapping kept for direct callers (existing tests cover all branches).
+/// New gates produce `RawAuthorizationStatus` via `mapEventKitStatusToRaw` / OSStatus mapping.
 public func mapAuthorizationStatus(_ raw: EKAuthorizationStatus) -> PermissionStatus {
     switch raw {
     case .notDetermined: return .notDetermined
@@ -68,13 +106,39 @@ public func mapAuthorizationStatus(_ raw: EKAuthorizationStatus) -> PermissionSt
     }
 }
 
+public func mapEventKitStatusToRaw(_ raw: EKAuthorizationStatus) -> RawAuthorizationStatus {
+    switch raw {
+    case .notDetermined: return .notDetermined
+    case .restricted: return .restricted
+    case .denied: return .denied
+    case .authorized: return .granted
+    case .fullAccess: return .granted
+    case .writeOnly: return .writeOnly
+    @unknown default: return .unknown
+    }
+}
+
+public func mapRawToPermissionStatus(_ raw: RawAuthorizationStatus) -> PermissionStatus {
+    switch raw {
+    case .granted: return .granted
+    case .denied: return .denied
+    case .restricted: return .restricted
+    case .notDetermined: return .notDetermined
+    case .writeOnly: return .writeOnly
+    case .targetNotRunning: return .targetNotRunning
+    case .unknown: return .silentReject
+    }
+}
+
 public func composeErrorMessage(
     status: PermissionStatus,
     entity: PermissionEntity,
-    bundleId: String = resolvedBundleIdentifier()
+    bundleId: String? = nil
 ) -> String {
+    let resolvedBundleId = bundleId ?? subBundleIdentifier(for: entity)
     let entityName = entity.rawValue.capitalized
-    let resetCmd = "tccutil reset \(entityName) \(bundleId)"
+    let serviceName = tccServiceName(for: entity)
+    let resetCmd = "tccutil reset \(serviceName) \(resolvedBundleId)"
     let settingsPath = "System Settings > Privacy & Security > \(entityName)"
     switch status {
     case .granted:
@@ -95,12 +159,26 @@ public func composeErrorMessage(
         return "Speedwave has write-only \(entityName) access. Open \(settingsPath) and grant Full Access for read support."
     case .silentReject:
         return "\(entityName) permission was silently rejected by macOS. This usually means a signing or entitlement problem — please reinstall Speedwave from a fresh download."
+    case .targetNotRunning:
+        // AE-only path (mail/notes). Not a TCC issue — do NOT mention tccutil here:
+        // resetting permission would not help and would just confuse the user.
+        return "\(entityName).app is not running. Open \(entityName).app and try again — this is not a permission problem."
     }
 }
 
 public protocol PermissionGate {
-    func authorizationStatus() -> EKAuthorizationStatus
+    func authorizationStatus() -> RawAuthorizationStatus
     func requestAccess(completion: @escaping (Bool, Error?) -> Void)
+    /// Optional second-phase verification run after TCC reports `.granted`.
+    /// Returns nil on success, or an error string describing why the gate has TCC
+    /// permission but cannot actually access data. Default is no-op (nil).
+    /// Used by AppleEventsGate to run the AppleScript probe against Mail/Notes data —
+    /// preserves the v1 invariant that Mail/Notes permission checks accessed real data.
+    func verifyDataAccess() -> String?
+}
+
+public extension PermissionGate {
+    func verifyDataAccess() -> String? { nil }
 }
 
 /// Inner timeout (default 55s) is intentionally shorter than the outer Rust
@@ -108,19 +186,21 @@ public protocol PermissionGate {
 /// so the Swift process gets to emit a structured timeout message before the
 /// parent kills it; otherwise the user only ever sees the generic Rust kill message.
 public func performCheckPermission(gate: PermissionGate, entity: PermissionEntity, timeout: TimeInterval = 55) -> String {
-    let initial = mapAuthorizationStatus(gate.authorizationStatus())
+    logTrace("performCheckPermission start entity=\(entity.rawValue) timeout=\(Int(timeout))s")
+    let initialRaw = gate.authorizationStatus()
+    let initial = mapRawToPermissionStatus(initialRaw)
+    logTrace("performCheckPermission initial entity=\(entity.rawValue) status=\(initial.rawValue)")
 
-    // Already in a terminal state — don't trigger a request that would return
-    // the cached value silently. This is the core fix for the bug where
-    // requestFullAccessToEvents returns granted=false without prompting when
-    // current status is .denied.
-    if initial != .notDetermined {
-        let granted = (initial == .granted)
-        let err = granted ? nil : composeErrorMessage(status: initial, entity: entity)
-        return formatPermissionResult(granted: granted, status: initial, error: err)
+    // Short-circuit terminal states. `.targetNotRunning` is NOT terminal here —
+    // we let it fall through so `requestAccess` can auto-launch the target
+    // (AppleEventsGate launches Mail/Notes only on the active path).
+    if initial != .notDetermined && initial != .targetNotRunning {
+        logTrace("performCheckPermission terminal-state short-circuit entity=\(entity.rawValue) final=\(initial.rawValue)")
+        return finalizeResult(status: initial, entity: entity, gate: gate)
     }
 
     // Status is .notDetermined — fire the request and wait for the prompt.
+    logTrace("performCheckPermission firing requestAccess entity=\(entity.rawValue)")
     let semaphore = DispatchSemaphore(value: 0)
     var requestGranted = false
     var requestError: Error?
@@ -131,36 +211,68 @@ public func performCheckPermission(gate: PermissionGate, entity: PermissionEntit
     }
     let waitResult = semaphore.wait(timeout: .now() + timeout)
     if waitResult == .timedOut {
+        logTrace("performCheckPermission TIMEOUT entity=\(entity.rawValue) after=\(Int(timeout))s")
         return formatPermissionResult(
             granted: false,
             status: .silentReject,
             error: "\(entity.rawValue.capitalized) permission dialog timed out after \(Int(timeout))s. The TCC system is unresponsive — please retry or reboot."
         )
     }
+    logTrace("performCheckPermission requestAccess returned entity=\(entity.rawValue) granted=\(requestGranted) error=\(requestError?.localizedDescription ?? "nil")")
 
     // Re-query status to disambiguate "user clicked Don't Allow" from "TCC silently rejected"
     // and to enforce the invariant that the post-status is the source of truth (a request
     // can return granted=true while a stale TCC entry remains denied; we trust post-status).
-    let postStatus = mapAuthorizationStatus(gate.authorizationStatus())
+    let postStatus = mapRawToPermissionStatus(gate.authorizationStatus())
+    logTrace("performCheckPermission post-status entity=\(entity.rawValue) status=\(postStatus.rawValue)")
     let final: PermissionStatus
     if requestGranted && postStatus == .granted {
         final = .granted
     } else if postStatus == .notDetermined {
         // Prompt never fired. Almost always usage-description / entitlement / signing.
         final = .silentReject
+        logTrace("performCheckPermission SILENT REJECT entity=\(entity.rawValue) — post-status remained notDetermined; check Info.plist usage description and code signature")
     } else {
         // Post-status trumps requestGranted — covers the (rare) case where the request
         // returned granted=true but TCC.db settled to a different state.
         final = postStatus
     }
-    let err: String?
-    if final == .granted {
-        err = nil
-    } else if let underlying = requestError {
-        // Prefer Apple's localized description if present (legacy parity), but always non-nil.
-        err = "\(composeErrorMessage(status: final, entity: entity))\n[underlying: \(underlying.localizedDescription)]"
-    } else {
-        err = composeErrorMessage(status: final, entity: entity)
+    logTrace("performCheckPermission done entity=\(entity.rawValue) final=\(final.rawValue)")
+    return finalizeResult(status: final, entity: entity, gate: gate, requestError: requestError)
+}
+
+/// Builds the final JSON response, optionally running `gate.verifyDataAccess()` when status
+/// is `.granted` (preserves the Mail/Notes data-access invariant from v1) and downgrading
+/// to `.silentReject` when data access fails despite TCC granting permission.
+private func finalizeResult(
+    status: PermissionStatus,
+    entity: PermissionEntity,
+    gate: PermissionGate,
+    requestError: Error? = nil
+) -> String {
+    if status == .granted {
+        logTrace("finalizeResult entity=\(entity.rawValue) status=granted — running verifyDataAccess()")
+        if let dataAccessError = gate.verifyDataAccess() {
+            // Granted by TCC but data access fails — surface as silentReject with the
+            // gate-specific error so users see why it's broken (e.g. AppleScript probe failure).
+            logTrace("finalizeResult entity=\(entity.rawValue) verifyDataAccess FAILED — downgrading granted→silentReject error=\(dataAccessError)")
+            return formatPermissionResult(
+                granted: false,
+                status: .silentReject,
+                error: "\(entity.rawValue.capitalized) permission granted by macOS but data access failed: \(dataAccessError)"
+            )
+        }
+        logTrace("finalizeResult entity=\(entity.rawValue) GRANTED + data access OK")
+        return formatPermissionResult(granted: true, status: .granted, error: nil)
     }
-    return formatPermissionResult(granted: final == .granted, status: final, error: err)
+
+    let baseMessage = composeErrorMessage(status: status, entity: entity)
+    let err: String
+    if let underlying = requestError {
+        err = "\(baseMessage)\n[underlying: \(underlying.localizedDescription)]"
+    } else {
+        err = baseMessage
+    }
+    logTrace("finalizeResult entity=\(entity.rawValue) status=\(status.rawValue) emitting error message")
+    return formatPermissionResult(granted: false, status: status, error: err)
 }

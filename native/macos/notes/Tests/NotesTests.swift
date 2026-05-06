@@ -179,4 +179,87 @@ final class NotesTests: XCTestCase {
             XCTAssertEqual(seconds, 42, "seconds value must be preserved across rewrap")
         }
     }
+
+    // MARK: - AppleEventsGate end-to-end through performCheckPermission
+    //
+    // Mirrors MailTests AppleEventsGate suite — same pattern, with .notes entity
+    // and com.apple.Notes target bundle. Verifies that the notes-cli check_permission
+    // path produces status-aware output identical to mail-cli, which is the
+    // unification goal of this change.
+
+    final class FakeNotesGate: PermissionGate {
+        var initialStatus: RawAuthorizationStatus = .notDetermined
+        var postRequestStatus: RawAuthorizationStatus = .notDetermined
+        var requestGranted: Bool = false
+        var dataAccessError: String? = nil
+        var queryCount = 0
+        func authorizationStatus() -> RawAuthorizationStatus {
+            queryCount += 1
+            return queryCount == 1 ? initialStatus : postRequestStatus
+        }
+        func requestAccess(completion: @escaping (Bool, Error?) -> Void) {
+            completion(requestGranted, nil)
+        }
+        func verifyDataAccess() -> String? { dataAccessError }
+    }
+
+    func testCheckPermissionGrantedWhenAEReturnsNoErr() {
+        let gate = FakeNotesGate()
+        gate.initialStatus = .granted
+        let result = performCheckPermission(gate: gate, entity: .notes)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["granted"] as? Bool, true)
+        XCTAssertEqual(parsed["status"] as? String, "granted")
+    }
+
+    func testCheckPermissionDeniedReturnsAppleEventsTccutil() {
+        let gate = FakeNotesGate()
+        gate.initialStatus = .denied
+        let result = performCheckPermission(gate: gate, entity: .notes)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["status"] as? String, "denied")
+        let error = parsed["error"] as? String ?? ""
+        XCTAssertTrue(error.contains("tccutil reset AppleEvents pl.speedwave.desktop.notes"),
+                      "Notes denied must use AppleEvents service + sub-identifier, got: \(error)")
+        XCTAssertFalse(error.contains("tccutil reset Notes"),
+                       "Notes must NOT use 'tccutil reset Notes' (no such TCC service), got: \(error)")
+    }
+
+    func testCheckPermissionTargetNotRunningOnProcNotFound() {
+        let gate = FakeNotesGate()
+        gate.initialStatus = .targetNotRunning(bundleId: "com.apple.Notes")
+        let result = performCheckPermission(gate: gate, entity: .notes)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["status"] as? String, "targetNotRunning")
+        let error = parsed["error"] as? String ?? ""
+        XCTAssertFalse(error.lowercased().contains("tccutil"),
+                       "targetNotRunning must NOT recommend tccutil")
+        XCTAssertTrue(error.contains("Notes.app"),
+                      "Notes targetNotRunning must mention Notes.app")
+    }
+
+    func testCheckPermissionSilentRejectWhenNotDeterminedTwice() {
+        let gate = FakeNotesGate()
+        gate.initialStatus = .notDetermined
+        gate.postRequestStatus = .notDetermined
+        gate.requestGranted = false
+        let result = performCheckPermission(gate: gate, entity: .notes)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["status"] as? String, "silentReject")
+        let error = parsed["error"] as? String ?? ""
+        XCTAssertTrue(error.contains("reinstall"))
+    }
+
+    func testCheckPermissionGrantedButDataAccessFails() {
+        let gate = FakeNotesGate()
+        gate.initialStatus = .granted
+        gate.dataAccessError = "AppleScript error: cannot read notes"
+        let result = performCheckPermission(gate: gate, entity: .notes)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["granted"] as? Bool, false)
+        XCTAssertEqual(parsed["status"] as? String, "silentReject")
+        let error = parsed["error"] as? String ?? ""
+        XCTAssertTrue(error.contains("data access failed"))
+        XCTAssertTrue(error.contains("cannot read notes"))
+    }
 }

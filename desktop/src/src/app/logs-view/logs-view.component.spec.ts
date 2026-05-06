@@ -23,7 +23,7 @@ describe('LogsViewComponent', () => {
   beforeEach(async () => {
     mockTauri = new MockTauriService();
     mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'get_compose_logs') return MOCK_LOGS;
+      if (cmd === 'get_all_logs') return MOCK_LOGS;
       return undefined;
     };
 
@@ -99,7 +99,7 @@ describe('LogsViewComponent', () => {
     // compose-level ISO stamp does. The fallback dates them with the host's
     // current day so two entries from different days cannot collide.
     mockTauri.invokeHandler = async (cmd: string) =>
-      cmd === 'get_compose_logs' ? 'speedwave_test_mcp-hub_1 | [11:32:56] INFO  hello' : undefined;
+      cmd === 'get_all_logs' ? 'speedwave_test_mcp-hub_1 | [11:32:56] INFO  hello' : undefined;
     vi.spyOn(component as unknown as { todayIso(): string }, 'todayIso').mockReturnValue(
       '2026-04-28'
     );
@@ -118,7 +118,7 @@ describe('LogsViewComponent', () => {
     // for the time column and keeps the full ISO value in `[title]` so
     // hovering still reveals microseconds + timezone.
     mockTauri.invokeHandler = async (cmd: string) =>
-      cmd === 'get_compose_logs'
+      cmd === 'get_all_logs'
         ? 'speedwave_test_mcp-hub_1 | 2026-04-28T11:32:56.123456Z INFO  hello'
         : undefined;
 
@@ -209,7 +209,7 @@ describe('LogsViewComponent', () => {
 
   // -- Error path --
 
-  it('renders an error block when get_compose_logs rejects', async () => {
+  it('renders an error block when get_all_logs rejects', async () => {
     mockTauri.invokeHandler = async () => {
       throw new Error('compose logs unavailable');
     };
@@ -373,9 +373,7 @@ describe('LogsViewComponent', () => {
     // Next refresh returns logs without the `redmine` source — the stale
     // selection must be reconciled instead of stranding the user on an empty list.
     mockTauri.invokeHandler = async (cmd: string) =>
-      cmd === 'get_compose_logs'
-        ? 'speedwave_test_mcp-hub_1 | [12:00:00] INFO  still here'
-        : undefined;
+      cmd === 'get_all_logs' ? 'speedwave_test_mcp-hub_1 | [12:00:00] INFO  still here' : undefined;
     await component['refresh']();
     fixture.detectChanges();
 
@@ -458,7 +456,7 @@ describe('LogsViewComponent — status bar layout', () => {
   beforeEach(async () => {
     mockTauri = new MockTauriService();
     mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'get_compose_logs') return '';
+      if (cmd === 'get_all_logs') return '';
       if (cmd === 'get_health') return MOCK_HEALTH;
       return undefined;
     };
@@ -526,7 +524,7 @@ describe('LogsViewComponent — status bar layout', () => {
     // read `selected_ide` as the source of truth for the connected state
     // and offer a deep-link to the section where the user can connect.
     mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'get_compose_logs') return '';
+      if (cmd === 'get_all_logs') return '';
       if (cmd === 'get_health')
         return {
           ...MOCK_HEALTH,
@@ -557,7 +555,7 @@ describe('LogsViewComponent — status bar layout', () => {
 
   it('hides the connect link and reports `no IDE detected` when neither selected nor detected', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'get_compose_logs') return '';
+      if (cmd === 'get_all_logs') return '';
       if (cmd === 'get_health')
         return {
           ...MOCK_HEALTH,
@@ -634,7 +632,7 @@ describe('LogsViewComponent — status bar layout', () => {
 
   it('export-diagnostics invokes the matching tauri command and opens the confirmation dialog with the resulting path', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'get_compose_logs') return '';
+      if (cmd === 'get_all_logs') return '';
       if (cmd === 'get_health') return MOCK_HEALTH;
       if (cmd === 'export_diagnostics') return '/tmp/speedwave-diag.zip';
       return undefined;
@@ -673,7 +671,7 @@ describe('LogsViewComponent — status bar layout', () => {
 
   it('does not open the export dialog when the backend returns an empty path', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'get_compose_logs') return '';
+      if (cmd === 'get_all_logs') return '';
       if (cmd === 'get_health') return MOCK_HEALTH;
       if (cmd === 'export_diagnostics') return '   ';
       return undefined;
@@ -693,7 +691,7 @@ describe('LogsViewComponent — status bar layout', () => {
 
   it('copy button writes the path to the clipboard and flips its label to copied', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'get_compose_logs') return '';
+      if (cmd === 'get_all_logs') return '';
       if (cmd === 'get_health') return MOCK_HEALTH;
       if (cmd === 'export_diagnostics') return '/tmp/speedwave-diag.zip';
       return undefined;
@@ -730,7 +728,7 @@ describe('LogsViewComponent — status bar layout', () => {
 
   it('close button dismisses the dialog and clears the transient copy state', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'get_compose_logs') return '';
+      if (cmd === 'get_all_logs') return '';
       if (cmd === 'get_health') return MOCK_HEALTH;
       if (cmd === 'export_diagnostics') return '/tmp/speedwave-diag.zip';
       return undefined;
@@ -757,7 +755,7 @@ describe('LogsViewComponent — status bar layout', () => {
 
   it('clipboard rejection routes the failure into the error banner and closes the dialog', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'get_compose_logs') return '';
+      if (cmd === 'get_all_logs') return '';
       if (cmd === 'get_health') return MOCK_HEALTH;
       if (cmd === 'export_diagnostics') return '/tmp/speedwave-diag.zip';
       return undefined;
@@ -786,7 +784,7 @@ describe('LogsViewComponent — status bar layout', () => {
 
   it('export-diagnostics surfaces backend errors via the existing error banner', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'get_compose_logs') return '';
+      if (cmd === 'get_all_logs') return '';
       if (cmd === 'get_health') return MOCK_HEALTH;
       if (cmd === 'export_diagnostics') throw new Error('zip failed');
       return undefined;
@@ -815,7 +813,7 @@ describe('LogsViewComponent — status bar layout', () => {
   it('does not surface set_log_level failures (browser dev mode is silent)', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'set_log_level') throw new Error('not in tauri');
-      if (cmd === 'get_compose_logs') return '';
+      if (cmd === 'get_all_logs') return '';
       if (cmd === 'get_health') return MOCK_HEALTH;
       return undefined;
     };
@@ -843,5 +841,70 @@ describe('LogsViewComponent — status bar layout', () => {
 
     expect(scrollSpy).toHaveBeenCalled();
     scrollSpy.mockRestore();
+  });
+
+  // -- Unified logs view (get_all_logs) --
+  //
+  // The component now invokes `get_all_logs` instead of `get_compose_logs`
+  // so that the dropdown surfaces every host-side log source (tauri-plugin-log,
+  // mcp-os.log, claude-session.log) in addition to compose containers. These
+  // tests pin the new behaviour so a future refactor cannot silently revert
+  // to compose-only output.
+
+  it('invokes get_all_logs (not get_compose_logs) on refresh', async () => {
+    const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+    await component.ngOnInit();
+
+    const calledCommands = invokeSpy.mock.calls.map((c) => c[0]);
+    expect(calledCommands).toContain('get_all_logs');
+    expect(calledCommands).not.toContain('get_compose_logs');
+  });
+
+  it('exposes desktop, mcp-os and claude as separate sources in the dropdown', async () => {
+    // Backend `get_all_logs` returns lines pre-prefixed with `<source> | …`.
+    // The existing `parseLogLine` extracts that source token and the
+    // `sources()` signal exposes distinct values. This test pins the
+    // contract: a merged backend response with all four token types must
+    // produce four entries in the dropdown.
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd !== 'get_all_logs') return undefined;
+      return [
+        'speedwave_test_mcp-hub_1 | [11:00:00] INFO container line',
+        'desktop | 2026-05-06T19:58:38.724+0200 INFO[target] desktop line',
+        'mcp-os | 2026-05-06T20:00:00 INFO mcp-os line',
+        'claude | 2026-05-06T20:00:01 INFO claude line',
+      ].join('\n');
+    };
+    await component.ngOnInit();
+
+    const sources = component.sources();
+    // Order is: 'all' first, then sorted distinct sources.
+    expect(sources).toContain('desktop');
+    expect(sources).toContain('mcp-os');
+    expect(sources).toContain('claude');
+    expect(sources).toContain('mcp-hub'); // compose container, prefix-stripped
+    expect(sources[0]).toBe('all');
+  });
+
+  it('renders desktop bracketed level as INFO/WARN level chip after Rust reformatting', async () => {
+    // Rust `prefix_lines` rewrites `[INFO]` → `INFO` so Angular `LEVEL_RE`
+    // (which expects unbracketed) hits and the line shows up in the level
+    // chip. Without that rewrite the line would default to `info` for every
+    // bracketed-level line — covering up real WARN/ERROR signals.
+    // The mock simulates what Rust `prefix_lines("desktop", …)` produces —
+    // the bracketed `[WARN]` from tauri-plugin-log is rewritten to `WARN ` (with
+    // trailing space, required by Angular `LEVEL_RE = /^LEVEL\s+/`) before
+    // the `desktop | ` prefix is added. If the Rust rewrite ever drops the
+    // trailing space, this test fails — which is the regression we want.
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd !== 'get_all_logs') return undefined;
+      return 'desktop | 2026-05-06T19:58:38.724+0200 WARN [x] auto-disabled mail';
+    };
+    await component.ngOnInit();
+
+    const lines = component.lines();
+    expect(lines.length).toBe(1);
+    expect(lines[0].level).toBe('warn');
+    expect(lines[0].source).toBe('desktop');
   });
 });

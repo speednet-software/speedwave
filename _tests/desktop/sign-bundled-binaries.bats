@@ -285,6 +285,39 @@ for path in glob.glob('$ent_dir/*.plist'):
     grep -qF 'com.apple.security.automation.apple-events' "$plist"
 }
 
+@test "verify_identifier function is defined for native CLI sub-identifier check" {
+    # Sub-identifier verification is what guarantees TCC.db rows are bound to
+    # `pl.speedwave.desktop.<svc>` and the recovery commands in
+    # docs/troubleshooting.md actually work. Without this, the codesign default
+    # identifier (`<svc>-cli`) would silently apply.
+    grep -qF 'verify_identifier()' "$SCRIPT"
+}
+
+@test "verify_identifier extracts codesign Identifier line and compares to expected" {
+    # Sanity that the function still uses `codesign -dvvv | grep Identifier=`
+    # — if Apple changes that flag, the test catches the drift before release.
+    grep -qF 'codesign -dvvv' "$SCRIPT"
+    grep -qF "grep -E '^Identifier='" "$SCRIPT"
+}
+
+@test "expected sub-identifier mapping covers all 4 native CLIs" {
+    # SSOT-alignment with native/macos/shared/Sources/SharedCLI/Utilities.swift
+    # ::subBundleIdentifier(for:) — must match these four exact values, otherwise
+    # the Swift gate will produce different tccutil hints than the codesign
+    # binding.
+    grep -qF 'pl.speedwave.desktop.calendar' "$SCRIPT"
+    grep -qF 'pl.speedwave.desktop.reminders' "$SCRIPT"
+    grep -qF 'pl.speedwave.desktop.mail' "$SCRIPT"
+    grep -qF 'pl.speedwave.desktop.notes' "$SCRIPT"
+}
+
+@test "verify_identifier is invoked for each native CLI in sign loop" {
+    # The post-sign loop must call verify_identifier (not just sign_macho +
+    # verify_macho). If a future refactor drops the call, sub-identifier
+    # binding regressions slip through.
+    grep -qE 'verify_identifier "\$path"' "$SCRIPT"
+}
+
 @test "error message names the missing file and gives actionable hint" {
     export APPLE_SIGNING_IDENTITY="$IDENTITY"
     populate_targets
