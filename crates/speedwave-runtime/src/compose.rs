@@ -139,10 +139,7 @@ pub fn render_compose(
         &tokens_dir,
     )?;
 
-    // Propagate host timezone into every service so Claude Code's
-    // "limit resets at HH:MM" message and any time-sensitive worker logs
-    // align with the user's local clock instead of UTC. Runs after
-    // apply_plugins so plugin services also get TZ.
+    // Propagate host timezone into every service; must run after plugin injection.
     let host_tz = crate::tz::detect_host_timezone();
     yaml = inject_host_timezone(&yaml, &host_tz)?;
 
