@@ -288,9 +288,7 @@ fn inject_host_timezone(yaml: &str, tz: &str) -> anyhow::Result<String> {
             let env_seq = match service_map.get_mut(&env_key) {
                 Some(existing) => match existing.as_sequence_mut() {
                     Some(seq) => seq,
-                    // compose.template.yml uses sequence-form environment uniformly;
-                    // mapping form is logged + skipped intentionally (would need a
-                    // separate insertion path with no current call site).
+                    // compose.template.yml uses sequence form uniformly; mapping form is intentionally skipped.
                     None => {
                         log::warn!(
                             "inject_host_timezone: service 'environment' is not a sequence \

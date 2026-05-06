@@ -39,8 +39,7 @@ fn detect_platform() -> Option<String> {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
-    // 5 s deadline so a slow PowerShell startup (cold boot, AV scan) cannot
-    // block render_compose indefinitely.
+    // 5 s deadline; slow PowerShell startup (cold boot, AV scan) must not stall caller.
     let timeout = Duration::from_secs(5);
     let mut child = Command::new("powershell")
         .args([
@@ -71,18 +70,13 @@ fn detect_platform() -> Option<String> {
         }
     }
 
-    // Output is `(Get-TimeZone).Id` — a single short line (~30 bytes), no
-    // pipe-buffer deadlock risk.
+    // Output ~30 bytes (single zone ID line); no pipe-buffer deadlock risk.
     let mut buf = String::new();
     child.stdout.as_mut()?.read_to_string(&mut buf).ok()?;
     detect_windows(buf.trim())
 }
 
-/// Reads `localtime_path` (typically `/etc/localtime`), falling back to the
-/// `TZ` environment variable.
-///
-/// Returns the IANA name extracted from the symlink target, or — when no
-/// symlink is present — a validated value from `tz_env`.
+/// Extracts IANA name from `/etc/localtime` symlink; falls back to validated `$TZ` env value.
 #[cfg(unix)]
 pub(crate) fn detect_unix(localtime_path: &Path, tz_env: Option<&str>) -> Option<String> {
     if let Ok(target) = std::fs::read_link(localtime_path) {
@@ -107,8 +101,7 @@ pub(crate) fn detect_windows(windows_tz_id: &str) -> Option<String> {
     windows_to_iana(windows_tz_id).map(|s| s.to_string())
 }
 
-/// Returns the IANA name for the given Windows timezone ID, or `None` if
-/// unmapped.
+/// Returns IANA name for the given Windows timezone ID, or `None` if unmapped.
 #[cfg(any(target_os = "windows", test))]
 pub(crate) fn windows_to_iana(id: &str) -> Option<&'static str> {
     WINDOWS_TO_IANA
@@ -116,9 +109,7 @@ pub(crate) fn windows_to_iana(id: &str) -> Option<&'static str> {
         .find_map(|(win, iana)| if *win == id { Some(*iana) } else { None })
 }
 
-/// Extracts the IANA name from a symlink target like
-/// `/usr/share/zoneinfo/Europe/Warsaw` or
-/// `/var/db/timezone/zoneinfo/Europe/Warsaw` (macOS).
+/// Extracts IANA name from a `zoneinfo/...` symlink target (Linux + macOS layouts).
 fn extract_zoneinfo_suffix(target: &Path) -> Option<String> {
     let s = target.to_str()?;
     let needle = "zoneinfo/";
@@ -131,10 +122,7 @@ fn extract_zoneinfo_suffix(target: &Path) -> Option<String> {
     }
 }
 
-/// Conservative IANA name validator: 1–3 path segments separated by `/`,
-/// each segment composed of letters, digits, `_`, `+`, `-`. Rejects empty
-/// strings, leading colons (`:Europe/Warsaw` is a glibc-ism we don't want
-/// to forward), `..`, and absolute paths.
+/// IANA-shape validator: 1–3 segments of `[A-Za-z0-9_+-]`; rejects empty, leading-colon, traversal, absolute.
 fn is_valid_iana_name(s: &str) -> bool {
     if s.is_empty() {
         return false;
@@ -151,12 +139,7 @@ fn is_valid_iana_name(s: &str) -> bool {
     })
 }
 
-/// Windows timezone ID → IANA name mapping.
-///
-/// Sourced from CLDR `windowsZones.xml` (territory `001` — default mapping).
-/// Updates: when Windows ships a new timezone or CLDR changes a default,
-/// regenerate this table from the current CLDR release. Linear search is
-/// fine — called once per compose render and N is bounded (~140).
+/// Windows zone ID → IANA map (CLDR windowsZones.xml territory 001; ~140 entries, linear scan is fine).
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_TO_IANA: &[(&str, &str)] = &[
     ("Dateline Standard Time", "Etc/GMT+12"),
