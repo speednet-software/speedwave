@@ -26,6 +26,7 @@ RUN apt-get update -o Acquire::Retries=3 && \
         ca-certificates \
         curl \
         git \
+        tzdata \
         wget \
     && rm -rf /var/lib/apt/lists/*
 

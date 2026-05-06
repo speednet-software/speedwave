@@ -139,6 +139,13 @@ pub fn render_compose(
         &tokens_dir,
     )?;
 
+    // Propagate host timezone into every service so Claude Code's
+    // "limit resets at HH:MM" message and any time-sensitive worker logs
+    // align with the user's local clock instead of UTC. Runs after
+    // apply_plugins so plugin services also get TZ.
+    let host_tz = crate::tz::detect_host_timezone();
+    yaml = inject_host_timezone(&yaml, &host_tz)?;
+
     // Inject Anthropic API key from secrets if configured.
     // Skipped when a local LLM provider is active — the dummy
     // ANTHROPIC_AUTH_TOKEN=sk-no-key-required is all Claude Code needs, and
@@ -265,6 +272,60 @@ fn inject_claude_env(
 
     serde_yaml_ng::to_string(&doc)
         .map_err(|e| anyhow::anyhow!("inject_claude_env: failed to serialize compose YAML: {e}"))
+}
+
+/// Adds `TZ=<tz>` to every service's `environment` sequence (idempotent).
+///
+/// Walks all services under the top-level `services:` key — including plugin
+/// services injected by `apply_plugins` — and ensures each one carries a
+/// `TZ` entry. Existing `TZ=...` entries are left untouched, so callers
+/// can chain this safely without duplicating values.
+fn inject_host_timezone(yaml: &str, tz: &str) -> anyhow::Result<String> {
+    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)
+        .map_err(|e| anyhow::anyhow!("inject_host_timezone: failed to parse compose YAML: {e}"))?;
+
+    if let Some(services) = doc.get_mut("services").and_then(|s| s.as_mapping_mut()) {
+        for (_, service) in services.iter_mut() {
+            let Some(service_map) = service.as_mapping_mut() else {
+                continue;
+            };
+            let env_key = serde_yaml_ng::Value::String("environment".to_string());
+            let env_seq = match service_map.get_mut(&env_key) {
+                Some(existing) => match existing.as_sequence_mut() {
+                    Some(seq) => seq,
+                    None => {
+                        log::warn!(
+                            "inject_host_timezone: service 'environment' is not a sequence \
+                             (got {:?}) — TZ not injected",
+                            existing
+                        );
+                        continue;
+                    }
+                },
+                None => {
+                    service_map.insert(env_key.clone(), serde_yaml_ng::Value::Sequence(vec![]));
+                    let Some(inserted) = service_map
+                        .get_mut(&env_key)
+                        .and_then(|v| v.as_sequence_mut())
+                    else {
+                        continue;
+                    };
+                    inserted
+                }
+            };
+
+            let already_set = env_seq.iter().any(|v| {
+                v.as_str()
+                    .is_some_and(|s| s.split('=').next() == Some("TZ"))
+            });
+            if !already_set {
+                env_seq.push(serde_yaml_ng::Value::String(format!("TZ={}", tz)));
+            }
+        }
+    }
+
+    serde_yaml_ng::to_string(&doc)
+        .map_err(|e| anyhow::anyhow!("inject_host_timezone: failed to serialize compose YAML: {e}"))
 }
 
 fn apply_llm_config(yaml: &str, llm: &LlmConfig) -> anyhow::Result<String> {
@@ -7724,5 +7785,139 @@ services:
             fn_body[ensure_pos..].contains("enabled_plugin_service_ids"),
             "ensure_plugin_images call must use enabled_plugin_service_ids for project scoping"
         );
+    }
+
+    // ---- inject_host_timezone -----------------------------------------------
+
+    #[test]
+    fn test_inject_host_timezone_adds_tz_to_every_service() {
+        let yaml = "services:\n  \
+                    claude:\n    environment:\n      - PORT=3000\n  \
+                    mcp-hub:\n    environment:\n      - PORT=4000\n  \
+                    mcp-slack:\n    environment:\n      - PORT=5000\n";
+        let result = inject_host_timezone(yaml, "Europe/Warsaw").unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        for service_name in ["claude", "mcp-hub", "mcp-slack"] {
+            let env = doc
+                .get("services")
+                .and_then(|s| s.get(service_name))
+                .and_then(|s| s.get("environment"))
+                .and_then(|e| e.as_sequence())
+                .unwrap_or_else(|| panic!("missing environment sequence for {}", service_name));
+            assert!(
+                env.iter().any(|v| v.as_str() == Some("TZ=Europe/Warsaw")),
+                "service {} missing TZ entry; got {:?}",
+                service_name,
+                env
+            );
+        }
+    }
+
+    #[test]
+    fn test_inject_host_timezone_idempotent() {
+        let yaml = "services:\n  claude:\n    environment:\n      - PORT=3000\n";
+        let once = inject_host_timezone(yaml, "Europe/Warsaw").unwrap();
+        let twice = inject_host_timezone(&once, "Europe/Warsaw").unwrap();
+        let count = twice.matches("TZ=Europe/Warsaw").count();
+        assert_eq!(count, 1, "TZ entry duplicated; got:\n{}", twice);
+    }
+
+    #[test]
+    fn test_inject_host_timezone_does_not_overwrite_existing() {
+        let yaml = "services:\n  claude:\n    environment:\n      - TZ=America/New_York\n";
+        let result = inject_host_timezone(yaml, "Europe/Warsaw").unwrap();
+        assert!(
+            result.contains("TZ=America/New_York"),
+            "existing TZ value clobbered; got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("TZ=Europe/Warsaw"),
+            "duplicate TZ entry added; got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_inject_host_timezone_preserves_existing_env() {
+        let yaml = "services:\n  claude:\n    environment:\n      - PORT=3000\n      - DEBUG=1\n";
+        let result = inject_host_timezone(yaml, "Europe/Warsaw").unwrap();
+        assert!(result.contains("PORT=3000"));
+        assert!(result.contains("DEBUG=1"));
+        assert!(result.contains("TZ=Europe/Warsaw"));
+    }
+
+    #[test]
+    fn test_inject_host_timezone_creates_environment_when_missing() {
+        let yaml = "services:\n  claude:\n    image: foo\n";
+        let result = inject_host_timezone(yaml, "Europe/Warsaw").unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+        let env = doc
+            .get("services")
+            .and_then(|s| s.get("claude"))
+            .and_then(|c| c.get("environment"))
+            .and_then(|e| e.as_sequence())
+            .expect("environment sequence should be created");
+        assert!(env.iter().any(|v| v.as_str() == Some("TZ=Europe/Warsaw")));
+    }
+
+    #[test]
+    fn test_inject_host_timezone_handles_no_services_key() {
+        let yaml = "version: '3'\n";
+        let result = inject_host_timezone(yaml, "Europe/Warsaw");
+        assert!(
+            result.is_ok(),
+            "should not error on compose without services"
+        );
+    }
+
+    #[test]
+    fn test_inject_host_timezone_propagates_parse_error() {
+        let bad = "this is: not: yaml: : :";
+        let result = inject_host_timezone(bad, "Europe/Warsaw");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("failed to parse compose YAML"),
+            "expected parse error message, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_render_compose_propagates_tz_to_all_services() {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: LlmConfig::default(),
+        };
+        let yaml = render_compose(
+            "test-project",
+            "/home/user/projects/test",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let services = doc
+            .get("services")
+            .and_then(|s| s.as_mapping())
+            .expect("services mapping");
+        assert!(!services.is_empty(), "expected at least one service");
+        for (name, service) in services {
+            let service_name = name.as_str().unwrap_or("<non-string>");
+            let env = service
+                .get("environment")
+                .and_then(|e| e.as_sequence())
+                .unwrap_or_else(|| panic!("service {} has no environment sequence", service_name));
+            assert!(
+                env.iter()
+                    .any(|v| { v.as_str().is_some_and(|s| s.starts_with("TZ=")) }),
+                "service {} missing TZ env entry; got {:?}",
+                service_name,
+                env
+            );
+        }
     }
 }
