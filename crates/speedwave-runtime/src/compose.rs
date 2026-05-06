@@ -274,12 +274,7 @@ fn inject_claude_env(
         .map_err(|e| anyhow::anyhow!("inject_claude_env: failed to serialize compose YAML: {e}"))
 }
 
-/// Adds `TZ=<tz>` to every service's `environment` sequence (idempotent).
-///
-/// Walks all services under the top-level `services:` key — including plugin
-/// services injected by `apply_plugins` — and ensures each one carries a
-/// `TZ` entry. Existing `TZ=...` entries are left untouched, so callers
-/// can chain this safely without duplicating values.
+/// Appends `TZ=<tz>` to every service's `environment` sequence; idempotent, never overwrites an existing `TZ`.
 fn inject_host_timezone(yaml: &str, tz: &str) -> anyhow::Result<String> {
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)
         .map_err(|e| anyhow::anyhow!("inject_host_timezone: failed to parse compose YAML: {e}"))?;
@@ -293,6 +288,9 @@ fn inject_host_timezone(yaml: &str, tz: &str) -> anyhow::Result<String> {
             let env_seq = match service_map.get_mut(&env_key) {
                 Some(existing) => match existing.as_sequence_mut() {
                     Some(seq) => seq,
+                    // compose.template.yml uses sequence-form environment uniformly;
+                    // mapping form is logged + skipped intentionally (would need a
+                    // separate insertion path with no current call site).
                     None => {
                         log::warn!(
                             "inject_host_timezone: service 'environment' is not a sequence \

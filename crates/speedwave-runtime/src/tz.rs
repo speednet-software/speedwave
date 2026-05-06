@@ -6,7 +6,7 @@
 //! HH:MM" message reflect the host's local time instead of UTC.
 //!
 //! Detection is best-effort: on failure we log a warning and fall back to
-//! `UTC` so containers always have a defined `TZ`.
+//! `Etc/UTC` so containers always have a defined `TZ`.
 
 use std::path::Path;
 
