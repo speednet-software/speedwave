@@ -54,6 +54,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-045](ADR-045-one-slot-queued-message.md)                          | One-Slot Queued Message Per Session (Replace, Not FIFO) | Accepted              |
 | [ADR-046](ADR-046-native-session-resume-for-retry.md)                  | Native Session Resume for Assistant-Message Retry       | Accepted              |
 | [ADR-047](ADR-047-plugin-install-progress-events.md)                   | Plugin Install Progress Events                          | Accepted              |
+| [ADR-048](ADR-048-windows-uninstall-cleanup.md)                        | Windows Uninstall Cleanup — Unregister WSL Distro       | Accepted              |
 
 ## Creating a New ADR
 

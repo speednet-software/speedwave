@@ -205,6 +205,8 @@ These checks run at multiple points: setup wizard (before VM init), container st
 
 Both OS prereq failures and `SecurityCheck` compose violations block the application — containers never start if either check fails.
 
+**Windows uninstall cleanup (ADR-048):** The NSIS uninstaller offers an opt-in `MessageBox` that, when accepted, performs `wsl --unregister Speedwave` and `RMDir /r $PROFILE\.speedwave` on the host. The default for unattended (`/S`) uninstalls is to preserve data (`/SD IDNO`). If `SPEEDWAVE_DATA_DIR` is set (ADR-031), the data-dir removal is skipped and the user is instructed to remove that path manually; only the WSL distro is unregistered.
+
 Additionally, `check_os_warnings()` provides non-blocking diagnostic warnings (e.g. nested virtualization detected) logged via `log::warn!` during system checks. These warnings do not block container operations but appear in `speedwave check` output and Desktop log files.
 
 ## Redmine API Proxy Commands

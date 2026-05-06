@@ -856,6 +856,12 @@ mod tests {
     }
 
     #[test]
+    fn reset_vm_default_is_noop() {
+        let rt = NerdctlRuntime::with_runner(Box::new(MockRunner::new()));
+        assert!(rt.reset_vm().is_ok());
+    }
+
+    #[test]
     fn test_prepare_build_context_returns_path_unchanged() {
         let runner = MockRunner::new();
         let rt = NerdctlRuntime::with_runner(Box::new(runner));
