@@ -523,7 +523,7 @@ describe('LlmProviderComponent', () => {
 
   it('falls back to the generic placeholder when backend returns null', async () => {
     // Older backends (or backends in dev mode without the new command)
-    // may return null. The component must keep the previous mglista
+    // may return null. The component must keep the generic placeholder
     // wording rather than render a broken half-string.
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       switch (cmd) {
