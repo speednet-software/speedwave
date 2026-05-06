@@ -573,7 +573,7 @@ impl ContainerRuntime for WslRuntime {
 
     fn reset_vm(&self) -> anyhow::Result<()> {
         use std::time::Duration;
-        let distro = self.distro_name.as_str();
+        let distro = self.distro();
 
         // Use the canonical System32 path to avoid PATH-based binary substitution.
         // CLAUDE.md security: host-side commands must not be resolvable via a

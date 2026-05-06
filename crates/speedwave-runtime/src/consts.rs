@@ -1378,8 +1378,8 @@ mod tests {
 
     // SSOT alignment guards (ADR-048, CLAUDE.md "WSL distro name" row).
     // If WSL_DISTRO_NAME is renamed, at least one of these will fail at compile
-    // time (include_str! panics if the file is missing) or at test time.
-    // Update all four locations together in the same commit.
+    // time (include_str! produces a compile error if the file is missing) or
+    // at test time. Update all four locations together in the same commit.
 
     #[test]
     fn wsl_distro_name_appears_in_installer_hooks() {

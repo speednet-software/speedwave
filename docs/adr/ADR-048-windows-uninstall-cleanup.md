@@ -21,7 +21,7 @@ Speedwave also publishes an MSI for managed enterprise deployments.[^3] MSI cust
 
 Add a `reset_vm()` method to the `ContainerRuntime` trait (default no-op) and override it in `WslRuntime`. The override runs:
 
-1. `wsl.exe --terminate Speedwave` (10 s timeout, best-effort — failure is debug-logged and does not abort)
+1. `wsl.exe --terminate Speedwave` (10 s timeout, best-effort — failure is warn-logged and does not abort)
 2. `wsl.exe --unregister Speedwave` (25 s timeout — "no distribution" errors are treated as success; timeout and unexpected errors are surfaced to the caller as `Err`)
 
 The call is inserted in `setup_wizard::factory_reset()` between the macOS Lima VM teardown and `wipe_data_dir()`, so the WSL VHDX is still at its expected path when `wsl --unregister` runs. Errors from `reset_vm()` are logged as warnings and do not abort the data-dir wipe — the primary remediation must complete regardless.

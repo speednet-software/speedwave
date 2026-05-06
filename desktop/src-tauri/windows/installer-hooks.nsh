@@ -58,13 +58,15 @@ Var SpeedwaveDataDirOverride
   StrCmp $SpeedwaveCleanData "1" 0 sw_skip_cleanup
 
     ; Best-effort terminate; ignore exit code.
-    nsExec::ExecToLog 'wsl.exe --terminate Speedwave'
+    ; Use $SYSDIR (System32) to prevent PATH-based binary substitution,
+    ; matching the absolute-path hardening in WslRuntime::reset_vm().
+    nsExec::ExecToLog '"$SYSDIR\wsl.exe" --terminate Speedwave'
     Pop $0
 
     ; Unregister the WSL distro. "No distribution" exit code is treated as
     ; success (idempotent). Any other non-zero exit code gets a warning so
     ; the user knows to run `wsl --unregister Speedwave` manually.
-    nsExec::ExecToLog 'wsl.exe --unregister Speedwave'
+    nsExec::ExecToLog '"$SYSDIR\wsl.exe" --unregister Speedwave'
     Pop $0
     ${If} $0 != 0
       DetailPrint "Speedwave WARNING: wsl --unregister Speedwave returned $0."
