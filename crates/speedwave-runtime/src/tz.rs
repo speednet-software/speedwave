@@ -1,18 +1,8 @@
-//! Host timezone detection.
-//!
-//! Returns an IANA timezone name (e.g. `Europe/Warsaw`) so it can be passed
-//! into containers via the `TZ` environment variable. Used by
-//! [`crate::compose::render_compose`] to make Claude Code's "limit resets at
-//! HH:MM" message reflect the host's local time instead of UTC.
-//!
-//! Detection is best-effort: on failure we log a warning and fall back to
-//! `Etc/UTC` so containers always have a defined `TZ`.
+//! Host timezone detection: returns an IANA name for the `TZ` env var injected into every container service.
 
 use std::path::Path;
 
-/// Returns the host's IANA timezone name (e.g. `"Europe/Warsaw"`).
-///
-/// On failure logs a `warn!` and returns `"Etc/UTC"`. Never panics.
+/// Returns the host IANA timezone name (e.g. `"Europe/Warsaw"`); warns and returns `"Etc/UTC"` on failure.
 pub fn detect_host_timezone() -> String {
     let detected = detect_platform();
     match detected {
