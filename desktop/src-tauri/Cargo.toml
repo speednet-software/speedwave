@@ -20,10 +20,12 @@ uuid = { version = "1", features = ["v4"] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 log = "0.4"
 open = "5"
+tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-log = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 tauri-plugin-webdriver = { version = "0.2", optional = true }
 url = "2"
 tokio-tungstenite = "0.28"

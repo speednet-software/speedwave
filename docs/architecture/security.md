@@ -39,6 +39,14 @@ Each MCP worker container mounts **only its own** service credentials:
 
 **Exception:** SharePoint uses `:rw` mount for OAuth token refresh (see [ADR-009](../adr/ADR-009-per-project-isolation-preserved.md)).
 
+Anthropic OAuth credentials are managed entirely by Claude Code inside the `CLAUDE_HOME` bind-mount (`~/.speedwave/claude-home/<project>/.claude/.credentials.json`); Speedwave does not touch them. See [ADR-051](../adr/ADR-051-anthropic-oauth-login-flow.md) for the login-flow rationale.
+
+### Clipboard wrappers (OSC 52)
+
+The `claude` image bakes `/usr/local/bin/{pbcopy,xclip,xsel,wl-copy,clip.exe}` as five symlinks to one shell script (`osc52-copy.sh`) that base64-encodes stdin and writes an [OSC 52](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Operating-System-Commands) sequence to `/dev/tty`. Compatible host terminals interpret it as a clipboard write request — incompatible terminals ignore it.
+
+The wrapper is **write-only by design**: it never reads the host clipboard (OSC 52 query/paste would require a terminal-side response handshake and would leak host clipboard contents into the container). It touches only its own stdin and `/dev/tty`, runs as the unprivileged container user, and adds no new mounts. See [ADR-051](../adr/ADR-051-anthropic-oauth-login-flow.md).
+
 ## Threat Model
 
 When implementing any feature, ask these questions:

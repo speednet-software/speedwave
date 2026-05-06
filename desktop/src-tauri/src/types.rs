@@ -60,6 +60,7 @@ pub(crate) struct LlmConfigResponse {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AuthStatusResponse {
     pub(crate) api_key_configured: bool,
+    /// True when `claude auth status` inside the running container succeeds.
     pub(crate) oauth_authenticated: bool,
 }
 

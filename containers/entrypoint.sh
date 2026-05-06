@@ -136,6 +136,19 @@ cat > "${HOME}/.claude/mcp-config.json" << EOF
 }
 EOF
 
+# Pre-create .claude.json so Claude Code skips the onboarding flow on start.
+# Without this, Claude treats the session as a fresh install and re-prompts
+# for login even when ~/.claude/.credentials.json exists.
+# See: https://github.com/tfvchow/field-notes-public/issues/10
+if [ ! -f "${HOME}/.claude.json" ]; then
+    cat > "${HOME}/.claude.json" << 'EOF'
+{
+  "hasCompletedOnboarding": true,
+  "installMethod": "native"
+}
+EOF
+fi
+
 # Health check marker
 touch /tmp/claude-ready
 

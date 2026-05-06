@@ -22,7 +22,9 @@ enum CliAction {
     PluginEnable { service_id: String, project: String },
     PluginDisable { service_id: String, project: String },
     Check,
-    Init(Option<String>), // optional project name
+    Init(Option<String>),   // optional project name
+    Login(Option<String>),  // optional --project override
+    Logout(Option<String>), // optional --project override
     SelfUpdate,
     Update,
     Run, // default: compose_up + exec
@@ -38,6 +40,22 @@ fn parse_project_flag(args: &[String], subcommand: &str) -> Result<String, Strin
     args.get(flag_pos + 1).cloned().ok_or(format!(
         "usage: speedwave plugin {subcommand} <service_id> --project <project>"
     ))
+}
+
+/// Parses optional `--project <value>` for `login`/`logout`. The flag itself
+/// is optional; if present it must carry a value. Returns Ok(None) when the
+/// flag is absent.
+fn parse_optional_project_flag(
+    args: &[String],
+    subcommand: &str,
+) -> Result<Option<String>, String> {
+    let Some(flag_pos) = args.iter().position(|a| a == "--project") else {
+        return Ok(None);
+    };
+    args.get(flag_pos + 1)
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| format!("usage: speedwave {subcommand} [--project <project>]"))
 }
 
 fn parse_action(args: &[String]) -> Result<CliAction, String> {
@@ -86,6 +104,12 @@ fn parse_action(args: &[String]) -> Result<CliAction, String> {
         }
         Some("self-update") => Ok(CliAction::SelfUpdate),
         Some("update") => Ok(CliAction::Update),
+        Some("login") => Ok(CliAction::Login(parse_optional_project_flag(
+            args, "login",
+        )?)),
+        Some("logout") => Ok(CliAction::Logout(parse_optional_project_flag(
+            args, "logout",
+        )?)),
         _ => Ok(CliAction::Run),
     }
 }
@@ -286,6 +310,8 @@ USAGE:
     speedwave                         Start Claude Code for the current project
     speedwave check                   Run security + OS prerequisite checks
     speedwave init [name]             Register the current directory as a project
+    speedwave login   [--project <p>] Run Anthropic OAuth login (type /login at Claude's prompt)
+    speedwave logout  [--project <p>] Delete Claude Code credentials for the project
     speedwave update                  Rebuild container images for the current bundle
     speedwave self-update             Download the latest speedwave CLI binary
 
@@ -448,6 +474,43 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Handle `speedwave logout` — deletes Claude Code's credential files
+    // (~/.claude/.credentials.json and ~/.claude.json) from the per-project
+    // CLAUDE_HOME mount. No runtime needed.
+    if let CliAction::Logout(ref project_override) = action {
+        let user_config = config::load_user_config().unwrap_or_else(|e| {
+            eprintln!("Failed to load config: {e}");
+            std::process::exit(1);
+        });
+        let project_name = match project_override {
+            Some(name) => name.clone(),
+            None => resolve_project(&user_config)?,
+        };
+        validate_project_name(&project_name).map_err(|e| anyhow::anyhow!(e))?;
+        let claude_home = consts::data_dir().join("claude-home").join(&project_name);
+        let creds = claude_home.join(".claude").join(".credentials.json");
+        let claude_json = claude_home.join(".claude.json");
+        let mut removed = 0;
+        for path in [&creds, &claude_json] {
+            if path.exists() {
+                std::fs::remove_file(path)?;
+                removed += 1;
+            }
+        }
+        if removed == 0 {
+            println!(
+                "No Claude credentials found for project '{}'.",
+                project_name
+            );
+        } else {
+            println!(
+                "Removed Claude credentials for project '{}' ({removed} file(s)).",
+                project_name
+            );
+        }
+        std::process::exit(0);
+    }
+
     // Handle plugin subcommands before runtime check
     // (plugin install/list/remove don't need a running VM)
     match &action {
@@ -566,7 +629,12 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     });
 
-    let project_name = resolve_project(&user_config)?;
+    // `speedwave login --project=foo` overrides CWD-based project resolution
+    // so users can log in from any working directory.
+    let project_name = match &action {
+        CliAction::Login(Some(name)) => name.clone(),
+        _ => resolve_project(&user_config)?,
+    };
 
     // Validate project name is safe for container naming
     validate_project_name(&project_name).map_err(|e| anyhow::anyhow!(e))?;
@@ -689,6 +757,24 @@ fn main() -> anyhow::Result<()> {
     // Recovers automatically from stale mounts after macOS sleep/resume.
     let container_name = format!("{}_{}_claude", consts::compose_prefix(), project_name);
     ensure_exec_healthy(&*runtime, &project_name, &container_name)?;
+
+    // Handle `speedwave login` — runs `claude` interactively with the same
+    // resolved flags as a normal start (--dangerously-skip-permissions etc.).
+    // User types /login; Claude writes ~/.claude/.credentials.json to the
+    // per-project CLAUDE_HOME mount. Speedwave persists nothing itself.
+    if let CliAction::Login(_) = action {
+        eprintln!("Starting Claude Code. Type /login at the prompt, then /quit when done.");
+        let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
+        exec_cmd.extend(resolved.flags.iter().map(String::as_str));
+        let status = runtime
+            .container_exec(&container_name, &exec_cmd)
+            .status()?;
+        std::process::exit(
+            status
+                .code()
+                .unwrap_or(if status.success() { 0 } else { 1 }),
+        );
+    }
 
     // exec -it -> interactive Claude terminal inside container
     let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
@@ -913,6 +999,96 @@ mod tests {
     fn parse_action_unknown_command_returns_run() {
         let args = vec!["speedwave".to_string(), "unknown".to_string()];
         assert_eq!(parse_action(&args).unwrap(), CliAction::Run);
+    }
+
+    // ── login / logout ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_action_login_no_project() {
+        let args = vec!["speedwave".to_string(), "login".to_string()];
+        assert_eq!(parse_action(&args).unwrap(), CliAction::Login(None));
+    }
+
+    #[test]
+    fn parse_action_login_with_project() {
+        let args = vec![
+            "speedwave".to_string(),
+            "login".to_string(),
+            "--project".to_string(),
+            "foo".to_string(),
+        ];
+        assert_eq!(
+            parse_action(&args).unwrap(),
+            CliAction::Login(Some("foo".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_action_login_project_flag_without_value() {
+        let args = vec![
+            "speedwave".to_string(),
+            "login".to_string(),
+            "--project".to_string(),
+        ];
+        let err = parse_action(&args).unwrap_err();
+        assert!(
+            err.contains("speedwave login"),
+            "expected usage hint, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_action_logout_no_project() {
+        let args = vec!["speedwave".to_string(), "logout".to_string()];
+        assert_eq!(parse_action(&args).unwrap(), CliAction::Logout(None));
+    }
+
+    #[test]
+    fn parse_action_logout_with_project() {
+        let args = vec![
+            "speedwave".to_string(),
+            "logout".to_string(),
+            "--project".to_string(),
+            "bar".to_string(),
+        ];
+        assert_eq!(
+            parse_action(&args).unwrap(),
+            CliAction::Logout(Some("bar".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_action_logout_project_flag_without_value() {
+        let args = vec![
+            "speedwave".to_string(),
+            "logout".to_string(),
+            "--project".to_string(),
+        ];
+        assert!(parse_action(&args).is_err());
+    }
+
+    #[test]
+    fn print_help_lists_login_and_logout() {
+        // Compile-time check on the string literal in print_help: tests can't
+        // capture stdout directly without involving a subprocess, but we can
+        // verify the documentation lines exist in the source so user-facing
+        // help stays in sync with the CliAction variants.
+        let source = include_str!("main.rs");
+        let help_start = source
+            .find("fn print_help() {")
+            .expect("print_help must exist");
+        let help_end = source[help_start..]
+            .find("\n}")
+            .expect("print_help must end with `}`");
+        let body = &source[help_start..help_start + help_end];
+        assert!(
+            body.contains("speedwave login"),
+            "print_help must document `login` subcommand"
+        );
+        assert!(
+            body.contains("speedwave logout"),
+            "print_help must document `logout` subcommand"
+        );
     }
 
     #[test]

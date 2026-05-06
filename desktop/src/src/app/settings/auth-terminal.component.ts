@@ -23,12 +23,27 @@ import { TauriService } from '../services/tauri.service';
   template: `
     <div class="mt-3 rounded border border-[var(--line)] bg-[var(--bg-1)] p-4">
       <p class="text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
-        Open a terminal and run the following command. Claude Code will launch its interactive setup
-        and walk you through the login flow.
+        Click the button below — Speedwave opens a terminal, runs Claude Code, and you type
+        <code>/login</code> at the prompt. Claude Code saves your credentials inside the container
+        so the next start skips the login flow.
       </p>
+      <div class="mt-3 flex items-center gap-2">
+        <button
+          type="button"
+          class="rounded bg-[var(--accent)] px-3 py-1.5 text-[12px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-50"
+          data-testid="auth-open-terminal"
+          [disabled]="opening"
+          (click)="openTerminal()"
+        >
+          {{ opening ? 'Opening…' : 'Open terminal and log in' }}
+        </button>
+      </div>
       @if (command) {
+        <p class="mt-4 text-[12px] leading-relaxed text-[var(--ink-dim)]">
+          Or run this command yourself in any terminal:
+        </p>
         <div
-          class="mt-3 flex items-center gap-2 rounded border border-[var(--line)] bg-[var(--bg-2)] px-3 py-2"
+          class="mt-2 flex items-center gap-2 rounded border border-[var(--line)] bg-[var(--bg-2)] px-3 py-2"
         >
           <code
             class="mono flex-1 select-all break-all text-[12px] text-[var(--accent)]"
@@ -75,6 +90,8 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
   error = '';
   /** Whether the current platform is Windows (for WSL terminal hint). */
   isWindows = false;
+  /** True while the host terminal-open Tauri call is in flight. */
+  opening = false;
 
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
@@ -99,6 +116,26 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
       this.cdr.markForCheck();
     });
     this.startPolling();
+  }
+
+  /**
+   * Spawns the host's system terminal running `speedwave login` for the
+   *  active project. Does NOT cancel polling — `get_auth_status` still
+   *  detects when the user finishes the OAuth flow.
+   */
+  openTerminal(): void {
+    this.opening = true;
+    this.error = '';
+    this.cdr.markForCheck();
+    this.tauri
+      .invoke<void>('start_oauth_login', { project: this.project() })
+      .catch((err: string) => {
+        this.error = err || 'Failed to open terminal';
+      })
+      .finally(() => {
+        this.opening = false;
+        this.cdr.markForCheck();
+      });
   }
 
   /** Copies the CLI command to the clipboard. */

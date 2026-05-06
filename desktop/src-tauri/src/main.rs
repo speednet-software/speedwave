@@ -10,6 +10,7 @@
 mod auth;
 mod auth_commands;
 mod chat;
+mod clipboard_bridge;
 mod cloudstorage_cmd;
 mod container_logs_cmd;
 mod containers_cmd;
@@ -26,6 +27,7 @@ mod log_file;
 mod logging_cmd;
 mod mcp_os_process;
 mod oauth_cmd;
+mod oauth_login_cmd;
 mod patch_emitter;
 mod plugin_cmd;
 mod queue_cmd;
@@ -1098,6 +1100,7 @@ fn main() {
                 })
                 .build()
         })
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -1123,6 +1126,8 @@ fn main() {
                 .and_then(|l| parse_log_level(&l))
                 .unwrap_or(log::LevelFilter::Info);
             log::set_max_level(initial_level);
+
+            clipboard_bridge::spawn(app.handle().clone());
 
             // Clean up old rotated log files (max 10 kept)
             cleanup_old_logs(10);
@@ -1416,6 +1421,7 @@ fn main() {
             auth_commands::save_api_key,
             auth_commands::delete_api_key,
             auth_commands::get_auth_status,
+            oauth_login_cmd::start_oauth_login,
             // URL opener
             url_validation::open_url,
             // Platform
