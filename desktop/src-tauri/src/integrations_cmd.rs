@@ -662,108 +662,114 @@ pub fn validate_os_integrations_on_startup(
         .map(|s| s.config_key)
         .collect();
 
-    let mut validations: Vec<OsIntegrationValidation> = Vec::new();
-    let mut checked = 0usize;
-    let mut already_disabled = 0usize;
-
-    config::with_config_lock(|| {
-        let mut user_config = config::load_user_config()?;
-
+    // Phase 1: short config_lock — snapshot enabled state per service.
+    // Holding the lock through ~400ms parallel CLI runs would block any
+    // concurrent toggle/restart from the UI; snapshot-then-unlock keeps the
+    // lock window in microseconds.
+    let prev_state: std::collections::HashMap<&'static str, bool> = config::with_config_lock(|| {
+        let user_config = config::load_user_config()?;
         let entry = user_config
-            .find_project_mut(&project)
+            .find_project(&project)
             .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
-
-        // Snapshot current enabled state per service from config (before any mutation).
-        let prev_state: std::collections::HashMap<&'static str, bool> = os_services
+        let os_cfg = entry.integrations.as_ref().and_then(|i| i.os.as_ref());
+        Ok(os_services
             .iter()
             .map(|svc| {
-                let enabled = entry
-                    .integrations
-                    .as_ref()
-                    .and_then(|i| i.os.as_ref())
-                    .and_then(|os| match *svc {
-                        "reminders" => os.reminders.as_ref(),
-                        "calendar" => os.calendar.as_ref(),
-                        "mail" => os.mail.as_ref(),
-                        "notes" => os.notes.as_ref(),
-                        _ => None,
-                    })
+                let enabled = os_cfg
+                    .and_then(|os| os.get_service(svc))
                     .and_then(|cfg| cfg.enabled)
                     .unwrap_or(false);
                 (*svc, enabled)
             })
-            .collect();
-
-        // Run all enabled services in parallel — each spawn-and-wait is ~200-400ms,
-        // so 4 sequential checks add up to >1s blocking the integrations view.
-        // Parallel = bounded by the slowest single CLI (~400ms).
-        let to_check: Vec<&'static str> = os_services
-            .iter()
-            .filter(|svc| *prev_state.get(*svc).unwrap_or(&false))
-            .copied()
-            .collect();
-        already_disabled = os_services.len() - to_check.len();
-        checked = to_check.len();
-        for svc in &os_services {
-            if !*prev_state.get(svc).unwrap_or(&false) {
-                log::debug!(
-                    "validate_os_integrations_on_startup: skipping {svc} (already disabled in config)"
-                );
-            }
-        }
-        let handles: Vec<(&'static str, std::thread::JoinHandle<Result<(), String>>)> = to_check
-            .into_iter()
-            .map(|svc| {
-                log::info!(
-                    "validate_os_integrations_on_startup: checking {svc} (currently enabled in config)"
-                );
-                let handle = std::thread::spawn(move || check_os_permission(svc, false));
-                (svc, handle)
-            })
-            .collect();
-
-        let mut mutated = false;
-        for (svc, handle) in handles {
-            let result = handle.join().unwrap_or_else(|_| {
-                Err(format!("validate worker thread for {svc} panicked"))
-            });
-            match result {
-                Ok(()) => {
-                    log::info!(
-                        "validate_os_integrations_on_startup: {svc} VALID (TCC granted, keeping enabled)"
-                    );
-                }
-                Err(reason) => {
-                    log::warn!(
-                        "validate_os_integrations_on_startup: auto-disabling {svc} (was enabled, TCC reports: {reason})"
-                    );
-                    let integrations = entry.integrations.get_or_insert_with(Default::default);
-                    let os = integrations.os.get_or_insert_with(Default::default);
-                    let cfg = config::IntegrationConfig {
-                        enabled: Some(false),
-                    };
-                    os.set_service(svc, cfg);
-                    mutated = true;
-                    validations.push(OsIntegrationValidation {
-                        service: svc.to_string(),
-                        previous_enabled: true,
-                        new_enabled: false,
-                        reason,
-                    });
-                }
-            }
-        }
-
-        if mutated {
-            config::save_user_config(&user_config)
-        } else {
-            Ok(())
-        }
+            .collect())
     })
-    .map_err(|e| {
-        log::error!("validate_os_integrations_on_startup: config IO failure for project={project}: {e}");
+    .map_err(|e: anyhow::Error| {
+        log::error!("validate_os_integrations_on_startup: config snapshot failure for project={project}: {e}");
         e.to_string()
     })?;
+
+    let to_check: Vec<&'static str> = os_services
+        .iter()
+        .filter(|svc| *prev_state.get(*svc).unwrap_or(&false))
+        .copied()
+        .collect();
+    let already_disabled = os_services.len() - to_check.len();
+    let checked = to_check.len();
+    for svc in &os_services {
+        if !*prev_state.get(svc).unwrap_or(&false) {
+            log::debug!(
+                "validate_os_integrations_on_startup: skipping {svc} (already disabled in config)"
+            );
+        }
+    }
+
+    // Phase 2: parallel CLI checks — each spawn-and-wait is ~200-400ms; 4
+    // sequential = ~1.4s. Parallel = bounded by the slowest CLI (~400ms).
+    // No config lock held here.
+    let handles: Vec<(&'static str, std::thread::JoinHandle<Result<(), String>>)> = to_check
+        .into_iter()
+        .map(|svc| {
+            log::info!(
+                "validate_os_integrations_on_startup: checking {svc} (currently enabled in config)"
+            );
+            let handle = std::thread::spawn(move || check_os_permission(svc, false));
+            (svc, handle)
+        })
+        .collect();
+
+    let mut validations: Vec<OsIntegrationValidation> = Vec::new();
+    let mut to_disable: Vec<&'static str> = Vec::new();
+    for (svc, handle) in handles {
+        let result = handle
+            .join()
+            .unwrap_or_else(|_| Err(format!("validate worker thread for {svc} panicked")));
+        match result {
+            Ok(()) => log::info!(
+                "validate_os_integrations_on_startup: {svc} VALID (TCC granted, keeping enabled)"
+            ),
+            Err(reason) => {
+                log::warn!(
+                    "validate_os_integrations_on_startup: auto-disabling {svc} (was enabled, TCC reports: {reason})"
+                );
+                to_disable.push(svc);
+                validations.push(OsIntegrationValidation {
+                    service: svc.to_string(),
+                    previous_enabled: true,
+                    new_enabled: false,
+                    reason,
+                });
+            }
+        }
+    }
+
+    // Phase 3: short config_lock — apply mutations only when there's something
+    // to write. Skipping the lock entirely on the no-op path keeps the happy
+    // case zero-contention.
+    if !to_disable.is_empty() {
+        config::with_config_lock(|| {
+            let mut user_config = config::load_user_config()?;
+            let entry = user_config
+                .find_project_mut(&project)
+                .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
+            let integrations = entry.integrations.get_or_insert_with(Default::default);
+            let os = integrations.os.get_or_insert_with(Default::default);
+            for svc in &to_disable {
+                os.set_service(
+                    svc,
+                    config::IntegrationConfig {
+                        enabled: Some(false),
+                    },
+                );
+            }
+            config::save_user_config(&user_config)
+        })
+        .map_err(|e| {
+            log::error!(
+                "validate_os_integrations_on_startup: config persist failure for project={project}: {e}"
+            );
+            e.to_string()
+        })?;
+    }
 
     log::info!(
         "validate_os_integrations_on_startup: project={project} done — total_services={} checked={checked} skipped_already_disabled={already_disabled} auto_disabled={} services=[{}]",
@@ -1085,22 +1091,34 @@ mod tests {
     }
 
     #[test]
-    fn validate_os_integrations_iterates_all_toggleable_services() {
-        // The validator must iterate every entry in TOGGLEABLE_OS_SERVICES so
-        // no service is silently skipped after a future PR adds a new one.
-        // Static check via source string — keeps the test CI-portable (no
-        // process spawn, no config IO).
-        let src = include_str!("integrations_cmd.rs");
-        let validate_fn_start = src
-            .find("pub fn validate_os_integrations_on_startup(")
-            .expect("validate_os_integrations_on_startup must be defined");
-        let validate_fn_body = &src[validate_fn_start..];
-        let body_end = validate_fn_body.find("\n}\n").unwrap_or(validate_fn_body.len());
-        let body = &validate_fn_body[..body_end];
-        assert!(
-            body.contains("TOGGLEABLE_OS_SERVICES"),
-            "validate must iterate TOGGLEABLE_OS_SERVICES, not hardcode service names"
-        );
+    fn os_integrations_config_get_service_covers_every_toggleable_service() {
+        // SSOT alignment: get_service must accept every config_key in
+        // TOGGLEABLE_OS_SERVICES. A new entry without a matching arm would
+        // make the validator silently skip the service.
+        use speedwave_runtime::config::{IntegrationConfig, OsIntegrationsConfig};
+        let mut cfg = OsIntegrationsConfig::default();
+        for svc in speedwave_runtime::consts::TOGGLEABLE_OS_SERVICES {
+            assert!(
+                cfg.set_service(svc.config_key, IntegrationConfig { enabled: Some(true) }),
+                "set_service must accept '{}'",
+                svc.config_key
+            );
+            let got = cfg.get_service(svc.config_key);
+            assert!(
+                got.is_some(),
+                "get_service must round-trip '{}'",
+                svc.config_key
+            );
+            assert_eq!(got.and_then(|c| c.enabled), Some(true));
+        }
+    }
+
+    #[test]
+    fn os_integrations_config_get_service_rejects_unknown() {
+        use speedwave_runtime::config::OsIntegrationsConfig;
+        let cfg = OsIntegrationsConfig::default();
+        assert!(cfg.get_service("contacts").is_none());
+        assert!(cfg.get_service("").is_none());
     }
 
     // -- validate_credential_field tests --

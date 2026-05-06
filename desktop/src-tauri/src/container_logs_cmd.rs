@@ -170,15 +170,13 @@ fn has_source_prefix(line: &str) -> bool {
 /// Returns the line unchanged when it does not match the expected layout
 /// (e.g. multi-line stack traces or external library lines).
 fn rewrite_desktop_bracketed_level(line: &str) -> String {
-    let bytes = line.as_bytes();
-    // Look for the first space after the leading ISO timestamp. The timestamp
-    // contains digits, `-`, `:`, `.`, `+`, and optionally `Z` — never spaces.
+    // ISO timestamp ends at the first space (timestamp contains digits, `-`,
+    // `:`, `.`, `+`, optionally `Z` — never spaces).
     let Some(space_idx) = line.find(' ') else {
         return line.to_string();
     };
     let after_ts = &line[space_idx + 1..];
-    let bytes = &bytes[space_idx + 1..];
-    if !bytes.starts_with(b"[") {
+    if !after_ts.starts_with('[') {
         return line.to_string();
     }
     let Some(close_idx) = after_ts.find(']') else {

@@ -432,22 +432,15 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Asks the backend to validate every OS integration against the live macOS
-   * TCC state. Any service that was `enabled=true` in config but whose live
-   * permission is now denied/silentReject/targetNotRunning is auto-disabled in
-   * config; the returned list populates `osIntegrationsAutoDisabled` so the
-   * banner explains what happened. On non-macOS hosts the command returns an
-   * empty array (OS integrations are macOS-only); failure is non-fatal — we
-   * just clear the list and continue. Without this validation, a stale
-   * `enabled=true` from a prior install would silently fail the first time
-   * the integration is used in the background, with no UI indication.
-   */
-  /**
-   * Runs OS validation in the background, only once per project per session.
-   *  Re-entering the view via routing does NOT re-trigger 4 CLI spawns.
-   *  Returns the (possibly cached) in-flight promise so callers that DO want
-   *  the outcome — e.g. tests asserting on osIntegrationsAutoDisabled — can
-   *  await it. Production callers ignore the return value (fire-and-forget).
+   * Runs OS validation once per project per session (cached as a static
+   * promise). Re-entering the view does not re-spawn 4 CLIs. Returns the
+   * cached promise so tests can await; production fires-and-forgets.
+   *
+   * NOTE: a stale entry persists for the lifetime of the app session. If the
+   * user changes a permission in System Settings mid-session and revisits
+   * /integrations, the banner will not refresh until next launch. Acceptable
+   * trade-off: the cost of re-spawning 4 native CLIs on every navigation
+   * (1.4s + Mail.app re-launch attempts) is much worse than this edge case.
    */
   runInitialOsValidation(): Promise<void> {
     if (!this.activeProject) return Promise.resolve();
@@ -463,9 +456,11 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     return inflight;
   }
 
-  /** Spawns 4 native CLIs to verify that every OS integration enabled in
-   *  config still has macOS TCC permission; auto-disables those that don't
-   *  and populates `osIntegrationsAutoDisabled` so the banner can render. */
+  /**
+   * Spawns 4 native CLIs to verify that every OS integration enabled in
+   * config still has macOS TCC permission; auto-disables those that don't
+   * and populates `osIntegrationsAutoDisabled` so the banner can render.
+   */
   async validateOsIntegrations(): Promise<void> {
     if (!this.activeProject) {
       this.logger.debug('[integrations] validateOsIntegrations skipped — no active project');

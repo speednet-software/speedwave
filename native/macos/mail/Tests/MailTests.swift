@@ -177,9 +177,11 @@ final class MailTests: XCTestCase {
     }
 
     func testCheckPermissionTargetNotRunningOnProcNotFound() {
-        // procNotFound → .targetNotRunning(bundleId) → must NOT mention tccutil.
+        // post-status must also be .targetNotRunning — orchestrator no longer
+        // short-circuits on initial .targetNotRunning (gate may auto-launch).
         let gate = FakeMailGate()
         gate.initialStatus = .targetNotRunning(bundleId: "com.apple.mail")
+        gate.postRequestStatus = .targetNotRunning(bundleId: "com.apple.mail")
         let result = performCheckPermission(gate: gate, entity: .mail)
         let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
         XCTAssertEqual(parsed["status"] as? String, "targetNotRunning")

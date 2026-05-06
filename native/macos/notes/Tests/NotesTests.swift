@@ -226,8 +226,11 @@ final class NotesTests: XCTestCase {
     }
 
     func testCheckPermissionTargetNotRunningOnProcNotFound() {
+        // post-status must also be .targetNotRunning — orchestrator no longer
+        // short-circuits on initial .targetNotRunning (gate may auto-launch).
         let gate = FakeNotesGate()
         gate.initialStatus = .targetNotRunning(bundleId: "com.apple.Notes")
+        gate.postRequestStatus = .targetNotRunning(bundleId: "com.apple.Notes")
         let result = performCheckPermission(gate: gate, entity: .notes)
         let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
         XCTAssertEqual(parsed["status"] as? String, "targetNotRunning")
