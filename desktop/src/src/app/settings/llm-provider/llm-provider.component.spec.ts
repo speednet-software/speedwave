@@ -53,6 +53,8 @@ function setupMockTauri(mockTauri: MockTauriService, provider = 'anthropic'): vo
         return DEFAULT_BASE_URLS[(args?.['provider'] as string) ?? ''] ?? null;
       case 'list_anthropic_models':
         return TEST_ANTHROPIC_MODELS;
+      case 'get_default_anthropic_model_label':
+        return 'Opus 4.7';
       case 'update_llm_config':
         return undefined;
       case 'discover_llm_models':
@@ -424,7 +426,10 @@ describe('LlmProviderComponent', () => {
     const defaultLabel = (
       modelEl.querySelector('option[value=""]') as HTMLOptionElement
     )?.textContent?.trim();
-    expect(defaultLabel).toContain('default');
+    // Default option carries the SSOT-resolved Opus family label so the
+    // user knows which model the alias-mode actually steers toward. The
+    // exact string is verified by the dedicated tests below.
+    expect(defaultLabel?.toLowerCase()).toContain('default');
 
     // Latest entries land in an optgroup labelled "Latest" so users see
     // the recommended families at the top.
@@ -492,6 +497,64 @@ describe('LlmProviderComponent', () => {
       .find((o) => o.value === 'claude-opus-4-1');
     expect(stray).toBeTruthy();
     expect(stray?.textContent).toContain('not in catalog');
+  });
+
+  it('renders dynamic Default — <family> label when backend returns a label', async () => {
+    // Backend SSOT returns the Opus family label so the dropdown surfaces
+    // what `(default)` actually steers toward (alias mode → Opus 4.7 today).
+    // Anything but the dynamic form would hide the resolved model from the
+    // user — exactly the regression this PR fixes.
+    component.ngOnInit();
+    await fixture.whenStable();
+    await flushMicrotasks();
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
+
+    const modelEl = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-model"]'
+    ) as HTMLSelectElement;
+    const defaultLabel = (
+      modelEl.querySelector('option[value=""]') as HTMLOptionElement
+    )?.textContent?.trim();
+    expect(defaultLabel).toBe('Default — Opus 4.7 (switchable via /model)');
+  });
+
+  it('falls back to the generic placeholder when backend returns null', async () => {
+    // Older backends (or backends in dev mode without the new command)
+    // may return null. The component must keep the previous mglista
+    // wording rather than render a broken half-string.
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      switch (cmd) {
+        case 'get_llm_config':
+          return {
+            provider: 'anthropic',
+            model: null,
+            base_url: null,
+            default_base_url: null,
+          };
+        case 'get_default_base_url':
+          return DEFAULT_BASE_URLS[(args?.['provider'] as string) ?? ''] ?? null;
+        case 'list_anthropic_models':
+          return TEST_ANTHROPIC_MODELS;
+        case 'get_default_anthropic_model_label':
+          return null;
+        default:
+          return undefined;
+      }
+    };
+    component.ngOnInit();
+    await fixture.whenStable();
+    await flushMicrotasks();
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
+
+    const modelEl = fixture.nativeElement.querySelector(
+      '[data-testid="settings-llm-model"]'
+    ) as HTMLSelectElement;
+    const defaultLabel = (
+      modelEl.querySelector('option[value=""]') as HTMLOptionElement
+    )?.textContent?.trim();
+    expect(defaultLabel).toBe('(default — let Claude Code choose)');
   });
 
   it('shows model and base URL fields for ollama provider', async () => {

@@ -144,8 +144,15 @@ const PROVIDER_CARDS: readonly ProviderCard[] = [
               data-testid="settings-llm-model"
             >
               <!-- Empty value = no ANTHROPIC_MODEL injected; Claude Code
-                   picks its built-in default. -->
-              <option value="">(default — let Claude Code choose)</option>
+                   picks its built-in default via ANTHROPIC_DEFAULT_OPUS_MODEL
+                   (set by compose::apply_llm_config). The label resolves the
+                   Opus family from the SSOT so the user knows what they
+                   actually get instead of the previous mglista wording. -->
+              @if (defaultAnthropicLabel(); as label) {
+                <option value="">Default — {{ label }} (switchable via /model)</option>
+              } @else {
+                <option value="">(default — let Claude Code choose)</option>
+              }
               @if (latestAnthropicModels().length > 0) {
                 <optgroup label="Latest">
                   @for (m of latestAnthropicModels(); track m.id) {
@@ -316,10 +323,19 @@ export class LlmProviderComponent implements OnInit {
     this.anthropicCatalog().filter((m) => !m.latest)
   );
 
+  /**
+   * Family label of the Opus model that the dropdown's `(default)` option
+   * resolves to at runtime. Sourced from `get_default_anthropic_model_label`
+   * (backend SSOT). `null` until first fetch resolves; falsy values fall
+   * back to the generic placeholder text in the template.
+   */
+  protected readonly defaultAnthropicLabel = signal<string | null>(null);
+
   /** Loads the LLM configuration + the SSOT model catalog from the backend on init. */
   ngOnInit(): void {
     this.loadConfig();
     void this.loadAnthropicCatalog();
+    void this.loadDefaultAnthropicLabel();
   }
 
   /**
@@ -397,6 +413,22 @@ export class LlmProviderComponent implements OnInit {
     const list = await this.anthropicModels.list();
     this.anthropicCatalog.set(list);
     this.cdr.markForCheck();
+  }
+
+  /**
+   * Fetches the SSOT family label of the Opus model that anchors the
+   * `(default)` dropdown option. Failure is silent — the template falls
+   * back to the generic placeholder when the signal stays null (e.g. dev
+   * mode without Tauri, or a backend that pre-dates this command).
+   */
+  private async loadDefaultAnthropicLabel(): Promise<void> {
+    try {
+      const label = await this.tauri.invoke<string | null>('get_default_anthropic_model_label');
+      this.defaultAnthropicLabel.set(label);
+      this.cdr.markForCheck();
+    } catch {
+      // Stay on the generic placeholder.
+    }
   }
 
   /**

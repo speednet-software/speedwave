@@ -654,6 +654,18 @@ pub fn list_anthropic_models() -> &'static [speedwave_runtime::defaults::Anthrop
     speedwave_runtime::defaults::ANTHROPIC_MODELS
 }
 
+/// Returns the display label of the Opus model that the dropdown's
+/// `(default)` option resolves to at runtime — used by the Settings UI to
+/// render an honest hint like *"Default — Opus 4.7 (switchable via /model)"*
+/// instead of the previous mglista *"let Claude Code choose"* placeholder.
+///
+/// `None` when the SSOT has no `latest = true` Opus family — frontend then
+/// falls back to the generic placeholder.
+#[tauri::command]
+pub fn get_default_anthropic_model_label() -> Option<&'static str> {
+    speedwave_runtime::defaults::default_anthropic_family_label()
+}
+
 /// Applies LLM config to the active project in-memory. Extracted for
 /// testability and reused by `update_llm_config`.
 ///
@@ -702,6 +714,13 @@ fn apply_llm_config(
 
 #[tauri::command]
 pub fn update_llm_config(update: config::LlmConfig) -> Result<(), String> {
+    log::info!(
+        "update_llm_config: provider={:?} model={:?} base_url={:?} context_tokens={:?}",
+        update.provider,
+        update.model,
+        update.base_url,
+        update.context_tokens
+    );
     // Local providers (ollama, lmstudio, llamacpp) cannot start a session
     // without a model — `compose::apply_llm_config` rejects the compose
     // render, which only surfaces when the user tries to run Claude.
@@ -749,8 +768,14 @@ pub fn update_llm_config(update: config::LlmConfig) -> Result<(), String> {
     }
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
+        let active = user_config.active_project.clone();
         apply_llm_config(&mut user_config, update)?;
-        config::save_user_config(&user_config)
+        config::save_user_config(&user_config)?;
+        log::info!(
+            "update_llm_config: persisted to active_project={:?}",
+            active
+        );
+        Ok(())
     })
     .map_err(|e| e.to_string())
 }

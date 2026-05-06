@@ -60,7 +60,30 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         context_tokens: 200_000,
         latest: true,
     },
+    AnthropicModelInfo {
+        id: "claude-opus-4-6",
+        family: "Opus 4.6",
+        context_tokens: 1_000_000,
+        latest: false,
+    },
 ];
+
+/// The display label of the Opus model that the `(default)` dropdown option
+/// resolves to at runtime — i.e. what `ANTHROPIC_DEFAULT_OPUS_MODEL` points
+/// at when `model` is left blank. Used by the Settings UI to render an
+/// honest hint like *"Default — Opus 4.7 (switchable via /model)"* instead
+/// of the previous mglista *"let Claude Code choose"* placeholder.
+///
+/// Reads from `ANTHROPIC_MODELS` (the SSOT) so a future Opus bump (e.g. 4.8)
+/// updates the UI hint without touching this helper. Returns `None` if the
+/// catalog has no `latest = true` Opus entry — frontend falls back to the
+/// generic placeholder in that case.
+pub fn default_anthropic_family_label() -> Option<&'static str> {
+    ANTHROPIC_MODELS
+        .iter()
+        .find(|m| m.family.starts_with("Opus") && m.latest)
+        .map(|m| m.family)
+}
 
 pub const DEFAULT_FLAGS: &[&str] = &[
     // SECURITY RATIONALE: --dangerously-skip-permissions is safe in this context because:
@@ -422,5 +445,14 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn default_anthropic_family_label_returns_latest_opus_family() {
+        // Forces the constant in this assertion to be updated alongside the
+        // SSOT when a new Opus snapshot lands (e.g. Opus 4.8). If the test
+        // breaks on a model bump, the helper still works — the assertion
+        // just needs to follow the family label.
+        assert_eq!(default_anthropic_family_label(), Some("Opus 4.7"));
     }
 }
