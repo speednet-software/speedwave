@@ -425,8 +425,7 @@ mod tests {
 
     #[test]
     fn detect_host_timezone_never_panics() {
-        // Smoke test: must always return a non-empty string, on any platform,
-        // regardless of host configuration.
+        // smoke test: must always return a non-empty string on any platform.
         let tz = detect_host_timezone();
         assert!(!tz.is_empty());
     }
