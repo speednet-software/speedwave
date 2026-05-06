@@ -2614,6 +2614,12 @@ mod tests {
     }
 
     #[test]
+    fn reset_vm_default_is_noop() {
+        let rt = LimaRuntime::with_runner(Box::new(MockRunner::new()));
+        assert!(rt.reset_vm().is_ok());
+    }
+
+    #[test]
     fn test_ensure_ready_stopping_then_stopped_starts_vm() {
         let vm = consts::LIMA_VM_NAME;
         let runner = SequencedRunner::new()

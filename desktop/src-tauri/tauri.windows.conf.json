@@ -8,6 +8,11 @@
       "nodejs/node.exe": "nodejs/node.exe",
       "mcp-os/": "mcp-os/",
       "cli/speedwave.exe": "cli/speedwave.exe"
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "windows/installer-hooks.nsh"
+      }
     }
   }
 }

@@ -62,7 +62,7 @@ Speedwave ships as an NSIS installer (`.exe`); an MSI is also published for mana
 2. Run the installer. It writes to `%LOCALAPPDATA%\Programs\Speedwave\` (per-user, no admin needed at runtime).
 3. Launch Speedwave from the Start menu. If WSL2 is missing, the setup wizard runs `wsl --install --no-distribution` for you (you will see a UAC prompt). After WSL2 finishes installing, reboot and start Speedwave again. The wizard then imports a dedicated WSL2 distribution named **Speedwave** (`wsl --list --quiet` will show it) and starts the same rootless nerdctl stack as on Linux inside it.
 
-Speedwave does not modify your default WSL distro and does not require Docker Desktop. The `Speedwave` distro is dedicated to Speedwave and can be removed with `wsl --unregister Speedwave`.
+Speedwave does not modify your default WSL distro and does not require Docker Desktop. The `Speedwave` distro is dedicated to Speedwave. When you uninstall Speedwave via Add/Remove Programs, the uninstaller will offer an opt-in prompt to also remove the `Speedwave` WSL distro and user data (`%USERPROFILE%\.speedwave`). If you already have a phantom `Speedwave` distro from an earlier uninstall (v0.10.0 or before), remove it manually with `wsl --unregister Speedwave` before reinstalling.
 
 If the auto-install fails (locked-down corporate machine, Group Policy, etc.), enable WSL2 manually from an elevated PowerShell and retry:
 
