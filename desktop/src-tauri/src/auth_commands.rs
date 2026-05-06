@@ -67,25 +67,77 @@ fn shell_escape_single_quoted(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-/// Builds the CLI command string for the user to copy into their terminal.
+/// Strips the `\\?\` extended-length prefix from a Windows path when the
+/// remainder begins with `<drive>:\` or `<drive>:/` (`\\?\C:\…` -> `C:\…`).
+/// Returns the input unchanged for paths that don't match `\\?\<drive>:\`
+/// (UNC paths, already-stripped paths, POSIX paths, anything else). The
+/// function is purely pattern-based on the input string and does not inspect
+/// the host OS. Bare `\\?\C:` (no separator) is intentionally left alone —
+/// `Set-Location 'C:'` would set drive-relative cwd, which is not what the
+/// user copied a project path for; passing the original string through means
+/// PowerShell raises a clear "path not found" error rather than silently
+/// changing drive.
 ///
-/// When `data_dir` differs from `default_data_dir`, the command includes an
-/// `export SPEEDWAVE_DATA_DIR=...` prefix so the CLI uses the correct data
-/// directory regardless of the terminal's inherited environment.
-///
-/// Paths are single-quote escaped (POSIX) to handle spaces, `&`, `|`, and
-/// other shell metacharacters. The user pastes this into a shell, so quoting
-/// must be correct for safe execution.
-fn build_auth_command(
+/// The Tauri folder picker on Windows can return canonicalized paths with
+/// the `\\?\` prefix; neither PowerShell `Set-Location` nor `cd` handles
+/// these, and they are not user-readable. This helper unifies the path so
+/// the rendered command is paste-ready.
+fn strip_windows_extended_length_prefix(path: &str) -> &str {
+    let b = path.as_bytes();
+    if b.len() >= 7
+        && b[0] == b'\\'
+        && b[1] == b'\\'
+        && b[2] == b'?'
+        && b[3] == b'\\'
+        && b[4].is_ascii_alphabetic()
+        && b[5] == b':'
+        && (b[6] == b'\\' || b[6] == b'/')
+    {
+        &path[4..]
+    } else {
+        path
+    }
+}
+
+/// Escapes a string for safe interpolation inside a PowerShell single-quoted
+/// literal. PowerShell single-quote literals are literal — only embedded
+/// single quotes need doubling.
+fn ps_escape_single_quoted(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// Pure, host-platform-agnostic command assembly. The `is_windows` flag
+/// selects PowerShell-shaped output (Set-Location, `;`, $env:, '' escape,
+/// \\?\ prefix stripping) versus POSIX-shaped output (cd, &&, export,
+/// '\'' escape). The flag is taken as a parameter — not derived inside the
+/// function from `cfg!()` — so both branches are reachable from unit tests
+/// on any host, including macOS/Linux where `make test-desktop` runs.
+fn build_auth_command_for_platform(
     project_dir: &str,
     data_dir: &std::path::Path,
     default_data_dir: Option<&std::path::Path>,
+    is_windows: bool,
 ) -> String {
     let needs_env_pin = default_data_dir.map(|d| d != data_dir).unwrap_or(false);
-
     let data_dir_str = data_dir.to_string_lossy();
 
-    if needs_env_pin {
+    if is_windows {
+        let pdir = strip_windows_extended_length_prefix(project_dir);
+        let ddir = strip_windows_extended_length_prefix(&data_dir_str);
+        if needs_env_pin {
+            format!(
+                "$env:{} = '{}'; Set-Location '{}'; speedwave",
+                speedwave_runtime::consts::DATA_DIR_ENV,
+                ps_escape_single_quoted(ddir),
+                ps_escape_single_quoted(pdir),
+            )
+        } else {
+            format!(
+                "Set-Location '{}'; speedwave",
+                ps_escape_single_quoted(pdir),
+            )
+        }
+    } else if needs_env_pin {
         format!(
             "export {}='{}' && cd '{}' && speedwave",
             speedwave_runtime::consts::DATA_DIR_ENV,
@@ -100,13 +152,29 @@ fn build_auth_command(
     }
 }
 
+/// Production entry point. Reads the host platform once via `cfg!()` and
+/// delegates to `build_auth_command_for_platform`. Keeping this wrapper
+/// preserves the existing call-site in `get_auth_command` unchanged.
+fn build_auth_command(
+    project_dir: &str,
+    data_dir: &std::path::Path,
+    default_data_dir: Option<&std::path::Path>,
+) -> String {
+    build_auth_command_for_platform(
+        project_dir,
+        data_dir,
+        default_data_dir,
+        cfg!(target_os = "windows"),
+    )
+}
+
 /// Returns a CLI command string for the user to copy into their terminal
 /// to authenticate with Claude Code.
 ///
 /// When the Desktop app's data directory differs from the default
-/// (`~/.speedwave`), the command includes an `export SPEEDWAVE_DATA_DIR=...`
-/// prefix to ensure the CLI uses the correct data directory regardless of
-/// the terminal's inherited environment.
+/// (`~/.speedwave`), the command includes a data-directory prefix:
+/// `export SPEEDWAVE_DATA_DIR=...` on POSIX shells, or
+/// `$env:SPEEDWAVE_DATA_DIR = '...'` on Windows PowerShell.
 #[tauri::command]
 pub async fn get_auth_command(project: String) -> Result<String, String> {
     check_project(&project)?;
@@ -296,5 +364,262 @@ mod tests {
             Some(std::path::Path::new("/data")),
         );
         assert_eq!(cmd, "cd '' && speedwave");
+    }
+
+    // -- strip_windows_extended_length_prefix tests --
+    // build_auth_command_for_platform is infallible by design — every input is a valid
+    // PathBuf or &str chosen by the user. No error-path or state-transition tests apply
+    // to pure functions.
+
+    #[test]
+    fn strip_prefix_uppercase_drive() {
+        assert_eq!(
+            strip_windows_extended_length_prefix(r"\\?\C:\Users\dev"),
+            r"C:\Users\dev"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_lowercase_drive() {
+        assert_eq!(
+            strip_windows_extended_length_prefix(r"\\?\d:\temp\proj"),
+            r"d:\temp\proj"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_forward_slash_separator() {
+        assert_eq!(
+            strip_windows_extended_length_prefix(r"\\?\C:/Users/dev"),
+            r"C:/Users/dev"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_already_stripped() {
+        assert_eq!(
+            strip_windows_extended_length_prefix(r"C:\Users\dev"),
+            r"C:\Users\dev"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_unc_path() {
+        assert_eq!(
+            strip_windows_extended_length_prefix(r"\\server\share"),
+            r"\\server\share"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_unc_extended_length() {
+        assert_eq!(
+            strip_windows_extended_length_prefix(r"\\?\UNC\server\share"),
+            r"\\?\UNC\server\share"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_posix_path() {
+        assert_eq!(
+            strip_windows_extended_length_prefix("/Users/dev"),
+            "/Users/dev"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_empty_string() {
+        assert_eq!(strip_windows_extended_length_prefix(""), "");
+    }
+
+    #[test]
+    fn strip_prefix_too_short() {
+        assert_eq!(strip_windows_extended_length_prefix(r"\\?\"), r"\\?\");
+    }
+
+    #[test]
+    fn strip_prefix_bare_drive_no_separator() {
+        // \\?\C: is six bytes — must NOT strip (would yield "C:" which is drive-relative)
+        assert_eq!(strip_windows_extended_length_prefix(r"\\?\C:"), r"\\?\C:");
+    }
+
+    #[test]
+    fn strip_prefix_unicode_no_crash() {
+        let s = "プロジェクト";
+        assert_eq!(strip_windows_extended_length_prefix(s), s);
+    }
+
+    // -- ps_escape_single_quoted tests --
+
+    #[test]
+    fn ps_escape_no_quotes() {
+        assert_eq!(ps_escape_single_quoted("hello"), "hello");
+    }
+
+    #[test]
+    fn ps_escape_single_quote() {
+        assert_eq!(ps_escape_single_quoted("it's"), "it''s");
+    }
+
+    #[test]
+    fn ps_escape_multiple_quotes() {
+        assert_eq!(ps_escape_single_quoted("a'b'c"), "a''b''c");
+    }
+
+    #[test]
+    fn ps_escape_empty_string() {
+        assert_eq!(ps_escape_single_quoted(""), "");
+    }
+
+    #[test]
+    fn ps_escape_unicode_preserved() {
+        assert_eq!(ps_escape_single_quoted("プロジェクト"), "プロジェクト");
+    }
+
+    // -- build_auth_command_for_platform Windows branch tests --
+
+    #[test]
+    fn build_auth_command_for_platform_windows_default_data_dir() {
+        let cmd = build_auth_command_for_platform(
+            r"C:\Users\test\Projects",
+            std::path::Path::new(r"C:\Users\test\.speedwave"),
+            Some(std::path::Path::new(r"C:\Users\test\.speedwave")),
+            true,
+        );
+        assert_eq!(cmd, r"Set-Location 'C:\Users\test\Projects'; speedwave");
+        assert!(!cmd.contains("&&"));
+        assert!(!cmd.contains("export"));
+        assert!(!cmd.starts_with("cd "));
+    }
+
+    #[test]
+    fn build_auth_command_for_platform_windows_custom_data_dir() {
+        let cmd = build_auth_command_for_platform(
+            r"C:\Users\test\Projects",
+            std::path::Path::new(r"C:\Users\test\.speedwave-dev"),
+            Some(std::path::Path::new(r"C:\Users\test\.speedwave")),
+            true,
+        );
+        assert!(cmd.starts_with(&format!(
+            "$env:{} = '",
+            speedwave_runtime::consts::DATA_DIR_ENV
+        )));
+        let env_pos = cmd.find("$env:").unwrap();
+        let loc_pos = cmd.find("Set-Location").unwrap();
+        // Find "; speedwave" to avoid matching "SPEEDWAVE_DATA_DIR"
+        let sw_pos = cmd.find("; speedwave").unwrap();
+        assert!(env_pos < loc_pos);
+        assert!(loc_pos < sw_pos);
+        assert!(!cmd.contains("&&"));
+        assert!(!cmd.contains("export "));
+    }
+
+    #[test]
+    fn build_auth_command_for_platform_strips_extended_length_prefix_issue_612() {
+        // Regression test for GitHub issue #612 — reproduces the exact failing input
+        let cmd = build_auth_command_for_platform(
+            r"\\?\C:\Users\NikodemDeja\testproject",
+            std::path::Path::new(r"C:\Users\NikodemDeja\.speedwave"),
+            Some(std::path::Path::new(r"C:\Users\NikodemDeja\.speedwave")),
+            true,
+        );
+        assert_eq!(
+            cmd,
+            r"Set-Location 'C:\Users\NikodemDeja\testproject'; speedwave"
+        );
+        assert!(!cmd.contains(r"\\?\"));
+        assert!(!cmd.contains(" && "));
+        assert!(!cmd.contains("export "));
+        assert!(!cmd.contains(" cd "));
+    }
+
+    #[test]
+    fn build_auth_command_for_platform_windows_escapes_single_quote_in_path() {
+        let cmd = build_auth_command_for_platform(
+            r"C:\Users\O'Brien\proj",
+            std::path::Path::new(r"C:\Users\O'Brien\.speedwave"),
+            Some(std::path::Path::new(r"C:\Users\O'Brien\.speedwave")),
+            true,
+        );
+        assert!(cmd.contains("O''Brien"));
+        assert!(!cmd.contains("O'\\''Brien"));
+    }
+
+    #[test]
+    fn build_auth_command_for_platform_windows_unicode_path() {
+        let cmd = build_auth_command_for_platform(
+            r"C:\Users\test\プロジェクト",
+            std::path::Path::new(r"C:\Users\test\.speedwave"),
+            Some(std::path::Path::new(r"C:\Users\test\.speedwave")),
+            true,
+        );
+        assert!(cmd.contains("プロジェクト"));
+    }
+
+    #[test]
+    fn build_auth_command_for_platform_windows_no_double_ampersand() {
+        // Defence-in-depth: no Windows output may contain " && "
+        let cmd_no_env = build_auth_command_for_platform(
+            r"C:\proj",
+            std::path::Path::new(r"C:\.speedwave"),
+            Some(std::path::Path::new(r"C:\.speedwave")),
+            true,
+        );
+        assert!(!cmd_no_env.contains(" && "));
+
+        let cmd_with_env = build_auth_command_for_platform(
+            r"C:\proj",
+            std::path::Path::new(r"C:\.speedwave-dev"),
+            Some(std::path::Path::new(r"C:\.speedwave")),
+            true,
+        );
+        assert!(!cmd_with_env.contains(" && "));
+    }
+
+    #[test]
+    fn build_auth_command_for_platform_windows_escapes_single_quote_in_data_dir() {
+        // Custom data dir containing a `'` must use PS doubling (`''`),
+        // never POSIX backslash escaping (`'\''`). Closes review gap.
+        let cmd = build_auth_command_for_platform(
+            r"C:\proj",
+            std::path::Path::new(r"C:\Users\O'Brien\.speedwave-dev"),
+            Some(std::path::Path::new(r"C:\Users\O'Brien\.speedwave")),
+            true,
+        );
+        assert!(cmd.contains("O''Brien"));
+        assert!(!cmd.contains("O'\\''Brien"));
+        assert!(cmd.starts_with(&format!(
+            "$env:{} = 'C:\\Users\\O''Brien\\.speedwave-dev'",
+            speedwave_runtime::consts::DATA_DIR_ENV
+        )));
+    }
+
+    #[test]
+    fn build_auth_command_for_platform_windows_strips_extended_length_prefix_in_data_dir() {
+        // Defence-in-depth: if data_dir ever carries `\\?\` (e.g. a future
+        // "choose data directory" picker on Windows), the env var must be
+        // set to a clean, paste-ready path — not the raw extended-length
+        // form which subsequent tools would mishandle.
+        let cmd = build_auth_command_for_platform(
+            r"C:\proj",
+            std::path::Path::new(r"\\?\C:\Users\test\.speedwave-dev"),
+            Some(std::path::Path::new(r"C:\Users\test\.speedwave")),
+            true,
+        );
+        assert!(!cmd.contains(r"\\?\"));
+        assert!(cmd.contains(r"$env:"));
+        assert!(cmd.contains(r"'C:\Users\test\.speedwave-dev'"));
+    }
+
+    #[test]
+    fn build_auth_command_for_platform_windows_passthrough_bare_drive() {
+        // \\?\C: (bare drive, no separator) must pass through unchanged
+        let cmd = build_auth_command_for_platform(
+            r"\\?\C:",
+            std::path::Path::new(r"C:\.speedwave"),
+            Some(std::path::Path::new(r"C:\.speedwave")),
+            true,
+        );
+        assert!(cmd.contains(r"Set-Location '\\?\C:'"));
     }
 }

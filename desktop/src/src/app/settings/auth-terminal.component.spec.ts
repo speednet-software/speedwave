@@ -229,6 +229,25 @@ describe('AuthTerminalComponent', () => {
     fixture.detectChanges();
     const note = (fixture.nativeElement as HTMLElement).textContent;
     expect(note).toContain('On Windows');
+    expect(note).toContain('PowerShell');
+  });
+
+  it('displays PowerShell-shaped command on Windows', async () => {
+    const WIN_COMMAND = "Set-Location 'C:\\Users\\test\\Projects'; speedwave";
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') return { oauth_authenticated: false };
+      if (cmd === 'get_auth_command') return WIN_COMMAND;
+      if (cmd === 'get_platform') return 'windows';
+      return undefined;
+    };
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    fixture.detectChanges();
+    const el = (fixture.nativeElement as HTMLElement).querySelector('[data-testid="auth-command"]');
+    expect(el).toBeTruthy();
+    expect(el!.textContent).toContain('Set-Location');
+    expect(el!.textContent).toContain('; speedwave');
+    expect(el!.textContent).not.toContain('&&');
   });
 
   it('starts polling on init', () => {
