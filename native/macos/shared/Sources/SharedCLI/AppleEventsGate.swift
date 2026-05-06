@@ -228,11 +228,14 @@ public struct NSWorkspaceAppLauncher: AppLauncher {
     }
 }
 
-/// Test default — never launches (used by AppleEventsGate test initializer).
+/// Passive-mode launcher: declines launch by design (used in CLI's
+/// `check_permission` without `--launch`, and in tests). Returns
+/// `.notSupported` so logs read "AELAUNCH not supported" — clearer than
+/// `.failed` which would suggest an attempted launch went wrong.
 public struct NeverLaunchAppLauncher: AppLauncher {
     public init() {}
-    public func launch(bundleId: String) -> AppLaunchOutcome {
-        .failed("NeverLaunchAppLauncher always declines to launch \(bundleId)")
+    public func launch(bundleId _: String) -> AppLaunchOutcome {
+        .notSupported
     }
 }
 
