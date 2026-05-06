@@ -12,6 +12,8 @@ RUN npm run build --if-present
 
 # Stage 2: Runtime
 FROM node:24-alpine
+# tzdata: zoneinfo for TZ env from compose — keep aligned with tz.rs (see CLAUDE.md SSOT).
+RUN apk add --no-cache tzdata
 RUN addgroup -g 1000 speedwave && \
     adduser -u 1000 -G speedwave -s /bin/sh -D speedwave
 WORKDIR /app

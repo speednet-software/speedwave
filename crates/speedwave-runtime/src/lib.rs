@@ -19,5 +19,6 @@ pub mod session;
 pub mod signing;
 pub mod slash;
 pub mod stream;
+pub mod tz;
 pub mod update;
 pub mod validation;
