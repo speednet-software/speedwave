@@ -69,8 +69,10 @@ fn shell_escape_single_quoted(s: &str) -> String {
 
 /// Strips the `\\?\` extended-length prefix from a Windows path when the
 /// remainder begins with `<drive>:\` or `<drive>:/` (`\\?\C:\…` -> `C:\…`).
-/// Returns the input unchanged for every other shape (UNC, already-stripped,
-/// non-Windows). Bare `\\?\C:` (no separator) is intentionally left alone —
+/// Returns the input unchanged for paths that don't match `\\?\<drive>:\`
+/// (UNC paths, already-stripped paths, POSIX paths, anything else). The
+/// function is purely pattern-based on the input string and does not inspect
+/// the host OS. Bare `\\?\C:` (no separator) is intentionally left alone —
 /// `Set-Location 'C:'` would set drive-relative cwd, which is not what the
 /// user copied a project path for; passing the original string through means
 /// PowerShell raises a clear "path not found" error rather than silently
@@ -121,11 +123,12 @@ fn build_auth_command_for_platform(
 
     if is_windows {
         let pdir = strip_windows_extended_length_prefix(project_dir);
+        let ddir = strip_windows_extended_length_prefix(&data_dir_str);
         if needs_env_pin {
             format!(
                 "$env:{} = '{}'; Set-Location '{}'; speedwave",
                 speedwave_runtime::consts::DATA_DIR_ENV,
-                ps_escape_single_quoted(&data_dir_str),
+                ps_escape_single_quoted(ddir),
                 ps_escape_single_quoted(pdir),
             )
         } else {
@@ -571,6 +574,41 @@ mod tests {
             true,
         );
         assert!(!cmd_with_env.contains(" && "));
+    }
+
+    #[test]
+    fn build_auth_command_for_platform_windows_escapes_single_quote_in_data_dir() {
+        // Custom data dir containing a `'` must use PS doubling (`''`),
+        // never POSIX backslash escaping (`'\''`). Closes review gap.
+        let cmd = build_auth_command_for_platform(
+            r"C:\proj",
+            std::path::Path::new(r"C:\Users\O'Brien\.speedwave-dev"),
+            Some(std::path::Path::new(r"C:\Users\O'Brien\.speedwave")),
+            true,
+        );
+        assert!(cmd.contains("O''Brien"));
+        assert!(!cmd.contains("O'\\''Brien"));
+        assert!(cmd.starts_with(&format!(
+            "$env:{} = 'C:\\Users\\O''Brien\\.speedwave-dev'",
+            speedwave_runtime::consts::DATA_DIR_ENV
+        )));
+    }
+
+    #[test]
+    fn build_auth_command_for_platform_windows_strips_extended_length_prefix_in_data_dir() {
+        // Defence-in-depth: if data_dir ever carries `\\?\` (e.g. a future
+        // "choose data directory" picker on Windows), the env var must be
+        // set to a clean, paste-ready path — not the raw extended-length
+        // form which subsequent tools would mishandle.
+        let cmd = build_auth_command_for_platform(
+            r"C:\proj",
+            std::path::Path::new(r"\\?\C:\Users\test\.speedwave-dev"),
+            Some(std::path::Path::new(r"C:\Users\test\.speedwave")),
+            true,
+        );
+        assert!(!cmd.contains(r"\\?\"));
+        assert!(cmd.contains(r"$env:"));
+        assert!(cmd.contains(r"'C:\Users\test\.speedwave-dev'"));
     }
 
     #[test]
