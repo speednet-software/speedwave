@@ -5,8 +5,8 @@ import SharedCLI
 // File-scope so tests can reach it via @testable import calendar_cli.
 struct EventStoreGate: PermissionGate {
     let store: EKEventStore
-    func authorizationStatus() -> EKAuthorizationStatus {
-        EKEventStore.authorizationStatus(for: .event)
+    func authorizationStatus() -> RawAuthorizationStatus {
+        mapEventKitStatusToRaw(EKEventStore.authorizationStatus(for: .event))
     }
     func requestAccess(completion: @escaping (Bool, Error?) -> Void) {
         if #available(macOS 14.0, *) {

@@ -37,19 +37,36 @@ fn persist_log_level(level: &str) -> anyhow::Result<()> {
     })
 }
 
+/// Returns the absolute path of the directory tauri-plugin-log writes
+/// `speedwave-desktop.log` (and rotated copies) into. Per-OS layout matches
+/// what the plugin's `LogDir` target resolves to:
+///
+/// - macOS: `~/Library/Logs/pl.speedwave.desktop`
+/// - Linux: `~/.local/share/pl.speedwave.desktop/logs`
+/// - Windows: `%APPDATA%/pl.speedwave.desktop` (handled by AppData fallback)
+///
+/// Returns `None` only when `dirs::home_dir()` itself fails (rare, sandbox
+/// edge cases). SSOT for this path — used by `cleanup_old_logs`,
+/// `diagnostics::export_diagnostics`, and the unified-logs view command in
+/// `container_logs_cmd.rs::get_all_logs`.
+pub(crate) fn desktop_log_dir() -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir()?;
+    if cfg!(target_os = "macos") {
+        Some(home.join("Library/Logs/pl.speedwave.desktop"))
+    } else if cfg!(target_os = "windows") {
+        // tauri-plugin-log on Windows defaults to %APPDATA%/<bundle id>; this
+        // helper keeps the same convention so log lookup works after install.
+        dirs::data_dir().map(|d| d.join("pl.speedwave.desktop"))
+    } else {
+        Some(home.join(".local/share/pl.speedwave.desktop/logs"))
+    }
+}
+
 /// Removes old rotated log files, keeping at most `max_files` recent ones.
 pub(crate) fn cleanup_old_logs(max_files: usize) {
-    let log_dir = match dirs::home_dir() {
-        Some(h) => {
-            if cfg!(target_os = "macos") {
-                h.join("Library/Logs/pl.speedwave.desktop")
-            } else {
-                h.join(".local/share/pl.speedwave.desktop/logs")
-            }
-        }
-        None => return,
+    let Some(log_dir) = desktop_log_dir() else {
+        return;
     };
-
     cleanup_log_dir(&log_dir, max_files);
 }
 
@@ -388,6 +405,39 @@ mod tests {
 
         let count = std::fs::read_dir(tmp.path()).unwrap().count();
         assert_eq!(count, 0, "empty directory should stay empty");
+    }
+
+    // -- desktop_log_dir tests --
+
+    #[test]
+    fn desktop_log_dir_returns_some_on_supported_platform() {
+        // dirs::home_dir() returns Some on every supported OS during normal
+        // unit-test runs. If this fails on CI it indicates a sandbox issue
+        // worth diagnosing — not silent skip.
+        let dir = desktop_log_dir();
+        assert!(dir.is_some(), "desktop_log_dir must resolve under a normal home dir");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn desktop_log_dir_macos_path_under_library_logs() {
+        let dir = desktop_log_dir().unwrap();
+        let s = dir.to_string_lossy();
+        assert!(
+            s.contains("Library/Logs/pl.speedwave.desktop"),
+            "macOS path must point at Library/Logs/pl.speedwave.desktop, got {s}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn desktop_log_dir_linux_path_under_local_share() {
+        let dir = desktop_log_dir().unwrap();
+        let s = dir.to_string_lossy();
+        assert!(
+            s.contains(".local/share/pl.speedwave.desktop/logs"),
+            "Linux path must point at .local/share/pl.speedwave.desktop/logs, got {s}"
+        );
     }
 
     #[test]

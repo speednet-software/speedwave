@@ -53,6 +53,19 @@ impl OsIntegrationsConfig {
         }
         true
     }
+
+    /// SSOT for service-key → field mapping. Returns `None` for unknown keys
+    /// so callers cannot silently miss a new service added to
+    /// `TOGGLEABLE_OS_SERVICES` without also updating this match.
+    pub fn get_service(&self, key: &str) -> Option<&IntegrationConfig> {
+        match key {
+            "reminders" => self.reminders.as_ref(),
+            "calendar" => self.calendar.as_ref(),
+            "mail" => self.mail.as_ref(),
+            "notes" => self.notes.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]

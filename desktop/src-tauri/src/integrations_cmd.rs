@@ -431,27 +431,44 @@ fn parse_permission_output(stdout: &str) -> Result<(), String> {
 ///
 /// Pipe-buffer deadlock is not a risk: `check_permission` output is <200 bytes,
 /// well within the OS pipe buffer of 64KB. Stdout is read after child exits.
-fn check_os_permission(service: &str) -> Result<(), String> {
-    // Outer 60s budget intentionally outlives the inner Swift timeout (55s in
-    // performCheckPermission) so the child can emit a structured timeout payload
-    // before this guard kills it; otherwise the user only ever sees a generic
-    // "process killed" error.
-    check_os_permission_with_timeout(service, std::time::Duration::from_secs(60))
+fn check_os_permission(service: &str, launch_if_needed: bool) -> Result<(), String> {
+    check_os_permission_with_timeout(
+        service,
+        launch_if_needed,
+        std::time::Duration::from_secs(60),
+    )
 }
 
 /// Inner implementation with configurable timeout for testability.
+/// `launch_if_needed=true` (toggle click) lets the CLI auto-launch the target
+/// app if not running. `false` (startup validate) keeps the check passive so
+/// Speedwave never opens Mail/Notes uninvited at app boot.
 fn check_os_permission_with_timeout(
     service: &str,
+    launch_if_needed: bool,
     timeout: std::time::Duration,
 ) -> Result<(), String> {
     let binary_path = resolve_native_cli_binary(service)?;
+    log::info!(
+        "check_os_permission: spawning {service}-cli check_permission launch={launch_if_needed} (binary={})",
+        binary_path.display()
+    );
+    let spawn_started = std::time::Instant::now();
 
-    let mut child = std::process::Command::new(&binary_path)
-        .arg("check_permission")
+    let mut cmd = std::process::Command::new(&binary_path);
+    cmd.arg("check_permission");
+    if launch_if_needed {
+        cmd.arg("--launch");
+    }
+    let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| {
+            log::error!(
+                "check_os_permission: spawn failed for {service}: {e} (binary={})",
+                binary_path.display()
+            );
             format!(
                 "Failed to run permission check for {service}: {e}. Binary: {}",
                 binary_path.display()
@@ -467,6 +484,10 @@ fn check_os_permission_with_timeout(
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
+                    log::warn!(
+                        "check_os_permission: {service}-cli timed out after {}s",
+                        timeout.as_secs()
+                    );
                     return Err(format!(
                         "Permission check timed out after {}s. Try again.",
                         timeout.as_secs()
@@ -474,7 +495,10 @@ fn check_os_permission_with_timeout(
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
-            Err(e) => return Err(format!("Permission check failed: {e}")),
+            Err(e) => {
+                log::error!("check_os_permission: try_wait failed for {service}: {e}");
+                return Err(format!("Permission check failed: {e}"));
+            }
         }
     };
 
@@ -499,16 +523,42 @@ fn check_os_permission_with_timeout(
         })
         .unwrap_or_default();
 
+    let elapsed_ms = spawn_started.elapsed().as_millis();
+    log::debug!(
+        "check_os_permission: {service}-cli exited code={} elapsed_ms={elapsed_ms} stdout_len={} stderr_len={}",
+        status.code().unwrap_or(-1),
+        stdout.len(),
+        stderr.len()
+    );
+
+    // Always surface Swift CLI stderr to the log — it carries the per-CLI trace
+    // (AppleEvents OSStatus values, EventKit gate transitions) that's invaluable
+    // when diagnosing TCC silent rejects from a user-supplied logs ZIP.
+    if !stderr.trim().is_empty() {
+        for line in stderr.lines() {
+            log::info!("check_os_permission: {service}-cli stderr: {line}");
+        }
+    }
+
     if !status.success() {
         let detail = if stderr.trim().is_empty() {
             format!("exit code {}", status.code().unwrap_or(-1))
         } else {
             stderr.trim().to_string()
         };
+        log::warn!(
+            "check_os_permission: {service}-cli non-zero exit (code={}): {detail}",
+            status.code().unwrap_or(-1)
+        );
         return Err(format!("Permission check failed: {detail}"));
     }
 
-    parse_permission_output(&stdout)
+    let parse_result = parse_permission_output(&stdout);
+    match &parse_result {
+        Ok(()) => log::info!("check_os_permission: {service} GRANTED"),
+        Err(reason) => log::warn!("check_os_permission: {service} NOT GRANTED — {reason}"),
+    }
+    parse_result
 }
 
 #[tauri::command]
@@ -525,10 +575,15 @@ pub fn set_os_integration_enabled(
 
     // When enabling, check macOS permission first
     if enabled {
-        check_os_permission(&service)?;
+        if let Err(reason) = check_os_permission(&service, true) {
+            log::warn!(
+                "set_os_integration_enabled: rejecting enable for {service} (project={project}) — {reason}"
+            );
+            return Err(reason);
+        }
     }
 
-    config::with_config_lock(|| {
+    let result = config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
 
         let entry = user_config
@@ -547,7 +602,183 @@ pub fn set_os_integration_enabled(
 
         config::save_user_config(&user_config)
     })
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string());
+
+    match &result {
+        Ok(()) => log::info!(
+            "set_os_integration_enabled: persisted project={project} service={service} enabled={enabled}"
+        ),
+        Err(e) => log::error!(
+            "set_os_integration_enabled: persist failed project={project} service={service} enabled={enabled} — {e}"
+        ),
+    }
+    result
+}
+
+/// Result of validating one OS integration against the actual macOS TCC state.
+/// Returned per-service to the frontend so the UI can render a toast for each
+/// integration that was auto-disabled.
+#[derive(serde::Serialize, Debug, Clone, PartialEq)]
+pub struct OsIntegrationValidation {
+    pub service: String,
+    pub previous_enabled: bool,
+    pub new_enabled: bool,
+    pub reason: String,
+}
+
+/// Validates every OS integration configured for the active project against
+/// the live macOS TCC state. If `enabled=true` in config but `check_os_permission`
+/// returns an error (denied / silentReject / targetNotRunning), the integration
+/// is auto-disabled in config and a validation entry is returned so the UI can
+/// surface a toast.
+///
+/// This is the migration path for users upgrading across the embedded-Info.plist
+/// boundary: their existing TCC.db row was bound to `<svc>-cli` (the codesign
+/// default identifier), the new build's row is bound to `pl.speedwave.desktop.<svc>`.
+/// On first launch, every previously-granted integration looks "silentReject"
+/// because the new identifier has no TCC entry yet — auto-disabling the toggle
+/// keeps the user-facing state honest. The user then re-clicks the toggle, the
+/// system shows a fresh consent prompt, and TCC writes a row under the new
+/// identifier.
+///
+/// On non-macOS hosts, returns an empty Vec without error (OS integrations are
+/// macOS-only; nothing to validate).
+#[tauri::command]
+pub fn validate_os_integrations_on_startup(
+    project: String,
+) -> Result<Vec<OsIntegrationValidation>, String> {
+    if !cfg!(target_os = "macos") {
+        log::debug!(
+            "validate_os_integrations_on_startup: skipping on non-macOS host (project={project})"
+        );
+        return Ok(Vec::new());
+    }
+    check_project(&project)?;
+    log::info!("validate_os_integrations_on_startup: project={project} — start");
+
+    // SSOT: list of OS services to validate comes from speedwave_runtime::consts.
+    let os_services: Vec<&'static str> = speedwave_runtime::consts::TOGGLEABLE_OS_SERVICES
+        .iter()
+        .map(|s| s.config_key)
+        .collect();
+
+    // Phase 1: short config_lock — snapshot enabled state per service.
+    // Holding the lock through ~400ms parallel CLI runs would block any
+    // concurrent toggle/restart from the UI; snapshot-then-unlock keeps the
+    // lock window in microseconds.
+    let prev_state: std::collections::HashMap<&'static str, bool> = config::with_config_lock(|| {
+        let user_config = config::load_user_config()?;
+        let entry = user_config
+            .find_project(&project)
+            .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
+        let os_cfg = entry.integrations.as_ref().and_then(|i| i.os.as_ref());
+        Ok(os_services
+            .iter()
+            .map(|svc| {
+                let enabled = os_cfg
+                    .and_then(|os| os.get_service(svc))
+                    .and_then(|cfg| cfg.enabled)
+                    .unwrap_or(false);
+                (*svc, enabled)
+            })
+            .collect())
+    })
+    .map_err(|e: anyhow::Error| {
+        log::error!("validate_os_integrations_on_startup: config snapshot failure for project={project}: {e}");
+        e.to_string()
+    })?;
+
+    let to_check: Vec<&'static str> = os_services
+        .iter()
+        .filter(|svc| *prev_state.get(*svc).unwrap_or(&false))
+        .copied()
+        .collect();
+    let already_disabled = os_services.len() - to_check.len();
+    let checked = to_check.len();
+    for svc in &os_services {
+        if !*prev_state.get(svc).unwrap_or(&false) {
+            log::debug!(
+                "validate_os_integrations_on_startup: skipping {svc} (already disabled in config)"
+            );
+        }
+    }
+
+    // Phase 2: parallel CLI checks — each spawn-and-wait is ~200-400ms; 4
+    // sequential = ~1.4s. Parallel = bounded by the slowest CLI (~400ms).
+    // No config lock held here.
+    let handles: Vec<(&'static str, std::thread::JoinHandle<Result<(), String>>)> = to_check
+        .into_iter()
+        .map(|svc| {
+            log::info!(
+                "validate_os_integrations_on_startup: checking {svc} (currently enabled in config)"
+            );
+            let handle = std::thread::spawn(move || check_os_permission(svc, false));
+            (svc, handle)
+        })
+        .collect();
+
+    let mut validations: Vec<OsIntegrationValidation> = Vec::new();
+    let mut to_disable: Vec<&'static str> = Vec::new();
+    for (svc, handle) in handles {
+        let result = handle
+            .join()
+            .unwrap_or_else(|_| Err(format!("validate worker thread for {svc} panicked")));
+        match result {
+            Ok(()) => log::info!(
+                "validate_os_integrations_on_startup: {svc} VALID (TCC granted, keeping enabled)"
+            ),
+            Err(reason) => {
+                log::warn!(
+                    "validate_os_integrations_on_startup: auto-disabling {svc} (was enabled, TCC reports: {reason})"
+                );
+                to_disable.push(svc);
+                validations.push(OsIntegrationValidation {
+                    service: svc.to_string(),
+                    previous_enabled: true,
+                    new_enabled: false,
+                    reason,
+                });
+            }
+        }
+    }
+
+    // Phase 3: short config_lock — apply mutations only when there's something
+    // to write. Skipping the lock entirely on the no-op path keeps the happy
+    // case zero-contention.
+    if !to_disable.is_empty() {
+        config::with_config_lock(|| {
+            let mut user_config = config::load_user_config()?;
+            let entry = user_config
+                .find_project_mut(&project)
+                .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
+            let integrations = entry.integrations.get_or_insert_with(Default::default);
+            let os = integrations.os.get_or_insert_with(Default::default);
+            for svc in &to_disable {
+                os.set_service(
+                    svc,
+                    config::IntegrationConfig {
+                        enabled: Some(false),
+                    },
+                );
+            }
+            config::save_user_config(&user_config)
+        })
+        .map_err(|e| {
+            log::error!(
+                "validate_os_integrations_on_startup: config persist failure for project={project}: {e}"
+            );
+            e.to_string()
+        })?;
+    }
+
+    log::info!(
+        "validate_os_integrations_on_startup: project={project} done — total_services={} checked={checked} skipped_already_disabled={already_disabled} auto_disabled={} services=[{}]",
+        os_services.len(),
+        validations.len(),
+        validations.iter().map(|v| v.service.as_str()).collect::<Vec<_>>().join(",")
+    );
+
+    Ok(validations)
 }
 
 #[tauri::command]
@@ -813,6 +1044,81 @@ mod tests {
         let result = set_os_integration_enabled("test".into(), "reminders".into(), true);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only available on macOS"));
+    }
+
+    // -- validate_os_integrations_on_startup --
+    //
+    // The full happy/error/state-transition path requires a temporary
+    // ~/.speedwave/ data dir and a mocked native CLI that returns scripted
+    // status JSON. That harness already exists for set_os_integration_enabled
+    // tests at the integration level (run via `make test-desktop`). The unit
+    // tests here cover the boundary behaviour reachable without spawning
+    // child processes.
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn validate_os_integrations_returns_empty_on_non_macos() {
+        // OS integrations are macOS-only — the validator must short-circuit
+        // with Ok([]) on Linux/Windows hosts so the Angular ngOnInit hook
+        // can call it unconditionally.
+        let result = validate_os_integrations_on_startup("test".into());
+        assert!(result.is_ok(), "expected Ok on non-macOS, got {result:?}");
+        assert_eq!(
+            result.unwrap(),
+            Vec::<OsIntegrationValidation>::new(),
+            "non-macOS host must return empty validation list, not auto-disable anything"
+        );
+    }
+
+    #[test]
+    fn os_integration_validation_serializes_to_camel_case_for_frontend() {
+        // The Tauri command return type is consumed by Angular as
+        // OsIntegrationValidation in models/integration.ts — the field names
+        // must serialize to snake_case (Rust default). If a future PR adds
+        // serde rename rules, this test catches the drift before frontend
+        // breaks at runtime.
+        let v = OsIntegrationValidation {
+            service: "calendar".to_string(),
+            previous_enabled: true,
+            new_enabled: false,
+            reason: "tccutil reset Calendar pl.speedwave.desktop.calendar".to_string(),
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(json.contains(r#""service":"calendar""#));
+        assert!(json.contains(r#""previous_enabled":true"#));
+        assert!(json.contains(r#""new_enabled":false"#));
+        assert!(json.contains(r#""reason":"tccutil reset Calendar pl.speedwave.desktop.calendar""#));
+    }
+
+    #[test]
+    fn os_integrations_config_get_service_covers_every_toggleable_service() {
+        // SSOT alignment: get_service must accept every config_key in
+        // TOGGLEABLE_OS_SERVICES. A new entry without a matching arm would
+        // make the validator silently skip the service.
+        use speedwave_runtime::config::{IntegrationConfig, OsIntegrationsConfig};
+        let mut cfg = OsIntegrationsConfig::default();
+        for svc in speedwave_runtime::consts::TOGGLEABLE_OS_SERVICES {
+            assert!(
+                cfg.set_service(svc.config_key, IntegrationConfig { enabled: Some(true) }),
+                "set_service must accept '{}'",
+                svc.config_key
+            );
+            let got = cfg.get_service(svc.config_key);
+            assert!(
+                got.is_some(),
+                "get_service must round-trip '{}'",
+                svc.config_key
+            );
+            assert_eq!(got.and_then(|c| c.enabled), Some(true));
+        }
+    }
+
+    #[test]
+    fn os_integrations_config_get_service_rejects_unknown() {
+        use speedwave_runtime::config::OsIntegrationsConfig;
+        let cfg = OsIntegrationsConfig::default();
+        assert!(cfg.get_service("contacts").is_none());
+        assert!(cfg.get_service("").is_none());
     }
 
     // -- validate_credential_field tests --
@@ -1215,13 +1521,81 @@ mod tests {
 
     #[test]
     fn parse_permission_output_denied_with_status_and_error() {
+        // Calendar uses sub-identifier `pl.speedwave.desktop.calendar` per
+        // SharedCLI/Utilities.swift::subBundleIdentifier — the `tccutil reset`
+        // command in the error string must use the sub-identifier so that
+        // recovery actually clears the right TCC.db row.
         let result = parse_permission_output(
-            r#"{"granted": false, "status": "denied", "error": "tccutil reset Calendar pl.speedwave.desktop"}"#,
+            r#"{"granted": false, "status": "denied", "error": "tccutil reset Calendar pl.speedwave.desktop.calendar"}"#,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("tccutil reset Calendar pl.speedwave.desktop.calendar"),
+            "error must contain calendar sub-identifier in tccutil command, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_permission_output_reminders_uses_sub_identifier() {
+        let result = parse_permission_output(
+            r#"{"granted": false, "status": "denied", "error": "tccutil reset Reminders pl.speedwave.desktop.reminders"}"#,
         );
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().contains("tccutil reset Calendar"),
-            "error message must contain tccutil reset Calendar"
+            result
+                .unwrap_err()
+                .contains("tccutil reset Reminders pl.speedwave.desktop.reminders")
+        );
+    }
+
+    #[test]
+    fn parse_permission_output_mail_uses_apple_events_service() {
+        // Mail/Notes use kTCCServiceAppleEvents — `tccutil reset Mail` is wrong
+        // (no such TCC service exists). The Swift composeErrorMessage produces
+        // `tccutil reset AppleEvents pl.speedwave.desktop.mail` and the parser
+        // must surface this string verbatim.
+        let result = parse_permission_output(
+            r#"{"granted": false, "status": "denied", "error": "tccutil reset AppleEvents pl.speedwave.desktop.mail"}"#,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("tccutil reset AppleEvents pl.speedwave.desktop.mail"),
+            "Mail must use AppleEvents service in tccutil command, got: {err}"
+        );
+        assert!(
+            !err.contains("tccutil reset Mail "),
+            "Mail must NOT use 'tccutil reset Mail' (no such TCC service), got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_permission_output_notes_uses_apple_events_service() {
+        let result = parse_permission_output(
+            r#"{"granted": false, "status": "denied", "error": "tccutil reset AppleEvents pl.speedwave.desktop.notes"}"#,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("tccutil reset AppleEvents pl.speedwave.desktop.notes"));
+        assert!(!err.contains("tccutil reset Notes "));
+    }
+
+    #[test]
+    fn parse_permission_output_target_not_running_omits_tccutil() {
+        // .targetNotRunning (Mail/Notes app not running) is NOT a TCC issue —
+        // the error string must NOT recommend tccutil because resetting
+        // permission would not help. The Swift composeErrorMessage produces
+        // a "open Mail.app and try again" message instead.
+        let result = parse_permission_output(
+            r#"{"granted": false, "status": "targetNotRunning", "error": "Mail.app is not running. Open Mail.app and try again — this is not a permission problem."}"#,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Mail.app is not running"));
+        assert!(
+            !err.to_lowercase().contains("tccutil"),
+            "targetNotRunning must NOT recommend tccutil, got: {err}"
         );
     }
 
@@ -1335,7 +1709,7 @@ mod tests {
             speedwave_runtime::consts::BUNDLE_RESOURCES_ENV,
             "/nonexistent/path",
         );
-        let result = check_os_permission("reminders");
+        let result = check_os_permission("reminders", false);
         std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -1357,7 +1731,7 @@ mod tests {
         std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
         std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, tmp.path());
-        let result = check_os_permission("reminders");
+        let result = check_os_permission("reminders", false);
         std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -1378,7 +1752,7 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, tmp.path());
-        let result = check_os_permission("reminders");
+        let result = check_os_permission("reminders", false);
         std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("crash info"));
@@ -1395,7 +1769,7 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, tmp.path());
-        let result = check_os_permission("reminders");
+        let result = check_os_permission("reminders", false);
         std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to parse"));
@@ -1414,8 +1788,11 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         std::env::set_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV, tmp.path());
-        let result =
-            check_os_permission_with_timeout("reminders", std::time::Duration::from_secs(2));
+        let result = check_os_permission_with_timeout(
+            "reminders",
+            false,
+            std::time::Duration::from_secs(2),
+        );
         std::env::remove_var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV);
         assert!(result.is_err());
         assert!(

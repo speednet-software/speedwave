@@ -15,20 +15,25 @@ struct MailCLI {
 
         let command = args[1]
 
-        // check_permission: verify macOS Automation access for Apple Mail.
-        // Returns JSON {"granted": true/false} on stdout, always exits 0.
-        // Uses error.errorDescription for user-friendly messages from ScriptError.
+        // check_permission: verify macOS Automation access for Apple Mail through the
+        // unified PermissionGate (AppleEventsGate). The TCC layer is determined by
+        // AEDeterminePermissionToAutomateTarget; the data-access layer is verified by
+        // the AppleScript probe (`permissionCheckScript`) running as gate.verifyDataAccess().
+        // Status-aware output (granted/denied/restricted/notDetermined/silentReject/
+        // targetNotRunning) is identical to calendar/reminders for UX consistency.
         // check_permission validates Apple Mail automation; Outlook availability is checked separately by resolveClient()
-        // NOTE: "to name" does NOT trigger macOS Automation prompt — must access data (e.g. accounts).
+        // NOTE: "to name" does NOT trigger macOS Automation prompt — script must access real data.
         // Pattern: see also notes/Sources/NotesCLI.swift check_permission
         if command == "check_permission" {
-            do {
-                _ = try ScriptRunner.run(permissionCheckScript, timeout: 15)
-                print(formatPermissionResult(granted: true, error: nil))
-            } catch {
-                let detail = "Mail access denied: \(error.localizedDescription)\nGrant access in System Settings > Privacy & Security > Automation"
-                print(formatPermissionResult(granted: false, error: detail))
-            }
+            let allowLaunch = args.contains("--launch")
+            let gate = AppleEventsGate(
+                targetBundleId: "com.apple.mail",
+                dataAccessScript: permissionCheckScript,
+                dataAccessTimeout: 15,
+                pidResolver: NSWorkspacePidResolver(),
+                appLauncher: allowLaunch ? NSWorkspaceAppLauncher() : NeverLaunchAppLauncher()
+            )
+            print(performCheckPermission(gate: gate, entity: .mail))
             return
         }
 

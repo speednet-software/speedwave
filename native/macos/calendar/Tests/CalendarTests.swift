@@ -78,8 +78,25 @@ final class CalendarTests: XCTestCase {
         // Calling authorizationStatus() on a real EKEventStore is a pure read.
         let store = EKEventStore()
         let gate: PermissionGate = EventStoreGate(store: store)
-        let status = gate.authorizationStatus()
-        XCTAssertNotNil(status)
+        // The protocol now returns RawAuthorizationStatus (not EKAuthorizationStatus);
+        // every concrete enum value is acceptable here — we just want compile-time
+        // confirmation that the gate produces the new raw type. The value depends on
+        // the test machine's TCC state and may differ between dev runs.
+        let _: RawAuthorizationStatus = gate.authorizationStatus()
+    }
+
+    func testCalendarEventStoreGateProducesRawStatus() {
+        // Sanity: at runtime, the gate's raw status is one of the documented cases.
+        // Catches drift if mapEventKitStatusToRaw is changed without updating the gate.
+        let store = EKEventStore()
+        let gate = EventStoreGate(store: store)
+        let raw = gate.authorizationStatus()
+        switch raw {
+        case .granted, .denied, .restricted, .notDetermined, .writeOnly, .unknown:
+            break  // expected EventKit-producible cases
+        case .targetNotRunning:
+            XCTFail("EventKit gate must never produce .targetNotRunning — that is AE-only")
+        }
     }
 
     // MARK: - eventToDict Output Keys

@@ -53,7 +53,17 @@ const FORCED_LOG_LEVEL = 'trace';
 
 const COMPOSE_RE = /^([\w.-]+)\s*\|\s*(.*)$/;
 const BRACKETED_TIME_RE = /^\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]\s*(.*)$/;
-const ISO_TIME_RE = /^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)\s+(.*)$/;
+// Matches ISO 8601 timestamps emitted by the various log sources we consume:
+//   - `2026-04-28T12:34:56Z`            (UTC, no fractional seconds)
+//   - `2026-04-28 12:34:56.123Z`        (legacy compose with millis)
+//   - `2026-05-06T19:58:38.724+0200`    (tauri-plugin-log local time + numeric offset)
+//   - `2026-05-06T19:58:38.724+02:00`   (some libraries emit colon-separated offset)
+// The offset variant matters for the unified `/logs` view: tauri-plugin-log's
+// format callback in `desktop/src-tauri/src/main.rs` uses `%.3f%z` which
+// produces `+0200` (no colon). Without `[+-]\d{2}:?\d{2}` here, those lines
+// fall through to default `info` level and lose their level chip.
+const ISO_TIME_RE =
+  /^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+(.*)$/;
 /** ISO date+time at the start of a stamped log line (e.g. `2026-04-28T12:34:56.123Z`). */
 const FORMAT_TIME_ISO_RE = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/;
 /** Bare `HH:MM:SS` prefix used by some compose log lines. Date is filled in from the host clock. */
@@ -732,7 +742,13 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     }
     this.loading.set(true);
     try {
-      const raw = await this.tauri.invoke<string>('get_compose_logs', {
+      // `get_all_logs` merges every host-side log source (tauri-plugin-log
+      // file, mcp-os.log, claude-session.log) with `compose logs` so that the
+      // dropdown shows every source the app produces — not just compose
+      // containers. Each line carries a `<source> | …` prefix that
+      // `parseLogLine` recognises (`COMPOSE_RE`), so the dropdown
+      // automatically picks up the new sources without code changes here.
+      const raw = await this.tauri.invoke<string>('get_all_logs', {
         project,
         tail: LOGS_TAIL_LINES,
       });
