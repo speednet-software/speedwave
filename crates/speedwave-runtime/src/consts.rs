@@ -1402,6 +1402,16 @@ mod tests {
     }
 
     #[test]
+    fn wsl_distro_name_appears_in_installation_doc() {
+        let src = include_str!("../../../docs/getting-started/installation.md");
+        assert!(
+            src.contains(WSL_DISTRO_NAME),
+            "WSL_DISTRO_NAME ({WSL_DISTRO_NAME}) not found in docs/getting-started/installation.md; \
+             rename it there too (CLAUDE.md SSOT alignment)"
+        );
+    }
+
+    #[test]
     fn data_dir_appears_in_installer_hooks() {
         let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks.nsh");
         // DATA_DIR = ".speedwave"; the NSIS hook hard-codes "$PROFILE\.speedwave"

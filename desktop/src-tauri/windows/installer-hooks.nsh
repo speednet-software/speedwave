@@ -57,15 +57,25 @@ Var SpeedwaveDataDirOverride
 
   StrCmp $SpeedwaveCleanData "1" 0 sw_skip_cleanup
 
-    ; Best-effort terminate; ignore exit code.
+    ; Probe whether the Speedwave distro is registered. `wsl -d <name> -- true`
+    ; returns 0 only if the distro exists and can be entered. If it does not
+    ; exist (user installed but never completed setup), skip the terminate +
+    ; unregister to avoid a misleading "WARNING: returned 1" in the install log.
     ; Use $SYSDIR (System32) to prevent PATH-based binary substitution,
     ; matching the absolute-path hardening in WslRuntime::reset_vm().
+    nsExec::Exec '"$SYSDIR\wsl.exe" -d Speedwave -- true'
+    Pop $0
+    ${If} $0 != 0
+      DetailPrint "Speedwave: WSL distribution not registered, skipping unregister"
+      Goto sw_after_wsl_unregister
+    ${EndIf}
+
+    ; Best-effort terminate; ignore exit code.
     nsExec::ExecToLog '"$SYSDIR\wsl.exe" --terminate Speedwave'
     Pop $0
 
-    ; Unregister the WSL distro. "No distribution" exit code is treated as
-    ; success (idempotent). Any other non-zero exit code gets a warning so
-    ; the user knows to run `wsl --unregister Speedwave` manually.
+    ; Unregister the WSL distro. Any non-zero exit code at this point is
+    ; unexpected (we just confirmed the distro exists), so warn the user.
     nsExec::ExecToLog '"$SYSDIR\wsl.exe" --unregister Speedwave'
     Pop $0
     ${If} $0 != 0
@@ -73,6 +83,8 @@ Var SpeedwaveDataDirOverride
       DetailPrint "If a 'Speedwave' entry remains in 'wsl --list', run:"
       DetailPrint "  wsl --unregister Speedwave"
     ${EndIf}
+
+    sw_after_wsl_unregister:
 
     ; Only delete the default data dir; leave SPEEDWAVE_DATA_DIR alone
     ; (we cannot validate or sandbox the path safely from the uninstaller).
