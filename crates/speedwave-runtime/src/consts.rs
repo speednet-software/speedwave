@@ -579,7 +579,11 @@ pub const RESERVED_ENV_KEYS: &[&str] = &[
 /// Upper bound for plugin `mem_limit`, normalised to MiB. A plugin requesting
 /// more is rejected at install time. Built-in services are not subject to
 /// this cap — they configure their own limits via `compose.template.yml`.
-pub const PLUGIN_MEM_LIMIT_MAX_MIB: u64 = 8192;
+/// 16 GiB is enough headroom for legitimate ML-heavy MCP workers (the
+/// in-tree `presale` plugin requests 12 GiB) while still rejecting
+/// ridiculous values like `mem_limit: 999g` that would let a plugin OOM
+/// the host VM.
+pub const PLUGIN_MEM_LIMIT_MAX_MIB: u64 = 16384;
 
 /// Upper bound for plugin `cpu_limit` (cores). 4 cores is enough for any
 /// MCP worker we ship; raises trip an explicit ADR.

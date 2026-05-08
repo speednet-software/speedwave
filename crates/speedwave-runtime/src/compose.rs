@@ -4,7 +4,7 @@ use crate::defaults;
 use crate::plugin::{self, PluginManifest};
 use crate::runtime::ContainerRuntime;
 use crate::{build, bundle};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use strum::EnumProperty;
 
 /// Converts a host path to the path seen by the container engine.
@@ -477,6 +477,15 @@ pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
 /// - Injects WORKER_<PLUGIN>_URL into mcp-hub environment
 /// - Adds plugin resource volume mounts to claude container
 /// - Sets SPEEDWAVE_PLUGINS env var in claude container
+///
+/// Loads plugins via [`plugin::list_verified_plugins`], which fails the
+/// compose render if any installed plugin has a missing/invalid signature
+/// or a directory/manifest slug mismatch — a missing fail-closed loader
+/// here would let an attacker who tampered with one plugin still get the
+/// rest of the compose to render and run. Manifests are re-validated at
+/// render time so a post-install tamper that only changed the manifest
+/// (not enough to change the digest, e.g. a different field semantic)
+/// would still be caught by the same code that gates install.
 fn apply_plugins(
     yaml: &str,
     project_name: &str,
@@ -485,7 +494,7 @@ fn apply_plugins(
     network_name: &str,
     tokens_dir: &std::path::Path,
 ) -> anyhow::Result<String> {
-    let plugins = plugin::list_installed_plugins()?;
+    let plugins = plugin::list_verified_plugins()?;
     if plugins.is_empty() {
         return Ok(yaml.to_string());
     }
@@ -493,9 +502,19 @@ fn apply_plugins(
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
     let mut plugin_slugs: Vec<String> = Vec::new();
 
-    for manifest in &plugins {
+    for vp in &plugins {
+        let manifest = &vp.manifest;
+        let plugin_dir = vp.dir.as_path();
         let slug = &manifest.slug;
         let service_id = manifest.service_id.as_deref();
+
+        // Re-validate the manifest at render time. The signature already
+        // covers the manifest bytes, but re-running validate_manifest gives
+        // us a single rendering of the post-install rules (built-in slug
+        // collision, reserved env keys, mem/cpu caps) — useful when
+        // validate_manifest grows new rules and we don't want any installed
+        // plugin to silently survive a stricter ruleset.
+        plugin::validate_manifest(manifest, plugin_dir)?;
 
         // Check if plugin is enabled (by service_id for MCP plugins, by slug otherwise)
         let plugin_key = service_id.unwrap_or(slug);
@@ -514,12 +533,21 @@ fn apply_plugins(
                 tokens_dir,
                 project_dir,
             )?;
-            // Insert into doc["services"]["mcp-<service_id>"]
+            // Insert into doc["services"]["mcp-<service_id>"]. Refuse to
+            // overwrite a built-in service already present in the YAML —
+            // validate_manifest blocks the obvious "slug: hub" case at
+            // install, but a future change there should not silently
+            // re-open the door here. serde_yaml_ng's mapping insert
+            // overwrites on key collision; we want a hard failure instead.
+            let compose_name = plugin::derive_compose_name(sid);
             if let Some(services) = doc.get_mut("services").and_then(|v| v.as_mapping_mut()) {
-                services.insert(
-                    serde_yaml_ng::Value::String(plugin::derive_compose_name(sid)),
-                    service_value,
-                );
+                let key = serde_yaml_ng::Value::String(compose_name.clone());
+                if services.contains_key(&key) {
+                    anyhow::bail!(
+                        "plugin '{slug}' would overwrite existing compose service '{compose_name}'"
+                    );
+                }
+                services.insert(key, service_value);
             }
             // Inject WORKER_*_URL into hub. All workers share PORT_WORKER —
             // each container has its own network namespace, so port reuse is
@@ -544,17 +572,20 @@ fn apply_plugins(
             inject_worker_env(&mut doc, &worker_env, &url);
         }
 
-        // Mount claude-resources to claude container
-        if let Ok(plugins_base) = plugin::plugins_base_dir() {
-            let plugin_resources = plugins_base.join(slug).join("claude-resources");
-            if plugin_resources.exists() {
-                let mount = format!(
-                    "{}:/speedwave/plugins/{}:ro",
-                    to_engine_path(&plugin_resources)?,
-                    slug
-                );
-                add_claude_volume(&mut doc, &mount);
-            }
+        // Mount claude-resources to claude container. The resources dir
+        // must be a *real* directory inside the verified plugin tree —
+        // a symlink (or anything that escapes the tree under canonicalize)
+        // would let an attacker bind-mount /etc into the claude container.
+        let plugin_resources = vp.dir.join("claude-resources");
+        if plugin_resources.exists() {
+            ensure_resources_dir_safe(plugin_dir, &plugin_resources)
+                .map_err(|e| anyhow::anyhow!("plugin '{slug}': claude-resources unsafe: {e}"))?;
+            let mount = format!(
+                "{}:/speedwave/plugins/{}:ro",
+                to_engine_path(&plugin_resources)?,
+                slug
+            );
+            add_claude_volume(&mut doc, &mount);
         }
     }
 
@@ -1008,6 +1039,61 @@ fn ide_host_override() -> &'static str {
     {
         consts::WSL_HOST // "host.speedwave.internal"
     }
+}
+
+/// Verifies that a plugin's `claude-resources` directory and every entry
+/// underneath it is a real, non-symlink path inside the canonicalised
+/// plugin directory. Bind-mounting `claude-resources` into the claude
+/// container makes every file beneath it readable from inside; without
+/// this check, an attacker could:
+///
+///   - replace `claude-resources` itself with a symlink to `/etc`, so
+///     the container sees host configuration files at
+///     `/speedwave/plugins/<slug>/`, or
+///
+///   - drop `claude-resources/skills/foo.md → ~/.ssh/id_rsa` so the
+///     mount surfaces user secrets one level deeper.
+///
+/// The plugin signing model has no notion of legitimate symlinks, so
+/// any encountered symlink is fatal — same invariant as
+/// `compute_plugin_digest` in `signing.rs`.
+fn ensure_resources_dir_safe(plugin_dir: &Path, resources: &Path) -> anyhow::Result<()> {
+    use std::fs;
+    let resources_meta = fs::symlink_metadata(resources)?;
+    if resources_meta.file_type().is_symlink() {
+        anyhow::bail!("claude-resources is a symlink: {}", resources.display());
+    }
+    if !resources_meta.is_dir() {
+        anyhow::bail!(
+            "claude-resources is not a directory: {}",
+            resources.display()
+        );
+    }
+    let canonical_plugin = plugin_dir.canonicalize()?;
+    let canonical_resources = resources.canonicalize()?;
+    if !canonical_resources.starts_with(&canonical_plugin) {
+        anyhow::bail!(
+            "claude-resources canonicalises outside plugin dir: {} -> {}",
+            resources.display(),
+            canonical_resources.display()
+        );
+    }
+    walk_reject_symlinks(resources)
+}
+
+fn walk_reject_symlinks(dir: &Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ft = std::fs::symlink_metadata(&path)?.file_type();
+        if ft.is_symlink() {
+            anyhow::bail!("claude-resources contains symlink: {}", path.display());
+        }
+        if ft.is_dir() {
+            walk_reject_symlinks(&path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Injects a WORKER_*_URL environment variable into the mcp-hub service.
@@ -7912,5 +7998,52 @@ services:
                 env
             );
         }
+    }
+
+    // --- PR4: claude-resources mount safety ---
+
+    #[test]
+    fn test_ensure_resources_dir_safe_accepts_real_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plug");
+        let resources = plugin.join("claude-resources");
+        std::fs::create_dir_all(resources.join("skills")).unwrap();
+        std::fs::write(resources.join("skills").join("ok.md"), b"hi").unwrap();
+        super::ensure_resources_dir_safe(&plugin, &resources)
+            .expect("real directory tree must be accepted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_resources_dir_safe_rejects_root_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plug");
+        std::fs::create_dir_all(&plugin).unwrap();
+        // Symlink the entire claude-resources dir to /etc — without this
+        // check, the bind-mount would surface /etc inside the claude
+        // container as /speedwave/plugins/<slug>/.
+        let resources = plugin.join("claude-resources");
+        std::os::unix::fs::symlink("/etc", &resources).unwrap();
+
+        let err = super::ensure_resources_dir_safe(&plugin, &resources)
+            .expect_err("symlinked claude-resources must be rejected");
+        assert!(err.to_string().contains("symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_resources_dir_safe_rejects_nested_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plug");
+        let resources = plugin.join("claude-resources");
+        let skills = resources.join("skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        // Real symlink deep in the tree — also fatal because the bind
+        // mount surfaces every entry, including nested ones.
+        std::os::unix::fs::symlink("/etc/passwd", skills.join("evil.md")).unwrap();
+
+        let err = super::ensure_resources_dir_safe(&plugin, &resources)
+            .expect_err("nested symlink in claude-resources must be rejected");
+        assert!(err.to_string().contains("symlink"));
     }
 }
