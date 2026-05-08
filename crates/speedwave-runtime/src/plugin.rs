@@ -167,9 +167,11 @@ fn image_pending_marker_for(plugins_dir: &Path, slug: &str) -> PathBuf {
 
 /// Returns true if the plugin has a pending image build, looking in both
 /// the new state directory and the legacy in-tree location. Legacy-only
-/// markers are still observed so plugins installed before this change keep
-/// building on next launch; PR3's audit pass migrates them by deleting the
-/// in-tree marker after successful verification.
+/// markers are still observed so plugins installed before this change
+/// keep building on next launch. The first verify-side load (`audit_all`,
+/// `list_verified_*`, `list_for_ui`) migrates the in-tree marker into
+/// `plugin-state/` via `migrate_legacy_image_pending`, after which only
+/// the new location ever has the marker.
 fn has_pending_image_build_for(plugins_dir: &Path, plugin_dir: &Path, slug: &str) -> bool {
     image_pending_marker_for(plugins_dir, slug).exists()
         || plugin_dir.join(".image_pending").exists()
@@ -190,6 +192,64 @@ fn mark_image_pending_for(plugins_dir: &Path, slug: &str) -> anyhow::Result<()> 
 fn clear_image_pending_for(plugins_dir: &Path, plugin_dir: &Path, slug: &str) {
     let _ = std::fs::remove_file(image_pending_marker_for(plugins_dir, slug));
     let _ = std::fs::remove_file(plugin_dir.join(".image_pending"));
+}
+
+/// Migrates the pre-PR2 in-tree `.image_pending` marker out of the
+/// signed plugin tree before the digest is computed. Without this, every
+/// MCP plugin installed under an older Speedwave release fails signature
+/// verification on first launch under a runtime-invariant build (the
+/// in-tree marker was not part of the signed tree, so its presence
+/// changes the digest). Idempotent — a missing marker is a no-op.
+///
+/// Only the *root-level* `.image_pending` is migrated, and only if it
+/// is a regular file (not a symlink): both rules close the obvious
+/// "attacker plants a symlinked .image_pending and triggers a copy of
+/// host content into plugin-state" angle. The new marker location is
+/// `<plugin-state>/<slug>/image_pending`.
+///
+/// Run BEFORE every load-side signature check that observes a tree the
+/// user might be upgrading from — `audit_all`, `list_verified_*`,
+/// `list_for_ui`. Subsequent verifications then see a tree free of the
+/// legacy marker and the digest matches what was signed.
+fn migrate_legacy_image_pending(plugins_dir: &Path, plugin_dir: &Path, slug: &str) {
+    let legacy = plugin_dir.join(".image_pending");
+    let Ok(meta) = std::fs::symlink_metadata(&legacy) else {
+        return; // no marker, nothing to migrate
+    };
+    if !meta.file_type().is_file() {
+        // Symlink, dir, or anything other than a regular file — refuse
+        // to act. Removing a symlink the user planted would silently
+        // hide tamper from the verifier; we want the verifier to fail
+        // loudly instead.
+        log::warn!(
+            "plugin '{}': legacy .image_pending is not a regular file ({:?}); leaving untouched",
+            slug,
+            meta.file_type()
+        );
+        return;
+    }
+    let target_dir = plugin_state_dir_for(plugins_dir, slug);
+    if let Err(e) = std::fs::create_dir_all(&target_dir) {
+        log::warn!(
+            "plugin '{}': failed to create plugin-state dir {}: {e}",
+            slug,
+            target_dir.display()
+        );
+        return;
+    }
+    let target = target_dir.join("image_pending");
+    // Best effort. If rename fails (e.g. cross-FS) fall back to
+    // create+remove. The new marker is only used to trigger a build
+    // retry, so duplication risk is irrelevant.
+    if std::fs::rename(&legacy, &target).is_err() {
+        let _ = std::fs::write(&target, b"");
+        let _ = std::fs::remove_file(&legacy);
+    }
+    log::info!(
+        "plugin '{}': migrated legacy .image_pending to {}",
+        slug,
+        target.display()
+    );
 }
 
 /// Returns `~/.speedwave/tokens/<project>/<service_id>/`
@@ -1038,7 +1098,7 @@ pub fn list_verified_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<Verified
             continue;
         }
         let plugin_dir = entry.path();
-        let vp = verify_one_plugin_dir(&plugin_dir, &dir_name)?;
+        let vp = verify_one_plugin_dir(plugins_dir, &plugin_dir, &dir_name)?;
         out.push(vp);
     }
     Ok(out)
@@ -1047,7 +1107,20 @@ pub fn list_verified_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<Verified
 /// Verifies one plugin directory: signature, manifest parse,
 /// dir-name/slug equality, and `validate_manifest`. Returns a
 /// `VerifiedPlugin` on success or a contextual error on any failure.
-fn verify_one_plugin_dir(plugin_dir: &Path, dir_name: &str) -> anyhow::Result<VerifiedPlugin> {
+///
+/// Performs a one-shot migration of any pre-PR2 in-tree
+/// `.image_pending` marker out of the signed tree before computing the
+/// digest. Without that step, every MCP plugin installed under an
+/// older Speedwave release would fail signature verification on the
+/// first launch under a runtime-invariant build (the in-tree marker
+/// changes the digest). The migration is idempotent — once moved, the
+/// marker stays in plugin-state.
+fn verify_one_plugin_dir(
+    plugins_dir: &Path,
+    plugin_dir: &Path,
+    dir_name: &str,
+) -> anyhow::Result<VerifiedPlugin> {
+    migrate_legacy_image_pending(plugins_dir, plugin_dir, dir_name);
     signing::verify_plugin_signature(plugin_dir)
         .map_err(|e| anyhow::anyhow!("plugin '{dir_name}': signature verification failed: {e}"))?;
     let manifest_path = plugin_dir.join("plugin.json");
@@ -1104,6 +1177,12 @@ pub fn list_for_ui_from_dir(plugins_dir: &Path) -> Vec<PluginListEntry> {
             continue;
         }
         let plugin_dir = entry.path();
+        // Migrate legacy in-tree `.image_pending` before reading the
+        // tree, so the UI lister observes the same digest as
+        // `audit_all` and `list_verified_plugins` — otherwise a
+        // pre-PR2 install would show "tampered" in the UI even though
+        // it would auto-recover on the next CLI run.
+        migrate_legacy_image_pending(plugins_dir, &plugin_dir, &dir_name);
         let entry_record = classify_plugin_for_ui(&plugin_dir, &dir_name);
         out.push(entry_record);
     }
@@ -1203,7 +1282,7 @@ pub fn audit_all_in_dir(plugins_dir: &Path) -> Result<(), Vec<(String, String)>>
             continue;
         }
         let plugin_dir = entry.path();
-        if let Err(e) = verify_one_plugin_dir(&plugin_dir, &dir_name) {
+        if let Err(e) = verify_one_plugin_dir(plugins_dir, &plugin_dir, &dir_name) {
             failures.push((dir_name, crate::log_sanitizer::sanitize(&e.to_string())));
         }
     }
@@ -2925,6 +3004,122 @@ mod tests {
             leftovers.is_empty(),
             "after successful install/reinstall, no transient dirs should remain: {leftovers:?}"
         );
+    }
+
+    /// Pre-PR2 installs left a `.image_pending` marker inside the
+    /// signed tree. Once the runtime treats the signature as a runtime
+    /// invariant, that file changes the digest and verification fails
+    /// on first launch — every existing user with an MCP plugin would
+    /// be hard-failed unless we migrate the marker out of the tree
+    /// before computing the digest. `audit_all_in_dir` is the first
+    /// load-side path that observes the upgrade, so the migration must
+    /// fire from there.
+    #[test]
+    fn test_audit_migrates_legacy_image_pending() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        let plugin_dir = plugins.join("legacy-mcp");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"{"name":"x","slug":"legacy-mcp","version":"1.0.0","description":"x"}"#,
+        )
+        .unwrap();
+        // Legacy in-tree marker — exactly what an old install would
+        // leave behind.
+        std::fs::write(plugin_dir.join(".image_pending"), b"").unwrap();
+
+        // Audit succeeds (bypass active) and migrates the marker as a
+        // side-effect.
+        let _ = audit_all_in_dir(&plugins);
+
+        assert!(
+            !plugin_dir.join(".image_pending").exists(),
+            "legacy marker must be moved out of the signed tree"
+        );
+        assert!(
+            image_pending_marker_for(&plugins, "legacy-mcp").exists(),
+            "marker must land in plugin-state/<slug>/image_pending"
+        );
+    }
+
+    /// Migration must refuse to act on a non-regular-file `.image_pending`
+    /// — a symlink could be an attacker primitive (e.g. pointing at a
+    /// host secret); silently following it would copy that content into
+    /// `plugin-state/`, then leave the verifier confused. Better to
+    /// leave the legacy file in place and let the verifier fail loudly.
+    #[cfg(unix)]
+    #[test]
+    fn test_migrate_rejects_symlinked_image_pending() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        let plugin_dir = plugins.join("evil-legacy");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        // Symlink target need not exist; symlink_metadata still observes it.
+        std::os::unix::fs::symlink("/etc/passwd", plugin_dir.join(".image_pending")).unwrap();
+
+        migrate_legacy_image_pending(&plugins, &plugin_dir, "evil-legacy");
+
+        // Symlink stays put — verifier will still fail (which is what
+        // we want for a tampered tree).
+        assert!(plugin_dir.join(".image_pending").is_symlink());
+        assert!(!image_pending_marker_for(&plugins, "evil-legacy").exists());
+    }
+
+    /// Two threads racing to install the same slug must not corrupt the
+    /// destination tree. `install_plugin_with_base` holds an exclusive
+    /// flock on `<plugins>/.install.lock`, copies into a
+    /// `<slug>.installing.<uuid>` staging dir, and only then renames
+    /// into place — concurrent calls serialise on the lock and each
+    /// produces a clean tree.
+    #[test]
+    fn test_install_concurrent_no_corruption() {
+        // SPEEDWAVE_ALLOW_UNSIGNED is process-global; we hold the
+        // unsigned-env lock for both threads via the guard *outside*
+        // the spawned threads. Threads inherit the env.
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let zip = tmp.path().join("plugin.zip");
+        build_test_plugin_zip(&zip, "race-target", false);
+        let plugins_dir = tmp.path().join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+
+        let plugins_dir_a = plugins_dir.clone();
+        let zip_a = zip.clone();
+        let t_a = std::thread::spawn(move || {
+            let mut sink: Vec<PluginInstallProgress> = Vec::new();
+            install_plugin_with_base(&zip_a, None, &mut |p| sink.push(p), &plugins_dir_a)
+        });
+        let plugins_dir_b = plugins_dir.clone();
+        let zip_b = zip.clone();
+        let t_b = std::thread::spawn(move || {
+            let mut sink: Vec<PluginInstallProgress> = Vec::new();
+            install_plugin_with_base(&zip_b, None, &mut |p| sink.push(p), &plugins_dir_b)
+        });
+
+        let r_a = t_a.join().expect("thread A panicked");
+        let r_b = t_b.join().expect("thread B panicked");
+        // Both must succeed (lock serialises them; second install is a
+        // legal upgrade-in-place).
+        r_a.expect("install A");
+        r_b.expect("install B");
+
+        // No leftover staging or removing dirs.
+        let leftovers: Vec<String> = std::fs::read_dir(&plugins_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".installing.") || n.contains(".removing."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "lock+rename must leave no transient dirs after concurrent installs: {leftovers:?}"
+        );
+
+        // Final state is a single, consistent plugin tree.
+        let final_dir = plugins_dir.join("race-target");
+        assert!(final_dir.join("plugin.json").is_file());
     }
 
     #[test]

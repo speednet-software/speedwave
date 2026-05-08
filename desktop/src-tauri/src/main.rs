@@ -940,6 +940,47 @@ fn ensure_mcp_os_running(
     }
 }
 
+/// Shows the audit-failure dialog and terminates the process. Returns
+/// only via `process::exit`. On macOS / Windows the OS-native dialog
+/// is shown synchronously via `blocking_show`. On Linux the same call
+/// can deadlock the Tauri setup thread when the window manager isn't
+/// ready (`tauri-apps/plugins-workspace#956`); we fall back there to
+/// a non-blocking show with a 30-second timeout that exits the process
+/// regardless. In every code path the function does not return.
+fn show_audit_failure_dialog_and_exit(app: &tauri::AppHandle, body: String) -> ! {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app
+            .dialog()
+            .message(body)
+            .title("Plugin verification failed")
+            .kind(MessageDialogKind::Error)
+            .blocking_show();
+        std::process::exit(1);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let body_for_dialog = body.clone();
+        let app_for_dialog = app.clone();
+        std::thread::spawn(move || {
+            app_for_dialog
+                .dialog()
+                .message(body_for_dialog)
+                .title("Plugin verification failed")
+                .kind(MessageDialogKind::Error)
+                .show(|_| {
+                    std::process::exit(1);
+                });
+        });
+        // Safety net — if the dialog can't render (no DISPLAY, headless,
+        // dialog plugin failure), we still terminate within 30 s instead
+        // of leaving the user with a frozen, half-initialised app.
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        std::process::exit(1);
+    }
+}
+
 /// Formats the per-plugin failures from `plugin::audit_all` into a
 /// user-actionable dialog message. Tells the user what failed and how
 /// to recover via CLI/manual cleanup — Settings UI is unreachable
@@ -1156,25 +1197,27 @@ fn main() {
             // collected and shown to the user in one dialog. Recovery
             // path is the CLI (`speedwave plugin remove <slug>`) or
             // manual deletion — Settings UI is behind this gate.
+            //
+            // Hard-fail semantics: the dialog shows the user every failed
+            // plugin synchronously, then the process exits. Returning
+            // `Ok(())` from `setup` would let Tauri continue starting
+            // the webview and registering command handlers — a tampered
+            // plugin would still be inert (`#[tauri::command]` callers
+            // go through the verified-only gates added in PR5), but the
+            // command surface would be live for unrelated calls. We
+            // refuse to bring the rest of the app online at all: the
+            // dialog is shown via the OS-native blocking path on
+            // platforms where it is reliable, and the process exits the
+            // moment the user dismisses it (or after a timeout fallback
+            // on Linux, where blocking-show can deadlock).
             if let Err(failures) = speedwave_runtime::plugin::audit_all() {
                 let body = format_audit_failure_message(&failures);
                 log::error!("plugin audit failed:\n{}", body);
-                use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-                let handle_for_exit = app.handle().clone();
-                // Use the non-blocking variant with a callback — on Linux
-                // `blocking_show` can deadlock the setup thread if the
-                // window manager isn't ready. See tauri-plugin-dialog
-                // issue #956. Exit happens on user dismiss.
-                app.dialog()
-                    .message(body)
-                    .title("Plugin verification failed")
-                    .kind(MessageDialogKind::Error)
-                    .show(move |_| {
-                        handle_for_exit.exit(1);
-                    });
-                // Return early so setup doesn't continue spawning
-                // background services for a known-bad state.
-                return Ok(());
+                // Diverges (`-> !`) — `process::exit` is the last call.
+                // No `Ok(())` / `Err(...)` follows because Tauri must
+                // not bring up the webview / command surface for a
+                // tampered plugin set.
+                show_audit_failure_dialog_and_exit(app.handle(), body);
             }
 
             // Clean up old rotated log files (max 10 kept)

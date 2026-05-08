@@ -123,10 +123,7 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
         // An unverified plugin must NOT count as enabled, even if the
         // user previously enabled a (now-tampered) version. The frontend
         // additionally disables the enable toggle for non-verified entries.
-        let verified = matches!(
-            ui.verification_status,
-            plugin::VerificationStatus::Verified
-        );
+        let verified = matches!(ui.verification_status, plugin::VerificationStatus::Verified);
         let enabled = verified && integrations.is_plugin_enabled(sid);
 
         let auth_fields: Vec<plugin::AuthFieldDef> = manifest.auth_fields.clone();
@@ -413,12 +410,9 @@ pub fn set_plugin_enabled(
         let matches_id = |m: &plugin::PluginManifest| {
             m.service_id.as_deref() == Some(&service_id) || m.slug == service_id
         };
-        let candidate = entries.iter().find(|e| {
-            e.manifest
-                .as_ref()
-                .map(matches_id)
-                .unwrap_or(false)
-        });
+        let candidate = entries
+            .iter()
+            .find(|e| e.manifest.as_ref().map(matches_id).unwrap_or(false));
         match candidate {
             None => {
                 return Err(format!(
@@ -430,7 +424,9 @@ pub fn set_plugin_enabled(
                 return Err(format!(
                     "plugin '{}' cannot be enabled: {}. Reinstall a signed plugin or remove it.",
                     service_id,
-                    e.verification_error.as_deref().unwrap_or("verification failed")
+                    e.verification_error
+                        .as_deref()
+                        .unwrap_or("verification failed")
                 ));
             }
             Some(_) => {}
@@ -478,7 +474,10 @@ pub fn save_plugin_credentials(
         return Err(format!(
             "plugin '{}' cannot accept credentials: {}",
             slug,
-            entry.verification_error.as_deref().unwrap_or("verification failed")
+            entry
+                .verification_error
+                .as_deref()
+                .unwrap_or("verification failed")
         ));
     }
     let manifest = entry
@@ -523,7 +522,7 @@ pub fn plugin_save_settings(
     // comes from the manifest; persisting settings for a tampered
     // plugin would let an attacker pre-populate state for a future
     // (re)installed legitimate plugin.
-    require_verified(&slug)?;
+    let manifest = require_verified_with_manifest(&slug)?;
 
     // Cap settings JSON size to prevent a runaway plugin from bloating
     // user_config.json. 64 KiB is generous — settings are key/value
@@ -535,6 +534,22 @@ pub fn plugin_save_settings(
             "plugin '{}' settings exceed {} bytes",
             slug, SETTINGS_MAX_BYTES
         ));
+    }
+
+    // If the plugin declared a `settings_schema`, the payload must
+    // validate against it. Without this, the manifest field is
+    // documentation only — the user_config could end up holding values
+    // outside the schema's enum/type, which the worker would later
+    // crash on or, worse, silently misinterpret.
+    if let Some(ref schema) = manifest.settings_schema {
+        let validator = jsonschema::draft7::new(schema)
+            .map_err(|e| format!("plugin '{}' has an invalid settings_schema: {e}", slug))?;
+        if let Err(e) = validator.validate(&settings) {
+            return Err(format!(
+                "settings for plugin '{}' do not match its schema: {e}",
+                slug
+            ));
+        }
     }
 
     config::with_config_lock(|| {
@@ -559,19 +574,32 @@ pub fn plugin_save_settings(
 /// on* a plugin's identity — credentials, settings — to keep the
 /// "tampered plugins are inert" invariant in one place.
 fn require_verified(slug: &str) -> Result<(), String> {
+    require_verified_with_manifest(slug).map(|_| ())
+}
+
+/// Same gate as [`require_verified`] but returns the parsed manifest
+/// so callers that need to inspect declared fields (e.g. the
+/// `settings_schema` for `plugin_save_settings`) don't have to look
+/// it up a second time.
+fn require_verified_with_manifest(slug: &str) -> Result<plugin::PluginManifest, String> {
     let entries = plugin::list_for_ui();
     let entry = entries
-        .iter()
+        .into_iter()
         .find(|e| e.slug == slug)
         .ok_or_else(|| format!("plugin '{}' not found", slug))?;
     if entry.verification_status != plugin::VerificationStatus::Verified {
         return Err(format!(
             "plugin '{}' is not verified: {}",
             slug,
-            entry.verification_error.as_deref().unwrap_or("verification failed")
+            entry
+                .verification_error
+                .as_deref()
+                .unwrap_or("verification failed")
         ));
     }
-    Ok(())
+    entry
+        .manifest
+        .ok_or_else(|| format!("plugin '{}' has no manifest", slug))
 }
 
 #[tauri::command]
@@ -675,6 +703,8 @@ mod tests {
             token_mount: "ro".into(),
             settings_schema: None,
             requires_integrations: vec![],
+            verification_status: "verified".into(),
+            verification_error: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("test-plugin"));
@@ -707,6 +737,8 @@ mod tests {
             token_mount: "ro".into(),
             settings_schema: Some(schema),
             requires_integrations: vec!["sharepoint".into()],
+            verification_status: "verified".into(),
+            verification_error: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("settings_schema"));

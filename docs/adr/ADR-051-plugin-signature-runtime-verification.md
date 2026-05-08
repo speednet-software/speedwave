@@ -8,7 +8,7 @@
 
 Speedwave verifies plugin Ed25519 signatures against an embedded Speednet public key during `speedwave plugin install`. The verifier itself is correct: it computes a deterministic SHA-256 of every file under the plugin tree (excluding `SIGNATURE`), then verifies the signature against that digest using `ed25519-dalek`.[^1][^2]
 
-The defect was structural — `verify_plugin_signature` was called from exactly one production site, `install_plugin_with_base` in `crates/speedwave-runtime/src/plugin.rs`. Every code path that subsequently *read* the plugin tree trusted the on-disk contents blindly:
+The defect was structural — `verify_plugin_signature` was called from exactly one production site, `install_plugin_with_base` in `crates/speedwave-runtime/src/plugin.rs`. Every code path that subsequently _read_ the plugin tree trusted the on-disk contents blindly:
 
 - `apply_plugins` in `compose.rs` rendered MCP services and bind-mounted `claude-resources/` into the claude container.
 - `ensure_plugin_images_from_dir`, `ensure_all_plugin_images_from_dir`, `build_pending_from_dir`, and `build_single_plugin_image` read each plugin's `Containerfile` and invoked `prepare_build_context` + `build_image`.
@@ -23,10 +23,10 @@ The signing system was therefore an install-time gate, not a runtime integrity i
 
 A secondary bundle of weaknesses surfaced during the audit:
 
-- The `image_pending` build marker was written *into* the signed tree (`<plugin>/.image_pending`), so install of a fresh MCP plugin permanently invalidated its own digest.
+- The `image_pending` build marker was written _into_ the signed tree (`<plugin>/.image_pending`), so install of a fresh MCP plugin permanently invalidated its own digest.
 - `compute_plugin_digest` followed symlinks via `is_dir()` and `read()`, so an attacker could drop `claude-resources/skills/foo.md → /etc/passwd` and the signed digest would fold in arbitrary host content.
 - Install used `remove_dir_all + copy_dir_recursive` with no lock and no atomic rename, so two concurrent installs for the same slug could produce a half-A/half-B tree.
-- `make build-tauri` produced production installers (.dmg, .app, .exe) whose bundled `speedwave` CLI was a *debug* build — and the `SPEEDWAVE_ALLOW_UNSIGNED` bypass in `signing::unsigned_bypass_active` is `cfg(debug_assertions)`-gated, which only flips off in the release profile.[^3]
+- `make build-tauri` produced production installers (.dmg, .app, .exe) whose bundled `speedwave` CLI was a _debug_ build — and the `SPEEDWAVE_ALLOW_UNSIGNED` bypass in `signing::unsigned_bypass_active` is `cfg(debug_assertions)`-gated, which only flips off in the release profile.[^3]
 - `validate_manifest` accepted `LD_PRELOAD` / `DYLD_*` / `NODE_OPTIONS` in `extra_env`, accepted `mem_limit: "999g"` (989 GiB), allowed `token_mount: read_write` for any plugin (despite ADR-009 reserving it for SharePoint), and admitted slugs that derived a compose name colliding with built-in services (`hub` → `mcp-hub`).
 
 ## Decision
@@ -41,7 +41,7 @@ Stat-only cache keys (mtime + len) were rejected: `utimensat` makes those trivia
 
 The runtime exposes two loaders. `list_verified_plugins` returns `Vec<VerifiedPlugin { manifest, dir }>` — fail-closed, with `dir.file_name() == manifest.slug` enforced. Callers (`apply_plugins`, image builders, Claude wiring) use `vp.dir`; they never reconstruct a path via `plugins_base.join(manifest.slug)`. Without the dir/slug enforcement an attacker dropping `evil/plugin.json` whose `slug: "good"` would silently re-route every caller to a different on-disk tree.
 
-`list_for_ui` is the tolerant counterpart. It returns one `PluginListEntry` per directory with a `verification_status` discriminator (`Verified` / `MissingSignature` / `InvalidSignature` / `DirSlugMismatch` / `ManifestInvalid`) and a `verification_error` string. The Desktop UI uses this so users can see *what* is broken; the green pill becomes red with a short label and a tooltip.
+`list_for_ui` is the tolerant counterpart. It returns one `PluginListEntry` per directory with a `verification_status` discriminator (`Verified` / `MissingSignature` / `InvalidSignature` / `DirSlugMismatch` / `ManifestInvalid`) and a `verification_error` string. The Desktop UI uses this so users can see _what_ is broken; the green pill becomes red with a short label and a tooltip.
 
 `audit_all` is the startup pass. It collects every failure into a `Vec<(slug, reason)>` and is called both from the Desktop `.setup()` callback and from the CLI before any non-recovery action. Both surfaces show the user every failed plugin in one report.
 
@@ -73,7 +73,7 @@ Per-plugin mutable state lives at `~/.speedwave/plugin-state/<slug>/`, not under
 
 The Desktop `.setup()` callback runs `audit_all` and, on failure, shows a Tauri 2 dialog with every slug+reason and the CLI commands that fix them, then exits. The dialog uses `.show(callback)` instead of `.blocking_show()` — the latter can deadlock the setup thread on Linux if the window manager isn't ready.[^5]
 
-The CLI runs the same audit *after* Help and SelfUpdate (which exit before reaching this point) and *before* any action that touches the runtime. Recovery actions (`Init`, `PluginInstall`, `PluginList`, `PluginRemove`) skip the audit so a user with a bad plugin can list status, install a fresh signed plugin, or remove the broken one even when another plugin is failing. The skip list is an explicit allow-list, so any future `CliAction` variant defaults to gated.
+The CLI runs the same audit _after_ Help and SelfUpdate (which exit before reaching this point) and _before_ any action that touches the runtime. Recovery actions (`Init`, `PluginInstall`, `PluginList`, `PluginRemove`) skip the audit so a user with a bad plugin can list status, install a fresh signed plugin, or remove the broken one even when another plugin is failing. The skip list is an explicit allow-list, so any future `CliAction` variant defaults to gated.
 
 The Desktop dialog deliberately does not say "open Settings" — Settings is behind the audit gate. Recovery instructions point at `speedwave plugin remove <slug>` and manual `~/.speedwave/plugins/<slug>/` cleanup.
 
@@ -107,7 +107,7 @@ Tauri commands that mutate plugin state (`set_plugin_enabled` for enable, `save_
 
 ### Neutral
 
-- The `validate_manifest` ruleset got stricter. The in-tree `presale` plugin's `mem_limit: 12g` motivated raising the cap from the planned 8 192 MiB to 16 384 MiB. Future plugins that need more must either prove the case in a follow-up ADR or be a built-in service.
+- The `validate_manifest` ruleset got stricter, and the `mem_limit` cap was raised from the planned 8 192 MiB to 16 384 MiB during implementation. The in-tree `presale` plugin requests 12 GiB for ML-heavy presale generation; an 8 GiB cap would have rejected it without giving operators a way to opt in. 16 GiB is the smallest cap that admits the existing legitimate plugin while still rejecting the manifestly-bad values the cap is there to catch (`mem_limit: 999g`, etc.). The cap does not weaken the threat model — the host VM (Lima default 4 GiB on macOS, configurable) still imposes the real ceiling at runtime; the manifest cap exists to surface absurd values at install time, not to be the resource-management primitive. Future plugins that need more than 16 GiB must either prove the case in a follow-up ADR or be a built-in service.
 
 ## Alternatives considered
 
@@ -119,8 +119,12 @@ Tauri commands that mutate plugin state (`set_plugin_enabled` for enable, `save_
 
 ## Footnotes
 
-[^1]: Internet Engineering Task Force, *RFC 8032: Edwards-Curve Digital Signature Algorithm (EdDSA)*. <https://datatracker.ietf.org/doc/html/rfc8032>
+[^1]: Internet Engineering Task Force, _RFC 8032: Edwards-Curve Digital Signature Algorithm (EdDSA)_. <https://datatracker.ietf.org/doc/html/rfc8032>
+
 [^2]: `ed25519-dalek` v2 documentation. <https://docs.rs/ed25519-dalek/latest/ed25519_dalek/>
+
 [^3]: The Rust Reference, "Conditional compilation": `debug_assertions` is `true` for the dev profile and `false` for the release profile, so `#[cfg(debug_assertions)]` blocks are not compiled into release binaries. <https://doc.rust-lang.org/reference/conditional-compilation.html#debug_assertions>
+
 [^4]: POSIX `utimensat(2)` allows any file owner to set arbitrary atime/mtime. <https://pubs.opengroup.org/onlinepubs/9699919799/functions/utimensat.html>
+
 [^5]: `tauri-apps/plugins-workspace` issue #956: `dialog::blocking_show` can deadlock the setup callback on Linux when the window manager isn't fully ready. <https://github.com/tauri-apps/plugins-workspace/issues/956>

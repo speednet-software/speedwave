@@ -242,9 +242,12 @@ const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
                       } @else {
                         <span
                           class="pill red"
-                          [attr.title]="plugin.verification_error || verificationStatusLabel(plugin)"
+                          [attr.title]="
+                            plugin.verification_error || verificationStatusLabel(plugin)
+                          "
                           [attr.data-testid]="'plugins-row-unverified-' + plugin.slug"
-                        >⚠ {{ verificationStatusLabel(plugin) }}</span>
+                          >⚠ {{ verificationStatusLabel(plugin) }}</span
+                        >
                       }
                     </td>
                     <td class="px-4 py-2.5 text-right">
@@ -259,7 +262,8 @@ const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
                         [attr.title]="
                           isVerified(plugin)
                             ? null
-                            : 'Plugin cannot be enabled: ' + (plugin.verification_error || verificationStatusLabel(plugin))
+                            : 'Plugin cannot be enabled: ' +
+                              (plugin.verification_error || verificationStatusLabel(plugin))
                         "
                         (click)="onRowToggle(plugin, $event)"
                       ></button>
@@ -364,6 +368,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
    * audit. Drives whether the enable toggle is interactive and which
    * pill (green/red) renders. The remove action is intentionally
    * available regardless — that's the recovery path.
+   * @param plugin - the plugin status entry to inspect
    */
   isVerified(plugin: PluginStatusEntry): boolean {
     return plugin.verification_status === 'verified';
@@ -373,6 +378,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
    * Short label for the pill / aria text when a plugin is unverified.
    * Backend always supplies `verification_status` so we don't need a
    * "missing field" fallback here.
+   * @param plugin - the plugin status entry whose status string to render
    */
   verificationStatusLabel(plugin: PluginStatusEntry): string {
     switch (plugin.verification_status) {

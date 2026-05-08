@@ -8046,4 +8046,41 @@ services:
             .expect_err("nested symlink in claude-resources must be rejected");
         assert!(err.to_string().contains("symlink"));
     }
+
+    /// `claude-resources/` must be a real directory on disk, not a
+    /// regular file dressed up as the resources root. Without this,
+    /// `add_claude_volume` would still emit a bind-mount entry whose
+    /// host source is a single file — and depending on the engine
+    /// either fails opaquely at start, or surfaces the file in place
+    /// of a directory inside the container.
+    #[test]
+    fn test_ensure_resources_dir_safe_rejects_non_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plug");
+        std::fs::create_dir_all(&plugin).unwrap();
+        let resources = plugin.join("claude-resources");
+        std::fs::write(&resources, b"not a dir").unwrap();
+
+        let err = super::ensure_resources_dir_safe(&plugin, &resources)
+            .expect_err("non-directory claude-resources must be rejected");
+        assert!(err.to_string().contains("not a directory"));
+    }
+
+    /// If the canonical resolution of `claude-resources` escapes the
+    /// canonical plugin tree, the helper bails. We can't trivially
+    /// build such a path without symlinks (which `walk_reject_symlinks`
+    /// already catches), but we can at least pin the invariant by
+    /// verifying that a deeply-nested real directory tree IS accepted
+    /// — regression test for "I broke the canonicalize check by
+    /// being too strict".
+    #[test]
+    fn test_ensure_resources_dir_safe_accepts_deep_nesting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plug");
+        let deep = plugin.join("claude-resources/skills/sub/deeper");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("ok.md"), b"hi").unwrap();
+        super::ensure_resources_dir_safe(&plugin, &plugin.join("claude-resources"))
+            .expect("deep real-directory tree must be accepted");
+    }
 }
