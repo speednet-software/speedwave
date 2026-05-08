@@ -47,6 +47,20 @@ When implementing any feature, ask these questions:
 2. **Does this add a new attack surface?** Document it and mitigate it.
 3. **Does this require mounting host filesystem into a container?** Minimize scope, use `:ro` wherever possible.
 
+### Local attacker with home-directory write access
+
+Speedwave's threat model includes a non-privileged process running as the same user — a malicious npm `postinstall` script, a browser exploit, or any locally-executed code that can write under `~/`. The container hardening above stops a *compromised container* from escaping; it does not stop a *host* process from rewriting the files Speedwave reads.
+
+`~/.speedwave/plugins/<slug>/` is writable by the user, so any path that reads from it is in this attacker's reach. Plugin Ed25519 signatures are therefore enforced as a **runtime invariant**, not just an install gate (see [ADR-051](../adr/ADR-051-plugin-signature-runtime-verification.md)):
+
+- Every read of a plugin tree (compose render, image build, claude-resources mount, UI listing) goes through `signing::verify_plugin_signature_cached` — the cache is keyed by canonical path AND content digest, so any byte change to any file forces a fresh Ed25519 check.
+- Mutable per-plugin state lives at `~/.speedwave/plugin-state/<slug>/`, not under `plugins/<slug>/`, so writing the `image_pending` marker does not invalidate the digest.
+- `plugin::compute_plugin_digest` rejects symlinks. Without this, an attacker dropping `claude-resources/skills/foo.md → /etc/passwd` could fold arbitrary host content into the digest of an otherwise-innocent tree.
+- Install is atomic: lock + staging dir on the same filesystem + `rename` swap + cleanup, so a concurrent install or a crash mid-replace cannot leave a half-A/half-B Frankenstein.
+- Startup runs `plugin::audit_all` — the Desktop blocks with a recovery dialog (Tauri 2 `tauri-plugin-dialog`) on any failure; the CLI exits 2. Recovery commands (`plugin remove`, `plugin install`, `plugin list`, `init`) skip the audit so users can always reach the recovery path.
+
+`~/.speedwave/tokens/<project>/<service_id>/<key>` is mode 0600 by `set_owner_only` and lives outside the plugin tree, so token files are not part of the plugin signature surface — but they are also write-protected against unprivileged tampering by filesystem ACLs.
+
 ### Security Boundaries
 
 - **Host ↔ VM**: Lima/WSL2 kernel isolation
