@@ -195,10 +195,20 @@ build-runtime:
 build-cli:
 	cargo build -p speedwave-cli
 
+# Release-profile build of the CLI, used as a dependency of `build-tauri`
+# so the bundled CLI shipped inside the .app/.exe/.dmg is a release
+# binary. With a debug binary, the `SPEEDWAVE_ALLOW_UNSIGNED` bypass in
+# `signing::unsigned_bypass_active` would still be live in shipped
+# artifacts (it is `cfg(debug_assertions)`-gated, which only flips off
+# in the release profile). Keep `build-cli` (debug) untouched so
+# `make dev` and ad-hoc developer runs are not slowed down.
+build-cli-release:
+	cargo build -p speedwave-cli --release
+
 build-desktop:
 	cd desktop/src-tauri && cargo build
 
-build-tauri: build-cli build-angular build-mcp build-os-cli download-nodejs
+build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nodejs
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) download-lima; fi
 	@if [ "$$(uname)" = "Linux" ]; then $(MAKE) download-nerdctl-full; fi
 	@if [ "$(OS)" = "Windows_NT" ]; then $(MAKE) download-wsl-resources; fi
@@ -206,9 +216,9 @@ build-tauri: build-cli build-angular build-mcp build-os-cli download-nodejs
 	@if [ "$$(uname)" = "Darwin" ]; then $(MAKE) bundle-native-assets; fi
 	mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
-	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
+	cp target/release/speedwave.exe desktop/src-tauri/cli/speedwave.exe
 else
-	cp target/debug/speedwave desktop/src-tauri/cli/speedwave
+	cp target/release/speedwave desktop/src-tauri/cli/speedwave
 	chmod +x desktop/src-tauri/cli/speedwave
 endif
 	@$(MAKE) verify-bundled-assets
