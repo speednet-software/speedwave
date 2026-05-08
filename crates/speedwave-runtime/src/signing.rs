@@ -106,7 +106,21 @@ fn collect_files_recursive(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> any
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_dir() {
+        // Use symlink_metadata so symlinks are observed *as symlinks*, not
+        // silently followed. The plugin signing model has no notion of
+        // legitimate symlinks — every plugin file is a real file inside the
+        // plugin tree. A symlink anywhere under the plugin dir is either an
+        // attacker pointing the digest at content outside the tree (e.g.
+        // `claude-resources/skills/foo.md → /etc/passwd`) or a packaging
+        // accident; both are fatal.
+        let file_type = std::fs::symlink_metadata(&path)?.file_type();
+        if file_type.is_symlink() {
+            anyhow::bail!(
+                "plugin contains symlink which is not allowed: {}",
+                path.display()
+            );
+        }
+        if file_type.is_dir() {
             collect_files_recursive(&path, out)?;
         } else if path.file_name().map(|n| n != "SIGNATURE").unwrap_or(true) {
             out.push(path);
@@ -251,6 +265,13 @@ mod tests {
 
     #[test]
     fn test_missing_signature_file_errors() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        // SPEEDWAVE_ALLOW_UNSIGNED can be set in the developer's shell (e.g.
+        // `make dev`); a previous test in the same process can also leak it.
+        // Either case turns this assertion into a flake. Clear the var while
+        // serialised by ENV_MUTEX.
+        std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
+
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path();
         std::fs::write(plugin_dir.join("plugin.json"), r#"{"name":"test"}"#).unwrap();
@@ -369,5 +390,46 @@ mod tests {
         std::fs::write(dir.join("SIGNATURE"), "some-signature").unwrap();
         let d2 = compute_plugin_digest(dir).unwrap();
         assert_eq!(d1, d2, "SIGNATURE file must be excluded from digest");
+    }
+
+    /// A symlink anywhere inside the plugin tree must abort digest
+    /// computation. Without this guard, an attacker could place a symlink
+    /// pointing at an arbitrary host file (e.g. `/etc/passwd`) — the
+    /// digest would fold its contents in and the plugin would still
+    /// validate against a "signed" tree that no longer reflects what's on
+    /// disk.
+    #[cfg(unix)]
+    #[test]
+    fn test_compute_digest_rejects_file_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("plugin.json"), r#"{"name":"test"}"#).unwrap();
+        // Symlink → arbitrary outside-the-tree path. Target need not exist
+        // for symlink_metadata() / is_symlink() to fire.
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("evil.md")).unwrap();
+
+        let err = compute_plugin_digest(dir).expect_err("symlink must abort digest");
+        assert!(
+            err.to_string().contains("symlink"),
+            "expected symlink rejection, got: {err}"
+        );
+    }
+
+    /// Same invariant for directory-symlinks — equally dangerous because
+    /// `symlink_metadata` on the link would otherwise be followed by a
+    /// recursive descent that escapes the plugin tree.
+    #[cfg(unix)]
+    #[test]
+    fn test_compute_digest_rejects_dir_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("plugin.json"), r#"{"name":"test"}"#).unwrap();
+        std::os::unix::fs::symlink("/etc", dir.join("hijacked")).unwrap();
+
+        let err = compute_plugin_digest(dir).expect_err("dir-symlink must abort digest");
+        assert!(
+            err.to_string().contains("symlink"),
+            "expected symlink rejection, got: {err}"
+        );
     }
 }

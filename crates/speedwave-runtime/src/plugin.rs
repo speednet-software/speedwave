@@ -139,6 +139,59 @@ pub fn plugins_base_dir() -> anyhow::Result<PathBuf> {
     Ok(consts::data_dir().join("plugins"))
 }
 
+/// Returns the base directory for mutable per-plugin state — by default
+/// `~/.speedwave/plugin-state/`. Kept *outside* the signed plugin
+/// directory: markers like `image_pending` (telling the next launch to
+/// retry an image build) used to live inside the plugin tree, but writing
+/// into a tree that we then sign and re-verify is contradictory — any
+/// post-install marker invalidates the digest.
+///
+/// `plugins_dir` ends in `plugins`; we replace that final segment with
+/// `plugin-state` so unit tests pointing `plugins_dir` at a temp dir keep
+/// their state under the same temp root instead of leaking into the user's
+/// real `~/.speedwave/`.
+fn plugin_state_base_for(plugins_dir: &Path) -> PathBuf {
+    plugins_dir
+        .parent()
+        .map(|p| p.join("plugin-state"))
+        .unwrap_or_else(|| plugins_dir.with_file_name("plugin-state"))
+}
+
+fn plugin_state_dir_for(plugins_dir: &Path, slug: &str) -> PathBuf {
+    plugin_state_base_for(plugins_dir).join(slug)
+}
+
+fn image_pending_marker_for(plugins_dir: &Path, slug: &str) -> PathBuf {
+    plugin_state_dir_for(plugins_dir, slug).join("image_pending")
+}
+
+/// Returns true if the plugin has a pending image build, looking in both
+/// the new state directory and the legacy in-tree location. Legacy-only
+/// markers are still observed so plugins installed before this change keep
+/// building on next launch; PR3's audit pass migrates them by deleting the
+/// in-tree marker after successful verification.
+fn has_pending_image_build_for(plugins_dir: &Path, plugin_dir: &Path, slug: &str) -> bool {
+    image_pending_marker_for(plugins_dir, slug).exists()
+        || plugin_dir.join(".image_pending").exists()
+}
+
+/// Marks the plugin's image build as pending. Always writes to the new
+/// state directory (`<plugin-state-base>/<slug>/image_pending`), never
+/// into the signed plugin tree.
+fn mark_image_pending_for(plugins_dir: &Path, slug: &str) -> anyhow::Result<()> {
+    let dir = plugin_state_dir_for(plugins_dir, slug);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("image_pending"), b"")?;
+    Ok(())
+}
+
+/// Clears the pending marker for `slug`, in both the state directory and
+/// the legacy in-tree location. Best-effort — a missing marker is fine.
+fn clear_image_pending_for(plugins_dir: &Path, plugin_dir: &Path, slug: &str) {
+    let _ = std::fs::remove_file(image_pending_marker_for(plugins_dir, slug));
+    let _ = std::fs::remove_file(plugin_dir.join(".image_pending"));
+}
+
 /// Returns `~/.speedwave/tokens/<project>/<service_id>/`
 pub fn token_dir(project: &str, service_id: &str) -> anyhow::Result<PathBuf> {
     Ok(consts::data_dir()
@@ -676,9 +729,11 @@ fn install_plugin_with_base(
     }
     copy_dir_recursive(&plugin_src, &dest)?;
 
-    // Create .image_pending marker if MCP plugin
+    // Mark pending image build for MCP plugins. Stored OUTSIDE the signed
+    // tree (see `plugin_state_base_for`) so that creating the marker
+    // doesn't invalidate the plugin's digest.
     if manifest.service_id.is_some() {
-        std::fs::write(dest.join(".image_pending"), "")?;
+        mark_image_pending_for(plugins_dir, &manifest.slug)?;
 
         // Build immediately if runtime is available
         if let Some(rt) = runtime {
@@ -768,6 +823,18 @@ fn remove_plugin_with_base(
     };
 
     std::fs::remove_dir_all(&plugin_dir)?;
+    // Mutable state lives outside the signed tree (PR2). Wipe it too, so a
+    // subsequent reinstall starts from a clean state and we don't leak a
+    // stale `image_pending` marker for a plugin that no longer exists.
+    let state_dir = plugin_state_dir_for(plugins_dir, slug);
+    if state_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&state_dir) {
+            log::warn!(
+                "Failed to remove plugin state dir {}: {e}",
+                state_dir.display()
+            );
+        }
+    }
     log::info!("Removed plugin '{}'", slug);
 
     if let (Some(rt), Some(manifest)) = (runtime, manifest_for_image) {
@@ -992,18 +1059,23 @@ fn build_pending_from_dir(
         if !entry.file_type()?.is_dir() {
             continue;
         }
-        let pending_marker = entry.path().join(".image_pending");
-        if !pending_marker.exists() {
+        let slug = entry.file_name().to_string_lossy().to_string();
+        let plugin_dir = entry.path();
+        // Pending markers may live in two places: the new state directory
+        // (`<plugin-state-base>/<slug>/image_pending`, written by installs
+        // after PR2) or, for plugins installed before PR2, the legacy
+        // in-tree `.image_pending`. Check both.
+        if !has_pending_image_build_for(plugins_dir, &plugin_dir, &slug) {
             continue;
         }
-        let manifest_path = entry.path().join("plugin.json");
+        let manifest_path = plugin_dir.join("plugin.json");
         if !manifest_path.exists() {
             continue;
         }
         let content = match std::fs::read_to_string(&manifest_path) {
             Ok(c) => c,
             Err(e) => {
-                errors.push(format!("{}: read manifest: {e}", entry.path().display()));
+                errors.push(format!("{}: read manifest: {e}", plugin_dir.display()));
                 continue;
             }
         };
@@ -1056,10 +1128,15 @@ fn build_single_plugin_image(
         &[],
     )?;
 
-    // Remove the pending marker on success
-    let pending_marker = plugin_dir.join(".image_pending");
-    if pending_marker.exists() {
-        let _ = std::fs::remove_file(&pending_marker);
+    // Remove the pending marker on success — both the new state-dir
+    // location and the legacy in-tree marker, so a plugin installed before
+    // PR2 stops re-triggering on every launch. `plugin_dir` is always
+    // `<plugins_dir>/<slug>/`, so its parent is the plugins base.
+    if let Some(plugins_dir) = plugin_dir.parent() {
+        clear_image_pending_for(plugins_dir, plugin_dir, &manifest.slug);
+    } else {
+        // Defensive — should not happen since plugin_dir always has a parent.
+        let _ = std::fs::remove_file(plugin_dir.join(".image_pending"));
     }
 
     // Clean up temporary build context if it differs from plugin_dir
@@ -2305,6 +2382,54 @@ mod tests {
         move |p| progresses.lock().unwrap().push(p)
     }
 
+    /// `plugin_state_base_for` must keep mutable state under the same
+    /// parent as `plugins_dir`, so unit tests pointing `plugins_dir` at a
+    /// temp dir don't leak markers into the user's real `~/.speedwave/`.
+    #[test]
+    fn test_plugin_state_base_is_sibling_of_plugins_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        let state = plugin_state_base_for(&plugins);
+        assert_eq!(state, tmp.path().join("plugin-state"));
+    }
+
+    /// Legacy plugins (installed before PR2) carry an `.image_pending`
+    /// marker inside the signed tree. `has_pending_image_build_for` must
+    /// honour either location during the migration window — without this,
+    /// every plugin installed before PR2 would silently stop rebuilding
+    /// after a failed first build.
+    #[test]
+    fn test_has_pending_image_build_honours_legacy_in_tree_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        let plugin_dir = plugins.join("legacy-slug");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        // Only a legacy in-tree marker — no state-dir marker.
+        std::fs::write(plugin_dir.join(".image_pending"), b"").unwrap();
+
+        assert!(
+            has_pending_image_build_for(&plugins, &plugin_dir, "legacy-slug"),
+            "legacy in-tree marker must still trigger pending build"
+        );
+    }
+
+    /// Successful build clears markers in both places, so a plugin that
+    /// migrates from legacy to new layout doesn't loop on the old marker.
+    #[test]
+    fn test_clear_image_pending_for_removes_both_locations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        let plugin_dir = plugins.join("dual-marker");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join(".image_pending"), b"").unwrap();
+        mark_image_pending_for(&plugins, "dual-marker").unwrap();
+
+        clear_image_pending_for(&plugins, &plugin_dir, "dual-marker");
+
+        assert!(!plugin_dir.join(".image_pending").exists());
+        assert!(!image_pending_marker_for(&plugins, "dual-marker").exists());
+    }
+
     #[test]
     fn test_install_plugin_resource_only_emits_verifying_extracting_done() {
         // SPEEDWAVE_ALLOW_UNSIGNED is process-global; serialize tests that
@@ -2350,7 +2475,12 @@ mod tests {
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
 
         let dest = plugins_dir.join("phases-no-runtime");
-        let pending_existed = dest.join(".image_pending").exists();
+        // Marker now lives in the state directory (sibling of plugins_dir),
+        // never in the signed plugin tree (PR2). The plugin tree must stay
+        // bit-for-bit identical to what was installed.
+        let state_marker_existed =
+            image_pending_marker_for(&plugins_dir, "phases-no-runtime").exists();
+        let in_tree_marker = dest.join(".image_pending").exists();
 
         let outcome = result.expect("install must succeed");
         assert!(
@@ -2358,8 +2488,12 @@ mod tests {
             "MCP plugin without runtime must return InstalledPendingBuild"
         );
         assert!(
-            pending_existed,
-            ".image_pending must be created when runtime is None"
+            state_marker_existed,
+            "image_pending marker must be created in plugin-state when runtime is None"
+        );
+        assert!(
+            !in_tree_marker,
+            "marker must NOT be written into the signed plugin tree"
         );
         let phases: Vec<String> = progresses
             .lock()
@@ -2445,7 +2579,9 @@ mod tests {
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
 
         let dest = plugins_dir.join("phases-build-fail");
-        let pending_kept = dest.join(".image_pending").exists();
+        let state_marker_kept =
+            image_pending_marker_for(&plugins_dir, "phases-build-fail").exists();
+        let in_tree_marker = dest.join(".image_pending").exists();
 
         assert!(
             result.is_ok(),
@@ -2456,8 +2592,12 @@ mod tests {
             InstallOutcome::InstalledPendingBuild(_)
         ));
         assert!(
-            pending_kept,
-            ".image_pending must remain after a failed build"
+            state_marker_kept,
+            "image_pending marker (in plugin-state) must remain after a failed build"
+        );
+        assert!(
+            !in_tree_marker,
+            "marker must never be written into the signed plugin tree"
         );
 
         let progresses = progresses.into_inner().unwrap();
