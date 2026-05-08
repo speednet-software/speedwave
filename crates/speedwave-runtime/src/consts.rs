@@ -545,6 +545,46 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "os",
 ];
 
+/// Environment variable names that plugins are forbidden from setting via
+/// `extra_env`. Either reserved by Speedwave (auto-injected) or dangerous
+/// (dynamic-linker / language-runtime hijack vectors). Comparison must be
+/// case-insensitive — the OS treats env var names as case-sensitive on Unix
+/// but a plugin shipping `Ld_Preload` would still be a hijack on macOS.
+///
+/// SSOT — referenced from `validate_manifest()` in `plugin.rs`.
+pub const RESERVED_ENV_KEYS: &[&str] = &[
+    // Reserved by Speedwave — auto-injected
+    "PORT",
+    // Dynamic linker hijacks (Linux)
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    // Dynamic linker hijacks (macOS)
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FORCE_FLAT_NAMESPACE",
+    // Language-runtime hijacks
+    "NODE_OPTIONS",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    // Shell / process environment
+    "PATH",
+    "HOME",
+    "SHELL",
+    "IFS",
+    "BASH_ENV",
+    "ENV",
+];
+
+/// Upper bound for plugin `mem_limit`, normalised to MiB. A plugin requesting
+/// more is rejected at install time. Built-in services are not subject to
+/// this cap — they configure their own limits via `compose.template.yml`.
+pub const PLUGIN_MEM_LIMIT_MAX_MIB: u64 = 8192;
+
+/// Upper bound for plugin `cpu_limit` (cores). 4 cores is enough for any
+/// MCP worker we ship; raises trip an explicit ADR.
+pub const PLUGIN_CPU_LIMIT_MAX: f32 = 4.0;
+
 /// Pure, testable function for resolving the data directory.
 /// `env_val` = None or empty string → `home.join(DATA_DIR)` (empty string treated as unset)
 /// `env_val` = absolute path → returns that path

@@ -355,6 +355,22 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
         );
     }
 
+    // Slug must not collide with built-in compose service names. Without this,
+    // a plugin with slug "hub" would derive compose name "mcp-hub" and silently
+    // overwrite the built-in hub entry on YAML mapping insert — defeating the
+    // hub's zero-token guarantee.
+    let derived_compose = derive_compose_name(&manifest.slug);
+    if consts::BUILT_IN_SERVICES.contains(&derived_compose.as_str())
+        || manifest.slug == "hub"
+        || manifest.slug == "claude"
+    {
+        anyhow::bail!(
+            "Plugin slug '{}' would produce compose name '{}' which conflicts with a built-in service",
+            manifest.slug,
+            derived_compose
+        );
+    }
+
     // If service_id present, Containerfile must exist
     if manifest.service_id.is_some() && !plugin_dir.join("Containerfile").exists() {
         anyhow::bail!(
@@ -363,34 +379,35 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
         );
     }
 
-    // Validate mem_limit format (e.g. "256m", "1g", "512000")
+    // Validate mem_limit: format AND upper bound (DoS prevention).
     if let Some(ref limit) = manifest.mem_limit {
-        static MEM_RE: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
-            std::sync::OnceLock::new();
-        let re = MEM_RE
-            .get_or_init(|| regex::Regex::new(r"^[0-9]+[bkmgBKMG]?$"))
-            .as_ref()
-            .map_err(|e| anyhow::anyhow!("invalid mem_limit regex: {e}"))?;
-        if !re.is_match(limit) {
+        let mib = parse_mem_limit_to_mib(limit)?;
+        if mib > consts::PLUGIN_MEM_LIMIT_MAX_MIB {
             anyhow::bail!(
-                "Invalid mem_limit '{}': must be a number optionally followed by b/k/m/g",
-                limit
+                "mem_limit '{}' ({} MiB) exceeds maximum allowed for plugins ({} MiB)",
+                limit,
+                mib,
+                consts::PLUGIN_MEM_LIMIT_MAX_MIB
             );
         }
     }
 
-    // Validate cpu_limit format (e.g. "2.0", "4", "0.5")
+    // Validate cpu_limit: format AND upper bound.
     if let Some(ref limit) = manifest.cpu_limit {
-        static CPU_RE: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
-            std::sync::OnceLock::new();
-        let re = CPU_RE
-            .get_or_init(|| regex::Regex::new(r"^[0-9]+(\.[0-9]+)?$"))
-            .as_ref()
-            .map_err(|e| anyhow::anyhow!("invalid cpu_limit regex: {e}"))?;
-        if !re.is_match(limit) {
+        let cores: f32 = limit.parse().map_err(|_| {
+            anyhow::anyhow!("Invalid cpu_limit '{}': must be a positive number", limit)
+        })?;
+        if !cores.is_finite() || cores <= 0.0 {
             anyhow::bail!(
-                "Invalid cpu_limit '{}': must be a positive number (e.g. '2.0', '4')",
+                "Invalid cpu_limit '{}': must be a positive finite number",
                 limit
+            );
+        }
+        if cores > consts::PLUGIN_CPU_LIMIT_MAX {
+            anyhow::bail!(
+                "cpu_limit '{}' exceeds maximum allowed for plugins ({} cores)",
+                limit,
+                consts::PLUGIN_CPU_LIMIT_MAX
             );
         }
     }
@@ -446,13 +463,19 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
         }
     }
 
-    // Validate extra_env keys/values contain no newlines or null bytes (YAML injection defense)
-    const RESERVED_ENV_KEYS: &[&str] = &["PORT"];
+    // Validate extra_env keys/values contain no newlines or null bytes (YAML
+    // injection defense). Reserved keys (PORT auto-injected, plus dynamic-
+    // linker / language-runtime hijack vectors like LD_PRELOAD, NODE_OPTIONS)
+    // are sourced from `consts::RESERVED_ENV_KEYS` and rejected case-insensitively.
     if let Some(ref env) = manifest.extra_env {
         for (k, v) in env {
-            if RESERVED_ENV_KEYS.contains(&k.as_str()) {
+            let k_upper = k.to_ascii_uppercase();
+            if consts::RESERVED_ENV_KEYS
+                .iter()
+                .any(|reserved| reserved.eq_ignore_ascii_case(&k_upper))
+            {
                 anyhow::bail!(
-                    "extra_env key '{}' is reserved and injected automatically by Speedwave",
+                    "extra_env key '{}' is reserved (auto-injected by Speedwave or a dangerous runtime hijack vector)",
                     k
                 );
             }
@@ -474,14 +497,57 @@ fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Re
         }
     }
 
-    // If ReadWrite, justification must be non-empty
-    if let TokenMount::ReadWrite { ref justification } = manifest.token_mount {
-        if justification.trim().is_empty() {
-            anyhow::bail!("ReadWrite token mount requires a non-empty justification");
-        }
+    // token_mount: rw is reserved for built-in services per ADR-009 (currently
+    // SharePoint only, for OAuth refresh). Built-in service slugs are blocked
+    // by BUILT_IN_SERVICE_IDS earlier in this function, so any plugin reaching
+    // here with `ReadWrite` is by definition unauthorised. This is enforced by
+    // code, not just documentation.
+    if matches!(manifest.token_mount, TokenMount::ReadWrite { .. }) {
+        anyhow::bail!(
+            "token_mount: read_write is reserved for built-in services (ADR-009). \
+             Plugins must use token_mount: read_only."
+        );
     }
 
     Ok(())
+}
+
+/// Parses a Docker-style memory limit string into MiB.
+///
+/// Accepts: bare bytes (`"512000"`), or `<number><unit>` where unit is one of
+/// `b/k/m/g` (case-insensitive). Returns an error on malformed input,
+/// negative or zero values, or arithmetic overflow.
+fn parse_mem_limit_to_mib(s: &str) -> anyhow::Result<u64> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("mem_limit must not be empty");
+    }
+    let (num_part, unit) = match trimmed.chars().last() {
+        Some(c) if c.is_ascii_alphabetic() => (&trimmed[..trimmed.len() - 1], Some(c)),
+        Some(_) => (trimmed, None),
+        None => anyhow::bail!("mem_limit must not be empty"),
+    };
+    let n: u64 = num_part
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid mem_limit '{}': not a valid number", s))?;
+    let bytes = match unit.map(|c| c.to_ascii_lowercase()) {
+        None | Some('b') => n,
+        Some('k') => n
+            .checked_mul(1024)
+            .ok_or_else(|| anyhow::anyhow!("mem_limit overflow"))?,
+        Some('m') => n
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| anyhow::anyhow!("mem_limit overflow"))?,
+        Some('g') => n
+            .checked_mul(1024 * 1024 * 1024)
+            .ok_or_else(|| anyhow::anyhow!("mem_limit overflow"))?,
+        Some(other) => anyhow::bail!(
+            "Invalid mem_limit '{}': unit must be one of b/k/m/g (got '{}')",
+            s,
+            other
+        ),
+    };
+    Ok(bytes / (1024 * 1024))
 }
 
 /// Reads a plugin manifest summary from a ZIP without verifying the
@@ -3441,32 +3507,202 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_manifest_rejects_empty_readwrite_justification() {
+    fn test_validate_manifest_rejects_readwrite_token_mount() {
+        // ADR-009: token_mount: read_write is reserved for built-in services
+        // (currently SharePoint only, for OAuth refresh). Plugins must use
+        // read_only. This test covers BOTH the "non-empty justification" and
+        // "empty justification" cases — both must be rejected, since a plugin
+        // is never authorised to request read_write at all.
+        for justification in ["   ", "I really need this"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("Containerfile"), "FROM scratch").unwrap();
+            let manifest = PluginManifest {
+                name: "Test".to_string(),
+                service_id: Some("test-rw".to_string()),
+                slug: "test-rw".to_string(),
+                version: "1.0.0".to_string(),
+                description: "test".to_string(),
+                port: None,
+                image_tag: None,
+                resources: vec![],
+                token_mount: TokenMount::ReadWrite {
+                    justification: justification.to_string(),
+                },
+                auth_fields: vec![],
+                settings_schema: None,
+                speedwave_compat: None,
+                extra_env: None,
+                mem_limit: None,
+                cpu_limit: None,
+                requires_integrations: vec![],
+            };
+            let err = validate_manifest(&manifest, dir.path())
+                .expect_err("ReadWrite must be rejected for plugins");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("read_write") || msg.contains("ADR-009"),
+                "expected ADR-009 / read_write rejection, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_slug_hub() {
+        // A plugin slug that derives a compose name colliding with a built-in
+        // service must be rejected, otherwise serde_yaml_ng's mapping insert
+        // would silently overwrite the built-in `mcp-hub` entry, defeating the
+        // hub's zero-token guarantee.
+        for bad_slug in ["hub", "claude"] {
+            let dir = tempfile::tempdir().unwrap();
+            let manifest = PluginManifest {
+                name: "Test".to_string(),
+                service_id: None,
+                slug: bad_slug.to_string(),
+                version: "1.0.0".to_string(),
+                description: "test".to_string(),
+                port: None,
+                image_tag: None,
+                resources: vec![],
+                token_mount: TokenMount::ReadOnly,
+                auth_fields: vec![],
+                settings_schema: None,
+                speedwave_compat: None,
+                extra_env: None,
+                mem_limit: None,
+                cpu_limit: None,
+                requires_integrations: vec![],
+            };
+            let err = validate_manifest(&manifest, dir.path())
+                .expect_err("slug colliding with built-in compose name must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("conflicts with a built-in"),
+                "expected built-in collision rejection for slug '{bad_slug}', got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_dangerous_extra_env_keys() {
+        // SSOT: consts::RESERVED_ENV_KEYS lists every env var a plugin must
+        // not be allowed to inject — PORT (Speedwave-reserved), dynamic-linker
+        // hijacks (LD_PRELOAD, DYLD_INSERT_LIBRARIES, …), language-runtime
+        // hijacks (NODE_OPTIONS, PYTHONPATH), and shell-environment hijacks
+        // (PATH, HOME, IFS). Comparison is case-insensitive.
+        for &dangerous in &[
+            "LD_PRELOAD",
+            "ld_preload",
+            "LD_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "NODE_OPTIONS",
+            "PYTHONPATH",
+            "PATH",
+            "HOME",
+            "IFS",
+            "BASH_ENV",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut env = HashMap::new();
+            env.insert(dangerous.to_string(), "anything".to_string());
+            let manifest = PluginManifest {
+                name: "Test".to_string(),
+                service_id: None,
+                slug: "test-env".to_string(),
+                version: "1.0.0".to_string(),
+                description: "test".to_string(),
+                port: None,
+                image_tag: None,
+                resources: vec![],
+                token_mount: TokenMount::ReadOnly,
+                auth_fields: vec![],
+                settings_schema: None,
+                speedwave_compat: None,
+                extra_env: Some(env),
+                mem_limit: None,
+                cpu_limit: None,
+                requires_integrations: vec![],
+            };
+            let err = validate_manifest(&manifest, dir.path())
+                .expect_err("dangerous env key must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("reserved"),
+                "expected reserved-key rejection for '{dangerous}', got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_mem_limit_exceeding_cap() {
+        // 999g exceeds PLUGIN_MEM_LIMIT_MAX_MIB (8192 MiB = 8 GiB).
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("Containerfile"), "FROM scratch").unwrap();
         let manifest = PluginManifest {
             name: "Test".to_string(),
-            service_id: Some("test-rw".to_string()),
-            slug: "test-rw".to_string(),
+            service_id: None,
+            slug: "test-mem".to_string(),
             version: "1.0.0".to_string(),
             description: "test".to_string(),
             port: None,
             image_tag: None,
             resources: vec![],
-            token_mount: TokenMount::ReadWrite {
-                justification: "   ".to_string(),
-            },
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: Some("999g".to_string()),
+            cpu_limit: None,
+            requires_integrations: vec![],
+        };
+        let err = validate_manifest(&manifest, dir.path())
+            .expect_err("mem_limit beyond cap must be rejected");
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "expected upper-bound rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_cpu_limit_exceeding_cap() {
+        // 16 cores exceeds PLUGIN_CPU_LIMIT_MAX (4.0).
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = PluginManifest {
+            name: "Test".to_string(),
+            service_id: None,
+            slug: "test-cpu".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
             auth_fields: vec![],
             settings_schema: None,
             speedwave_compat: None,
             extra_env: None,
             mem_limit: None,
-            cpu_limit: None,
+            cpu_limit: Some("16".to_string()),
             requires_integrations: vec![],
         };
-        let result = validate_manifest(&manifest, dir.path());
-        assert!(result.is_err(), "empty justification should be rejected");
-        assert!(result.unwrap_err().to_string().contains("justification"));
+        let err = validate_manifest(&manifest, dir.path())
+            .expect_err("cpu_limit beyond cap must be rejected");
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "expected upper-bound rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_mem_limit_to_mib_units() {
+        assert_eq!(parse_mem_limit_to_mib("1024m").unwrap(), 1024);
+        assert_eq!(parse_mem_limit_to_mib("2g").unwrap(), 2048);
+        assert_eq!(parse_mem_limit_to_mib("1G").unwrap(), 1024);
+        assert_eq!(parse_mem_limit_to_mib("1024K").unwrap(), 1);
+        // 512000 bare bytes → 0 MiB after integer division
+        assert_eq!(parse_mem_limit_to_mib("512000").unwrap(), 0);
+        assert!(parse_mem_limit_to_mib("").is_err());
+        assert!(parse_mem_limit_to_mib("abc").is_err());
+        assert!(parse_mem_limit_to_mib("1x").is_err());
     }
 
     // --- build_pending_from_dir error accumulation tests ---
