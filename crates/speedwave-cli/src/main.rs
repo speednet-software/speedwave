@@ -97,6 +97,24 @@ const REPO_NAME: &str = "speedwave";
 const UPDATE_CHECK_INTERVAL_SECS: u64 =
     speedwave_runtime::consts::UPDATE_CHECK_INTERVAL_HOURS as u64 * 3600;
 
+/// Returns true for actions that must run even when one or more
+/// installed plugins fail signature verification. Without these
+/// skips, `speedwave plugin remove <bad>` would refuse to run while
+/// `<bad>` is the plugin causing the failure — leaving the user with
+/// no recovery path other than manually editing `~/.speedwave/`.
+///
+/// Help and self-update are handled earlier in `main` and never reach
+/// the audit; they are intentionally not listed here.
+fn skip_plugin_audit(action: &CliAction) -> bool {
+    matches!(
+        action,
+        CliAction::Init(_)
+            | CliAction::PluginInstall(_)
+            | CliAction::PluginList
+            | CliAction::PluginRemove(_)
+    )
+}
+
 // ── Update check cache ────────────────────────────────────────────────────
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -390,6 +408,24 @@ fn main() -> anyhow::Result<()> {
 
     // Non-blocking update hint (max once per day, cached)
     maybe_print_update_hint();
+
+    // Hard-fail on tampered plugins. Recovery actions (remove, list,
+    // install) and project setup (init) skip the audit so a user with
+    // a bad plugin can still use the CLI to recover. Help/self-update
+    // already exited above.
+    if !skip_plugin_audit(&action) {
+        if let Err(failures) = speedwave_runtime::plugin::audit_all() {
+            eprintln!("Plugin verification failed:");
+            for (slug, reason) in &failures {
+                eprintln!("  • {slug}: {reason}");
+            }
+            eprintln!(
+                "\nFix: speedwave plugin remove <slug>   OR   \
+                 rm -rf ~/.speedwave/plugins/<slug>/\nThen reinstall a signed plugin."
+            );
+            std::process::exit(2);
+        }
+    }
 
     // Handle `speedwave init [name]` — register CWD as a project (no running VM required)
     if let CliAction::Init(ref custom_name) = action {

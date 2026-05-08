@@ -27,6 +27,16 @@ pub(crate) struct PluginStatusEntry {
     pub(crate) token_mount: String,
     pub(crate) settings_schema: Option<serde_json::Value>,
     pub(crate) requires_integrations: Vec<String>,
+    /// Outcome of `runtime::plugin::list_for_ui` for this entry. See the
+    /// `verification_status` enum on the frontend for the full set —
+    /// `"verified"` means the plugin is usable; anything else disables
+    /// the enable toggle and credential editing in the UI but keeps the
+    /// remove button active so the user can still recover.
+    pub(crate) verification_status: String,
+    /// Human-readable diagnostic when `verification_status != "verified"`.
+    /// `None` when the plugin is verified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) verification_error: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -77,12 +87,47 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
     let integrations =
         config::resolve_integrations(std::path::Path::new(project_dir), &user_config, &project);
 
-    let manifests = plugin::list_installed_plugins().map_err(|e| e.to_string())?;
+    // Tolerant lister: every installed directory becomes one entry, with
+    // `verification_status` carrying the verdict. Unverified entries are
+    // shown so users know *why* a plugin is disabled and what to do
+    // about it — hiding them would force users to inspect the filesystem.
+    let ui_entries = plugin::list_for_ui();
 
     let mut entries = Vec::new();
-    for manifest in &manifests {
+    for ui in &ui_entries {
+        let status_str = verification_status_to_string(&ui.verification_status);
+        // For entries without a parseable manifest, surface what we know
+        // (slug = directory name) and a clear status; everything else
+        // gets sensible empty defaults.
+        let Some(manifest) = ui.manifest.as_ref() else {
+            entries.push(PluginStatusEntry {
+                slug: ui.slug.clone(),
+                name: ui.slug.clone(),
+                service_id: None,
+                version: String::new(),
+                description: String::new(),
+                enabled: false,
+                configured: false,
+                auth_fields: Vec::new(),
+                current_values: HashMap::new(),
+                token_mount: "ro".to_string(),
+                settings_schema: None,
+                requires_integrations: Vec::new(),
+                verification_status: status_str,
+                verification_error: ui.verification_error.clone(),
+            });
+            continue;
+        };
+
         let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
-        let enabled = integrations.is_plugin_enabled(sid);
+        // An unverified plugin must NOT count as enabled, even if the
+        // user previously enabled a (now-tampered) version. The frontend
+        // additionally disables the enable toggle for non-verified entries.
+        let verified = matches!(
+            ui.verification_status,
+            plugin::VerificationStatus::Verified
+        );
+        let enabled = verified && integrations.is_plugin_enabled(sid);
 
         let auth_fields: Vec<plugin::AuthFieldDef> = manifest.auth_fields.clone();
 
@@ -128,10 +173,27 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
             token_mount,
             settings_schema: manifest.settings_schema.clone(),
             requires_integrations: manifest.requires_integrations.clone(),
+            verification_status: status_str,
+            verification_error: ui.verification_error.clone(),
         });
     }
 
     Ok(PluginsResponse { plugins: entries })
+}
+
+/// String representation matching the frontend `VerificationStatus`
+/// union. Kept narrow on purpose — the runtime enum is in Rust and this
+/// is the only translation point. Frontend `models/plugin.ts` mirrors
+/// these literals.
+fn verification_status_to_string(s: &plugin::VerificationStatus) -> String {
+    match s {
+        plugin::VerificationStatus::Verified => "verified",
+        plugin::VerificationStatus::MissingSignature => "missing_signature",
+        plugin::VerificationStatus::InvalidSignature => "invalid_signature",
+        plugin::VerificationStatus::DirSlugMismatch => "dir_slug_mismatch",
+        plugin::VerificationStatus::ManifestInvalid => "manifest_invalid",
+    }
+    .to_string()
 }
 
 fn is_plugin_configured(
@@ -246,9 +308,13 @@ pub async fn install_plugin(
 pub fn remove_plugin(slug: String) -> Result<(), String> {
     log::info!("remove_plugin: slug={slug}");
 
-    // Read manifest BEFORE deleting plugin files — need service_id, auth_fields
-    let manifests = plugin::list_installed_plugins().map_err(|e| e.to_string())?;
-    let manifest = manifests.iter().find(|m| m.slug == slug);
+    // Recovery action: removal must work for tampered plugins too.
+    // Use the tolerant lister so an unparseable manifest still gives us
+    // the slug-as-fallback path. We need `service_id` and `auth_fields`
+    // for cleanup; both default sensibly when the manifest is missing.
+    let entries = plugin::list_for_ui();
+    let entry = entries.iter().find(|e| e.slug == slug);
+    let manifest = entry.and_then(|e| e.manifest.as_ref());
     let service_id = manifest
         .and_then(|m| m.service_id.as_deref())
         .map(|s| s.to_string())
@@ -334,16 +400,41 @@ pub fn set_plugin_enabled(
     check_project(&project)?;
     log::info!("set_plugin_enabled: project={project} service_id={service_id} enabled={enabled}");
 
-    // Validate that service_id corresponds to an installed plugin
-    let manifests = plugin::list_installed_plugins().map_err(|e| e.to_string())?;
-    let found = manifests
-        .iter()
-        .any(|m| m.service_id.as_deref() == Some(&service_id) || m.slug == service_id);
-    if !found {
-        return Err(format!(
-            "no installed plugin with service_id '{}'",
-            service_id
-        ));
+    // Verified-only on enable: a tampered plugin (missing SIGNATURE,
+    // dir/slug mismatch, etc.) must not become enabled. We use the
+    // tolerant `list_for_ui` so the presence of *another* unverified
+    // plugin doesn't block the user from enabling a verified one. The
+    // frontend already disables the toggle for non-verified entries, but
+    // we re-check here so direct command calls from tests/scripts can't
+    // bypass it. Disable requests skip the check — the user must always
+    // be able to turn off a bad plugin.
+    if enabled {
+        let entries = plugin::list_for_ui();
+        let matches_id = |m: &plugin::PluginManifest| {
+            m.service_id.as_deref() == Some(&service_id) || m.slug == service_id
+        };
+        let candidate = entries.iter().find(|e| {
+            e.manifest
+                .as_ref()
+                .map(matches_id)
+                .unwrap_or(false)
+        });
+        match candidate {
+            None => {
+                return Err(format!(
+                    "no installed plugin with service_id '{}'",
+                    service_id
+                ));
+            }
+            Some(e) if e.verification_status != plugin::VerificationStatus::Verified => {
+                return Err(format!(
+                    "plugin '{}' cannot be enabled: {}. Reinstall a signed plugin or remove it.",
+                    service_id,
+                    e.verification_error.as_deref().unwrap_or("verification failed")
+                ));
+            }
+            Some(_) => {}
+        }
     }
 
     config::with_config_lock(|| {
@@ -372,11 +463,28 @@ pub fn save_plugin_credentials(
     check_project(&project)?;
     log::info!("save_plugin_credentials: project={project} slug={slug}");
 
-    let manifests = plugin::list_installed_plugins().map_err(|e| e.to_string())?;
-    let manifest = manifests
+    // Verified-only: writing credentials for an unverified plugin is an
+    // attack — the manifest's `auth_fields` allowlist (and `service_id`,
+    // which decides the on-disk token path) come from a manifest we
+    // can't trust until the signature checks out. Find the matching
+    // entry via the tolerant lister so a *different* tampered plugin
+    // doesn't poison this lookup.
+    let entries = plugin::list_for_ui();
+    let entry = entries
         .iter()
-        .find(|m| m.slug == slug)
+        .find(|e| e.slug == slug)
         .ok_or_else(|| format!("plugin '{}' not found", slug))?;
+    if entry.verification_status != plugin::VerificationStatus::Verified {
+        return Err(format!(
+            "plugin '{}' cannot accept credentials: {}",
+            slug,
+            entry.verification_error.as_deref().unwrap_or("verification failed")
+        ));
+    }
+    let manifest = entry
+        .manifest
+        .as_ref()
+        .ok_or_else(|| format!("plugin '{}' has no manifest", slug))?;
 
     let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
     let allowed_keys: Vec<&str> = manifest
@@ -411,6 +519,24 @@ pub fn plugin_save_settings(
     check_project(&project)?;
     log::info!("plugin_save_settings: project={project} slug={slug}");
 
+    // Verified-only: settings are stored under a slug whose meaning
+    // comes from the manifest; persisting settings for a tampered
+    // plugin would let an attacker pre-populate state for a future
+    // (re)installed legitimate plugin.
+    require_verified(&slug)?;
+
+    // Cap settings JSON size to prevent a runaway plugin from bloating
+    // user_config.json. 64 KiB is generous — settings are key/value
+    // metadata, not arbitrary blobs.
+    const SETTINGS_MAX_BYTES: usize = 64 * 1024;
+    let serialised = serde_json::to_vec(&settings).map_err(|e| e.to_string())?;
+    if serialised.len() > SETTINGS_MAX_BYTES {
+        return Err(format!(
+            "plugin '{}' settings exceed {} bytes",
+            slug, SETTINGS_MAX_BYTES
+        ));
+    }
+
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
 
@@ -428,10 +554,37 @@ pub fn plugin_save_settings(
     .map_err(|e| e.to_string())
 }
 
+/// Helper: rejects calls that target a plugin whose verification
+/// status is not `Verified`. Used by every Tauri command that *acts
+/// on* a plugin's identity — credentials, settings — to keep the
+/// "tampered plugins are inert" invariant in one place.
+fn require_verified(slug: &str) -> Result<(), String> {
+    let entries = plugin::list_for_ui();
+    let entry = entries
+        .iter()
+        .find(|e| e.slug == slug)
+        .ok_or_else(|| format!("plugin '{}' not found", slug))?;
+    if entry.verification_status != plugin::VerificationStatus::Verified {
+        return Err(format!(
+            "plugin '{}' is not verified: {}",
+            slug,
+            entry.verification_error.as_deref().unwrap_or("verification failed")
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn plugin_load_settings(project: String, slug: String) -> Result<serde_json::Value, String> {
     check_project(&project)?;
     log::info!("plugin_load_settings: project={project} slug={slug}");
+
+    // Verified-only: a tampered plugin must not be able to read settings
+    // saved for a previously-legitimate version of itself. Settings can
+    // contain non-secret-but-private project metadata (host names,
+    // ticket IDs, model selections) that a tampered plugin should not
+    // be allowed to scrape.
+    require_verified(&slug)?;
 
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
 
@@ -452,11 +605,21 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
     check_project(&project)?;
     log::info!("delete_plugin_credentials: project={project} slug={slug}");
 
-    let manifests = plugin::list_installed_plugins().map_err(|e| e.to_string())?;
-    let manifest = manifests
+    // Recovery action: a user must be able to clear the credentials
+    // of a tampered plugin even if its signature no longer verifies —
+    // this is the cleanup half of `remove_plugin`. So we use the
+    // tolerant lister and accept any installed dir, not only verified
+    // ones. The slug came from validated UI state; per-field paths are
+    // still constrained by the manifest's `auth_fields` allowlist.
+    let entries = plugin::list_for_ui();
+    let entry = entries
         .iter()
-        .find(|m| m.slug == slug)
+        .find(|e| e.slug == slug)
         .ok_or_else(|| format!("plugin '{}' not found", slug))?;
+    let manifest = entry
+        .manifest
+        .as_ref()
+        .ok_or_else(|| format!("plugin '{}' has no manifest", slug))?;
 
     let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
 

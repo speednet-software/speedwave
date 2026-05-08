@@ -940,6 +940,33 @@ fn ensure_mcp_os_running(
     }
 }
 
+/// Formats the per-plugin failures from `plugin::audit_all` into a
+/// user-actionable dialog message. Tells the user what failed and how
+/// to recover via CLI/manual cleanup — Settings UI is unreachable
+/// while the audit fails.
+fn format_audit_failure_message(failures: &[(String, String)]) -> String {
+    let mut body = String::from(
+        "Speedwave detected one or more plugins that no longer match their\n\
+         original signed contents. For your safety, the app cannot start until\n\
+         the affected plugins are removed or reinstalled.\n\n\
+         Affected plugins:\n",
+    );
+    for (slug, reason) in failures {
+        body.push_str(&format!("  • {slug}: {reason}\n"));
+    }
+    body.push_str(
+        "\nHow to recover:\n\
+         1. Open Terminal and run `speedwave plugin remove <slug>` for each\n\
+            affected plugin (CLI commands always work even when this dialog\n\
+            blocks the UI).\n\
+         2. Reinstall a fresh signed plugin via `speedwave plugin install\n\
+            <path/to/plugin.zip>`.\n\n\
+         Alternatively, manually delete the affected plugin directory under\n\
+         `~/.speedwave/plugins/<slug>/` and restart Speedwave.",
+    );
+    body
+}
+
 // ---------------------------------------------------------------------------
 // Application entry point
 // ---------------------------------------------------------------------------
@@ -1123,6 +1150,32 @@ fn main() {
                 .and_then(|l| parse_log_level(&l))
                 .unwrap_or(log::LevelFilter::Info);
             log::set_max_level(initial_level);
+
+            // Hard-fail on tampered plugins. PR3's `audit_all` re-verifies
+            // every plugin under `~/.speedwave/plugins/`; failures are
+            // collected and shown to the user in one dialog. Recovery
+            // path is the CLI (`speedwave plugin remove <slug>`) or
+            // manual deletion — Settings UI is behind this gate.
+            if let Err(failures) = speedwave_runtime::plugin::audit_all() {
+                let body = format_audit_failure_message(&failures);
+                log::error!("plugin audit failed:\n{}", body);
+                use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                let handle_for_exit = app.handle().clone();
+                // Use the non-blocking variant with a callback — on Linux
+                // `blocking_show` can deadlock the setup thread if the
+                // window manager isn't ready. See tauri-plugin-dialog
+                // issue #956. Exit happens on user dismiss.
+                app.dialog()
+                    .message(body)
+                    .title("Plugin verification failed")
+                    .kind(MessageDialogKind::Error)
+                    .show(move |_| {
+                        handle_for_exit.exit(1);
+                    });
+                // Return early so setup doesn't continue spawning
+                // background services for a known-bad state.
+                return Ok(());
+            }
 
             // Clean up old rotated log files (max 10 kept)
             cleanup_old_logs(10);

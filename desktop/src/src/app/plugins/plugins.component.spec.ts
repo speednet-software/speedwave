@@ -34,6 +34,7 @@ const MOCK_PLUGINS = {
       token_mount: 'ro',
       settings_schema: null,
       requires_integrations: [],
+      verification_status: 'verified',
     },
     {
       slug: 'my-commands',
@@ -48,6 +49,7 @@ const MOCK_PLUGINS = {
       token_mount: 'ro',
       settings_schema: null,
       requires_integrations: [],
+      verification_status: 'verified',
     },
   ],
 };
