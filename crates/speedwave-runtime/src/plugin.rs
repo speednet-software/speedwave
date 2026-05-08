@@ -385,7 +385,10 @@ fn validate_speedwave_compat(compat: Option<&str>) -> anyhow::Result<()> {
 }
 
 /// Validates manifest constraints at install time.
-fn validate_manifest(manifest: &PluginManifest, plugin_dir: &Path) -> anyhow::Result<()> {
+pub(crate) fn validate_manifest(
+    manifest: &PluginManifest,
+    plugin_dir: &Path,
+) -> anyhow::Result<()> {
     validate_slug(&manifest.slug)?;
     validate_speedwave_compat(manifest.speedwave_compat.as_deref())?;
 
@@ -673,13 +676,33 @@ fn install_plugin_with_base(
 
     std::fs::create_dir_all(plugins_dir)?;
 
+    // Serialize concurrent installs. Without this, two `install_plugin`
+    // calls for the same slug could `remove_dir_all(dest)` then both
+    // `rename(staging, dest)`, leaving a half-A / half-B Frankenstein on
+    // disk. The lock file is created once and reused across installs.
+    let lock_path = plugins_dir.join(".install.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)?;
+    use fs2::FileExt;
+    lock_file.lock_exclusive()?;
+    // The lock is held for the rest of this scope. `fs2`'s lock is
+    // released on file drop.
+
     // Phase: verifying — signature check
     emit("verifying", "Verifying signature");
 
-    // Extract ZIP to a temporary directory first
-    let tmp_dir = std::env::temp_dir().join(format!("speedwave-plugin-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&tmp_dir)?;
-    let _cleanup = TmpDirGuard(tmp_dir.clone());
+    // Extract ZIP to a temporary directory on the *same filesystem* as
+    // `plugins_dir` so the final rename(staging, dest) can be atomic.
+    // `tempfile::tempdir_in` creates a permission-700 directory that is
+    // cleaned up when the `TempDir` is dropped — the predictable
+    // `/tmp/speedwave-plugin-<uuid>` prefix the previous code used was
+    // also a TOCTOU surface (FSEvents-watch + swap between verify and
+    // copy).
+    let tmp = tempfile::tempdir_in(plugins_dir)?;
+    let tmp_dir = tmp.path().to_path_buf();
     extract_zip(zip_path, &tmp_dir)?;
 
     // Zip Slip protection
@@ -721,13 +744,51 @@ fn install_plugin_with_base(
         }
     }
 
-    // Phase: extracting — copy from temp to permanent location
+    // Phase: extracting — atomic-install the plugin. We copy first into a
+    // staging dir that name-shadows the slug with a `.installing.<uuid>`
+    // suffix (filtered out by every `list_*`), then swap it into place
+    // with a single `rename`. If `dest` already exists, it is moved to a
+    // `.removing.<uuid>` sibling and cleaned up on success — a crash
+    // mid-rename leaves a recoverable state instead of a half-installed
+    // tree. Lock is still held; concurrent installs are blocked above.
     emit("extracting", "Extracting archive");
     let dest = plugins_dir.join(&manifest.slug);
-    if dest.exists() {
-        std::fs::remove_dir_all(&dest)?;
+    let staging_name = format!("{}.installing.{}", manifest.slug, uuid::Uuid::new_v4());
+    let staging = plugins_dir.join(&staging_name);
+    copy_dir_recursive(&plugin_src, &staging)?;
+
+    let removed_old: Option<PathBuf> = if dest.exists() {
+        let old_name = format!("{}.removing.{}", manifest.slug, uuid::Uuid::new_v4());
+        let old_path = plugins_dir.join(&old_name);
+        std::fs::rename(&dest, &old_path)?;
+        Some(old_path)
+    } else {
+        None
+    };
+
+    if let Err(e) = std::fs::rename(&staging, &dest) {
+        // Roll back: try to restore the old plugin so the user isn't left
+        // with nothing on disk after a failed swap.
+        if let Some(ref old_path) = removed_old {
+            let _ = std::fs::rename(old_path, &dest);
+        }
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(anyhow::anyhow!(
+            "atomic install rename failed for plugin '{}': {e}",
+            manifest.slug
+        ));
     }
-    copy_dir_recursive(&plugin_src, &dest)?;
+    // Verified-cache may hold a verdict for the *previous* version of
+    // this plugin. Drop it before any verify-on-load path runs again.
+    signing::invalidate_cache(&dest);
+    if let Some(old_path) = removed_old {
+        if let Err(e) = std::fs::remove_dir_all(&old_path) {
+            log::warn!(
+                "failed to clean up replaced plugin dir {}: {e}",
+                old_path.display()
+            );
+        }
+    }
 
     // Mark pending image build for MCP plugins. Stored OUTSIDE the signed
     // tree (see `plugin_state_base_for`) so that creating the marker
@@ -856,13 +917,67 @@ fn remove_plugin_with_base(
     Ok(())
 }
 
-/// Lists all installed plugins by scanning `~/.speedwave/plugins/*/plugin.json`
+/// A plugin whose Ed25519 signature has been verified and whose
+/// directory name matches its manifest slug. The path is included so
+/// callers don't have to reconstruct it via `plugins_base.join(slug)` —
+/// reconstruction would defeat the dir/slug enforcement (an attacker
+/// drops `evil/plugin.json` whose `slug: "good"` and the caller
+/// silently re-routes to a different on-disk tree).
+#[derive(Debug)]
+pub struct VerifiedPlugin {
+    pub manifest: PluginManifest,
+    pub dir: PathBuf,
+}
+
+/// Reasons a plugin can fail the load-time audit. UI shows this so users
+/// can tell *why* a plugin was rejected instead of seeing a generic error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerificationStatus {
+    /// Signature verified and manifest validated.
+    Verified,
+    /// `SIGNATURE` file is missing.
+    MissingSignature,
+    /// `SIGNATURE` failed Ed25519 verification, or the digest didn't match.
+    InvalidSignature,
+    /// The directory name doesn't match `manifest.slug` — the plugin was
+    /// not installed via the supported flow.
+    DirSlugMismatch,
+    /// Manifest is missing, malformed, or fails `validate_manifest`.
+    ManifestInvalid,
+}
+
+/// One entry in the tolerant UI listing. `manifest` is `None` when even
+/// the manifest could not be parsed; `verification_error` carries the
+/// human-readable reason a plugin was rejected.
+pub struct PluginListEntry {
+    pub slug: String,
+    pub dir: PathBuf,
+    pub manifest: Option<PluginManifest>,
+    pub verification_status: VerificationStatus,
+    pub verification_error: Option<String>,
+}
+
+/// Returns true for entries that should be excluded from any user-facing
+/// or runtime-relevant listing: in-flight installs (`.installing.*`),
+/// in-flight removals (`.removing.*`), and dot-files. These directories
+/// exist briefly during atomic install but are not real plugins.
+fn is_transient_plugin_dir(name: &str) -> bool {
+    name.contains(".installing.") || name.contains(".removing.") || name.starts_with('.')
+}
+
+/// Lists all installed plugins by scanning `~/.speedwave/plugins/*/plugin.json`.
+/// **No signature verification.** Use [`list_verified_plugins`] when the
+/// caller is going to act on the result (build images, render compose,
+/// hand to Claude) — only that path enforces the runtime signature
+/// invariant. This raw lister exists for diagnostics (UI listing,
+/// `audit_all`, install/remove paths that already trust their own slug).
 pub fn list_installed_plugins() -> anyhow::Result<Vec<PluginManifest>> {
     let plugins_dir = plugins_base_dir()?;
     list_installed_from_dir(&plugins_dir)
 }
 
 /// Lists plugins from a given directory by scanning `<dir>/*/plugin.json`.
+/// **No signature verification** — see [`list_installed_plugins`].
 pub fn list_installed_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<PluginManifest>> {
     if !plugins_dir.exists() {
         return Ok(vec![]);
@@ -871,23 +986,232 @@ pub fn list_installed_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<PluginM
     let mut plugins = Vec::new();
     for entry in std::fs::read_dir(plugins_dir)? {
         let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            let manifest_path = entry.path().join("plugin.json");
-            if manifest_path.exists() {
-                let content = std::fs::read_to_string(&manifest_path)?;
-                match serde_json::from_str::<PluginManifest>(&content) {
-                    Ok(manifest) => plugins.push(manifest),
-                    Err(e) => {
-                        log::warn!(
-                            "Skipping plugin at {}: invalid manifest: {e}",
-                            entry.path().display()
-                        );
-                    }
-                }
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        if is_transient_plugin_dir(&dir_name) {
+            continue;
+        }
+        let manifest_path = entry.path().join("plugin.json");
+        if !manifest_path.exists() {
+            continue;
+        }
+        let content = std::fs::read_to_string(&manifest_path)?;
+        match serde_json::from_str::<PluginManifest>(&content) {
+            Ok(manifest) => plugins.push(manifest),
+            Err(e) => {
+                log::warn!(
+                    "Skipping plugin at {}: invalid manifest: {e}",
+                    entry.path().display()
+                );
             }
         }
     }
     Ok(plugins)
+}
+
+/// Loads every plugin under `~/.speedwave/plugins/`, verifying each
+/// signature and validating each manifest. Returns `Err` if any installed
+/// plugin fails — callers using this loader (compose render, image
+/// build, Claude wiring) must not proceed with a partial set of trusted
+/// plugins. Use [`list_for_ui`] when you need to show a tolerant view
+/// instead.
+pub fn list_verified_plugins() -> anyhow::Result<Vec<VerifiedPlugin>> {
+    let plugins_dir = plugins_base_dir()?;
+    list_verified_from_dir(&plugins_dir)
+}
+
+/// Test-friendly variant of [`list_verified_plugins`].
+pub fn list_verified_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<VerifiedPlugin>> {
+    if !plugins_dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(plugins_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        if is_transient_plugin_dir(&dir_name) {
+            continue;
+        }
+        let plugin_dir = entry.path();
+        let vp = verify_one_plugin_dir(&plugin_dir, &dir_name)?;
+        out.push(vp);
+    }
+    Ok(out)
+}
+
+/// Verifies one plugin directory: signature, manifest parse,
+/// dir-name/slug equality, and `validate_manifest`. Returns a
+/// `VerifiedPlugin` on success or a contextual error on any failure.
+fn verify_one_plugin_dir(plugin_dir: &Path, dir_name: &str) -> anyhow::Result<VerifiedPlugin> {
+    signing::verify_plugin_signature(plugin_dir)
+        .map_err(|e| anyhow::anyhow!("plugin '{dir_name}': signature verification failed: {e}"))?;
+    let manifest_path = plugin_dir.join("plugin.json");
+    let content = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| anyhow::anyhow!("plugin '{dir_name}': cannot read plugin.json: {e}"))?;
+    let manifest: PluginManifest = serde_json::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("plugin '{dir_name}': invalid plugin.json: {e}"))?;
+    if manifest.slug != dir_name {
+        anyhow::bail!(
+            "plugin '{dir_name}': directory name does not match manifest slug '{}'",
+            manifest.slug
+        );
+    }
+    validate_manifest(&manifest, plugin_dir)
+        .map_err(|e| anyhow::anyhow!("plugin '{dir_name}': manifest validation failed: {e}"))?;
+    Ok(VerifiedPlugin {
+        manifest,
+        dir: plugin_dir.to_path_buf(),
+    })
+}
+
+/// Tolerant lister for the Desktop UI. Never returns `Err` — every
+/// installed directory becomes one entry, with `verification_status`
+/// telling the user (and the frontend) whether the plugin is usable.
+/// UI-only commands (`get_plugins`) consume this; runtime-relevant
+/// callers must use [`list_verified_plugins`] instead.
+pub fn list_for_ui() -> Vec<PluginListEntry> {
+    match plugins_base_dir() {
+        Ok(plugins_dir) => list_for_ui_from_dir(&plugins_dir),
+        Err(e) => {
+            log::warn!("plugins_base_dir failed: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// Test-friendly variant of [`list_for_ui`].
+pub fn list_for_ui_from_dir(plugins_dir: &Path) -> Vec<PluginListEntry> {
+    if !plugins_dir.exists() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let read_dir = match std::fs::read_dir(plugins_dir) {
+        Ok(rd) => rd,
+        Err(_) => return Vec::new(),
+    };
+    for entry in read_dir.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if !ft.is_dir() {
+            continue;
+        }
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        if is_transient_plugin_dir(&dir_name) {
+            continue;
+        }
+        let plugin_dir = entry.path();
+        let entry_record = classify_plugin_for_ui(&plugin_dir, &dir_name);
+        out.push(entry_record);
+    }
+    out
+}
+
+fn classify_plugin_for_ui(plugin_dir: &Path, dir_name: &str) -> PluginListEntry {
+    // Try to parse the manifest first so even rejected plugins surface
+    // their `name`/`description` to the UI when possible.
+    let manifest_path = plugin_dir.join("plugin.json");
+    let manifest: Option<PluginManifest> = std::fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<PluginManifest>(&s).ok());
+
+    let make_entry = |status: VerificationStatus,
+                      err: Option<String>,
+                      m: Option<PluginManifest>|
+     -> PluginListEntry {
+        PluginListEntry {
+            slug: dir_name.to_string(),
+            dir: plugin_dir.to_path_buf(),
+            manifest: m,
+            verification_status: status,
+            verification_error: err,
+        }
+    };
+
+    let Some(m) = manifest else {
+        return make_entry(
+            VerificationStatus::ManifestInvalid,
+            Some("plugin.json missing or unparseable".into()),
+            None,
+        );
+    };
+
+    if m.slug != dir_name {
+        let mismatch_err = format!("directory name does not match manifest slug '{}'", m.slug);
+        return make_entry(
+            VerificationStatus::DirSlugMismatch,
+            Some(mismatch_err),
+            Some(m),
+        );
+    }
+    if !plugin_dir.join("SIGNATURE").exists() {
+        return make_entry(
+            VerificationStatus::MissingSignature,
+            Some("SIGNATURE file not present".into()),
+            Some(m),
+        );
+    }
+    if let Err(e) = signing::verify_plugin_signature(plugin_dir) {
+        return make_entry(
+            VerificationStatus::InvalidSignature,
+            Some(crate::log_sanitizer::sanitize(&e.to_string())),
+            Some(m),
+        );
+    }
+    if let Err(e) = validate_manifest(&m, plugin_dir) {
+        return make_entry(
+            VerificationStatus::ManifestInvalid,
+            Some(e.to_string()),
+            Some(m),
+        );
+    }
+    make_entry(VerificationStatus::Verified, None, Some(m))
+}
+
+/// Audits every installed plugin and returns a list of `(slug, reason)`
+/// pairs for the ones that fail. Called at process startup (Desktop
+/// `.setup()`, CLI before any non-recovery action) so the user gets a
+/// single dialog/output describing every bad plugin instead of
+/// discovering them one by one.
+pub fn audit_all() -> Result<(), Vec<(String, String)>> {
+    match plugins_base_dir() {
+        Ok(p) => audit_all_in_dir(&p),
+        Err(e) => Err(vec![("<plugins-base>".into(), e.to_string())]),
+    }
+}
+
+/// Test-friendly variant of [`audit_all`].
+pub fn audit_all_in_dir(plugins_dir: &Path) -> Result<(), Vec<(String, String)>> {
+    if !plugins_dir.exists() {
+        return Ok(());
+    }
+    let mut failures: Vec<(String, String)> = Vec::new();
+    let read_dir = match std::fs::read_dir(plugins_dir) {
+        Ok(rd) => rd,
+        Err(e) => return Err(vec![("<plugins-base>".into(), e.to_string())]),
+    };
+    for entry in read_dir.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if !ft.is_dir() {
+            continue;
+        }
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        if is_transient_plugin_dir(&dir_name) {
+            continue;
+        }
+        let plugin_dir = entry.path();
+        if let Err(e) = verify_one_plugin_dir(&plugin_dir, &dir_name) {
+            failures.push((dir_name, crate::log_sanitizer::sanitize(&e.to_string())));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures)
+    }
 }
 
 /// Ensures plugin images exist for the given enabled service IDs (project-scoped).
@@ -1107,11 +1431,24 @@ fn build_pending_from_dir(
 }
 
 /// Builds a single plugin image using prepare_build_context + build_image.
+///
+/// Re-verifies the plugin's signature before building. Without this, an
+/// attacker who could write to `~/.speedwave/plugins/<slug>/Containerfile`
+/// after install would have arbitrary RUN commands executed at build
+/// time. The image build is the highest-impact post-install action — any
+/// `RUN` inside the Containerfile runs with the build context's contents
+/// available, so the verify gate must come *before* `prepare_build_context`.
 fn build_single_plugin_image(
     runtime: &dyn ContainerRuntime,
     manifest: &PluginManifest,
     plugin_dir: &Path,
 ) -> anyhow::Result<()> {
+    signing::verify_plugin_signature(plugin_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "refusing to build image for plugin '{}': {e}",
+            manifest.slug
+        )
+    })?;
     let tag = plugin_image_tag(manifest);
     let vm_root = runtime.prepare_build_context(plugin_dir)?;
     let containerfile = vm_root.join("Containerfile");
@@ -1340,7 +1677,20 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> anyhow::Result<()> {
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let target = dest.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        // symlink_metadata so symlinks are observed *as symlinks*, not
+        // followed. The same invariant `compute_plugin_digest` enforces
+        // (no symlinks in a plugin tree); enforced here too as
+        // defence-in-depth — `extract_zip` already rejects symlink
+        // entries, but a future caller might copy from a directory
+        // produced by something other than ZIP extraction.
+        let file_type = std::fs::symlink_metadata(entry.path())?.file_type();
+        if file_type.is_symlink() {
+            anyhow::bail!(
+                "plugin source contains symlink which is not allowed: {}",
+                entry.path().display()
+            );
+        }
+        if file_type.is_dir() {
             copy_dir_recursive(&entry.path(), &target)?;
         } else {
             std::fs::copy(entry.path(), &target)?;
@@ -2292,6 +2642,27 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
     }
 
+    /// RAII guard that turns on the debug-only signature bypass for the
+    /// scope of the test, holding `unsigned_env_lock` for the duration.
+    /// Use in tests that synthesise plugin directories without a real
+    /// SIGNATURE — they must still pass the verify gates added in PR3
+    /// (e.g. `build_single_plugin_image`'s pre-build verify).
+    struct UnsignedBypassGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl UnsignedBypassGuard {
+        fn new() -> Self {
+            let lock = unsigned_env_lock();
+            std::env::set_var("SPEEDWAVE_ALLOW_UNSIGNED", "1");
+            Self { _lock: lock }
+        }
+    }
+    impl Drop for UnsignedBypassGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
+        }
+    }
+
     #[test]
     fn test_peek_plugin_manifest_mcp_plugin() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2428,6 +2799,155 @@ mod tests {
 
         assert!(!plugin_dir.join(".image_pending").exists());
         assert!(!image_pending_marker_for(&plugins, "dual-marker").exists());
+    }
+
+    // --- PR3: VerifiedPlugin / list_verified / audit_all / list_for_ui ---
+
+    /// Helper: synthesises a plugin dir with a manifest where the
+    /// directory name and `slug` are deliberately different.  Used to
+    /// verify the loader rejects this layout — an attacker drops
+    /// `evil/plugin.json` whose `slug: "good"` and the loader must
+    /// refuse before any caller acts on `manifest.slug`.
+    fn make_dir_with_mismatched_slug(plugins_dir: &Path, dir_name: &str, manifest_slug: &str) {
+        let plugin_dir = plugins_dir.join(dir_name);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let manifest = format!(
+            r#"{{"name":"x","slug":"{manifest_slug}","version":"1.0.0","description":"x"}}"#
+        );
+        std::fs::write(plugin_dir.join("plugin.json"), manifest).unwrap();
+    }
+
+    #[test]
+    fn test_list_for_ui_reports_dir_slug_mismatch() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        make_dir_with_mismatched_slug(&plugins, "evil", "good");
+
+        let entries = list_for_ui_from_dir(&plugins);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].slug, "evil");
+        assert_eq!(
+            entries[0].verification_status,
+            VerificationStatus::DirSlugMismatch,
+            "loader must observe directory name, not manifest claim"
+        );
+    }
+
+    #[test]
+    fn test_list_verified_rejects_dir_slug_mismatch() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        make_dir_with_mismatched_slug(&plugins, "evil", "good");
+
+        let err = list_verified_from_dir(&plugins)
+            .expect_err("list_verified must fail when any plugin has a dir/slug mismatch");
+        assert!(err.to_string().contains("does not match manifest slug"));
+    }
+
+    #[test]
+    fn test_list_for_ui_skips_transient_install_dirs() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        // Real plugin
+        make_resource_only_plugin_dir(&plugins, "okplugin", "1.0.0");
+        // In-flight install staging
+        std::fs::create_dir_all(plugins.join("okplugin.installing.abc123")).unwrap();
+        // In-flight removal
+        std::fs::create_dir_all(plugins.join("okplugin.removing.def456")).unwrap();
+
+        let entries = list_for_ui_from_dir(&plugins);
+        let slugs: Vec<&str> = entries.iter().map(|e| e.slug.as_str()).collect();
+        assert_eq!(
+            slugs,
+            vec!["okplugin"],
+            "transient .installing.* / .removing.* dirs must not appear in UI listing"
+        );
+    }
+
+    #[test]
+    fn test_audit_all_reports_failures_collectively() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        // One good resource-only plugin (no signature, but bypass active)
+        make_resource_only_plugin_dir(&plugins, "good", "1.0.0");
+        // One mismatched slug — failure
+        make_dir_with_mismatched_slug(&plugins, "bad", "different");
+        // One missing manifest entirely — failure
+        std::fs::create_dir_all(plugins.join("broken")).unwrap();
+
+        let failures = audit_all_in_dir(&plugins).expect_err("audit must report failures");
+        let bad: Vec<&str> = failures.iter().map(|(s, _)| s.as_str()).collect();
+        assert!(bad.contains(&"bad"), "mismatched dir/slug must be reported");
+        assert!(bad.contains(&"broken"), "missing manifest must be reported");
+        assert!(!bad.contains(&"good"), "good plugin must not be reported");
+    }
+
+    /// Atomic install — even with the lock held by another thread, the
+    /// existing on-disk plugin must not vanish mid-replace. We can't
+    /// easily test the lock contention itself in a unit test, but we can
+    /// verify the rollback path: if the rename fails, the old plugin
+    /// stays in place. A direct way to trigger that is impractical
+    /// (rename is atomic on the same FS), so this test instead asserts
+    /// that two sequential installs produce no leftover staging or
+    /// removing directories — those would be evidence of a swap that
+    /// failed mid-flight.
+    #[test]
+    fn test_install_leaves_no_staging_or_removing_dirs() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let zip = tmp.path().join("plugin.zip");
+        build_test_plugin_zip(&zip, "phases-atomic", false);
+        let plugins_dir = tmp.path().join("plugins");
+
+        let progresses = std::sync::Mutex::new(Vec::<PluginInstallProgress>::new());
+        // First install
+        install_plugin_with_base(&zip, None, &mut collect_progress(&progresses), &plugins_dir)
+            .expect("first install must succeed");
+        // Re-install same slug (simulates upgrade)
+        install_plugin_with_base(&zip, None, &mut collect_progress(&progresses), &plugins_dir)
+            .expect("reinstall must succeed");
+
+        let leftovers: Vec<String> = std::fs::read_dir(&plugins_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".installing.") || n.contains(".removing."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "after successful install/reinstall, no transient dirs should remain: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn test_copy_dir_recursive_rejects_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("ok.txt"), b"hi").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc/passwd", src.join("evil")).unwrap();
+
+        let result = copy_dir_recursive(&src, &dest);
+        #[cfg(unix)]
+        {
+            let err = result.expect_err("copy must reject symlink");
+            assert!(err.to_string().contains("symlink"));
+        }
+        #[cfg(not(unix))]
+        {
+            // On non-Unix we don't create the symlink; just assert it works.
+            result.expect("copy must succeed without symlinks");
+        }
     }
 
     #[test]
@@ -3946,6 +4466,7 @@ mod tests {
 
     #[test]
     fn test_build_pending_accumulates_build_errors() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         let plugins_dir = tmp.path();
 
@@ -3987,6 +4508,7 @@ mod tests {
 
     #[test]
     fn test_build_pending_mixed_parse_and_build_errors() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         let plugins_dir = tmp.path();
 
@@ -4250,6 +4772,7 @@ mod tests {
 
     #[test]
     fn test_ensure_plugin_images_rebuilds_missing_enabled() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
 
@@ -4309,6 +4832,7 @@ mod tests {
 
     #[test]
     fn test_ensure_plugin_images_handles_multiple_plugins_mixed_enabled() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "plugin-a", "1.0.0"); // enabled, missing image
         make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0"); // enabled, existing image
@@ -4328,6 +4852,7 @@ mod tests {
 
     #[test]
     fn test_ensure_plugin_images_also_builds_pending_for_enabled() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
         // Add .image_pending marker
@@ -4349,6 +4874,7 @@ mod tests {
 
     #[test]
     fn test_ensure_all_plugin_images_rebuilds_all_missing() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "plugin-a", "1.0.0");
         make_mcp_plugin_dir(tmp.path(), "plugin-b", "2.0.0");
@@ -4405,6 +4931,7 @@ mod tests {
 
     #[test]
     fn test_ensure_plugin_images_continues_after_single_failure() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "plugin-a", "1.0.0");
         make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0");
@@ -4444,6 +4971,7 @@ mod tests {
 
     #[test]
     fn test_ensure_plugin_images_image_exists_returns_err() {
+        let _g = UnsignedBypassGuard::new();
         // image_exists returning Err should be treated as missing — attempt build
         // We use FailingBuildRuntime for this because TrackingRuntime always succeeds
         // for image_exists. Create a custom mock inline.
@@ -4560,6 +5088,7 @@ mod tests {
 
     #[test]
     fn test_ensure_plugin_images_custom_image_tag() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path().join("presale");
         std::fs::create_dir_all(&plugin_dir).unwrap();
@@ -4593,6 +5122,7 @@ mod tests {
 
     #[test]
     fn test_ensure_plugin_images_pending_marker_cleared_after_build() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "presale", "1.0.0");
         let pending = tmp.path().join("presale").join(".image_pending");
@@ -4610,6 +5140,7 @@ mod tests {
 
     #[test]
     fn test_ensure_plugin_images_image_exists_after_rebuild() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "presale", "1.0.0");
 
