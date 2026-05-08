@@ -12,10 +12,17 @@ load setup
 
 # Override `setup` to also point SPEEDWAVE_DATA_DIR at a per-test
 # tempdir, so we never touch the developer's real `~/.speedwave/`.
+#
+# `consts::derive_instance_name_from` (called eagerly during CLI
+# startup) asserts that the data-dir basename matches
+# `^[a-z][a-z0-9-]{0,63}$`. `mktemp -d` produces basenames like
+# `tmp.XXXXXX` on macOS / `tmp.XXXX` on Linux, both containing a `.`
+# that breaks the assertion — so we create the tempdir, then nest a
+# clean-named child under it and use *that* as SPEEDWAVE_DATA_DIR.
 setup() {
     TEST_TEMP_DIR="$(mktemp -d)"
     export TEST_TEMP_DIR
-    export SPEEDWAVE_DATA_DIR="$TEST_TEMP_DIR"
+    export SPEEDWAVE_DATA_DIR="$TEST_TEMP_DIR/sw-test"
     mkdir -p "$SPEEDWAVE_DATA_DIR/plugins"
 }
 
@@ -75,4 +82,32 @@ EOF
     run "$SPEEDWAVE_BIN" plugin list
     [ "$status" -eq 0 ]
     [[ "$output" == *"evil"* ]]
+}
+
+# Two plugins side-by-side: one tampered, one fine. The skip-list's
+# whole point is that the user can `plugin remove <bad>` even when
+# `<good>` is also installed. Without an explicit two-plugin scenario,
+# recovery could regress (e.g. someone wires `plugin remove` through
+# `list_verified_plugins`, which fails on the bad one) and the
+# single-plugin tests would still pass.
+@test "speedwave plugin remove targets only the bad plugin" {
+    make_unsigned_plugin_dir "evil"
+    make_unsigned_plugin_dir "also-evil"
+    run "$SPEEDWAVE_BIN" plugin remove evil
+    [ "$status" -eq 0 ]
+    [ ! -d "$SPEEDWAVE_DATA_DIR/plugins/evil" ]
+    [ -d "$SPEEDWAVE_DATA_DIR/plugins/also-evil" ]
+}
+
+@test "speedwave plugin list shows both verified and unverified entries" {
+    # The tolerant lister surfaces every directory; the user must see
+    # *which* one is broken, not just that "something" is wrong. A
+    # filter that hid unverified plugins would make recovery
+    # impossible in the UI without dropping to the shell.
+    make_unsigned_plugin_dir "evil"
+    make_unsigned_plugin_dir "also-evil"
+    run "$SPEEDWAVE_BIN" plugin list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"evil"* ]]
+    [[ "$output" == *"also-evil"* ]]
 }

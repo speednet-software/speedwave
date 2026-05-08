@@ -71,7 +71,10 @@ Per-plugin mutable state lives at `~/.speedwave/plugin-state/<slug>/`, not under
 
 ### Hard-fail at startup with explicit recovery
 
-The Desktop `.setup()` callback runs `audit_all` and, on failure, shows a Tauri 2 dialog with every slug+reason and the CLI commands that fix them, then exits. The dialog uses `.show(callback)` instead of `.blocking_show()` — the latter can deadlock the setup thread on Linux if the window manager isn't ready.[^5]
+The Desktop `.setup()` callback runs `audit_all` and, on failure, shows a Tauri 2 dialog with every slug+reason and the CLI commands that fix them, then exits via `show_audit_failure_dialog_and_exit(...) -> !`. The platform-specific behaviour:
+
+- **macOS / Windows**: `tauri-plugin-dialog`'s `blocking_show()` renders a native dialog directly from inside `setup()`. The OS-level dialog runs independently of the Tauri event loop, so the user sees the message synchronously.
+- **Linux**: the dialog plugin queues `show()` onto the Tauri event loop, which has not yet started running when `setup()` executes.[^5] `blocking_show` would deadlock and `show(callback)` would silently drop the dialog. We bypass the plugin and write the audit body to stderr (the same diagnostic the CLI prints), then exit. Users running the Desktop app from a terminal or via a journal-aware launcher see the message; users with no console attached see the process exit silently. This is a deliberate downgrade — the security invariant (process exits, command surface never comes online) holds on every platform; the user-facing diagnostic is best-effort on Linux.
 
 The CLI runs the same audit _after_ Help and SelfUpdate (which exit before reaching this point) and _before_ any action that touches the runtime. Recovery actions (`Init`, `PluginInstall`, `PluginList`, `PluginRemove`) skip the audit so a user with a bad plugin can list status, install a fresh signed plugin, or remove the broken one even when another plugin is failing. The skip list is an explicit allow-list, so any future `CliAction` variant defaults to gated.
 

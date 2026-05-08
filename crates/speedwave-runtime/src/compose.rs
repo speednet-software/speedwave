@@ -495,6 +495,32 @@ fn apply_plugins(
     tokens_dir: &std::path::Path,
 ) -> anyhow::Result<String> {
     let plugins = plugin::list_verified_plugins()?;
+    apply_plugins_from_verified(
+        yaml,
+        project_name,
+        project_dir,
+        integrations,
+        network_name,
+        tokens_dir,
+        &plugins,
+    )
+}
+
+/// Test-friendly variant of [`apply_plugins`] — accepts a pre-built
+/// list of `VerifiedPlugin` instead of consulting the on-disk
+/// `~/.speedwave/plugins/`. Production callers go through
+/// `apply_plugins`; tests inject crafted scenarios (forged manifest,
+/// dangling `claude-resources` symlink, slug collision) without
+/// touching the user's real data dir.
+fn apply_plugins_from_verified(
+    yaml: &str,
+    project_name: &str,
+    project_dir: &str,
+    integrations: &ResolvedIntegrationsConfig,
+    network_name: &str,
+    tokens_dir: &std::path::Path,
+    plugins: &[plugin::VerifiedPlugin],
+) -> anyhow::Result<String> {
     if plugins.is_empty() {
         return Ok(yaml.to_string());
     }
@@ -502,7 +528,7 @@ fn apply_plugins(
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
     let mut plugin_slugs: Vec<String> = Vec::new();
 
-    for vp in &plugins {
+    for vp in plugins {
         let manifest = &vp.manifest;
         let plugin_dir = vp.dir.as_path();
         let slug = &manifest.slug;
@@ -8064,6 +8090,173 @@ services:
         let err = super::ensure_resources_dir_safe(&plugin, &resources)
             .expect_err("non-directory claude-resources must be rejected");
         assert!(err.to_string().contains("not a directory"));
+    }
+
+    // ── apply_plugins_from_verified — render-time invariants ─────────
+
+    /// Builds a minimal valid YAML doc for `apply_plugins_from_verified`
+    /// to mutate. The shape mirrors `compose.template.yml` enough that
+    /// the renderer can find `services.claude` and `services.mcp-hub`.
+    fn fixture_compose_yaml() -> &'static str {
+        r#"
+services:
+  claude:
+    image: speedwave-claude:test
+    environment: []
+    volumes: []
+  mcp-hub:
+    image: speedwave-mcp-hub:test
+    environment: []
+"#
+    }
+
+    fn fixture_integrations_with_enabled(slug: &str) -> ResolvedIntegrationsConfig {
+        let mut cfg = ResolvedIntegrationsConfig::default();
+        cfg.plugins.insert(slug.to_string(), true);
+        cfg
+    }
+
+    fn fixture_verified_plugin(
+        slug: &str,
+        service_id: Option<&str>,
+        plugin_dir: &Path,
+        mem_limit: Option<&str>,
+    ) -> plugin::VerifiedPlugin {
+        // MCP plugins (service_id present) require a Containerfile per
+        // validate_manifest. Stub one in the fixture dir so apply_plugins
+        // re-validation passes the existence check and proceeds to the
+        // render-time invariants we actually want to test.
+        if service_id.is_some() {
+            std::fs::create_dir_all(plugin_dir).ok();
+            std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").ok();
+        }
+        let manifest = plugin::PluginManifest {
+            name: slug.into(),
+            service_id: service_id.map(String::from),
+            slug: slug.into(),
+            version: "1.0.0".into(),
+            description: "fixture".into(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: mem_limit.map(String::from),
+            cpu_limit: None,
+            requires_integrations: vec![],
+        };
+        plugin::VerifiedPlugin {
+            manifest,
+            dir: plugin_dir.to_path_buf(),
+        }
+    }
+
+    /// `apply_plugins` re-runs `validate_manifest` so a manifest whose
+    /// fields would now fail the (potentially stricter) ruleset is
+    /// rejected at render time, not silently rendered. We can't
+    /// hand-craft a "post-install rule violation" without breaking
+    /// other tests, so we verify the call chain by passing a
+    /// manifest with a value that would fail the cap (`mem_limit`
+    /// above PLUGIN_MEM_LIMIT_MAX_MIB).
+    #[test]
+    fn test_apply_plugins_revalidates_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("evil");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        // 999g is far above the 16 GiB cap. Re-validation must reject.
+        let vp = fixture_verified_plugin("evil", Some("evil"), &plugin_dir, Some("999g"));
+        let result = super::apply_plugins_from_verified(
+            fixture_compose_yaml(),
+            "test-project",
+            "/tmp/test",
+            &fixture_integrations_with_enabled("evil"),
+            "test-net",
+            tmp.path(),
+            &[vp],
+        );
+        let err = result.expect_err("oversized mem_limit must be rejected at render");
+        assert!(err.to_string().contains("exceeds maximum"));
+    }
+
+    /// `apply_plugins` MUST reject a plugin whose derived compose name
+    /// would overwrite an existing `services.<name>` entry. Without
+    /// this check, `serde_yaml_ng`'s mapping insert silently replaces
+    /// the built-in entry — defeating the hub's zero-token guarantee.
+    /// The slug-collision rule in `validate_manifest` already blocks
+    /// the obvious "slug: hub" case at install, so the render-time
+    /// check is defence in depth — but a regression in either layer
+    /// is invisible without a test that pins the contract.
+    #[test]
+    fn test_apply_plugins_rejects_compose_name_collision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("decoy");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        // We can't construct a manifest with `slug: "hub"` —
+        // `validate_manifest` rejects it. Instead, hand-build YAML
+        // that already contains the service name a plugin would
+        // produce, and pass a plugin whose service_id derives that
+        // name. Pre-populating `services.mcp-decoy` simulates the
+        // race where two render passes try to claim the same name.
+        let yaml = r#"
+services:
+  claude:
+    image: speedwave-claude:test
+    environment: []
+    volumes: []
+  mcp-hub:
+    image: speedwave-mcp-hub:test
+    environment: []
+  mcp-decoy:
+    image: pre-existing:test
+"#;
+        let cfg = fixture_integrations_with_enabled("decoy");
+        let vp = fixture_verified_plugin("decoy", Some("decoy"), &plugin_dir, None);
+        let err = super::apply_plugins_from_verified(
+            yaml,
+            "test-project",
+            "/tmp/test",
+            &cfg,
+            "test-net",
+            tmp.path(),
+            &[vp],
+        )
+        .expect_err("collision must abort the render");
+        assert!(
+            err.to_string().contains("would overwrite"),
+            "expected collision rejection, got: {err}"
+        );
+    }
+
+    /// Sanity: a verified plugin not blocked by validate_manifest and
+    /// not colliding renders successfully. Pins the happy path so a
+    /// regression that always returns Err (e.g. someone tightening
+    /// validate_manifest in a way that breaks all in-tree manifests)
+    /// is caught here rather than at the user's first launch.
+    #[test]
+    fn test_apply_plugins_renders_enabled_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("ok-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let cfg = fixture_integrations_with_enabled("ok-plugin");
+        let vp = fixture_verified_plugin("ok-plugin", Some("ok-plugin"), &plugin_dir, None);
+        let yaml = super::apply_plugins_from_verified(
+            fixture_compose_yaml(),
+            "test-project",
+            "/tmp/test",
+            &cfg,
+            "test-net",
+            tmp.path(),
+            &[vp],
+        )
+        .expect("happy path must render");
+        assert!(
+            yaml.contains("mcp-ok-plugin"),
+            "rendered YAML must contain plugin service"
+        );
+        assert!(yaml.contains("SPEEDWAVE_PLUGINS=ok-plugin"));
     }
 
     /// If the canonical resolution of `claude-resources` escapes the

@@ -1435,6 +1435,48 @@ mod tests {
         assert!(parse_action(&args).is_err());
     }
 
+    // ── plugin audit skip-list ────────────────────────────────────────────
+    //
+    // The skip-list decides which CLI actions can run with a tampered
+    // plugin on disk. A regression that adds `Update` or `Run` to the
+    // list would silently disable the hard-fail invariant; a regression
+    // that *removes* `PluginRemove` or `PluginList` would lock the user
+    // out of the recovery path. Both are silent — neither shows up as a
+    // panic or compile error. Pin the contract here.
+
+    #[test]
+    fn skip_plugin_audit_skips_recovery_actions() {
+        // These actions MUST run even when another plugin fails audit,
+        // otherwise a user with a bad plugin has no way to fix it from
+        // the CLI.
+        assert!(skip_plugin_audit(&CliAction::Init(None)));
+        assert!(skip_plugin_audit(&CliAction::Init(Some("foo".into()))));
+        assert!(skip_plugin_audit(&CliAction::PluginInstall(
+            "/tmp/x.zip".into()
+        )));
+        assert!(skip_plugin_audit(&CliAction::PluginList));
+        assert!(skip_plugin_audit(&CliAction::PluginRemove("foo".into())));
+    }
+
+    #[test]
+    fn skip_plugin_audit_does_not_skip_runtime_actions() {
+        // These actions touch the runtime / config in ways that depend
+        // on every installed plugin being trusted. The audit must
+        // gate them — a regression that flips any of these to `true`
+        // silently disables the runtime-invariant promise.
+        assert!(!skip_plugin_audit(&CliAction::Run));
+        assert!(!skip_plugin_audit(&CliAction::Check));
+        assert!(!skip_plugin_audit(&CliAction::Update));
+        assert!(!skip_plugin_audit(&CliAction::PluginEnable {
+            project: "p".into(),
+            service_id: "s".into(),
+        }));
+        assert!(!skip_plugin_audit(&CliAction::PluginDisable {
+            project: "p".into(),
+            service_id: "s".into(),
+        }));
+    }
+
     // ── self-update rebuild structural tests ─────────────────────────────
 
     /// Extract the body of a top-level function from source, stopping at the

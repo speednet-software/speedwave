@@ -228,6 +228,27 @@ fn migrate_legacy_image_pending(plugins_dir: &Path, plugin_dir: &Path, slug: &st
         );
         return;
     }
+    // Hardlink defence: a regular-file marker can still be a hardlink
+    // pointing into the user's home (e.g. `~/.aws/credentials`). On
+    // POSIX a regular file's link count tells us. We refuse to touch
+    // multi-link files — moving them under our control isn't a leak
+    // (rename only changes the dirent, not the inode permissions),
+    // but `unlink` in the cross-FS fallback would decrement the link
+    // count on a file we have no business managing. The verifier will
+    // then fail loudly on the still-present `.image_pending`, which
+    // is the right outcome for a tampered tree.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() > 1 {
+            log::warn!(
+                "plugin '{}': legacy .image_pending has nlink={} (hardlink); leaving untouched",
+                slug,
+                meta.nlink()
+            );
+            return;
+        }
+    }
     let target_dir = plugin_state_dir_for(plugins_dir, slug);
     if let Err(e) = std::fs::create_dir_all(&target_dir) {
         log::warn!(
@@ -238,18 +259,43 @@ fn migrate_legacy_image_pending(plugins_dir: &Path, plugin_dir: &Path, slug: &st
         return;
     }
     let target = target_dir.join("image_pending");
-    // Best effort. If rename fails (e.g. cross-FS) fall back to
-    // create+remove. The new marker is only used to trigger a build
-    // retry, so duplication risk is irrelevant.
-    if std::fs::rename(&legacy, &target).is_err() {
-        let _ = std::fs::write(&target, b"");
-        let _ = std::fs::remove_file(&legacy);
+    // Try the cheap atomic path first: same-FS rename. On cross-FS
+    // (rare — `~/.speedwave/` mounted on a separate volume) fall
+    // back to create-new-and-unlink-old, but ONLY if both halves
+    // succeed. If unlink fails, the legacy marker is still in the
+    // signed tree and the verifier will fail audit on the next load
+    // — which is exactly what we want, instead of silently logging
+    // "migrated" and leaving the user wondering why startup blocks.
+    let migrated = match std::fs::rename(&legacy, &target) {
+        Ok(()) => true,
+        Err(_rename_err) => {
+            if let Err(e) = std::fs::write(&target, b"") {
+                log::warn!(
+                    "plugin '{}': failed to write replacement marker {}: {e}",
+                    slug,
+                    target.display()
+                );
+                false
+            } else if let Err(e) = std::fs::remove_file(&legacy) {
+                log::warn!(
+                    "plugin '{}': created replacement marker but failed to remove legacy file {}: {e}; \
+                     audit will refuse this plugin on next load",
+                    slug,
+                    legacy.display()
+                );
+                false
+            } else {
+                true
+            }
+        }
+    };
+    if migrated {
+        log::info!(
+            "plugin '{}': migrated legacy .image_pending to {}",
+            slug,
+            target.display()
+        );
     }
-    log::info!(
-        "plugin '{}': migrated legacy .image_pending to {}",
-        slug,
-        target.display()
-    );
 }
 
 /// Returns `~/.speedwave/tokens/<project>/<service_id>/`
@@ -623,6 +669,45 @@ pub(crate) fn validate_manifest(
             "token_mount: read_write is reserved for built-in services (ADR-009). \
              Plugins must use token_mount: read_only."
         );
+    }
+
+    // `settings_schema` shape gate. Full Draft-7 validation lives in
+    // `desktop/src-tauri/src/plugin_cmd.rs::plugin_save_settings`
+    // (which has the `jsonschema` crate); we keep runtime free of that
+    // dep. But a manifest reaches install with this field already
+    // pre-rendered, and a malformed schema (not a JSON object, or a
+    // multi-megabyte blob) would silently break the settings UI for
+    // that plugin once installed. Reject the obviously-bad shapes at
+    // install time so the user sees the failure as a manifest error,
+    // not as "settings won't save".
+    if let Some(ref schema) = manifest.settings_schema {
+        if !schema.is_object() {
+            anyhow::bail!(
+                "settings_schema must be a JSON object (got {})",
+                match schema {
+                    serde_json::Value::Null => "null",
+                    serde_json::Value::Bool(_) => "boolean",
+                    serde_json::Value::Number(_) => "number",
+                    serde_json::Value::String(_) => "string",
+                    serde_json::Value::Array(_) => "array",
+                    serde_json::Value::Object(_) => unreachable!(),
+                }
+            );
+        }
+        // Cap the schema size — a 1 MiB schema is either a mistake or
+        // a deliberate DoS payload (regex catastrophic-backtrack
+        // schemas are typically small, but we don't want a manifest to
+        // be able to bloat user_config.json indirectly either).
+        const SCHEMA_MAX_BYTES: usize = 64 * 1024;
+        let serialised = serde_json::to_vec(schema)
+            .map_err(|e| anyhow::anyhow!("settings_schema serialises to invalid JSON: {e}"))?;
+        if serialised.len() > SCHEMA_MAX_BYTES {
+            anyhow::bail!(
+                "settings_schema exceeds {} bytes ({} bytes)",
+                SCHEMA_MAX_BYTES,
+                serialised.len()
+            );
+        }
     }
 
     Ok(())
@@ -1177,12 +1262,14 @@ pub fn list_for_ui_from_dir(plugins_dir: &Path) -> Vec<PluginListEntry> {
             continue;
         }
         let plugin_dir = entry.path();
-        // Migrate legacy in-tree `.image_pending` before reading the
-        // tree, so the UI lister observes the same digest as
-        // `audit_all` and `list_verified_plugins` — otherwise a
-        // pre-PR2 install would show "tampered" in the UI even though
-        // it would auto-recover on the next CLI run.
-        migrate_legacy_image_pending(plugins_dir, &plugin_dir, &dir_name);
+        // The UI lister is intentionally read-only. Migration of the
+        // pre-PR2 in-tree `.image_pending` marker is performed by
+        // `verify_one_plugin_dir` (used by `audit_all` and
+        // `list_verified_plugins`); both fire well before any user-
+        // initiated UI list. If a hypothetical race shows a legacy
+        // plugin as `InvalidSignature` here, the next launch's audit
+        // pass migrates it, and the next listing reflects the
+        // recovered state.
         let entry_record = classify_plugin_for_ui(&plugin_dir, &dir_name);
         out.push(entry_record);
     }
@@ -3011,11 +3098,75 @@ mod tests {
     /// invariant, that file changes the digest and verification fails
     /// on first launch — every existing user with an MCP plugin would
     /// be hard-failed unless we migrate the marker out of the tree
-    /// before computing the digest. `audit_all_in_dir` is the first
-    /// load-side path that observes the upgrade, so the migration must
-    /// fire from there.
+    /// before computing the digest.
+    ///
+    /// This test exercises the full chain WITHOUT the unsigned bypass:
+    /// it signs the tree with a fresh test key, drops a legacy
+    /// `.image_pending` afterwards (simulating the upgrade scenario),
+    /// runs the migration, and asserts that the post-migration digest
+    /// matches the digest at signing time — i.e. that signature
+    /// verification with the same test key would now succeed. A
+    /// no-op `migrate_legacy_image_pending` would leave the legacy
+    /// marker in the tree, the digest would differ, and this test
+    /// would fail. The earlier (R2-flagged) version of this test ran
+    /// under `UnsignedBypassGuard` and passed even with a no-op
+    /// migration; that defeated its purpose.
     #[test]
-    fn test_audit_migrates_legacy_image_pending() {
+    fn test_migration_restores_signed_digest() {
+        use crate::signing::{compute_plugin_digest, generate_keypair, sign_plugin};
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        let plugin_dir = plugins.join("legacy-mcp");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"{"name":"x","slug":"legacy-mcp","version":"1.0.0","description":"x"}"#,
+        )
+        .unwrap();
+
+        // Sign the *clean* tree (state at the time of plugin authoring,
+        // before the runtime ever creates a marker).
+        let (priv_key, _pub_key) = generate_keypair();
+        sign_plugin(&plugin_dir, &priv_key).unwrap();
+        let signed_digest = compute_plugin_digest(&plugin_dir).unwrap();
+
+        // Simulate the pre-PR2 install behaviour: dump a marker into
+        // the signed tree.
+        std::fs::write(plugin_dir.join(".image_pending"), b"").unwrap();
+
+        // Pre-migration, the tree's digest no longer matches what was
+        // signed — the legacy marker is hashed in.
+        let pre_migration_digest = compute_plugin_digest(&plugin_dir).unwrap();
+        assert_ne!(
+            pre_migration_digest, signed_digest,
+            "sanity check: legacy marker must alter the digest, otherwise the test proves nothing"
+        );
+
+        migrate_legacy_image_pending(&plugins, &plugin_dir, "legacy-mcp");
+
+        // Post-migration, the tree must be byte-identical to the
+        // signed state, and the marker must live in plugin-state/.
+        let post_migration_digest = compute_plugin_digest(&plugin_dir).unwrap();
+        assert_eq!(
+            post_migration_digest, signed_digest,
+            "migration must restore the digest to the as-signed state"
+        );
+        assert!(
+            !plugin_dir.join(".image_pending").exists(),
+            "legacy marker must be removed from the signed tree"
+        );
+        assert!(
+            image_pending_marker_for(&plugins, "legacy-mcp").exists(),
+            "marker must land in plugin-state/<slug>/image_pending"
+        );
+    }
+
+    /// Wires the migration test through `audit_all_in_dir` to pin the
+    /// caller chain: a regression that bypassed the migration in the
+    /// audit path (e.g. someone short-circuiting `verify_one_plugin_dir`
+    /// before the migration runs) would let the legacy marker survive.
+    #[test]
+    fn test_audit_calls_migration() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         let plugins = tmp.path().join("plugins");
@@ -3026,22 +3177,15 @@ mod tests {
             r#"{"name":"x","slug":"legacy-mcp","version":"1.0.0","description":"x"}"#,
         )
         .unwrap();
-        // Legacy in-tree marker — exactly what an old install would
-        // leave behind.
         std::fs::write(plugin_dir.join(".image_pending"), b"").unwrap();
 
-        // Audit succeeds (bypass active) and migrates the marker as a
-        // side-effect.
+        // Bypass is active so the (non-prod-key) plugin doesn't fail
+        // signature verification — we're only checking that the audit
+        // pass invokes the migration.
         let _ = audit_all_in_dir(&plugins);
 
-        assert!(
-            !plugin_dir.join(".image_pending").exists(),
-            "legacy marker must be moved out of the signed tree"
-        );
-        assert!(
-            image_pending_marker_for(&plugins, "legacy-mcp").exists(),
-            "marker must land in plugin-state/<slug>/image_pending"
-        );
+        assert!(!plugin_dir.join(".image_pending").exists());
+        assert!(image_pending_marker_for(&plugins, "legacy-mcp").exists());
     }
 
     /// Migration must refuse to act on a non-regular-file `.image_pending`
@@ -3075,6 +3219,13 @@ mod tests {
     /// produces a clean tree.
     #[test]
     fn test_install_concurrent_no_corruption() {
+        // Without a barrier, thread A typically finishes before B even
+        // starts — the test then degenerates to "two sequential installs
+        // of the same slug" and the flock is never exercised. The
+        // `Barrier::new(2)` releases both threads only once both are
+        // sitting at the entry of `install_plugin_with_base`, so the
+        // second one is guaranteed to block on the exclusive flock.
+        use std::sync::Barrier;
         // SPEEDWAVE_ALLOW_UNSIGNED is process-global; we hold the
         // unsigned-env lock for both threads via the guard *outside*
         // the spawned threads. Threads inherit the env.
@@ -3085,15 +3236,21 @@ mod tests {
         let plugins_dir = tmp.path().join("plugins");
         std::fs::create_dir_all(&plugins_dir).unwrap();
 
+        let barrier = std::sync::Arc::new(Barrier::new(2));
+
         let plugins_dir_a = plugins_dir.clone();
         let zip_a = zip.clone();
+        let barrier_a = barrier.clone();
         let t_a = std::thread::spawn(move || {
+            barrier_a.wait();
             let mut sink: Vec<PluginInstallProgress> = Vec::new();
             install_plugin_with_base(&zip_a, None, &mut |p| sink.push(p), &plugins_dir_a)
         });
         let plugins_dir_b = plugins_dir.clone();
         let zip_b = zip.clone();
+        let barrier_b = barrier.clone();
         let t_b = std::thread::spawn(move || {
+            barrier_b.wait();
             let mut sink: Vec<PluginInstallProgress> = Vec::new();
             install_plugin_with_base(&zip_b, None, &mut |p| sink.push(p), &plugins_dir_b)
         });
@@ -4545,6 +4702,113 @@ mod tests {
             err.to_string().contains("exceeds maximum"),
             "expected upper-bound rejection, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_non_object_settings_schema() {
+        // `settings_schema` is consumed by the Desktop UI as a JSON
+        // Schema object. A non-object value (array, scalar, …) cannot
+        // be a Draft-7 schema and would silently break the settings
+        // form for the plugin. Reject at install.
+        let dir = tempfile::tempdir().unwrap();
+        for non_object in [
+            serde_json::json!("not a schema"),
+            serde_json::json!([{"type": "object"}]),
+            serde_json::json!(42),
+            serde_json::json!(null),
+        ] {
+            let manifest = PluginManifest {
+                name: "Test".to_string(),
+                service_id: None,
+                slug: "test-schema".to_string(),
+                version: "1.0.0".to_string(),
+                description: "test".to_string(),
+                port: None,
+                image_tag: None,
+                resources: vec![],
+                token_mount: TokenMount::ReadOnly,
+                auth_fields: vec![],
+                settings_schema: Some(non_object.clone()),
+                speedwave_compat: None,
+                extra_env: None,
+                mem_limit: None,
+                cpu_limit: None,
+                requires_integrations: vec![],
+            };
+            let err = validate_manifest(&manifest, dir.path())
+                .expect_err("non-object settings_schema must be rejected");
+            assert!(
+                err.to_string()
+                    .contains("settings_schema must be a JSON object"),
+                "expected JSON-object rejection, got: {err} (input was {non_object:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_oversized_settings_schema() {
+        // 1 MiB pseudo-schema — 16x the cap. Should be rejected.
+        let big_string = "x".repeat(1024 * 1024);
+        let schema = serde_json::json!({
+            "type": "object",
+            "description": big_string,
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = PluginManifest {
+            name: "Test".to_string(),
+            service_id: None,
+            slug: "test-schema-big".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: Some(schema),
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+        };
+        let err = validate_manifest(&manifest, dir.path())
+            .expect_err("oversized settings_schema must be rejected");
+        assert!(err.to_string().contains("exceeds"));
+    }
+
+    #[test]
+    fn test_validate_manifest_accepts_valid_settings_schema() {
+        // Sanity: an in-tree-style schema must still pass.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "currency": {
+                    "type": "string",
+                    "enum": ["PLN", "EUR", "USD"]
+                }
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = PluginManifest {
+            name: "Test".to_string(),
+            service_id: None,
+            slug: "test-schema-ok".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: Some(schema),
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+        };
+        validate_manifest(&manifest, dir.path()).expect("valid schema must pass");
     }
 
     #[test]

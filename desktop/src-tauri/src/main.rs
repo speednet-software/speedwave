@@ -941,16 +941,26 @@ fn ensure_mcp_os_running(
 }
 
 /// Shows the audit-failure dialog and terminates the process. Returns
-/// only via `process::exit`. On macOS / Windows the OS-native dialog
-/// is shown synchronously via `blocking_show`. On Linux the same call
-/// can deadlock the Tauri setup thread when the window manager isn't
-/// ready (`tauri-apps/plugins-workspace#956`); we fall back there to
-/// a non-blocking show with a 30-second timeout that exits the process
-/// regardless. In every code path the function does not return.
+/// only via `process::exit`.
+///
+/// macOS / Windows: native blocking dialog via `tauri-plugin-dialog`'s
+/// `blocking_show()`. The setup thread is not the UI thread on these
+/// platforms; the OS-native dialog renders directly.
+///
+/// Linux: the dialog plugin queues `show()` onto the Tauri event loop,
+/// which has not yet started running when `setup()` is executing —
+/// blocking_show would deadlock, and `show(callback)` would silently
+/// drop the dialog because the queue never drains. We bypass the
+/// plugin entirely and write the body to stderr, the same diagnostic
+/// path the CLI already takes. Users running the Desktop app from a
+/// terminal see the message; users launching from a desktop launcher
+/// see nothing in the UI but the journalctl record carries the same
+/// content. This is a deliberate downgrade from the cross-platform
+/// dialog story, recorded in ADR-051.
 fn show_audit_failure_dialog_and_exit(app: &tauri::AppHandle, body: String) -> ! {
-    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
     #[cfg(not(target_os = "linux"))]
     {
+        use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
         let _ = app
             .dialog()
             .message(body)
@@ -961,22 +971,8 @@ fn show_audit_failure_dialog_and_exit(app: &tauri::AppHandle, body: String) -> !
     }
     #[cfg(target_os = "linux")]
     {
-        let body_for_dialog = body.clone();
-        let app_for_dialog = app.clone();
-        std::thread::spawn(move || {
-            app_for_dialog
-                .dialog()
-                .message(body_for_dialog)
-                .title("Plugin verification failed")
-                .kind(MessageDialogKind::Error)
-                .show(|_| {
-                    std::process::exit(1);
-                });
-        });
-        // Safety net — if the dialog can't render (no DISPLAY, headless,
-        // dialog plugin failure), we still terminate within 30 s instead
-        // of leaving the user with a frozen, half-initialised app.
-        std::thread::sleep(std::time::Duration::from_secs(30));
+        let _ = app; // suppress unused-var warning on Linux
+        eprintln!("Plugin verification failed:\n{}", body);
         std::process::exit(1);
     }
 }
