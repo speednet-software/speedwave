@@ -25,6 +25,13 @@ All containers follow OWASP container hardening guidelines:
 - `tmpfs: /tmp:noexec,nosuid` — temporary filesystem with restricted execution
 - Resource limits: CPU and memory caps defined per container in `compose.template.yml`
 
+**The `claude` container's `$HOME` is writable by design.** `${CLAUDE_HOME}` is bind-mounted at `/home/speedwave` as `:rw` because Claude Code self-installs there (`entrypoint.sh` writes `~/.local/bin`, `~/.bashrc`, `~/.claude/*`, `~/.claude.json` — Anthropic All-Rights-Reserved, can't be bundled — see [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md)), and `${PROJECT_DIR}` is mounted at `/workspace:rw` because Claude edits code. Consequences:
+
+- A toolchain Claude installs into `$HOME` (e.g. a JDK tarball — `apt`/`sudo` fail in the hardened container, but `curl … | tar -x` into `$HOME` works) **persists per-project** (it's in `claude-home/<project>/`), is **uncontrolled** (whatever a `curl | bash` pulls), but is **confined to the container** plus the Lima / WSL2 / rootless layer — it does not reach the host. It is also re-installed on a fresh project / data-dir reset, and it grows `claude-home/<project>/` unboundedly. It is **not** a substitute for **Host Exec** (no Docker; pollutes `claude-home`; ephemeral).
+- Because `/workspace` is `:rw`, a prompt-injected Claude doesn't need a malicious repo from outside — it can write a malicious `build.gradle` / `package.json` script *itself* and then (if Host Exec is enabled and a whitelisted recipe runs that toolchain) have it executed on the host. `cwdSub` confinement is cosmetic against this; the real mitigation is Host Exec's per-recipe confirmation and the trust decision to enable it at all (see [Host Exec → deliberate, scoped weakening](#host-exec--deliberate-scoped-weakening) below).
+
+Neither the IDE Bridge lock dir (`${IDE_LOCK_DIR}` → `~/.claude/ide/`, mounted `:ro`) nor the clipboard bridge gives the container any further writable host path or a way to make the host execute something.
+
 ## Token Isolation
 
 Each MCP worker container mounts **only its own** service credentials:
@@ -68,6 +75,30 @@ Speedwave's threat model includes a non-privileged process running as the same u
 - Startup runs `plugin::audit_all` — the Desktop blocks with a recovery dialog (Tauri 2 `tauri-plugin-dialog`) on any failure; the CLI exits 2. Recovery commands (`plugin remove`, `plugin install`, `plugin list`, `init`) skip the audit so users can always reach the recovery path.
 
 `~/.speedwave/tokens/<project>/<service_id>/<key>` is mode 0600 by `set_owner_only` and lives outside the plugin tree, so token files are not part of the plugin signature surface — but they are also write-protected against unprivileged tampering by filesystem ACLs.
+
+### Host Exec — deliberate, scoped weakening
+
+**Host Exec** (`host_exec`, [ADR-054](../adr/ADR-054-host-exec-worker.md)) is the one place Speedwave deliberately and explicitly relaxes the container-isolation model: it runs a user-defined whitelist of project-toolchain commands (`./gradlew test`, `npm run build`, `docker compose up`, …) **on the host machine, with the user's privileges, in the project folder**, behind the per-project MCP hub. It exists because Claude — running in the hardened, token-free `claude` container — otherwise cannot build/test/lint the project or drive the host's Docker; users were already filling that gap insecurely by hand (an LLM-generated agent on `0.0.0.0` with a token committed to the repo). Host Exec is the safe-as-possible version of that capability, not a removal of the boundary.
+
+**Mitigations (what keeps it as narrow as it can be):**
+
+- **Off by default; the whitelist is empty.** A project with `host_exec` disabled — or enabled with no recipes — lets Claude run nothing. Enabling it requires confirming a **blocking danger modal** in the Desktop UI that spells out the consequences.
+- **User-local config only.** The whitelist lives in `~/.speedwave/config.json` (`integrations.hostExec`). The repo `.speedwave.json` layer **ignores `host_exec` entirely** — an executable command whitelist is a security-class field, like the LLM `provider`/`base_url` (`config::apply_integrations_layer`'s `from_repo` gate). A hostile repo cannot grant itself execution.
+- **Per-recipe confirmation.** Each recipe declares `confirm: ask` (prompt every time — the default), `session` (prompt once per argv/cwd per app session), or `always` (never). `always` is only offered when editing an existing recipe, behind a second warning, and is **rejected** for recipes that look state-changing (a DB client; `docker compose up/down/exec/rm/prune`; a migration tool — `host_exec::is_state_changing_recipe`). On a frontend non-answer the worker **fails closed** (the command doesn't start).
+- **Fixed commands, not free-form strings.** `exec` + a fixed `args` list; `{name}` parameter tokens substitute into fixed positions and each substitution is **one** argv element, never re-split. Validation (`host_exec::validate_host_exec_config`) rejects an `exec` whose basename is a **shell/eval launcher** (`bash sh zsh dash ksh fish eval env xargs find ssh sshpass` — `consts::HOST_EXEC_SHELL_LAUNCHERS`), and rejects a **bare `{param}`** as the whole element after a meta-tool (`node deno python python3 perl ruby make npm npx pnpm yarn` — `consts::HOST_EXEC_META_TOOLS`); a literal sub-command (`npm run build`, `make test`) is fine. `shell: false`, always; no `-c`/eval option.
+- **`127.0.0.1`-only worker; per-(project, app-session) bearer.** Each project gets its own worker process on a dynamic loopback port; the hub→worker auth token (`~/.speedwave/secrets/<project>/host-exec-auth-token`, mode 0600, symlink-rejected on read) is a fresh UUIDv4 minted per app session and never appears in the repo. Two projects' workers share nothing.
+- **Recipe child env is a strict allowlist.** Spawned recipes get only `PATH` (the recovered login-shell PATH, not Finder's stub), `HOME`/`USERPROFILE`, `TMPDIR`/`TMP`/`TEMP`, `LANG`/`LC_*`, `JAVA_HOME`, `DOCKER_HOST`, the platform minimum, **plus the recipe's own literal `env` map** — never `HOST_EXEC_AUTH_TOKEN`/`HOST_EXEC_CONFIG_PATH`/`PORT`. Recipe `env` keys that are reserved (`RESERVED_ENV_KEYS`) are rejected.
+- **Config file 0600; host log redacts `env`.** The per-project worker snapshot (`~/.speedwave/host-exec/<project>/config.json`) is `0600` (it may hold a recipe's `env` literals, possibly secrets — the UI warns against that); the host audit log (`~/.speedwave/host-exec/<project>/log`) records the full argv, cwd, exit code, status, duration and the confirm decision but **redacts** recipe `env` values (keys only).
+- **Bounded execution; process-tree kill.** A per-command timeout (≈7 min) kills the **whole process group** (`kill(-pid, SIGKILL)` on Unix / `taskkill /T /F /PID` on Windows) so a runaway Gradle daemon / `docker compose` child can't outlive the call. Per-stream output caps (tail kept, ANSI stripped) bound what comes back.
+- **Fail-closed on whitelist change.** The worker re-reads its config snapshot per tool call, so a removed/disabled recipe stops working immediately regardless of hub-cache state; a whitelist edit also respawns the worker (clearing its session cache) and recreates the project's hub container so the tool set re-discovers.
+
+**Residual risk (documented and accepted — see [ADR-054 §Negative](../adr/ADR-054-host-exec-worker.md)):**
+
+- **A whitelist with build/test means repo code runs on the host.** `npm run`, `make`, `gradle`, `docker compose` all execute repo-controlled code — often via `/bin/sh` themselves. The `shell:false` + launcher/meta-tool bans are **defense-in-depth, not a guarantee**: they close `{"exec":"bash","args":["-c","{cmd}"]}` and "run whatever Claude types through `npm`", not "no repo code ever runs". The launcher ban is by **basename**, so `./node_modules/.bin/node …` is not caught.
+- **Claude can write the repo then run it.** `/workspace` is `:rw` (Claude edits code), so a prompt-injected Claude can author a malicious `build.gradle`/`package.json`/`docker-compose.yml` and then run a whitelisted recipe over it. `cwdSub` confinement doesn't help. The mitigations against this are the trust decision to enable Host Exec at all, and per-recipe confirmation — **prompt injection is mitigated, not eliminated.**
+- **`confirm: always` and absolute-path `exec` are user-chosen footguns.** Both are guarded (a second warning; rejected for state-changing recipes; the editor flags an absolute `exec`), but a user can choose them.
+
+In short: treat any enabled Host Exec recipe as "this repository's code, on my machine, with my privileges" — because that is exactly what it is. Enable it only for repositories you trust, and keep `confirm: ask`/`session` for anything that changes state.
 
 ### Security Boundaries
 
@@ -166,7 +197,7 @@ Every rule below corresponds to a variant in the `SecurityRule` enum. Compose YA
 
 `validate_manifest` (`crates/speedwave-runtime/src/plugin.rs`) is run both at install time and at every load-side path (compose render, image build). Beyond the basic slug/version/format checks it enforces:
 
-- **`extra_env` reserved keys** — a plugin must not inject env vars that Speedwave reserves (`PORT`, auto-injected) or that are dynamic-linker / language-runtime / shell-environment hijack vectors (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_*`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `PATH`, `HOME`, `SHELL`, `IFS`, `BASH_ENV`, `ENV`). The list is `consts::RESERVED_ENV_KEYS` (SSOT — see CLAUDE.md), matched case-insensitively.
+- **`extra_env` reserved keys** — a plugin must not inject env vars that Speedwave reserves (`PORT`, auto-injected) or that are dynamic-linker / language-runtime / shell-environment hijack vectors (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_*`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `PATH`, `HOME`, `SHELL`, `IFS`, `BASH_ENV`, `ENV`). The list is `consts::RESERVED_ENV_KEYS` (SSOT — see CLAUDE.md), matched case-insensitively. The same list also rejects a [Host Exec](#host-exec--deliberate-scoped-weakening) recipe's `env` keys; alongside it, `consts::HOST_EXEC_SHELL_LAUNCHERS` (banned `exec` basenames — shell/eval launchers) and `consts::HOST_EXEC_META_TOOLS` (interpreters/package-script runners that may not take a bare-`{param}` argument) are sibling SSOT lists consumed by `host_exec::validate_host_exec_config` — edit `consts.rs`, not the validators.
 - **`token_mount: read_write`** — rejected unconditionally for plugins. `:rw` is reserved for built-in services (currently SharePoint only, for OAuth refresh — [ADR-009](../adr/ADR-009-per-project-isolation-preserved.md)). Built-in service slugs are blocked earlier in the function, so any plugin reaching this check is by definition unauthorised.
 - **`mem_limit` / `cpu_limit`** — parsed numerically and bounded by `PLUGIN_MEM_LIMIT_MAX_MIB` / `PLUGIN_CPU_LIMIT_MAX`. An explicit `0` (Docker's "no limit") is rejected so a plugin cannot bypass the cap.
 - **Slug collision** — a slug whose derived compose name (`mcp-<slug>`) or whose bare form matches a built-in service is rejected, so a plugin cannot shadow `mcp-hub`, `claude`, etc. via a silent YAML-mapping overwrite.
@@ -199,16 +230,18 @@ Same checks as plugin volumes, applied to the built-in SharePoint service. Share
 
 Sensitive directories must be `0o700` (owner rwx only):
 
-- `~/.speedwave/secrets/<project>/` — worker auth tokens
+- `~/.speedwave/secrets/<project>/` — worker auth tokens (including the Host Exec hub→worker bearer)
 - `~/.speedwave/snapshots/<project>/` — compose rollback snapshots
 - `~/.speedwave/ide-bridge/` — IDE bridge lock files
 - `~/.speedwave/tokens/<project>/` — token parent directory
 - `~/.speedwave/tokens/<project>/<service>/` — per-service token directories
+- `~/.speedwave/host-exec/<project>/` — per-project Host Exec worker state (config snapshot, PID, port, log)
 
 Sensitive files must be `0o600` (owner rw only):
 
-- `~/.speedwave/secrets/<project>/*` — service auth tokens. Reads of these files reject symbolic links — `is_symlink()` is checked before `is_file()` to defeat host-write attackers planting a symlink to a substitute UUID.
+- `~/.speedwave/secrets/<project>/*` — service auth tokens, including `host-exec-auth-token` (the Host Exec hub→worker bearer). Reads of these files reject symbolic links — `is_symlink()` is checked before `is_file()` to defeat host-write attackers planting a symlink to a substitute UUID.
 - `~/.speedwave/tokens/<project>/<service>/*` — plugin credentials
+- `~/.speedwave/host-exec/<project>/config.json` — Host Exec recipe whitelist snapshot the worker reads (may contain a recipe's `env` literals; `host_exec_save_settings` writes it `0o600` via `write_host_exec_config_snapshot`)
 - `~/.speedwave/snapshots/<project>/*.json` — compose snapshots
 - `~/.speedwave/ide-bridge/*.lock` — IDE bridge auth tokens
 - `~/.speedwave/bundle-state.json` — bundle reconciliation state
@@ -375,4 +408,6 @@ Treat the Apple Developer ID as the primary secret. The Tauri key is a defense-i
 - [ADR-009: Per-Project Isolation Preserved](../adr/ADR-009-per-project-isolation-preserved.md)
 - [ADR-026: Linux Rootless nerdctl — Per-Platform Container User](../adr/ADR-026-linux-rootless-container-user.md)
 - [ADR-037: Code Signing and Bundled Binary Signing](../adr/ADR-037-code-signing-and-bundled-binary-signing.md)
+- [ADR-051: Plugin Signature Runtime Verification](../adr/ADR-051-plugin-signature-runtime-verification.md)
+- [ADR-054: Host Exec — Host-Side Per-Project Toolchain Worker](../adr/ADR-054-host-exec-worker.md)
 - [Release Signing Guide](../contributing/release-signing.md)
