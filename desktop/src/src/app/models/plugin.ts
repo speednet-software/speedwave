@@ -15,9 +15,9 @@ export interface PluginAuthField {
  * recover (the remove button stays available regardless).
  *
  * Mirrors the `VerificationStatus` enum in
- * `crates/speedwave-runtime/src/plugin.rs` — the literals here must
- * match `verification_status_to_string` in
- * `desktop/src-tauri/src/plugin_cmd.rs`.
+ * `crates/speedwave-runtime/src/plugin.rs`, which derives
+ * `#[serde(rename_all = "snake_case")]` — the literals here must
+ * stay in sync with that derive.
  */
 export type PluginVerificationStatus =
   | 'verified'

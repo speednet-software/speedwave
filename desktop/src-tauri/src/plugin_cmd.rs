@@ -712,6 +712,10 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("test-plugin"));
         assert!(json.contains("api_key"));
+        // The Angular frontend's `PluginVerificationStatus` union depends
+        // on the snake_case wire literals — pin one here so a mis-annotated
+        // `VerificationStatus` enum (e.g. PascalCase) is caught.
+        assert!(json.contains(r#""verification_status":"verified""#));
     }
 
     #[test]
