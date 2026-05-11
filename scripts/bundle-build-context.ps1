@@ -52,6 +52,13 @@ foreach ($svc in $services) {
     if (Test-Path "mcp-servers\$svc\tsconfig.json") {
         Copy-Item "mcp-servers\$svc\tsconfig.json" "$svcDest\"
     }
+    # office ships Python support-scripts + a pinned requirements.txt that its Dockerfile COPYs.
+    if (Test-Path "mcp-servers\$svc\scripts") {
+        Copy-Item -Recurse "mcp-servers\$svc\scripts" "$svcDest\scripts"
+    }
+    if (Test-Path "mcp-servers\$svc\requirements.txt") {
+        Copy-Item "mcp-servers\$svc\requirements.txt" "$svcDest\"
+    }
     foreach ($f in @('Dockerfile','Containerfile')) {
         if (Test-Path "mcp-servers\$svc\$f") {
             Copy-Item "mcp-servers\$svc\$f" "$svcDest\"

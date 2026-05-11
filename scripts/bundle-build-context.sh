@@ -46,6 +46,9 @@ for svc in $MCP_SERVICES; do
   # Some services (e.g. playwright) have no own src/ — they wrap an upstream npm package.
   [ -d "$svc_src/src" ] && cp -r "$svc_src/src" "$svc_dest/"
   [ -f "$svc_src/tsconfig.json" ] && cp "$svc_src/tsconfig.json" "$svc_dest/"
+  # office ships Python support-scripts + a pinned requirements.txt that its Dockerfile COPYs.
+  [ -d "$svc_src/scripts" ] && cp -r "$svc_src/scripts" "$svc_dest/"
+  [ -f "$svc_src/requirements.txt" ] && cp "$svc_src/requirements.txt" "$svc_dest/"
   for f in Dockerfile Containerfile; do
     [ -f "$svc_src/$f" ] && cp "$svc_src/$f" "$svc_dest/"
   done
