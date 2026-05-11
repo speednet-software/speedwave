@@ -553,13 +553,17 @@ pub(crate) fn validate_manifest(
     // way a serde_yaml_ng mapping insert would silently overwrite the
     // built-in entry — defeating, e.g., the hub's zero-token guarantee.
     let derived_compose = derive_compose_name(&manifest.slug);
-    if consts::BUILT_IN_SERVICES.contains(&derived_compose.as_str())
-        || consts::BUILT_IN_SERVICES.contains(&manifest.slug.as_str())
-    {
+    if consts::BUILT_IN_SERVICES.contains(&derived_compose.as_str()) {
         anyhow::bail!(
-            "Plugin slug '{}' would produce compose name '{}' which conflicts with a built-in service",
+            "Plugin slug '{}' derives compose name '{}' which is reserved by a built-in service",
             manifest.slug,
             derived_compose
+        );
+    }
+    if consts::BUILT_IN_SERVICES.contains(&manifest.slug.as_str()) {
+        anyhow::bail!(
+            "Plugin slug '{}' is itself a built-in compose service name",
+            manifest.slug
         );
     }
 
@@ -4625,7 +4629,7 @@ mod tests {
                 .expect_err("slug colliding with built-in compose name must be rejected");
             let msg = err.to_string();
             assert!(
-                msg.contains("conflicts with a built-in"),
+                msg.contains("built-in"),
                 "expected built-in collision rejection for slug '{bad_slug}', got: {msg}"
             );
         }
