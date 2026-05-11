@@ -69,17 +69,6 @@ const DEFAULT_LIMIT = 100;
 const MAX_PER_PAGE = 100;
 
 /**
- * Extracts the redirect target URL from an Octokit response fetched with
- * `request: { redirect: 'manual' }` (logs/artifact download endpoints). The URL
- * is in the `Location` header; older Octokit versions also exposed it as `res.url`.
- * Throws if neither is present — better a clear error than handing Claude an empty
- * `download_url` it can't act on (would only happen if GitHub changes the redirect
- * behaviour or a future Octokit version stops exposing it).
- * @param res - Octokit response object (status 302)
- * @param what - What was being downloaded, for the error message (e.g. "workflow run logs")
- * @returns The non-empty redirect URL
- */
-/**
  * `true` if `url` is a syntactically valid absolute `https://` URL. Used to keep
  * GitHub-supplied download URLs (`Location` headers, `archive_download_url`) from
  * carrying a `file://`, `http://`, or metadata-service address to the model — see
@@ -96,6 +85,18 @@ function isHttpsUrl(url: string): boolean {
   }
 }
 
+/**
+ * Extracts the redirect target URL from an Octokit response fetched with
+ * `request: { redirect: 'manual' }` (logs/artifact download endpoints). The URL
+ * is in the `Location` header; older Octokit versions also exposed it as `res.url`.
+ * Throws if neither is present, or if it isn't an `https://` URL — better a clear
+ * error than handing Claude an empty or unsafe `download_url` it can't act on
+ * (would only happen if GitHub changes the redirect behaviour, a future Octokit
+ * version stops exposing it, or a GHES/config-driven base URL is added later).
+ * @param res - Octokit response object (status 302)
+ * @param what - What was being downloaded, for the error message (e.g. "workflow run logs")
+ * @returns The non-empty `https://` redirect URL
+ */
 function extractRedirectUrl(res: unknown, what: string): string {
   const r = res as { url?: unknown; headers?: { location?: unknown } };
   const url = String(r.headers?.location || r.url || '');

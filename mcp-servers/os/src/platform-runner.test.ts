@@ -163,6 +163,67 @@ describe('platform-runner', () => {
         expect(paths.reminders).toContain('native-os-cli');
       });
     });
+
+    // Exercises resolveDarwinPaths() regardless of the host platform — on a Linux CI
+    // runner the `process.platform === 'darwin'` branch is otherwise never taken.
+    describe('macOS paths (resolveDarwinPaths)', () => {
+      const originalPlatform = process.platform;
+
+      function mockPlatform(platform: string): void {
+        Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+      }
+
+      afterEach(() => {
+        Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+      });
+
+      it('resolves darwin dev paths to the four Swift CLI binaries under native/macos', () => {
+        mockPlatform('darwin');
+        delete process.env.SPEEDWAVE_PROD;
+
+        const paths = resolvePaths();
+
+        expect(paths.reminders).toContain(path.join('native', 'macos', 'reminders'));
+        expect(paths.reminders).toContain('reminders-cli');
+        expect(paths.calendar).toContain(path.join('native', 'macos', 'calendar'));
+        expect(paths.calendar).toContain('calendar-cli');
+        expect(paths.mail).toContain(path.join('native', 'macos', 'mail'));
+        expect(paths.mail).toContain('mail-cli');
+        expect(paths.notes).toContain(path.join('native', 'macos', 'notes'));
+        expect(paths.notes).toContain('notes-cli');
+        // macOS uses four distinct binaries, not one shared one.
+        expect(paths.calendar).not.toBe(paths.reminders);
+        expect(path.isAbsolute(paths.reminders)).toBe(true);
+      });
+
+      it('resolves darwin production paths to per-domain CLIs under Resources/', () => {
+        mockPlatform('darwin');
+        process.env.SPEEDWAVE_PROD = '1';
+
+        const paths = resolvePaths();
+
+        expect(paths.reminders).toContain('Resources');
+        expect(paths.reminders).toContain('reminders-cli');
+        expect(paths.calendar).toContain('calendar-cli');
+        expect(paths.mail).toContain('mail-cli');
+        expect(paths.notes).toContain('notes-cli');
+      });
+
+      it('uses SPEEDWAVE_RESOURCES_DIR for darwin production', () => {
+        mockPlatform('darwin');
+        process.env.SPEEDWAVE_PROD = '1';
+        process.env.SPEEDWAVE_RESOURCES_DIR = '/Applications/Speedwave.app/Contents/Resources';
+
+        const paths = resolvePaths();
+
+        expect(paths.reminders).toBe(
+          path.join('/Applications/Speedwave.app/Contents/Resources', 'reminders-cli')
+        );
+        expect(paths.notes).toBe(
+          path.join('/Applications/Speedwave.app/Contents/Resources', 'notes-cli')
+        );
+      });
+    });
   });
 
   describe('ALLOWED_COMMANDS', () => {
@@ -182,9 +243,19 @@ describe('platform-runner', () => {
   });
 
   describe('runCommand', () => {
-    it('calls execFile with correct args on macOS', async () => {
-      if (process.platform !== 'darwin') return;
+    const originalPlatform = process.platform;
 
+    function mockPlatform(platform: string): void {
+      Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+    }
+
+    afterEach(() => {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+    });
+
+    it('calls execFile with the bare-command form on macOS', async () => {
+      // Force darwin so this branch is covered on a non-darwin CI runner too.
+      mockPlatform('darwin');
       execFileAsyncMock.mockResolvedValue({ stdout: '{"lists": []}', stderr: '' });
 
       const result = await runCommand('reminders', 'list_lists', {});
@@ -196,9 +267,8 @@ describe('platform-runner', () => {
       expect(result.parsed).toEqual({ lists: [] });
     });
 
-    it('calls execFile with domain.command format on Linux', async () => {
-      if (process.platform !== 'linux') return;
-
+    it('calls execFile with the domain.command form on Linux/Windows', async () => {
+      mockPlatform('linux');
       execFileAsyncMock.mockResolvedValue({ stdout: '{"reminders": []}', stderr: '' });
 
       const result = await runCommand('reminders', 'list_reminders', { limit: 20 });
@@ -207,6 +277,16 @@ describe('platform-runner', () => {
       const [, args] = execFileAsyncMock.mock.calls[0];
       expect(args).toEqual(['reminders.list_reminders', '{"limit":20}']);
       expect(result.parsed).toEqual({ reminders: [] });
+    });
+
+    it('names the right toolchain in the binary-not-found message per platform', async () => {
+      existsSyncMock.mockReturnValue(false);
+
+      mockPlatform('darwin');
+      await expect(runCommand('reminders', 'list_lists')).rejects.toThrow(/Swift CLI binaries/);
+
+      mockPlatform('linux');
+      await expect(runCommand('reminders', 'list_lists')).rejects.toThrow(/Rust CLI binaries/);
     });
 
     it('parses JSON stdout correctly', async () => {
