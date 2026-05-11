@@ -2,7 +2,7 @@
  * MCP GitHub Worker
  *
  * Isolated GitHub MCP server with per-service token isolation.
- * Exposes ~46 tools via `@octokit/rest` across multiple domains.
+ * Exposes 45 tools via `@octokit/rest` across multiple domains.
  * @module mcp-github
  */
 
