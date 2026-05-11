@@ -65,7 +65,7 @@ RUN CLAUDE_BIN=$(readlink -f /home/speedwave/.local/bin/claude) && \
 # OSC 52 clipboard wrappers — five symlinks redirect to one script emitting
 # the OSC 52 escape sequence. Claude Code's "press c to copy URL" probes for
 # pbcopy/xclip/xsel/wl-copy/clip.exe and pipes the URL through whichever it
-# finds. See ADR-051.
+# finds. See ADR-052.
 COPY --chmod=755 osc52-copy.sh /usr/local/bin/osc52-copy.sh
 RUN ln -s osc52-copy.sh /usr/local/bin/pbcopy && \
     ln -s osc52-copy.sh /usr/local/bin/xclip && \
