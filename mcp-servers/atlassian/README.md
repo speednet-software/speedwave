@@ -29,7 +29,7 @@ Isolated Jira & Confluence (Atlassian Cloud) MCP server with per-service token i
 - Optional scope allowlists: when `jira_project_keys` / `confluence_space_keys` are set, operations outside those projects/spaces are rejected
 - Non-root user in container, read-only token mount, `cap_drop: ALL`, `no-new-privileges`, read-only filesystem
 
-## Tools (35 total)
+## Tools (33 total)
 
 | Domain                 | Count | Tools                                                                                            |
 | ---------------------- | ----- | ------------------------------------------------------------------------------------------------ |

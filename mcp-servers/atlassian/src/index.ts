@@ -3,7 +3,7 @@
  *
  * Isolated Jira & Confluence (Atlassian Cloud) MCP server with per-service token
  * isolation. Built on a thin `axios` HTTP client (no external Atlassian SDK —
- * see `docs/guides/integrations.md` for the rationale). Exposes 35 tools across
+ * see `docs/guides/integrations.md` for the rationale). Exposes 33 tools across
  * Jira (issues, comments, projects, Agile boards/sprints) and Confluence
  * (spaces, pages, comments, labels, attachments).
  * @module mcp-atlassian
