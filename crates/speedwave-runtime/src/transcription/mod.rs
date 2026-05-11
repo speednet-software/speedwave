@@ -8,6 +8,9 @@ pub mod diarizer;
 pub mod model_catalog;
 pub mod model_store;
 pub mod transcriber;
+pub mod transcript;
+pub mod transcript_driver;
+pub mod transcript_store;
 
 pub use accel::{compiled_backends, has_gpu_backend, recommended_live_model, Backend};
 pub use audio::{
@@ -28,6 +31,9 @@ pub use transcriber::{
     Language, Segment, SpeakerId, TranscribeError, TranscribeOptions, Transcriber,
     WhisperCppTranscriber, Word,
 };
+pub use transcript::{ModelsUsed, TranscriptSession, TranscriptStatus};
+pub use transcript_driver::{DriverConfig, DriverError, StopSignal, TranscriptDriver};
+pub use transcript_store::{StoreError, Subscription, TranscriptEvent, TranscriptStore};
 
 use std::path::PathBuf;
 
