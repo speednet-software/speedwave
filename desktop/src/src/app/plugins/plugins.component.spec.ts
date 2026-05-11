@@ -34,6 +34,7 @@ const MOCK_PLUGINS = {
       token_mount: 'ro',
       settings_schema: null,
       requires_integrations: [],
+      verification_status: 'verified',
     },
     {
       slug: 'my-commands',
@@ -48,6 +49,7 @@ const MOCK_PLUGINS = {
       token_mount: 'ro',
       settings_schema: null,
       requires_integrations: [],
+      verification_status: 'verified',
     },
   ],
 };
@@ -750,6 +752,72 @@ describe('PluginsComponent', () => {
       // the assertion in some Angular zone flushes.
       expect(target.enabled).toBe(!before);
       expect(navSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('unverified plugin row', () => {
+    function setupWithUnverifiedPlugin(): void {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return {
+              projects: [{ name: 'test-project', dir: '/tmp/test' }],
+              active_project: 'test-project',
+            };
+          case 'get_plugins':
+            return {
+              plugins: [
+                {
+                  slug: 'tampered',
+                  name: 'Tampered Plugin',
+                  service_id: 'tampered',
+                  version: '1.0.0',
+                  description: 'modified after install',
+                  enabled: false,
+                  configured: true,
+                  auth_fields: [],
+                  current_values: {},
+                  token_mount: 'ro',
+                  settings_schema: null,
+                  requires_integrations: [],
+                  verification_status: 'invalid_signature',
+                  verification_error: 'Ed25519 verification failed',
+                },
+              ],
+            };
+          default:
+            return undefined;
+        }
+      };
+    }
+
+    it('renders the red pill with the verification error and disables the toggle', async () => {
+      setupWithUnverifiedPlugin();
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+
+      const pill = fixture.nativeElement.querySelector(
+        '[data-testid="plugins-row-unverified-tampered"]'
+      );
+      expect(pill).not.toBeNull();
+      expect(pill.classList.contains('red')).toBe(true);
+      expect(pill.getAttribute('title')).toBe('Ed25519 verification failed');
+      // The "verified" pill must not be present.
+      expect(fixture.nativeElement.querySelector('[data-testid="plugins-row-signed"]')).toBeNull();
+
+      const toggle = fixture.nativeElement.querySelector(
+        '[data-testid="plugins-row-toggle-tampered"]'
+      );
+      expect(toggle).not.toBeNull();
+      expect(toggle.disabled).toBe(true);
+      expect(toggle.getAttribute('title')).toContain('Ed25519 verification failed');
+    });
+
+    it('isVerified() returns false for a non-verified status', async () => {
+      setupWithUnverifiedPlugin();
+      await component.ngOnInit();
+      expect(component.isVerified(component.plugins[0])).toBe(false);
     });
   });
 });

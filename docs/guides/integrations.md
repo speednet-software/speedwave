@@ -175,7 +175,35 @@ The Desktop install dialog reports progress through the `plugin_install_status` 
 3. `building` — `nerdctl build` for plugins with a `service_id` (skipped for resource-only plugins; can take 2–5 minutes for heavy dependencies)
 4. `done` — terminal success
 
-If the image build fails, the overlay shows the failure inline and emits a final `done_with_pending_build` event. The plugin is left on disk with an `.image_pending` marker; `ensure_all_plugin_images` retries the build automatically on the next launch. See [ADR-047](../adr/ADR-047-plugin-install-progress-events.md) for the event payload and per-platform cleanup behaviour.
+If the image build fails, the overlay shows the failure inline and emits a final `done_with_pending_build` event. The plugin is left on disk; the build retry marker now lives at `~/.speedwave/plugin-state/<slug>/image_pending` (outside the signed plugin tree, see [ADR-051](../adr/ADR-051-plugin-signature-runtime-verification.md)) and `ensure_all_plugin_images` retries the build automatically on the next launch. See [ADR-047](../adr/ADR-047-plugin-install-progress-events.md) for the event payload and per-platform cleanup behaviour.
+
+### Plugin verification & recovery
+
+Speedwave verifies each plugin's Ed25519 signature **on every load**, not just at install time. If a file inside `~/.speedwave/plugins/<slug>/` changes after install — even by accident — the next launch refuses to start until the affected plugin is removed or reinstalled. See [ADR-051](../adr/ADR-051-plugin-signature-runtime-verification.md) for the threat model.
+
+The Desktop app shows an error dialog listing every failed plugin and the recovery commands. The CLI prints the same list and exits with code 2. Recovery commands (`speedwave plugin remove`, `speedwave plugin install`, `speedwave plugin list`) bypass the audit so you can always reach them, even when another plugin is failing.
+
+To recover from a verification failure:
+
+```bash
+# 1. List all installed plugins and their verification status
+speedwave plugin list
+
+# 2. Remove the failed plugin
+speedwave plugin remove <slug>
+
+# 3. Reinstall a fresh signed plugin
+speedwave plugin install /path/to/plugin.zip
+```
+
+If the CLI is unavailable, manual recovery also works:
+
+```bash
+rm -rf ~/.speedwave/plugins/<slug>
+rm -rf ~/.speedwave/plugin-state/<slug>      # mutable per-plugin state, if any
+```
+
+After cleanup, restart Speedwave. The Desktop app will start normally if no other plugin fails verification.
 
 See [ADR-015](../adr/ADR-015-plugin-system.md) for the plugin system design and [ADR-036](../adr/ADR-036-self-declaring-worker-policy.md) for the tool policy model.
 

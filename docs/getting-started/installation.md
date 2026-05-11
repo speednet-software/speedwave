@@ -105,7 +105,7 @@ After the setup wizard finishes, log in to your Claude account so Claude Code ca
 
   or pass `--project <name>` if you want to log in for a project other than the one matched by your current directory. Type `/login` at Claude's prompt.
 
-Credentials are stored by Claude Code at `~/.speedwave/claude-home/<project>/.claude/.credentials.json` (the per-project CLAUDE_HOME bind-mount) and are available on every subsequent `speedwave` start. To log out, run `speedwave logout` (or `speedwave logout --project <name>`). Credentials are per-project — logging in for one project does not authenticate another. See [ADR-051](../adr/ADR-051-anthropic-oauth-login-flow.md) for the full rationale.
+Credentials are stored by Claude Code at `~/.speedwave/claude-home/<project>/.claude/.credentials.json` (the per-project CLAUDE_HOME bind-mount) and are available on every subsequent `speedwave` start. To log out, run `speedwave logout` (or `speedwave logout --project <name>`). Credentials are per-project — logging in for one project does not authenticate another. See [ADR-052](../adr/ADR-052-anthropic-oauth-login-flow.md) for the full rationale.
 
 If you prefer using a Console API key instead of OAuth, set it from Settings → Authentication → API key.
 
@@ -134,4 +134,4 @@ If your terminal does not support OSC 52, the URL still appears on screen — se
 - [ADR-003: Bundled nerdctl-full on Linux](../adr/ADR-003-bundled-nerdctl-full-on-linux.md)
 - [ADR-004: WSL2 + nerdctl on Windows](../adr/ADR-004-wsl2-and-nerdctl-on-windows.md)
 - [ADR-021: Bundled Dependencies and Zero-Install Strategy](../adr/ADR-021-bundled-dependencies-and-zero-install-strategy.md)
-- [ADR-051: Anthropic OAuth Login Flow](../adr/ADR-051-anthropic-oauth-login-flow.md)
+- [ADR-052: Anthropic OAuth Login Flow](../adr/ADR-052-anthropic-oauth-login-flow.md)

@@ -5,6 +5,7 @@
 
 use crate::types::check_project;
 use speedwave_runtime::config;
+use speedwave_runtime::consts;
 use speedwave_runtime::plugin;
 use std::collections::HashMap;
 use tauri::Emitter;
@@ -27,6 +28,14 @@ pub(crate) struct PluginStatusEntry {
     pub(crate) token_mount: String,
     pub(crate) settings_schema: Option<serde_json::Value>,
     pub(crate) requires_integrations: Vec<String>,
+    /// Outcome of `runtime::plugin::list_for_ui` for this entry.
+    /// Serializes to snake_case (`verified`, `missing_signature`, …).
+    /// Anything but `Verified` disables the enable toggle and
+    /// credential editing in the UI but keeps the remove button active.
+    pub(crate) verification_status: plugin::VerificationStatus,
+    /// Human-readable diagnostic when `verification_status != Verified`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) verification_error: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -77,12 +86,43 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
     let integrations =
         config::resolve_integrations(std::path::Path::new(project_dir), &user_config, &project);
 
-    let manifests = plugin::list_installed_plugins().map_err(|e| e.to_string())?;
+    // Tolerant lister: every installed directory becomes one entry, with
+    // `verification_status` carrying the verdict. Unverified entries are
+    // shown so users know *why* a plugin is disabled and what to do
+    // about it — hiding them would force users to inspect the filesystem.
+    let ui_entries = plugin::list_for_ui();
 
     let mut entries = Vec::new();
-    for manifest in &manifests {
+    for ui in &ui_entries {
+        // For entries without a parseable manifest, surface what we know
+        // (slug = directory name) and a clear status; everything else
+        // gets sensible empty defaults.
+        let Some(manifest) = ui.manifest.as_ref() else {
+            entries.push(PluginStatusEntry {
+                slug: ui.slug.clone(),
+                name: ui.slug.clone(),
+                service_id: None,
+                version: String::new(),
+                description: String::new(),
+                enabled: false,
+                configured: false,
+                auth_fields: Vec::new(),
+                current_values: HashMap::new(),
+                token_mount: "ro".to_string(),
+                settings_schema: None,
+                requires_integrations: Vec::new(),
+                verification_status: ui.verification_status.clone(),
+                verification_error: ui.verification_error.clone(),
+            });
+            continue;
+        };
+
         let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
-        let enabled = integrations.is_plugin_enabled(sid);
+        // An unverified plugin must NOT count as enabled, even if the
+        // user previously enabled a (now-tampered) version. The frontend
+        // additionally disables the enable toggle for non-verified entries.
+        let verified = matches!(ui.verification_status, plugin::VerificationStatus::Verified);
+        let enabled = verified && integrations.is_plugin_enabled(sid);
 
         let auth_fields: Vec<plugin::AuthFieldDef> = manifest.auth_fields.clone();
 
@@ -128,6 +168,8 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
             token_mount,
             settings_schema: manifest.settings_schema.clone(),
             requires_integrations: manifest.requires_integrations.clone(),
+            verification_status: ui.verification_status.clone(),
+            verification_error: ui.verification_error.clone(),
         });
     }
 
@@ -246,9 +288,13 @@ pub async fn install_plugin(
 pub fn remove_plugin(slug: String) -> Result<(), String> {
     log::info!("remove_plugin: slug={slug}");
 
-    // Read manifest BEFORE deleting plugin files — need service_id, auth_fields
-    let manifests = plugin::list_installed_plugins().map_err(|e| e.to_string())?;
-    let manifest = manifests.iter().find(|m| m.slug == slug);
+    // Recovery action: removal must work for tampered plugins too.
+    // Use the tolerant lister so an unparseable manifest still gives us
+    // the slug-as-fallback path. We need `service_id` and `auth_fields`
+    // for cleanup; both default sensibly when the manifest is missing.
+    let entries = plugin::list_for_ui();
+    let entry = entries.iter().find(|e| e.slug == slug);
+    let manifest = entry.and_then(|e| e.manifest.as_ref());
     let service_id = manifest
         .and_then(|m| m.service_id.as_deref())
         .map(|s| s.to_string())
@@ -334,16 +380,40 @@ pub fn set_plugin_enabled(
     check_project(&project)?;
     log::info!("set_plugin_enabled: project={project} service_id={service_id} enabled={enabled}");
 
-    // Validate that service_id corresponds to an installed plugin
-    let manifests = plugin::list_installed_plugins().map_err(|e| e.to_string())?;
-    let found = manifests
-        .iter()
-        .any(|m| m.service_id.as_deref() == Some(&service_id) || m.slug == service_id);
-    if !found {
-        return Err(format!(
-            "no installed plugin with service_id '{}'",
-            service_id
-        ));
+    // Verified-only on enable: a tampered plugin (missing SIGNATURE,
+    // dir/slug mismatch, etc.) must not become enabled. We use the
+    // tolerant `list_for_ui` so the presence of *another* unverified
+    // plugin doesn't block the user from enabling a verified one. The
+    // frontend already disables the toggle for non-verified entries, but
+    // we re-check here so direct command calls from tests/scripts can't
+    // bypass it. Disable requests skip the check — the user must always
+    // be able to turn off a bad plugin.
+    if enabled {
+        let entries = plugin::list_for_ui();
+        let matches_id = |m: &plugin::PluginManifest| {
+            m.service_id.as_deref() == Some(&service_id) || m.slug == service_id
+        };
+        let candidate = entries
+            .iter()
+            .find(|e| e.manifest.as_ref().map(matches_id).unwrap_or(false));
+        match candidate {
+            None => {
+                return Err(format!(
+                    "no installed plugin with service_id '{}'",
+                    service_id
+                ));
+            }
+            Some(e) if e.verification_status != plugin::VerificationStatus::Verified => {
+                return Err(format!(
+                    "plugin '{}' cannot be enabled: {}. Reinstall a signed plugin or remove it.",
+                    service_id,
+                    e.verification_error
+                        .as_deref()
+                        .unwrap_or("verification failed")
+                ));
+            }
+            Some(_) => {}
+        }
     }
 
     config::with_config_lock(|| {
@@ -372,11 +442,11 @@ pub fn save_plugin_credentials(
     check_project(&project)?;
     log::info!("save_plugin_credentials: project={project} slug={slug}");
 
-    let manifests = plugin::list_installed_plugins().map_err(|e| e.to_string())?;
-    let manifest = manifests
-        .iter()
-        .find(|m| m.slug == slug)
-        .ok_or_else(|| format!("plugin '{}' not found", slug))?;
+    // Verified-only: writing credentials for an unverified plugin is an
+    // attack — the manifest's `auth_fields` allowlist (and `service_id`,
+    // which decides the on-disk token path) come from a manifest we
+    // can't trust until the signature checks out.
+    let manifest = require_verified_with_manifest(&slug)?;
 
     let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
     let allowed_keys: Vec<&str> = manifest
@@ -411,6 +481,33 @@ pub fn plugin_save_settings(
     check_project(&project)?;
     log::info!("plugin_save_settings: project={project} slug={slug}");
 
+    // Verified-only: settings are stored under a slug whose meaning
+    // comes from the manifest; persisting settings for a tampered
+    // plugin would let an attacker pre-populate state for a future
+    // (re)installed legitimate plugin.
+    let manifest = require_verified_with_manifest(&slug)?;
+
+    // Cap settings JSON size to prevent a runaway plugin from bloating
+    // user_config.json. The bound is shared with `settings_schema`
+    // validation (see `consts::PLUGIN_SETTINGS_MAX_BYTES`).
+    let serialised = serde_json::to_vec(&settings).map_err(|e| e.to_string())?;
+    if serialised.len() > consts::PLUGIN_SETTINGS_MAX_BYTES {
+        return Err(format!(
+            "plugin '{}' settings exceed {} bytes",
+            slug,
+            consts::PLUGIN_SETTINGS_MAX_BYTES
+        ));
+    }
+
+    // If the plugin declared a `settings_schema`, the payload must
+    // validate against it. Without this, the manifest field is
+    // documentation only — the user_config could end up holding values
+    // outside the schema's enum/type, which the worker would later
+    // crash on or, worse, silently misinterpret.
+    if let Some(ref schema) = manifest.settings_schema {
+        validate_settings_against_schema(&slug, schema, &settings)?;
+    }
+
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
 
@@ -428,10 +525,78 @@ pub fn plugin_save_settings(
     .map_err(|e| e.to_string())
 }
 
+/// Helper: rejects calls that target a plugin whose verification
+/// status is not `Verified`. Used by every Tauri command that *acts
+/// on* a plugin's identity — credentials, settings — to keep the
+/// "tampered plugins are inert" invariant in one place.
+fn require_verified(slug: &str) -> Result<(), String> {
+    require_verified_with_manifest(slug).map(|_| ())
+}
+
+/// Same gate as [`require_verified`] but returns the parsed manifest
+/// so callers that need to inspect declared fields (e.g. the
+/// `settings_schema` for `plugin_save_settings`) don't have to look
+/// it up a second time.
+fn require_verified_with_manifest(slug: &str) -> Result<plugin::PluginManifest, String> {
+    let entries = plugin::list_for_ui();
+    let entry = entries
+        .into_iter()
+        .find(|e| e.slug == slug)
+        .ok_or_else(|| format!("plugin '{}' not found", slug))?;
+    if entry.verification_status != plugin::VerificationStatus::Verified {
+        return Err(format!(
+            "plugin '{}' is not verified: {}",
+            slug,
+            entry
+                .verification_error
+                .as_deref()
+                .unwrap_or("verification failed")
+        ));
+    }
+    entry
+        .manifest
+        .ok_or_else(|| format!("plugin '{}' has no manifest", slug))
+}
+
+/// Validates a settings payload against a plugin's declared JSON Schema
+/// (Draft 7). Pure function — extracted from `plugin_save_settings` so
+/// the schema-rejection invariant can be unit-tested without standing
+/// up a project/config/verified-plugin fixture. Returns a
+/// user-presentable error string on a malformed schema or a payload
+/// that doesn't validate; `Ok(())` when the payload conforms.
+///
+/// The runtime side already gates `settings_schema` shape and size at
+/// install time (`plugin::validate_manifest`), so a *malformed* schema
+/// reaching here is unusual — but we still return a clean error rather
+/// than panicking, in case an older plugin was installed before that
+/// gate existed.
+fn validate_settings_against_schema(
+    slug: &str,
+    schema: &serde_json::Value,
+    settings: &serde_json::Value,
+) -> Result<(), String> {
+    let validator = jsonschema::draft7::new(schema)
+        .map_err(|e| format!("plugin '{}' has an invalid settings_schema: {e}", slug))?;
+    if let Err(e) = validator.validate(settings) {
+        return Err(format!(
+            "settings for plugin '{}' do not match its schema: {e}",
+            slug
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn plugin_load_settings(project: String, slug: String) -> Result<serde_json::Value, String> {
     check_project(&project)?;
     log::info!("plugin_load_settings: project={project} slug={slug}");
+
+    // Verified-only: a tampered plugin must not be able to read settings
+    // saved for a previously-legitimate version of itself. Settings can
+    // contain non-secret-but-private project metadata (host names,
+    // ticket IDs, model selections) that a tampered plugin should not
+    // be allowed to scrape.
+    require_verified(&slug)?;
 
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
 
@@ -452,20 +617,53 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
     check_project(&project)?;
     log::info!("delete_plugin_credentials: project={project} slug={slug}");
 
-    let manifests = plugin::list_installed_plugins().map_err(|e| e.to_string())?;
-    let manifest = manifests
-        .iter()
-        .find(|m| m.slug == slug)
-        .ok_or_else(|| format!("plugin '{}' not found", slug))?;
+    // Recovery action: a user must be able to clear the credentials of
+    // a tampered plugin even if its signature no longer verifies — this
+    // is the cleanup half of `remove_plugin`. We use the tolerant
+    // lister and tolerate a missing/unparseable manifest. The token
+    // directory is identified by `service_id` (or the slug when the
+    // manifest is absent), and EVERY path we touch is canonicalised and
+    // checked to stay inside that directory — a tampered `plugin.json`
+    // with an `auth_field` key like `../../../other-project/token`
+    // must not let us delete outside the service token dir.
+    let entries = plugin::list_for_ui();
+    let entry = entries.iter().find(|e| e.slug == slug);
+    let manifest = entry.and_then(|e| e.manifest.as_ref());
+    let sid = manifest
+        .and_then(|m| m.service_id.as_deref())
+        .unwrap_or(slug.as_str());
 
-    let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
-
-    // Delete token files (no config lock needed for filesystem ops)
     let svc_dir = token_dir_for(&project, sid)?;
-    for field in &manifest.auth_fields {
-        let path = svc_dir.join(&field.key);
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    if svc_dir.exists() {
+        // Which token files to delete: the manifest's auth_fields if we
+        // have a (possibly unverified) manifest, otherwise everything in
+        // the service token dir (slug-based cleanup, mirroring
+        // `remove_plugin`).
+        let keys: Vec<String> = match manifest {
+            Some(m) => m.auth_fields.iter().map(|f| f.key.clone()).collect(),
+            None => std::fs::read_dir(&svc_dir)
+                .map_err(|e| e.to_string())?
+                .flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect(),
+        };
+        let svc_canon = svc_dir.canonicalize().map_err(|e| e.to_string())?;
+        for key in &keys {
+            let path = svc_dir.join(key);
+            // Path-traversal guard: canonicalise and confirm it stays
+            // inside the service token dir before unlinking.
+            match path.canonicalize() {
+                Ok(canon) if canon.starts_with(&svc_canon) => {
+                    std::fs::remove_file(&canon).map_err(|e| e.to_string())?;
+                }
+                Ok(canon) => {
+                    return Err(format!(
+                        "refusing to delete '{}': resolves outside the plugin's token dir",
+                        canon.display()
+                    ));
+                }
+                Err(_) => { /* file doesn't exist — nothing to delete */ }
+            }
         }
     }
 
@@ -512,10 +710,16 @@ mod tests {
             token_mount: "ro".into(),
             settings_schema: None,
             requires_integrations: vec![],
+            verification_status: plugin::VerificationStatus::Verified,
+            verification_error: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("test-plugin"));
         assert!(json.contains("api_key"));
+        // The Angular frontend's `PluginVerificationStatus` union depends
+        // on the snake_case wire literals — pin one here so a mis-annotated
+        // `VerificationStatus` enum (e.g. PascalCase) is caught.
+        assert!(json.contains(r#""verification_status":"verified""#));
     }
 
     #[test]
@@ -544,6 +748,8 @@ mod tests {
             token_mount: "ro".into(),
             settings_schema: Some(schema),
             requires_integrations: vec!["sharepoint".into()],
+            verification_status: plugin::VerificationStatus::Verified,
+            verification_error: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("settings_schema"));
@@ -551,6 +757,69 @@ mod tests {
         assert!(json.contains("PLN"));
         assert!(json.contains("requires_integrations"));
         assert!(json.contains("sharepoint"));
+        assert!(json.contains(r#""verification_status":"verified""#));
+    }
+
+    // ── settings-schema validation (the `plugin_save_settings` gate) ─────
+    //
+    // `plugin_save_settings` is a Tauri command and needs a project /
+    // config / verified-plugin fixture to drive end-to-end. The
+    // schema-validation step is the security-relevant part, so it's
+    // extracted into `validate_settings_against_schema` and tested
+    // directly here.
+
+    #[test]
+    fn validate_settings_against_schema_accepts_conforming_payload() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "currency": { "type": "string", "enum": ["PLN", "EUR", "USD"] }
+            },
+            "required": ["currency"]
+        });
+        let payload = serde_json::json!({ "currency": "EUR" });
+        super::validate_settings_against_schema("presale", &schema, &payload)
+            .expect("a conforming payload must pass");
+    }
+
+    #[test]
+    fn validate_settings_against_schema_rejects_payload_violating_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "currency": { "type": "string", "enum": ["PLN", "EUR", "USD"] }
+            },
+            "required": ["currency"]
+        });
+        // Value outside the enum.
+        let bad_enum = serde_json::json!({ "currency": "BTC" });
+        let err = super::validate_settings_against_schema("presale", &schema, &bad_enum)
+            .expect_err("off-enum value must be rejected");
+        assert!(err.contains("do not match its schema"), "got: {err}");
+
+        // Wrong type.
+        let bad_type = serde_json::json!({ "currency": 42 });
+        let err = super::validate_settings_against_schema("presale", &schema, &bad_type)
+            .expect_err("wrong-type value must be rejected");
+        assert!(err.contains("do not match its schema"), "got: {err}");
+
+        // Missing required field.
+        let missing = serde_json::json!({});
+        let err = super::validate_settings_against_schema("presale", &schema, &missing)
+            .expect_err("missing required field must be rejected");
+        assert!(err.contains("do not match its schema"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_settings_against_schema_rejects_malformed_schema() {
+        // A schema that isn't a valid Draft-7 schema (e.g. `type` set
+        // to a non-string nonsense value). `jsonschema::draft7::new`
+        // should fail to compile it; we surface that as a clean error.
+        let bogus_schema = serde_json::json!({ "type": 12345 });
+        let payload = serde_json::json!({ "anything": true });
+        let err = super::validate_settings_against_schema("presale", &bogus_schema, &payload)
+            .expect_err("malformed schema must be rejected, not panic");
+        assert!(err.contains("invalid settings_schema"), "got: {err}");
     }
 
     #[test]

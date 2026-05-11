@@ -10,7 +10,7 @@
 #      it (iTerm2, Alacritty, Windows Terminal, etc.). No-op on Apple Terminal.
 # Errors on either channel are reported to stderr (Claude Code shows it in the
 # TTY) but the script always exits 0 so Claude's "press c" detection keeps
-# working. See ADR-051.
+# working. See ADR-052.
 
 # `set -f` disables filename globbing so the base64 blob and the raw input are
 # never expanded as shell patterns.

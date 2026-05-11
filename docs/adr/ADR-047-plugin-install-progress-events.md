@@ -3,6 +3,13 @@
 **Status:** Accepted
 **Date:** 2026-05-04
 
+> **Update (ADR-051):** the deferred-build marker referred to below as
+> `~/.speedwave/plugins/<slug>/.image_pending` now lives at
+> `~/.speedwave/plugin-state/<slug>/image_pending` — a sibling of
+> `plugins/`, outside the signed plugin tree, so writing it never changes
+> a plugin's content digest. The lifecycle (host-side create/remove,
+> retry on next launch) is unchanged.
+
 ## Context
 
 Issue [#400](https://github.com/speednet-software/speedwave/issues/400) reports that plugin installation in the Desktop UI shows no visible feedback during the multi-minute work it performs. The previous implementation registered `install_plugin` as a synchronous Tauri command and ran the entire flow — Ed25519 signature verification, ZIP extraction, manifest validation, container image build via `nerdctl build`, and on-disk side-effects — in one blocking call. On macOS, where Tauri runs on the main thread, the user sees the system spinning beachball for 2-5 minutes when installing a heavy plugin with multi-GB build dependencies (e.g. ML libraries) and only learns about a build error after the freeze ends.

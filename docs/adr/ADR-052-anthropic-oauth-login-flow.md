@@ -1,4 +1,4 @@
-# ADR-051: Claude Code Login Surface + Clipboard Bridge
+# ADR-052: Claude Code Login Surface + Clipboard Bridge
 
 **Status:** Accepted
 

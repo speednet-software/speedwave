@@ -32,6 +32,7 @@ function makeMcpPlugin(): PluginStatusEntry {
     token_mount: 'ro',
     settings_schema: null,
     requires_integrations: [],
+    verification_status: 'verified',
   };
 }
 
@@ -49,6 +50,7 @@ function makeResourcePlugin(): PluginStatusEntry {
     token_mount: 'ro',
     settings_schema: null,
     requires_integrations: [],
+    verification_status: 'verified',
   };
 }
 

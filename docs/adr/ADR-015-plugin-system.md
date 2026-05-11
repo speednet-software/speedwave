@@ -100,23 +100,24 @@ presale-1.2.0/
 
 ### Field Reference
 
-| Field                   | Type     | Required | Description                                                                                   |
-| ----------------------- | -------- | -------- | --------------------------------------------------------------------------------------------- |
-| `name`                  | string   | Yes      | Human-readable display name                                                                   |
-| `slug`                  | string   | Yes      | Unique identifier, `^[a-z][a-z0-9-]{0,63}$`                                                   |
-| `service_id`            | string?  | MCP only | Must equal `slug` when present                                                                |
-| `version`               | string   | Yes      | Semantic version                                                                              |
-| `description`           | string   | Yes      | Short description                                                                             |
-| `port`                  | u16?     | MCP only | Container listening port                                                                      |
-| `image_tag`             | string?  | No       | Custom image tag (default: `version`)                                                         |
-| `resources`             | string[] | No       | Subset of `["skills", "commands", "agents", "hooks"]`                                         |
-| `token_mount`           | object   | No       | `{"mode": "read_only"}` (default) or `{"mode": "read_write", "justification": "..."}`         |
-| `auth_fields`           | object[] | No       | Credential field definitions for the Desktop UI                                               |
-| `settings_schema`       | JSON?    | No       | JSON Schema for per-project plugin settings                                                   |
-| `speedwave_compat`      | string?  | No       | Semver `VersionReq` (e.g. `">=0.8, <1"`). Validated at install; mismatch rejects the install. |
-| `extra_env`             | map?     | No       | Additional environment variables for the container                                            |
-| `mem_limit`             | string?  | No       | Container memory limit (default: `128m`)                                                      |
-| `requires_integrations` | string[] | No       | Core integrations the plugin depends on (e.g. `["sharepoint"]`)                               |
+| Field                   | Type     | Required | Description                                                                                          |
+| ----------------------- | -------- | -------- | ---------------------------------------------------------------------------------------------------- |
+| `name`                  | string   | Yes      | Human-readable display name                                                                          |
+| `slug`                  | string   | Yes      | Unique identifier, `^[a-z][a-z0-9-]{0,63}$`                                                          |
+| `service_id`            | string?  | MCP only | Must equal `slug` when present                                                                       |
+| `version`               | string   | Yes      | Semantic version                                                                                     |
+| `description`           | string   | Yes      | Short description                                                                                    |
+| `port`                  | u16?     | MCP only | Container listening port                                                                             |
+| `image_tag`             | string?  | No       | Custom image tag (default: `version`)                                                                |
+| `resources`             | string[] | No       | Subset of `["skills", "commands", "agents", "hooks"]`                                                |
+| `token_mount`           | object   | No       | `{"mode": "read_only"}` only — `read_write` is rejected (reserved for built-ins, ADR-009)            |
+| `auth_fields`           | object[] | No       | Credential field definitions for the Desktop UI                                                      |
+| `settings_schema`       | JSON?    | No       | JSON Schema (object, ≤ 64 KiB) for per-project plugin settings; payloads are validated against it    |
+| `speedwave_compat`      | string?  | No       | Semver `VersionReq` (e.g. `">=0.8, <1"`). Validated at install; mismatch rejects the install.        |
+| `extra_env`             | map?     | No       | Additional environment variables; reserved/dangerous keys (see `consts::RESERVED_ENV_KEYS`) rejected |
+| `mem_limit`             | string?  | No       | Container memory limit (default: `128m`); must be > 0 and ≤ 16 GiB                                   |
+| `cpu_limit`             | f32?     | No       | Container CPU limit in cores; must be ≤ 4                                                            |
+| `requires_integrations` | string[] | No       | Core integrations the plugin depends on (e.g. `["sharepoint"]`)                                      |
 
 ### Compatibility enforcement
 
@@ -162,18 +163,20 @@ The slug determines all paths and keys:
 
 ```
 ~/.speedwave/
-├── plugins/
+├── plugins/                             # signed plugin trees — re-verified on every load
 │   ├── presale/                         # MCP plugin (keyed by slug)
 │   │   ├── plugin.json
 │   │   ├── Containerfile
 │   │   ├── src/
 │   │   ├── claude-resources/
-│   │   ├── SIGNATURE
-│   │   └── .image_pending               # deferred build marker (temporary)
+│   │   └── SIGNATURE
 │   └── my-commands/                     # Resource-only plugin
 │       ├── plugin.json
 │       ├── claude-resources/
 │       └── SIGNATURE
+├── plugin-state/                        # mutable per-plugin state, OUTSIDE the signed tree
+│   └── presale/
+│       └── image_pending                # deferred build marker (temporary)
 ├── tokens/
 │   └── acme/
 │       └── presale/                     # per-project credentials
@@ -184,20 +187,24 @@ The slug determines all paths and keys:
     └── projects[].plugin_settings.presale = { ... }
 ```
 
+> Mutable state (like the `image_pending` marker) lives in `plugin-state/`, a sibling of `plugins/`, so writing it never changes a plugin's content digest. Plugins installed by an older Speedwave release that still carry an in-tree `.image_pending` are migrated to `plugin-state/` on the first load. See [ADR-051](ADR-051-plugin-signature-runtime-verification.md).
+
 ---
 
 ## Signature Verification
 
 Every plugin ZIP must contain a `SIGNATURE` file — an Ed25519 detached signature created by Speednet's private key. The public key is embedded at compile time in `signing.rs`.
 
-Verification runs at install time before any other processing:
+Verification runs at install time **and on every subsequent load** (compose render, image build, claude-resources mount, UI listing, startup audit) — the signature is a runtime invariant, not just an install gate. See [ADR-051](ADR-051-plugin-signature-runtime-verification.md) for the threat model (a local attacker with write access to `~/.speedwave/plugins/`) and the verdict cache (keyed by content digest, so any byte change forces a fresh Ed25519 check).
+
+Each verification:
 
 1. Read `SIGNATURE` (base64-encoded, 64 bytes decoded)
-2. Compute SHA-256 digest of all files except `SIGNATURE` (sorted by name for determinism)
+2. Compute SHA-256 digest of all files except `SIGNATURE` (sorted by name for determinism); a symlink anywhere in the tree is a hard reject
 3. Verify Ed25519 signature against the embedded Speednet public key[^3]
 4. Reject if missing, tampered, or invalid
 
-In debug builds only (`#[cfg(debug_assertions)]`), the `SPEEDWAVE_ALLOW_UNSIGNED` env var skips verification for development. No CLI flag exists — prevents accidental use in production.[^4]
+In debug builds only (`#[cfg(debug_assertions)]`), the `SPEEDWAVE_ALLOW_UNSIGNED` env var skips verification for development. No CLI flag exists — prevents accidental use in production. The bundled CLI inside the `.dmg`/`.exe`/`.deb` is built in release mode, so the bypass is compiled out of shipped artifacts.[^4]
 
 ---
 
@@ -206,12 +213,17 @@ In debug builds only (`#[cfg(debug_assertions)]`), the `SPEEDWAVE_ALLOW_UNSIGNED
 Beyond signature verification:
 
 1. **Slug format** — must match `^[a-z][a-z0-9-]{0,63}$`
-2. **No built-in collision** — slug must not be in `BUILT_IN_SERVICE_IDS` (`slack`, `sharepoint`, `redmine`, `gitlab`, `os`)
+2. **No built-in collision** — slug must not collide with a `BUILT_IN_SERVICE_IDS` entry (`slack`, `sharepoint`, `redmine`, `gitlab`, `playwright`, `os`) nor with a built-in compose service name (`claude`, `mcp-hub`, `mcp-slack`, …)
 3. **Slug == service_id** — enforced when `service_id` is present
 4. **Containerfile required** — if `service_id` present, Containerfile must exist
-5. **ReadWrite justification** — if token mount is `read_write`, `justification` must be non-empty
+5. **No `read_write` token mount** — `token_mount: read_write` is unconditionally rejected; the `:rw` token mount is reserved for built-in services per [ADR-009](ADR-009-per-project-isolation-preserved.md). (Earlier drafts allowed it with a justification string; that path was removed.)
 6. **No duplicate service_id** — no other installed plugin may have the same `service_id`
-7. **Zip Slip protection** — all extracted paths validated to stay within the target directory[^5]
+7. **No reserved/dangerous `extra_env` keys** — `PORT`, `PATH`, `HOME`, dynamic-linker hijacks (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, …) and language-runtime hijacks (`NODE_OPTIONS`, `PYTHONPATH`, …); see `consts::RESERVED_ENV_KEYS`
+8. **Resource limits bounded** — `mem_limit` ≤ 16 GiB and `cpu_limit` ≤ 4 cores; `mem_limit: 0` (Docker "no limit") rejected
+9. **`settings_schema` shape** — must be a JSON object, ≤ 64 KiB
+10. **Zip Slip protection** — all extracted paths validated to stay within the target directory[^5]
+
+The slug-collision, reserved-env-key, `read_write`, and resource-limit checks (4–9) also re-run when compose is rendered, so a manifest that would now fail a stricter ruleset is rejected at render time rather than silently rendered.
 
 ---
 
@@ -295,9 +307,9 @@ For each enabled MCP plugin, `apply_plugins()` injects:
 
 Plugin images are built lazily:
 
-1. `install_plugin()` creates `.image_pending` marker in the plugin directory
+1. `install_plugin()` writes an `image_pending` marker under `~/.speedwave/plugin-state/<slug>/` (outside the signed plugin tree — see ADR-051)
 2. If `ContainerRuntime` is available at install time, builds immediately
-3. Otherwise, `render_compose()` calls `ensure_plugin_images(runtime, enabled_ids)` before compose generation — this builds pending installs (`.image_pending` marker) AND rebuilds any images missing from the container engine (e.g., after VM reset), scoped to plugins enabled for the current project
+3. Otherwise, `render_compose()` calls `ensure_plugin_images(runtime, enabled_ids)` before compose generation — this builds pending installs (the `image_pending` marker) AND rebuilds any images missing from the container engine (e.g., after VM reset), scoped to plugins enabled for the current project. Only plugins that pass signature verification are built.
 4. Build uses `prepare_build_context()` + `build_image()`, handling Lima/WSL path translation[^6]
 
 ---
@@ -320,24 +332,18 @@ All OWASP protections[^7] apply to plugin containers (same as built-in workers):
 
 Four additional checks in `SecurityCheck::run()`, targeting services labeled `speedwave.plugin-service: "true"`:
 
-| Check                           | Rejects                                                   |
-| ------------------------------- | --------------------------------------------------------- |
-| `check_plugin_no_privileged`    | `privileged: true`                                        |
-| `check_plugin_no_host_network`  | `network_mode: host`                                      |
-| `check_plugin_no_extra_volumes` | Any volume beyond the single `/tokens` mount              |
-| `check_plugin_token_mount_mode` | Compose mount mode that doesn't match the signed manifest |
-
-The token mount mode check is the critical integrity guarantee: the signed manifest declares `:ro` or `:rw`, and the SecurityCheck verifies the generated compose matches. A plugin cannot escalate from read-only to read-write without Speednet re-signing the manifest.
+| Check                           | Rejects                                      |
+| ------------------------------- | -------------------------------------------- |
+| `check_plugin_no_privileged`    | `privileged: true`                           |
+| `check_plugin_no_host_network`  | `network_mode: host`                         |
+| `check_plugin_no_extra_volumes` | Any volume beyond the single `/tokens` mount |
+| `check_plugin_token_mount_mode` | Compose mount mode other than `:ro`          |
 
 `SecurityCheck::run()` receives `&[PluginManifest]` from the caller — manifests are loaded once during compose generation and passed through. The security gate is mandatory before any `compose_up`.
 
-### Token mount modes
+### Token mount mode
 
-Default: **read-only** (`:ro`). A plugin requiring write access (e.g., OAuth token refresh) must declare `read_write` with a non-empty justification — same exception model as SharePoint (ADR-009)[^8]:
-
-```json
-{ "token_mount": { "mode": "read_write", "justification": "OAuth token refresh" } }
-```
+Plugins always get a **read-only** (`:ro`) token mount. `token_mount: read_write` is rejected at install time and again at compose-render time — the `:rw` token mount is reserved for built-in services (SharePoint's OAuth refresh, ADR-009)[^8]. A plugin that needs to persist data writes to `/workspace` (mounted `:rw`), not to `/tokens`.
 
 ### Service ID constants
 
