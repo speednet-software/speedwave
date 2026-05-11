@@ -259,33 +259,61 @@ fn migrate_legacy_image_pending(plugins_dir: &Path, plugin_dir: &Path, slug: &st
         return;
     }
     let target = target_dir.join("image_pending");
-    // Try the cheap atomic path first: same-FS rename. On cross-FS
-    // (rare — `~/.speedwave/` mounted on a separate volume) fall
-    // back to create-new-and-unlink-old, but ONLY if both halves
-    // succeed. If unlink fails, the legacy marker is still in the
-    // signed tree and the verifier will fail audit on the next load
-    // — which is exactly what we want, instead of silently logging
-    // "migrated" and leaving the user wondering why startup blocks.
+    // Try the cheap atomic path first: same-FS rename. `rename` only
+    // re-points the directory entry — it never touches the inode's
+    // link count or permissions, so even a hardlinked marker is safe
+    // to move this way. On cross-FS (rare — `~/.speedwave/` mounted on
+    // a separate volume) the behaviour differs by platform:
+    //
+    //   - Unix: `rename` failed (EXDEV). We've already ruled out
+    //     hardlinks above (nlink check), so the cross-FS fallback
+    //     `write(target) + unlink(legacy)` is safe.
+    //
+    //   - Windows: `std::fs::Metadata` exposes no link count, so we
+    //     cannot rule out an NTFS hardlink. We refuse the unlink
+    //     fallback entirely — `write(target)` is harmless, but
+    //     `remove_file(legacy)` could decrement the link count on a
+    //     file the attacker hardlinked from elsewhere. We leave the
+    //     legacy marker in place; the verifier then fails audit on
+    //     the next load, which is the correct outcome for a tree we
+    //     can't safely normalise.
+    //
+    // In every "couldn't fully migrate" path, the legacy marker stays
+    // in the signed tree and audit fails loudly on the next load —
+    // never a silent "migrated" log.
     let migrated = match std::fs::rename(&legacy, &target) {
         Ok(()) => true,
         Err(_rename_err) => {
-            if let Err(e) = std::fs::write(&target, b"") {
+            #[cfg(windows)]
+            {
                 log::warn!(
-                    "plugin '{}': failed to write replacement marker {}: {e}",
-                    slug,
-                    target.display()
+                    "plugin '{}': cannot rename .image_pending across filesystems on Windows \
+                     (link count unknown); leaving legacy marker in place — audit will refuse \
+                     this plugin on next load",
+                    slug
                 );
                 false
-            } else if let Err(e) = std::fs::remove_file(&legacy) {
-                log::warn!(
-                    "plugin '{}': created replacement marker but failed to remove legacy file {}: {e}; \
-                     audit will refuse this plugin on next load",
-                    slug,
-                    legacy.display()
-                );
-                false
-            } else {
-                true
+            }
+            #[cfg(not(windows))]
+            {
+                if let Err(e) = std::fs::write(&target, b"") {
+                    log::warn!(
+                        "plugin '{}': failed to write replacement marker {}: {e}",
+                        slug,
+                        target.display()
+                    );
+                    false
+                } else if let Err(e) = std::fs::remove_file(&legacy) {
+                    log::warn!(
+                        "plugin '{}': created replacement marker but failed to remove legacy file {}: {e}; \
+                         audit will refuse this plugin on next load",
+                        slug,
+                        legacy.display()
+                    );
+                    false
+                } else {
+                    true
+                }
             }
         }
     };

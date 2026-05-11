@@ -542,14 +542,7 @@ pub fn plugin_save_settings(
     // outside the schema's enum/type, which the worker would later
     // crash on or, worse, silently misinterpret.
     if let Some(ref schema) = manifest.settings_schema {
-        let validator = jsonschema::draft7::new(schema)
-            .map_err(|e| format!("plugin '{}' has an invalid settings_schema: {e}", slug))?;
-        if let Err(e) = validator.validate(&settings) {
-            return Err(format!(
-                "settings for plugin '{}' do not match its schema: {e}",
-                slug
-            ));
-        }
+        validate_settings_against_schema(&slug, schema, &settings)?;
     }
 
     config::with_config_lock(|| {
@@ -600,6 +593,34 @@ fn require_verified_with_manifest(slug: &str) -> Result<plugin::PluginManifest, 
     entry
         .manifest
         .ok_or_else(|| format!("plugin '{}' has no manifest", slug))
+}
+
+/// Validates a settings payload against a plugin's declared JSON Schema
+/// (Draft 7). Pure function — extracted from `plugin_save_settings` so
+/// the schema-rejection invariant can be unit-tested without standing
+/// up a project/config/verified-plugin fixture. Returns a
+/// user-presentable error string on a malformed schema or a payload
+/// that doesn't validate; `Ok(())` when the payload conforms.
+///
+/// The runtime side already gates `settings_schema` shape and size at
+/// install time (`plugin::validate_manifest`), so a *malformed* schema
+/// reaching here is unusual — but we still return a clean error rather
+/// than panicking, in case an older plugin was installed before that
+/// gate existed.
+fn validate_settings_against_schema(
+    slug: &str,
+    schema: &serde_json::Value,
+    settings: &serde_json::Value,
+) -> Result<(), String> {
+    let validator = jsonschema::draft7::new(schema)
+        .map_err(|e| format!("plugin '{}' has an invalid settings_schema: {e}", slug))?;
+    if let Err(e) = validator.validate(settings) {
+        return Err(format!(
+            "settings for plugin '{}' do not match its schema: {e}",
+            slug
+        ));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -746,6 +767,68 @@ mod tests {
         assert!(json.contains("PLN"));
         assert!(json.contains("requires_integrations"));
         assert!(json.contains("sharepoint"));
+    }
+
+    // ── settings-schema validation (the `plugin_save_settings` gate) ─────
+    //
+    // `plugin_save_settings` is a Tauri command and needs a project /
+    // config / verified-plugin fixture to drive end-to-end. The
+    // schema-validation step is the security-relevant part, so it's
+    // extracted into `validate_settings_against_schema` and tested
+    // directly here.
+
+    #[test]
+    fn validate_settings_against_schema_accepts_conforming_payload() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "currency": { "type": "string", "enum": ["PLN", "EUR", "USD"] }
+            },
+            "required": ["currency"]
+        });
+        let payload = serde_json::json!({ "currency": "EUR" });
+        super::validate_settings_against_schema("presale", &schema, &payload)
+            .expect("a conforming payload must pass");
+    }
+
+    #[test]
+    fn validate_settings_against_schema_rejects_payload_violating_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "currency": { "type": "string", "enum": ["PLN", "EUR", "USD"] }
+            },
+            "required": ["currency"]
+        });
+        // Value outside the enum.
+        let bad_enum = serde_json::json!({ "currency": "BTC" });
+        let err = super::validate_settings_against_schema("presale", &schema, &bad_enum)
+            .expect_err("off-enum value must be rejected");
+        assert!(err.contains("do not match its schema"), "got: {err}");
+
+        // Wrong type.
+        let bad_type = serde_json::json!({ "currency": 42 });
+        let err = super::validate_settings_against_schema("presale", &schema, &bad_type)
+            .expect_err("wrong-type value must be rejected");
+        assert!(err.contains("do not match its schema"), "got: {err}");
+
+        // Missing required field.
+        let missing = serde_json::json!({});
+        let err = super::validate_settings_against_schema("presale", &schema, &missing)
+            .expect_err("missing required field must be rejected");
+        assert!(err.contains("do not match its schema"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_settings_against_schema_rejects_malformed_schema() {
+        // A schema that isn't a valid Draft-7 schema (e.g. `type` set
+        // to a non-string nonsense value). `jsonschema::draft7::new`
+        // should fail to compile it; we surface that as a clean error.
+        let bogus_schema = serde_json::json!({ "type": 12345 });
+        let payload = serde_json::json!({ "anything": true });
+        let err = super::validate_settings_against_schema("presale", &bogus_schema, &payload)
+            .expect_err("malformed schema must be rejected, not panic");
+        assert!(err.contains("invalid settings_schema"), "got: {err}");
     }
 
     #[test]
