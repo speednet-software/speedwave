@@ -4,6 +4,8 @@
 
 pub mod accel;
 pub mod audio;
+#[cfg(target_os = "linux")]
+pub mod audio_linux;
 #[cfg(target_os = "macos")]
 pub mod audio_macos;
 pub mod diarizer;
@@ -50,14 +52,19 @@ pub fn models_dir() -> PathBuf {
 }
 
 /// Resolves the `AudioCapture` backend for this host. macOS uses the bundled
-/// `audio-capture-cli` (CoreAudio process taps); other platforms still fall
-/// back to `FileAudioCapture` until their Phase 4 backends land.
+/// `audio-capture-cli` (CoreAudio process taps); Linux shells out to
+/// `pw-record` / `parec`; Windows still falls back to `FileAudioCapture` until
+/// its Phase 4-W backend lands.
 pub fn detect_audio_capture() -> Box<dyn AudioCapture> {
     #[cfg(target_os = "macos")]
     {
         Box::new(audio_macos::MacOsAudioCapture::new())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        Box::new(audio_linux::LinuxAudioCapture::new())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         Box::new(FileAudioCapture::new())
     }
@@ -127,12 +134,17 @@ mod tests {
     #[test]
     fn detect_audio_capture_picks_the_host_backend() {
         let caps = detect_audio_capture().capabilities();
-        // macOS has a real backend (the audio-capture-cli); other platforms
-        // still fall back to FileAudioCapture (file input only) until their
-        // Phase 4 backends land.
+        // macOS always has a real backend (the audio-capture-cli enforces
+        // 14.4 itself, so we assume taps are available). Linux depends on a
+        // running sound server — true on a dev box, false on a bare CI runner
+        // — so we don't assert its flags here. Windows still falls back to
+        // FileAudioCapture (file input only) until Phase 4-W.
         if cfg!(target_os = "macos") {
             assert!(caps.supports_system_audio);
             assert!(caps.supports_per_process);
+        } else if cfg!(target_os = "linux") {
+            // Either a real PipeWire/Pulse backend or the "no server" state —
+            // both are valid; just require the UI note.
         } else {
             assert!(!caps.supports_system_audio);
             assert!(!caps.supports_per_process);
@@ -179,8 +191,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(target_os = "macos"))]
-    fn engine_default_uses_the_file_backend_off_macos() {
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    fn engine_default_uses_the_file_backend_on_unsupported_os() {
         let engine = TranscriptionEngine::default();
         // With the file backend, capturing without a path fails cleanly.
         // (`Box<dyn AudioStream>` has no Debug, so match the error out.)
@@ -191,6 +203,16 @@ mod tests {
                 "expected Unsupported, got {e:?}"
             ),
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn engine_default_uses_the_linux_backend() {
+        // On Linux the default engine wraps the shell-out capture; we only
+        // assert it has a UI note (the rest depends on whether a sound server
+        // is running, which a CI runner usually lacks).
+        let engine = TranscriptionEngine::default();
+        assert!(engine.capture_capabilities().note.is_some());
     }
 
     #[test]
