@@ -586,8 +586,17 @@ pub const RESERVED_ENV_KEYS: &[&str] = &[
 pub const PLUGIN_MEM_LIMIT_MAX_MIB: u64 = 16384;
 
 /// Upper bound for plugin `cpu_limit` (cores). 4 cores is enough for any
-/// MCP worker we ship; raises trip an explicit ADR.
+/// MCP worker we ship; raising it requires an explicit ADR.
 pub const PLUGIN_CPU_LIMIT_MAX: f32 = 4.0;
+
+/// Upper bound (bytes) for two distinct JSON blobs in the plugin system,
+/// both of which end up inline in `user_config.json`: a plugin's
+/// `settings_schema` (validated at install / compose-render time) and a
+/// project's per-plugin settings payload (validated when the Desktop
+/// `plugin_save_settings` command writes it). 64 KiB is generous —
+/// settings are small key/value maps and schemas are hand-written — while
+/// still bounding what an attacker can wedge into the shared config file.
+pub const PLUGIN_SETTINGS_MAX_BYTES: usize = 64 * 1024;
 
 /// Pure, testable function for resolving the data directory.
 /// `env_val` = None or empty string → `home.join(DATA_DIR)` (empty string treated as unset)
@@ -678,6 +687,34 @@ pub fn compose_prefix() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_reserved_env_keys_complete_and_uppercase() {
+        // A change here is deliberate — bumping this count signals a new
+        // hijack vector was added (and the matching test in plugin.rs
+        // should grow too). Catches accidental deletions.
+        assert_eq!(RESERVED_ENV_KEYS.len(), 16);
+        for &k in RESERVED_ENV_KEYS {
+            assert_eq!(
+                k,
+                k.to_uppercase(),
+                "RESERVED_ENV_KEYS entries are stored uppercase; comparison is case-insensitive at the call site"
+            );
+        }
+        // Sanity: the dynamic-linker and Speedwave-reserved entries are present.
+        for required in [
+            "PORT",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "NODE_OPTIONS",
+            "PATH",
+        ] {
+            assert!(
+                RESERVED_ENV_KEYS.contains(&required),
+                "{required} must be reserved"
+            );
+        }
+    }
 
     #[test]
     fn test_nerdctl_full_version_is_semver() {

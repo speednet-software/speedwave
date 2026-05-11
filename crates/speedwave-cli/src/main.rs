@@ -509,12 +509,31 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(0);
         }
         CliAction::PluginList => {
-            let plugins = plugin::list_installed_plugins()?;
+            // Tolerant listing: never fails, reports a verification status
+            // per plugin so the user can see *why* a plugin was rejected
+            // (this command intentionally skips the startup audit so it
+            // stays usable as a recovery/diagnostic path).
+            let plugins = plugin::list_for_ui();
             if plugins.is_empty() {
                 println!("No plugins installed");
             } else {
-                for m in &plugins {
-                    println!("{} ({}): {}", m.name, m.slug, m.version);
+                for e in &plugins {
+                    let name = e
+                        .manifest
+                        .as_ref()
+                        .map(|m| m.name.as_str())
+                        .unwrap_or(&e.slug);
+                    let version = e
+                        .manifest
+                        .as_ref()
+                        .map(|m| m.version.as_str())
+                        .unwrap_or("?");
+                    if e.verification_status == plugin::VerificationStatus::Verified {
+                        println!("{name} ({}): {version}  [verified]", e.slug);
+                    } else {
+                        let reason = e.verification_error.as_deref().unwrap_or("unverified");
+                        println!("{name} ({}): {version}  [UNVERIFIED: {reason}]", e.slug);
+                    }
                 }
             }
             std::process::exit(0);

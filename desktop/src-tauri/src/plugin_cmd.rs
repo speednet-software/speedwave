@@ -5,6 +5,7 @@
 
 use crate::types::check_project;
 use speedwave_runtime::config;
+use speedwave_runtime::consts;
 use speedwave_runtime::plugin;
 use std::collections::HashMap;
 use tauri::Emitter;
@@ -487,14 +488,14 @@ pub fn plugin_save_settings(
     let manifest = require_verified_with_manifest(&slug)?;
 
     // Cap settings JSON size to prevent a runaway plugin from bloating
-    // user_config.json. 64 KiB is generous — settings are key/value
-    // metadata, not arbitrary blobs.
-    const SETTINGS_MAX_BYTES: usize = 64 * 1024;
+    // user_config.json. The bound is shared with `settings_schema`
+    // validation (see `consts::PLUGIN_SETTINGS_MAX_BYTES`).
     let serialised = serde_json::to_vec(&settings).map_err(|e| e.to_string())?;
-    if serialised.len() > SETTINGS_MAX_BYTES {
+    if serialised.len() > consts::PLUGIN_SETTINGS_MAX_BYTES {
         return Err(format!(
             "plugin '{}' settings exceed {} bytes",
-            slug, SETTINGS_MAX_BYTES
+            slug,
+            consts::PLUGIN_SETTINGS_MAX_BYTES
         ));
     }
 

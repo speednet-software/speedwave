@@ -1177,7 +1177,7 @@ fn main() {
                 .unwrap_or(log::LevelFilter::Info);
             log::set_max_level(initial_level);
 
-            // Hard-fail on tampered plugins. PR3's `audit_all` re-verifies
+            // Hard-fail on tampered plugins. `plugin::audit_all` re-verifies
             // every plugin under `~/.speedwave/plugins/`; failures are
             // collected and shown to the user in one dialog. Recovery
             // path is the CLI (`speedwave plugin remove <slug>`) or
@@ -1188,7 +1188,7 @@ fn main() {
             // `Ok(())` from `setup` would let Tauri continue starting
             // the webview and registering command handlers — a tampered
             // plugin would still be inert (`#[tauri::command]` callers
-            // go through the verified-only gates added in PR5), but the
+            // go through the verified-only command gates), but the
             // command surface would be live for unrelated calls. We
             // refuse to bring the rest of the app online at all: the
             // dialog is shown via the OS-native blocking path on

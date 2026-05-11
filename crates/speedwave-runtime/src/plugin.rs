@@ -168,10 +168,12 @@ fn image_pending_marker_for(plugins_dir: &Path, slug: &str) -> PathBuf {
 /// Returns true if the plugin has a pending image build, looking in both
 /// the new state directory and the legacy in-tree location. Legacy-only
 /// markers are still observed so plugins installed before this change
-/// keep building on next launch. The first verify-side load (`audit_all`,
-/// `list_verified_*`, `list_for_ui`) migrates the in-tree marker into
-/// `plugin-state/` via `migrate_legacy_image_pending`, after which only
-/// the new location ever has the marker.
+/// keep building on next launch. The first fail-closed load
+/// (`audit_all` / `list_verified_*`, both via `verify_one_plugin_dir`)
+/// migrates the in-tree marker into `plugin-state/` via
+/// `migrate_legacy_image_pending`, after which only the new location ever
+/// has the marker. The tolerant `list_for_ui` path does *not* migrate —
+/// it must not mutate a tampered tree.
 fn has_pending_image_build_for(plugins_dir: &Path, plugin_dir: &Path, slug: &str) -> bool {
     image_pending_marker_for(plugins_dir, slug).exists()
         || plugin_dir.join(".image_pending").exists()
@@ -236,7 +238,7 @@ fn relocate_legacy_marker(slug: &str, legacy: &Path, target: &Path) -> bool {
     }
 }
 
-/// Migrates the pre-PR2 in-tree `.image_pending` marker out of the
+/// Migrates the legacy in-tree `.image_pending` marker out of the
 /// signed plugin tree before the digest is computed. Without this, every
 /// MCP plugin installed under an older Speedwave release fails signature
 /// verification on first launch under a runtime-invariant build — the
@@ -701,13 +703,12 @@ pub(crate) fn validate_manifest(
         // a deliberate DoS payload (regex catastrophic-backtrack
         // schemas are typically small, but we don't want a manifest to
         // be able to bloat user_config.json indirectly either).
-        const SCHEMA_MAX_BYTES: usize = 64 * 1024;
         let serialised = serde_json::to_vec(schema)
             .map_err(|e| anyhow::anyhow!("settings_schema serialises to invalid JSON: {e}"))?;
-        if serialised.len() > SCHEMA_MAX_BYTES {
+        if serialised.len() > consts::PLUGIN_SETTINGS_MAX_BYTES {
             anyhow::bail!(
                 "settings_schema exceeds {} bytes ({} bytes)",
-                SCHEMA_MAX_BYTES,
+                consts::PLUGIN_SETTINGS_MAX_BYTES,
                 serialised.len()
             );
         }
@@ -1046,7 +1047,7 @@ fn remove_plugin_with_base(
     // symmetric thing on `dest`.
     signing::invalidate_cache(&plugin_dir);
     std::fs::remove_dir_all(&plugin_dir)?;
-    // Mutable state lives outside the signed tree (PR2). Wipe it too, so a
+    // Mutable state lives outside the signed tree. Wipe it too, so a
     // subsequent reinstall starts from a clean state and we don't leak a
     // stale `image_pending` marker for a plugin that no longer exists.
     let state_dir = plugin_state_dir_for(plugins_dir, slug);
@@ -1191,10 +1192,15 @@ fn is_transient_plugin_dir(name: &str) -> bool {
 
 /// Lists all installed plugins by scanning `~/.speedwave/plugins/*/plugin.json`.
 /// **No signature verification.** Use [`list_verified_plugins`] when the
-/// caller is going to act on the result (build images, render compose,
-/// hand to Claude) — only that path enforces the runtime signature
-/// invariant. This raw lister exists for diagnostics (UI listing,
-/// `audit_all`, install/remove paths that already trust their own slug).
+/// caller will act on the result in a way that affects what Claude sees —
+/// rendering the plugin section of compose, building images, mounting
+/// claude-resources — because only that path enforces the runtime
+/// signature invariant. This raw lister is for callers that only need the
+/// *set of slugs* (update hints, CLI `plugin list` diagnostics, the
+/// worker-auth-token pass that just keys side files by slug) or that
+/// already validated their own slug (install collision check). For the
+/// Desktop UI use [`list_for_ui`], which reports a per-plugin
+/// verification status instead of silently trusting the on-disk manifest.
 pub fn list_installed_plugins() -> anyhow::Result<Vec<PluginManifest>> {
     let plugins_dir = plugins_base_dir()?;
     list_installed_from_dir(&plugins_dir)
@@ -1272,7 +1278,7 @@ pub(crate) fn list_verified_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<V
 /// dir-name/slug equality, and `validate_manifest`. Returns a
 /// `VerifiedPlugin` on success or a contextual error on any failure.
 ///
-/// Performs a one-shot migration of any pre-PR2 in-tree
+/// Performs a one-shot migration of any legacy in-tree
 /// `.image_pending` marker out of the signed tree before computing the
 /// digest. Without that step, every MCP plugin installed under an
 /// older Speedwave release would fail signature verification on the
@@ -1663,9 +1669,9 @@ fn build_pending_from_dir(
             continue;
         }
         let plugin_dir = entry.path();
-        // Pending markers may live in two places: the new state directory
-        // (`<plugin-state-base>/<slug>/image_pending`, written by installs
-        // after PR2) or, for plugins installed before PR2, the legacy
+        // Pending markers may live in two places: the state directory
+        // (`<plugin-state-base>/<slug>/image_pending`, written by current
+        // installs) or, for plugins installed by older releases, the legacy
         // in-tree `.image_pending`. Check both.
         if !has_pending_image_build_for(plugins_dir, &plugin_dir, &slug) {
             continue;
@@ -1744,8 +1750,8 @@ fn build_single_plugin_image(
     )?;
 
     // Remove the pending marker on success — both the new state-dir
-    // location and the legacy in-tree marker, so a plugin installed before
-    // PR2 stops re-triggering on every launch. `plugin_dir` is always
+    // location and the legacy in-tree marker, so a plugin installed by an older release
+    // stops re-triggering on every launch. `plugin_dir` is always
     // `<plugins_dir>/<slug>/`, so its parent is the plugins base.
     if let Some(plugins_dir) = plugin_dir.parent() {
         clear_image_pending_for(plugins_dir, plugin_dir, &manifest.slug);
@@ -2923,7 +2929,7 @@ mod tests {
     /// RAII guard that turns on the debug-only signature bypass for the
     /// scope of the test, holding `unsigned_env_lock` for the duration.
     /// Use in tests that synthesise plugin directories without a real
-    /// SIGNATURE — they must still pass the verify gates added in PR3
+    /// SIGNATURE — they must still pass the runtime verify gates
     /// (e.g. `build_single_plugin_image`'s pre-build verify).
     struct UnsignedBypassGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
@@ -3042,10 +3048,10 @@ mod tests {
         assert_eq!(state, tmp.path().join("plugin-state"));
     }
 
-    /// Legacy plugins (installed before PR2) carry an `.image_pending`
+    /// Legacy plugins (installed by older releases) carry an `.image_pending`
     /// marker inside the signed tree. `has_pending_image_build_for` must
     /// honour either location during the migration window — without this,
-    /// every plugin installed before PR2 would silently stop rebuilding
+    /// every such plugin would silently stop rebuilding
     /// after a failed first build.
     #[test]
     fn test_has_pending_image_build_honours_legacy_in_tree_marker() {
@@ -3078,8 +3084,6 @@ mod tests {
         assert!(!plugin_dir.join(".image_pending").exists());
         assert!(!image_pending_marker_for(&plugins, "dual-marker").exists());
     }
-
-    // --- PR3: VerifiedPlugin / list_verified / audit_all / list_for_ui ---
 
     /// Helper: synthesises a plugin dir with a manifest where the
     /// directory name and `slug` are deliberately different.  Used to
@@ -3309,7 +3313,7 @@ mod tests {
         );
     }
 
-    /// Pre-PR2 installs left `.image_pending` inside the signed tree;
+    /// Legacy installs left `.image_pending` inside the signed tree;
     /// once the signature is a runtime invariant that file shifts the
     /// digest and verification fails on the upgrade. The migration must
     /// restore the tree to the as-signed state. This test signs a tree
@@ -3333,7 +3337,7 @@ mod tests {
         sign_plugin(&plugin_dir, &priv_key).unwrap();
         let pub_key: [u8; 32] = pub_key.try_into().unwrap();
 
-        // Simulate the pre-PR2 install: marker dumped into the signed tree.
+        // Simulate a legacy install: marker dumped into the signed tree.
         std::fs::write(plugin_dir.join(".image_pending"), b"").unwrap();
         verify_plugin_signature_with_key(&plugin_dir, &pub_key).expect_err(
             "sanity: legacy marker must break verification, else the test proves nothing",
@@ -3534,7 +3538,7 @@ mod tests {
 
         let dest = plugins_dir.join("phases-no-runtime");
         // Marker now lives in the state directory (sibling of plugins_dir),
-        // never in the signed plugin tree (PR2). The plugin tree must stay
+        // never in the signed plugin tree. The plugin tree must stay
         // bit-for-bit identical to what was installed.
         let state_marker_existed =
             image_pending_marker_for(&plugins_dir, "phases-no-runtime").exists();

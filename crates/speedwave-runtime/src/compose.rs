@@ -8026,8 +8026,6 @@ services:
         }
     }
 
-    // --- PR4: claude-resources mount safety ---
-
     #[test]
     fn test_ensure_resources_dir_safe_accepts_real_dir() {
         let tmp = tempfile::tempdir().unwrap();

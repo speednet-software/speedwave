@@ -90,7 +90,7 @@ Tauri commands that mutate plugin state (`set_plugin_enabled` for enable, `save_
 
 ### Manifest validation
 
-`consts::RESERVED_ENV_KEYS` is the SSOT for env keys plugins cannot inject — `PORT` (Speedwave-reserved), dynamic-linker hijacks (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`, …), language-runtime hijacks (`NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`), and shell-environment hijacks (`PATH`, `HOME`, `SHELL`, `IFS`, `BASH_ENV`, `ENV`). Comparison is case-insensitive.
+`consts::RESERVED_ENV_KEYS` is the SSOT for env keys plugins cannot inject — `PORT` (Speedwave-reserved), dynamic-linker hijacks (`LD_*` on Linux, `DYLD_*` on macOS), language-runtime hijacks (`NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`), and shell-environment hijacks (`PATH`, `HOME`, `SHELL`, `IFS`, `BASH_ENV`, `ENV`). The list is exact (not glob — `LD_*` above is shorthand for the explicit entries `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT` and `DYLD_*` for `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `DYLD_FORCE_FLAT_NAMESPACE`); see `consts.rs` for the authoritative set). Comparison is case-insensitive.
 
 `validate_manifest` rejects `mem_limit > PLUGIN_MEM_LIMIT_MAX_MIB` (16 384 MiB), `cpu_limit > PLUGIN_CPU_LIMIT_MAX` (4.0 cores), `token_mount: read_write` for any plugin (ADR-009 reserves it for built-in services), and slugs that produce a compose name in `BUILT_IN_SERVICES` (`hub`, `claude`, etc.).
 

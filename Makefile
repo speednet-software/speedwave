@@ -366,7 +366,7 @@ test-e2e: build-cli
 
 # Plugin tamper / signature-bypass E2E. Runs against the *release* CLI
 # so the `SPEEDWAVE_ALLOW_UNSIGNED` debug bypass is verified to be
-# compiled out — see PR6 in ADR-051.
+# compiled out — see ADR-051 ("Build hygiene").
 test-e2e-plugin-tamper-release: build-cli-release
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
 	SPEEDWAVE_BIN=./target/release/speedwave bats _tests/e2e/plugin-tamper.bats

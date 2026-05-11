@@ -52,7 +52,7 @@ fn unsigned_bypass_active() -> bool {
 }
 
 /// Verifies a pre-computed Ed25519 digest against the SIGNATURE file in
-/// `plugin_dir`. The bazowa low-level entry point — every other verifier
+/// `plugin_dir`. The primary low-level entry point — every other verifier
 /// in this module composes on top of it. Splitting digest computation
 /// from verification lets callers (notably `verify_plugin_signature_cached`)
 /// hash the tree exactly once per call.
@@ -185,11 +185,9 @@ pub fn verify_plugin_signature_cached(plugin_dir: &Path) -> anyhow::Result<()> {
 
 /// Verifies the Ed25519 signature of a plugin directory.
 ///
-/// Thin wrapper over [`verify_plugin_signature_cached`] for backward
-/// compatibility — every existing caller in the codebase goes through
-/// this name. New callers should prefer `_cached` directly.
-///
-/// In debug builds, `SPEEDWAVE_ALLOW_UNSIGNED` env var skips verification.
+/// This is the public entry point callers use; it delegates to
+/// [`verify_plugin_signature_cached`], which is where the caching and
+/// the debug-only `SPEEDWAVE_ALLOW_UNSIGNED` bypass live.
 pub fn verify_plugin_signature(plugin_dir: &Path) -> anyhow::Result<()> {
     verify_plugin_signature_cached(plugin_dir)
 }
