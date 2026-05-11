@@ -9,7 +9,9 @@ model: sonnet
 
 You have the `office` MCP service for every Office/PDF task. **NEVER** run `pip install python-docx`, `pip install openpyxl`, `pip install python-pptx`, `pip install pypdf`, `pip install weasyprint`, `pip install matplotlib`, `npm install xlsx`, `apt install libreoffice`, or any equivalent — those libraries are already wired behind the `office__*` tools, and the `claude` container can't install them anyway (read-only rootfs, no network egress, no sudo).
 
-If a tool in the table below fits the task, use it. Otherwise reach for `office__search_tools` once with the task keywords; do not improvise with `Bash`.
+If a tool in the table below fits the task, use it. Otherwise call the hub's `search_tools` meta-tool once with the task keywords (e.g. `search_tools({ query: "office watermark", detail_level: "with_descriptions" })`) — `search_tools` has no service prefix. Do not improvise with `Bash`.
+
+All `office__*` tools run through the hub's `execute_code` meta-tool, where the calling convention is dot notation: `await office.createDocx({ spec: { … }, outName: "…" })`. The DSL sections below give the exact shapes; the workflow sections show full `execute_code`-ready calls.
 
 ## Decision table: task → tool
 
@@ -110,6 +112,45 @@ Each element is one of:
 
 `chart.type` ∈ `column | line | pie | xy | bubble`.
 
+## DSL: edit ops (`editDocx` / `editXlsx` / `editPptx` `ops[]`)
+
+Each `ops` entry has an `op` discriminator. Indices are 0-based.
+
+**`editDocx`** — operates on paragraphs (the `element` of an `append` op is a `createDocx` element from above):
+
+```jsonc
+[
+  { "op": "append", "element": { "type": "heading", "level": 2, "text": "New section" } },
+  { "op": "replace_text", "find": "DRAFT", "replace": "FINAL" }, // all occurrences
+  { "op": "delete_paragraph", "index": 3 }, // 0-based
+]
+```
+
+**`editXlsx`** — operates on sheets/cells (the `chart` of an `add_chart` op is a `createXlsx` chart from above):
+
+```jsonc
+[
+  { "op": "set_cell", "sheet": "Sales", "cell": "B5", "value": 200 },
+  { "op": "set_formula", "sheet": "Sales", "cell": "B6", "formula": "=SUM(B2:B5)" },
+  { "op": "add_sheet", "name": "Summary" },
+  {
+    "op": "add_chart",
+    "sheet": "Sales",
+    "chart": { "type": "line", "dataRange": "Sales!B2:B6", "anchor": "E2" },
+  },
+]
+```
+
+**`editPptx`** — operates on slides (the `slide` of an `add_slide` op is a `createPptx` slide from above):
+
+```jsonc
+[
+  { "op": "add_slide", "slide": { "title": "Appendix", "bullets": ["Source data"] } },
+  { "op": "set_title", "index": 0, "text": "Q1 2025 Results" }, // 0-based
+  { "op": "delete_slide", "index": 4 }, // 0-based
+]
+```
+
 ## DSL: `renderChart` `spec`
 
 ```jsonc
@@ -143,44 +184,58 @@ Anything outside this matrix returns an error — those pairs are lossy or unsup
 
 ## Workflow: Word report with a chart
 
-```jsonc
+Run inside `execute_code` — dot notation, `await` each call:
+
+```javascript
 // 1. render the chart
-office__renderChart({
+const chart = await office.renderChart({
   spec: {
-    type: "bar",
-    title: "Revenue 2025",
-    data: { labels: ["Q1","Q2","Q3","Q4"], series: [{ name:"€k", values:[100,150,120,180] }] }
+    type: 'bar',
+    title: 'Revenue 2025',
+    data: {
+      labels: ['Q1', 'Q2', 'Q3', 'Q4'],
+      series: [{ name: '€k', values: [100, 150, 120, 180] }],
+    },
   },
-  outName: "revenue.png"
+  outName: 'revenue.png',
 });
 
-// 2. build the docx
-office__createDocx({
+// 2. build the docx, embedding the PNG
+const doc = await office.createDocx({
   spec: {
     elements: [
-      { type: "heading", level: 1, text: "Quarterly Revenue Report" },
-      { type: "paragraph", text: "Strong growth across all quarters." },
-      { type: "image", path: "/workspace/.speedwave-office/revenue.png" },
-      { type: "pagebreak" },
-      { type: "heading", level: 2, text: "Details" },
-      { type: "table", header: ["Q","€k"], rows: [["Q1","100"],["Q2","150"]] }
-    ]
+      { type: 'heading', level: 1, text: 'Quarterly Revenue Report' },
+      { type: 'paragraph', text: 'Strong growth across all quarters.' },
+      { type: 'image', path: chart.path },
+      { type: 'pagebreak' },
+      { type: 'heading', level: 2, text: 'Details' },
+      {
+        type: 'table',
+        header: ['Q', '€k'],
+        rows: [
+          ['Q1', '100'],
+          ['Q2', '150'],
+        ],
+      },
+    ],
   },
-  outName: "report.docx"
+  outName: 'report.docx',
 });
+
+return doc; // { path, bytes, format }
 ```
 
 ## Workflow: Convert a deck to PDF
 
-```jsonc
-office__officeToPdf({ path: "/workspace/deck.pptx", outName: "deck.pdf" });
+```javascript
+return await office.officeToPdf({ path: '/workspace/deck.pptx', outName: 'deck.pdf' });
 ```
 
 ## Workflow: Merge invoices
 
-```jsonc
-office__mergePdf({
-  paths: ["/workspace/invoice-01.pdf", "/workspace/invoice-02.pdf"],
-  outName: "invoices.pdf"
+```javascript
+return await office.mergePdf({
+  paths: ['/workspace/invoice-01.pdf', '/workspace/invoice-02.pdf'],
+  outName: 'invoices.pdf',
 });
 ```
