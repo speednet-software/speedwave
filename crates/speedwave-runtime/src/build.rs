@@ -726,28 +726,28 @@ const BASE_IMAGE_REGISTRY_HOSTS: &[&str] =
 /// `FROM <base-image>` metadata fetch inside that window, so the resolver returns
 /// `SERVFAIL` (`server misbehaving` / `failed to resolve source metadata`) or even
 /// `NXDOMAIN` (`no such host`) for `docker.io` / `mcr.microsoft.com`. A retry a few
-/// seconds later hits the now-degraded resolver and succeeds. The NXDOMAIN-shaped
-/// cases are scoped to `BASE_IMAGE_REGISTRY_HOSTS` so a typo'd custom registry URL
-/// fails fast instead of silently retrying.
+/// seconds later hits the now-degraded resolver and succeeds. *All* DNS-shaped cases
+/// are scoped to `BASE_IMAGE_REGISTRY_HOSTS` so a typo'd — or rogue — custom registry
+/// URL fails fast instead of silently retrying (it could otherwise embed any of these
+/// strings in its error body to force up to `TRANSIENT_BUILD_RETRIES` retries).
 ///
 /// Uses case-insensitive matching because kernel/libc/BuildKit error messages vary
 /// in casing across distros and locales.
 fn is_transient_build_error(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
         let msg = cause.to_string().to_ascii_lowercase();
+        let dns_shaped = msg.contains("server misbehaving")
+            || msg.contains("failed to resolve source metadata")
+            || msg.contains("no such host")
+            || (msg.contains("dial tcp") && msg.contains("lookup"));
         if msg.contains("i/o timeout")
             || msg.contains("input/output error")
             || msg.contains("connection reset")
             || msg.contains("temporary failure")
             || msg.contains("resource temporarily unavailable")
-            // SERVFAIL during the EDNS0→UDP fallback window (see doc above) — these
-            // strings only ever appear for a registry metadata fetch, so no host scope.
-            || msg.contains("server misbehaving")
-            || msg.contains("failed to resolve source metadata")
-            // NXDOMAIN / generic dial-lookup failures: only transient if they name one
-            // of our base-image registries; a typo'd custom registry should fail fast.
-            || (mentions_base_image_registry(&msg)
-                && (msg.contains("no such host") || (msg.contains("dial tcp") && msg.contains("lookup"))))
+            // DNS hiccups (SERVFAIL / NXDOMAIN / dial-lookup) are transient only when
+            // they name one of our base-image registries — see the doc above.
+            || (dns_shaped && mentions_base_image_registry(&msg))
         {
             return true;
         }
@@ -2110,20 +2110,34 @@ mod tests {
         assert!(!is_transient_build_error(&nxdomain));
         let dial_lookup =
             anyhow::anyhow!("dial tcp: lookup ghcr.io on 127.0.0.53:53: server can't find ghcr.io");
-        // (`ghcr.io` isn't in BASE_IMAGE_REGISTRY_HOSTS, and there's no "server misbehaving" /
-        // "failed to resolve source metadata" substring here.)
+        // `ghcr.io` isn't in BASE_IMAGE_REGISTRY_HOSTS — a DNS-shaped error for it fails fast
+        // regardless of which DNS-failure string it carries.
         assert!(!is_transient_build_error(&dial_lookup));
     }
 
     #[test]
-    fn test_is_transient_build_error_servfail_is_transient_regardless_of_host() {
-        // "server misbehaving" / "failed to resolve source metadata" only ever appear for a
-        // registry metadata fetch during the EDNS0→UDP window, so they're transient even
-        // without a base-image hostname in the message.
-        let servfail = anyhow::anyhow!("Head \"https://example.invalid/v2/\": server misbehaving");
+    fn test_is_transient_build_error_servfail_for_known_registry_is_transient() {
+        // SERVFAIL-shaped errors that DO name a base-image registry are the boot-time
+        // resolver race — transient.
+        let servfail = anyhow::anyhow!(
+            "Head \"https://registry-1.docker.io/v2/\": dial tcp: lookup registry-1.docker.io: server misbehaving"
+        );
         assert!(is_transient_build_error(&servfail));
-        let no_metadata = anyhow::anyhow!("foo:bar: failed to resolve source metadata for foo/bar");
+        let no_metadata = anyhow::anyhow!(
+            "node:24-alpine: failed to resolve source metadata for docker.io/library/node"
+        );
         assert!(is_transient_build_error(&no_metadata));
+    }
+
+    #[test]
+    fn test_is_transient_build_error_servfail_for_unknown_host_is_not_transient() {
+        // SERVFAIL / "failed to resolve source metadata" for a host that is NOT a base-image
+        // registry must fail fast — a rogue or typo'd custom registry could otherwise embed
+        // these strings to force retries.
+        let servfail = anyhow::anyhow!("Head \"https://example.invalid/v2/\": server misbehaving");
+        assert!(!is_transient_build_error(&servfail));
+        let no_metadata = anyhow::anyhow!("foo:bar: failed to resolve source metadata for foo/bar");
+        assert!(!is_transient_build_error(&no_metadata));
     }
 
     // -----------------------------------------------------------------------
@@ -2439,6 +2453,9 @@ mod tests {
 
     #[test]
     fn test_parallel_build_transient_error_retries_without_prune() {
+        // Injects exactly one transient failure (attempt 1), so the first retry succeeds —
+        // see `test_parallel_build_dns_error_retries_then_succeeds_on_second_attempt` for the
+        // path where it takes more than one retry (TRANSIENT_BUILD_RETRIES = 2).
         let mut fail_on = std::collections::HashMap::new();
         fail_on.insert(
             format!("{}:1", image_ref(IMAGE_MCP_HUB, "test-bundle")),
