@@ -5447,6 +5447,7 @@ mod tests {
 
     #[test]
     fn test_ensure_plugin_images_skips_existing() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
 
@@ -5462,6 +5463,7 @@ mod tests {
 
     #[test]
     fn test_ensure_plugin_images_skips_disabled_plugin() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
 
@@ -5478,6 +5480,7 @@ mod tests {
 
     #[test]
     fn test_ensure_plugin_images_skips_resource_only_plugins() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_resource_only_plugin_dir(tmp.path(), "my-skills", "1.0.0");
 
@@ -5555,6 +5558,7 @@ mod tests {
 
     #[test]
     fn test_ensure_all_plugin_images_skips_existing() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "presale", "1.4.6");
 
@@ -5572,6 +5576,7 @@ mod tests {
 
     #[test]
     fn test_ensure_plugin_images_accumulates_build_errors() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "plugin-a", "1.0.0");
         make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0");
@@ -5702,6 +5707,7 @@ mod tests {
 
     #[test]
     fn test_ensure_all_plugin_images_accumulates_build_errors() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "plugin-a", "1.0.0");
         make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0");
@@ -5834,6 +5840,7 @@ mod tests {
 
     #[test]
     fn test_broken_plugin_does_not_block_unrelated_project_restore() {
+        let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "plugin-a", "1.0.0"); // will always fail to build
         make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0"); // will build successfully
