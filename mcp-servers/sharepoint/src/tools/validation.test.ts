@@ -1,0 +1,147 @@
+/**
+ * Tests for withValidation wrapper — parameter validation and error wrapping.
+ */
+
+import { describe, it, expect } from 'vitest';
+import { withValidation } from './validation.js';
+import type { ToolResult } from './validation.js';
+
+describe('withValidation', () => {
+  // ─── validateParams guard ────────────────────────────────────────────────────
+
+  describe('invalid params (INVALID_INPUT)', () => {
+    it('returns INVALID_INPUT when params is null', async () => {
+      const handler = withValidation(async (_p: Record<string, unknown>) => ({
+        success: true,
+        data: 'ok',
+      }));
+
+      const result = await handler(null as unknown as Record<string, unknown>);
+
+      expect(result.isError).toBe(true);
+      const parsed = JSON.parse(result.content[0].text as string);
+      expect(parsed.code).toBe('INVALID_INPUT');
+      expect(parsed.message).toContain('non-null object');
+    });
+
+    it('returns INVALID_INPUT when params is an array', async () => {
+      const handler = withValidation(async (_p: unknown[]) => ({
+        success: true,
+        data: 'ok',
+      }));
+
+      const result = await handler([] as unknown as Record<string, unknown>);
+
+      expect(result.isError).toBe(true);
+      const parsed = JSON.parse(result.content[0].text as string);
+      expect(parsed.code).toBe('INVALID_INPUT');
+    });
+
+    it('returns INVALID_INPUT when params is a string', async () => {
+      const handler = withValidation(async (_p: string) => ({
+        success: true as const,
+        data: 'ok',
+      }));
+
+      const result = await handler('oops' as unknown as Record<string, unknown>);
+
+      expect(result.isError).toBe(true);
+      const parsed = JSON.parse(result.content[0].text as string);
+      expect(parsed.code).toBe('INVALID_INPUT');
+    });
+
+    it('returns INVALID_INPUT when params is a number', async () => {
+      const handler = withValidation(async (_p: unknown) => ({
+        success: true as const,
+        data: 'ok',
+      }));
+
+      const result = await handler(42 as unknown as Record<string, unknown>);
+
+      expect(result.isError).toBe(true);
+      const parsed = JSON.parse(result.content[0].text as string);
+      expect(parsed.code).toBe('INVALID_INPUT');
+    });
+  });
+
+  // ─── handler success path ────────────────────────────────────────────────────
+
+  describe('successful handler', () => {
+    it('formats success result as JSON text', async () => {
+      const handler = withValidation(
+        async (_p: Record<string, unknown>): Promise<ToolResult> => ({
+          success: true,
+          data: { message: 'hello', count: 3 },
+        })
+      );
+
+      const result = await handler({ key: 'value' });
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].type).toBe('text');
+      const parsed = JSON.parse(result.content[0].text as string);
+      expect(parsed.message).toBe('hello');
+      expect(parsed.count).toBe(3);
+    });
+
+    it('formats failure result as JSON text with isError flag', async () => {
+      const handler = withValidation(
+        async (_p: Record<string, unknown>): Promise<ToolResult> => ({
+          success: false,
+          error: { code: 'MY_ERROR', message: 'something went wrong' },
+        })
+      );
+
+      const result = await handler({});
+
+      expect(result.isError).toBe(true);
+      const parsed = JSON.parse(result.content[0].text as string);
+      expect(parsed.code).toBe('MY_ERROR');
+      expect(parsed.message).toBe('something went wrong');
+    });
+  });
+
+  // ─── HANDLER_ERROR catch branch ──────────────────────────────────────────────
+
+  describe('HANDLER_ERROR (unexpected throw from handler)', () => {
+    it('catches synchronous Error thrown from handler', async () => {
+      const handler = withValidation((_p: Record<string, unknown>): ToolResult => {
+        throw new Error('Boom from handler');
+      });
+
+      const result = await handler({});
+
+      expect(result.isError).toBe(true);
+      const parsed = JSON.parse(result.content[0].text as string);
+      expect(parsed.code).toBe('HANDLER_ERROR');
+      expect(parsed.message).toBe('Boom from handler');
+    });
+
+    it('catches rejected promise from handler', async () => {
+      const handler = withValidation(async (_p: Record<string, unknown>): Promise<ToolResult> => {
+        return Promise.reject(new Error('async boom'));
+      });
+
+      const result = await handler({});
+
+      expect(result.isError).toBe(true);
+      const parsed = JSON.parse(result.content[0].text as string);
+      expect(parsed.code).toBe('HANDLER_ERROR');
+      expect(parsed.message).toBe('async boom');
+    });
+
+    it('catches non-Error thrown value and stringifies it', async () => {
+      const handler = withValidation((_p: Record<string, unknown>): ToolResult => {
+        // eslint-disable-next-line @typescript-eslint/only-throw-error
+        throw 'string error';
+      });
+
+      const result = await handler({});
+
+      expect(result.isError).toBe(true);
+      const parsed = JSON.parse(result.content[0].text as string);
+      expect(parsed.code).toBe('HANDLER_ERROR');
+      expect(parsed.message).toBe('string error');
+    });
+  });
+});

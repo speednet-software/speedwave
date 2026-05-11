@@ -188,6 +188,15 @@ describe('slack client', () => {
       );
     });
 
+    it('returns null and uses "Unknown error" when a non-Error value is thrown', async () => {
+      // Simulate a non-Error rejection (e.g., a plain string thrown)
+      vi.mocked(fs.readFile).mockRejectedValueOnce('plain string failure');
+
+      const result = await initializeSlackClients();
+      expect(result).toBeNull();
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Unknown error'));
+    });
+
     it('trims whitespace from tokens', async () => {
       vi.mocked(fs.readFile)
         .mockResolvedValueOnce('  xoxb-bot-token-123  \n')

@@ -6,6 +6,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SharePointClient, SharePointConfig } from './client.js';
 import { PathValidator } from './path-validator.js';
+import fsPromises from 'fs/promises';
+
+vi.mock('fs/promises');
 
 // Test configuration
 const mockConfig: SharePointConfig = {
@@ -239,6 +242,14 @@ describe('Security: validatePath', () => {
 
     it('should reject network path (//server/share)', async () => {
       const maliciousPath = '//server/share/file.txt';
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+    });
+
+    it('should reject URL-encoded absolute path (%2Fetc%2Fpasswd → /etc/passwd)', async () => {
+      // After decoding, the path starts with '/' — line 94 decodedPath branch
+      const maliciousPath = '%2Fetc%2Fpasswd';
       await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
         'Invalid path (security check failed)'
       );
@@ -557,17 +568,15 @@ describe('Security: validateLocalPath', () => {
   //═══════════════════════════════════════════════════════════════════════════════
 
   describe('Valid Local Paths', () => {
-    beforeEach(async () => {
+    beforeEach(() => {
       // Mock fs operations for successful scenarios
       global.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ eTag: 'test-etag', size: 100 }),
       });
 
-      vi.mock('fs/promises');
-      const mockFs = await import('fs/promises');
-      vi.mocked(mockFs.default.readFile).mockResolvedValue(Buffer.from('test'));
-      vi.mocked(mockFs.default.mkdir).mockResolvedValue(undefined);
+      vi.mocked(fsPromises.readFile).mockResolvedValue(Buffer.from('test'));
+      vi.mocked(fsPromises.mkdir).mockResolvedValue(undefined);
     });
 
     it('should accept exact whitelist path', async () => {
@@ -613,9 +622,7 @@ describe('Security: validateLocalPath', () => {
         ok: true,
         json: async () => ({ eTag: 'test-etag', size: 100 }),
       });
-      vi.mock('fs/promises');
-      const mockFs = await import('fs/promises');
-      vi.mocked(mockFs.default.readFile).mockResolvedValue(Buffer.from('test'));
+      vi.mocked(fsPromises.readFile).mockResolvedValue(Buffer.from('test'));
 
       await expect(client.uploadFile('docs/test.txt', '//workspace')).resolves.toBeDefined();
     });
@@ -625,9 +632,7 @@ describe('Security: validateLocalPath', () => {
         ok: true,
         json: async () => ({ eTag: 'test-etag', size: 100 }),
       });
-      vi.mock('fs/promises');
-      const mockFs = await import('fs/promises');
-      vi.mocked(mockFs.default.readFile).mockResolvedValue(Buffer.from('test'));
+      vi.mocked(fsPromises.readFile).mockResolvedValue(Buffer.from('test'));
 
       const validPath = '/workspace/';
       await expect(client.uploadFile('docs/test.txt', validPath)).resolves.toBeDefined();
@@ -794,9 +799,7 @@ describe('Security: denylist enforcement', () => {
         ok: true,
         json: async () => ({ eTag: 'test-etag', size: 100 }),
       });
-      vi.mock('fs/promises');
-      const mockFs = await import('fs/promises');
-      vi.mocked(mockFs.default.readFile).mockResolvedValue(Buffer.from('test'));
+      vi.mocked(fsPromises.readFile).mockResolvedValue(Buffer.from('test'));
 
       await expect(
         client.uploadFile('docs/.gitignore', '/workspace/.gitignore')
@@ -808,9 +811,7 @@ describe('Security: denylist enforcement', () => {
         ok: true,
         json: async () => ({ eTag: 'test-etag', size: 100 }),
       });
-      vi.mock('fs/promises');
-      const mockFs = await import('fs/promises');
-      vi.mocked(mockFs.default.readFile).mockResolvedValue(Buffer.from('test'));
+      vi.mocked(fsPromises.readFile).mockResolvedValue(Buffer.from('test'));
 
       await expect(
         client.uploadFile('docs/ci.yml', '/workspace/.github/workflows/ci.yml')
@@ -830,9 +831,7 @@ describe('Security: denylist enforcement', () => {
         ok: true,
         json: async () => ({ eTag: 'test-etag', size: 100 }),
       });
-      vi.mock('fs/promises');
-      const mockFs = await import('fs/promises');
-      vi.mocked(mockFs.default.readFile).mockResolvedValue(Buffer.from('test'));
+      vi.mocked(fsPromises.readFile).mockResolvedValue(Buffer.from('test'));
 
       await expect(client.uploadFile('docs/.envrc', '/workspace/.envrc')).resolves.toBeDefined();
     });
@@ -842,9 +841,7 @@ describe('Security: denylist enforcement', () => {
         ok: true,
         json: async () => ({ eTag: 'test-etag', size: 100 }),
       });
-      vi.mock('fs/promises');
-      const mockFs = await import('fs/promises');
-      vi.mocked(mockFs.default.readFile).mockResolvedValue(Buffer.from('test'));
+      vi.mocked(fsPromises.readFile).mockResolvedValue(Buffer.from('test'));
 
       await expect(
         client.uploadFile('docs/.env.example', '/workspace/.env.example')

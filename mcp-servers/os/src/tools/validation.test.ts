@@ -292,6 +292,38 @@ describe('validation', () => {
       expect(result.valid).toBe(false);
       if (!result.valid) expect(result.error.error?.code).toBe('INVALID_CHARACTERS');
     });
+
+    it('rejects a non-string value (number) with INVALID_TYPE', () => {
+      const result = validateStringFields({ name: 42 as unknown as string }, [
+        ['name', 100, false],
+      ]);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('INVALID_TYPE');
+        expect(result.error.error?.message).toContain('name must be a string');
+      }
+    });
+
+    it('rejects a non-string value (object) with INVALID_TYPE', () => {
+      const result = validateStringFields({ name: { value: 'test' } as unknown as string }, [
+        ['name', 100, false],
+      ]);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('INVALID_TYPE');
+      }
+    });
+
+    it('rejects a non-string value (boolean) with INVALID_TYPE', () => {
+      const result = validateStringFields({ name: true as unknown as string }, [
+        ['name', 100, false],
+      ]);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('INVALID_TYPE');
+        expect(result.error.error?.message).toContain('name must be a string');
+      }
+    });
   });
 
   describe('validateNumberFields', () => {

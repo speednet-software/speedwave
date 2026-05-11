@@ -364,7 +364,7 @@ export async function getChannels(
       name: ch.name || '',
       is_channel: ch.is_channel || false,
       is_private: ch.is_private || false,
-      is_member: ch.is_member || false,
+      is_member: Boolean(ch.is_member),
       num_members: ch.num_members,
     }));
 

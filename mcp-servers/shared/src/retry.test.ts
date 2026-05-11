@@ -408,5 +408,33 @@ describe('retryAsync', () => {
       );
       expect(warnCalls.some((msg) => msg.includes('connection refused'))).toBe(true);
     });
+
+    it('converts non-Error thrown values to string in warning', async () => {
+      // Covers the `String(error)` branch when caught value is not an Error instance
+      vi.useFakeTimers();
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+
+      const fn = vi
+        .fn()
+        // Throw a plain string (not an Error instance)
+        .mockRejectedValueOnce('plain string failure')
+        .mockResolvedValue('recovered');
+
+      const promise = retryAsync(fn, {
+        maxRetries: 1,
+        baseDelayMs: 50,
+        label: 'non-error-throw',
+      });
+
+      await vi.advanceTimersByTimeAsync(50);
+      const result = await promise;
+
+      expect(result).toBe('recovered');
+
+      const warnCalls = (console.warn as ReturnType<typeof vi.fn>).mock.calls.map((args) =>
+        args.join(' ')
+      );
+      expect(warnCalls.some((msg) => msg.includes('plain string failure'))).toBe(true);
+    });
   });
 });

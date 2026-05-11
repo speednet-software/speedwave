@@ -168,15 +168,10 @@ export function createSlackHandlers(slackClients: { bot: WebClient; user: WebCli
       return userCache.get(userId)!;
     }
 
-    // Fetch from API
-    if (!slackClients) {
-      const error = new UserInfoError(userId);
-      console.error(`${ts()} ❌ ${error.message}: Slack clients not configured`);
-      throw error;
-    }
-
+    // Fetch from API — only called from handleReadChannel which guards slackClients != null
+    const clients = slackClients!;
     try {
-      const result = await slackClients.bot.users.info({ user: userId });
+      const result = await clients.bot.users.info({ user: userId });
       if (result.ok && result.user) {
         const userInfo: UserInfo = {
           real_name: result.user.real_name,

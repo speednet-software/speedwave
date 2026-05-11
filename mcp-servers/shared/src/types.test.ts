@@ -6,7 +6,12 @@ import type {
   ProcessRequestResult,
   ServerCapabilities,
 } from './types.js';
-import { READ_ONLY_ANNOTATIONS, WRITE_ANNOTATIONS, DESTRUCTIVE_ANNOTATIONS } from './types.js';
+import {
+  READ_ONLY_ANNOTATIONS,
+  WRITE_ANNOTATIONS,
+  DESTRUCTIVE_ANNOTATIONS,
+  isErrorLike,
+} from './types.js';
 
 describe('Tool interface', () => {
   it('supports base fields only (backward compatible)', () => {
@@ -452,5 +457,40 @@ describe('Annotation constants', () => {
     expect(writeTool.annotations!.destructiveHint).toBe(false);
     expect(destructiveTool.annotations!.readOnlyHint).toBe(false);
     expect(destructiveTool.annotations!.destructiveHint).toBe(true);
+  });
+});
+
+describe('isErrorLike', () => {
+  it('returns true for an Error instance (object, non-null)', () => {
+    expect(isErrorLike(new Error('test'))).toBe(true);
+  });
+
+  it('returns true for a plain object', () => {
+    expect(isErrorLike({ message: 'oops', code: 'ERR' })).toBe(true);
+  });
+
+  it('returns true for an empty object', () => {
+    expect(isErrorLike({})).toBe(true);
+  });
+
+  it('returns false for null', () => {
+    // null is typeof 'object' but the guard checks e !== null
+    expect(isErrorLike(null)).toBe(false);
+  });
+
+  it('returns false for a string', () => {
+    expect(isErrorLike('error string')).toBe(false);
+  });
+
+  it('returns false for a number', () => {
+    expect(isErrorLike(42)).toBe(false);
+  });
+
+  it('returns false for undefined', () => {
+    expect(isErrorLike(undefined)).toBe(false);
+  });
+
+  it('returns false for a boolean', () => {
+    expect(isErrorLike(true)).toBe(false);
   });
 });

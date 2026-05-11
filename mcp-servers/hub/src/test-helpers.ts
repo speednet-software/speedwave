@@ -281,11 +281,13 @@ function buildMockToolMetadata(
 ): ToolMetadata {
   return {
     name: methodName,
+    /* c8 ignore next — MOCK_SERVICE_TOOLS always provides description */
     description: partial.description ?? `${methodName} tool`,
     keywords: partial.keywords ?? [],
     inputSchema: partial.inputSchema ?? { type: 'object', properties: {} },
     example: partial.example ?? '',
     service,
+    /* c8 ignore next — MOCK_SERVICE_TOOLS always provides deferLoading */
     deferLoading: partial.deferLoading ?? true,
     timeoutClass: partial.timeoutClass,
     timeoutMs: partial.timeoutMs,

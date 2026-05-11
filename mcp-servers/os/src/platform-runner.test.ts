@@ -94,6 +94,75 @@ describe('platform-runner', () => {
       expect(path.isAbsolute(paths.mail)).toBe(true);
       expect(path.isAbsolute(paths.notes)).toBe(true);
     });
+
+    describe('Linux/Windows paths (resolveNativePaths)', () => {
+      const originalPlatform = process.platform;
+
+      function mockPlatform(platform: string): void {
+        Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+      }
+
+      afterEach(() => {
+        Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+      });
+
+      it('resolves linux dev paths to native-os-cli in target/release', () => {
+        mockPlatform('linux');
+        delete process.env.SPEEDWAVE_PROD;
+
+        const paths = resolvePaths();
+
+        expect(paths.reminders).toContain(path.join('target', 'release', 'native-os-cli'));
+        expect(paths.calendar).toBe(paths.reminders);
+        expect(paths.mail).toBe(paths.reminders);
+        expect(paths.notes).toBe(paths.reminders);
+        expect(path.isAbsolute(paths.reminders)).toBe(true);
+      });
+
+      it('resolves linux production paths to Resources/native-os-cli', () => {
+        mockPlatform('linux');
+        process.env.SPEEDWAVE_PROD = '1';
+
+        const paths = resolvePaths();
+
+        expect(paths.reminders).toContain('native-os-cli');
+        expect(paths.reminders).toContain('Resources');
+        expect(paths.calendar).toBe(paths.reminders);
+        expect(paths.mail).toBe(paths.reminders);
+        expect(paths.notes).toBe(paths.reminders);
+      });
+
+      it('resolves win32 production paths to native-os-cli.exe', () => {
+        mockPlatform('win32');
+        process.env.SPEEDWAVE_PROD = '1';
+
+        const paths = resolvePaths();
+
+        expect(paths.reminders).toContain('native-os-cli.exe');
+        expect(paths.calendar).toBe(paths.reminders);
+      });
+
+      it('resolves win32 dev paths to native-os-cli.exe in target/release', () => {
+        mockPlatform('win32');
+        delete process.env.SPEEDWAVE_PROD;
+
+        const paths = resolvePaths();
+
+        expect(paths.reminders).toContain('native-os-cli.exe');
+        expect(paths.reminders).toContain(path.join('target', 'release'));
+      });
+
+      it('uses SPEEDWAVE_RESOURCES_DIR for linux production', () => {
+        mockPlatform('linux');
+        process.env.SPEEDWAVE_PROD = '1';
+        process.env.SPEEDWAVE_RESOURCES_DIR = '/opt/speedwave/resources';
+
+        const paths = resolvePaths();
+
+        expect(paths.reminders).toMatch(/^\/opt\/speedwave\/resources\//);
+        expect(paths.reminders).toContain('native-os-cli');
+      });
+    });
   });
 
   describe('ALLOWED_COMMANDS', () => {

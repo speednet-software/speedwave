@@ -154,4 +154,21 @@ describe('addAutoReturn (AST-based)', () => {
     expect(result.code).toBe('return 42');
     expect(result.parseError).toBeUndefined();
   });
+
+  // AST body length === 0: a comment-only string parses to an empty body
+  it('returns original code unchanged when AST body is empty (comment only)', () => {
+    // Acorn parses a comment-only string to ast.body === [] — no statements.
+    // addAutoReturn should detect this and return { code } unchanged.
+    const input = '/* just a comment */';
+    const result = addAutoReturn(input);
+    expect(result.code).toBe(input);
+    expect(result.parseError).toBeUndefined();
+  });
+
+  it('returns original code unchanged for line-comment only', () => {
+    const input = '// just a line comment';
+    const result = addAutoReturn(input);
+    expect(result.code).toBe(input);
+    expect(result.parseError).toBeUndefined();
+  });
 });
