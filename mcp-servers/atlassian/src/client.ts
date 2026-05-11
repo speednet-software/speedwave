@@ -84,8 +84,8 @@ export class AtlassianClient {
   /**
    * Build the client from a resolved configuration.
    * @param config - Resolved worker configuration (from `/tokens`).
-   * @throws If `config.siteUrl` is not an `https://*.atlassian.net` origin
-   *   (`readCredentials` already enforces this, but a directly-constructed
+   * @throws {Error} If `config.siteUrl` is not an `https://*.atlassian.net`
+   *   origin (`readCredentials` already enforces this, but a directly-constructed
    *   config must not bypass the SSRF-prevention guard).
    */
   constructor(config: AtlassianConfig) {
