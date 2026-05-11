@@ -1,9 +1,11 @@
 // Compose port reconciliation, exit cleanup, and resource directory resolution.
 
+use crate::host_exec_process;
 use crate::ide_bridge;
 use crate::mcp_os_process;
 use crate::types::BundleReconcileStatus;
 use speedwave_runtime::{build, bundle, config, plugin};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -15,12 +17,17 @@ pub(crate) type SharedIdeBridge = Arc<Mutex<Option<ide_bridge::IdeBridge>>>;
 /// Shared handle for the mcp-os process.
 pub(crate) type SharedMcpOs = Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>;
 
+/// Shared map of per-project `host_exec` workers (ADR-054). Unlike `mcp-os`
+/// (one global instance), `host_exec` is per-project — one worker process per
+/// project, keyed by project name. Empty until a project enables `host_exec`.
+pub(crate) type SharedHostExec = Arc<Mutex<HashMap<String, host_exec_process::HostExecProcess>>>;
+
 /// Shared handle for the background auto-update check task.
 pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>;
 
-/// The three shared-state Arcs required by every `run_exit_cleanup` call site.
+/// The shared-state Arcs required by every `run_exit_cleanup` call site.
 ///
-/// Wrapping them in a struct eliminates the nine parallel Arc clones that would
+/// Wrapping them in a struct eliminates the parallel Arc clones that would
 /// otherwise appear at each of the three call sites (signal handler,
 /// `WindowEvent::Destroyed`, `RunEvent::ExitRequested`). Clone the struct once
 /// per exit path instead of cloning each Arc individually.
@@ -28,7 +35,32 @@ pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::J
 pub(crate) struct ExitCleanupContext {
     pub(crate) ide_bridge: SharedIdeBridge,
     pub(crate) mcp_os: SharedMcpOs,
+    /// Per-project `host_exec` workers — all stopped + their files cleaned on exit.
+    pub(crate) host_exec: SharedHostExec,
     pub(crate) auto_check_handle: SharedAutoCheckHandle,
+}
+
+/// Stop and remove a project's `host_exec` worker (if any) from the shared
+/// map, cleaning up its token/port/pid/config files. Called when a project is
+/// switched away from (the new project's worker is spawned on demand by the
+/// next chat/container start) and — once step 6 lands — when `host_exec` is
+/// disabled for the project. The audit log is kept (see
+/// `HostExecProcess::cleanup_files`).
+pub(crate) fn teardown_host_exec_for_project(host_exec: &SharedHostExec, project: &str) {
+    let proc = match host_exec.lock() {
+        Ok(mut map) => map.remove(project),
+        Err(e) => {
+            log::warn!("teardown_host_exec_for_project: map mutex poisoned: {e}");
+            return;
+        }
+    };
+    if let Some(mut proc) = proc {
+        log::info!("host_exec[{project}]: tearing down worker");
+        if let Err(e) = proc.stop() {
+            log::warn!("host_exec[{project}]: stop error during teardown: {e}");
+        }
+        proc.cleanup_files();
+    }
 }
 
 /// Reconcile phase: nothing running.
@@ -739,9 +771,11 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
     }
 
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::HOST_EXEC_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let ide_bridge = ctx.ide_bridge.clone();
     let mcp_os = ctx.mcp_os.clone();
+    let host_exec = ctx.host_exec.clone();
     let auto_check = ctx.auto_check_handle.clone();
 
     let handle = std::thread::spawn(move || {
@@ -778,6 +812,17 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
                 }
             }
             Err(e) => log::warn!("mcp-os cleanup skipped: mutex poisoned: {e}"),
+        }
+        match host_exec.lock() {
+            Ok(mut map) => {
+                for (project, mut proc) in map.drain() {
+                    if let Err(e) = proc.stop() {
+                        log::warn!("host_exec[{project}] stop error: {e}");
+                    }
+                    proc.cleanup_files();
+                }
+            }
+            Err(e) => log::warn!("host_exec cleanup skipped: map mutex poisoned: {e}"),
         }
         match auto_check.lock() {
             Ok(mut guard) => {
@@ -848,6 +893,14 @@ pub(crate) fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std:
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn teardown_host_exec_for_project_is_noop_when_absent() {
+        let map: SharedHostExec = SharedHostExec::default();
+        // No worker registered for "ghost" — must not panic.
+        teardown_host_exec_for_project(&map, "ghost");
+        assert!(map.lock().unwrap().is_empty());
+    }
 
     // stop_all_containers is compiled out on macOS (see its definition).
     // Its tests are gated to match, otherwise the `use super::stop_all_containers`
@@ -1608,6 +1661,7 @@ mod tests {
         let ctx = ExitCleanupContext {
             ide_bridge: SharedIdeBridge::default(),
             mcp_os: SharedMcpOs::default(),
+            host_exec: SharedHostExec::default(),
             auto_check_handle: SharedAutoCheckHandle::default(),
         };
 
