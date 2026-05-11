@@ -39,6 +39,7 @@ mod setup_wizard;
 mod slash_cmd;
 mod subscribe_cmd;
 mod system_settings_cmd;
+mod transcription_cmd;
 mod tray;
 mod types;
 mod update_commands;
@@ -1046,6 +1047,12 @@ fn main() {
     let compose_lock: ComposeLock = Arc::new(Mutex::new(()));
     let queue_service = speedwave_runtime::session::QueuedMessageService::new();
     let msg_store_registry = subscribe_cmd::MsgStoreRegistry::new();
+    // Meeting-transcription stores (ADR-056). Active sessions live in memory;
+    // both stores walk the disk lazily on first access.
+    let transcript_store: transcription_cmd::TranscriptStoreHandle =
+        Arc::new(speedwave_runtime::transcription::TranscriptStore::new());
+    let model_store: transcription_cmd::ModelStoreHandle =
+        Arc::new(speedwave_runtime::transcription::ModelStore::new());
 
     // Shared state for IDE Bridge, mcp-os process, auto-check handle, and tray update version
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
@@ -1172,6 +1179,8 @@ fn main() {
         .manage(mcp_os.clone())
         .manage(queue_service.clone())
         .manage(msg_store_registry.clone())
+        .manage(transcript_store.clone())
+        .manage(model_store.clone())
         .setup(move |app| {
             // Restore persisted log level (default: Info)
             let initial_level = config::load_user_config()
@@ -1521,6 +1530,23 @@ fn main() {
             queue_cmd::peek_queued_message,
             // JSON-Patch stream protocol (ADR-042/043)
             subscribe_cmd::subscribe_session,
+            // Meeting transcription (ADR-056)
+            transcription_cmd::transcription_enabled,
+            transcription_cmd::set_transcription_enabled,
+            transcription_cmd::transcription_capabilities,
+            transcription_cmd::list_audio_sources,
+            transcription_cmd::start_transcription,
+            transcription_cmd::stop_transcription,
+            transcription_cmd::subscribe_transcript,
+            transcription_cmd::list_transcripts,
+            transcription_cmd::get_transcript,
+            transcription_cmd::delete_transcript,
+            transcription_cmd::discard_transcript_audio,
+            transcription_cmd::relabel_speaker,
+            transcription_cmd::get_transcript_markdown,
+            transcription_cmd::list_transcription_models,
+            transcription_cmd::download_transcription_model,
+            transcription_cmd::delete_transcription_model,
             // Chat history
             list_conversations,
             get_conversation,

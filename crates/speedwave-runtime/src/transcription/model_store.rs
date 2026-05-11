@@ -103,7 +103,7 @@ pub enum ModelStoreError {
 /// Progress of a model download, reported via the `&mut dyn FnMut(...)`
 /// callback `ensure_*` take. `total_bytes` is `None` when the server didn't
 /// send `Content-Length` (rare for these CDNs — observed present in spike 0C).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DownloadProgress {
     /// Catalogue key of the model being downloaded.
     pub model_key: String,
