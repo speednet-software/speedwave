@@ -1,29 +1,20 @@
-//! Host-side meeting transcription — the SSOT layer (ADR-056).
-//!
-//! This module owns everything that is *not* UI: audio capture (a per-OS
-//! `AudioCapture` trait — Phase 1a ships only `FileAudioCapture`), the model
-//! catalogue (`model_catalog`), and — added in later phases — the model store
-//! (download-on-demand, SHA256-verified), the Whisper transcriber, the
-//! sherpa-onnx diarizer, and the per-recording session/store/driver. The Tauri
-//! command layer (`desktop/src-tauri/src/transcription_cmd.rs`) is a thin
-//! wrapper over this; the CLI never enables the `audio-transcription` feature
-//! and so never compiles this module.
-//!
-//! Submodules land across Phase 1's four PRs:
-//! - 1a: `audio` (trait + `FileAudioCapture`), `model_catalog` (SSOT).
-//! - 1b (this PR): `model_store` (download/verify/cache).
-//! - 1c: `transcriber` (Whisper via `whisper-rs`), `diarizer` (sherpa-onnx),
-//!   `accel` (which backends were compiled in).
-//! - 1d: `transcript` (`TranscriptSession`), `transcript_store`, `transcript_driver`.
+//! Host-side meeting transcription — SSOT layer (ADR-056). Capture +
+//! Whisper + sherpa-onnx + model store; gated behind the `audio-transcription`
+//! feature (CLI never enables it).
 
+pub mod accel;
 pub mod audio;
+pub mod diarizer;
 pub mod model_catalog;
 pub mod model_store;
+pub mod transcriber;
 
+pub use accel::{compiled_backends, has_gpu_backend, recommended_live_model, Backend};
 pub use audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
     CaptureError, FileAudioCapture, ProcessSelector, CHUNK_DURATION, SAMPLE_RATE_HZ,
 };
+pub use diarizer::{DiarizeError, DiarizeOptions, Diarizer, SherpaDiarizer, SpeakerTurn};
 pub use model_catalog::{
     default_diarization_model, diarization_model, whisper_model, DiarizationModelInfo,
     DiarizationModelKind, ModelRole, Quantization, WhisperModelInfo, DIARIZATION_MODELS,
@@ -33,71 +24,59 @@ pub use model_store::{
     no_progress, DiarizationModelPaths, DownloadProgress, ModelStatusEntry, ModelStore,
     ModelStoreError,
 };
+pub use transcriber::{
+    Language, Segment, SpeakerId, TranscribeError, TranscribeOptions, Transcriber,
+    WhisperCppTranscriber, Word,
+};
 
 use std::path::PathBuf;
 
-/// Path to the transcripts directory under `data_dir()`
-/// (`<data_dir>/transcripts/`). Created on demand by the session store; perms
-/// `0o700` (it contains microphone/system audio).
+/// `<data_dir>/transcripts/` (perms 0o700, files 0o600 — contains audio).
 pub fn transcripts_dir() -> PathBuf {
     crate::consts::data_dir().join(crate::consts::TRANSCRIPTS_SUBDIR)
 }
 
-/// Path to the downloaded-models directory under `data_dir()`
-/// (`<data_dir>/models/`). Whisper models go under `whisper/`, diarization
-/// models under `diarization/`. Created on demand by the model store; perms
-/// `0o700`.
+/// `<data_dir>/models/` (whisper/ + diarization/).
 pub fn models_dir() -> PathBuf {
     crate::consts::data_dir().join(crate::consts::MODELS_SUBDIR)
 }
 
-/// Resolves the `AudioCapture` backend for this host.
-///
-/// Phase 1a returns `FileAudioCapture` on every platform — the only thing it
-/// can "capture" is a WAV file path passed to `start()` (the dev affordance,
-/// and the substrate every Phase 1 test runs on). Phase 4 replaces this with
-/// `#[cfg(windows)] WasapiAudioCapture`, `#[cfg(target_os = "macos")]
-/// MacOsAudioCapture`, `#[cfg(target_os = "linux")] LinuxAudioCapture` —
-/// the same `Box<dyn …>` seam as `runtime::detect_runtime()`.
+/// Resolves the `AudioCapture` backend for this host. Phase 1a:
+/// `FileAudioCapture` everywhere; Phase 4 adds the real per-OS backends.
 pub fn detect_audio_capture() -> Box<dyn AudioCapture> {
     Box::new(FileAudioCapture::new())
 }
 
-/// The orchestration facade — owns the capture backend and (in later phases) a
-/// transcriber, a diarizer, and a reference to the model store. Phase 1a is a
-/// thin shell; 1c/1d flesh it out. Kept deliberately small (it's the "thin
-/// orchestration layer" — the heavy lifting is in `whisper-rs` / `sherpa-onnx`).
+/// Orchestration facade — owns the capture backend (+ later, a transcriber /
+/// diarizer / `ModelStore`).
 pub struct TranscriptionEngine {
     capture: Box<dyn AudioCapture>,
 }
 
 impl TranscriptionEngine {
-    /// Builds an engine using the host's `AudioCapture` backend.
+    /// Uses the host's `AudioCapture` backend.
     pub fn new() -> Self {
         Self {
             capture: detect_audio_capture(),
         }
     }
 
-    /// Builds an engine with an explicit capture backend (used by tests to
-    /// inject `FileAudioCapture` bound to a fixture).
+    /// Injects an explicit capture backend (for tests).
     pub fn with_capture(capture: Box<dyn AudioCapture>) -> Self {
         Self { capture }
     }
 
-    /// What the host's capture backend can do.
+    /// Capabilities of the host's capture backend.
     pub fn capture_capabilities(&self) -> CaptureCapabilities {
         self.capture.capabilities()
     }
 
-    /// Audio sources the user can pick from.
+    /// Sources the user can pick from.
     pub fn list_audio_sources(&self) -> Result<Vec<AudioSourceInfo>, CaptureError> {
         self.capture.enumerate_sources()
     }
 
-    /// Start capturing `source`. (Phase 1d wires this into a `TranscriptDriver`
-    /// that pumps the resulting stream through the transcriber and diarizer; for
-    /// now this just exposes the raw stream so 1a's tests can exercise capture.)
+    /// Starts capturing `source`. (Phase 1d wires this into a `TranscriptDriver`.)
     pub fn start_capture(&self, source: AudioSource) -> Result<Box<dyn AudioStream>, CaptureError> {
         self.capture.start(source)
     }

@@ -53,12 +53,27 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Untar the sherpa-onnx diarization-model archives (`.tar.bz2`).
 tar = { version = "0.4", optional = true }
 bzip2 = { version = "0.4", optional = true }
+# Whisper (transcription) — links libwhisper, built from whisper.cpp's vendored
+# submodule via cmake at build time (so CI needs `cmake`). The `metal` backend
+# is added on macOS only via the target-specific block below; CPU elsewhere.
+whisper-rs = { version = "0.16", optional = true }
+# Speaker diarization — the official sherpa-onnx Rust crate (csukuangfj). Its
+# `static` feature (default) downloads a prebuilt static-library archive from
+# k2-fsa's GitHub releases at build time (so CI needs network or a vendored
+# SHERPA_ONNX_LIB_DIR) and links it in — no shared libs to bundle/sign.
+sherpa-onnx = { version = "1.13", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# On macOS, build whisper.cpp with the Metal backend (the Metal shader library
+# is embedded into the binary — no separate .metallib). Cargo merges this
+# feature set with the optional `whisper-rs` entry above.
+whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
 
 [features]
-# Host-side meeting transcription: WAV I/O + the model downloader now;
-# whisper-rs / sherpa-onnx / cpal are added to this feature's dep list in
-# later phases (1c Transcriber/Diarizer, 4 capture impls).
-audio-transcription = ["dep:hound", "dep:reqwest", "dep:tar", "dep:bzip2"]
+# Host-side meeting transcription: WAV I/O + the model downloader + the Whisper
+# transcriber + the sherpa-onnx diarizer. `cpal` is added to this feature in
+# Phase 4 (Windows capture).
+audio-transcription = ["dep:hound", "dep:reqwest", "dep:tar", "dep:bzip2", "dep:whisper-rs", "dep:sherpa-onnx"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
