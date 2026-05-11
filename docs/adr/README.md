@@ -57,6 +57,9 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-048](ADR-048-windows-uninstall-cleanup.md)                        | Windows Uninstall Cleanup — Unregister WSL Distro       | Accepted              |
 | [ADR-049](ADR-049-tcc-sub-identifiers-and-applevents-gate.md)          | TCC Sub-Identifiers and Unified AppleEvents Permission Gate | Accepted          |
 | [ADR-050](ADR-050-host-timezone-propagation.md)                        | Host Timezone Propagation Into Containers              | Accepted              |
+| [ADR-053](ADR-053-worker-implementation-own-vs-wrap-official-mcp.md)   | Worker Implementation — Own Thin Worker vs Wrapping an Official MCP Server | Accepted          |
+
+> ADR-051 and ADR-052 are reserved by in-flight PRs (plugin signature runtime verification; Anthropic OAuth login flow) and will appear in this index when those land.
 
 ## Creating a New ADR
 
