@@ -69,11 +69,20 @@ sherpa-onnx = { version = "1.13", optional = true }
 # feature set with the optional `whisper-rs` entry above.
 whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
 
+[target.'cfg(windows)'.dependencies]
+# Windows capture (Phase 4-W): WASAPI loopback via cpal. Windows-only — macOS
+# uses the bundled audio-capture-cli and Linux shells out to pw-record/parec,
+# so cpal is dead weight there. Still gated behind `audio-transcription` so the
+# CLI build stays lean.
+cpal = { version = "0.16", optional = true }
+
 [features]
 # Host-side meeting transcription: WAV I/O + the model downloader + the Whisper
-# transcriber + the sherpa-onnx diarizer. `cpal` is added to this feature in
-# Phase 4 (Windows capture).
-audio-transcription = ["dep:hound", "dep:reqwest", "dep:tar", "dep:bzip2", "dep:whisper-rs", "dep:sherpa-onnx"]
+# transcriber + the sherpa-onnx diarizer (+ cpal on Windows for WASAPI loopback).
+audio-transcription = ["dep:hound", "dep:reqwest", "dep:tar", "dep:bzip2", "dep:whisper-rs", "dep:sherpa-onnx", "windows-capture"]
+# Internal: pulls in cpal. Only meaningful on Windows (the target-specific dep
+# block above), but listing it unconditionally keeps `--features` simple.
+windows-capture = ["dep:cpal"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }

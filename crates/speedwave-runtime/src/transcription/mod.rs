@@ -8,6 +8,8 @@ pub mod audio;
 pub mod audio_linux;
 #[cfg(target_os = "macos")]
 pub mod audio_macos;
+#[cfg(windows)]
+pub mod audio_windows;
 pub mod diarizer;
 pub mod model_catalog;
 pub mod model_store;
@@ -51,10 +53,10 @@ pub fn models_dir() -> PathBuf {
     crate::consts::data_dir().join(crate::consts::MODELS_SUBDIR)
 }
 
-/// Resolves the `AudioCapture` backend for this host. macOS uses the bundled
-/// `audio-capture-cli` (CoreAudio process taps); Linux shells out to
-/// `pw-record` / `parec`; Windows still falls back to `FileAudioCapture` until
-/// its Phase 4-W backend lands.
+/// Resolves the `AudioCapture` backend for this host: macOS = the bundled
+/// `audio-capture-cli` (CoreAudio process taps); Linux = shell-out to
+/// `pw-record` / `parec`; Windows = WASAPI loopback via cpal; anything else =
+/// `FileAudioCapture` (file input only).
 pub fn detect_audio_capture() -> Box<dyn AudioCapture> {
     #[cfg(target_os = "macos")]
     {
@@ -64,7 +66,11 @@ pub fn detect_audio_capture() -> Box<dyn AudioCapture> {
     {
         Box::new(audio_linux::LinuxAudioCapture::new())
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    {
+        Box::new(audio_windows::WasapiAudioCapture::new())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         Box::new(FileAudioCapture::new())
     }
@@ -136,15 +142,18 @@ mod tests {
         let caps = detect_audio_capture().capabilities();
         // macOS always has a real backend (the audio-capture-cli enforces
         // 14.4 itself, so we assume taps are available). Linux depends on a
-        // running sound server — true on a dev box, false on a bare CI runner
-        // — so we don't assert its flags here. Windows still falls back to
-        // FileAudioCapture (file input only) until Phase 4-W.
+        // running sound server, and Windows on a present output device — both
+        // true on a dev box, possibly false on a bare CI runner — so we don't
+        // assert their flags here. Other OSes fall back to FileAudioCapture.
         if cfg!(target_os = "macos") {
             assert!(caps.supports_system_audio);
             assert!(caps.supports_per_process);
-        } else if cfg!(target_os = "linux") {
-            // Either a real PipeWire/Pulse backend or the "no server" state —
-            // both are valid; just require the UI note.
+        } else if cfg!(target_os = "linux") || cfg!(windows) {
+            // A real backend or its degraded state — both valid; just require
+            // the UI note (and per-process must be off on Windows in v1).
+            if cfg!(windows) {
+                assert!(!caps.supports_per_process, "no per-app on Windows in v1");
+            }
         } else {
             assert!(!caps.supports_system_audio);
             assert!(!caps.supports_per_process);
@@ -191,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     fn engine_default_uses_the_file_backend_on_unsupported_os() {
         let engine = TranscriptionEngine::default();
         // With the file backend, capturing without a path fails cleanly.
@@ -203,6 +212,18 @@ mod tests {
                 "expected Unsupported, got {e:?}"
             ),
         }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn engine_default_uses_the_windows_backend() {
+        // On Windows the default engine wraps the WASAPI-loopback capture; we
+        // only assert it has a UI note and never advertises per-process in v1
+        // (a CI runner may have no audio device, so other flags aren't asserted).
+        let engine = TranscriptionEngine::default();
+        let caps = engine.capture_capabilities();
+        assert!(caps.note.is_some());
+        assert!(!caps.supports_per_process);
     }
 
     #[test]
